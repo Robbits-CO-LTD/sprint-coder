@@ -221,19 +221,13 @@ export class ProviderWorkspaceTools {
           execute: async (input, context) => {
             const prepared = input as PreparedWorkspaceInput;
             assertPreparedWorkspaceInput(prepared, 'create-directory');
-            await deps.workspaceEdit!.createDirectory!({
+            return deps.workspaceEdit!.createDirectory!({
               taskId: context.taskId,
               turnId: context.turnId,
               rootId: prepared.rootId,
               path: prepared.relativePath,
               guard: prepared.guard,
             });
-            return {
-              rootId: prepared.rootId,
-              path: prepared.relativePath,
-              state: 'committed',
-              kind: 'add',
-            };
           },
         });
     }

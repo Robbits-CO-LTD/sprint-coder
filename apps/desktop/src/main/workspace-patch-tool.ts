@@ -132,7 +132,7 @@ export type WorkspacePatchDeps = Readonly<{
     rootId: string;
     path: string;
     guard: PathGuard;
-  }) => Promise<void>;
+  }) => Promise<unknown>;
   policyEpochFor: (taskId: string) => number;
   newId?: () => string;
   now?: () => string;
@@ -310,10 +310,70 @@ export async function executeWorkspaceCreateFile(
   };
 }
 
+export async function executeWorkspaceCreateDirectory(
+  input: unknown,
+  context: WorkspacePatchContext,
+  deps: WorkspacePatchDeps,
+  approvedGuard: PathGuard,
+): Promise<{ rootId: string; path: string; sagaId: string; state: string; kind: 'mkdir' }> {
+  const request = parseCreateDirectoryInput(input);
+  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  if (workspace === null)
+    throw new Error('create_directory requires a sealed Turn Workspace snapshot');
+  if (workspace.roots.length === 0)
+    throw new Error('create_directory requires a selected Workspace');
+  const requestedRootId = request.rootId ?? workspace.primaryRootId;
+  const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
+  if (root === undefined) throw new Error('create_directory requires a valid Workspace rootId');
+  const mutationBinding =
+    workspace.source === 'project'
+      ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
+      : undefined;
+  if (workspace.source === 'project' && mutationBinding === undefined)
+    throw new Error('create_directory Turn Workspace identity is incomplete');
+  const plan = await prepareStructuredPatch({
+    owner: { taskId: context.taskId, turnId: context.turnId },
+    rootId: root.rootId,
+    workspacePath: root.path,
+    ...(mutationBinding === undefined
+      ? {}
+      : { expectedRootIdentityDigest: mutationBinding.rootIdentityDigest }),
+    policyEpoch: deps.policyEpochFor(context.taskId),
+    registry: deps.revisions,
+    operations: [{ kind: 'mkdir', path: request.path }],
+  });
+  assertApprovedPatchTarget(plan, approvedGuard, 'mkdir');
+  const saga = await deps.apply({
+    id: (deps.newId ?? randomUUID)(),
+    taskId: context.taskId,
+    turnId: context.turnId,
+    operationId: (deps.newId ?? randomUUID)(),
+    plan,
+    ...(mutationBinding === undefined
+      ? {}
+      : {
+          mutationBinding: {
+            rootId: root.rootId,
+            workspacePath: root.path,
+            workspaceKey: mutationBinding.workspaceKey,
+            rootIdentityDigest: mutationBinding.rootIdentityDigest,
+          },
+        }),
+    createdAt: (deps.now ?? (() => new Date().toISOString()))(),
+  });
+  return {
+    rootId: root.rootId,
+    path: request.path,
+    sagaId: saga.id,
+    state: saga.state,
+    kind: 'mkdir',
+  };
+}
+
 function assertApprovedPatchTarget(
   plan: Awaited<ReturnType<typeof prepareStructuredPatch>>,
   guard: PathGuard,
-  kind: 'add' | 'update',
+  kind: 'add' | 'mkdir' | 'update',
 ): void {
   const operation = plan.operations[0];
   if (
@@ -323,12 +383,23 @@ function assertApprovedPatchTarget(
     operation.canonicalPath !== guard.resolvedPath ||
     operation.path !== guard.originalTargetPath ||
     guard.operation !== 'write' ||
-    (kind === 'add'
+    (kind === 'add' || kind === 'mkdir'
       ? guard.targetIdentity !== null
       : guard.targetIdentity?.kind !== 'file' ||
         operation.preRevision?.identityDigest !== fileRevisionIdentityDigest(guard.targetIdentity))
   )
     throw new Error('Workspace mutation target changed after authorization');
+}
+
+function parseCreateDirectoryInput(input: unknown): { rootId?: string; path: string } {
+  if (typeof input !== 'object' || input === null || Array.isArray(input))
+    throw new Error('create_directory requires an object');
+  const { rootId, path } = input as { rootId?: unknown; path?: unknown };
+  if (rootId !== undefined && (typeof rootId !== 'string' || rootId.length === 0))
+    throw new Error('create_directory rootId must be a non-empty string');
+  if (typeof path !== 'string' || path.length === 0)
+    throw new Error('create_directory requires a path');
+  return { ...(typeof rootId === 'string' ? { rootId } : {}), path };
 }
 
 function parseInput(input: unknown): {

@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rename,
+  rmdir,
   rm,
   symlink,
   writeFile,
@@ -65,6 +66,84 @@ async function childOpenOutcome(addonPath: string, input: NativeSafeFsOpenInput)
   } catch (error) {
     return String((error as { stdout?: string }).stdout ?? 'CHILD_FAILED');
   }
+}
+
+async function childDirectoryCrash(input: {
+  addonPath: string;
+  session: NativeSafeFsOpenInput;
+  method: 'createDirectory' | 'removeDirectory' | 'cleanupDirectoryRemoval';
+  payload: Record<string, unknown>;
+  point: string;
+}): Promise<number> {
+  const source = [
+    'const addon = require(process.argv[1]);',
+    'addon.openSession(JSON.parse(process.argv[2])).then((session) => {',
+    '  const payload = JSON.parse(process.argv[4]);',
+    '  addon[process.argv[3]]({ ...payload, sessionId: session.id });',
+    '  process.exit(99);',
+    '});',
+  ].join('\n');
+  try {
+    await execFileAsync(
+      process.execPath,
+      [
+        '-e',
+        source,
+        input.addonPath,
+        JSON.stringify(input.session),
+        input.method,
+        JSON.stringify(input.payload),
+      ],
+      { env: { ...process.env, SPRINT_CODER_NATIVE_SAFE_FS_CRASH_POINT: input.point } },
+    );
+    return 0;
+  } catch (error) {
+    return (error as { code?: number }).code ?? -1;
+  }
+}
+
+async function childDirectoryOutcome(input: {
+  addonPath: string;
+  session: NativeSafeFsOpenInput;
+  payload: Record<string, unknown>;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string> {
+  const source = [
+    'const addon = require(process.argv[1]);',
+    'addon.openSession(JSON.parse(process.argv[2])).then((session) => {',
+    '  try { addon.createDirectory({ ...JSON.parse(process.argv[3]), sessionId: session.id });',
+    "    process.stdout.write('CREATED');",
+    '  } catch (error) { process.stdout.write(String(error.code)); }',
+    '});',
+  ].join('\n');
+  const result = await execFileAsync(
+    process.execPath,
+    ['-e', source, input.addonPath, JSON.stringify(input.session), JSON.stringify(input.payload)],
+    { env: { ...process.env, ...input.env } },
+  );
+  return result.stdout;
+}
+
+async function childDirectoryCleanupOutcome(input: {
+  addonPath: string;
+  session: NativeSafeFsOpenInput;
+  payload: Record<string, unknown>;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string> {
+  const source = [
+    'const addon = require(process.argv[1]);',
+    'addon.openSession(JSON.parse(process.argv[2])).then((session) => {',
+    '  try { addon.cleanupDirectoryRemoval({ ...JSON.parse(process.argv[3]), sessionId: session.id });',
+    "    process.stdout.write('COMPLETED');",
+    '  } catch (error) { process.stdout.write(String(error.code)); }',
+    '});',
+  ].join('\n');
+  const result = await execFileAsync(
+    process.execPath,
+    ['-e', source, input.addonPath, JSON.stringify(input.session), JSON.stringify(input.payload)],
+    { env: { ...process.env, ...input.env } },
+  );
+  return result.stdout;
 }
 
 afterEach(async () => {
@@ -200,7 +279,7 @@ function nativeIntent(input: {
   const expectedMode =
     input.kind === 'add'
       ? 0o100600
-      : input.expectedSource.state === 'present'
+      : input.expectedSource.state === 'present' && input.expectedSource.entryKind !== 'directory'
         ? input.expectedSource.mode
         : 0o100600;
   return createNativeMutationIntentSnapshot(
@@ -321,6 +400,7 @@ describe('NativeSafeFs authority boundary', () => {
           durableFence: true,
           synchronousInvalidation: true,
           mutation: true,
+          directoryOwnership: 'workspace-probed',
         },
       });
     });
@@ -520,20 +600,396 @@ describe('NativeSafeFs authority boundary', () => {
       await symlink(outside, join(input.workspace, 'escape'));
       const boundary = fixtureBoundary(input);
       const session = await boundary.openSession({ ...input, fence: '32' });
+      const ownershipToken = 'a'.repeat(64);
+      const ownership = {
+        markerLeafName: `.sprint-coder-mkdir-${ownershipToken.slice(0, 32)}`,
+        token: ownershipToken,
+      };
 
-      await expect(boundary.createDirectory(session, ['parent', 'child'])).resolves.toBeUndefined();
+      await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual({
+        state: 'absent',
+      });
+      const created = await boundary.createDirectory(session, ['parent', 'child'], ownership);
+      expect(created).toMatchObject({ state: 'present', identityDigest: expect.any(String) });
       expect((await lstat(join(input.workspace, 'parent', 'child'))).isDirectory()).toBe(true);
-      await expect(boundary.createDirectory(session, ['parent', 'child'])).rejects.toMatchObject({
+      await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual(
+        created,
+      );
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['parent', 'child'], ownership),
+      ).resolves.toEqual(created);
+      const markerPath = join(input.workspace, 'parent', 'child', ownership.markerLeafName);
+      await writeFile(markerPath, 'b'.repeat(64));
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['parent', 'child'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await writeFile(markerPath, ownership.token);
+      await expect(
+        boundary.createDirectory(session, ['parent', 'child'], ownership),
+      ).rejects.toMatchObject({
         code: 'UNSAFE_PATH',
       } satisfies Partial<NativeSafeFsError>);
-      await expect(boundary.createDirectory(session, ['escape', 'child'])).rejects.toMatchObject({
+      await expect(
+        boundary.createDirectory(session, ['escape', 'child'], ownership),
+      ).rejects.toMatchObject({
         code: 'UNSAFE_PATH',
       } satisfies Partial<NativeSafeFsError>);
-      await expect(boundary.createDirectory(session, ['..', 'child'])).rejects.toMatchObject({
+      await expect(
+        boundary.createDirectory(session, ['..', 'child'], ownership),
+      ).rejects.toMatchObject({
         code: 'INVALID_INPUT',
       } satisfies Partial<NativeSafeFsError>);
+      await writeFile(join(input.workspace, 'parent', 'child', 'kept.txt'), 'kept');
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], created.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await rm(join(input.workspace, 'parent', 'child', 'kept.txt'));
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], '0'.repeat(64)),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await boundary.cleanupDirectoryOwnership(
+        session,
+        ['parent', 'child'],
+        created.identityDigest,
+        ownership,
+      );
+      await rmdir(join(input.workspace, 'parent', 'child'));
+      await mkdir(join(input.workspace, 'parent', 'child'));
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], created.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      const replacement = await boundary.observeDirectory(session, ['parent', 'child']);
+      expect(replacement.state).toBe('present');
+      if (replacement.state !== 'present') {
+        throw new Error('replacement directory was not observed');
+      }
+      expect(replacement.identityDigest).not.toBe(created.identityDigest);
+      await expect(
+        boundary.removeDirectory(session, ['parent', 'child'], replacement.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await rmdir(join(input.workspace, 'parent', 'child'));
+      await expect(boundary.observeDirectory(session, ['parent', 'child'])).resolves.toEqual({
+        state: 'absent',
+      });
+      const detachedWorkspace = join(input.root, 'detached-workspace');
+      await rename(input.workspace, detachedWorkspace);
+      await mkdir(input.workspace);
+      await mkdir(join(input.workspace, 'parent'));
+      await expect(
+        boundary.createDirectory(session, ['parent', 'detached-child'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      expect(existsSync(join(detachedWorkspace, 'parent', 'detached-child'))).toBe(false);
+      expect(existsSync(join(input.workspace, 'parent', 'detached-child'))).toBe(false);
+      await rm(input.workspace, { recursive: true });
+      await rename(detachedWorkspace, input.workspace);
       await boundary.closeSession(session);
     });
+
+    it
+      .skipIf(!existsSync(nativeSafeFsTestAddonPath()))
+      .each(['directory.after_stage', 'directory.after_publish'])(
+      'resumes an owned mkdir after a subprocess crash at %s',
+      async (point) => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        const addonPath = nativeSafeFsTestAddonPath();
+        const token = 'c'.repeat(64);
+        const ownership = {
+          markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+          ownershipToken: token,
+        };
+        await expect(
+          childDirectoryCrash({
+            addonPath,
+            session: { ...input, fence: '701' },
+            method: 'createDirectory',
+            payload: { pathSegments: ['parent', 'crash-child'], ...ownership },
+            point,
+          }),
+        ).resolves.toBe(86);
+        const boundary = fixtureBoundary(input, addonPath);
+        const session = await boundary.openSession({ ...input, fence: '702' });
+        const typedOwnership = { markerLeafName: ownership.markerLeafName, token };
+        if (point === 'directory.after_stage')
+          await expect(
+            boundary.createDirectory(session, ['parent', 'crash-child'], typedOwnership),
+          ).resolves.toMatchObject({ state: 'present' });
+        await expect(
+          boundary.inspectDirectoryOwnership(session, ['parent', 'crash-child'], typedOwnership),
+        ).resolves.toMatchObject({ state: 'present' });
+        await boundary.closeSession(session);
+      },
+    );
+
+    it
+      .skipIf(!existsSync(nativeSafeFsTestAddonPath()))
+      .each(['directory.after_remove_stage', 'directory.after_remove_cleanup'])(
+      'resumes an owned removal quarantine after a subprocess crash at %s',
+      async (cleanupPoint) => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        const addonPath = nativeSafeFsTestAddonPath();
+        const boundary = fixtureBoundary(input, addonPath);
+        const token = 'd'.repeat(64);
+        const ownership = {
+          markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+          token,
+        };
+        let session = await boundary.openSession({ ...input, fence: '711' });
+        const created = await boundary.createDirectory(
+          session,
+          ['parent', 'removed-after-crash'],
+          ownership,
+        );
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['parent', 'removed-after-crash'],
+          created.identityDigest,
+          ownership,
+        );
+        await boundary.closeSession(session);
+        await expect(
+          childDirectoryCrash({
+            addonPath,
+            session: { ...input, fence: '712' },
+            method: 'removeDirectory',
+            payload: {
+              pathSegments: ['parent', 'removed-after-crash'],
+              expectedIdentityDigest: created.identityDigest,
+            },
+            point: 'directory.after_quarantine',
+          }),
+        ).resolves.toBe(86);
+        session = await boundary.openSession({ ...input, fence: '713' });
+        await expect(
+          boundary.removeDirectory(
+            session,
+            ['parent', 'removed-after-crash'],
+            created.identityDigest,
+          ),
+        ).resolves.toBeUndefined();
+        await boundary.closeSession(session);
+        const privateQuarantine = join(
+          input.root,
+          `.sprint-coder-directory-quarantine-${input.workspaceKey.slice(0, 32)}`,
+        );
+        expect(existsSync(privateQuarantine)).toBe(true);
+        await expect(
+          childDirectoryCrash({
+            addonPath,
+            session: { ...input, fence: '714' },
+            method: 'cleanupDirectoryRemoval',
+            payload: {
+              pathSegments: ['parent', 'removed-after-crash'],
+              expectedIdentityDigest: created.identityDigest,
+            },
+            point: cleanupPoint,
+          }),
+        ).resolves.toBe(86);
+        session = await boundary.openSession({ ...input, fence: '715' });
+        await expect(
+          boundary.cleanupDirectoryRemoval(
+            session,
+            ['parent', 'removed-after-crash'],
+            created.identityDigest,
+          ),
+        ).resolves.toBeUndefined();
+        await expect(
+          boundary.cleanupDirectoryRemoval(
+            session,
+            ['parent', 'removed-after-crash'],
+            created.identityDigest,
+          ),
+        ).resolves.toBeUndefined();
+        await boundary.closeSession(session);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'refuses a private quarantine substitution at the final delete check',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        const addonPath = nativeSafeFsTestAddonPath();
+        const boundary = fixtureBoundary(input, addonPath);
+        const token = 'f'.repeat(64);
+        const ownership = {
+          markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+          token,
+        };
+        const session = await boundary.openSession({ ...input, fence: '731' });
+        const created = await boundary.createDirectory(
+          session,
+          ['parent', 'swap-delete'],
+          ownership,
+        );
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['parent', 'swap-delete'],
+          created.identityDigest,
+          ownership,
+        );
+        await boundary.removeDirectory(session, ['parent', 'swap-delete'], created.identityDigest);
+        await boundary.closeSession(session);
+        await expect(
+          childDirectoryCleanupOutcome({
+            addonPath,
+            session: { ...input, fence: '732' },
+            payload: {
+              pathSegments: ['parent', 'swap-delete'],
+              expectedIdentityDigest: created.identityDigest,
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_SUBSTITUTE_PRIVATE_DELETE: '1' },
+          }),
+        ).resolves.toBe('UNSAFE_PATH');
+        expect(existsSync(join(input.workspace, 'parent', 'swap-delete'))).toBe(false);
+        const privateQuarantine = join(
+          input.root,
+          `.sprint-coder-directory-quarantine-${input.workspaceKey.slice(0, 32)}`,
+        );
+        const privateLeaf = `.sprint-coder-rmdir-delete-${created.identityDigest.slice(0, 32)}`;
+        expect(existsSync(join(privateQuarantine, privateLeaf))).toBe(true);
+        expect(existsSync(join(privateQuarantine, `${privateLeaf}-held`))).toBe(true);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()) || !existsSync('/dev/shm'))(
+      'cleans an owned directory when the app lock directory is on another filesystem',
+      async () => {
+        const input = await fixture();
+        const crossFilesystemLocks = await mkdtemp('/dev/shm/sprint-coder-native-locks-');
+        cleanup.push(crossFilesystemLocks);
+        await chmod(crossFilesystemLocks, 0o700);
+        const workspaceStats = await lstat(input.workspace, { bigint: true });
+        const lockStats = await lstat(crossFilesystemLocks, { bigint: true });
+        expect(lockStats.dev).not.toBe(workspaceStats.dev);
+        const crossFilesystemInput = {
+          ...input,
+          locks: crossFilesystemLocks,
+          lockDirectoryPath: crossFilesystemLocks,
+        };
+        await mkdir(join(input.workspace, 'parent'));
+        const boundary = fixtureBoundary(crossFilesystemInput, nativeSafeFsTestAddonPath());
+        const token = 'e'.repeat(64);
+        const ownership = {
+          markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+          token,
+        };
+        const session = await boundary.openSession({ ...crossFilesystemInput, fence: '741' });
+        const created = await boundary.createDirectory(
+          session,
+          ['parent', 'cross-filesystem-cleanup'],
+          ownership,
+        );
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['parent', 'cross-filesystem-cleanup'],
+          created.identityDigest,
+          ownership,
+        );
+        await boundary.removeDirectory(
+          session,
+          ['parent', 'cross-filesystem-cleanup'],
+          created.identityDigest,
+        );
+        await expect(
+          boundary.cleanupDirectoryRemoval(
+            session,
+            ['parent', 'cross-filesystem-cleanup'],
+            created.identityDigest,
+          ),
+        ).resolves.toBeUndefined();
+        expect(existsSync(join(input.workspace, 'parent', 'cross-filesystem-cleanup'))).toBe(false);
+        await boundary.closeSession(session);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'refuses mkdir before any effect when the workspace authority parent is unavailable',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        await expect(
+          childDirectoryOutcome({
+            addonPath: nativeSafeFsTestAddonPath(),
+            session: { ...input, fence: '751' },
+            payload: {
+              pathSegments: ['parent', 'unsupported-authority'],
+              markerLeafName: `.sprint-coder-mkdir-${'a'.repeat(32)}`,
+              ownershipToken: 'a'.repeat(64),
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_UNAVAILABLE: '1' },
+          }),
+        ).resolves.toBe('UNSUPPORTED_PLATFORM');
+        expect(existsSync(join(input.workspace, 'parent', 'unsupported-authority'))).toBe(false);
+        expect(
+          existsSync(
+            join(input.workspace, 'parent', `.sprint-coder-mkdir-stage-${'a'.repeat(32)}`),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'refuses a mount-root mkdir without creating an authority or workspace artifact',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        await expect(
+          childDirectoryOutcome({
+            addonPath: nativeSafeFsTestAddonPath(),
+            session: { ...input, fence: '752' },
+            payload: {
+              pathSegments: ['parent', 'mount-root-unsupported'],
+              markerLeafName: `.sprint-coder-mkdir-${'b'.repeat(32)}`,
+              ownershipToken: 'b'.repeat(64),
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_CROSS_FILESYSTEM: '1' },
+          }),
+        ).resolves.toBe('UNSUPPORTED_PLATFORM');
+        expect(
+          existsSync(
+            join(
+              input.root,
+              `.sprint-coder-directory-quarantine-${input.workspaceKey.slice(0, 32)}`,
+            ),
+          ),
+        ).toBe(false);
+        expect(existsSync(join(input.workspace, 'parent', 'mount-root-unsupported'))).toBe(false);
+        expect(
+          existsSync(
+            join(input.workspace, 'parent', `.sprint-coder-mkdir-stage-${'b'.repeat(32)}`),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.skipIf(!existsSync(nativeSafeFsTestAddonPath()))(
+      'reports unsupported workspace ownership metadata before publishing a directory',
+      async () => {
+        const input = await fixture();
+        await mkdir(join(input.workspace, 'parent'));
+        const token = 'e'.repeat(64);
+        await expect(
+          childDirectoryOutcome({
+            addonPath: nativeSafeFsTestAddonPath(),
+            session: { ...input, fence: '721' },
+            payload: {
+              pathSegments: ['parent', 'unsupported-owner'],
+              markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
+              ownershipToken: token,
+            },
+            env: { SPRINT_CODER_NATIVE_SAFE_FS_XATTR_UNSUPPORTED: '1' },
+          }),
+        ).resolves.toBe('UNSUPPORTED_PLATFORM');
+        expect(existsSync(join(input.workspace, 'parent', 'unsupported-owner'))).toBe(false);
+        expect(
+          existsSync(
+            join(input.workspace, 'parent', `.sprint-coder-mkdir-stage-${token.slice(0, 32)}`),
+          ),
+        ).toBe(false);
+      },
+    );
 
     it('recovers the last checksummed fence after a partial append', async () => {
       const input = await fixture();

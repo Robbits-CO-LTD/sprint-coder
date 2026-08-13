@@ -104,6 +104,13 @@ describe('Provider workspace read tools', () => {
           expect(workspaceToolAuthorizationGuard({})).toBeUndefined();
           expect(guard.operation).toBe('write');
           created.push(path);
+          return {
+            rootId: 'root-a',
+            path,
+            sagaId: 'mkdir-saga',
+            state: 'committed',
+            kind: 'mkdir',
+          };
         },
         policyEpochFor: () => 2,
       },
@@ -129,7 +136,8 @@ describe('Provider workspace read tools', () => {
       rootId: 'root-a',
       path: 'discord-mcp',
       state: 'committed',
-      kind: 'add',
+      kind: 'mkdir',
+      sagaId: 'mkdir-saga',
     });
     expect(created).toEqual(['discord-mcp']);
   });

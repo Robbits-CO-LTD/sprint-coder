@@ -1,8 +1,10 @@
 #include <node_api.h>
 
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #if defined(__APPLE__)
 #include <sys/stdio.h>
 #elif defined(__linux__)
@@ -16,6 +18,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -112,6 +115,15 @@ bool HitTestControl(const char* point, int* injected_errno = nullptr) {
 #else
 bool HitTestControl(const char*, int* = nullptr) { return false; }
 #endif
+
+void HitDirectoryCrashPoint(const char* point) {
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  const char* selected = std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_CRASH_POINT");
+  if (selected != nullptr && std::string(selected) == point) _exit(86);
+#else
+  (void)point;
+#endif
+}
 
 void CloseFd(int* fd) {
   if (*fd >= 0) {
@@ -1115,6 +1127,59 @@ std::string FileIdentityDigest(const struct stat& file_stat) {
       std::to_string(static_cast<uint64_t>(file_stat.st_ino)) + "\"," +
       std::to_string(static_cast<uint32_t>(file_stat.st_mode)) + "," +
       std::to_string(static_cast<uint64_t>(file_stat.st_nlink)) + ",\"file\"]";
+  return Sha256Bytes(reinterpret_cast<const unsigned char*>(facts.data()), facts.size());
+}
+
+std::string DirectoryIdentityDigest(const struct stat& directory_stat) {
+  const std::string facts =
+      "[\"native-directory-identity-v1\",\"" +
+      std::to_string(static_cast<uint64_t>(directory_stat.st_dev)) + "\",\"" +
+      std::to_string(static_cast<uint64_t>(directory_stat.st_ino)) + "\"," +
+      std::to_string(static_cast<uint32_t>(directory_stat.st_mode)) + ",\"directory\"]";
+  return Sha256Bytes(reinterpret_cast<const unsigned char*>(facts.data()), facts.size());
+}
+
+bool WriteDirectoryOwnershipToken(int directory_fd, const std::string& token) {
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  const char* unavailable = std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_XATTR_UNSUPPORTED");
+  if (unavailable != nullptr && std::string(unavailable) == "1") {
+    errno = ENOTSUP;
+    return false;
+  }
+#endif
+#if defined(__APPLE__)
+  return fsetxattr(directory_fd, "com.sprint-coder.mkdir-owner", token.data(), token.size(), 0, 0) ==
+         0;
+#elif defined(__linux__)
+  return fsetxattr(directory_fd, "user.sprint-coder.mkdir-owner", token.data(), token.size(), 0) == 0;
+#else
+  errno = ENOTSUP;
+  return false;
+#endif
+}
+
+bool ReadDirectoryOwnershipToken(int directory_fd, std::string* token) {
+  std::array<char, 64> bytes {};
+#if defined(__APPLE__)
+  const ssize_t count =
+      fgetxattr(directory_fd, "com.sprint-coder.mkdir-owner", bytes.data(), bytes.size(), 0, 0);
+#elif defined(__linux__)
+  const ssize_t count =
+      fgetxattr(directory_fd, "user.sprint-coder.mkdir-owner", bytes.data(), bytes.size());
+#else
+  const ssize_t count = -1;
+  errno = ENOTSUP;
+#endif
+  if (count != static_cast<ssize_t>(bytes.size())) return false;
+  *token = std::string(bytes.data(), bytes.size());
+  return IsLowerHex(*token, 64);
+}
+
+std::string OwnedDirectoryIdentityDigest(const struct stat& directory_stat,
+                                         const std::string& ownership_token) {
+  const std::string facts = "[\"native-owned-directory-identity-v1\",\"" +
+                            DirectoryIdentityDigest(directory_stat) + "\",\"" + ownership_token +
+                            "\"]";
   return Sha256Bytes(reinterpret_cast<const unsigned char*>(facts.data()), facts.size());
 }
 
@@ -2287,18 +2352,244 @@ napi_value CleanupIntentAuxiliary(napi_env env, napi_callback_info info) {
   return promise;
 }
 
-napi_value CreateDirectory(napi_env env, napi_callback_info info) {
+bool ReadDirectoryInput(napi_env env, napi_value value, std::string* session_id,
+                        std::vector<std::string>* segments) {
+  return ReadString(env, value, "sessionId", session_id) && IsLowerHex(*session_id, 32) &&
+         ReadSegments(env, value, "pathSegments", false, false, segments);
+}
+
+bool ReadDirectoryOwnershipInput(napi_env env, napi_value value, std::string* session_id,
+                                 std::vector<std::string>* segments, std::string* marker_leaf,
+                                 std::string* token) {
+  return ReadDirectoryInput(env, value, session_id, segments) &&
+         ReadString(env, value, "markerLeafName", marker_leaf) &&
+         ReadString(env, value, "ownershipToken", token) && IsLowerHex(*token, 64) &&
+         *marker_leaf == ".sprint-coder-mkdir-" + token->substr(0, 32);
+}
+
+bool ReadMarkerToken(int directory_fd, const std::string& marker_leaf, std::string* token) {
+  int marker_fd = openat(directory_fd, marker_leaf.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (marker_fd < 0) return false;
+  struct stat marker_stat {};
+  std::array<char, 64> bytes {};
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t count = pread(marker_fd, bytes.data() + offset, bytes.size() - offset,
+                                static_cast<off_t>(offset));
+    if (count <= 0) break;
+    offset += static_cast<size_t>(count);
+  }
+  const bool valid = fstat(marker_fd, &marker_stat) == 0 && S_ISREG(marker_stat.st_mode) &&
+                     marker_stat.st_nlink == 1 && marker_stat.st_size == 64 && offset == 64;
+  CloseFd(&marker_fd);
+  if (!valid) return false;
+  *token = std::string(bytes.data(), bytes.size());
+  return true;
+}
+
+bool DirectoryContainsOnlyMarker(int directory_fd, const std::string& marker_leaf) {
+  const int scan_fd = openat(directory_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (scan_fd < 0) return false;
+  DIR* directory = fdopendir(scan_fd);
+  if (directory == nullptr) {
+    close(scan_fd);
+    return false;
+  }
+  bool found = false;
+  bool safe = true;
+  while (dirent* entry = readdir(directory)) {
+    const std::string name(entry->d_name);
+    if (name == "." || name == "..") continue;
+    if (name != marker_leaf || found) {
+      safe = false;
+      break;
+    }
+    found = true;
+  }
+  closedir(directory);
+  return safe && found;
+}
+
+bool DirectoryIsEmpty(int directory_fd) {
+  const int scan_fd = openat(directory_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (scan_fd < 0) return false;
+  DIR* directory = fdopendir(scan_fd);
+  if (directory == nullptr) {
+    close(scan_fd);
+    return false;
+  }
+  bool empty = true;
+  while (dirent* entry = readdir(directory)) {
+    const std::string name(entry->d_name);
+    if (name != "." && name != "..") {
+      empty = false;
+      break;
+    }
+  }
+  closedir(directory);
+  return empty;
+}
+
+bool SameDirectoryObject(const struct stat& first, const struct stat& second);
+
+bool RemovePinnedDirectory(int parent_fd, const std::string& leaf, int directory_fd) {
+  struct stat descriptor_stat {};
+  struct stat namespace_stat {};
+  if (fstat(directory_fd, &descriptor_stat) != 0 ||
+      fstatat(parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(descriptor_stat, namespace_stat)) {
+    errno = ESTALE;
+    return false;
+  }
+  return unlinkat(parent_fd, leaf.c_str(), AT_REMOVEDIR) == 0;
+}
+
+int OpenPrivateDirectoryQuarantine(int root_fd, const std::string& workspace_path,
+                                   const std::string& workspace_key, NativeFailure* failure) {
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  const char* authority_unavailable =
+      std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_UNAVAILABLE");
+  if (authority_unavailable != nullptr && std::string(authority_unavailable) == "1") {
+    *failure = {"UNSUPPORTED_PLATFORM",
+                "Workspace filesystem cannot host a durable directory authority"};
+    return -1;
+  }
+#endif
+  const size_t separator = workspace_path.find_last_of('/');
+  if (separator == std::string::npos || separator + 1 >= workspace_path.size()) {
+    *failure = {"UNSUPPORTED_PLATFORM",
+                "Workspace root has no same-filesystem authority parent"};
+    return -1;
+  }
+  const std::string workspace_leaf = workspace_path.substr(separator + 1);
+  int authority_parent_fd = openat(root_fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  struct stat root_stat {};
+  struct stat authority_parent_stat {};
+  struct stat workspace_namespace_stat {};
+  if (authority_parent_fd < 0 || fstat(root_fd, &root_stat) != 0 ||
+      fstat(authority_parent_fd, &authority_parent_stat) != 0 ||
+      fstatat(authority_parent_fd, workspace_leaf.c_str(), &workspace_namespace_stat,
+              AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(root_stat, workspace_namespace_stat)) {
+    CloseFd(&authority_parent_fd);
+    *failure = {"UNSAFE_PATH", "Workspace authority parent changed"};
+    return -1;
+  }
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  const char* authority_cross_filesystem =
+      std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_AUTHORITY_CROSS_FILESYSTEM");
+  const bool force_cross_filesystem = authority_cross_filesystem != nullptr &&
+                                      std::string(authority_cross_filesystem) == "1";
+#else
+  const bool force_cross_filesystem = false;
+#endif
+  if (force_cross_filesystem || authority_parent_stat.st_dev != root_stat.st_dev) {
+    CloseFd(&authority_parent_fd);
+    *failure = {"UNSUPPORTED_PLATFORM",
+                "Workspace root is a filesystem mount without a private authority parent"};
+    return -1;
+  }
+  const std::string leaf = ".sprint-coder-directory-quarantine-" + workspace_key.substr(0, 32);
+  bool created = false;
+  if (mkdirat(authority_parent_fd, leaf.c_str(), 0700) == 0)
+    created = true;
+  else if (errno != EEXIST) {
+    const int mkdir_errno = errno;
+    CloseFd(&authority_parent_fd);
+    errno = mkdir_errno;
+    *failure = {(mkdir_errno == EACCES || mkdir_errno == EPERM || mkdir_errno == EROFS)
+                    ? "UNSUPPORTED_PLATFORM"
+                    : "NATIVE_FAILURE",
+                ErrnoMessage("create private directory quarantine")};
+    return -1;
+  }
+  if (created && fsync(authority_parent_fd) != 0) {
+    CloseFd(&authority_parent_fd);
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("persist private directory quarantine")};
+    return -1;
+  }
+  int fd = openat(authority_parent_fd, leaf.c_str(),
+                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat descriptor_stat {};
+  struct stat namespace_stat {};
+  if (fd < 0 || fstat(fd, &descriptor_stat) != 0 ||
+      fstatat(authority_parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(descriptor_stat, namespace_stat) || descriptor_stat.st_uid != getuid() ||
+      descriptor_stat.st_dev != root_stat.st_dev || (descriptor_stat.st_mode & 0777) != 0700) {
+    CloseFd(&fd);
+    CloseFd(&authority_parent_fd);
+    *failure = {"UNSAFE_LOCK", "Private directory quarantine identity is unsafe"};
+    return -1;
+  }
+  CloseFd(&authority_parent_fd);
+  return fd;
+}
+
+bool SameDirectoryObject(const struct stat& first, const struct stat& second) {
+  return S_ISDIR(first.st_mode) && S_ISDIR(second.st_mode) && first.st_dev == second.st_dev &&
+         first.st_ino == second.st_ino && first.st_mode == second.st_mode;
+}
+
+bool PinnedOwnedDirectoryIdentityMatches(int parent_fd, const std::string& leaf,
+                                         int directory_fd, const std::string& expected_token,
+                                         const std::string* expected_identity,
+                                         struct stat* pinned_stat) {
+  struct stat descriptor_stat {};
+  struct stat namespace_stat {};
+  std::string attribute_token;
+  if (directory_fd < 0 || fstat(directory_fd, &descriptor_stat) != 0 ||
+      fstatat(parent_fd, leaf.c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !SameDirectoryObject(descriptor_stat, namespace_stat) ||
+      !ReadDirectoryOwnershipToken(directory_fd, &attribute_token) ||
+      attribute_token != expected_token ||
+      (expected_identity != nullptr &&
+       OwnedDirectoryIdentityDigest(descriptor_stat, attribute_token) != *expected_identity))
+    return false;
+  if (pinned_stat != nullptr) *pinned_stat = descriptor_stat;
+  return true;
+}
+
+bool PinnedOwnedDirectoryMatches(int parent_fd, const std::string& leaf, int directory_fd,
+                                 const std::string& marker_leaf,
+                                 const std::string& expected_token, bool require_only_marker,
+                                 struct stat* pinned_stat) {
+  std::string marker_token;
+  if (!PinnedOwnedDirectoryIdentityMatches(parent_fd, leaf, directory_fd, expected_token, nullptr,
+                                           pinned_stat) ||
+      (require_only_marker &&
+       (!ReadMarkerToken(directory_fd, marker_leaf, &marker_token) ||
+        marker_token != expected_token ||
+        !DirectoryContainsOnlyMarker(directory_fd, marker_leaf))))
+    return false;
+  return true;
+}
+
+napi_value MakeDirectoryObservation(napi_env env, const struct stat* directory_stat,
+                                    const std::string* ownership_token = nullptr) {
+  napi_value result;
+  napi_create_object(env, &result);
+  if (directory_stat == nullptr) {
+    napi_set_named_property(env, result, "state", MakeString(env, "absent"));
+    return result;
+  }
+  napi_set_named_property(env, result, "state", MakeString(env, "present"));
+  napi_set_named_property(env, result, "identityDigest",
+                          MakeString(env, ownership_token == nullptr
+                                              ? DirectoryIdentityDigest(*directory_stat)
+                                              : OwnedDirectoryIdentityDigest(*directory_stat,
+                                                                             *ownership_token)));
+  return result;
+}
+
+napi_value ObserveDirectory(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   napi_valuetype type;
-  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object)
-    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs create directory input must be an object");
   std::string session_id;
   std::vector<std::string> segments;
-  if (!ReadString(env, argv[0], "sessionId", &session_id) ||
-      !IsLowerHex(session_id, 32) ||
-      !ReadSegments(env, argv[0], "pathSegments", false, false, &segments))
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadDirectoryInput(env, argv[0], &session_id, &segments))
     return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs directory input");
 
   NativeFailure failure;
@@ -2310,6 +2601,80 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
                           &invalidation_version, &failure))
     return ThrowFailure(env, failure.code, failure.message);
+  if (!VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  if (parent_fd < 0) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  struct stat observed {};
+  std::string ownership_token;
+  bool has_ownership_token = false;
+  int result = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before observation"};
+    } else if (!VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+               !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+      // Verification provides the failure.
+    } else {
+      result = fstatat(parent_fd, segments.back().c_str(), &observed, AT_SYMLINK_NOFOLLOW);
+      const int saved_errno = errno;
+      if (result == 0 && !S_ISDIR(observed.st_mode)) {
+        failure = {"UNSAFE_PATH", "NativeSafeFs directory endpoint is not a directory"};
+      } else if (result == 0) {
+        int directory_fd = openat(parent_fd, segments.back().c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        has_ownership_token =
+            directory_fd >= 0 && ReadDirectoryOwnershipToken(directory_fd, &ownership_token);
+        CloseFd(&directory_fd);
+      } else if (result != 0 && saved_errno != ENOENT) {
+        errno = saved_errno;
+        failure = {"UNSAFE_PATH", ErrnoMessage("stat workspace directory")};
+      }
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
+  return MakeDirectoryObservation(env, result == 0 ? &observed : nullptr,
+                                  has_ownership_token ? &ownership_token : nullptr);
+}
+
+napi_value CreateDirectory(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object)
+    return ThrowFailure(env, "INVALID_INPUT", "NativeSafeFs create directory input must be an object");
+  std::string session_id;
+  std::string marker_leaf;
+  std::string ownership_token;
+  std::vector<std::string> segments;
+  if (!ReadDirectoryOwnershipInput(env, argv[0], &session_id, &segments, &marker_leaf,
+                                   &ownership_token))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs directory input");
+
+  NativeFailure failure;
+  int root_fd = -1;
+  int parent_fd = -1;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  if (!VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
   parent_fd = OpenRelativeParent(root_fd, segments, &failure);
   if (parent_fd < 0) {
     CloseFd(&root_fd);
@@ -2317,29 +2682,121 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   }
 
   int result = -1;
+  struct stat created {};
+  const std::string staging_leaf = ".sprint-coder-mkdir-stage-" + ownership_token.substr(0, 32);
+  bool published = false;
   {
     std::lock_guard<std::mutex> guard(state.mutex);
     const auto session = state.sessions.find(session_id);
     if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
         state.invalidation_versions[workspace_key] != invalidation_version) {
       failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before mkdir"};
-    } else if (!VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure)) {
+    } else if (!VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+               !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
       // VerifyRelativeParentNamespace provides the failure.
     } else {
+      int authority_probe_fd =
+          OpenPrivateDirectoryQuarantine(root_fd, workspace_path, workspace_key, &failure);
+      CloseFd(&authority_probe_fd);
+    }
+    if (failure.code.empty()) {
       struct stat existing {};
       if (fstatat(parent_fd, segments.back().c_str(), &existing, AT_SYMLINK_NOFOLLOW) == 0 ||
           errno != ENOENT) {
         failure = {"UNSAFE_PATH", "NativeSafeFs directory destination already exists"};
       } else {
-        result = mkdirat(parent_fd, segments.back().c_str(), 0755);
-        if (result != 0) {
-          failure = {"NATIVE_FAILURE", ErrnoMessage("mkdir workspace directory")};
-        } else if (fsync(parent_fd) != 0) {
-          const int saved_errno = errno;
-          unlinkat(parent_fd, segments.back().c_str(), AT_REMOVEDIR);
-          errno = saved_errno;
-          failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mkdir parent")};
+        bool created_staging = false;
+        if (mkdirat(parent_fd, staging_leaf.c_str(), 0755) == 0) {
+          created_staging = true;
+        } else if (errno != EEXIST) {
+          failure = {"NATIVE_FAILURE", ErrnoMessage("mkdir workspace staging directory")};
         }
+        int directory_fd = failure.code.empty()
+                               ? openat(parent_fd, staging_leaf.c_str(),
+                                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                               : -1;
+        if (failure.code.empty() && directory_fd < 0)
+          failure = {"UNSAFE_PATH", "NativeSafeFs mkdir staging endpoint is unsafe"};
+        if (failure.code.empty() && created_staging) {
+          int marker_fd = directory_fd < 0
+                              ? -1
+                              : openat(directory_fd, marker_leaf.c_str(),
+                                       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+          ssize_t written = marker_fd < 0
+                                ? -1
+                                : write(marker_fd, ownership_token.data(), ownership_token.size());
+          const bool ownership_written = WriteDirectoryOwnershipToken(directory_fd, ownership_token);
+          const int ownership_errno = errno;
+          if (marker_fd < 0 || written != static_cast<ssize_t>(ownership_token.size()) ||
+              !ownership_written || fsync(marker_fd) != 0 || fsync(directory_fd) != 0) {
+            if (!ownership_written &&
+                (ownership_errno == ENOTSUP || ownership_errno == EOPNOTSUPP))
+              failure = {"UNSUPPORTED_PLATFORM",
+                         "Workspace filesystem does not support durable directory ownership"};
+            else
+              failure = {"NATIVE_FAILURE", "NativeSafeFs mkdir ownership marker failed"};
+          }
+          CloseFd(&marker_fd);
+        }
+        if (failure.code.empty() &&
+            !PinnedOwnedDirectoryMatches(parent_fd, staging_leaf, directory_fd, marker_leaf,
+                                         ownership_token, true, &created))
+          failure = {"UNSAFE_PATH", "NativeSafeFs mkdir staging ownership changed"};
+        if (failure.code.empty()) {
+          result = 0;
+          HitDirectoryCrashPoint("directory.after_stage");
+          if (AtomicMoveNoReplace(parent_fd, staging_leaf.c_str(), parent_fd,
+                                  segments.back().c_str()) != 0)
+            failure = AtomicMutationFailure("publish workspace directory");
+          else {
+            published = true;
+            HitDirectoryCrashPoint("directory.after_publish");
+          }
+        }
+        if (failure.code.empty() &&
+            !PinnedOwnedDirectoryMatches(parent_fd, segments.back(), directory_fd, marker_leaf,
+                                         ownership_token, true, nullptr))
+          failure = {"UNSAFE_PATH", "NativeSafeFs published directory identity changed"};
+        if (failure.code.empty() &&
+            (!VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+             !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH"))) {
+          // Namespace verification provides the failure.
+        }
+        if (failure.code.empty() && fsync(parent_fd) != 0)
+          failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mkdir parent")};
+        if (!failure.code.empty() && published) {
+          if (AtomicMoveNoReplace(parent_fd, segments.back().c_str(), parent_fd,
+                                  staging_leaf.c_str()) == 0) {
+            struct stat quarantined {};
+            if (PinnedOwnedDirectoryMatches(parent_fd, staging_leaf, directory_fd, marker_leaf,
+                                            ownership_token, false, &quarantined) &&
+                SameDirectoryObject(created, quarantined)) {
+              published = false;
+            } else if (AtomicMoveNoReplace(parent_fd, staging_leaf.c_str(), parent_fd,
+                                           segments.back().c_str()) != 0) {
+              failure = {"NATIVE_FAILURE", "Failed to restore substituted mkdir target"};
+            }
+          }
+        }
+        if (!failure.code.empty() && created_staging && !published && directory_fd >= 0) {
+          struct stat descriptor_stat {};
+          struct stat namespace_stat {};
+          std::string marker_token;
+          const bool same_staging = fstat(directory_fd, &descriptor_stat) == 0 &&
+                                    fstatat(parent_fd, staging_leaf.c_str(), &namespace_stat,
+                                            AT_SYMLINK_NOFOLLOW) == 0 &&
+                                    SameDirectoryObject(descriptor_stat, namespace_stat);
+          const bool marker_only =
+              ReadMarkerToken(directory_fd, marker_leaf, &marker_token) &&
+              marker_token == ownership_token &&
+              DirectoryContainsOnlyMarker(directory_fd, marker_leaf);
+          if (same_staging && (marker_only || DirectoryIsEmpty(directory_fd))) {
+            if (marker_only) unlinkat(directory_fd, marker_leaf.c_str(), 0);
+            unlinkat(parent_fd, staging_leaf.c_str(), AT_REMOVEDIR);
+            fsync(parent_fd);
+          }
+        }
+        CloseFd(&directory_fd);
       }
     }
   }
@@ -2348,6 +2805,339 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   if (result != 0 || !failure.code.empty())
     return ThrowFailure(env, failure.code.empty() ? "NATIVE_FAILURE" : failure.code,
                         failure.message.empty() ? "NativeSafeFs mkdir failed" : failure.message);
+  return MakeDirectoryObservation(env, &created, &ownership_token);
+}
+
+napi_value InspectDirectoryOwnership(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string session_id, marker_leaf, expected_token;
+  std::vector<std::string> segments;
+  if (argc != 1 ||
+      !ReadDirectoryOwnershipInput(env, argv[0], &session_id, &segments, &marker_leaf,
+                                   &expected_token))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid directory ownership input");
+  NativeFailure failure;
+  int root_fd = -1;
+  std::string workspace_key, workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  if (!VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  int parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  struct stat observed {};
+  int result = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before ownership check"};
+    } else if (parent_fd < 0 ||
+               !VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+               !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+      if (failure.code.empty()) failure = {"UNSAFE_PATH", "Directory parent changed"};
+    } else {
+      result = fstatat(parent_fd, segments.back().c_str(), &observed, AT_SYMLINK_NOFOLLOW);
+      if (result != 0 && errno == ENOENT) {
+        // Absent is a valid pre-effect observation.
+      } else if (result != 0 || !S_ISDIR(observed.st_mode)) {
+        failure = {"UNSAFE_PATH", "Directory ownership endpoint is unsafe"};
+      } else {
+        int directory_fd = openat(parent_fd, segments.back().c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (!PinnedOwnedDirectoryMatches(parent_fd, segments.back(), directory_fd, marker_leaf,
+                                         expected_token, true, &observed)) {
+          failure = {"UNSAFE_PATH", "Directory ownership marker does not match"};
+        }
+        CloseFd(&directory_fd);
+      }
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
+  return MakeDirectoryObservation(env, result == 0 ? &observed : nullptr,
+                                  result == 0 ? &expected_token : nullptr);
+}
+
+napi_value CleanupDirectoryOwnership(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string session_id, marker_leaf, expected_token, expected_identity;
+  std::vector<std::string> segments;
+  if (argc != 1 ||
+      !ReadDirectoryOwnershipInput(env, argv[0], &session_id, &segments, &marker_leaf,
+                                   &expected_token) ||
+      !ReadString(env, argv[0], "expectedIdentityDigest", &expected_identity) ||
+      !IsLowerHex(expected_identity, 64))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid directory ownership cleanup input");
+  NativeFailure failure;
+  int root_fd = -1;
+  std::string workspace_key, workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  if (!VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  int parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    struct stat observed {};
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before marker cleanup"};
+    } else if (parent_fd < 0 ||
+               !VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+               !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH") ||
+               fstatat(parent_fd, segments.back().c_str(), &observed, AT_SYMLINK_NOFOLLOW) != 0 ||
+               !S_ISDIR(observed.st_mode)) {
+      if (failure.code.empty()) failure = {"UNSAFE_PATH", "Directory identity changed"};
+    } else {
+      int directory_fd = openat(parent_fd, segments.back().c_str(),
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+      std::string token;
+      const bool attribute_matches = PinnedOwnedDirectoryIdentityMatches(
+          parent_fd, segments.back(), directory_fd, expected_token, &expected_identity, &observed);
+      const bool marker_present = ReadMarkerToken(directory_fd, marker_leaf, &token);
+      if (!attribute_matches ||
+          (marker_present
+               ? token != expected_token || !DirectoryContainsOnlyMarker(directory_fd, marker_leaf)
+               : !DirectoryIsEmpty(directory_fd))) {
+        failure = {"UNSAFE_PATH", "Directory marker cleanup refused non-owned contents"};
+      } else if (marker_present &&
+                 (!PinnedOwnedDirectoryIdentityMatches(parent_fd, segments.back(), directory_fd,
+                                                       expected_token, &expected_identity, nullptr) ||
+                  unlinkat(directory_fd, marker_leaf.c_str(), 0) != 0 || fsync(directory_fd) != 0)) {
+        failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup mkdir ownership marker")};
+      }
+      CloseFd(&directory_fd);
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
+napi_value RemoveDirectory(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  std::string session_id;
+  std::string expected_identity;
+  std::vector<std::string> segments;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadDirectoryInput(env, argv[0], &session_id, &segments) ||
+      !ReadString(env, argv[0], "expectedIdentityDigest", &expected_identity) ||
+      !IsLowerHex(expected_identity, 64))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs remove directory input");
+  NativeFailure failure;
+  int root_fd = -1;
+  int parent_fd = -1;
+  std::string workspace_key;
+  std::string workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  if (!VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  struct stat current {};
+  const std::string quarantine_leaf = ".sprint-coder-rmdir-" + expected_identity.substr(0, 32);
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version) {
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before directory removal"};
+    } else if (parent_fd < 0 ||
+               !VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+               !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+      if (failure.code.empty()) failure = {"UNSAFE_PATH", "Directory parent changed"};
+    } else {
+      const int target_result =
+          fstatat(parent_fd, segments.back().c_str(), &current, AT_SYMLINK_NOFOLLOW);
+      if (target_result == 0 && S_ISDIR(current.st_mode)) {
+        int directory_fd = openat(parent_fd, segments.back().c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        std::string ownership_token;
+        const bool has_token = directory_fd >= 0 &&
+                               ReadDirectoryOwnershipToken(directory_fd, &ownership_token);
+        const bool identity_matches =
+            has_token && PinnedOwnedDirectoryIdentityMatches(
+                             parent_fd, segments.back(), directory_fd, ownership_token,
+                             &expected_identity, &current) &&
+            DirectoryIsEmpty(directory_fd);
+        CloseFd(&directory_fd);
+        if (!identity_matches)
+          failure = {"UNSAFE_PATH", "NativeSafeFs directory ownership changed before removal"};
+        else if (AtomicMoveNoReplace(parent_fd, segments.back().c_str(), parent_fd,
+                                     quarantine_leaf.c_str()) != 0)
+          failure = AtomicMutationFailure("quarantine workspace directory");
+        else
+          HitDirectoryCrashPoint("directory.after_quarantine");
+      } else if (target_result != 0 && errno == ENOENT) {
+        // A previous authorized attempt may already have moved the directory.
+      } else {
+        failure = {"UNSAFE_PATH", "NativeSafeFs directory identity changed before removal"};
+      }
+    }
+    if (failure.code.empty()) {
+      struct stat quarantined {};
+      int quarantined_fd = openat(parent_fd, quarantine_leaf.c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+      std::string ownership_token;
+      const bool quarantine_matches =
+          quarantined_fd >= 0 && fstat(quarantined_fd, &quarantined) == 0 &&
+          ReadDirectoryOwnershipToken(quarantined_fd, &ownership_token) &&
+          PinnedOwnedDirectoryIdentityMatches(parent_fd, quarantine_leaf, quarantined_fd,
+                                              ownership_token, &expected_identity, &quarantined);
+      CloseFd(&quarantined_fd);
+      if (!quarantine_matches) {
+        if (AtomicMoveNoReplace(parent_fd, quarantine_leaf.c_str(), parent_fd,
+                                segments.back().c_str()) == 0)
+          failure = {"UNSAFE_PATH", "Directory identity changed during quarantine"};
+        else
+          failure = {"NATIVE_FAILURE", "Failed to restore substituted directory quarantine"};
+      }
+    }
+    if (failure.code.empty() && fsync(parent_fd) != 0) {
+      failure = {"NATIVE_FAILURE", ErrnoMessage("fsync removed directory parent")};
+    }
+  }
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
+napi_value CleanupDirectoryRemoval(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string session_id, expected_identity;
+  std::vector<std::string> segments;
+  if (argc != 1 || !ReadDirectoryInput(env, argv[0], &session_id, &segments) ||
+      !ReadString(env, argv[0], "expectedIdentityDigest", &expected_identity) ||
+      !IsLowerHex(expected_identity, 64))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid directory removal cleanup input");
+  NativeFailure failure;
+  int root_fd = -1;
+  std::string workspace_key, workspace_path;
+  uint64_t invalidation_version = 0;
+  if (!CaptureSessionRoot(session_id, &root_fd, &workspace_key, &workspace_path,
+                          &invalidation_version, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  int parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  const std::string quarantine_leaf = ".sprint-coder-rmdir-" + expected_identity.substr(0, 32);
+  const std::string delete_leaf = ".sprint-coder-rmdir-delete-" + expected_identity.substr(0, 32);
+  int private_quarantine_fd = -1;
+  {
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const auto session = state.sessions.find(session_id);
+    if (session == state.sessions.end() || session->second.workspace_key != workspace_key ||
+        state.invalidation_versions[workspace_key] != invalidation_version)
+      failure = {"STALE_SESSION", "NativeSafeFs session was invalidated before removal cleanup"};
+    else if (parent_fd < 0 ||
+             !VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure) ||
+             !VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+      if (failure.code.empty()) failure = {"UNSAFE_PATH", "Directory parent changed"};
+    } else {
+      private_quarantine_fd =
+          OpenPrivateDirectoryQuarantine(root_fd, workspace_path, workspace_key, &failure);
+      if (private_quarantine_fd < 0) {
+        // OpenPrivateDirectoryQuarantine provides the failure.
+      } else {
+        struct stat target {};
+        if (fstatat(parent_fd, segments.back().c_str(), &target, AT_SYMLINK_NOFOLLOW) == 0 ||
+            errno != ENOENT) {
+          failure = {"UNSAFE_PATH", "Directory removal cleanup found a target"};
+        } else {
+          struct stat quarantined {};
+          int quarantine_fd = openat(parent_fd, quarantine_leaf.c_str(),
+                                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+          if (quarantine_fd < 0 && errno == ENOENT) {
+            quarantine_fd = openat(private_quarantine_fd, delete_leaf.c_str(),
+                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (quarantine_fd < 0 && errno == ENOENT) {
+              // cleanup_pending is the durable proof that removal was authorized and completed.
+            }
+          }
+          if (quarantine_fd >= 0) {
+            const bool already_staged =
+                fstatat(private_quarantine_fd, delete_leaf.c_str(), &quarantined,
+                        AT_SYMLINK_NOFOLLOW) == 0;
+            const std::string& cleanup_leaf = already_staged ? delete_leaf : quarantine_leaf;
+            const int cleanup_parent_fd = already_staged ? private_quarantine_fd : parent_fd;
+            std::string token;
+            const bool matches = quarantine_fd >= 0 && fstat(quarantine_fd, &quarantined) == 0 &&
+                                 ReadDirectoryOwnershipToken(quarantine_fd, &token) &&
+                                 PinnedOwnedDirectoryIdentityMatches(
+                                     cleanup_parent_fd, cleanup_leaf, quarantine_fd, token,
+                                     &expected_identity, &quarantined) &&
+                                 DirectoryIsEmpty(quarantine_fd);
+            if (!matches)
+              failure = {"UNSAFE_PATH", "Directory removal cleanup refused quarantine"};
+            else if (!already_staged &&
+                     AtomicMoveNoReplace(parent_fd, quarantine_leaf.c_str(), private_quarantine_fd,
+                                         delete_leaf.c_str()) != 0)
+              failure = AtomicMutationFailure("stage removed directory cleanup");
+            else if (!already_staged &&
+                     (fsync(parent_fd) != 0 || fsync(private_quarantine_fd) != 0))
+              failure = {"NATIVE_FAILURE",
+                         ErrnoMessage("persist staged removed directory cleanup")};
+            else {
+              HitDirectoryCrashPoint("directory.after_remove_stage");
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+              const char* substitute =
+                  std::getenv("SPRINT_CODER_NATIVE_SAFE_FS_SUBSTITUTE_PRIVATE_DELETE");
+              if (substitute != nullptr && std::string(substitute) == "1") {
+                const std::string held_leaf = delete_leaf + "-held";
+                renameat(private_quarantine_fd, delete_leaf.c_str(), private_quarantine_fd,
+                         held_leaf.c_str());
+                mkdirat(private_quarantine_fd, delete_leaf.c_str(), 0700);
+              }
+#endif
+              if (!PinnedOwnedDirectoryIdentityMatches(
+                      private_quarantine_fd, delete_leaf, quarantine_fd, token,
+                      &expected_identity, nullptr))
+                failure = {"UNSAFE_PATH", "Directory removal cleanup identity changed"};
+              else if (!RemovePinnedDirectory(private_quarantine_fd, delete_leaf,
+                                               quarantine_fd) ||
+                       fsync(private_quarantine_fd) != 0)
+                failure = {"NATIVE_FAILURE", ErrnoMessage("cleanup removed directory quarantine")};
+              else
+                HitDirectoryCrashPoint("directory.after_remove_cleanup");
+            }
+            CloseFd(&quarantine_fd);
+          }
+        }
+      }
+    }
+  }
+  CloseFd(&private_quarantine_fd);
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (!failure.code.empty()) return ThrowFailure(env, failure.code, failure.message);
   napi_value undefined;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -2376,6 +3166,8 @@ napi_value Probe(napi_env env, napi_callback_info) {
     napi_set_named_property(env, capabilities, name, boolean);
   }
   napi_set_named_property(env, capabilities, "mutation", boolean);
+  napi_set_named_property(env, capabilities, "directoryOwnership",
+                          MakeString(env, "workspace-probed"));
   napi_set_named_property(env, result, "capabilities", capabilities);
   napi_value null_value;
   napi_get_null(env, &null_value);
@@ -2416,8 +3208,18 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr},
       {"cleanupIntentAuxiliary", nullptr, CleanupIntentAuxiliary, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"observeDirectory", nullptr, ObserveDirectory, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
       {"createDirectory", nullptr, CreateDirectory, nullptr, nullptr, nullptr, napi_default,
        nullptr},
+      {"inspectDirectoryOwnership", nullptr, InspectDirectoryOwnership, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"cleanupDirectoryOwnership", nullptr, CleanupDirectoryOwnership, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"removeDirectory", nullptr, RemoveDirectory, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"cleanupDirectoryRemoval", nullptr, CleanupDirectoryRemoval, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"closeSession", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"exchangeFiles", nullptr, ExchangeFiles, nullptr, nullptr, nullptr, napi_default, nullptr},
   };

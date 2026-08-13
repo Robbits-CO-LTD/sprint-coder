@@ -648,7 +648,9 @@ function matchesPhase(
 }
 
 function endpointHash(value: OperationObservation['source']): string | null {
-  return value.state === 'present' ? value.revision.contentHash : null;
+  return value.state === 'present' && value.revision.entryKind !== 'directory'
+    ? value.revision.contentHash
+    : null;
 }
 
 function singleOperationPlan(kind: 'add' | 'delete' | 'rename'): PreparedStructuredPatch {

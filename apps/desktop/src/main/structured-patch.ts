@@ -25,6 +25,7 @@ export type StructuredPatchOperation =
       edits: readonly Readonly<{ oldText: string; newText: string }>[];
     }>
   | Readonly<{ kind: 'add'; path: string; content: string }>
+  | Readonly<{ kind: 'mkdir'; path: string }>
   | Readonly<{ kind: 'delete'; path: string; revision: FileRevisionReference }>
   | Readonly<{
       kind: 'rename';
@@ -138,17 +139,17 @@ export async function prepareStructuredPatch(input: {
       workspacePath: input.workspacePath,
       expectedRootIdentityDigest: input.expectedRootIdentityDigest,
       targetPath: operation.path,
-      operation: operation.kind === 'add' ? 'write' : 'read',
+      operation: operation.kind === 'add' || operation.kind === 'mkdir' ? 'write' : 'read',
     });
     claimPath(claimedPaths, sourceGuard.resolvedPath);
 
-    if (operation.kind === 'add') {
+    if (operation.kind === 'add' || operation.kind === 'mkdir') {
       if (sourceGuard.targetIdentity !== null)
-        throw new PatchValidationError('DESTINATION_EXISTS', 'Add destination already exists');
-      validatePostImage(operation.content);
+        throw new PatchValidationError('DESTINATION_EXISTS', 'Create destination already exists');
+      if (operation.kind === 'add') validatePostImage(operation.content);
       prepared.push(
         freezeOperation({
-          kind: 'add',
+          kind: operation.kind,
           path: operation.path,
           canonicalPath: sourceGuard.resolvedPath,
           destination: null,
@@ -156,9 +157,9 @@ export async function prepareStructuredPatch(input: {
           revisionTokenId: null,
           preRevision: null,
           preImage: null,
-          postImage: operation.content,
+          postImage: operation.kind === 'add' ? operation.content : null,
           preHash: null,
-          postHash: hash(operation.content),
+          postHash: operation.kind === 'add' ? hash(operation.content) : null,
         }),
       );
       continue;

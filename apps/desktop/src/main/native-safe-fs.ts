@@ -39,6 +39,7 @@ export type NativeSafeFsProbe = Readonly<{
     durableFence: boolean;
     synchronousInvalidation: boolean;
     mutation: boolean;
+    directoryOwnership: 'workspace-probed' | false;
   }>;
   unavailableReason: string | null;
 }>;
@@ -86,9 +87,45 @@ export interface NativeSafeFs {
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
   ): Promise<Readonly<{ state: 'absent' }>>;
-  createDirectory(session: NativeSafeFsSession, pathSegments: readonly string[]): Promise<void>;
+  observeDirectory(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+  ): Promise<NativeDirectoryObservation>;
+  createDirectory(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    ownership: Readonly<{ markerLeafName: string; token: string }>,
+  ): Promise<NativeDirectoryRevision>;
+  inspectDirectoryOwnership(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    ownership: Readonly<{ markerLeafName: string; token: string }>,
+  ): Promise<NativeDirectoryObservation>;
+  cleanupDirectoryOwnership(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    expectedIdentityDigest: string,
+    ownership: Readonly<{ markerLeafName: string; token: string }>,
+  ): Promise<void>;
+  removeDirectory(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    expectedIdentityDigest: string,
+  ): Promise<void>;
+  cleanupDirectoryRemoval(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    expectedIdentityDigest: string,
+  ): Promise<void>;
   closeSession(session: NativeSafeFsSession): Promise<void>;
 }
+
+export type NativeDirectoryRevision = Readonly<{
+  state: 'present';
+  identityDigest: string;
+}>;
+
+export type NativeDirectoryObservation = Readonly<{ state: 'absent' }> | NativeDirectoryRevision;
 
 type RawJournalBinding = Readonly<{
   sessionId: string;
@@ -131,6 +168,13 @@ type RawCleanupInput = RawJournalBinding &
     expectedAuxiliary: NativeMutationIntentSnapshot['expectedSource'];
   }>;
 
+type RawDirectoryOwnershipInput = Readonly<{
+  sessionId: string;
+  pathSegments: readonly string[];
+  markerLeafName: string;
+  ownershipToken: string;
+}>;
+
 type RawAddon = Readonly<{
   probe(): unknown;
   openSession(input: NativeSafeFsOpenInput): Promise<unknown>;
@@ -139,7 +183,22 @@ type RawAddon = Readonly<{
   stageIntentArtifact(input: RawStageInput, bytes: Buffer): Promise<unknown>;
   applyIntentEffect(input: RawEffectInput): Promise<unknown>;
   cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
-  createDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
+  observeDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
+  createDirectory(input: RawDirectoryOwnershipInput): unknown;
+  inspectDirectoryOwnership(input: RawDirectoryOwnershipInput): unknown;
+  cleanupDirectoryOwnership(
+    input: RawDirectoryOwnershipInput & { expectedIdentityDigest: string },
+  ): unknown;
+  removeDirectory(input: {
+    sessionId: string;
+    pathSegments: readonly string[];
+    expectedIdentityDigest: string;
+  }): unknown;
+  cleanupDirectoryRemoval(input: {
+    sessionId: string;
+    pathSegments: readonly string[];
+    expectedIdentityDigest: string;
+  }): unknown;
   closeSession(id: string): Promise<unknown>;
 }>;
 
@@ -399,28 +458,127 @@ export function loadNativeSafeFs(
       }
     },
 
+    async observeDirectory(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+    ): Promise<NativeDirectoryObservation> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      try {
+        const observation = await addon!.observeDirectory(
+          Object.freeze({ sessionId: session.id, pathSegments: Object.freeze([...pathSegments]) }),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parseDirectoryObservation(observation);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
     async createDirectory(
       session: NativeSafeFsSession,
       pathSegments: readonly string[],
+      ownership: Readonly<{ markerLeafName: string; token: string }>,
+    ): Promise<NativeDirectoryRevision> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      validateDirectoryOwnership(ownership);
+      try {
+        const revision = await addon!.createDirectory(
+          directoryOwnershipInput(session, pathSegments, ownership),
+        );
+        assertIssuedSession(issuedSessions, session);
+        const parsed = parseDirectoryObservation(revision);
+        if (parsed.state !== 'present')
+          throw new NativeSafeFsError('NATIVE_FAILURE', 'NativeSafeFs mkdir identity is missing');
+        return parsed;
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async inspectDirectoryOwnership(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      ownership: Readonly<{ markerLeafName: string; token: string }>,
+    ): Promise<NativeDirectoryObservation> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      validateDirectoryOwnership(ownership);
+      try {
+        const result = await addon!.inspectDirectoryOwnership(
+          directoryOwnershipInput(session, pathSegments, ownership),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parseDirectoryObservation(result);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async cleanupDirectoryOwnership(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      expectedIdentityDigest: string,
+      ownership: Readonly<{ markerLeafName: string; token: string }>,
     ): Promise<void> {
       assertIssuedSession(issuedSessions, session);
-      if (
-        pathSegments.length === 0 ||
-        pathSegments.length > 128 ||
-        pathSegments.some(
-          (segment) =>
-            typeof segment !== 'string' ||
-            segment.length === 0 ||
-            segment === '.' ||
-            segment === '..' ||
-            segment.length > 255 ||
-            /[\\/:\0]/.test(segment),
-        )
-      )
-        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid NativeSafeFs directory path');
+      validateDirectoryPathSegments(pathSegments);
+      validateDirectoryOwnership(ownership);
+      if (!/^[a-f0-9]{64}$/.test(expectedIdentityDigest))
+        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory identity digest');
       try {
-        await addon!.createDirectory(
-          Object.freeze({ sessionId: session.id, pathSegments: Object.freeze([...pathSegments]) }),
+        await addon!.cleanupDirectoryOwnership(
+          Object.freeze({
+            ...directoryOwnershipInput(session, pathSegments, ownership),
+            expectedIdentityDigest,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async removeDirectory(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      expectedIdentityDigest: string,
+    ): Promise<void> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      if (!/^[a-f0-9]{64}$/.test(expectedIdentityDigest))
+        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory identity digest');
+      try {
+        await addon!.removeDirectory(
+          Object.freeze({
+            sessionId: session.id,
+            pathSegments: Object.freeze([...pathSegments]),
+            expectedIdentityDigest,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async cleanupDirectoryRemoval(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      expectedIdentityDigest: string,
+    ): Promise<void> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      if (!/^[a-f0-9]{64}$/.test(expectedIdentityDigest))
+        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory identity digest');
+      try {
+        await addon!.cleanupDirectoryRemoval(
+          Object.freeze({
+            sessionId: session.id,
+            pathSegments: Object.freeze([...pathSegments]),
+            expectedIdentityDigest,
+          }),
         );
         assertIssuedSession(issuedSessions, session);
       } catch (error) {
@@ -454,11 +612,71 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).stageIntentArtifact !== 'function' ||
     typeof (value as Partial<RawAddon>).applyIntentEffect !== 'function' ||
     typeof (value as Partial<RawAddon>).cleanupIntentAuxiliary !== 'function' ||
+    typeof (value as Partial<RawAddon>).observeDirectory !== 'function' ||
     typeof (value as Partial<RawAddon>).createDirectory !== 'function' ||
+    typeof (value as Partial<RawAddon>).inspectDirectoryOwnership !== 'function' ||
+    typeof (value as Partial<RawAddon>).cleanupDirectoryOwnership !== 'function' ||
+    typeof (value as Partial<RawAddon>).removeDirectory !== 'function' ||
+    typeof (value as Partial<RawAddon>).cleanupDirectoryRemoval !== 'function' ||
     typeof (value as Partial<RawAddon>).closeSession !== 'function'
   )
     throw new Error('NativeSafeFs addon contract mismatch');
   return value as RawAddon;
+}
+
+function validateDirectoryPathSegments(pathSegments: readonly string[]): void {
+  if (
+    pathSegments.length === 0 ||
+    pathSegments.length > 128 ||
+    pathSegments.some(
+      (segment) =>
+        typeof segment !== 'string' ||
+        segment.length === 0 ||
+        segment === '.' ||
+        segment === '..' ||
+        segment.length > 255 ||
+        /[\\/:\0]/.test(segment),
+    )
+  )
+    throw new NativeSafeFsError('INVALID_INPUT', 'Invalid NativeSafeFs directory path');
+}
+
+function validateDirectoryOwnership(
+  ownership: Readonly<{ markerLeafName: string; token: string }>,
+) {
+  if (
+    !/^\.sprint-coder-mkdir-[a-f0-9]{32}$/.test(ownership.markerLeafName) ||
+    !/^[a-f0-9]{64}$/.test(ownership.token) ||
+    ownership.markerLeafName !== `.sprint-coder-mkdir-${ownership.token.slice(0, 32)}`
+  )
+    throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory ownership seal');
+}
+
+function directoryOwnershipInput(
+  session: NativeSafeFsSession,
+  pathSegments: readonly string[],
+  ownership: Readonly<{ markerLeafName: string; token: string }>,
+): RawDirectoryOwnershipInput {
+  return Object.freeze({
+    sessionId: session.id,
+    pathSegments: Object.freeze([...pathSegments]),
+    markerLeafName: ownership.markerLeafName,
+    ownershipToken: ownership.token,
+  });
+}
+
+function parseDirectoryObservation(value: unknown): NativeDirectoryObservation {
+  if (typeof value !== 'object' || value === null || !('state' in value))
+    throw new NativeSafeFsError('NATIVE_FAILURE', 'Invalid directory observation');
+  if (value.state === 'absent') return Object.freeze({ state: 'absent' });
+  if (
+    value.state === 'present' &&
+    'identityDigest' in value &&
+    typeof value.identityDigest === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.identityDigest)
+  )
+    return Object.freeze({ state: 'present', identityDigest: value.identityDigest });
+  throw new NativeSafeFsError('NATIVE_FAILURE', 'Invalid directory observation');
 }
 
 function failInvalidNativeIntent(): never {
@@ -584,7 +802,8 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
     (capabilities as Record<string, unknown>)['workspaceLock'] !== true ||
     (capabilities as Record<string, unknown>)['durableFence'] !== true ||
     (capabilities as Record<string, unknown>)['synchronousInvalidation'] !== true ||
-    (capabilities as Record<string, unknown>)['mutation'] !== true
+    (capabilities as Record<string, unknown>)['mutation'] !== true ||
+    (capabilities as Record<string, unknown>)['directoryOwnership'] !== 'workspace-probed'
   )
     throw new Error('Invalid native probe');
   return Object.freeze({
@@ -597,6 +816,7 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
       durableFence: true,
       synchronousInvalidation: true,
       mutation: true,
+      directoryOwnership: 'workspace-probed',
     }),
     unavailableReason: null,
   });
@@ -639,6 +859,7 @@ function unavailableProbe(reason: string | null): NativeSafeFsProbe {
       durableFence: false,
       synchronousInvalidation: false,
       mutation: false,
+      directoryOwnership: false,
     }),
     unavailableReason: reason ?? 'NativeSafeFs addon is unavailable',
   });

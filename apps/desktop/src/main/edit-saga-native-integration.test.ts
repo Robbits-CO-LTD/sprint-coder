@@ -10,10 +10,20 @@
 // binary with ELECTRON_RUN_AS_NODE=1 unless it is already running that way.
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { loadNativeSafeFs, nativeSafeFsAddonPath } from './native-safe-fs';
@@ -28,22 +38,25 @@ import {
 } from './edit-saga';
 import { EditArtifactStore } from './edit-artifact-store';
 import { SqlitePersistenceClient, SqliteEditSagaLeaseGuard } from './persistence';
+import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import { FileRevisionRegistry } from './file-revision';
+import { executeWorkspaceCreateDirectory, type WorkspacePatchDeps } from './workspace-patch-tool';
 import {
   structuredPatchDigest,
   type PreparedFileRevision,
   type PreparedPatchOperation,
   type PreparedStructuredPatch,
 } from './structured-patch';
-import {
-  mutationWorkspaceKey,
-  MutationLeaseStaleError,
-  type MutationLeaseToken,
-} from './mutation-lease';
+import { MutationLeaseStaleError, type MutationLeaseToken } from './mutation-lease';
+import { workspaceMutationBinding } from './path-guard';
 
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 const cleanup: string[] = [];
 
-afterEach(async () => {
+// Keep fixture roots alive for the whole process. NativeSafeFs fences by the sealed
+// dev/inode workspace identity; deleting each tmpfs fixture after a test lets Linux
+// reuse the inode for the next test while the addon correctly retains the old fence.
+afterAll(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -240,15 +253,15 @@ async function buildFullPatch(
 async function preparePersistence(env: Fixture) {
   const persistence = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
   const task = persistence.createTask();
-  const rootIdentityDigest = hash(`root-identity:${env.workspace}`);
-  const workspaceKey = mutationWorkspaceKey(env.workspace, rootIdentityDigest);
+  const { rootIdentityDigest, workspaceKey } = await workspaceMutationBinding(env.workspace);
   persistence.setWorkspaceBinding(task.id, {
     path: env.workspace,
     workspaceKey,
     rootIdentityDigest,
   });
   const turn = persistence.startTurn(task.id, 'edit saga native integration');
-  return { persistence, task, turn, workspaceKey, rootIdentityDigest };
+  const workspace = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
+  return { persistence, task, turn, workspace, workspaceKey, rootIdentityDigest };
 }
 
 function buildRequest(input: {
@@ -280,6 +293,202 @@ async function expectMissing(path: string): Promise<void> {
 
 if (runsWithElectronAbi) {
   describe.skipIf(process.platform === 'win32')('EditSagaExecutor native integration', () => {
+    it('runs the Provider create_directory call through the durable Saga to a terminal intent', async () => {
+      const env = await fixture('mkdir');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const directoryPath = join(env.workspace, 'provider-directory');
+      const { persistence, task, turn, workspace, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-instance'),
+      );
+      const rootId = workspace.primaryRootId ?? 'legacy-primary';
+      const ids = ['saga-mkdir', 'op-mkdir'][Symbol.iterator]();
+      const workspaceEdit: WorkspacePatchDeps = {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () =>
+          persistence.getTurnWorkspaceMutationBindings(turn.turnId),
+        revisions: new FileRevisionRegistry(),
+        apply: (request) => executor.apply(request),
+        createDirectory: ({ taskId, turnId, rootId, path, guard }) =>
+          executeWorkspaceCreateDirectory(
+            { rootId, path },
+            { taskId, turnId },
+            workspaceEdit,
+            guard,
+          ),
+        policyEpochFor: () => 0,
+        newId: () => ids.next().value ?? 'unexpected-extra-id',
+        now: () => '2026-07-23T00:00:00.000Z',
+      };
+      const provider = new ProviderWorkspaceTools({
+        workspaceFor: () => workspace,
+        rootIdentityFor: () => rootIdentityDigest,
+        policyEpochFor: () => 0,
+        authorizer: () => ({
+          decision: 'allow',
+          reason: 'integration test',
+          beforeExecute: () => true,
+        }),
+        workspaceEdit,
+      });
+      const context = {
+        taskId: task.id,
+        turnId: turn.turnId,
+        workspaceId: workspace.digest,
+        policyEpoch: 0,
+      } as const;
+      provider.startTurn(context, 'ollama');
+      const result = await provider.broker.dispatch({
+        ...context,
+        callId: 'call-mkdir',
+        providerName: 'create_directory',
+        input: { rootId, path: 'provider-directory' },
+      });
+
+      expect(result).toEqual({
+        rootId,
+        path: 'provider-directory',
+        sagaId: 'saga-mkdir',
+        state: 'committed',
+        kind: 'mkdir',
+      });
+      expect((await lstat(directoryPath)).isDirectory()).toBe(true);
+      await expect(
+        readFile(join(directoryPath, '.sprint-coder-mkdir-placeholder')),
+      ).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(persistence.getNativeMutationIntent('nmi-forward-1-saga-mkdir')).toMatchObject({
+        kind: 'mkdir',
+        state: 'completed',
+      });
+      provider.finishTurn(task.id, turn.turnId);
+      await provider.dispose();
+      await Promise.all([...sessions.values()].map((session) => native.closeSession(session)));
+      persistence.close();
+    });
+
+    it('converges a restart after mkdir completed before the Saga journal update', async () => {
+      const env = await fixture('mkdir-restart');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const firstSessions = makeResolveSession(native, env);
+      const directoryPath = join(env.workspace, 'restart-directory');
+      const operations: readonly PreparedPatchOperation[] = Object.freeze([
+        Object.freeze({
+          kind: 'mkdir' as const,
+          path: 'restart-directory',
+          canonicalPath: directoryPath,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: null,
+          preRevision: null,
+          preImage: null,
+          postImage: null,
+          preHash: null,
+          postHash: null,
+        }),
+      ]);
+      const facts = { version: 1 as const, policyEpoch: 0, operations };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const boundary = new NativeSafeFsEditEffectBoundary({
+        native,
+        journal: persistence,
+        artifacts,
+        resolveSession: firstSessions.resolveSession,
+      });
+      const crash: EditSagaFaultInjector = {
+        hit(point) {
+          if (point.kind === 'afterEffectBeforeJournal')
+            throw new EditSagaCrashError('mkdir crash');
+        },
+      };
+      const request = buildRequest({
+        id: 'saga-mkdir-restart',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-mkdir-restart',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+      await expect(
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          boundary,
+          artifacts,
+          crash,
+          new SqliteEditSagaLeaseGuard(persistence, 'mkdir-crash-1'),
+        ).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(persistence.getEditSaga(request.id).steps[0]).toMatchObject({
+        state: 'effect_pending',
+      });
+      await Promise.all(
+        [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+      reopened.initializeMutationRecovery('mkdir-crash-2', new Date().toISOString());
+      const secondSessions = makeResolveSession(native, env);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const recovered = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopened),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: reopened,
+          artifacts: reopenedArtifacts,
+          resolveSession: secondSessions.resolveSession,
+        }),
+        reopenedArtifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(reopened, 'mkdir-crash-2'),
+      ).recover(request.id);
+      expect(recovered.state).toBe('committed');
+      expect((await lstat(directoryPath)).isDirectory()).toBe(true);
+      expect(reopened.getNativeMutationIntent('nmi-forward-1-saga-mkdir-restart')).toMatchObject({
+        state: 'completed',
+        cleanupObservation: { state: 'absent' },
+      });
+      await expect(readFile(directoryPath)).rejects.toMatchObject({ code: 'EISDIR' });
+      expect(
+        (await readdir(directoryPath)).filter((name) => name.startsWith('.sprint-coder-')),
+      ).toEqual([]);
+      await Promise.all(
+        [...secondSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      reopened.close();
+    });
+
     it('applies add+update+rename+delete atomically through the real native boundary', async () => {
       const env = await fixture('forward');
       const native = loadNativeSafeFs({

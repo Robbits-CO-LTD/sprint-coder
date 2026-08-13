@@ -17708,20 +17708,32 @@ export function expectedNativeMutationBinding(
   const expectedSource =
     kind === 'add'
       ? ({ state: 'absent' } as const)
-      : direction === 'forward'
-        ? operation.preRevision === null
-          ? failNativeMutationBinding()
-          : ({ state: 'present' as const, ...operation.preRevision } as const)
-        : compensationSource?.state !== 'present'
-          ? failNativeMutationBinding()
-          : ({
-              state: 'present' as const,
-              identityDigest: compensationSource.revision.identityDigest,
-              contentHash: compensationSource.revision.contentHash,
-              size: compensationSource.revision.size,
-              mode: operation.preRevision?.mode ?? 0o100600,
-              nlink: 1 as const,
-            } as const);
+      : kind === 'mkdir'
+        ? direction === 'forward'
+          ? ({ state: 'absent' } as const)
+          : compensationSource?.state !== 'present' ||
+              compensationSource.revision.entryKind !== 'directory'
+            ? failNativeMutationBinding()
+            : ({
+                state: 'present' as const,
+                entryKind: 'directory' as const,
+                identityDigest: compensationSource.revision.identityDigest,
+              } as const)
+        : direction === 'forward'
+          ? operation.preRevision === null
+            ? failNativeMutationBinding()
+            : ({ state: 'present' as const, ...operation.preRevision } as const)
+          : compensationSource?.state !== 'present' ||
+              compensationSource.revision.entryKind === 'directory'
+            ? failNativeMutationBinding()
+            : ({
+                state: 'present' as const,
+                identityDigest: compensationSource.revision.identityDigest,
+                contentHash: compensationSource.revision.contentHash,
+                size: compensationSource.revision.size,
+                mode: operation.preRevision?.mode ?? 0o100600,
+                nlink: 1 as const,
+              } as const);
   return {
     kind,
     artifact: expectedNativeMutationArtifact(operation, direction),
@@ -17740,14 +17752,19 @@ function nativeIntentSagaObservation(
   ): OperationObservation['source'] =>
     value.state === 'absent'
       ? { state: 'absent' }
-      : {
-          state: 'present',
-          revision: {
-            identityDigest: value.identityDigest,
-            contentHash: value.contentHash,
-            size: value.size,
-          },
-        };
+      : value.entryKind === 'directory'
+        ? {
+            state: 'present',
+            revision: { entryKind: 'directory', identityDigest: value.identityDigest },
+          }
+        : {
+            state: 'present',
+            revision: {
+              identityDigest: value.identityDigest,
+              contentHash: value.contentHash,
+              size: value.size,
+            },
+          };
   return intent.direction === 'compensation' && intent.kind === 'rename'
     ? { source: endpoint(observation.destination), destination: endpoint(observation.source) }
     : { source: endpoint(observation.source), destination: endpoint(observation.destination) };

@@ -1423,7 +1423,7 @@ export const generatedImageRefSchema = z.object({ imageId: digestSchema }).stric
 export const turnDiffEntrySchema = z
   .object({
     ordinal: z.number().int().positive(),
-    kind: z.enum(['add', 'update', 'delete', 'rename']),
+    kind: z.enum(['add', 'mkdir', 'update', 'delete', 'rename']),
     path: z.string().min(1).max(4_096),
     destination: z.string().min(1).max(4_096).nullable(),
     preHash: digestSchema.nullable(),
