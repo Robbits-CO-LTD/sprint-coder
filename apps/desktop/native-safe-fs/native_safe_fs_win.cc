@@ -99,6 +99,120 @@ napi_value EnableSafeDllSearchPolicy(napi_env env, napi_callback_info info) {
   return result;
 }
 
+std::wstring QuoteCommandLineArgument(const std::wstring& value) {
+  if (value.find_first_of(L" \t\n\v\"") == std::wstring::npos) return value;
+  std::wstring quoted = L"\"";
+  size_t slashes = 0;
+  for (wchar_t character : value) {
+    if (character == L'\\') {
+      ++slashes;
+      continue;
+    }
+    if (character == L'\"') {
+      quoted.append(slashes * 2 + 1, L'\\');
+      quoted.push_back(L'\"');
+    } else {
+      quoted.append(slashes, L'\\');
+      quoted.push_back(character);
+    }
+    slashes = 0;
+  }
+  quoted.append(slashes * 2, L'\\');
+  quoted.push_back(L'\"');
+  return quoted;
+}
+
+bool ReadCommandArgument(napi_env env, napi_value value, std::wstring* output) {
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok || length > 1000000)
+    return false;
+  std::string utf8(length + 1, '\0');
+  if (napi_get_value_string_utf8(env, value, utf8.data(), length + 1, &length) != napi_ok)
+    return false;
+  utf8.resize(length);
+  if (utf8.find('\0') != std::string::npos) return false;
+  if (utf8.empty()) {
+    output->clear();
+    return true;
+  }
+  return Utf8ToWide(utf8, output);
+}
+
+napi_value RunPreparedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 2) {
+    napi_throw_type_error(env, nullptr, "runPreparedExecutionImage requires executable and argv");
+    return nullptr;
+  }
+  std::string executable_utf8;
+  std::wstring executable;
+  bool is_array = false;
+  if (!ReadString(env, argv[0], &executable_utf8) || !Utf8ToWide(executable_utf8, &executable) ||
+      napi_is_array(env, argv[1], &is_array) != napi_ok || !is_array) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared execution request");
+    return nullptr;
+  }
+  uint32_t length = 0;
+  if (napi_get_array_length(env, argv[1], &length) != napi_ok || length > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared execution argv");
+    return nullptr;
+  }
+  std::wstring command_line = QuoteCommandLineArgument(executable);
+  for (uint32_t index = 0; index < length; ++index) {
+    napi_value item;
+    std::wstring value;
+    if (napi_get_element(env, argv[1], index, &item) != napi_ok ||
+        !ReadCommandArgument(env, item, &value)) {
+      napi_throw_type_error(env, nullptr, "Invalid prepared execution argv entry");
+      return nullptr;
+    }
+    command_line.push_back(L' ');
+    command_line.append(QuoteCommandLineArgument(value));
+  }
+  SIZE_T attribute_bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  std::vector<unsigned char> attribute_storage(attribute_bytes);
+  auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+  if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes))
+    return ThrowWindowsError(env, "InitializeProcThreadAttributeList");
+  ULONG64 mitigation = PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_REMOTE_ALWAYS_ON |
+                       PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON |
+                       PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
+  if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+                                 &mitigation, sizeof(mitigation), nullptr, nullptr)) {
+    DeleteProcThreadAttributeList(attributes);
+    return ThrowWindowsError(env, "UpdateProcThreadAttribute");
+  }
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.lpAttributeList = attributes;
+  PROCESS_INFORMATION process{};
+  std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+  mutable_command.push_back(L'\0');
+  const BOOL created = CreateProcessW(
+      executable.c_str(), mutable_command.data(), nullptr, nullptr, TRUE,
+      CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+      &startup.StartupInfo, &process);
+  DeleteProcThreadAttributeList(attributes);
+  if (!created) return ThrowWindowsError(env, "CreateProcessW");
+  if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+    TerminateProcess(process.hProcess, 126);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return ThrowWindowsError(env, "ResumeThread");
+  }
+  CloseHandle(process.hThread);
+  const DWORD wait = WaitForSingleObject(process.hProcess, INFINITE);
+  DWORD exit_code = 126;
+  const BOOL read_exit = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exit_code);
+  CloseHandle(process.hProcess);
+  if (!read_exit) return ThrowWindowsError(env, "WaitForSingleObject");
+  napi_value result;
+  napi_create_uint32(env, exit_code, &result);
+  return result;
+}
+
 std::wstring NormalizeFinalPath(std::wstring path) {
   constexpr wchar_t kUncPrefix[] = L"\\\\?\\UNC\\";
   constexpr wchar_t kLongPrefix[] = L"\\\\?\\";
@@ -772,6 +886,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"closePreparedExecutionImage", nullptr, ClosePreparedExecutionImage, nullptr, nullptr,
        nullptr, napi_default, nullptr},
       {"enableSafeDllSearchPolicy", nullptr, EnableSafeDllSearchPolicy, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"runPreparedExecutionImage", nullptr, RunPreparedExecutionImage, nullptr, nullptr, nullptr,
        napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);

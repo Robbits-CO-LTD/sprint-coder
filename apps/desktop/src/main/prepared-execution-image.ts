@@ -29,6 +29,7 @@ export type SealedExecutableIdentity = Readonly<{
   digest: string;
   allowSourceHardlinks?: boolean;
   interpreter?: SealedExecutableIdentity;
+  dependencies?: readonly SealedExecutableIdentity[];
 }>;
 
 export type PreparedExecutionImage = Readonly<{
@@ -56,6 +57,7 @@ export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentit
         identity.interpreter === undefined
           ? null
           : sealedExecutableIdentityDigest(identity.interpreter),
+        (identity.dependencies ?? []).map(sealedExecutableIdentityDigest).sort(),
       ]),
       'utf8',
     ),
@@ -95,11 +97,7 @@ export async function prepareExecutionImage(
   try {
     const sourceBytes =
       process.platform === 'win32'
-        ? readWindowsImage(
-            expected.canonicalPath,
-            expected.allowSourceHardlinks === true,
-            'approved executable',
-          )
+        ? await readExpectedWindowsImage(expected, 'approved executable')
         : await readStablePosixImage(expected);
     assertDigestAndSize(sourceBytes, expected);
     await writeFile(destination, sourceBytes, { flag: 'wx', mode: expected.mode & 0o777 });
@@ -134,22 +132,23 @@ export async function prepareExecutionImage(
     assertDigestAndSize(heldBytes, expected);
     if (process.platform === 'win32')
       windowsDependencyIds.push(
-        ...(await prepareWindowsSideBySideImages(
-          expected.canonicalPath,
-          imageDirectory,
-          heldBytes,
-        )),
+        ...(await prepareWindowsSideBySideImages(imageDirectory, expected.dependencies ?? [])),
       );
     const digest = sha256(heldBytes);
     const trustedMacPath =
       process.platform === 'darwin' && (await isRootOwnedSystemExecutable(expected.canonicalPath));
+    const trustedLinuxPath =
+      process.platform === 'linux' &&
+      (await isRootOwnedNonWritableExecutable(expected.canonicalPath));
     // Linux exposes the sealed memfd through the Main process so descendants that reuse
     // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
     // root-owned, non-writable system images (or descriptor-fed scripts) below.
     const descriptor = process.platform === 'linux' ? undefined : held?.fd;
     const baseLaunchPath =
       process.platform === 'linux'
-        ? `/proc/${process.pid}/fd/${sealedDescriptor}`
+        ? trustedLinuxPath
+          ? expected.canonicalPath
+          : `/proc/${process.pid}/fd/${sealedDescriptor}`
         : trustedMacPath
           ? expected.canonicalPath
           : destination;
@@ -166,8 +165,13 @@ export async function prepareExecutionImage(
       (!trustedMacPath || hasRelativeMachOLoaderPath)
     )
       throw new Error('macOS cannot safely launch this mutable native execution image');
-    if (process.platform === 'linux' && shebang === undefined && hasRelativeElfLoaderPath)
-      throw new Error('Linux cannot safely launch an image with a relative loader path');
+    if (
+      process.platform === 'linux' &&
+      shebang === undefined &&
+      !trustedLinuxPath &&
+      hasRelativeElfLoaderPath
+    )
+      throw new Error('Linux cannot safely launch a mutable dynamically loaded image');
     if (shebang !== undefined && !allowScript)
       throw new Error('Nested shebang interpreters are unsupported');
     if ((shebang === undefined) !== (expected.interpreter === undefined))
@@ -258,12 +262,21 @@ export function containsRelativeMachOLoaderPath(bytes: Buffer): boolean {
 }
 
 export function containsUnsafeElfLoaderPath(bytes: Buffer): boolean {
-  const paths = parseElfDynamicSearchPaths(bytes);
-  return paths === null || paths.length > 0;
+  const dynamic = parseElfDynamicInputs(bytes);
+  return (
+    dynamic === null ||
+    dynamic.hasInterpreter ||
+    dynamic.hasNeededDependency ||
+    dynamic.searchPaths.length > 0
+  );
 }
 
 /** Parse DT_RPATH/DT_RUNPATH through PT_DYNAMIC. Any malformed ELF fails closed. */
-function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
+function parseElfDynamicInputs(bytes: Buffer): Readonly<{
+  searchPaths: readonly string[];
+  hasInterpreter: boolean;
+  hasNeededDependency: boolean;
+}> | null {
   if (
     bytes.length < 64 ||
     bytes[0] !== 0x7f ||
@@ -288,6 +301,7 @@ function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
   if (phentsize < (is64 ? 56 : 32) || phnum > 4096) return null;
   const loads: Array<{ offset: number; vaddr: number; filesz: number }> = [];
   let dynamic: { offset: number; size: number } | undefined;
+  let hasInterpreter = false;
   for (let index = 0; index < phnum; index += 1) {
     const header = phoff + index * phentsize;
     if (header < 0 || header > bytes.length - phentsize) return null;
@@ -299,13 +313,20 @@ function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
       return null;
     if (type === 1) loads.push({ offset, vaddr, filesz });
     if (type === 2) dynamic = { offset, size: filesz };
+    if (type === 3) hasInterpreter = true;
   }
-  if (dynamic === undefined) return Object.freeze([]);
+  if (dynamic === undefined)
+    return Object.freeze({
+      searchPaths: Object.freeze([]),
+      hasInterpreter,
+      hasNeededDependency: false,
+    });
   const entrySize = is64 ? 16 : 8;
   let stringTableAddress: number | undefined;
   let stringTableSize: number | undefined;
   const searchOffsets: number[] = [];
   let terminated = false;
+  let hasNeededDependency = false;
   for (
     let offset = dynamic.offset;
     offset + entrySize <= dynamic.offset + dynamic.size;
@@ -320,10 +341,16 @@ function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
     }
     if (tag === 5) stringTableAddress = value;
     else if (tag === 10) stringTableSize = value;
+    else if (tag === 1) hasNeededDependency = true;
     else if (tag === 15 || tag === 29) searchOffsets.push(value);
   }
   if (!terminated) return null;
-  if (searchOffsets.length === 0) return Object.freeze([]);
+  if (searchOffsets.length === 0)
+    return Object.freeze({
+      searchPaths: Object.freeze([]),
+      hasInterpreter,
+      hasNeededDependency,
+    });
   if (stringTableAddress === undefined || stringTableSize === undefined) return null;
   const mapping = loads.find(
     (load) =>
@@ -343,11 +370,15 @@ function parseElfDynamicSearchPaths(bytes: Buffer): readonly string[] | null {
     const value = bytes.subarray(start, end).toString('utf8');
     if (value.length > 0) paths.push(value);
   }
-  return Object.freeze(paths);
+  return Object.freeze({
+    searchPaths: Object.freeze(paths),
+    hasInterpreter,
+    hasNeededDependency,
+  });
 }
 
 const WINDOWS_SYSTEM_DLL =
-  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|ws2_32|wtsapi32)\.dll$/iu;
+  /^(?:(?:api-ms-win-|ext-ms-win-)[a-z0-9-]+-l\d+-\d+-\d+|(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|ws2_32|wtsapi32))\.dll$/iu;
 
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
@@ -355,45 +386,36 @@ export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
 }
 
 async function prepareWindowsSideBySideImages(
-  executablePath: string,
   imageDirectory: string,
-  executableBytes: Buffer,
+  dependencies: readonly SealedExecutableIdentity[],
 ): Promise<readonly string[]> {
-  const sourceDirectory = dirname(executablePath);
-  const queue: Buffer[] = [executableBytes];
+  const queue = [...dependencies];
   const copied = new Set<string>();
   const heldIds: string[] = [];
-  let totalBytes = executableBytes.byteLength;
+  let totalBytes = 0;
   try {
     while (queue.length > 0) {
-      const imports = parsePeImports(queue.shift()!);
-      if (imports === null)
-        throw new Error('Windows execution image has an invalid PE import table');
-      for (const name of imports) {
-        if (WINDOWS_SYSTEM_DLL.test(name) || copied.has(name)) continue;
-        if (basename(name).toLowerCase() !== name || !/^[a-z0-9_.-]+\.dll$/u.test(name))
-          throw new Error('Windows execution image has an unsafe DLL import name');
-        if (copied.size >= 128)
-          throw new Error('Windows execution image exceeds the side-by-side DLL limit');
-        const sourcePath = join(sourceDirectory, name);
-        // A source DLL may be hardlinked by a package manager. That alias is harmless here: the
-        // native read pins one handle, and only those exact bytes are materialized into the held
-        // app-owned execution directory before CreateProcess.
-        const bytes = readWindowsImage(sourcePath, true, `side-by-side dependency ${name}`);
-        totalBytes += bytes.byteLength;
-        if (totalBytes > MAX_EXECUTION_IMAGE_BYTES)
-          throw new Error('Windows execution image dependencies exceed the size limit');
-        const destination = join(imageDirectory, name);
-        await writeFile(destination, bytes, { flag: 'wx' });
-        const prepared = windowsAddon().holdPreparedExecutionImage(destination);
-        if (!prepared.bytes.equals(bytes)) {
-          windowsAddon().closePreparedExecutionImage(prepared.id);
-          throw new Error('Windows side-by-side execution image changed while pinned');
-        }
-        copied.add(name);
-        heldIds.push(prepared.id);
-        queue.push(bytes);
+      const dependency = queue.shift()!;
+      const name = basename(dependency.canonicalPath).toLowerCase();
+      if (copied.has(name)) continue;
+      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/u.test(name))
+        throw new Error('Windows execution image has an unsafe DLL dependency name');
+      if (copied.size >= 128)
+        throw new Error('Windows execution image exceeds the side-by-side DLL limit');
+      const bytes = await readExpectedWindowsImage(dependency, `side-by-side dependency ${name}`);
+      totalBytes += bytes.byteLength;
+      if (totalBytes > MAX_EXECUTION_IMAGE_BYTES)
+        throw new Error('Windows execution image dependencies exceed the size limit');
+      const destination = join(imageDirectory, name);
+      await writeFile(destination, bytes, { flag: 'wx' });
+      const prepared = windowsAddon().holdPreparedExecutionImage(destination);
+      if (!prepared.bytes.equals(bytes)) {
+        windowsAddon().closePreparedExecutionImage(prepared.id);
+        throw new Error('Windows side-by-side execution image changed while pinned');
       }
+      copied.add(name);
+      heldIds.push(prepared.id);
+      queue.push(...(dependency.dependencies ?? []));
     }
     return Object.freeze(heldIds);
   } catch (error) {
@@ -494,10 +516,22 @@ export async function sealExecutablePath(
   allowHardlinks = false,
   allowScript = true,
 ): Promise<SealedExecutableIdentity> {
+  return sealExecutablePathInternal(path, allowHardlinks, allowScript, new Set());
+}
+
+async function sealExecutablePathInternal(
+  path: string,
+  allowHardlinks: boolean,
+  allowScript: boolean,
+  seen: Set<string>,
+): Promise<SealedExecutableIdentity> {
   const canonicalPath = await realpath(path);
   if (canonicalPath.split('/').at(-1) === 'env')
     throw new Error('Dynamic shebang interpreters are unsupported');
   if (process.platform === 'win32') {
+    const key = canonicalPath.toLowerCase();
+    if (seen.has(key)) throw new Error('Windows execution image has a cyclic DLL dependency');
+    seen.add(key);
     const before = await stat(canonicalPath, { bigint: true });
     if (!before.isFile() || (before.nlink !== 1n && !allowHardlinks))
       throw new Error('Executable is not a permitted regular file');
@@ -505,7 +539,31 @@ export async function sealExecutablePath(
     const after = await stat(canonicalPath, { bigint: true });
     if (!sameIdentityStats(before, after, allowHardlinks))
       throw new Error('Executable changed while sealing approval');
-    return sealedIdentity(canonicalPath, before, bytes, allowHardlinks);
+    const imports = parsePeImports(bytes);
+    if (imports === null) throw new Error('Windows execution image has an invalid PE import table');
+    const dependencies: SealedExecutableIdentity[] = [];
+    for (const name of imports) {
+      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/u.test(name))
+        throw new Error('Windows execution image has an unsafe DLL import name');
+      const dependencyPath = join(dirname(canonicalPath), name);
+      let localDependency = true;
+      try {
+        await stat(dependencyPath);
+      } catch {
+        localDependency = false;
+      }
+      if (!localDependency) {
+        if (!WINDOWS_SYSTEM_DLL.test(name))
+          throw new Error(`Windows execution image dependency is unavailable: ${name}`);
+        continue;
+      }
+      const dependencyCanonicalPath = await realpath(dependencyPath);
+      if (seen.has(dependencyCanonicalPath.toLowerCase())) continue;
+      dependencies.push(
+        await sealExecutablePathInternal(dependencyCanonicalPath, true, false, seen),
+      );
+    }
+    return sealedIdentity(canonicalPath, before, bytes, allowHardlinks, undefined, dependencies);
   }
   const noFollow = constants.O_NOFOLLOW;
   if (noFollow === undefined) throw new Error('O_NOFOLLOW is unavailable');
@@ -521,7 +579,9 @@ export async function sealExecutablePath(
       throw new Error('Shebang interpreter exceeds the size limit');
     const shebang = !allowScript ? undefined : parseShebang(bytes);
     const interpreter =
-      shebang === undefined ? undefined : await sealExecutablePath(shebang.path, false, false);
+      shebang === undefined
+        ? undefined
+        : await sealExecutablePathInternal(shebang.path, false, false, seen);
     return sealedIdentity(canonicalPath, before, bytes, allowHardlinks, interpreter);
   } finally {
     await source.close();
@@ -548,6 +608,7 @@ function sealedIdentity(
   bytes: Buffer,
   allowHardlinks: boolean,
   interpreter?: SealedExecutableIdentity,
+  dependencies?: readonly SealedExecutableIdentity[],
 ): SealedExecutableIdentity {
   if (bytes.byteLength < 1 || bytes.byteLength > MAX_EXECUTION_IMAGE_BYTES)
     throw new Error('Executable exceeds the size limit');
@@ -564,12 +625,46 @@ function sealedIdentity(
     digest: sha256(bytes),
     allowSourceHardlinks: allowHardlinks,
     ...(interpreter === undefined ? {} : { interpreter }),
+    ...(dependencies === undefined ? {} : { dependencies: Object.freeze([...dependencies]) }),
   });
+}
+
+async function readExpectedWindowsImage(
+  expected: SealedExecutableIdentity,
+  label: string,
+): Promise<Buffer> {
+  const before = await stat(expected.canonicalPath, { bigint: true });
+  assertExpectedStats(before, expected);
+  const bytes = readWindowsImage(
+    expected.canonicalPath,
+    expected.allowSourceHardlinks === true,
+    label,
+  );
+  const after = await stat(expected.canonicalPath, { bigint: true });
+  if (!sameIdentityStats(before, after, expected.allowSourceHardlinks === true))
+    throw new Error(`${label} changed while validating`);
+  assertDigestAndSize(bytes, expected);
+  return bytes;
 }
 
 async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
   const systemPrefixes = ['/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/', '/System/'];
   if (!systemPrefixes.some((prefix) => path.startsWith(prefix))) return false;
+  let current = path;
+  for (;;) {
+    try {
+      const stats = await stat(current, { bigint: true });
+      if (stats.uid !== 0n || (stats.mode & 0o22n) !== 0n) return false;
+    } catch {
+      return false;
+    }
+    const parent = dirname(current);
+    if (parent === current) return true;
+    current = parent;
+  }
+}
+
+async function isRootOwnedNonWritableExecutable(path: string): Promise<boolean> {
   let current = path;
   for (;;) {
     try {
@@ -603,7 +698,7 @@ async function readStablePosixImage(expected: SealedExecutableIdentity): Promise
 function assertExpectedStats(stats: BigIntStats, expected: SealedExecutableIdentity): void {
   if (
     !stats.isFile() ||
-    stats.nlink !== 1n ||
+    (stats.nlink !== 1n && expected.allowSourceHardlinks !== true) ||
     String(stats.dev) !== expected.dev ||
     String(stats.ino) !== expected.ino ||
     Number(stats.size) !== expected.size ||

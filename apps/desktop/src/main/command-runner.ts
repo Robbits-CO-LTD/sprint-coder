@@ -217,6 +217,7 @@ type ActiveProcess = {
   posixIdentityMonitor?: ReturnType<typeof setTimeout>;
   windowsJobId?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
+  executionImage?: PreparedExecutionImage;
 };
 
 export class CommandRunner {
@@ -283,6 +284,7 @@ export class CommandRunner {
 
   async run(spec: ExecutionSpec, options: RunOptions = {}): Promise<CommandResult> {
     const executionImage = await this.revalidate(spec);
+    let retainedExecutionImage = false;
     try {
       if (options.signal?.aborted)
         return {
@@ -412,8 +414,11 @@ export class CommandRunner {
           if (
             error instanceof CommandRunnerError &&
             error.code === 'PROCESS_TREE_TERMINATION_FAILED'
-          )
+          ) {
+            retainedExecutionImage = true;
+            active.executionImage = executionImage;
             this.retainUntilOutcome(executionId, active);
+          }
           throw error;
         }
       }
@@ -462,8 +467,11 @@ export class CommandRunner {
           if (
             terminationError instanceof CommandRunnerError &&
             terminationError.code === 'PROCESS_TREE_TERMINATION_FAILED'
-          )
+          ) {
+            retainedExecutionImage = true;
+            active.executionImage = executionImage;
             this.retainUntilOutcome(executionId, active);
+          }
           throw terminationError;
         }
       }
@@ -731,6 +739,8 @@ export class CommandRunner {
           error.code === 'PROCESS_TREE_TERMINATION_FAILED'
         ) {
           retainActive = true;
+          retainedExecutionImage = true;
+          active.executionImage = executionImage;
           sinkError = error;
           const release = async (): Promise<void> => {
             try {
@@ -752,7 +762,7 @@ export class CommandRunner {
         if (!retainActive) this.releaseActive(executionId, active);
       }
     } finally {
-      await executionImage.close();
+      if (!retainedExecutionImage) await executionImage.close();
     }
   }
 
@@ -993,7 +1003,10 @@ export class CommandRunner {
       delete active.posixIdentityMonitor;
     }
     if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
-    active.resolveSettled();
+    const executionImage = active.executionImage;
+    delete active.executionImage;
+    if (executionImage === undefined) active.resolveSettled();
+    else void executionImage.close().finally(active.resolveSettled);
   }
 
   private ownedTreeAlive(executionId: string, lease: string): boolean {
