@@ -65,6 +65,7 @@ export async function prepareExecutionImage(
   );
   let held: FileHandle | undefined;
   let windowsId: string | undefined;
+  const windowsDependencyIds: string[] = [];
   let sealedId: string | undefined;
   let sealedDescriptor: number | undefined;
   try {
@@ -106,6 +107,14 @@ export async function prepareExecutionImage(
       }
     }
     assertDigestAndSize(heldBytes, expected);
+    if (process.platform === 'win32')
+      windowsDependencyIds.push(
+        ...(await prepareWindowsSideBySideImages(
+          expected.canonicalPath,
+          imageDirectory,
+          heldBytes,
+        )),
+      );
     const digest = sha256(heldBytes);
     const trustedMacPath =
       process.platform === 'darwin' && (await isRootOwnedSystemExecutable(expected.canonicalPath));
@@ -134,8 +143,6 @@ export async function prepareExecutionImage(
       throw new Error('macOS cannot safely launch this mutable native execution image');
     if (process.platform === 'linux' && shebang === undefined && hasRelativeElfLoaderPath)
       throw new Error('Linux cannot safely launch an image with a relative loader path');
-    if (process.platform === 'win32' && hasUnsafeWindowsDllImport(heldBytes))
-      throw new Error('Windows execution image requires a non-system side-by-side DLL');
     if (shebang !== undefined && !allowScript)
       throw new Error('Nested shebang interpreters are unsupported');
     const interpreter =
@@ -192,6 +199,8 @@ export async function prepareExecutionImage(
               windowsAddon().closePreparedExecutionImage(windowsId);
               windowsId = undefined;
             }
+            for (const id of windowsDependencyIds.splice(0))
+              windowsAddon().closePreparedExecutionImage(id);
             if (sealedId !== undefined) {
               posixAddon().closeSealedExecutionImage(sealedId);
               sealedId = undefined;
@@ -208,6 +217,7 @@ export async function prepareExecutionImage(
     });
   } catch (error) {
     if (windowsId !== undefined) windowsAddon().closePreparedExecutionImage(windowsId);
+    for (const id of windowsDependencyIds.splice(0)) windowsAddon().closePreparedExecutionImage(id);
     if (sealedId !== undefined) posixAddon().closeSealedExecutionImage(sealedId);
     await held?.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
@@ -231,6 +241,51 @@ const WINDOWS_SYSTEM_DLL =
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
   return imports === null || imports.some((name) => !WINDOWS_SYSTEM_DLL.test(name));
+}
+
+async function prepareWindowsSideBySideImages(
+  executablePath: string,
+  imageDirectory: string,
+  executableBytes: Buffer,
+): Promise<readonly string[]> {
+  const sourceDirectory = dirname(executablePath);
+  const queue: Buffer[] = [executableBytes];
+  const copied = new Set<string>();
+  const heldIds: string[] = [];
+  let totalBytes = executableBytes.byteLength;
+  try {
+    while (queue.length > 0) {
+      const imports = parsePeImports(queue.shift()!);
+      if (imports === null)
+        throw new Error('Windows execution image has an invalid PE import table');
+      for (const name of imports) {
+        if (WINDOWS_SYSTEM_DLL.test(name) || copied.has(name)) continue;
+        if (basename(name).toLowerCase() !== name || !/^[a-z0-9_.-]+\.dll$/u.test(name))
+          throw new Error('Windows execution image has an unsafe DLL import name');
+        if (copied.size >= 128)
+          throw new Error('Windows execution image exceeds the side-by-side DLL limit');
+        const sourcePath = join(sourceDirectory, name);
+        const bytes = windowsAddon().readNoReparseImageFile(sourcePath, false);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > MAX_EXECUTION_IMAGE_BYTES)
+          throw new Error('Windows execution image dependencies exceed the size limit');
+        const destination = join(imageDirectory, name);
+        await writeFile(destination, bytes, { flag: 'wx' });
+        const prepared = windowsAddon().holdPreparedExecutionImage(destination);
+        if (!prepared.bytes.equals(bytes)) {
+          windowsAddon().closePreparedExecutionImage(prepared.id);
+          throw new Error('Windows side-by-side execution image changed while pinned');
+        }
+        copied.add(name);
+        heldIds.push(prepared.id);
+        queue.push(bytes);
+      }
+    }
+    return Object.freeze(heldIds);
+  } catch (error) {
+    for (const id of heldIds) windowsAddon().closePreparedExecutionImage(id);
+    throw error;
+  }
 }
 
 function parsePeImports(bytes: Buffer): readonly string[] | null {
