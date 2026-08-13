@@ -236,7 +236,7 @@ export function containsRelativeElfLoaderPath(bytes: Buffer): boolean {
 }
 
 const WINDOWS_SYSTEM_DLL =
-  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|bcrypt|comctl32|comdlg32|crypt32|dbghelp|dnsapi|gdi32|imm32|iphlpapi|kernel32|msvcp140|normaliz|ntdll|ole32|oleaut32|powrprof|psapi|rpcrt4|secur32|setupapi|shell32|shlwapi|ucrtbase|user32|userenv|vcruntime140(?:_1)?|version|winhttp|winmm|ws2_32)\.dll$/iu;
+  /^(?:api-ms-win-|ext-ms-win-)|^(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|ws2_32|wtsapi32)\.dll$/iu;
 
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
@@ -265,7 +265,10 @@ async function prepareWindowsSideBySideImages(
         if (copied.size >= 128)
           throw new Error('Windows execution image exceeds the side-by-side DLL limit');
         const sourcePath = join(sourceDirectory, name);
-        const bytes = windowsAddon().readNoReparseImageFile(sourcePath, false);
+        // A source DLL may be hardlinked by a package manager. That alias is harmless here: the
+        // native read pins one handle, and only those exact bytes are materialized into the held
+        // app-owned execution directory before CreateProcess.
+        const bytes = windowsAddon().readNoReparseImageFile(sourcePath, true);
         totalBytes += bytes.byteLength;
         if (totalBytes > MAX_EXECUTION_IMAGE_BYTES)
           throw new Error('Windows execution image dependencies exceed the size limit');
