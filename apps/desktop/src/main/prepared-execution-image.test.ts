@@ -53,6 +53,7 @@ describe('hasUnsafeWindowsDllImport', () => {
       ),
     ).toBe(false);
     expect(hasUnsafeWindowsDllImport(peWithImport('wpaxholder.dll'))).toBe(false);
+    expect(hasUnsafeWindowsDllImport(peWithImport('winspool.drv'))).toBe(false);
     expect(hasUnsafeWindowsDllImport(peWithImport('python311.dll'))).toBe(true);
   });
 

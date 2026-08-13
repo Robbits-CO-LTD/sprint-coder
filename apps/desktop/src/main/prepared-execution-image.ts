@@ -450,7 +450,7 @@ async function hasTrustedSystemElfRuntime(bytes: Buffer): Promise<boolean> {
 }
 
 const WINDOWS_SYSTEM_DLL =
-  /^(?:(?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-\d+|(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|wpaxholder|ws2_32|wtsapi32))\.dll$/iu;
+  /^(?:(?:(?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-\d+|(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|wpaxholder|ws2_32|wtsapi32))\.dll|winspool\.drv)$/iu;
 
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
@@ -470,7 +470,7 @@ async function prepareWindowsSideBySideImages(
       const dependency = queue.shift()!;
       const name = basename(dependency.canonicalPath).toLowerCase();
       if (copied.has(name)) continue;
-      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/iu.test(name))
+      if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error('Windows execution image has an unsafe DLL dependency name');
       if (copied.size >= 128)
         throw new Error('Windows execution image exceeds the side-by-side DLL limit');
@@ -615,7 +615,7 @@ async function sealExecutablePathInternal(
     if (imports === null) throw new Error('Windows execution image has an invalid PE import table');
     const dependencies: SealedExecutableIdentity[] = [];
     for (const name of imports) {
-      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/iu.test(name))
+      if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error(`Windows execution image has an unsafe DLL import name: ${name}`);
       const dependencyPath = join(dirname(canonicalPath), name);
       let localDependency = true;
