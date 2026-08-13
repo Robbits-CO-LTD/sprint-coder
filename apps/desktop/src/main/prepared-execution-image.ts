@@ -615,8 +615,8 @@ async function sealExecutablePathInternal(
     if (imports === null) throw new Error('Windows execution image has an invalid PE import table');
     const dependencies: SealedExecutableIdentity[] = [];
     for (const name of imports) {
-      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/u.test(name))
-        throw new Error('Windows execution image has an unsafe DLL import name');
+      if (basename(name) !== name || !/^[a-z0-9_.-]+\.dll$/iu.test(name))
+        throw new Error(`Windows execution image has an unsafe DLL import name: ${name}`);
       const dependencyPath = join(dirname(canonicalPath), name);
       let localDependency = true;
       try {
