@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 
 export type SealedExecutableIdentity = Readonly<{
@@ -139,9 +139,7 @@ export async function prepareExecutionImage(
     const canonicalInterpreter = shebang === undefined ? undefined : await realpath(shebang.path);
     const shellScript =
       canonicalInterpreter !== undefined &&
-      ['/bin/sh', '/bin/bash', '/bin/zsh', '/usr/bin/sh', '/usr/bin/bash', '/usr/bin/zsh'].includes(
-        canonicalInterpreter,
-      );
+      ['sh', 'bash', 'zsh'].includes(basename(canonicalInterpreter));
     return Object.freeze({
       launchPath: interpreter?.launchPath ?? baseLaunchPath,
       argvPrefix:
