@@ -210,6 +210,7 @@ type ActiveProcess = {
   resolveSettled: () => void;
   outcome: Promise<{ exitCode: number | null; signal: string | null }>;
   posixOwnedMembers?: Map<number, string>;
+  posixIdentityMonitor?: ReturnType<typeof setInterval>;
   windowsJobId?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
 };
@@ -430,6 +431,8 @@ export class CommandRunner {
         processStartIdentity,
       });
       if (posixControl !== undefined) {
+        active.posixIdentityMonitor = setInterval(() => this.captureOwnedPosixMembers(active), 10);
+        active.posixIdentityMonitor.unref();
         const targetGate = (
           child.stdio as unknown as readonly (NodeJS.WritableStream | null | undefined)[]
         )[5];
@@ -877,6 +880,27 @@ export class CommandRunner {
     return true;
   }
 
+  private captureOwnedPosixMembers(active: ActiveProcess): void {
+    if (
+      process.platform === 'win32' ||
+      active.child.exitCode !== null ||
+      active.child.signalCode !== null ||
+      !posixGroupIdentityMatches({
+        expectedGroupId: active.pid,
+        observedGroupId: readPosixProcessGroupId(active.pid),
+        expectedStartIdentity: active.processStartIdentity,
+        observedStartIdentity: readProcessStartIdentity(active.pid),
+      })
+    )
+      return;
+    for (const pid of readPosixGroupMembers(active.pid)) {
+      if (pid === active.pid) continue;
+      const startIdentity = readProcessStartIdentity(pid);
+      if (startIdentity !== 'unavailable' && !startIdentity.startsWith('unsupported:'))
+        active.posixOwnedMembers?.set(pid, startIdentity);
+    }
+  }
+
   private async waitForOwnedTreeExit(
     executionId: string,
     lease: string,
@@ -935,6 +959,7 @@ export class CommandRunner {
 
   private releaseActive(executionId: string, active: ActiveProcess): void {
     if (this.active.get(executionId) === active) this.active.delete(executionId);
+    if (active.posixIdentityMonitor !== undefined) clearInterval(active.posixIdentityMonitor);
     if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
     active.resolveSettled();
   }

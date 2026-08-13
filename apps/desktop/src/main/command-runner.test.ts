@@ -487,7 +487,7 @@ describe('CommandRunner', () => {
         executable: process.execPath,
         argv: [
           '-e',
-          `process.on('SIGTERM',()=>{}); const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>process.kill(process.ppid,'SIGKILL'),100); setInterval(()=>{},1000)`,
+          `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>{process.kill(process.ppid,'SIGKILL'); setTimeout(()=>process.exit(0),150)},100); setInterval(()=>{},1000)`,
         ],
         cwd: '.',
       });
