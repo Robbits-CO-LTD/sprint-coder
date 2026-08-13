@@ -1213,7 +1213,9 @@ export class TeamCoordinator {
         return this.interruptRunningExecution(execution, 'steer', instruction);
       if (
         execution.state === 'waiting_rate_limit' &&
-        this.persistence.listTeamAttempts(execution.id).length > 0
+        this.persistence
+          .listTeamAttempts(execution.id)
+          .some((attempt) => attempt.state === 'waiting_rate_limit')
       )
         throw new Error('A rate-limited attempt cannot be steered until it resumes');
       const revised = this.persistence.reviseQueuedTeamExecution({
