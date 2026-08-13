@@ -756,6 +756,8 @@ export function recoveryText(recovery: DatabaseRecovery | null): string {
   if (recovery.corruptionDetected) notes.push('破損を検出');
   if (recovery.restoredFromBackup) notes.push('バックアップから復元');
   if (recovery.freshStart) notes.push('新しいデータベースで開始');
+  if (recovery.possibleCommittedDataLoss) notes.push('確定データ喪失の可能性');
+  if (recovery.corruptBundlePath !== null) notes.push(`回収先 ${recovery.corruptBundlePath}`);
   if (recovery.interruptedTurns > 0) notes.push(`中断されたターン ${recovery.interruptedTurns}件`);
   return notes.length === 0 ? '問題なく起動しました' : notes.join(' · ');
 }

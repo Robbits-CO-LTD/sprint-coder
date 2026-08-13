@@ -499,6 +499,8 @@ export type DatabaseRecovery = {
   corruptionDetected: boolean;
   restoredFromBackup: boolean;
   freshStart: boolean;
+  corruptBundlePath: string | null;
+  possibleCommittedDataLoss: boolean;
   interruptedTurns: number;
 };
 export type RuntimeConnectionState = 'idle' | 'running' | 'failed';

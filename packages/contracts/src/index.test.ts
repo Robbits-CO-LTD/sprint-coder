@@ -92,6 +92,22 @@ describe('public contracts', () => {
     budgetMode: 'bounded',
   } as const;
 
+  it('carries corrupt SQLite bundle diagnostics in startup recovery', () => {
+    expect(
+      contracts.databaseRecoverySchema.parse({
+        corruptionDetected: true,
+        restoredFromBackup: true,
+        freshStart: false,
+        corruptBundlePath: '/diagnostics/sprint-coder.db.corrupt-id',
+        possibleCommittedDataLoss: true,
+        interruptedTurns: 0,
+      }),
+    ).toMatchObject({
+      corruptBundlePath: '/diagnostics/sprint-coder.db.corrupt-id',
+      possibleCommittedDataLoss: true,
+    });
+  });
+
   it('bounds public image attachment draft metadata', () => {
     const attachment = {
       id: 'attachment-1',

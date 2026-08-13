@@ -21,6 +21,12 @@ export function describeRecovery(recovery: DatabaseRecovery | null): string | nu
   if (recovery.restoredFromBackup) parts.push('データベースをバックアップから復元しました');
   else if (recovery.corruptionDetected)
     parts.push('データベースが破損していたため退避しました（バックアップなし）');
+  if (recovery.possibleCommittedDataLoss)
+    parts.push(
+      `復元前のWALに確定データが残っている可能性があります${
+        recovery.corruptBundlePath === null ? '' : `（回収先: ${recovery.corruptBundlePath}）`
+      }`,
+    );
   if (recovery.interruptedTurns > 0)
     parts.push(
       `前回終了時に実行中だったRun ${recovery.interruptedTurns}件を中断として確定しました`,

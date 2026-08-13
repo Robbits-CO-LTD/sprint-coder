@@ -283,6 +283,11 @@ if (runsWithElectronAbi)
       expect(recovered.recoveryReport.possibleCommittedDataLoss).toBe(true);
       const bundlePath = recovered.recoveryReport.corruptBundlePath;
       expect(bundlePath).not.toBeNull();
+      expect(recovered.getStartupRecovery()).toMatchObject({
+        restoredFromBackup: true,
+        corruptBundlePath: bundlePath,
+        possibleCommittedDataLoss: true,
+      });
       expect(readFileSync(join(bundlePath ?? '', 'wal'))).toEqual(walBytes);
       expect(readFileSync(join(bundlePath ?? '', 'shm')).byteLength).toBe(shmBytes.byteLength);
       const manifest = JSON.parse(

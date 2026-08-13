@@ -12658,6 +12658,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       corruptionDetected: this.recoveryReport.corruptionDetected,
       restoredFromBackup: this.recoveryReport.restoredFromBackup,
       freshStart: this.recoveryReport.freshStart,
+      corruptBundlePath: this.recoveryReport.corruptBundlePath,
+      possibleCommittedDataLoss: this.recoveryReport.possibleCommittedDataLoss,
       interruptedTurns: this.startupInterruptedTurns,
     };
   }
