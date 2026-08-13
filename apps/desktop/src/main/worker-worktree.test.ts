@@ -52,6 +52,17 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     ]);
   });
 
+  it('does not execute a repository-local fsmonitor while requiring a clean base', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const marker = join(repoPath, '..', 'fsmonitor.marker');
+    const script = join(repoPath, '..', 'fsmonitor.cjs');
+    await writeFile(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')\n`);
+    await git(['-C', repoPath, 'config', 'core.fsmonitor', `node ${JSON.stringify(script)}`]);
+
+    await expect(manager.requireCleanBase(repoPath)).resolves.toEqual({ head });
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('rejects dirty, non-Git, and in-progress repositories', async () => {
     const dirty = await fixture();
     await writeFile(join(dirty.repoPath, 'dirty.txt'), 'dirty\n');

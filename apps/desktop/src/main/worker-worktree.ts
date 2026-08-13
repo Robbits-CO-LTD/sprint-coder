@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { mkdir, realpath, stat } from 'node:fs/promises';
-import { devNull } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { safeGitExec } from './safe-git';
 
 // Independent git-worktree isolation manager for write-capable Workers. Each agent gets
 // its own worktree under `worktreesRoot`, checked out --detach from a base ref, so a
@@ -507,8 +507,8 @@ export class WorkerWorktreeManager {
     failureCode: Exclude<WorktreeErrorCode, 'git_unavailable' | 'invalid_input'>,
   ): Promise<ExecFileResult> {
     try {
-      return await this.execFileImpl('git', ['-c', 'core.hooksPath=', '-C', dirArg, ...subArgs], {
-        env: sanitizedGitEnv(),
+      return await safeGitExec(this.execFileImpl, dirArg, subArgs, {
+        env: process.env,
         timeout: GIT_TIMEOUT_MS,
       });
     } catch (error) {
@@ -551,22 +551,6 @@ function validateWorktreeId(worktreeId: string): void {
 function validateGitHead(head: string): void {
   if (!/^[0-9a-f]{40,64}$/i.test(head))
     throw new WorktreeError('invalid_input', `invalid Git object id: ${JSON.stringify(head)}`);
-}
-
-function sanitizedGitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  const path = process.env['PATH'];
-  const home = process.env['HOME'];
-  if (path !== undefined) env['PATH'] = path;
-  if (home !== undefined) env['HOME'] = home;
-  env['GIT_TERMINAL_PROMPT'] = '0';
-  // Git for Windows rewrites Node's `\\.\nul` device path to `//./nul` and
-  // rejects it as a config file. The native DOS device name is accepted by
-  // Git while preserving the same "ignore ambient config" behavior.
-  const nullConfig = process.platform === 'win32' ? 'NUL' : devNull;
-  env['GIT_CONFIG_GLOBAL'] = nullConfig;
-  env['GIT_CONFIG_SYSTEM'] = nullConfig;
-  return env;
 }
 
 async function pathExists(path: string): Promise<boolean> {

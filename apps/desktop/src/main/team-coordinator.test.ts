@@ -668,6 +668,64 @@ describe('Mission workspace fingerprint', () => {
     writeFileSync(join(workspace, 'untracked.txt'), 'two\n');
     expect(captureGitWorkspaceFingerprint(workspace)).not.toEqual(firstUntracked);
   });
+
+  it('does not execute repository-local Git programs while capturing a fingerprint', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sprint-coder-mission-fingerprint-canary-'));
+    const workspace = join(root, 'repo');
+    cleanup.push(root);
+    writeFileSync(
+      join(root, 'fsmonitor.cjs'),
+      `require('node:fs').writeFileSync(${JSON.stringify(join(root, 'fsmonitor.marker'))}, 'ran')\n`,
+    );
+    writeFileSync(
+      join(root, 'filter.cjs'),
+      `require('node:fs').writeFileSync(${JSON.stringify(join(root, 'filter.marker'))}, 'ran')\n`,
+    );
+    expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+    writeFileSync(join(workspace, '.gitattributes'), 'tracked.txt filter=evil diff=evil\n');
+    writeFileSync(join(workspace, 'tracked.txt'), 'initial\n');
+    expect(spawnSync('git', ['-C', workspace, 'add', '.']).status).toBe(0);
+    expect(
+      spawnSync('git', [
+        '-C',
+        workspace,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '-q',
+        '-m',
+        'fixture',
+      ]).status,
+    ).toBe(0);
+    expect(
+      spawnSync('git', [
+        '-C',
+        workspace,
+        'config',
+        'core.fsmonitor',
+        `node ${JSON.stringify(join(root, 'fsmonitor.cjs'))}`,
+      ]).status,
+    ).toBe(0);
+    expect(
+      spawnSync('git', [
+        '-C',
+        workspace,
+        'config',
+        'filter.evil.clean',
+        `node ${JSON.stringify(join(root, 'filter.cjs'))}`,
+      ]).status,
+    ).toBe(0);
+    writeFileSync(join(workspace, 'tracked.txt'), 'changed\n');
+
+    const fingerprint = captureGitWorkspaceFingerprint(workspace);
+
+    expect(fingerprint.gitHead).toMatch(/^[0-9a-f]{40,64}$/u);
+    expect(fingerprint.workspaceDigest).toMatch(/^[0-9a-f]{64}$/u);
+    expect(existsSync(join(root, 'fsmonitor.marker'))).toBe(false);
+    expect(existsSync(join(root, 'filter.marker'))).toBe(false);
+  });
 });
 
 if (runsWithElectronAbi)

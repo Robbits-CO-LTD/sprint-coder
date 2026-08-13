@@ -22,7 +22,6 @@ import {
   type WorkerSummary,
 } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { realpath as fsRealpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import {
@@ -36,6 +35,7 @@ import {
   type TeamEnvelope,
 } from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
+import { safeGitSpawnSync } from './safe-git';
 import {
   TEAM_GLOBAL_EXECUTION_LIMIT,
   TeamExecutionScheduler,
@@ -3779,14 +3779,18 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
     timeout: 5_000,
     maxBuffer: 16 * 1024 * 1024,
   };
-  const git = (...args: string[]) =>
-    spawnSync('git', ['-c', 'core.hooksPath=', '-C', workspacePath, ...args], options);
+  const git = (...args: string[]) => safeGitSpawnSync(workspacePath, args, options);
   const head = git('rev-parse', 'HEAD');
   const status = git('status', '--porcelain=v1', '-z');
   const unstaged = git('diff', '--binary', '--no-ext-diff');
   const staged = git('diff', '--cached', '--binary', '--no-ext-diff');
   const untracked = git('ls-files', '--others', '--exclude-standard', '-z');
   if (
+    head === null ||
+    status === null ||
+    unstaged === null ||
+    staged === null ||
+    untracked === null ||
     head.status !== 0 ||
     head.stdout.trim() === '' ||
     status.status !== 0 ||
@@ -3801,7 +3805,7 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
     .slice(0, 500);
   const untrackedHashes =
     untrackedPaths.length === 0 ? null : git('hash-object', '--', ...untrackedPaths);
-  if (untrackedHashes !== null && untrackedHashes.status !== 0)
+  if (untrackedPaths.length > 0 && (untrackedHashes === null || untrackedHashes.status !== 0))
     return { gitHead: null, workspaceDigest: null };
   return {
     gitHead: head.stdout.trim(),
