@@ -625,7 +625,7 @@ async function sealExecutablePathInternal(
         localDependency = false;
       }
       if (!localDependency) {
-        if (!WINDOWS_SYSTEM_DLL.test(name))
+        if (!WINDOWS_SYSTEM_DLL.test(name) && !(await isWindowsSystem32Dependency(name)))
           throw new Error(`Windows execution image dependency is unavailable: ${name}`);
         continue;
       }
@@ -657,6 +657,19 @@ async function sealExecutablePathInternal(
     return sealedIdentity(canonicalPath, before, bytes, allowHardlinks, interpreter);
   } finally {
     await source.close();
+  }
+}
+
+async function isWindowsSystem32Dependency(name: string): Promise<boolean> {
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  if (systemRoot === undefined) return false;
+  try {
+    const systemDirectory = await realpath(join(systemRoot, 'System32'));
+    const dependency = await realpath(join(systemDirectory, name));
+    if (dirname(dependency).toLowerCase() !== systemDirectory.toLowerCase()) return false;
+    return (await stat(dependency, { bigint: true })).isFile();
+  } catch {
+    return false;
   }
 }
 
