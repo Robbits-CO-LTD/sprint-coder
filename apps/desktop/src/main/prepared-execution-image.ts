@@ -114,10 +114,11 @@ export async function prepareExecutionImage(
       process.platform === 'win32' || (expected.mode & 0o111) === 0
         ? undefined
         : parseShebang(heldBytes);
+    const hasRelativeMachOLoaderPath = containsRelativeMachOLoaderPath(heldBytes);
     if (
       process.platform === 'darwin' &&
       shebang === undefined &&
-      (!trustedMacPath || heldBytes.includes(Buffer.from('@loader_path/../lib', 'utf8')))
+      (!trustedMacPath || hasRelativeMachOLoaderPath)
     )
       throw new Error('macOS cannot safely launch this mutable native execution image');
     if (shebang !== undefined && !allowScript)
@@ -192,6 +193,12 @@ export async function prepareExecutionImage(
     await rm(directory, { recursive: true, force: true });
     throw error;
   }
+}
+
+export function containsRelativeMachOLoaderPath(bytes: Buffer): boolean {
+  return ['@loader_path/', '@executable_path/', '@rpath/'].some((token) =>
+    bytes.includes(Buffer.from(token, 'utf8')),
+  );
 }
 
 function parseShebang(
