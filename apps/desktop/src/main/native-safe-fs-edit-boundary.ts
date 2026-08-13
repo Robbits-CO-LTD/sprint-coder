@@ -50,6 +50,13 @@ export interface NativeMutationJournal {
     coordinator?: NativeMutationSagaCoordinator,
   ): NativeMutationIntentSnapshot;
   getNativeMutationIntent?(id: string): NativeMutationIntentSnapshot;
+  bindNativeMutationIntentRecovery?(
+    id: string,
+    expectedRevision: number,
+    lease: MutationLeaseToken,
+    nativeSessionId: string,
+    now: string,
+  ): unknown;
 }
 
 // Only the bounded edit primitives are ever exposed to the boundary; the raw addon
@@ -70,6 +77,7 @@ export type NativeSafeFsEffectPort = Pick<
       | 'inspectDirectoryOwnership'
       | 'cleanupDirectoryOwnership'
       | 'removeDirectory'
+      | 'cleanupDirectoryRemoval'
     >
   >;
 
@@ -146,7 +154,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
           return { state: 'post', observation };
         return { state: 'drift', observation };
       }
-      const seed = this.buildSeed(step, token, session, 'forward');
+      const seed = intent ?? this.buildSeed(step, token, session, 'forward');
       const owned = await this.native.inspectDirectoryOwnership!(
         session,
         seed.sourceSegments,
@@ -176,12 +184,34 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
   ): Promise<OperationObservation> {
     const session = await this.resolveSession(resolveToken());
     const token = resolveToken();
-    let intent = this.journal.prepareNativeMutationIntent(
-      this.buildSeed(step, token, session, direction),
-      token,
-      this.now(),
-      'edit-saga-executor',
-    );
+    const id = this.intentId(token.sagaId, step.ordinal, direction);
+    let intent: NativeMutationIntentSnapshot | null = null;
+    try {
+      intent = this.journal.getNativeMutationIntent?.(id) ?? null;
+    } catch {
+      // The first attempt has no native intent yet.
+    }
+    if (intent === null) {
+      intent = this.journal.prepareNativeMutationIntent(
+        this.buildSeed(step, token, session, direction),
+        token,
+        this.now(),
+        'edit-saga-executor',
+      );
+    } else if (intent.leaseFence !== String(token.fence) || intent.nativeSessionId !== session.id) {
+      if (
+        token.purpose !== 'recovery' ||
+        this.journal.bindNativeMutationIntentRecovery === undefined
+      )
+        throw new MutationLeaseStaleError();
+      this.journal.bindNativeMutationIntentRecovery(
+        intent.id,
+        intent.revision,
+        token,
+        session.id,
+        this.now(),
+      );
+    }
     if (step.operation.kind === 'mkdir')
       return this.runDirectoryIntent(intent, resolveToken, session);
     this.assertSession(session, resolveToken());
@@ -293,10 +323,27 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         state: 'completed',
         cleanupObservation: { state: 'absent' },
       });
-    } else if (intent.state === 'effect_observed') {
+    } else if (
+      intent.direction === 'compensation' &&
+      (intent.state === 'effect_observed' || intent.state === 'cleanup_pending')
+    ) {
+      if (
+        intent.expectedSource.state !== 'present' ||
+        intent.expectedSource.entryKind !== 'directory'
+      )
+        throw new MutationLeaseStaleError();
+      const expectedIdentityDigest = intent.expectedSource.identityDigest;
+      if (intent.state === 'effect_observed')
+        intent = this.transition(intent, resolveToken, session, { state: 'cleanup_pending' });
+      this.assertSession(session, resolveToken());
+      await this.native.cleanupDirectoryRemoval!(
+        session,
+        intent.sourceSegments,
+        expectedIdentityDigest,
+      );
       intent = this.transition(intent, resolveToken, session, {
         state: 'completed',
-        cleanupObservation: null,
+        cleanupObservation: { state: 'absent' },
       });
     }
     if (intent.effectObservation === null) throw new MutationLeaseStaleError();

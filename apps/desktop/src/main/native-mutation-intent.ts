@@ -259,9 +259,7 @@ export function transitionNativeMutationIntent(
   }
   if (transition.state === 'completed') {
     const cleanupRequired =
-      current.temp !== null ||
-      current.tombstone !== null ||
-      (current.kind === 'mkdir' && current.direction === 'forward');
+      current.temp !== null || current.tombstone !== null || current.kind === 'mkdir';
     if (
       current.state !== 'effect_observed' &&
       !(cleanupRequired && current.state === 'cleanup_pending')
@@ -374,9 +372,7 @@ export function parseNativeMutationIntentSnapshot(value: unknown): NativeMutatio
   )
     throw new Error('Native mutation intent is missing its effect observation');
   const cleanupRequired =
-    snapshot.temp !== null ||
-    snapshot.tombstone !== null ||
-    (snapshot.kind === 'mkdir' && snapshot.direction === 'forward');
+    snapshot.temp !== null || snapshot.tombstone !== null || snapshot.kind === 'mkdir';
   if (
     (snapshot.state === 'completed' && cleanupRequired) !==
       (snapshot.cleanupObservation?.state === 'absent') ||
@@ -573,15 +569,15 @@ function validateSeedFacts(
         : value.kind === 'update'
           ? value.expectedSource.state === 'present' &&
             value.destinationSegments === null &&
-          value.artifact !== null
+            value.artifact !== null
           : value.kind === 'delete'
             ? value.expectedSource.state === 'present' &&
               value.destinationSegments === null &&
-            value.artifact === null
+              value.artifact === null
             : value.expectedSource.state === 'present' &&
               value.destinationSegments !== null &&
               value.expectedDestination.state === 'absent' &&
-            value.artifact === null;
+              value.artifact === null;
   if (!validShape) throw new Error('Invalid Native mutation operation shape');
 }
 

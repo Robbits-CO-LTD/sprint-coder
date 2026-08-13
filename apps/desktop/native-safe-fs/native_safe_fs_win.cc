@@ -565,6 +565,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"cleanupDirectoryOwnership", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"removeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"cleanupDirectoryRemoval", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
       {"closeSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"assignProcessToOwnedJob", nullptr, AssignProcessToOwnedJob, nullptr, nullptr, nullptr,
        napi_default, nullptr},

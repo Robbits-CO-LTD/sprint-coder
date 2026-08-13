@@ -145,6 +145,9 @@ class FakeNative {
     this.calls.push('rmdir');
     this.directoryIdentity = null;
   }
+  async cleanupDirectoryRemoval() {
+    this.calls.push('cleanup-rmdir');
+  }
 }
 
 // In-memory journal that reuses the real intent state machine (transition validation,
@@ -522,6 +525,37 @@ describe('NativeSafeFsEditEffectBoundary', () => {
     expect(restored.source.state).toBe('present');
     if (restored.source.state === 'present' && restored.source.revision.entryKind !== 'directory')
       expect(restored.source.revision.contentHash).toBe(step.operation.preHash);
+  });
+
+  it('journals mkdir compensation quarantine cleanup before completion', async () => {
+    const native = new FakeNative();
+    native.directoryIdentity = 'd'.repeat(64);
+    const journal = new FakeJournal();
+    const artifacts = new MemoryArtifacts();
+    const saga = await stageSaga(singlePlan('mkdir'), artifacts);
+    const step = saga.steps[0]!;
+    const committed: EditSagaStep = {
+      ...step,
+      state: 'effect_observed',
+      postObservation: {
+        source: {
+          state: 'present',
+          revision: { entryKind: 'directory', identityDigest: 'd'.repeat(64) },
+        },
+        destination: { state: 'absent' },
+      },
+    };
+    const boundary = makeBoundary(native, journal, artifacts);
+
+    await expect(boundary.restore(committed, committed.postObservation!, lease())).resolves.toEqual(
+      { source: { state: 'absent' }, destination: { state: 'absent' } },
+    );
+    expect(native.calls).toEqual(['assert', 'rmdir', 'assert', 'cleanup-rmdir']);
+    expect([...journal.intents.values()][0]).toMatchObject({
+      direction: 'compensation',
+      state: 'completed',
+      cleanupObservation: { state: 'absent' },
+    });
   });
 });
 

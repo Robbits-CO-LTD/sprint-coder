@@ -28,17 +28,17 @@ import {
 } from './edit-saga';
 import { EditArtifactStore } from './edit-artifact-store';
 import { SqlitePersistenceClient, SqliteEditSagaLeaseGuard } from './persistence';
+import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import { FileRevisionRegistry } from './file-revision';
+import { executeWorkspaceCreateDirectory, type WorkspacePatchDeps } from './workspace-patch-tool';
 import {
   structuredPatchDigest,
   type PreparedFileRevision,
   type PreparedPatchOperation,
   type PreparedStructuredPatch,
 } from './structured-patch';
-import {
-  mutationWorkspaceKey,
-  MutationLeaseStaleError,
-  type MutationLeaseToken,
-} from './mutation-lease';
+import { MutationLeaseStaleError, type MutationLeaseToken } from './mutation-lease';
+import { workspaceMutationBinding } from './path-guard';
 
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 const cleanup: string[] = [];
@@ -240,15 +240,15 @@ async function buildFullPatch(
 async function preparePersistence(env: Fixture) {
   const persistence = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
   const task = persistence.createTask();
-  const rootIdentityDigest = hash(`root-identity:${env.workspace}`);
-  const workspaceKey = mutationWorkspaceKey(env.workspace, rootIdentityDigest);
+  const { rootIdentityDigest, workspaceKey } = await workspaceMutationBinding(env.workspace);
   persistence.setWorkspaceBinding(task.id, {
     path: env.workspace,
     workspaceKey,
     rootIdentityDigest,
   });
   const turn = persistence.startTurn(task.id, 'edit saga native integration');
-  return { persistence, task, turn, workspaceKey, rootIdentityDigest };
+  const workspace = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
+  return { persistence, task, turn, workspace, workspaceKey, rootIdentityDigest };
 }
 
 function buildRequest(input: {
@@ -280,7 +280,7 @@ async function expectMissing(path: string): Promise<void> {
 
 if (runsWithElectronAbi) {
   describe.skipIf(process.platform === 'win32')('EditSagaExecutor native integration', () => {
-    it('creates a directory through the durable Saga and leaves no ownership marker', async () => {
+    it('runs the Provider create_directory call through the durable Saga to a terminal intent', async () => {
       const env = await fixture('mkdir');
       const native = loadNativeSafeFs({
         addonPath: nativeSafeFsAddonPath(),
@@ -288,24 +288,7 @@ if (runsWithElectronAbi) {
       });
       const { resolveSession, sessions } = makeResolveSession(native, env);
       const directoryPath = join(env.workspace, 'provider-directory');
-      const operations: readonly PreparedPatchOperation[] = Object.freeze([
-        Object.freeze({
-          kind: 'mkdir' as const,
-          path: 'provider-directory',
-          canonicalPath: directoryPath,
-          destination: null,
-          canonicalDestination: null,
-          revisionTokenId: null,
-          preRevision: null,
-          preImage: null,
-          postImage: null,
-          preHash: null,
-          postHash: null,
-        }),
-      ]);
-      const facts = { version: 1 as const, policyEpoch: 0, operations };
-      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
-      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+      const { persistence, task, turn, workspace, workspaceKey, rootIdentityDigest } =
         await preparePersistence(env);
       const artifacts = await EditArtifactStore.open({
         rootPath: env.artifactRoot,
@@ -323,19 +306,58 @@ if (runsWithElectronAbi) {
         undefined,
         new SqliteEditSagaLeaseGuard(persistence, 'mkdir-instance'),
       );
-      const result = await executor.apply(
-        buildRequest({
-          id: 'saga-mkdir',
-          taskId: task.id,
-          turnId: turn.turnId,
-          operationId: 'op-mkdir',
-          plan,
-          workspaceKey,
-          rootIdentityDigest,
+      const rootId = workspace.primaryRootId ?? 'legacy-primary';
+      const ids = ['saga-mkdir', 'op-mkdir'][Symbol.iterator]();
+      let workspaceEdit!: WorkspacePatchDeps;
+      workspaceEdit = {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () =>
+          persistence.getTurnWorkspaceMutationBindings(turn.turnId),
+        revisions: new FileRevisionRegistry(),
+        apply: (request) => executor.apply(request),
+        createDirectory: ({ taskId, turnId, rootId, path, guard }) =>
+          executeWorkspaceCreateDirectory(
+            { rootId, path },
+            { taskId, turnId },
+            workspaceEdit,
+            guard,
+          ),
+        policyEpochFor: () => 0,
+        newId: () => ids.next().value ?? 'unexpected-extra-id',
+        now: () => '2026-07-23T00:00:00.000Z',
+      };
+      const provider = new ProviderWorkspaceTools({
+        workspaceFor: () => workspace,
+        rootIdentityFor: () => rootIdentityDigest,
+        policyEpochFor: () => 0,
+        authorizer: () => ({
+          decision: 'allow',
+          reason: 'integration test',
+          beforeExecute: () => true,
         }),
-      );
+        workspaceEdit,
+      });
+      const context = {
+        taskId: task.id,
+        turnId: turn.turnId,
+        workspaceId: workspace.digest,
+        policyEpoch: 0,
+      } as const;
+      provider.startTurn(context, 'ollama');
+      const result = await provider.broker.dispatch({
+        ...context,
+        callId: 'call-mkdir',
+        providerName: 'create_directory',
+        input: { rootId, path: 'provider-directory' },
+      });
 
-      expect(result).toMatchObject({ state: 'committed', artifactCleanupPending: false });
+      expect(result).toEqual({
+        rootId,
+        path: 'provider-directory',
+        sagaId: 'saga-mkdir',
+        state: 'committed',
+        kind: 'mkdir',
+      });
       expect((await lstat(directoryPath)).isDirectory()).toBe(true);
       await expect(
         readFile(join(directoryPath, '.sprint-coder-mkdir-placeholder')),
@@ -346,6 +368,8 @@ if (runsWithElectronAbi) {
         kind: 'mkdir',
         state: 'completed',
       });
+      provider.finishTurn(task.id, turn.turnId);
+      await provider.dispose();
       await Promise.all([...sessions.values()].map((session) => native.closeSession(session)));
       persistence.close();
     });

@@ -39,6 +39,7 @@ export type NativeSafeFsProbe = Readonly<{
     durableFence: boolean;
     synchronousInvalidation: boolean;
     mutation: boolean;
+    directoryOwnership: 'workspace-probed' | false;
   }>;
   unavailableReason: string | null;
 }>;
@@ -107,6 +108,11 @@ export interface NativeSafeFs {
     ownership: Readonly<{ markerLeafName: string; token: string }>,
   ): Promise<void>;
   removeDirectory(
+    session: NativeSafeFsSession,
+    pathSegments: readonly string[],
+    expectedIdentityDigest: string,
+  ): Promise<void>;
+  cleanupDirectoryRemoval(
     session: NativeSafeFsSession,
     pathSegments: readonly string[],
     expectedIdentityDigest: string,
@@ -184,6 +190,11 @@ type RawAddon = Readonly<{
     input: RawDirectoryOwnershipInput & { expectedIdentityDigest: string },
   ): unknown;
   removeDirectory(input: {
+    sessionId: string;
+    pathSegments: readonly string[];
+    expectedIdentityDigest: string;
+  }): unknown;
+  cleanupDirectoryRemoval(input: {
     sessionId: string;
     pathSegments: readonly string[];
     expectedIdentityDigest: string;
@@ -552,6 +563,29 @@ export function loadNativeSafeFs(
       }
     },
 
+    async cleanupDirectoryRemoval(
+      session: NativeSafeFsSession,
+      pathSegments: readonly string[],
+      expectedIdentityDigest: string,
+    ): Promise<void> {
+      assertIssuedSession(issuedSessions, session);
+      validateDirectoryPathSegments(pathSegments);
+      if (!/^[a-f0-9]{64}$/.test(expectedIdentityDigest))
+        throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory identity digest');
+      try {
+        await addon!.cleanupDirectoryRemoval(
+          Object.freeze({
+            sessionId: session.id,
+            pathSegments: Object.freeze([...pathSegments]),
+            expectedIdentityDigest,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
     async closeSession(session: NativeSafeFsSession): Promise<void> {
       if (addon === null)
         throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'NativeSafeFs addon is unavailable');
@@ -583,6 +617,7 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).inspectDirectoryOwnership !== 'function' ||
     typeof (value as Partial<RawAddon>).cleanupDirectoryOwnership !== 'function' ||
     typeof (value as Partial<RawAddon>).removeDirectory !== 'function' ||
+    typeof (value as Partial<RawAddon>).cleanupDirectoryRemoval !== 'function' ||
     typeof (value as Partial<RawAddon>).closeSession !== 'function'
   )
     throw new Error('NativeSafeFs addon contract mismatch');
@@ -767,7 +802,8 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
     (capabilities as Record<string, unknown>)['workspaceLock'] !== true ||
     (capabilities as Record<string, unknown>)['durableFence'] !== true ||
     (capabilities as Record<string, unknown>)['synchronousInvalidation'] !== true ||
-    (capabilities as Record<string, unknown>)['mutation'] !== true
+    (capabilities as Record<string, unknown>)['mutation'] !== true ||
+    (capabilities as Record<string, unknown>)['directoryOwnership'] !== 'workspace-probed'
   )
     throw new Error('Invalid native probe');
   return Object.freeze({
@@ -780,6 +816,7 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
       durableFence: true,
       synchronousInvalidation: true,
       mutation: true,
+      directoryOwnership: 'workspace-probed',
     }),
     unavailableReason: null,
   });
@@ -822,6 +859,7 @@ function unavailableProbe(reason: string | null): NativeSafeFsProbe {
       durableFence: false,
       synchronousInvalidation: false,
       mutation: false,
+      directoryOwnership: false,
     }),
     unavailableReason: reason ?? 'NativeSafeFs addon is unavailable',
   });
