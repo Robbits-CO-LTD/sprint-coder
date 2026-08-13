@@ -250,12 +250,16 @@ describe('CommandRunner', () => {
         },
       });
 
-      await expect(running).resolves.toMatchObject({
-        exitCode: null,
-        signal: 'SIGTERM',
+      const result = await running;
+      expect(result).toMatchObject({
         canceled: true,
         termination: 'forced',
       });
+      expect(result).toMatchObject(
+        process.platform === 'win32'
+          ? { exitCode: 1, signal: null }
+          : { exitCode: null, signal: 'SIGTERM' },
+      );
       expect(runner.activeCount).toBe(0);
       const stdout = chunks
         .filter(({ stream }) => stream === 'stdout')
