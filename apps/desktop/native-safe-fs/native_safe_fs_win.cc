@@ -2,7 +2,10 @@
 #include <windows.h>
 #include <aclapi.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <mutex>
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -12,6 +15,13 @@ namespace {
 
 std::mutex jobs_mutex;
 std::unordered_map<std::string, HANDLE> jobs;
+struct PreparedExecutionHandles {
+  HANDLE parent = INVALID_HANDLE_VALUE;
+  HANDLE file = INVALID_HANDLE_VALUE;
+};
+std::mutex prepared_execution_mutex;
+std::unordered_map<std::string, PreparedExecutionHandles> prepared_execution_images;
+std::atomic<uint64_t> prepared_execution_sequence{1};
 
 napi_value MakeString(napi_env env, const char* value) {
   napi_value result;
@@ -147,7 +157,7 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   FILE_ID_INFO before_id{};
   FILE_BASIC_INFO before_basic{};
   FILE_STANDARD_INFO before_standard{};
-  constexpr LONGLONG kMaximumBytes = 5LL * 1024LL * 1024LL;
+  constexpr LONGLONG kMaximumBytes = 512LL * 1024LL * 1024LL;
   bool safe = QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard);
   if (!safe || before_standard.EndOfFile.QuadPart < 1 ||
       before_standard.EndOfFile.QuadPart > kMaximumBytes) {
@@ -199,6 +209,133 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   if (napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &result) != napi_ok)
     return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
   return result;
+}
+
+napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "holdPreparedExecutionImage requires one absolute path");
+    return nullptr;
+  }
+  std::string path_utf8;
+  std::wstring path;
+  if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path))
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+  if (full_length == 0) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  std::vector<wchar_t> full_buffer(full_length, L'\0');
+  if (GetFullPathNameW(path.c_str(), full_length, full_buffer.data(), nullptr) == 0)
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const std::wstring full_path(full_buffer.data());
+  if (!SamePath(path, full_path)) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const size_t separator = full_path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const std::wstring parent_path = full_path.substr(0, separator);
+  HANDLE parent = CreateFileW(parent_path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (parent == INVALID_HANDLE_VALUE) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  FILE_ATTRIBUTE_TAG_INFO parent_tag{};
+  if (!GetFileInformationByHandleEx(parent, FileAttributeTagInfo, &parent_tag,
+                                    sizeof(parent_tag)) ||
+      (parent_tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+      (parent_tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || parent_tag.ReparseTag != 0) {
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  HANDLE file = CreateFileW(full_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+                                               FILE_FLAG_SEQUENTIAL_SCAN,
+                            nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  FILE_ID_INFO before_id{};
+  FILE_BASIC_INFO before_basic{};
+  FILE_STANDARD_INFO before_standard{};
+  constexpr LONGLONG kMaximumExecutionImageBytes = 512LL * 1024LL * 1024LL;
+  if (!QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard) ||
+      before_standard.EndOfFile.QuadPart < 1 ||
+      before_standard.EndOfFile.QuadPart > kMaximumExecutionImageBytes) {
+    CloseHandle(file);
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  const size_t byte_length = static_cast<size_t>(before_standard.EndOfFile.QuadPart);
+  std::vector<unsigned char> bytes(byte_length);
+  size_t offset = 0;
+  while (offset < byte_length) {
+    DWORD bytes_read = 0;
+    const DWORD requested = static_cast<DWORD>(
+        std::min<size_t>(byte_length - offset, static_cast<size_t>(MAXDWORD)));
+    if (!ReadFile(file, bytes.data() + offset, requested, &bytes_read, nullptr) || bytes_read == 0) {
+      CloseHandle(file);
+      CloseHandle(parent);
+      return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+    }
+    offset += bytes_read;
+  }
+  FILE_ID_INFO after_id{};
+  FILE_BASIC_INFO after_basic{};
+  FILE_STANDARD_INFO after_standard{};
+  if (!QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) ||
+      !SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
+                         after_standard)) {
+    CloseHandle(file);
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  const std::string id = std::to_string(GetCurrentProcessId()) + "-" +
+                         std::to_string(prepared_execution_sequence.fetch_add(1));
+  {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    prepared_execution_images.emplace(id, PreparedExecutionHandles{parent, file});
+  }
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "id", MakeString(env, id.c_str()));
+  napi_value buffer;
+  if (napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &buffer) != napi_ok) {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    prepared_execution_images.erase(id);
+    CloseHandle(file);
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  napi_set_named_property(env, result, "bytes", buffer);
+  return result;
+}
+
+napi_value ClosePreparedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "closePreparedExecutionImage requires one id");
+    return nullptr;
+  }
+  std::string id;
+  if (!ReadString(env, argv[0], &id)) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared execution image id");
+    return nullptr;
+  }
+  PreparedExecutionHandles handles;
+  {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    const auto found = prepared_execution_images.find(id);
+    if (found == prepared_execution_images.end()) {
+      napi_throw_error(env, nullptr, "Prepared execution image is stale");
+      return nullptr;
+    }
+    handles = found->second;
+    prepared_execution_images.erase(found);
+  }
+  CloseHandle(handles.file);
+  CloseHandle(handles.parent);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
 }
 
 bool SameParentPath(const std::wstring& first, const std::wstring& second) {
@@ -545,6 +682,16 @@ napi_value Probe(napi_env env, napi_callback_info) {
   return result;
 }
 
+void CleanupPreparedExecutionImages(void*) {
+  std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+  for (const auto& [id, handles] : prepared_execution_images) {
+    (void)id;
+    CloseHandle(handles.file);
+    CloseHandle(handles.parent);
+  }
+  prepared_execution_images.clear();
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -579,8 +726,13 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr},
       {"readNoReparseImageFile", nullptr, ReadNoReparseImageFile, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"holdPreparedExecutionImage", nullptr, HoldPreparedExecutionImage, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"closePreparedExecutionImage", nullptr, ClosePreparedExecutionImage, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
+  napi_add_env_cleanup_hook(env, CleanupPreparedExecutionImages, nullptr);
   return exports;
 }
 

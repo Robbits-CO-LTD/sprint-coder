@@ -17,6 +17,7 @@ import {
   type PathGuard,
 } from './path-guard';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
+import { prepareExecutionImage, type PreparedExecutionImage } from './prepared-execution-image';
 import { createStreamingSecretRedactor } from './secret-redactor';
 import {
   assignProcessToOwnedJob,
@@ -61,6 +62,8 @@ type PreparedIdentity = {
   executableSize: number;
   executableMtimeMs: number;
   executableCtimeMs: number;
+  executableMtimeNs: string;
+  executableCtimeNs: string;
   executableMode: number;
   executableDigest: string;
 };
@@ -79,16 +82,6 @@ if [ ! -x "$1" ]; then
   printf '{"nonce":"%s","type":"spawnError","status":126}\n' "$control_nonce" >&3
   exec /bin/sleep 2147483647
 fi
-first_line=$(/usr/bin/head -n 1 "$1" 2>/dev/null || :)
-case "$first_line" in
-  '#!'*)
-    interpreter=$(printf '%s\n' "$first_line" | /usr/bin/awk '{sub(/^#![[:space:]]*/, ""); print $1}')
-    if [ -n "$interpreter" ] && [ ! -x "$interpreter" ]; then
-      printf '{"nonce":"%s","type":"spawnError","status":127}\n' "$control_nonce" >&3
-      exec /bin/sleep 2147483647
-    fi
-    ;;
-esac
 (
   trap - TERM
   IFS= read -r gate <&5 || exit 125
@@ -130,9 +123,11 @@ export async function prepareExecutionSpec(
   if (!isAbsolute(input.executable))
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be absolute');
   const executableCanonicalPath = await realpath(input.executable);
-  const executableStats = await stat(executableCanonicalPath);
+  const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
+  if (executableStats.nlink !== 1n)
+    throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must have one link');
   const pathGuard = await createPathGuard({
     rootId: input.rootId,
     workspacePath: input.workspacePath,
@@ -158,10 +153,12 @@ export async function prepareExecutionSpec(
     executableCanonicalPath,
     executableDev: String(executableStats.dev),
     executableIno: String(executableStats.ino),
-    executableSize: executableStats.size,
-    executableMtimeMs: executableStats.mtimeMs,
-    executableCtimeMs: executableStats.ctimeMs,
-    executableMode: executableStats.mode,
+    executableSize: Number(executableStats.size),
+    executableMtimeMs: Number(executableStats.mtimeNs) / 1_000_000,
+    executableCtimeMs: Number(executableStats.ctimeNs) / 1_000_000,
+    executableMtimeNs: String(executableStats.mtimeNs),
+    executableCtimeNs: String(executableStats.ctimeNs),
+    executableMode: Number(executableStats.mode),
     executableDigest: await digestFile(executableCanonicalPath),
   });
   return spec;
@@ -196,6 +193,8 @@ type RunOptions = Readonly<{
       pid: number;
       startedAt: number;
       processStartIdentity: string;
+      executionImageDigest: string;
+      executionImageIdentity: string;
     }>,
   ) => void;
 }>;
@@ -278,460 +277,480 @@ export class CommandRunner {
   }
 
   async run(spec: ExecutionSpec, options: RunOptions = {}): Promise<CommandResult> {
-    await this.revalidate(spec);
-    if (options.signal?.aborted)
-      return {
-        executionId: randomUUID(),
-        exitCode: null,
-        signal: null,
-        canceled: true,
-        termination: 'cooperative',
-        durationMs: 0,
-        outputBytes: 0,
-        truncated: false,
-      };
-    const executionId = randomUUID();
-    const lease = randomUUID();
-    const posixControlNonce = randomUUID();
-    const startedAt = Date.now();
-    options.beforeSpawn?.();
-    let child: ChildProcess;
+    const executionImage = await this.revalidate(spec);
     try {
-      const windows = process.platform === 'win32';
-      child = spawn(
-        windows ? windowsJobWrapperCommand() : posixSupervisorCommand(),
-        [
-          ...(windows
-            ? ['-e', WINDOWS_JOB_WRAPPER]
-            : [
-                '-c',
-                POSIX_COMMAND_WRAPPER,
-                'sprint-coder-command-supervisor',
-                spec.absoluteExecutable,
-                ...spec.argv,
-              ]),
-        ],
-        {
-          cwd: spec.cwdIdentity.canonicalPath,
-          env: buildEnvironment(spec.envDelta),
-          shell: false,
-          stdio: windows
-            ? ['pipe', 'pipe', 'pipe']
-            : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
-          detached: !windows,
-          windowsHide: true,
-        },
-      );
-    } catch (error) {
-      throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
-    }
-    const processClosePromise = waitForClose(child);
-    const posixControl =
-      process.platform === 'win32'
-        ? undefined
-        : waitForPosixCommandOutcome(child, posixControlNonce);
-    const outcomePromise = posixControl?.outcome ?? processClosePromise;
-    void outcomePromise.catch(() => undefined);
-    try {
-      await waitForSpawn(child);
-    } catch (error) {
-      throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
-    }
-    if (child.pid === undefined)
-      throw new CommandRunnerError('SPAWN_FAILED', 'Command process did not receive a PID');
-    if (process.platform === 'win32') {
+      if (options.signal?.aborted)
+        return {
+          executionId: randomUUID(),
+          exitCode: null,
+          signal: null,
+          canceled: true,
+          termination: 'cooperative',
+          durationMs: 0,
+          outputBytes: 0,
+          truncated: false,
+        };
+      const executionId = randomUUID();
+      const lease = randomUUID();
+      const posixControlNonce = randomUUID();
+      const startedAt = Date.now();
+      options.beforeSpawn?.();
+      let child: ChildProcess;
       try {
-        assignProcessToOwnedJob(child.pid, executionId);
-        child.stdin?.end(
-          JSON.stringify({
-            executable: spec.absoluteExecutable,
-            argv: [...spec.argv],
+        const windows = process.platform === 'win32';
+        child = spawn(
+          windows ? windowsJobWrapperCommand() : posixSupervisorCommand(),
+          [
+            ...(windows
+              ? ['-e', WINDOWS_JOB_WRAPPER]
+              : [
+                  '-c',
+                  POSIX_COMMAND_WRAPPER,
+                  'sprint-coder-command-supervisor',
+                  executionImage.launchPath,
+                  ...executionImage.argvPrefix,
+                  ...spec.argv,
+                ]),
+          ],
+          {
             cwd: spec.cwdIdentity.canonicalPath,
             env: buildEnvironment(spec.envDelta),
-          }),
+            shell: false,
+            stdio: windows
+              ? ['pipe', 'pipe', 'pipe']
+              : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
+            detached: !windows,
+            windowsHide: true,
+          },
         );
       } catch (error) {
-        child.kill();
         throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
       }
-    } else {
-      const nonceInput = child.stdio[4] as NodeJS.WritableStream | null | undefined;
-      nonceInput?.end(`${posixControlNonce}\n`);
-    }
-    let resolveSettled = (): void => undefined;
-    const settled = new Promise<void>((resolve) => {
-      resolveSettled = resolve;
-    });
-    const active: ActiveProcess = {
-      lease,
-      child,
-      pid: child.pid,
-      startedAt,
-      processStartIdentity: 'pending',
-      settled,
-      resolveSettled,
-      outcome: processClosePromise,
-      ...(process.platform === 'win32' ? {} : { posixOwnedMembers: new Map<number, string>() }),
-      ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
-    };
-    this.active.set(executionId, active);
-    const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
-    let bufferedOutputBytes = 0;
-    let outputConsumer = (stream: 'stdout' | 'stderr', data: Buffer): void => {
-      const copy = Buffer.from(data);
-      bufferedOutput.push({ stream, data: copy });
-      bufferedOutputBytes += copy.byteLength;
-      if (bufferedOutputBytes >= this.maxBufferedBytes) {
-        child.stdout?.pause();
-        child.stderr?.pause();
-      }
-    };
-    child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
-    child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
-    const processStartIdentity = readProcessStartIdentity(child.pid);
-    if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
+      const processClosePromise = waitForClose(child);
+      const posixControl =
+        process.platform === 'win32'
+          ? undefined
+          : waitForPosixCommandOutcome(child, posixControlNonce);
+      const outcomePromise = posixControl?.outcome ?? processClosePromise;
+      void outcomePromise.catch(() => undefined);
       try {
-        await this.forceUnidentifiedProcess(active);
-        this.active.delete(executionId);
-        active.resolveSettled();
-        throw new CommandRunnerError(
-          'SPAWN_FAILED',
-          'Command process start identity is unavailable',
-        );
+        await waitForSpawn(child);
       } catch (error) {
-        if (error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED')
-          this.retainUntilOutcome(executionId, active);
-        throw error;
+        throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
       }
-    }
-    active.processStartIdentity = processStartIdentity;
-    try {
-      if (posixControl !== undefined) {
-        const targetPid = await posixControl.started;
-        const targetStartIdentity = readProcessStartIdentity(targetPid);
-        const targetGroupId = readPosixProcessGroupId(targetPid);
-        if (
-          targetStartIdentity === 'unavailable' ||
-          targetStartIdentity.startsWith('unsupported:') ||
-          targetGroupId !== active.pid
-        )
-          throw new CommandRunnerError('SPAWN_FAILED', 'POSIX target identity is unavailable');
-        active.posixOwnedMembers?.set(targetPid, targetStartIdentity);
+      if (child.pid === undefined)
+        throw new CommandRunnerError('SPAWN_FAILED', 'Command process did not receive a PID');
+      if (process.platform === 'win32') {
+        try {
+          assignProcessToOwnedJob(child.pid, executionId);
+          child.stdin?.end(
+            JSON.stringify({
+              executable: executionImage.launchPath,
+              argv: [...executionImage.argvPrefix, ...spec.argv],
+              cwd: spec.cwdIdentity.canonicalPath,
+              env: buildEnvironment(spec.envDelta),
+            }),
+          );
+        } catch (error) {
+          child.kill();
+          throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
+        }
+      } else {
+        const nonceInput = child.stdio[4] as NodeJS.WritableStream | null | undefined;
+        nonceInput?.end(`${posixControlNonce}\n`);
       }
-    } catch (error) {
-      await this.terminateKnownAndWait(executionId, lease, active.outcome);
-      this.releaseActive(executionId, active);
-      throw error;
-    }
-    try {
-      options.onStarted?.({
-        executionId,
+      let resolveSettled = (): void => undefined;
+      const settled = new Promise<void>((resolve) => {
+        resolveSettled = resolve;
+      });
+      const active: ActiveProcess = {
+        lease,
+        child,
         pid: child.pid,
         startedAt,
-        processStartIdentity,
-      });
-      if (posixControl !== undefined) {
-        const targetGate = (
-          child.stdio as unknown as readonly (NodeJS.WritableStream | null | undefined)[]
-        )[5];
-        targetGate?.end('run\n');
-        this.startPosixIdentityMonitor(active);
+        processStartIdentity: 'pending',
+        settled,
+        resolveSettled,
+        outcome: processClosePromise,
+        ...(process.platform === 'win32' ? {} : { posixOwnedMembers: new Map<number, string>() }),
+        ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
+      };
+      this.active.set(executionId, active);
+      const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
+      let bufferedOutputBytes = 0;
+      let outputConsumer = (stream: 'stdout' | 'stderr', data: Buffer): void => {
+        const copy = Buffer.from(data);
+        bufferedOutput.push({ stream, data: copy });
+        bufferedOutputBytes += copy.byteLength;
+        if (bufferedOutputBytes >= this.maxBufferedBytes) {
+          child.stdout?.pause();
+          child.stderr?.pause();
+        }
+      };
+      child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
+      child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
+      const processStartIdentity = readProcessStartIdentity(child.pid);
+      if (
+        processStartIdentity === 'unavailable' ||
+        processStartIdentity.startsWith('unsupported:')
+      ) {
+        try {
+          await this.forceUnidentifiedProcess(active);
+          this.active.delete(executionId);
+          active.resolveSettled();
+          throw new CommandRunnerError(
+            'SPAWN_FAILED',
+            'Command process start identity is unavailable',
+          );
+        } catch (error) {
+          if (
+            error instanceof CommandRunnerError &&
+            error.code === 'PROCESS_TREE_TERMINATION_FAILED'
+          )
+            this.retainUntilOutcome(executionId, active);
+          throw error;
+        }
       }
-    } catch (error) {
+      active.processStartIdentity = processStartIdentity;
       try {
+        if (posixControl !== undefined) {
+          const targetPid = await posixControl.started;
+          const targetStartIdentity = readProcessStartIdentity(targetPid);
+          const targetGroupId = readPosixProcessGroupId(targetPid);
+          if (
+            targetStartIdentity === 'unavailable' ||
+            targetStartIdentity.startsWith('unsupported:') ||
+            targetGroupId !== active.pid
+          )
+            throw new CommandRunnerError('SPAWN_FAILED', 'POSIX target identity is unavailable');
+          active.posixOwnedMembers?.set(targetPid, targetStartIdentity);
+        }
+      } catch (error) {
         await this.terminateKnownAndWait(executionId, lease, active.outcome);
-        this.active.delete(executionId);
-        active.resolveSettled();
+        this.releaseActive(executionId, active);
         throw error;
-      } catch (terminationError) {
-        if (
-          terminationError instanceof CommandRunnerError &&
-          terminationError.code === 'PROCESS_TREE_TERMINATION_FAILED'
-        )
-          this.retainUntilOutcome(executionId, active);
-        throw terminationError;
       }
-    }
+      try {
+        options.onStarted?.({
+          executionId,
+          pid: child.pid,
+          startedAt,
+          processStartIdentity,
+          executionImageDigest: executionImage.digest,
+          executionImageIdentity: executionImage.identity,
+        });
+        if (posixControl !== undefined) {
+          const targetGate = (
+            child.stdio as unknown as readonly (NodeJS.WritableStream | null | undefined)[]
+          )[5];
+          targetGate?.end('run\n');
+          this.startPosixIdentityMonitor(active);
+        }
+      } catch (error) {
+        try {
+          await this.terminateKnownAndWait(executionId, lease, active.outcome);
+          this.active.delete(executionId);
+          active.resolveSettled();
+          throw error;
+        } catch (terminationError) {
+          if (
+            terminationError instanceof CommandRunnerError &&
+            terminationError.code === 'PROCESS_TREE_TERMINATION_FAILED'
+          )
+            this.retainUntilOutcome(executionId, active);
+          throw terminationError;
+        }
+      }
 
-    let nextSeq = 1;
-    let outputBytes = 0;
-    let pendingBytes = 0;
-    let truncated = false;
-    let sinkError: unknown;
-    let canceled = false;
-    let termination: CommandResult['termination'] = 'natural';
-    let flushTimer: ReturnType<typeof setTimeout> | undefined;
-    // `sealed` marks a segment that has already been snapshotted into a batch handed to the sink.
-    // `queueText` must not append to such a segment: the batch holds a value copy, so a late append
-    // would be invisible to the sink yet still removed by this flush's `pending.splice`, silently
-    // losing that output (see the regression test in command-runner.test.ts).
-    const pending: {
-      stream: 'stdout' | 'stderr';
-      text: string;
-      byteLength: number;
-      sealed?: boolean;
-    }[] = [];
-    const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
-    const sanitizers: Record<'stdout' | 'stderr', TerminalOutputSanitizer> = {
-      stdout: sanitizeTerminalOutput.createStream(),
-      stderr: sanitizeTerminalOutput.createStream(),
-    };
-    const redactors = {
-      stdout: createStreamingSecretRedactor(),
-      stderr: createStreamingSecretRedactor(),
-    };
-    let terminationError: unknown;
-    const ownedCancellationSignals = new Set<'SIGTERM' | 'SIGKILL'>();
-    let rejectTerminationFailure: ((error: unknown) => void) | undefined;
-    const terminationFailure = new Promise<never>((_resolve, reject) => {
-      rejectTerminationFailure = reject;
-    });
-    let terminationWatchdog: ReturnType<typeof setTimeout> | undefined;
+      let nextSeq = 1;
+      let outputBytes = 0;
+      let pendingBytes = 0;
+      let truncated = false;
+      let sinkError: unknown;
+      let canceled = false;
+      let termination: CommandResult['termination'] = 'natural';
+      let flushTimer: ReturnType<typeof setTimeout> | undefined;
+      // `sealed` marks a segment that has already been snapshotted into a batch handed to the sink.
+      // `queueText` must not append to such a segment: the batch holds a value copy, so a late append
+      // would be invisible to the sink yet still removed by this flush's `pending.splice`, silently
+      // losing that output (see the regression test in command-runner.test.ts).
+      const pending: {
+        stream: 'stdout' | 'stderr';
+        text: string;
+        byteLength: number;
+        sealed?: boolean;
+      }[] = [];
+      const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
+      const sanitizers: Record<'stdout' | 'stderr', TerminalOutputSanitizer> = {
+        stdout: sanitizeTerminalOutput.createStream(),
+        stderr: sanitizeTerminalOutput.createStream(),
+      };
+      const redactors = {
+        stdout: createStreamingSecretRedactor(),
+        stderr: createStreamingSecretRedactor(),
+      };
+      let terminationError: unknown;
+      const ownedCancellationSignals = new Set<'SIGTERM' | 'SIGKILL'>();
+      let rejectTerminationFailure: ((error: unknown) => void) | undefined;
+      const terminationFailure = new Promise<never>((_resolve, reject) => {
+        rejectTerminationFailure = reject;
+      });
+      let terminationWatchdog: ReturnType<typeof setTimeout> | undefined;
 
-    let flushChain = Promise.resolve();
-    const flush = (): Promise<void> => {
-      if (flushTimer !== undefined) clearTimeout(flushTimer);
-      flushTimer = undefined;
-      flushChain = flushChain.then(async () => {
-        while (pending.length > 0 && sinkError === undefined) {
-          const count = pending.length;
-          // Seal before snapshotting: from here until the splice below these segments are in
-          // flight, and any further output must start a new segment instead of appending to one
-          // the sink has already been handed a copy of. Fields are listed explicitly rather than
-          // spread so `sealed` never leaks into the public CommandOutputChunk shape.
-          const batch = pending.slice(0, count).map((segment, index) => {
-            segment.sealed = true;
-            return Object.freeze({
-              seq: nextSeq + index,
-              stream: segment.stream,
-              text: segment.text,
-              byteLength: segment.byteLength,
+      let flushChain = Promise.resolve();
+      const flush = (): Promise<void> => {
+        if (flushTimer !== undefined) clearTimeout(flushTimer);
+        flushTimer = undefined;
+        flushChain = flushChain.then(async () => {
+          while (pending.length > 0 && sinkError === undefined) {
+            const count = pending.length;
+            // Seal before snapshotting: from here until the splice below these segments are in
+            // flight, and any further output must start a new segment instead of appending to one
+            // the sink has already been handed a copy of. Fields are listed explicitly rather than
+            // spread so `sealed` never leaks into the public CommandOutputChunk shape.
+            const batch = pending.slice(0, count).map((segment, index) => {
+              segment.sealed = true;
+              return Object.freeze({
+                seq: nextSeq + index,
+                stream: segment.stream,
+                text: segment.text,
+                byteLength: segment.byteLength,
+              });
             });
-          });
-          try {
-            if (options.onBatch !== undefined) await options.onBatch(Object.freeze(batch));
-            else if (options.onChunk !== undefined)
-              for (const chunk of batch) await options.onChunk(chunk);
-          } catch (error) {
-            sinkError = error;
-            truncated = true;
             try {
-              await this.forceOwnedTree(executionId, lease);
-              terminationWatchdog = setTimeout(() => {
-                const failure = new CommandRunnerError(
-                  'PROCESS_TREE_TERMINATION_FAILED',
-                  'Process did not close after output persistence failed',
-                );
-                terminationError = failure;
-                rejectTerminationFailure?.(failure);
-              }, 5_000);
-            } catch (terminationFailure) {
-              sinkError = terminationFailure;
-              terminationError = terminationFailure;
-              rejectTerminationFailure?.(terminationFailure);
+              if (options.onBatch !== undefined) await options.onBatch(Object.freeze(batch));
+              else if (options.onChunk !== undefined)
+                for (const chunk of batch) await options.onChunk(chunk);
+            } catch (error) {
+              sinkError = error;
+              truncated = true;
+              try {
+                await this.forceOwnedTree(executionId, lease);
+                terminationWatchdog = setTimeout(() => {
+                  const failure = new CommandRunnerError(
+                    'PROCESS_TREE_TERMINATION_FAILED',
+                    'Process did not close after output persistence failed',
+                  );
+                  terminationError = failure;
+                  rejectTerminationFailure?.(failure);
+                }, 5_000);
+              } catch (terminationFailure) {
+                sinkError = terminationFailure;
+                terminationError = terminationFailure;
+                rejectTerminationFailure?.(terminationFailure);
+              }
+              break;
             }
+            pending.splice(0, count);
+            pendingBytes -= batch.reduce((total, chunk) => total + chunk.byteLength, 0);
+            nextSeq += count;
+          }
+          if (pendingBytes < this.maxBufferedBytes) {
+            child.stdout?.resume();
+            child.stderr?.resume();
+          }
+        });
+        return flushChain;
+      };
+      const queueText = (stream: 'stdout' | 'stderr', text: string): void => {
+        if (text.length === 0) return;
+        for (const part of splitUtf8(text, this.maxBatchBytes)) {
+          const byteLength = Buffer.byteLength(part);
+          if (outputBytes + byteLength > this.maxOutputBytes) {
+            truncated = true;
             break;
           }
-          pending.splice(0, count);
-          pendingBytes -= batch.reduce((total, chunk) => total + chunk.byteLength, 0);
-          nextSeq += count;
+          outputBytes += byteLength;
+          pendingBytes += byteLength;
+          const previous = pending.at(-1);
+          if (
+            previous !== undefined &&
+            previous.sealed !== true &&
+            previous.stream === stream &&
+            previous.byteLength + byteLength <= this.maxBatchBytes
+          ) {
+            previous.text += part;
+            previous.byteLength += byteLength;
+          } else pending.push({ stream, text: part, byteLength });
         }
-        if (pendingBytes < this.maxBufferedBytes) {
-          child.stdout?.resume();
-          child.stderr?.resume();
-        }
-      });
-      return flushChain;
-    };
-    const queueText = (stream: 'stdout' | 'stderr', text: string): void => {
-      if (text.length === 0) return;
-      for (const part of splitUtf8(text, this.maxBatchBytes)) {
-        const byteLength = Buffer.byteLength(part);
-        if (outputBytes + byteLength > this.maxOutputBytes) {
-          truncated = true;
-          break;
-        }
-        outputBytes += byteLength;
-        pendingBytes += byteLength;
-        const previous = pending.at(-1);
-        if (
-          previous !== undefined &&
-          previous.sealed !== true &&
-          previous.stream === stream &&
-          previous.byteLength + byteLength <= this.maxBatchBytes
-        ) {
-          previous.text += part;
-          previous.byteLength += byteLength;
-        } else pending.push({ stream, text: part, byteLength });
+        if (pendingBytes >= this.maxBufferedBytes) {
+          child.stdout?.pause();
+          child.stderr?.pause();
+          void flush();
+        } else if (pendingBytes >= this.maxBatchBytes) void flush();
+        else if (flushTimer === undefined)
+          flushTimer = setTimeout(() => void flush(), this.batchIntervalMs);
+      };
+      const ingest = (stream: 'stdout' | 'stderr', data: Buffer): void => {
+        const decoded = decoders[stream].write(data);
+        queueText(stream, redactors[stream].write(sanitizers[stream].write(decoded)));
+      };
+      outputConsumer = ingest;
+      for (const buffered of bufferedOutput) ingest(buffered.stream, buffered.data);
+      bufferedOutput.length = 0;
+      bufferedOutputBytes = 0;
+      if (pendingBytes < this.maxBufferedBytes) {
+        child.stdout?.resume();
+        child.stderr?.resume();
       }
-      if (pendingBytes >= this.maxBufferedBytes) {
-        child.stdout?.pause();
-        child.stderr?.pause();
-        void flush();
-      } else if (pendingBytes >= this.maxBatchBytes) void flush();
-      else if (flushTimer === undefined)
-        flushTimer = setTimeout(() => void flush(), this.batchIntervalMs);
-    };
-    const ingest = (stream: 'stdout' | 'stderr', data: Buffer): void => {
-      const decoded = decoders[stream].write(data);
-      queueText(stream, redactors[stream].write(sanitizers[stream].write(decoded)));
-    };
-    outputConsumer = ingest;
-    for (const buffered of bufferedOutput) ingest(buffered.stream, buffered.data);
-    bufferedOutput.length = 0;
-    bufferedOutputBytes = 0;
-    if (pendingBytes < this.maxBufferedBytes) {
-      child.stdout?.resume();
-      child.stderr?.resume();
-    }
-    let streamsFinalized = false;
-    const finalizeStreams = async (): Promise<void> => {
-      if (streamsFinalized) return;
-      streamsFinalized = true;
-      queueText(
-        'stdout',
-        redactors.stdout.write(
-          sanitizers.stdout.write(decoders.stdout.end()) + sanitizers.stdout.end(),
-        ) + redactors.stdout.end(),
-      );
-      queueText(
-        'stderr',
-        redactors.stderr.write(
-          sanitizers.stderr.write(decoders.stderr.end()) + sanitizers.stderr.end(),
-        ) + redactors.stderr.end(),
-      );
-      await flush();
-    };
-
-    let forceTimer: ReturnType<typeof setTimeout> | undefined;
-    let resolveForce: (() => void) | undefined;
-    let forcePromise: Promise<void> | undefined;
-    const cancel = (): void => {
-      if (canceled) return;
-      canceled = true;
-      termination = 'cooperative';
-      if (process.platform !== 'win32' && this.signalOwnedTree(executionId, lease, 'SIGTERM'))
-        ownedCancellationSignals.add('SIGTERM');
-      forcePromise = new Promise<void>((resolve) => {
-        resolveForce = resolve;
-      });
-      forceTimer = setTimeout(() => {
-        void (async () => {
-          try {
-            if (await this.forceOwnedTree(executionId, lease)) {
-              termination = 'forced';
-              if (process.platform !== 'win32') ownedCancellationSignals.add('SIGKILL');
-            }
-            if (terminationWatchdog === undefined)
-              terminationWatchdog = setTimeout(() => {
-                const failure = new CommandRunnerError(
-                  'PROCESS_TREE_TERMINATION_FAILED',
-                  'Canceled process tree did not close after forced termination',
-                );
-                terminationError = failure;
-                rejectTerminationFailure?.(failure);
-              }, 5_000);
-          } catch (error) {
-            terminationError = error;
-            rejectTerminationFailure?.(error);
-          }
-          resolveForce?.();
-        })();
-      }, this.cancelGraceMs);
-    };
-    options.signal?.addEventListener('abort', cancel, { once: true });
-    if (options.signal?.aborted) cancel();
-
-    let retainActive = false;
-    let outcomeObserved = false;
-    try {
-      const outcome = await waitForOutcomeOrTerminationFailure(outcomePromise, terminationFailure);
-      outcomeObserved = true;
-      if (
-        canceled &&
-        process.platform !== 'win32' &&
-        this.ownedTreeAlive(executionId, lease) &&
-        !this.ownedPosixGroupHasDescendants(executionId, lease)
-      ) {
-        if (forceTimer !== undefined) clearTimeout(forceTimer);
-        forceTimer = undefined;
-        resolveForce?.();
-        await this.forceOwnedTree(executionId, lease);
-        if (!(await this.waitForOwnedTreeExit(executionId, lease, 5_000)))
-          throw new CommandRunnerError(
-            'PROCESS_TREE_TERMINATION_FAILED',
-            'Cooperatively canceled command supervisor did not close',
-          );
-      } else if (canceled && this.ownedTreeAlive(executionId, lease)) await forcePromise;
-      else if (forceTimer !== undefined) {
-        clearTimeout(forceTimer);
-        forceTimer = undefined;
-        resolveForce?.();
-      }
-      if (terminationError !== undefined) throw terminationError;
-      if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
-      if (!canceled && process.platform !== 'win32')
-        await this.drainNaturalPosixTree(executionId, lease);
-      if (process.platform !== 'win32')
-        await waitWithTimeout(
-          processClosePromise,
-          5_000,
-          'POSIX command supervisor did not close after group drain',
+      let streamsFinalized = false;
+      const finalizeStreams = async (): Promise<void> => {
+        if (streamsFinalized) return;
+        streamsFinalized = true;
+        queueText(
+          'stdout',
+          redactors.stdout.write(
+            sanitizers.stdout.write(decoders.stdout.end()) + sanitizers.stdout.end(),
+          ) + redactors.stdout.end(),
         );
-      await finalizeStreams();
-      if (sinkError !== undefined) throw sinkError;
-      const reportedOutcome =
-        process.platform === 'win32'
-          ? outcome
-          : outcomeFromOwnedCancellationSignal(outcome, ownedCancellationSignals);
-      return Object.freeze({
-        executionId,
-        ...reportedOutcome,
-        canceled,
-        termination,
-        durationMs: Date.now() - startedAt,
-        outputBytes,
-        truncated,
-      });
-    } catch (error) {
-      if (
-        process.platform !== 'win32' &&
-        (!(error instanceof CommandRunnerError) || error.code !== 'PROCESS_TREE_TERMINATION_FAILED')
-      ) {
-        if (this.ownedTreeAlive(executionId, lease)) {
+        queueText(
+          'stderr',
+          redactors.stderr.write(
+            sanitizers.stderr.write(decoders.stderr.end()) + sanitizers.stderr.end(),
+          ) + redactors.stderr.end(),
+        );
+        await flush();
+      };
+
+      let forceTimer: ReturnType<typeof setTimeout> | undefined;
+      let resolveForce: (() => void) | undefined;
+      let forcePromise: Promise<void> | undefined;
+      const cancel = (): void => {
+        if (canceled) return;
+        canceled = true;
+        termination = 'cooperative';
+        if (process.platform !== 'win32' && this.signalOwnedTree(executionId, lease, 'SIGTERM'))
+          ownedCancellationSignals.add('SIGTERM');
+        forcePromise = new Promise<void>((resolve) => {
+          resolveForce = resolve;
+        });
+        forceTimer = setTimeout(() => {
+          void (async () => {
+            try {
+              if (await this.forceOwnedTree(executionId, lease)) {
+                termination = 'forced';
+                if (process.platform !== 'win32') ownedCancellationSignals.add('SIGKILL');
+              }
+              if (terminationWatchdog === undefined)
+                terminationWatchdog = setTimeout(() => {
+                  const failure = new CommandRunnerError(
+                    'PROCESS_TREE_TERMINATION_FAILED',
+                    'Canceled process tree did not close after forced termination',
+                  );
+                  terminationError = failure;
+                  rejectTerminationFailure?.(failure);
+                }, 5_000);
+            } catch (error) {
+              terminationError = error;
+              rejectTerminationFailure?.(error);
+            }
+            resolveForce?.();
+          })();
+        }, this.cancelGraceMs);
+      };
+      options.signal?.addEventListener('abort', cancel, { once: true });
+      if (options.signal?.aborted) cancel();
+
+      let retainActive = false;
+      let outcomeObserved = false;
+      try {
+        const outcome = await waitForOutcomeOrTerminationFailure(
+          outcomePromise,
+          terminationFailure,
+        );
+        outcomeObserved = true;
+        if (
+          canceled &&
+          process.platform !== 'win32' &&
+          this.ownedTreeAlive(executionId, lease) &&
+          !this.ownedPosixGroupHasDescendants(executionId, lease)
+        ) {
+          if (forceTimer !== undefined) clearTimeout(forceTimer);
+          forceTimer = undefined;
+          resolveForce?.();
           await this.forceOwnedTree(executionId, lease);
+          if (!(await this.waitForOwnedTreeExit(executionId, lease, 5_000)))
+            throw new CommandRunnerError(
+              'PROCESS_TREE_TERMINATION_FAILED',
+              'Cooperatively canceled command supervisor did not close',
+            );
+        } else if (canceled && this.ownedTreeAlive(executionId, lease)) await forcePromise;
+        else if (forceTimer !== undefined) {
+          clearTimeout(forceTimer);
+          forceTimer = undefined;
+          resolveForce?.();
+        }
+        if (terminationError !== undefined) throw terminationError;
+        if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
+        if (!canceled && process.platform !== 'win32')
+          await this.drainNaturalPosixTree(executionId, lease);
+        if (process.platform !== 'win32')
           await waitWithTimeout(
             processClosePromise,
             5_000,
-            'POSIX command supervisor did not close after outcome rejection',
+            'POSIX command supervisor did not close after group drain',
           );
-        }
-      }
-      if (error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED') {
-        retainActive = true;
-        sinkError = error;
-        const release = async (): Promise<void> => {
-          try {
-            await finalizeStreams();
-          } finally {
-            this.releaseActive(executionId, active);
+        await finalizeStreams();
+        if (sinkError !== undefined) throw sinkError;
+        const reportedOutcome =
+          process.platform === 'win32'
+            ? outcome
+            : outcomeFromOwnedCancellationSignal(outcome, ownedCancellationSignals);
+        return Object.freeze({
+          executionId,
+          ...reportedOutcome,
+          canceled,
+          termination,
+          durationMs: Date.now() - startedAt,
+          outputBytes,
+          truncated,
+        });
+      } catch (error) {
+        if (
+          process.platform !== 'win32' &&
+          (!(error instanceof CommandRunnerError) ||
+            error.code !== 'PROCESS_TREE_TERMINATION_FAILED')
+        ) {
+          if (this.ownedTreeAlive(executionId, lease)) {
+            await this.forceOwnedTree(executionId, lease);
+            await waitWithTimeout(
+              processClosePromise,
+              5_000,
+              'POSIX command supervisor did not close after outcome rejection',
+            );
           }
-        };
-        if (!outcomeObserved) void active.outcome.then(release, release);
-        else if (process.platform !== 'win32')
-          void this.releaseWhenOwnedTreeExits(executionId, active).then(release, release);
+        }
+        if (
+          error instanceof CommandRunnerError &&
+          error.code === 'PROCESS_TREE_TERMINATION_FAILED'
+        ) {
+          retainActive = true;
+          sinkError = error;
+          const release = async (): Promise<void> => {
+            try {
+              await finalizeStreams();
+            } finally {
+              this.releaseActive(executionId, active);
+            }
+          };
+          if (!outcomeObserved) void active.outcome.then(release, release);
+          else if (process.platform !== 'win32')
+            void this.releaseWhenOwnedTreeExits(executionId, active).then(release, release);
+        }
+        throw error;
+      } finally {
+        if (flushTimer !== undefined) clearTimeout(flushTimer);
+        if (forceTimer !== undefined) clearTimeout(forceTimer);
+        if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
+        options.signal?.removeEventListener('abort', cancel);
+        if (!retainActive) this.releaseActive(executionId, active);
       }
-      throw error;
     } finally {
-      if (flushTimer !== undefined) clearTimeout(flushTimer);
-      if (forceTimer !== undefined) clearTimeout(forceTimer);
-      if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
-      options.signal?.removeEventListener('abort', cancel);
-      if (!retainActive) this.releaseActive(executionId, active);
+      await executionImage.close();
     }
   }
 
-  private async revalidate(spec: ExecutionSpec): Promise<void> {
+  private async revalidate(spec: ExecutionSpec): Promise<PreparedExecutionImage> {
     const identity = issuedSpecs.get(spec);
     if (!validateExecutionSpec(spec) || identity === undefined)
       throw new CommandRunnerError(
@@ -740,19 +759,18 @@ export class CommandRunner {
       );
     try {
       await revalidatePathGuard(identity.pathGuard);
-      const executableCanonicalPath = await realpath(spec.absoluteExecutable);
-      const executableStats = await stat(executableCanonicalPath);
-      if (
-        executableCanonicalPath !== identity.executableCanonicalPath ||
-        String(executableStats.dev) !== identity.executableDev ||
-        String(executableStats.ino) !== identity.executableIno ||
-        executableStats.size !== identity.executableSize ||
-        executableStats.mtimeMs !== identity.executableMtimeMs ||
-        executableStats.ctimeMs !== identity.executableCtimeMs ||
-        executableStats.mode !== identity.executableMode ||
-        (await digestFile(executableCanonicalPath)) !== identity.executableDigest
-      )
-        throw new Error('Executable identity changed');
+      return await prepareExecutionImage({
+        canonicalPath: identity.executableCanonicalPath,
+        dev: identity.executableDev,
+        ino: identity.executableIno,
+        size: identity.executableSize,
+        mtimeMs: identity.executableMtimeMs,
+        ctimeMs: identity.executableCtimeMs,
+        mtimeNs: identity.executableMtimeNs,
+        ctimeNs: identity.executableCtimeNs,
+        mode: identity.executableMode,
+        digest: identity.executableDigest,
+      });
     } catch (error) {
       throw new CommandRunnerError('EXECUTION_IDENTITY_CHANGED', errorMessage(error));
     }

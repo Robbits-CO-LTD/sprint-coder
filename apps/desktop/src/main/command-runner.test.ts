@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { renameSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
+  copyFile,
+  link,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -11,7 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -846,6 +851,134 @@ describe('CommandRunner', () => {
       expect(output.toLowerCase()).toContain('npm');
     },
   );
+
+  it.runIf(process.platform !== 'win32')(
+    'launches the prepared bytes when the approved path is replaced at the spawn barrier',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'command.sh');
+      const moved = join(root, 'approved-original.sh');
+      const approvedBytes = "#!/bin/sh\nprintf 'original\\n'\n";
+      await writeFile(executable, approvedBytes);
+      await chmod(executable, 0o700);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+      let output = '';
+      let startedImage: { digest: string; identity: string } | undefined;
+
+      const result = await new CommandRunner().run(spec, {
+        beforeSpawn: () => {
+          renameSync(executable, moved);
+          writeFileSync(executable, "#!/bin/sh\nprintf 'attacker\\n'\n", { mode: 0o700 });
+        },
+        onChunk: (chunk) => {
+          output += chunk.text;
+        },
+        onStarted: ({ executionImageDigest, executionImageIdentity }) => {
+          startedImage = { digest: executionImageDigest, identity: executionImageIdentity };
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(output).toBe('original\n');
+      expect(startedImage).toEqual({
+        digest: createHash('sha256').update(approvedBytes).digest('hex'),
+        identity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'pins a shebang interpreter before the approved interpreter path can be replaced',
+    async () => {
+      const root = await workspace();
+      const bin = join(root, 'bin');
+      const interpreter = join(bin, 'node');
+      await mkdir(bin);
+      await copyFile(process.execPath, interpreter);
+      if (process.platform === 'darwin') {
+        const sourceLib = join(dirname(dirname(process.execPath)), 'lib');
+        const targetLib = join(root, 'lib');
+        await mkdir(targetLib);
+        const dependency = (await readdir(sourceLib, { withFileTypes: true })).find(
+          (entry) => entry.isFile() && /^libnode.*\.dylib$/u.test(entry.name),
+        );
+        if (dependency === undefined) throw new Error('Node loader dependency was not found');
+        await copyFile(join(sourceLib, dependency.name), join(targetLib, dependency.name));
+      }
+      const executable = join(root, 'command.js');
+      await writeFile(executable, `#!${interpreter}\nconsole.log('approved-interpreter');\n`);
+      await chmod(executable, 0o700);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+      let output = '';
+
+      const result = await new CommandRunner().run(spec, {
+        beforeSpawn: () => {
+          renameSync(interpreter, `${interpreter}.approved`);
+          writeFileSync(interpreter, 'attacker');
+        },
+        onChunk: (chunk) => {
+          output += chunk.text;
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(output).toBe('approved-interpreter\n');
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'launches a held Windows image when its approved path is replaced at the spawn barrier',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'approved.exe');
+      const moved = join(root, 'approved-original.exe');
+      await copyFile(process.execPath, executable);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: ['--version'],
+        cwd: '.',
+      });
+      let output = '';
+
+      const result = await new CommandRunner().run(spec, {
+        beforeSpawn: () => {
+          renameSync(executable, moved);
+          writeFileSync(executable, 'not an executable');
+        },
+        onChunk: (chunk) => {
+          output += chunk.text;
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(output).toMatch(/^v\d+/);
+    },
+  );
+
+  it('rejects an executable with a hardlink alias', async () => {
+    const root = await workspace();
+    const executable = join(root, process.platform === 'win32' ? 'command.exe' : 'command.sh');
+    await copyFile(process.execPath, executable);
+    await link(executable, join(root, 'alias'));
+
+    await expect(
+      prepareExecutionSpec({ workspacePath: root, executable, argv: [], cwd: '.' }),
+    ).rejects.toMatchObject({
+      code: 'EXECUTION_SPEC_INVALID',
+    } satisfies Partial<CommandRunnerError>);
+  });
 
   it.runIf(process.platform !== 'win32')(
     'rejects an executable rewritten in place after preparation',
