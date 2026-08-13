@@ -68,6 +68,36 @@ type PreparedIdentity = {
 const issuedSpecs = new WeakMap<object, PreparedIdentity>();
 const execFileAsync = promisify(execFile);
 
+// The supervisor remains the owned POSIX process-group leader after the requested command exits.
+// Its dedicated fd 3 reports the requested command's outcome; CommandRunner then drains the group
+// while the captured leader PID/start identity is still verifiable, eliminating post-exit PGID reuse.
+const POSIX_COMMAND_WRAPPER = String.raw`
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+const executable = process.argv[1];
+const argv = JSON.parse(process.argv[2]);
+const targetEnv = { ...process.env };
+delete targetEnv.ELECTRON_RUN_AS_NODE;
+const target = spawn(executable, argv, { env: targetEnv, stdio: ['ignore', 'inherit', 'inherit'] });
+process.on('SIGTERM', () => {});
+let reported = false;
+const report = (exitCode, signal) => {
+  if (reported) return;
+  reported = true;
+  fs.writeSync(3, JSON.stringify({ exitCode, signal }) + '\n');
+};
+target.once('error', (error) => {
+  if (!reported) {
+    reported = true;
+    fs.writeSync(3, JSON.stringify({ spawnError: error.message }) + '\n');
+  }
+  process.exitCode = 127;
+  setTimeout(() => process.exit(), 0);
+});
+target.once('close', (exitCode, signal) => report(exitCode, signal));
+setInterval(() => {}, 1000);
+`;
+
 export class CommandRunnerError extends Error {
   constructor(
     readonly code:
@@ -255,13 +285,20 @@ export class CommandRunner {
     try {
       const windows = process.platform === 'win32';
       child = spawn(
-        windows ? windowsJobWrapperCommand() : spec.absoluteExecutable,
-        [...(windows ? ['-e', WINDOWS_JOB_WRAPPER] : spec.argv)],
+        windows ? windowsJobWrapperCommand() : process.execPath,
+        [
+          ...(windows
+            ? ['-e', WINDOWS_JOB_WRAPPER]
+            : ['-e', POSIX_COMMAND_WRAPPER, spec.absoluteExecutable, JSON.stringify(spec.argv)]),
+        ],
         {
           cwd: spec.cwdIdentity.canonicalPath,
-          env: buildEnvironment(spec.envDelta),
+          env: {
+            ...buildEnvironment(spec.envDelta),
+            ...(!windows ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+          },
           shell: false,
-          stdio: [windows ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+          stdio: windows ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'pipe'],
           detached: !windows,
           windowsHide: true,
         },
@@ -269,7 +306,9 @@ export class CommandRunner {
     } catch (error) {
       throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
     }
-    const outcomePromise = waitForClose(child);
+    const processClosePromise = waitForClose(child);
+    const outcomePromise =
+      process.platform === 'win32' ? processClosePromise : waitForPosixCommandOutcome(child);
     void outcomePromise.catch(() => undefined);
     try {
       await waitForSpawn(child);
@@ -306,7 +345,7 @@ export class CommandRunner {
       processStartIdentity: 'pending',
       settled,
       resolveSettled,
-      outcome: outcomePromise,
+      outcome: processClosePromise,
       ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
     };
     this.active.set(executionId, active);
@@ -323,7 +362,7 @@ export class CommandRunner {
     };
     child.stdout?.on('data', (data: Buffer) => outputConsumer('stdout', data));
     child.stderr?.on('data', (data: Buffer) => outputConsumer('stderr', data));
-    const processStartIdentity = await readProcessStartIdentity(child.pid);
+    const processStartIdentity = readProcessStartIdentity(child.pid);
     if (processStartIdentity === 'unavailable' || processStartIdentity.startsWith('unsupported:')) {
       try {
         await this.forceUnidentifiedProcess(active);
@@ -552,7 +591,22 @@ export class CommandRunner {
     try {
       const outcome = await waitForOutcomeOrTerminationFailure(outcomePromise, terminationFailure);
       outcomeObserved = true;
-      if (canceled && this.ownedTreeAlive(executionId, lease)) await forcePromise;
+      if (
+        canceled &&
+        process.platform !== 'win32' &&
+        this.ownedTreeAlive(executionId, lease) &&
+        !this.ownedPosixGroupHasDescendants(executionId, lease)
+      ) {
+        if (forceTimer !== undefined) clearTimeout(forceTimer);
+        forceTimer = undefined;
+        resolveForce?.();
+        await this.forceOwnedTree(executionId, lease);
+        if (!(await this.waitForOwnedTreeExit(executionId, lease, 5_000)))
+          throw new CommandRunnerError(
+            'PROCESS_TREE_TERMINATION_FAILED',
+            'Cooperatively canceled command supervisor did not close',
+          );
+      } else if (canceled && this.ownedTreeAlive(executionId, lease)) await forcePromise;
       else if (forceTimer !== undefined) {
         clearTimeout(forceTimer);
         forceTimer = undefined;
@@ -562,6 +616,12 @@ export class CommandRunner {
       if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
       if (!canceled && process.platform !== 'win32')
         await this.drainNaturalPosixTree(executionId, lease);
+      if (process.platform !== 'win32')
+        await waitWithTimeout(
+          processClosePromise,
+          5_000,
+          'POSIX command supervisor did not close after group drain',
+        );
       await finalizeStreams();
       if (sinkError !== undefined) throw sinkError;
       return Object.freeze({
@@ -637,14 +697,7 @@ export class CommandRunner {
     const active = this.active.get(executionId);
     if (active === undefined || active.lease !== lease) return false;
     const leaderAlive = active.child.exitCode === null && active.child.signalCode === null;
-    if (
-      !posixGroupIdentityMatches({
-        leaderAlive,
-        expectedStartIdentity: active.processStartIdentity,
-        observedStartIdentity: leaderAlive ? readProcessStartIdentity(active.pid) : null,
-      })
-    )
-      return false;
+    if (!this.posixGroupSignalIsOwned(active, leaderAlive)) return false;
     try {
       if (process.platform === 'win32') return false;
       process.kill(-active.pid, signal);
@@ -684,8 +737,7 @@ export class CommandRunner {
         return targets.length > 0;
       }
       const leaderAlive = active.child.exitCode === null && active.child.signalCode === null;
-      if (leaderAlive && readProcessStartIdentity(active.pid) !== active.processStartIdentity)
-        return false;
+      if (!this.posixGroupSignalIsOwned(active, leaderAlive)) return false;
       process.kill(-active.pid, 'SIGKILL');
       return true;
     } catch (error) {
@@ -699,13 +751,58 @@ export class CommandRunner {
   private async drainNaturalPosixTree(executionId: string, lease: string): Promise<void> {
     if (!this.ownedTreeAlive(executionId, lease)) return;
     this.signalOwnedTree(executionId, lease, 'SIGTERM');
-    if (await this.waitForOwnedTreeExit(executionId, lease, this.cancelGraceMs)) return;
+    await this.waitForOwnedDescendantsExit(executionId, lease, this.cancelGraceMs);
     await this.forceOwnedTree(executionId, lease);
     if (await this.waitForOwnedTreeExit(executionId, lease, 5_000)) return;
     throw new CommandRunnerError(
       'PROCESS_TREE_TERMINATION_FAILED',
       'Naturally completed command left an owned process group that could not be drained',
     );
+  }
+
+  private async waitForOwnedDescendantsExit(
+    executionId: string,
+    lease: string,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.ownedPosixGroupHasDescendants(executionId, lease)) {
+      if (Date.now() >= deadline) return false;
+      await delay(Math.min(20, Math.max(1, deadline - Date.now())));
+    }
+    return true;
+  }
+
+  private ownedPosixGroupHasDescendants(executionId: string, lease: string): boolean {
+    const active = this.active.get(executionId);
+    if (active === undefined || active.lease !== lease || process.platform === 'win32')
+      return false;
+    try {
+      return execFileSync('/bin/ps', ['-axo', 'pid=,pgid='], {
+        encoding: 'utf8',
+        timeout: 1_000,
+      })
+        .trim()
+        .split('\n')
+        .some((line) => {
+          const [pidText, groupText] = line.trim().split(/\s+/);
+          return Number(groupText) === active.pid && Number(pidText) !== active.pid;
+        });
+    } catch {
+      // An unverifiable group is treated as still populated; force remains identity-gated.
+      return true;
+    }
+  }
+
+  private posixGroupSignalIsOwned(active: ActiveProcess, leaderAlive: boolean): boolean {
+    if (process.platform === 'win32') return false;
+    return posixGroupSignalIsAuthorized({
+      leaderAlive,
+      expectedGroupId: active.pid,
+      observedGroupId: readPosixProcessGroupId(active.pid),
+      expectedStartIdentity: active.processStartIdentity,
+      observedStartIdentity: readProcessStartIdentity(active.pid),
+    });
   }
 
   private async waitForOwnedTreeExit(
@@ -778,15 +875,42 @@ export class CommandRunner {
 
 export function posixGroupIdentityMatches(
   input: Readonly<{
-    leaderAlive: boolean;
+    expectedGroupId: number;
+    observedGroupId: number | null;
     expectedStartIdentity: string;
-    observedStartIdentity: string | null;
+    observedStartIdentity: string;
   }>,
 ): boolean {
-  // While descendants keep the original process group alive, POSIX keeps its numeric PGID
-  // reserved even after the leader exits. A live leader still needs the captured start identity so
-  // a reused PID can never authorize a signal to an unrelated group.
-  return !input.leaderAlive || input.observedStartIdentity === input.expectedStartIdentity;
+  return (
+    input.observedGroupId === input.expectedGroupId &&
+    input.observedStartIdentity === input.expectedStartIdentity
+  );
+}
+
+export function posixGroupSignalIsAuthorized(
+  input: Readonly<{
+    leaderAlive: boolean;
+    expectedGroupId: number;
+    observedGroupId: number | null;
+    expectedStartIdentity: string;
+    observedStartIdentity: string;
+  }>,
+): boolean {
+  return input.leaderAlive && posixGroupIdentityMatches(input);
+}
+
+function readPosixProcessGroupId(pid: number): number | null {
+  if (process.platform === 'win32') return null;
+  try {
+    const value = execFileSync('/bin/ps', ['-o', 'pgid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 1_000,
+    }).trim();
+    const groupId = Number.parseInt(value, 10);
+    return Number.isInteger(groupId) && groupId > 0 ? groupId : null;
+  } catch {
+    return null;
+  }
 }
 
 async function captureWindowsProcessTree(
@@ -897,6 +1021,51 @@ function waitForClose(
   return new Promise((resolve, reject) => {
     child.once('error', (error) => reject(new CommandRunnerError('SPAWN_FAILED', error.message)));
     child.once('close', (exitCode, signal) => resolve({ exitCode, signal }));
+  });
+}
+
+function waitForPosixCommandOutcome(
+  child: ChildProcess,
+): Promise<{ exitCode: number | null; signal: string | null }> {
+  const control = child.stdio[3] as NodeJS.ReadableStream | null | undefined;
+  if (control === null || control === undefined) return waitForClose(child);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let buffer = '';
+    const finish = (outcome: { exitCode: number | null; signal: string | null }): void => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+    control.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      try {
+        const value = JSON.parse(buffer.slice(0, newline)) as Partial<{
+          exitCode: number | null;
+          signal: string | null;
+          spawnError: string;
+        }>;
+        if (typeof value.spawnError === 'string') {
+          settled = true;
+          reject(new CommandRunnerError('SPAWN_FAILED', value.spawnError));
+          return;
+        }
+        if (!(
+          (typeof value.exitCode === 'number' || value.exitCode === null) &&
+          (typeof value.signal === 'string' || value.signal === null)
+        ))
+          throw new Error('Malformed POSIX command outcome');
+        finish({ exitCode: value.exitCode, signal: value.signal });
+      } catch (error) {
+        if (!settled) reject(new CommandRunnerError('SPAWN_FAILED', errorMessage(error)));
+      }
+    });
+    child.once('error', (error) => {
+      if (!settled) reject(new CommandRunnerError('SPAWN_FAILED', error.message));
+    });
+    child.once('close', (exitCode, signal) => finish({ exitCode, signal }));
   });
 }
 

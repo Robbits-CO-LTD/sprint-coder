@@ -17,7 +17,7 @@ import {
   CommandRunnerError,
   buildControlledEnvironment,
   executionSpecPathGuard,
-  posixGroupIdentityMatches,
+  posixGroupSignalIsAuthorized,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
@@ -98,28 +98,43 @@ describe('CommandRunner', () => {
     ).rejects.toMatchObject({ code: 'PROCESS_TREE_TERMINATION_FAILED' });
   });
 
-  it('refuses a POSIX group signal when a live leader PID has a different start identity', () => {
+  it('requires a live POSIX leader with the same PGID and start identity before signaling', () => {
     expect(
-      posixGroupIdentityMatches({
+      posixGroupSignalIsAuthorized({
         leaderAlive: true,
+        expectedGroupId: 42,
+        observedGroupId: 42,
         expectedStartIdentity: 'darwin:expected',
         observedStartIdentity: 'darwin:reused',
       }),
     ).toBe(false);
     expect(
-      posixGroupIdentityMatches({
+      posixGroupSignalIsAuthorized({
         leaderAlive: true,
+        expectedGroupId: 42,
+        observedGroupId: 42,
         expectedStartIdentity: 'darwin:expected',
         observedStartIdentity: 'darwin:expected',
       }),
     ).toBe(true);
     expect(
-      posixGroupIdentityMatches({
+      posixGroupSignalIsAuthorized({
         leaderAlive: false,
-        expectedStartIdentity: 'darwin:expected',
-        observedStartIdentity: null,
+        expectedGroupId: 42,
+        observedGroupId: 42,
+        expectedStartIdentity: 'darwin:expected-leader',
+        observedStartIdentity: 'darwin:expected-leader',
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      posixGroupSignalIsAuthorized({
+        leaderAlive: true,
+        expectedGroupId: 42,
+        observedGroupId: 99,
+        expectedStartIdentity: 'darwin:owned-descendant',
+        observedStartIdentity: 'darwin:owned-descendant',
+      }),
+    ).toBe(false);
   });
 
   it('prepares an immutable spec from a canonical Workspace cwd and rejects escapes', async () => {
@@ -233,6 +248,38 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
+    'keeps cooperative cancellation when the requested command leaves no descendants',
+    async () => {
+      const root = await workspace();
+      const controller = new AbortController();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', "console.log('ready'); setInterval(()=>{},1000)"],
+        cwd: '.',
+      });
+      const runner = new CommandRunner({ cancelGraceMs: 100 });
+
+      try {
+        const running = runner.run(spec, {
+          signal: controller.signal,
+          onChunk: (chunk) => {
+            if (chunk.text.includes('ready')) controller.abort();
+          },
+        });
+        await expect(running).resolves.toMatchObject({
+          canceled: true,
+          termination: 'cooperative',
+        });
+        expect(runner.activeCount).toBe(0);
+      } finally {
+        controller.abort();
+        await runner.dispose().catch(() => undefined);
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'drains a redirected background descendant after its direct child exits naturally',
     async () => {
       const root = await workspace();
@@ -299,7 +346,7 @@ describe('CommandRunner', () => {
         descendantPid = await readPidWhenReady(join(root, 'child.pid'));
         if (processGroupId === undefined)
           throw new Error('Command process group was not published');
-        await expectProcessDead(processGroupId);
+        await new Promise((resolve) => setTimeout(resolve, 50));
         expect(runner.activeCount).toBe(1);
 
         await expect(running).resolves.toMatchObject({
