@@ -251,8 +251,19 @@ import {
   type EvidenceRecord,
 } from './assurance';
 
+class SqliteEditSagaLeaseHandle {
+  timer: ReturnType<typeof setTimeout> | null = null;
+  failure: unknown | null = null;
+  stopped = false;
+
+  constructor(
+    readonly sagaId: string,
+    public token: MutationLeaseToken,
+  ) {}
+}
+
 export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
-  private readonly issued = new Map<string, MutationLeaseToken>();
+  private readonly issued = new Map<string, SqliteEditSagaLeaseHandle>();
 
   constructor(
     private readonly persistence: PersistenceClient,
@@ -266,10 +277,7 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
       throw new Error('Invalid mutation lease TTL');
   }
 
-  async acquire(
-    saga: EditSagaSnapshot,
-    purpose: MutationLeasePurpose,
-  ): Promise<MutationLeaseToken> {
+  async acquire(saga: EditSagaSnapshot, purpose: MutationLeasePurpose): Promise<unknown> {
     if (saga.workspaceKey === null || saga.rootIdentityDigest === null)
       throw new MutationQuarantinedError();
     const now = this.now();
@@ -287,29 +295,82 @@ export class SqliteEditSagaLeaseGuard implements EditSagaLeaseGuard {
       now: now.toISOString(),
       expiresAt: new Date(now.getTime() + this.ttlMs).toISOString(),
     });
-    this.issued.set(saga.id, token);
-    return token;
+    const handle = new SqliteEditSagaLeaseHandle(saga.id, token);
+    this.issued.set(saga.id, handle);
+    this.scheduleRenewal(handle);
+    return handle;
+  }
+
+  current(lease: unknown, saga: EditSagaSnapshot): MutationLeaseToken {
+    const handle = this.requireIssued(lease, saga.id);
+    if (handle.failure !== null) throw handle.failure;
+    return handle.token;
   }
 
   async assertCurrent(lease: unknown, saga: EditSagaSnapshot): Promise<void> {
-    const token = this.requireIssued(lease, saga.id);
+    const token = this.current(lease, saga);
     this.persistence.assertMutationLease(token, this.now().toISOString());
   }
 
   async release(lease: unknown, saga: EditSagaSnapshot): Promise<void> {
-    const token = this.requireIssued(lease, saga.id);
+    const handle = this.requireIssued(lease, saga.id);
+    this.stopRenewal(handle);
     try {
-      await this.onReleased?.(token);
+      if (handle.failure !== null) throw handle.failure;
+      await this.onReleased?.(handle.token);
     } finally {
-      this.persistence.releaseMutationLease(token, this.now().toISOString());
+      if (handle.failure === null)
+        this.persistence.releaseMutationLease(handle.token, this.now().toISOString());
       this.issued.delete(saga.id);
     }
   }
 
-  private requireIssued(lease: unknown, sagaId: string): MutationLeaseToken {
-    const token = this.issued.get(sagaId);
-    if (token === undefined || token !== lease) throw new MutationLeaseStaleError();
-    return token;
+  async stop(lease: unknown, saga: EditSagaSnapshot): Promise<void> {
+    if (lease instanceof SqliteEditSagaLeaseHandle && lease.stopped && lease.sagaId === saga.id)
+      return;
+    const handle = this.requireIssued(lease, saga.id);
+    this.stopRenewal(handle);
+    this.issued.delete(saga.id);
+  }
+
+  private scheduleRenewal(handle: SqliteEditSagaLeaseHandle): void {
+    handle.timer = setTimeout(
+      () => {
+        if (handle.stopped || this.issued.get(handle.sagaId) !== handle) return;
+        try {
+          const now = this.now();
+          handle.token = this.persistence.renewMutationLease(
+            handle.token,
+            now.toISOString(),
+            new Date(now.getTime() + this.ttlMs).toISOString(),
+          );
+        } catch (error) {
+          handle.failure = error;
+          handle.timer = null;
+          return;
+        }
+        this.scheduleRenewal(handle);
+      },
+      Math.max(1, Math.floor(this.ttlMs / 3)),
+    );
+  }
+
+  private stopRenewal(handle: SqliteEditSagaLeaseHandle): void {
+    handle.stopped = true;
+    if (handle.timer !== null) clearTimeout(handle.timer);
+    handle.timer = null;
+  }
+
+  private requireIssued(lease: unknown, sagaId: string): SqliteEditSagaLeaseHandle {
+    const handle = this.issued.get(sagaId);
+    if (
+      !(lease instanceof SqliteEditSagaLeaseHandle) ||
+      handle === undefined ||
+      handle !== lease ||
+      handle.stopped
+    )
+      throw new MutationLeaseStaleError();
+    return handle;
   }
 }
 
