@@ -532,7 +532,9 @@ function readWindowsImage(path: string, allowHardlinks: boolean, label: string):
   try {
     return windowsAddon().readNoReparseImageFile(path, allowHardlinks);
   } catch (error) {
-    throw new Error(`${label} failed native identity validation: ${errorMessage(error)}`);
+    throw new Error(`${label} failed native identity validation: ${errorMessage(error)}`, {
+      cause: error,
+    });
   }
 }
 
