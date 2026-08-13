@@ -390,7 +390,7 @@ describe('CommandRunner', () => {
       const runner = new CommandRunner();
 
       await expect(runner.run(spec)).rejects.toMatchObject({
-        code: process.platform === 'darwin' ? 'EXECUTION_IDENTITY_CHANGED' : 'SPAWN_FAILED',
+        code: 'EXECUTION_IDENTITY_CHANGED',
       });
       expect(runner.activeCount).toBe(0);
     },
