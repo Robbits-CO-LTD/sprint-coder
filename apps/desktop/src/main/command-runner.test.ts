@@ -907,8 +907,8 @@ describe('CommandRunner', () => {
         const dependency = (await readdir(sourceLib, { withFileTypes: true })).find(
           (entry) => entry.isFile() && /^libnode.*\.dylib$/u.test(entry.name),
         );
-        if (dependency === undefined) throw new Error('Node loader dependency was not found');
-        await copyFile(join(sourceLib, dependency.name), join(targetLib, dependency.name));
+        if (dependency !== undefined)
+          await copyFile(join(sourceLib, dependency.name), join(targetLib, dependency.name));
       }
       const executable = join(root, 'command.js');
       await writeFile(executable, `#!${interpreter}\nconsole.log('approved-interpreter');\n`);

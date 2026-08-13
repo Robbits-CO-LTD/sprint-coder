@@ -94,7 +94,8 @@ bool SamePath(const std::wstring& left, const std::wstring& right) {
 }
 
 bool QueryStableImageIdentity(HANDLE file, FILE_ID_INFO* id, FILE_BASIC_INFO* basic,
-                              FILE_STANDARD_INFO* standard) {
+                              FILE_STANDARD_INFO* standard,
+                              bool require_unique_link = true) {
   FILE_ATTRIBUTE_TAG_INFO tag{};
   if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) ||
       (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
@@ -103,7 +104,8 @@ bool QueryStableImageIdentity(HANDLE file, FILE_ID_INFO* id, FILE_BASIC_INFO* ba
       !GetFileInformationByHandleEx(file, FileBasicInfo, basic, sizeof(*basic)) ||
       !GetFileInformationByHandleEx(file, FileStandardInfo, standard, sizeof(*standard)))
     return false;
-  return !standard->Directory && !standard->DeletePending && standard->NumberOfLinks == 1;
+  return !standard->Directory && !standard->DeletePending && standard->NumberOfLinks >= 1 &&
+         (!require_unique_link || standard->NumberOfLinks == 1);
 }
 
 bool SameImageIdentity(const FILE_ID_INFO& first_id, const FILE_BASIC_INFO& first_basic,
@@ -123,16 +125,23 @@ bool SameImageIdentity(const FILE_ID_INFO& first_id, const FILE_BASIC_INFO& firs
 }
 
 napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
-    napi_throw_type_error(env, nullptr, "readNoReparseImageFile requires one absolute path");
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 ||
+      argc > 2) {
+    napi_throw_type_error(env, nullptr,
+                          "readNoReparseImageFile requires a path and optional policy");
     return nullptr;
   }
   std::string path_utf8;
   std::wstring path;
   if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path)) {
     napi_throw_type_error(env, nullptr, "Invalid image path");
+    return nullptr;
+  }
+  bool allow_hardlinks = false;
+  if (argc == 2 && napi_get_value_bool(env, argv[1], &allow_hardlinks) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid image hardlink policy");
     return nullptr;
   }
   const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
@@ -158,7 +167,8 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   FILE_BASIC_INFO before_basic{};
   FILE_STANDARD_INFO before_standard{};
   constexpr LONGLONG kMaximumBytes = 512LL * 1024LL * 1024LL;
-  bool safe = QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard);
+  bool safe = QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard,
+                                       !allow_hardlinks);
   if (!safe || before_standard.EndOfFile.QuadPart < 1 ||
       before_standard.EndOfFile.QuadPart > kMaximumBytes) {
     const bool too_large = safe && before_standard.EndOfFile.QuadPart > kMaximumBytes;
@@ -199,7 +209,8 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   FILE_ID_INFO after_id{};
   FILE_BASIC_INFO after_basic{};
   FILE_STANDARD_INFO after_standard{};
-  safe = QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) &&
+  safe = QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard,
+                                  !allow_hardlinks) &&
          SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
                            after_standard);
   CloseHandle(file);

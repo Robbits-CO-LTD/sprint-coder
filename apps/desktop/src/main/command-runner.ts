@@ -66,6 +66,7 @@ type PreparedIdentity = {
   executableCtimeNs: string;
   executableMode: number;
   executableDigest: string;
+  allowSourceHardlinks: boolean;
 };
 
 const issuedSpecs = new WeakMap<object, PreparedIdentity>();
@@ -126,7 +127,9 @@ export async function prepareExecutionSpec(
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
-  if (executableStats.nlink !== 1n)
+  const allowSourceHardlinks =
+    process.platform === 'win32' && executableCanonicalPath === (await realpath(process.execPath));
+  if (executableStats.nlink !== 1n && !allowSourceHardlinks)
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must have one link');
   const pathGuard = await createPathGuard({
     rootId: input.rootId,
@@ -160,6 +163,7 @@ export async function prepareExecutionSpec(
     executableCtimeNs: String(executableStats.ctimeNs),
     executableMode: Number(executableStats.mode),
     executableDigest: await digestFile(executableCanonicalPath),
+    allowSourceHardlinks,
   });
   return spec;
 }
@@ -770,6 +774,7 @@ export class CommandRunner {
         ctimeNs: identity.executableCtimeNs,
         mode: identity.executableMode,
         digest: identity.executableDigest,
+        allowSourceHardlinks: identity.allowSourceHardlinks,
       });
     } catch (error) {
       throw new CommandRunnerError('EXECUTION_IDENTITY_CHANGED', errorMessage(error));

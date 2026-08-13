@@ -28,6 +28,7 @@ export type SealedExecutableIdentity = Readonly<{
   ctimeNs: string;
   mode: number;
   digest: string;
+  allowSourceHardlinks?: boolean;
 }>;
 
 export type PreparedExecutionImage = Readonly<{
@@ -40,7 +41,7 @@ export type PreparedExecutionImage = Readonly<{
 }>;
 
 type WindowsExecutionAddon = Readonly<{
-  readNoReparseImageFile(path: string): Buffer;
+  readNoReparseImageFile(path: string, allowHardlinks?: boolean): Buffer;
   holdPreparedExecutionImage(path: string): Readonly<{ id: string; bytes: Buffer }>;
   closePreparedExecutionImage(id: string): void;
 }>;
@@ -64,7 +65,10 @@ export async function prepareExecutionImage(
   try {
     const sourceBytes =
       process.platform === 'win32'
-        ? windowsAddon().readNoReparseImageFile(expected.canonicalPath)
+        ? windowsAddon().readNoReparseImageFile(
+            expected.canonicalPath,
+            expected.allowSourceHardlinks === true,
+          )
         : await readStablePosixImage(expected);
     assertDigestAndSize(sourceBytes, expected);
     await writeFile(destination, sourceBytes, { flag: 'wx', mode: expected.mode & 0o777 });
