@@ -210,7 +210,7 @@ type ActiveProcess = {
   resolveSettled: () => void;
   outcome: Promise<{ exitCode: number | null; signal: string | null }>;
   posixOwnedMembers?: Map<number, string>;
-  posixIdentityMonitor?: ReturnType<typeof setInterval>;
+  posixIdentityMonitor?: ReturnType<typeof setTimeout>;
   windowsJobId?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
 };
@@ -431,12 +431,11 @@ export class CommandRunner {
         processStartIdentity,
       });
       if (posixControl !== undefined) {
-        active.posixIdentityMonitor = setInterval(() => this.captureOwnedPosixMembers(active), 10);
-        active.posixIdentityMonitor.unref();
         const targetGate = (
           child.stdio as unknown as readonly (NodeJS.WritableStream | null | undefined)[]
         )[5];
         targetGate?.end('run\n');
+        this.startPosixIdentityMonitor(active);
       }
     } catch (error) {
       try {
@@ -767,9 +766,10 @@ export class CommandRunner {
     const active = this.active.get(executionId);
     if (active === undefined || active.lease !== lease) return false;
     const leaderAlive = active.child.exitCode === null && active.child.signalCode === null;
-    if (!this.posixGroupSignalIsOwned(active, leaderAlive)) return false;
     try {
       if (process.platform === 'win32') return false;
+      if (!leaderAlive) return this.signalRecordedPosixMembers(active, signal);
+      if (!this.posixLeaderSignalIsOwned(active)) return false;
       process.kill(-active.pid, signal);
       return true;
     } catch {
@@ -807,7 +807,8 @@ export class CommandRunner {
         return targets.length > 0;
       }
       const leaderAlive = active.child.exitCode === null && active.child.signalCode === null;
-      if (!this.posixGroupSignalIsOwned(active, leaderAlive)) return false;
+      if (!leaderAlive) return this.signalRecordedPosixMembers(active, 'SIGKILL');
+      if (!this.posixLeaderSignalIsOwned(active)) return false;
       process.kill(-active.pid, 'SIGKILL');
       return true;
     } catch (error) {
@@ -855,50 +856,63 @@ export class CommandRunner {
     }
   }
 
-  private posixGroupSignalIsOwned(active: ActiveProcess, leaderAlive: boolean): boolean {
-    if (process.platform === 'win32') return false;
-    if (leaderAlive)
-      return posixGroupSignalIsAuthorized({
-        leaderAlive,
-        expectedGroupId: active.pid,
-        observedGroupId: readPosixProcessGroupId(active.pid),
-        expectedStartIdentity: active.processStartIdentity,
-        observedStartIdentity: readProcessStartIdentity(active.pid),
-      });
-    const verifiedWitness = [...(active.posixOwnedMembers ?? [])].some(
-      ([pid, startIdentity]) =>
-        readPosixProcessGroupId(pid) === active.pid &&
-        readProcessStartIdentity(pid) === startIdentity,
-    );
-    if (!verifiedWitness) return false;
-    for (const pid of readPosixGroupMembers(active.pid)) {
-      if (pid === active.pid) continue;
-      const startIdentity = readProcessStartIdentity(pid);
-      if (startIdentity !== 'unavailable' && !startIdentity.startsWith('unsupported:'))
-        active.posixOwnedMembers?.set(pid, startIdentity);
-    }
-    return true;
+  private posixLeaderSignalIsOwned(active: ActiveProcess): boolean {
+    return posixGroupSignalIsAuthorized({
+      leaderAlive: true,
+      expectedGroupId: active.pid,
+      observedGroupId: readPosixProcessGroupId(active.pid),
+      expectedStartIdentity: active.processStartIdentity,
+      observedStartIdentity: readProcessStartIdentity(active.pid),
+    });
   }
 
-  private captureOwnedPosixMembers(active: ActiveProcess): void {
-    if (
-      process.platform === 'win32' ||
-      active.child.exitCode !== null ||
-      active.child.signalCode !== null ||
-      !posixGroupIdentityMatches({
-        expectedGroupId: active.pid,
-        observedGroupId: readPosixProcessGroupId(active.pid),
-        expectedStartIdentity: active.processStartIdentity,
-        observedStartIdentity: readProcessStartIdentity(active.pid),
-      })
-    )
-      return;
-    for (const pid of readPosixGroupMembers(active.pid)) {
-      if (pid === active.pid) continue;
-      const startIdentity = readProcessStartIdentity(pid);
-      if (startIdentity !== 'unavailable' && !startIdentity.startsWith('unsupported:'))
-        active.posixOwnedMembers?.set(pid, startIdentity);
+  private signalRecordedPosixMembers(
+    active: ActiveProcess,
+    signal: 'SIGTERM' | 'SIGKILL',
+  ): boolean {
+    let signaled = false;
+    for (const [pid, startIdentity] of active.posixOwnedMembers ?? []) {
+      if (
+        readPosixProcessGroupId(pid) !== active.pid ||
+        readProcessStartIdentity(pid) !== startIdentity
+      )
+        continue;
+      try {
+        // Do not enumerate the group between this identity check and the per-PID signal. If the
+        // witness disappears, an unrelated reused PGID is never signaled as a group.
+        process.kill(pid, signal);
+        signaled = true;
+      } catch {
+        // The verified member exited before the signal; retain ownership and fail closed.
+      }
     }
+    return signaled;
+  }
+
+  private startPosixIdentityMonitor(active: ActiveProcess): void {
+    const startedAt = Date.now();
+    const capture = async (): Promise<void> => {
+      try {
+        const members = await readPosixGroupMemberIdentities(active.pid);
+        if (members.get(active.pid) !== active.processStartIdentity) return;
+        for (const [pid, startIdentity] of members)
+          if (pid !== active.pid) active.posixOwnedMembers?.set(pid, startIdentity);
+      } catch {
+        // Monitoring is advisory. Signal-time identity checks remain fail-closed.
+      } finally {
+        if (
+          active.child.exitCode === null &&
+          active.child.signalCode === null &&
+          active.posixIdentityMonitor !== undefined
+        ) {
+          const intervalMs = Date.now() - startedAt < 500 ? 25 : 100;
+          active.posixIdentityMonitor = setTimeout(() => void capture(), intervalMs);
+          active.posixIdentityMonitor.unref();
+        }
+      }
+    };
+    active.posixIdentityMonitor = setTimeout(() => void capture(), 0);
+    active.posixIdentityMonitor.unref();
   }
 
   private async waitForOwnedTreeExit(
@@ -959,7 +973,10 @@ export class CommandRunner {
 
   private releaseActive(executionId: string, active: ActiveProcess): void {
     if (this.active.get(executionId) === active) this.active.delete(executionId);
-    if (active.posixIdentityMonitor !== undefined) clearInterval(active.posixIdentityMonitor);
+    if (active.posixIdentityMonitor !== undefined) {
+      clearTimeout(active.posixIdentityMonitor);
+      delete active.posixIdentityMonitor;
+    }
     if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
     active.resolveSettled();
   }
@@ -1029,6 +1046,27 @@ function readPosixGroupMembers(groupId: number): number[] {
       const pid = Number(pidText);
       return Number(groupText) === groupId && Number.isInteger(pid) && pid > 0 ? [pid] : [];
     });
+}
+
+async function readPosixGroupMemberIdentities(groupId: number): Promise<Map<number, string>> {
+  const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'pid=,pgid=,lstart='], {
+    encoding: 'utf8',
+    timeout: 1_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const identities = new Map<number, string>();
+  for (const line of stdout.trim().split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (match === null || Number(match[2]) !== groupId) continue;
+    const pid = Number(match[1]);
+    const startIdentity =
+      process.platform === 'linux'
+        ? readProcessStartIdentity(pid)
+        : `${process.platform}:${match[3]?.trim() ?? ''}`;
+    if (startIdentity !== 'unavailable' && !startIdentity.startsWith('unsupported:'))
+      identities.set(pid, startIdentity);
+  }
+  return identities;
 }
 
 async function captureWindowsProcessTree(
