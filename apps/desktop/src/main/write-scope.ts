@@ -17,8 +17,7 @@ import { sep } from 'node:path';
  *
  * `ask` maps to `read-only` rather than to a prompt because neither CLI can be asked mid-turn:
  * `codex exec` is one-shot stdin with no answerable approval channel, and `claude -p` has no
- * permission-prompt hook on 2.1.218 (verified — the flag is absent from its help, and
- * `--permission-mode manual` simply denies and reports the denial afterwards). Pretending to ask
+ * permission-prompt hook on supported CLI versions (the flag is absent from help). Pretending to ask
  * and then silently allowing would be the worst of the three options, so `ask` means "propose, do
  * not write", and what was refused is reported after the fact from Claude's `permission_denials`.
  */

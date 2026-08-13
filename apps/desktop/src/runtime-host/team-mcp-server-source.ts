@@ -245,16 +245,6 @@ const TOOLS = [
         },
       },
       required: ['agentKind', 'role', 'objective', 'modelSelection', 'modelSelectionReason'],
-      allOf: [
-        {
-          if: { properties: { agentKind: { const: 'manager' } } },
-          then: { required: ['managerPolicy'] },
-        },
-        {
-          if: { properties: { agentKind: { const: 'worker' } } },
-          then: { not: { required: ['managerPolicy'] } },
-        },
-      ],
       additionalProperties: false,
     },
   },

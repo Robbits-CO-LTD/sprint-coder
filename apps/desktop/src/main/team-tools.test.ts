@@ -7,6 +7,7 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
 import { TeamCoordinator } from './team-coordinator';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
+import { TEAM_HIRE_WORKER_TOOL } from './team-tools';
 import type { ToolBroker } from './tool-broker';
 
 const cleanup: string[] = [];
@@ -41,6 +42,14 @@ function dispatch(
     input,
   });
 }
+
+describe('Leader team tool schemas', () => {
+  it('keeps legacy MCP-incompatible conditional keywords out of hire-worker', () => {
+    expect(JSON.stringify(TEAM_HIRE_WORKER_TOOL.inputSchema)).not.toMatch(
+      /"(?:allOf|if|then|not)"/,
+    );
+  });
+});
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
