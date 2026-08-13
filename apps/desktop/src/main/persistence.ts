@@ -4777,9 +4777,10 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
       if (report.resumedRecovery) report.corruptionDetected = true;
       const source = existingCandidates.find(databasePassesQuickCheck);
       if (source === undefined) {
-        if (!existsSync(databasePath) && existingCandidates.length === 0) return report;
-        if (existingCandidates.length > 0)
+        if (!existsSync(databasePath)) {
+          if (existingCandidates.length === 0) return report;
           throw new Error('Database recovery failed: no valid backup candidate');
+        }
         report.corruptionDetected = true;
         const movedTo = `${databasePath}.corrupt-${Date.now()}`;
         renameSync(databasePath, movedTo);

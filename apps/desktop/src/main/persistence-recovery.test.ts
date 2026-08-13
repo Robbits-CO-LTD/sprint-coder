@@ -227,6 +227,25 @@ if (runsWithElectronAbi)
       recovered.close();
     });
 
+    it('starts fresh when initial corruption recovery finds only invalid backups', () => {
+      const path = tempDatabasePath();
+      writeFileSync(path, 'corrupt main database');
+      writeFileSync(`${path}.pre-migration.bak`, 'corrupt backup database');
+
+      const recovered = new SqlitePersistenceClient(path);
+      expect(recovered.recoveryReport).toMatchObject({
+        corruptionDetected: true,
+        restoredFromBackup: false,
+        freshStart: true,
+        resumedRecovery: false,
+        recoveryFailure: null,
+      });
+      expect(recovered.recoveryReport.corruptFileMovedTo).not.toBeNull();
+      expect(existsSync(recovered.recoveryReport.corruptFileMovedTo ?? '')).toBe(true);
+      expect(existsSync(`${path}.pre-migration.bak`)).toBe(true);
+      recovered.close();
+    });
+
     it('reports a clean open for a healthy database', () => {
       const path = tempDatabasePath();
       const client = new SqlitePersistenceClient(path);
