@@ -17658,6 +17658,37 @@ function parseResourceSet(json: string): ResourceSet {
   if (record['kind'] === 'external-exact' && typeof record['target'] === 'string')
     return { kind: 'external-exact', target: record['target'] };
   if (
+    record['kind'] === 'provider-disclosure-exact' &&
+    Object.keys(record).every((key) =>
+      [
+        'kind',
+        'providerId',
+        'canonicalPath',
+        'sourceDigest',
+        'disclosedDigest',
+        'classifierVersion',
+      ].includes(key),
+    ) &&
+    typeof record['providerId'] === 'string' &&
+    record['providerId'].length > 0 &&
+    typeof record['canonicalPath'] === 'string' &&
+    record['canonicalPath'].length > 0 &&
+    typeof record['sourceDigest'] === 'string' &&
+    /^[a-f0-9]{64}$/.test(record['sourceDigest']) &&
+    typeof record['disclosedDigest'] === 'string' &&
+    /^[a-f0-9]{64}$/.test(record['disclosedDigest']) &&
+    typeof record['classifierVersion'] === 'string' &&
+    record['classifierVersion'].length > 0
+  )
+    return {
+      kind: 'provider-disclosure-exact',
+      providerId: record['providerId'],
+      canonicalPath: record['canonicalPath'],
+      sourceDigest: record['sourceDigest'],
+      disclosedDigest: record['disclosedDigest'],
+      classifierVersion: record['classifierVersion'],
+    };
+  if (
     record['kind'] === 'provider-egress' &&
     Array.isArray(record['providerIds']) &&
     record['providerIds'].every((item) => typeof item === 'string') &&

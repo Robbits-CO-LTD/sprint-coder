@@ -11,7 +11,10 @@ import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain
 import type { ToolAuthorizationDecision, ToolAuthorizationRequest } from './tool-broker';
 import type { ApprovalRequestInput, ApprovalResolutionInput } from './persistence';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
-import { workspaceToolAuthorizationGuard } from './provider-workspace-tools';
+import {
+  providerDisclosureAuthorizationFacts,
+  workspaceToolAuthorizationGuard,
+} from './provider-workspace-tools';
 
 type ApprovalLike = {
   id: string;
@@ -389,6 +392,7 @@ export function approvalFactsForTool(
   operation: PermissionOperation;
 } {
   const operation = operationFor(capability);
+  const disclosure = providerDisclosureAuthorizationFacts(request.input);
   const workspaceGuard = workspaceToolAuthorizationGuard(
     request.input,
     operation === 'read' || operation === 'write' ? operation : undefined,
@@ -404,35 +408,57 @@ export function approvalFactsForTool(
       ? undefined
       : { kind: 'external' as const, target: `command:${executionSpecDigest(commandSpec)}` };
   const resourceSet: ResourceSet =
-    workspaceResource !== undefined
+    disclosure !== undefined
       ? {
-          kind: 'path-exact',
-          workspaceId: workspaceResource.workspaceId,
-          canonicalPath: workspaceResource.canonicalPath,
+          kind: 'provider-disclosure-exact',
+          providerId: disclosure.providerId,
+          canonicalPath: disclosure.canonicalPath,
+          sourceDigest: disclosure.sourceDigest,
+          disclosedDigest: disclosure.disclosedDigest,
+          classifierVersion: disclosure.classifierVersion,
         }
-      : commandResource === undefined
-        ? resourceFor(request)
-        : { kind: 'external-exact', target: commandResource.target };
+      : workspaceResource !== undefined
+        ? {
+            kind: 'path-exact',
+            workspaceId: workspaceResource.workspaceId,
+            canonicalPath: workspaceResource.canonicalPath,
+          }
+        : commandResource === undefined
+          ? resourceFor(request)
+          : { kind: 'external-exact', target: commandResource.target };
   const resource: PermissionResource =
-    workspaceResource ??
-    commandResource ??
-    (resourceSet.kind === 'network-origin'
-      ? { kind: 'network', origin: resourceSet.origin }
-      : resourceSet.kind === 'external-exact'
-        ? { kind: 'external', target: resourceSet.target }
-        : { kind: 'external', target: displayTarget(request.input) });
+    disclosure !== undefined
+      ? {
+          kind: 'provider-disclosure',
+          providerId: disclosure.providerId,
+          canonicalPath: disclosure.canonicalPath,
+          sourceDigest: disclosure.sourceDigest,
+          disclosedDigest: disclosure.disclosedDigest,
+          classification: disclosure.classification,
+          reasons: disclosure.reasons,
+          classifierVersion: disclosure.classifierVersion,
+        }
+      : (workspaceResource ??
+        commandResource ??
+        (resourceSet.kind === 'network-origin'
+          ? { kind: 'network', origin: resourceSet.origin }
+          : resourceSet.kind === 'external-exact'
+            ? { kind: 'external', target: resourceSet.target }
+            : { kind: 'external', target: displayTarget(request.input) }));
   return {
     subjectId: `tool:${request.entry.toolId}`,
     specDigest:
       request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)
         ? executionSpecDigest(request.input as ExecutionSpec)
-        : workspaceGuard === undefined
-          ? digest({ toolId: request.entry.toolId, input: request.input })
-          : digest({
-              toolId: request.entry.toolId,
-              pathGuardDigest: pathGuardIdentityDigest(workspaceGuard),
-              operation,
-            }),
+        : disclosure !== undefined
+          ? digest({ toolId: request.entry.toolId, disclosure, operation })
+          : workspaceGuard === undefined
+            ? digest({ toolId: request.entry.toolId, input: request.input })
+            : digest({
+                toolId: request.entry.toolId,
+                pathGuardDigest: pathGuardIdentityDigest(workspaceGuard),
+                operation,
+              }),
     resourceSet,
     resource,
     operation,
@@ -440,6 +466,8 @@ export function approvalFactsForTool(
 }
 
 function displayTarget(input: unknown): string {
+  const disclosure = providerDisclosureAuthorizationFacts(input);
+  if (disclosure !== undefined) return disclosure.canonicalPath;
   const workspaceGuard = workspaceToolAuthorizationGuard(input);
   if (workspaceGuard !== undefined) return workspaceGuard.originalTargetPath;
   if (typeof input === 'object' && input !== null) {
@@ -451,6 +479,21 @@ function displayTarget(input: unknown): string {
 }
 
 function safeApprovalExecution(request: ToolAuthorizationRequest): string {
+  const disclosure = providerDisclosureAuthorizationFacts(request.input);
+  if (disclosure !== undefined)
+    return stableStringify({
+      tool: request.entry.providerName,
+      providerId: disclosure.providerId,
+      path: disclosure.canonicalPath,
+      classification: disclosure.classification,
+      reasons: disclosure.reasons,
+      sourceDigest: disclosure.sourceDigest,
+      disclosedDigest: disclosure.disclosedDigest,
+      classifierVersion: disclosure.classifierVersion,
+      // Approval execution text is persisted for audit, so content previews never belong here.
+      // Classification, reasons, and both digests retain a useful tamper-evident audit record.
+      preview: '[CONTENT PREVIEW NOT PERSISTED]',
+    });
   const workspaceGuard = workspaceToolAuthorizationGuard(request.input);
   if (workspaceGuard !== undefined) {
     const prepared = request.input as { raw?: unknown };

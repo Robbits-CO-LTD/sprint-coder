@@ -8,6 +8,12 @@ describe('secret redactor', () => {
     );
   });
 
+  it('redacts an entire quoted credential value that contains spaces', () => {
+    expect(redactSecrets('password="correct horse battery staple" next=ok')).toBe(
+      'password=[REDACTED] next=ok',
+    );
+  });
+
   it('redacts a credential split across stream chunks', () => {
     const redactor = createStreamingSecretRedactor();
     const output =

@@ -279,6 +279,32 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
+    it.each([
+      'postgres://alice:hunter2@example.com/db',
+      ['xoxb', '1234567890', 'abcdefghijklmnopqrstuvwxyz'].join('-'),
+      'glpat-abcdefghijklmnopqrstuvwxyz',
+      'session 8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
+    ])('blocks a newly classified disclosure before Provider dispatch: %s', (prompt) => {
+      const fixture = createFixture(false);
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-provider-expanded-secret-scan',
+          prompt,
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision.allowed).toBe(false);
+      expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
+
     it('honors a revoked provider.egress capability before Runtime dispatch', () => {
       const fixture = createFixture(false);
       fixture.persistence.revokePermissionCapability(

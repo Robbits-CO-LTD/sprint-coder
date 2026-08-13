@@ -10,7 +10,10 @@ import {
 } from '@sprint-coder/domain';
 import { FileRevisionRegistry } from './file-revision';
 import { createPathGuard, revalidatePathGuard, type PathGuard } from './path-guard';
-import { redactSecrets } from './secret-redactor';
+import {
+  assessProviderDisclosure,
+  type ProviderDisclosureAssessment,
+} from './provider-disclosure-classifier';
 import { ToolBroker, type ToolAuthorizer } from './tool-broker';
 import { CommandRunner } from './command-runner';
 import {
@@ -147,6 +150,7 @@ type PreparedWorkspaceInput = Readonly<{
   relativePath: string;
   guard: PathGuard;
   readGuard?: PathGuard;
+  disclosure?: Omit<ProviderDisclosureAssessment, 'redactedContent'> & { providerId: string };
   raw?: unknown;
 }>;
 
@@ -155,6 +159,7 @@ const issuedPreparedInputs = new WeakSet<object>();
 export class ProviderWorkspaceTools {
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
+  private readonly providersByTurn = new Map<string, string>();
 
   constructor(private readonly deps: WorkspaceToolDeps) {
     this.revisions = deps.workspaceEdit?.revisions ?? new FileRevisionRegistry();
@@ -234,12 +239,15 @@ export class ProviderWorkspaceTools {
   }
 
   startTurn(context: ToolExecutionContext, providerId: string): ToolCatalogSnapshot {
-    return this.broker.startTurn(context, providerId);
+    const snapshot = this.broker.startTurn(context, providerId);
+    this.providersByTurn.set(JSON.stringify([context.taskId, context.turnId]), providerId);
+    return snapshot;
   }
 
   finishTurn(taskId: string, turnId: string): void {
     this.broker.finishTurn(taskId, turnId);
     this.revisions.finishTurn({ taskId, turnId });
+    this.providersByTurn.delete(JSON.stringify([taskId, turnId]));
   }
 
   async dispose(): Promise<void> {
@@ -262,18 +270,37 @@ export class ProviderWorkspaceTools {
         : undefined;
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
+    const guard = await createPathGuard({
+      rootId: root.rootId,
+      workspacePath: root.path,
+      ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+      targetPath: request.path,
+      operation: 'read',
+    });
+    const disclosure =
+      kind === 'read'
+        ? disclosureFacts(
+            assessProviderDisclosure(
+              (
+                await this.revisions.readGuarded({
+                  owner: { taskId: context.taskId, turnId: context.turnId },
+                  guard,
+                  policyEpoch: context.policyEpoch,
+                  maxBytes: MAX_READ_BYTES,
+                })
+              ).content,
+              request.path,
+            ),
+            this.providersByTurn.get(JSON.stringify([context.taskId, context.turnId])) ?? '',
+          )
+        : undefined;
     const prepared = Object.freeze({
       kind,
       rootId: root.rootId,
       rootLabel: root.label,
       relativePath: request.path,
-      guard: await createPathGuard({
-        rootId: root.rootId,
-        workspacePath: root.path,
-        ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
-        targetPath: request.path,
-        operation: 'read',
-      }),
+      guard,
+      ...(disclosure === undefined ? {} : { disclosure }),
     });
     issuedPreparedInputs.add(prepared);
     return prepared;
@@ -296,13 +323,27 @@ export class ProviderWorkspaceTools {
       policyEpoch: context.policyEpoch,
       maxBytes: MAX_READ_BYTES,
     });
-    if (redactSecrets(read.content) !== read.content)
-      throw new WorkspaceToolRejection('PROTECTED_CONTENT', 'File content was withheld by policy');
+    if (input.disclosure === undefined)
+      throw new WorkspaceToolRejection(
+        'DISCLOSURE_NOT_PREPARED',
+        'File disclosure was not prepared',
+      );
+    const assessed = assessProviderDisclosure(read.content, input.relativePath);
+    if (
+      assessed.sourceDigest !== input.disclosure.sourceDigest ||
+      assessed.disclosedDigest !== input.disclosure.disclosedDigest ||
+      assessed.classification !== input.disclosure.classification ||
+      assessed.classifierVersion !== input.disclosure.classifierVersion
+    )
+      throw new WorkspaceToolRejection(
+        'DISCLOSURE_CHANGED',
+        'File content changed after disclosure authorization',
+      );
     return {
       rootId: input.rootId,
       rootLabel: input.rootLabel,
       path: input.relativePath,
-      content: read.content,
+      content: assessed.redactedContent,
       revision: read.reference,
     };
   }
@@ -397,6 +438,48 @@ export function workspaceToolAuthorizationGuard(
   return prepared.guard.operation === operation || operation === undefined
     ? prepared.guard
     : undefined;
+}
+
+export function providerDisclosureAuthorizationFacts(input: unknown):
+  | Readonly<{
+      providerId: string;
+      canonicalPath: string;
+      sourceDigest: string;
+      disclosedDigest: string;
+      classification: 'sensitive' | 'uncertain';
+      reasons: readonly string[];
+      classifierVersion: string;
+      preview: string;
+    }>
+  | undefined {
+  if (typeof input !== 'object' || input === null || !issuedPreparedInputs.has(input))
+    return undefined;
+  const prepared = input as PreparedWorkspaceInput;
+  if (
+    prepared.kind !== 'read' ||
+    prepared.disclosure === undefined ||
+    prepared.disclosure.classification === 'safe'
+  )
+    return undefined;
+  return Object.freeze({
+    providerId: prepared.disclosure.providerId,
+    canonicalPath: prepared.guard.resolvedPath,
+    sourceDigest: prepared.disclosure.sourceDigest,
+    disclosedDigest: prepared.disclosure.disclosedDigest,
+    classification: prepared.disclosure.classification,
+    reasons: prepared.disclosure.reasons,
+    classifierVersion: prepared.disclosure.classifierVersion,
+    preview: prepared.disclosure.preview,
+  });
+}
+
+function disclosureFacts(
+  assessment: ProviderDisclosureAssessment,
+  providerId: string,
+): Omit<ProviderDisclosureAssessment, 'redactedContent'> & { providerId: string } {
+  if (providerId.length === 0) throw new Error('Provider disclosure is not bound to a Provider');
+  const { redactedContent: _redactedContent, ...facts } = assessment;
+  return Object.freeze({ ...facts, providerId });
 }
 
 async function listWorkspace(input: PreparedWorkspaceInput): Promise<{

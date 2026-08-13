@@ -6,11 +6,13 @@ import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import {
   PROVIDER_WORKSPACE_GUIDANCE,
   ProviderWorkspaceTools,
+  providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
 import { commandToolTruncated } from './default-tools';
+import { approvalFactsForTool } from './approval-coordinator';
 
 const roots: string[] = [];
 
@@ -232,7 +234,7 @@ describe('Provider workspace read tools', () => {
       ).rejects.toThrow();
   });
 
-  it('withholds secret-bearing content before it can become a tool result', async () => {
+  it('binds secret-bearing content to disclosure facts and returns only the redacted result', async () => {
     const { root, tools, context } = await harness();
     await writeFile(join(root, 'notes.txt'), 'password=hunter2\n');
 
@@ -243,7 +245,64 @@ describe('Provider workspace read tools', () => {
         providerName: 'read_file',
         input: { path: 'notes.txt' },
       }),
-    ).rejects.toMatchObject({ code: 'PROTECTED_CONTENT' });
+    ).resolves.toMatchObject({ content: 'password=[REDACTED]\n' });
+  });
+
+  it('presents only a bounded redacted disclosure preview to the authorizer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-disclosure-'));
+    roots.push(root);
+    await writeFile(join(root, '.env'), 'DATABASE_URL=postgres://alice:hunter2@example.com/db\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'd'.repeat(64),
+    };
+    let facts: ReturnType<typeof providerDisclosureAuthorizationFacts>;
+    let permissionFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        const { input } = request;
+        facts = providerDisclosureAuthorizationFacts(input);
+        permissionFacts = approvalFactsForTool(request, 'workspace.read');
+        return { decision: 'deny', reason: 'user_denied' };
+      },
+    });
+    const context = {
+      taskId: 'task-disclosure',
+      turnId: 'turn-disclosure',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'openai');
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-denied-disclosure',
+        providerName: 'read_file',
+        input: { path: '.env' },
+      }),
+    ).rejects.toThrow(/authorization deny/u);
+    expect(facts).toMatchObject({
+      classification: 'sensitive',
+      reasons: expect.arrayContaining(['credential-prone-filename', 'uri-userinfo']),
+    });
+    expect(facts?.preview).not.toContain('hunter2');
+    expect(permissionFacts).toMatchObject({
+      resource: {
+        kind: 'provider-disclosure',
+        sourceDigest: facts?.sourceDigest,
+        disclosedDigest: facts?.disclosedDigest,
+      },
+      resourceSet: { kind: 'provider-disclosure-exact' },
+    });
   });
 
   it('rejects a file identity substituted while authorization is pending', async () => {

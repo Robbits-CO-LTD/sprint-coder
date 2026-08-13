@@ -4,7 +4,7 @@ import type { PermissionEvaluation, PermissionRequest, ProviderEgress } from '@s
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
 import type { PermissionBroker } from './permission-broker';
-import { redactSecrets } from './secret-redactor';
+import { assessProviderDisclosure } from './provider-disclosure-classifier';
 
 export type ProviderEgressDecision = Readonly<{
   allowed: boolean;
@@ -96,7 +96,10 @@ function authorizeProviderEgress(
     ...input.context.fragments.map((fragment) => fragment.content),
     ...input.context.projectItems.map((item) => item.content),
   ].join('\n');
-  const secretScan = redactSecrets(content) === content ? ('clean' as const) : ('blocked' as const);
+  const secretScan =
+    assessProviderDisclosure(content).classification === 'safe'
+      ? ('clean' as const)
+      : ('blocked' as const);
   const textByteCount = Buffer.byteLength(content, 'utf8');
   const attachmentManifestDigest = input.attachmentManifestDigest ?? null;
   const attachmentByteCount = input.attachmentByteCount ?? 0;

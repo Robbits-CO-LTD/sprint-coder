@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -328,6 +328,49 @@ describe('ApprovalCoordinator', () => {
       expect(approval.display?.target).toBe('bot.py');
       expect(approval.display?.execution).toContain('contentDigest');
       expect(approval.display?.execution).not.toContain('SUPER_SECRET_SOURCE');
+      harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+      await expect(pending).rejects.toThrow();
+    } finally {
+      await rm(workspacePath, { recursive: true, force: true });
+    }
+  });
+
+  it('never persists an uncertain credential-file preview in approval history', async () => {
+    const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-disclosure-'));
+    try {
+      await writeFile(join(workspacePath, '.env'), 'region=private-preview-value\n');
+      const harness = createHarness();
+      const workspace = {
+        source: 'task' as const,
+        projectId: null,
+        primaryRootId: 'root-a',
+        roots: [
+          {
+            rootId: 'root-a',
+            path: workspacePath,
+            label: 'Workspace',
+            role: 'primary' as const,
+            status: 'available' as const,
+          },
+        ],
+        digest: 'e'.repeat(64),
+      };
+      const tools = new ProviderWorkspaceTools({
+        workspaceFor: () => workspace,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 7,
+        authorizer: harness.coordinator.authorizeTool.bind(harness.coordinator),
+      });
+      tools.startTurn(toolContext, 'openai');
+      const pending = tools.broker.dispatch({
+        ...toolContext,
+        callId: 'uncertain-read',
+        providerName: 'read_file',
+        input: { path: '.env' },
+      });
+      const approval = await waitForPublished(harness);
+      expect(approval.display?.execution).toContain('CONTENT PREVIEW NOT PERSISTED');
+      expect(approval.display?.execution).not.toContain('private-preview-value');
       harness.coordinator.resolve(resolveCommand(approval, 'deny'));
       await expect(pending).rejects.toThrow();
     } finally {

@@ -4972,6 +4972,32 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('persists an exact provider disclosure grant without a schema migration', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const resource = {
+        kind: 'provider-disclosure-exact' as const,
+        providerId: 'openai',
+        canonicalPath: '/workspace/.env',
+        sourceDigest: 'd'.repeat(64),
+        disclosedDigest: 'e'.repeat(64),
+        classifierVersion: 'provider-disclosure-v1',
+      };
+
+      const requested = persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          capability: 'workspace.read',
+          operation: 'read',
+          sandboxProfile: 'read-only',
+          resource,
+        }),
+      );
+
+      expect(requested.approval).toMatchObject({ resource });
+      persistence.close();
+    });
+
     it('deduplicates an at-least-once approval request after the Turn starts waiting', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();
