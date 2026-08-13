@@ -1902,6 +1902,14 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder?.teams || get().teamBusy) return;
       set({ teamBusy: true });
       try {
+        // The Team Leader runs as the task's active Turn, separately from worker runtimes.
+        // Stop it first so it cannot react to worker cancellation by hiring replacements while
+        // the user's "stop all" request is still being processed.
+        const activeTurn = get().turnByTask[taskId];
+        if (activeTurn?.status === 'running') {
+          const leaderStopped = await get().cancelActiveTurn(taskId);
+          if (!leaderStopped) return;
+        }
         const detail = await window.sprintCoder.teams.stopAll(taskId);
         set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {

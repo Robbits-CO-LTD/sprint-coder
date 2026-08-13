@@ -96,3 +96,48 @@ describe('stopAndSend shared cancellation state', () => {
     vi.unstubAllGlobals();
   });
 });
+
+describe('stopAllTeamWorkers leader cancellation', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      turnByTask: { [taskId]: activeTurn() },
+      teamByTask: {},
+      teamBusy: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('stops the Leader Turn before stopping Team workers', async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const detail = { team: { id: 'team-1' } };
+    const stopAll = vi.fn().mockResolvedValue(detail);
+    vi.stubGlobal('window', {
+      sprintCoder: { turns: { cancel }, teams: { stopAll } },
+    });
+
+    await useAppStore.getState().stopAllTeamWorkers(taskId);
+
+    expect(cancel).toHaveBeenCalledWith({ taskId, turnId: 'turn-1' });
+    expect(stopAll).toHaveBeenCalledWith(taskId);
+    expect(cancel.mock.invocationCallOrder[0]).toBeLessThan(stopAll.mock.invocationCallOrder[0]!);
+    expect(useAppStore.getState().teamByTask[taskId]).toBe(detail);
+    expect(useAppStore.getState().teamBusy).toBe(false);
+  });
+
+  it('does not stop workers when the Leader runtime cannot be stopped', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('leader cancel failed'));
+    const stopAll = vi.fn();
+    vi.stubGlobal('window', {
+      sprintCoder: { turns: { cancel }, teams: { stopAll } },
+    });
+
+    await useAppStore.getState().stopAllTeamWorkers(taskId);
+
+    expect(stopAll).not.toHaveBeenCalled();
+    expect(useAppStore.getState().turnByTask[taskId]?.status).toBe('running');
+    expect(useAppStore.getState().error).toBe('leader cancel failed');
+    expect(useAppStore.getState().teamBusy).toBe(false);
+  });
+});
