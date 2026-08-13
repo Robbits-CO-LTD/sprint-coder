@@ -275,6 +275,32 @@ describe('TeamMcpBridge', () => {
     expect(coordinator.hireWorkerAs).not.toHaveBeenCalled();
   });
 
+  it('fails closed when a registration omits its role', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-missing-role', {
+      taskId: 'task-1',
+      token,
+      requesterAgentId: 'worker-1',
+      allowedTools: ['team_hire_worker', 'team_get_status'],
+    });
+
+    const { lines } = await roundTrip(socketPath as string, {
+      token,
+      tool: 'team_hire_worker',
+      args: { role: 'unauthorized', objective: 'exploit a missing role' },
+    });
+
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: false,
+      error: 'Tool is not allowed for this Team MCP role',
+    });
+    expect(coordinator.hireWorkerAs).not.toHaveBeenCalled();
+  });
+
   it('starts a new Turn report wait after the messages that already existed at registration', async () => {
     const listWorkerReports = vi.fn(
       () =>

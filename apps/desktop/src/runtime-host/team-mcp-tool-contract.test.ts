@@ -10,7 +10,7 @@ import {
 
 describe('Team MCP tool contract', () => {
   it.each([
-    ['team', { allowTeamTools: true }, TEAM_CORE_MCP_TOOL_NAMES],
+    ['team', { role: 'leader' as const, allowTeamTools: true }, TEAM_CORE_MCP_TOOL_NAMES],
     ['memory', { allowTeamTools: false, allowProjectMemory: true }, PROJECT_MEMORY_MCP_TOOL_NAMES],
     [
       'skill creator',
@@ -26,8 +26,11 @@ describe('Team MCP tool contract', () => {
     expect(teamMcpToolNamesForCapabilities(capabilities)).toEqual(expected);
   });
 
-  it('preserves the bridge default that omitted allowTeamTools means enabled', () => {
-    expect(teamMcpToolNamesForCapabilities({})).toEqual(TEAM_CORE_MCP_TOOL_NAMES);
+  it('fails closed to leaf Worker tools when role is omitted', () => {
+    expect(teamMcpToolNamesForCapabilities({})).toEqual(WORKER_TEAM_MCP_TOOL_NAMES);
+    expect(
+      teamMcpToolNamesForCapabilities({ allowedTools: ['team_hire_worker', 'team_get_status'] }),
+    ).toEqual(['team_get_status']);
   });
 
   it('publishes hire only to Leader and Manager roles', () => {

@@ -47,7 +47,9 @@ export function teamMcpToolNamesForCapabilities(
   capabilities: TeamMcpToolCapabilities,
 ): readonly TeamMcpToolName[] {
   const roleTools =
-    capabilities.role === 'worker' ? WORKER_TEAM_MCP_TOOL_NAMES : TEAM_CORE_MCP_TOOL_NAMES;
+    capabilities.role === 'leader' || capabilities.role === 'manager'
+      ? TEAM_CORE_MCP_TOOL_NAMES
+      : WORKER_TEAM_MCP_TOOL_NAMES;
   const candidates: readonly TeamMcpToolName[] = [
     ...(capabilities.allowProjectMemory === true ? PROJECT_MEMORY_MCP_TOOL_NAMES : []),
     ...(capabilities.allowSkillDrafts === true ? SKILL_DRAFT_MCP_TOOL_NAMES : []),
