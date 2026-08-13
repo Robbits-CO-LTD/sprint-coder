@@ -29,6 +29,22 @@ describe('sealedExecutableIdentityDigest', () => {
       }),
     );
   });
+
+  it('binds the PE import name separately from the dependency canonical basename', () => {
+    const base = identity('a'.repeat(64));
+    const dependency = { ...identity('b'.repeat(64)), canonicalPath: '/approved/bar.dll' };
+    expect(
+      sealedExecutableIdentityDigest({
+        ...base,
+        dependencies: [{ ...dependency, importName: 'foo.dll' }],
+      }),
+    ).not.toBe(
+      sealedExecutableIdentityDigest({
+        ...base,
+        dependencies: [{ ...dependency, importName: 'bar.dll' }],
+      }),
+    );
+  });
 });
 
 describe('containsRelativeMachOLoaderPath', () => {

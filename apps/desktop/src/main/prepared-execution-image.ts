@@ -28,6 +28,7 @@ export type SealedExecutableIdentity = Readonly<{
   mode: number;
   digest: string;
   allowSourceHardlinks?: boolean;
+  importName?: string;
   interpreter?: SealedExecutableIdentity;
   dependencies?: readonly SealedExecutableIdentity[];
 }>;
@@ -55,6 +56,7 @@ export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentit
         identity.ctimeNs,
         identity.mode,
         identity.digest,
+        identity.importName ?? null,
         identity.interpreter === undefined
           ? null
           : sealedExecutableIdentityDigest(identity.interpreter),
@@ -479,7 +481,7 @@ async function prepareWindowsSideBySideImages(
   try {
     while (queue.length > 0) {
       const dependency = queue.shift()!;
-      const name = basename(dependency.canonicalPath).toLowerCase();
+      const name = (dependency.importName ?? basename(dependency.canonicalPath)).toLowerCase();
       if (copied.has(name)) continue;
       if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error('Windows execution image has an unsafe DLL dependency name');
@@ -643,9 +645,13 @@ async function sealExecutablePathInternal(
       }
       const dependencyCanonicalPath = await realpath(dependencyPath);
       if (seen.has(dependencyCanonicalPath.toLowerCase())) continue;
-      dependencies.push(
-        await sealExecutablePathInternal(dependencyCanonicalPath, true, false, seen),
+      const dependency = await sealExecutablePathInternal(
+        dependencyCanonicalPath,
+        true,
+        false,
+        seen,
       );
+      dependencies.push(Object.freeze({ ...dependency, importName: name.toLowerCase() }));
     }
     return sealedIdentity(canonicalPath, before, bytes, allowHardlinks, undefined, dependencies);
   }
