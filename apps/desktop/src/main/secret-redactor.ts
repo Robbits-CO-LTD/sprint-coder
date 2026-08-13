@@ -83,7 +83,7 @@ export function redactSecrets(input: string): string {
         // so it cannot see a keyword boundary inside `DB_PASSWORD` or `AWS_SECRET_ACCESS_KEY` — the
         // overwhelmingly common .env/CI naming convention. Requiring "not directly preceded by an
         // alnum" still rejects an unrelated compound word like `mypasswordfield`.
-        /(?<![a-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)\s*([:=])\s*([^\s,;]{4,})/gi,
+        /(?<![a-z0-9])(api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|aws[_-]?access[_-]?key[_-]?id|access[_-]?key[_-]?id|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)\s*([:=])\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]{4,})/gi,
         '$1$2[REDACTED]',
       )
       // A bare JWT (three dot-separated base64url segments, header starting `eyJ`) can appear
@@ -91,7 +91,10 @@ export function redactSecrets(input: string): string {
       .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED_JWT]')
       .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '[REDACTED_SLACK_TOKEN]')
       .replace(/\bglpat-[A-Za-z0-9_-]{10,}\b/g, '[REDACTED_GITLAB_TOKEN]')
-      .replace(/\b([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/@:]+)(?::[^\s/@]*)?@/gi, '$1[REDACTED]@')
+      .replace(
+        /\b([a-z][a-z0-9+.-]{0,31}:\/\/)(?:[^\s/@:]{1,256})(?::[^\s/@]{0,256})?@/gi,
+        '$1[REDACTED]@',
+      )
   );
 }
 

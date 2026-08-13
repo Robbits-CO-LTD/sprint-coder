@@ -3268,14 +3268,6 @@ export class IpcRouter {
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     const facts = approvalFactsForTool(request, capability);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
-    if (capability === 'workspace.read' && disclosure !== undefined)
-      return {
-        decision: 'approval_required' as const,
-        reason: 'provider_disclosure_requires_explicit_approval',
-        beforeExecute: () =>
-          providerDisclosureAuthorizationFacts(request.input)?.sourceDigest ===
-          disclosure.sourceDigest,
-      };
     const commandRunner = request.entry.implementationKind === 'command-runner';
     const sandboxProfile =
       capability === 'workspace.write' || capability === 'filesystem.external.write'
@@ -3418,6 +3410,22 @@ export class IpcRouter {
           now: new Date().toISOString(),
           ...(pathGuard === undefined ? {} : { pathGuard }),
         }).valid;
+      if (capability === 'workspace.read' && disclosure !== undefined)
+        return {
+          decision: 'approval_required' as const,
+          reason: 'provider_disclosure_requires_explicit_approval',
+          beforeExecute: () => {
+            const current = providerDisclosureAuthorizationFacts(request.input);
+            return (
+              beforeExecute() &&
+              current?.providerId === disclosure.providerId &&
+              current.canonicalPath === disclosure.canonicalPath &&
+              current.sourceDigest === disclosure.sourceDigest &&
+              current.disclosedDigest === disclosure.disclosedDigest &&
+              current.classifierVersion === disclosure.classifierVersion
+            );
+          },
+        };
       // Provider-issued processes are never covered by a preset-wide silent grant. A policy deny
       // still wins above; only an evaluated allow is upgraded to an explicit user approval.
       return requireExplicitProviderCommandApproval(

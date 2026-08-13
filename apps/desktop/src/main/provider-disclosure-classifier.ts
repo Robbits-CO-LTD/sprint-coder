@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { redactSecrets } from './secret-redactor';
 
-export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v1';
+export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v2';
 
 export type ProviderDisclosureClassification = 'safe' | 'sensitive' | 'uncertain';
 
@@ -18,14 +18,14 @@ export type ProviderDisclosureAssessment = Readonly<{
 
 const CREDENTIAL_FILENAME =
   /^(?:\.env(?:\..+)?|\.npmrc|\.pypirc|\.netrc|credentials?|secrets?(?:\..+)?|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|service[-_.]?account(?:\.json)?)$/iu;
-const URI_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s/@:]+)(?::([^\s/@]*))?@/giu;
+const URI_USERINFO = /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/@:]{1,256})(?::([^\s/@]{0,256}))?@/giu;
 const SLACK_TOKEN = /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gu;
 const GITLAB_TOKEN = /\bglpat-[A-Za-z0-9_-]{10,}\b/gu;
 const PROVIDER_TOKEN =
   /\b(?:sk-(?:ant|proj)-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,})\b/gu;
 const COOKIE_VALUE = /(?<![a-z0-9_-])(?:set-cookie|cookie)\s*[:=]\s*[^\r\n]{8,}/giu;
 const STRUCTURED_CREDENTIAL_FIELD =
-  /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|cookie)["']?\s*[:=]\s*["']?([^\s,"';}]{4,})/giu;
+  /["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|client[_-]?secret|private[_-]?key|cookie)["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]{4,})/giu;
 const ENTROPY_CANDIDATE = /(?<![A-Za-z0-9_-])[A-Za-z0-9_+/=-]{24,}(?![A-Za-z0-9_-])/gu;
 
 export function assessProviderDisclosure(
@@ -52,6 +52,12 @@ export function assessProviderDisclosure(
   });
   if (highEntropy) reasons.add('high-entropy-value');
 
+  const directSensitive = [...reasons].some((reason) => reason !== 'credential-prone-filename');
+  const classification: ProviderDisclosureClassification = directSensitive
+    ? 'sensitive'
+    : reasons.has('credential-prone-filename')
+      ? 'uncertain'
+      : 'safe';
   let redactedContent = baselineRedacted
     .replace(URI_USERINFO, '$1[REDACTED]@')
     .replace(SLACK_TOKEN, '[REDACTED_SLACK_TOKEN]')
@@ -66,13 +72,10 @@ export function assessProviderDisclosure(
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate) =>
       shannonEntropy(candidate) >= 4.25 ? '[REDACTED_HIGH_ENTROPY]' : candidate,
     );
-
-  const directSensitive = [...reasons].some((reason) => reason !== 'credential-prone-filename');
-  const classification: ProviderDisclosureClassification = directSensitive
-    ? 'sensitive'
-    : reasons.has('credential-prone-filename')
-      ? 'uncertain'
-      : 'safe';
+  // A credential-prone file with no recognized token is precisely the case where regex-based
+  // redaction cannot establish that any preview or Provider payload is safe. Disclose only an
+  // explicit placeholder until the classifier can prove which bytes are non-secret.
+  if (classification === 'uncertain') redactedContent = '[REDACTED_UNCERTAIN_CREDENTIAL_FILE]';
   const sourceDigest = sha256(content);
   const disclosedDigest = sha256(redactedContent);
   return Object.freeze({

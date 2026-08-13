@@ -11,6 +11,7 @@ describe('provider disclosure classifier', () => {
     ['AWS key', 'AKIAIOSFODNN7EXAMPLE', 'known-secret-pattern'],
     ['PEM key', '-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----', 'private-key'],
     ['structured field', '{"client_secret":"not-for-a-provider"}', 'credential-field'],
+    ['quoted secret with spaces', 'password="correct horse battery staple"', 'credential-field'],
     ['high entropy', 'session 8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH', 'high-entropy-value'],
   ])('classifies and redacts %s', (_label, content, reason) => {
     const result = assessProviderDisclosure(content);
@@ -23,13 +24,22 @@ describe('provider disclosure classifier', () => {
   });
 
   it('treats credential-prone filenames as uncertain without blocking ordinary source files', () => {
-    expect(assessProviderDisclosure('region=us-east-1\n', '.env')).toMatchObject({
+    const uncertain = assessProviderDisclosure('region=us-east-1\n', '.env');
+    expect(uncertain).toMatchObject({
       classification: 'uncertain',
       reasons: ['credential-prone-filename'],
+      redactedContent: '[REDACTED_UNCERTAIN_CREDENTIAL_FILE]',
     });
+    expect(uncertain.preview).not.toContain('us-east-1');
     expect(
       assessProviderDisclosure('export const greeting = "hello";\n', 'src/index.ts'),
     ).toMatchObject({ classification: 'safe', reasons: [] });
+  });
+
+  it('redacts a complete quoted credential value including spaces', () => {
+    const result = assessProviderDisclosure('password="correct horse battery staple"\nnext=ok');
+    expect(result.redactedContent).toBe('password=[REDACTED]\nnext=ok');
+    expect(result.preview).not.toContain('horse');
   });
 
   it('bounds the approval preview and never includes a detected raw value', () => {

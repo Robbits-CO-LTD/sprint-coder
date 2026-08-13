@@ -490,7 +490,9 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
       sourceDigest: disclosure.sourceDigest,
       disclosedDigest: disclosure.disclosedDigest,
       classifierVersion: disclosure.classifierVersion,
-      redactedPreview: disclosure.preview,
+      // Approval execution text is persisted for audit, so content previews never belong here.
+      // Classification, reasons, and both digests retain a useful tamper-evident audit record.
+      preview: '[CONTENT PREVIEW NOT PERSISTED]',
     });
   const workspaceGuard = workspaceToolAuthorizationGuard(request.input);
   if (workspaceGuard !== undefined) {
