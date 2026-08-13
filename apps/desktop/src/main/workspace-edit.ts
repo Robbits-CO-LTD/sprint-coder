@@ -112,6 +112,15 @@ export type SaveOutcome = {
   conflictPath: string | null;
 };
 
+/** Reads only the digest used to reconcile a durable user-save intent; it never repairs or writes. */
+export function observeWorkspaceFileDigest(
+  workspacePath: string,
+  relativePath: string,
+): string | null {
+  const opened = openWorkspaceFileForEdit(workspacePath, relativePath);
+  return opened.editable ? opened.digest : null;
+}
+
 /**
  * Writes the user's edit, but only if the file on disk still matches what they started from.
  *
