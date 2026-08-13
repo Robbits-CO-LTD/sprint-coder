@@ -15,6 +15,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { skillDraftSchema, teamBlueprintSchema, type SkillDraft } from '@sprint-coder/contracts';
 import { secureWindowsPath, secureWindowsPaths } from './windows-acl';
+import {
+  assertStableDirectoryIdentity,
+  assertStableSingleLinkFile,
+  UnsafeFileSnapshotError,
+} from './stable-file-snapshot';
 
 const MAX_FILES = 256;
 const MAX_FILE_BYTES = 1024 * 1024;
@@ -968,6 +973,9 @@ async function readRawSnapshot(
   async function walk(directory: string, relativeDirectory: string, depth: number): Promise<void> {
     if (depth > MAX_DEPTH)
       throw new SkillStoreError('INVALID_SKILL', 'Skill directory nesting is too deep');
+    const directoryBefore = await lstat(directory, { bigint: true });
+    if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink())
+      throw new SkillStoreError('UNSAFE_SOURCE', 'Skill directory changed identity');
     for (const name of (await readdir(directory)).sort()) {
       const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
       if (name.startsWith('.') || SECRET_FILE_NAMES.has(name.toLowerCase())) {
@@ -975,7 +983,7 @@ async function readRawSnapshot(
         continue;
       }
       const absolutePath = safeChild(canonicalSource, relativePath);
-      const before = await lstat(absolutePath);
+      const before = await lstat(absolutePath, { bigint: true });
       if (before.isSymbolicLink() || (!before.isDirectory() && !before.isFile()))
         throw new SkillStoreError('UNSAFE_SOURCE', `Unsupported file type: ${relativePath}`);
       if (before.isDirectory()) {
@@ -984,23 +992,21 @@ async function readRawSnapshot(
       }
       if (files.length >= MAX_FILES)
         throw new SkillStoreError('INVALID_SKILL', 'Skill contains too many files');
-      if (before.size > MAX_FILE_BYTES)
+      if (before.size > BigInt(MAX_FILE_BYTES))
         throw new SkillStoreError('INVALID_SKILL', `Skill file is too large: ${relativePath}`);
       const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
       let bytes: Buffer;
       try {
-        const opened = await handle.stat();
-        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino)
-          throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
+        const opened = await handle.stat({ bigint: true });
         bytes = await handle.readFile();
-        const after = await handle.stat();
-        if (
-          after.dev !== opened.dev ||
-          after.ino !== opened.ino ||
-          after.size !== opened.size ||
-          after.mtimeMs !== opened.mtimeMs
-        )
+        const after = await handle.stat({ bigint: true });
+        const pathAfter = await lstat(absolutePath, { bigint: true });
+        try {
+          assertStableSingleLinkFile(before, opened, after, pathAfter, bytes);
+        } catch (error) {
+          if (!(error instanceof UnsafeFileSnapshotError)) throw error;
           throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
+        }
       } finally {
         await handle.close();
       }
@@ -1008,6 +1014,12 @@ async function readRawSnapshot(
       if (totalBytes > MAX_TOTAL_BYTES)
         throw new SkillStoreError('INVALID_SKILL', 'Skill exceeds the total size limit');
       files.push({ path: relativePath, bytes });
+    }
+    const directoryAfter = await lstat(directory, { bigint: true });
+    try {
+      assertStableDirectoryIdentity(directoryBefore, directoryBefore, directoryAfter);
+    } catch {
+      throw new SkillStoreError('SOURCE_CHANGED', 'Skill directory changed identity');
     }
   }
 }
@@ -1171,24 +1183,52 @@ async function writeExclusive(
   bytes: Buffer,
   secureDestination = true,
 ): Promise<void> {
-  const handle = await open(
-    path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-    0o600,
-  );
+  const parentPath = dirname(path);
+  const parentBefore = await lstat(parentPath, { bigint: true });
+  const parentHandle =
+    process.platform === 'win32'
+      ? undefined
+      : await open(parentPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let created = false;
   try {
-    await handle.writeFile(bytes);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  if (process.platform === 'win32' && secureDestination) {
+    const handle = await open(
+      path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    created = true;
     try {
-      await secureWindowsPath(path, 'file');
-    } catch {
-      throw new SkillStoreError('UNSAFE_SOURCE', 'Skill store file ACL is unsafe');
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
-  } else await chmod(path, 0o600);
+    if (parentHandle !== undefined) {
+      const opened = await parentHandle.stat({ bigint: true });
+      const pathAfter = await lstat(parentPath, { bigint: true });
+      assertStableDirectoryIdentity(parentBefore, opened, pathAfter);
+    }
+    await assertMaterializedSingleLinkFile(path, bytes);
+    if (process.platform === 'win32' && secureDestination) {
+      try {
+        await secureWindowsPath(path, 'file');
+      } catch {
+        throw new SkillStoreError('UNSAFE_SOURCE', 'Skill store file ACL is unsafe');
+      }
+    } else await chmod(path, 0o600);
+    if (parentHandle !== undefined) {
+      const opened = await parentHandle.stat({ bigint: true });
+      const pathAfter = await lstat(parentPath, { bigint: true });
+      assertStableDirectoryIdentity(parentBefore, opened, pathAfter);
+    }
+    await assertMaterializedSingleLinkFile(path, bytes);
+  } catch (error) {
+    if (created) await rm(path, { force: true }).catch(() => undefined);
+    if (error instanceof SkillStoreError) throw error;
+    throw new SkillStoreError('SOURCE_CHANGED', 'Skill destination changed identity');
+  } finally {
+    await parentHandle?.close();
+  }
 }
 
 async function readExistingManifest(path: string): Promise<SkillManifest | null> {
@@ -1353,12 +1393,21 @@ async function copySafeDirectory(
   ): Promise<void> {
     if (depth > MAX_DEPTH)
       throw new SkillStoreError('INVALID_SKILL', 'Skill directory nesting is too deep');
+    const sourceDirectoryBefore = await lstat(sourceDirectory, { bigint: true });
+    const destinationDirectoryBefore = await lstat(destinationDirectory, { bigint: true });
+    if (
+      !sourceDirectoryBefore.isDirectory() ||
+      sourceDirectoryBefore.isSymbolicLink() ||
+      !destinationDirectoryBefore.isDirectory() ||
+      destinationDirectoryBefore.isSymbolicLink()
+    )
+      throw new SkillStoreError('UNSAFE_SOURCE', 'Skill directory changed identity');
     for (const name of (await readdir(sourceDirectory)).sort()) {
       if (name.startsWith('.') || options.omit.has(name)) continue;
       const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
       const sourcePath = safeChild(sourceRoot, relativePath);
       const destinationPath = safeChild(destinationRoot, relativePath);
-      const before = await lstat(sourcePath);
+      const before = await lstat(sourcePath, { bigint: true });
       if (before.isSymbolicLink() || (!before.isDirectory() && !before.isFile()))
         throw new SkillStoreError('UNSAFE_SOURCE', `Unsupported file type: ${relativePath}`);
       if (before.isDirectory()) {
@@ -1368,20 +1417,62 @@ async function copySafeDirectory(
         continue;
       }
       files += 1;
-      totalBytes += before.size;
-      if (files > MAX_FILES || before.size > MAX_FILE_BYTES || totalBytes > MAX_TOTAL_BYTES)
+      totalBytes += Number(before.size);
+      if (files > MAX_FILES || before.size > BigInt(MAX_FILE_BYTES) || totalBytes > MAX_TOTAL_BYTES)
         throw new SkillStoreError('INVALID_SKILL', 'Skill revision exceeds its limits');
       const handle = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        const opened = await handle.stat();
-        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino)
+        const opened = await handle.stat({ bigint: true });
+        const bytes = await handle.readFile();
+        const after = await handle.stat({ bigint: true });
+        const pathAfter = await lstat(sourcePath, { bigint: true });
+        try {
+          assertStableSingleLinkFile(before, opened, after, pathAfter, bytes);
+        } catch (error) {
+          if (!(error instanceof UnsafeFileSnapshotError)) throw error;
           throw new SkillStoreError('SOURCE_CHANGED', `Skill file changed: ${relativePath}`);
-        await writeExclusive(destinationPath, await handle.readFile(), false);
+        }
+        await writeExclusive(destinationPath, bytes, false);
         if (secureDestination) aclPaths.push({ path: destinationPath, kind: 'file' });
       } finally {
         await handle.close();
       }
     }
+    const sourceDirectoryAfter = await lstat(sourceDirectory, { bigint: true });
+    const destinationDirectoryAfter = await lstat(destinationDirectory, { bigint: true });
+    try {
+      assertStableDirectoryIdentity(
+        sourceDirectoryBefore,
+        sourceDirectoryBefore,
+        sourceDirectoryAfter,
+      );
+      assertStableDirectoryIdentity(
+        destinationDirectoryBefore,
+        destinationDirectoryBefore,
+        destinationDirectoryAfter,
+      );
+    } catch {
+      throw new SkillStoreError('SOURCE_CHANGED', 'Skill directory changed identity');
+    }
+  }
+}
+
+async function assertMaterializedSingleLinkFile(path: string, expected: Buffer): Promise<void> {
+  const before = await lstat(path, { bigint: true });
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat({ bigint: true });
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    const pathAfter = await lstat(path, { bigint: true });
+    assertStableSingleLinkFile(before, opened, after, pathAfter, bytes);
+    if (!bytes.equals(expected))
+      throw new SkillStoreError('SOURCE_CHANGED', 'Materialized Skill file changed');
+  } catch (error) {
+    if (error instanceof SkillStoreError) throw error;
+    throw new SkillStoreError('SOURCE_CHANGED', 'Materialized Skill file changed');
+  } finally {
+    await handle.close();
   }
 }
 

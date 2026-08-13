@@ -94,7 +94,7 @@ describe('readProjectReference', () => {
     ).toBe('too_large');
   });
 
-  it('allows a stable hardlink and the exact byte limit', () => {
+  it('rejects a stable hardlink alias', () => {
     const ws = workspace();
     writeFileSync(join(ws.root, 'source'), 'a'.repeat(PROJECT_REFERENCE_MAX_BYTES));
     linkSync(join(ws.root, 'source'), join(ws.root, 'hardlink'));
@@ -103,6 +103,18 @@ describe('readProjectReference', () => {
         workspacePath: ws.root,
         registeredRootIdentity: ws.identity,
         relativePath: 'hardlink',
+      }).status,
+    ).toBe('unreadable');
+  });
+
+  it('allows a single-link file at the exact byte limit', () => {
+    const ws = workspace();
+    writeFileSync(join(ws.root, 'single'), 'a'.repeat(PROJECT_REFERENCE_MAX_BYTES));
+    expect(
+      readProjectReference({
+        workspacePath: ws.root,
+        registeredRootIdentity: ws.identity,
+        relativePath: 'single',
       }).status,
     ).toBe('healthy');
   });

@@ -10,6 +10,7 @@ import {
 import { createHash } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ProjectReference } from '@sprint-coder/contracts';
+import { assertStableSingleLinkFile } from './stable-file-snapshot';
 
 export const PROJECT_REFERENCE_MAX_BYTES = 65_536;
 
@@ -56,7 +57,7 @@ export function readProjectReference(input: {
 
   let fd: number | null = null;
   try {
-    const lexical = lstatSync(absolute);
+    const lexical = lstatSync(absolute, { bigint: true });
     if (!lexical.isFile()) return result(lexical.isSymbolicLink() ? 'unreadable' : 'non_text');
     if (realpathSync(absolute) !== absolute) return result('unreadable');
     if (lexical.size > PROJECT_REFERENCE_MAX_BYTES) return result('too_large');
@@ -66,14 +67,8 @@ export function readProjectReference(input: {
     if (before.size > BigInt(PROJECT_REFERENCE_MAX_BYTES)) return result('too_large');
     const bytes = readFileSync(fd);
     const after = fstatSync(fd, { bigint: true });
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      BigInt(bytes.byteLength) !== after.size
-    )
-      return result('unreadable');
+    const pathAfter = lstatSync(absolute, { bigint: true });
+    assertStableSingleLinkFile(lexical, before, after, pathAfter, bytes);
     let content: string;
     try {
       content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);

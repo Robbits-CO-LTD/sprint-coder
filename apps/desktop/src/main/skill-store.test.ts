@@ -1,6 +1,7 @@
 import {
   chmod,
   lstat,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -216,6 +217,23 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     await expect(store.previewImport(candidate!)).rejects.toMatchObject({
       code: 'UNSAFE_SOURCE',
     });
+  });
+
+  it('rejects a hardlink in a Skill snapshot without creating an import', async () => {
+    const root = await tempRoot();
+    const source = join(root, 'skills');
+    const { path } = await fixture(source, 'hardlinked');
+    const outside = join(root, 'outside.txt');
+    await writeFile(outside, 'outside bytes');
+    await link(outside, join(path, 'reference.txt'));
+    const storeRoot = join(root, 'store');
+    const store = await SkillStore.open({ rootPath: storeRoot });
+    const [candidate] = await store.scanSources({ claudePath: source });
+
+    await expect(store.previewImport(candidate!)).rejects.toMatchObject({
+      code: 'SOURCE_CHANGED',
+    });
+    expect(await readdir(join(storeRoot, 'imported', 'claude'))).toEqual([]);
   });
 
   it('is idempotent for the same digest and conflicts on a changed skill', async () => {
