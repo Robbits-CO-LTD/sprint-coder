@@ -17,8 +17,9 @@ vi.mock('mermaid', () => ({
 describe('Mermaid SVG security boundary', () => {
   beforeEach(() => {
     renderMermaid.mockClear();
-    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
-      .IS_REACT_ACT_ENVIRONMENT = true;
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
   });
   it('removes executable, external-fetch, and event-bearing SVG content', () => {
     const sanitized = sanitizeMermaidSvg(`

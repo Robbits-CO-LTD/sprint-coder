@@ -100,7 +100,7 @@ function PreBlock(props: MarkdownElementProps<'pre'> & { isStreaming: boolean })
 }
 
 function MermaidDiagram({ source, fallback }: { source: string; fallback: ReactNode }) {
-  const [svg, setSvg] = useState<string | null>(null);
+  const [rendered, setRendered] = useState<{ source: string; svg: string } | null>(null);
   const invalidInput =
     source.length === 0 ||
     source.length > MAX_MERMAID_SOURCE_LENGTH ||
@@ -110,7 +110,6 @@ function MermaidDiagram({ source, fallback }: { source: string; fallback: ReactN
   useEffect(() => {
     if (invalidInput) return;
     let current = true;
-    setSvg(null);
     const id = `sprint-coder-mermaid-${nextMermaidId++}`;
     void import('mermaid')
       .then(async ({ default: mermaid }) => {
@@ -121,16 +120,17 @@ function MermaidDiagram({ source, fallback }: { source: string; fallback: ReactN
           suppressErrorRendering: true,
         });
         const rendered = await mermaid.render(id, source);
-        if (current) setSvg(sanitizeMermaidSvg(rendered.svg));
+        if (current) setRendered({ source, svg: sanitizeMermaidSvg(rendered.svg) });
       })
       .catch(() => {
-        if (current) setSvg(null);
+        if (current) setRendered(null);
       });
     return () => {
       current = false;
     };
   }, [invalidInput, source]);
 
+  const svg = rendered?.source === source ? rendered.svg : null;
   if (invalidInput || svg === null) return fallback;
   return (
     <div
