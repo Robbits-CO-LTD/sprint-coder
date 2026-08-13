@@ -94,7 +94,6 @@ export async function prepareExecutionImage(
   const windowsDependencyIds: string[] = [];
   let sealedId: string | undefined;
   let sealedDescriptor: number | undefined;
-  let supportSealedId: string | undefined;
   let interpreter: PreparedExecutionImage | undefined;
   try {
     const sourceBytes =
@@ -205,16 +204,13 @@ export async function prepareExecutionImage(
       !trustedLinuxPath &&
       ['node', 'nodejs'].includes(basename(expected.canonicalPath).toLowerCase())
     ) {
-      const preload = posixAddon().prepareSealedExecutionImage(
-        Buffer.from(
-          'Object.defineProperty(process,"execPath",{value:process.env.SPRINT_CODER_PINNED_EXECUTABLE});',
-          'utf8',
-        ),
-        0o444,
-      );
-      supportSealedId = preload.id;
       environment = Object.freeze({
-        NODE_OPTIONS: `--require=/proc/${process.pid}/fd/${preload.fd}`,
+        // A file-backed preload is deliberately avoided here: Node realpaths `--require`
+        // targets and turns a sealed memfd into an unusable `/memfd:... (deleted)` path.
+        // The constant data URL contains no executable bytes from the approved image and
+        // keeps descendant Node launches pinned to the Main-owned sealed descriptor.
+        NODE_OPTIONS:
+          '--import=data:text/javascript,process.execPath%3Dprocess.env.SPRINT_CODER_PINNED_EXECUTABLE',
         SPRINT_CODER_PINNED_EXECUTABLE: baseLaunchPath,
       });
     }
@@ -261,10 +257,6 @@ export async function prepareExecutionImage(
               posixAddon().closeSealedExecutionImage(sealedId);
               sealedId = undefined;
             }
-            if (supportSealedId !== undefined) {
-              posixAddon().closeSealedExecutionImage(supportSealedId);
-              supportSealedId = undefined;
-            }
             if (held !== undefined) {
               await held.close();
               held = undefined;
@@ -280,7 +272,6 @@ export async function prepareExecutionImage(
     if (windowsId !== undefined) windowsAddon().closePreparedExecutionImage(windowsId);
     for (const id of windowsDependencyIds.splice(0)) windowsAddon().closePreparedExecutionImage(id);
     if (sealedId !== undefined) posixAddon().closeSealedExecutionImage(sealedId);
-    if (supportSealedId !== undefined) posixAddon().closeSealedExecutionImage(supportSealedId);
     await held?.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
     throw error;
