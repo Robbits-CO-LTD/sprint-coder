@@ -1,13 +1,19 @@
 import Database from 'better-sqlite3';
 import {
+  closeSync,
   copyFileSync,
+  fsyncSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
+import { COPYFILE_EXCL } from 'node:constants';
 import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
@@ -4605,53 +4611,285 @@ export type DatabaseRecoveryReport = {
   restoredFromBackup: boolean;
   freshStart: boolean;
   corruptFileMovedTo: string | null;
+  resumedRecovery: boolean;
+  recoveryFailure: string | null;
 };
 
-// Probe the database file before real use: a corrupt or non-database file is moved aside and,
-// when a pre-migration backup exists, the backup is restored in its place (blocking-subset item
-// "backup/restore"). Stale -wal/-shm files from the corrupt database must never be replayed
-// against the restored copy, so they are removed together with the corrupt file.
+export class DatabaseRecoveryError extends Error {
+  readonly name = 'DatabaseRecoveryError';
+
+  constructor(
+    message: string,
+    readonly recoveryReport: DatabaseRecoveryReport,
+  ) {
+    super(message);
+  }
+}
+
+type RecoveryCrashCheckpoint = 'after_main_retired' | 'after_staging_validated' | 'before_publish';
+
+type RecoveryMarker = {
+  version: 1;
+  phase: 'recovering';
+  source: string;
+  staging: string;
+  retired: string;
+};
+
+type RecoveryMarkerRecord = { marker: RecoveryMarker; path: string };
+
+let recoveryCrashCheckpointForTesting: ((checkpoint: RecoveryCrashCheckpoint) => void) | null =
+  null;
+
+function syncFile(path: string): void {
+  const descriptor = openSync(path, 'r');
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function syncDirectory(path: string): void {
+  let descriptor: number;
+  try {
+    descriptor = openSync(path, 'r');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform === 'win32' && (code === 'EISDIR' || code === 'EPERM')) return;
+    throw error;
+  }
+  try {
+    try {
+      fsyncSync(descriptor);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== 'win32' || (code !== 'EINVAL' && code !== 'ENOTSUP')) throw error;
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function databasePassesQuickCheck(path: string): boolean {
+  if (!isRegularFile(path)) return false;
+  let handle: Database.Database | null = null;
+  try {
+    handle = new Database(path, { readonly: true, fileMustExist: true });
+    const rows = handle.pragma('quick_check') as { quick_check?: string }[] | string[];
+    const first = rows[0];
+    return (typeof first === 'string' ? first : (first?.quick_check ?? '')) === 'ok';
+  } catch {
+    return false;
+  } finally {
+    handle?.close();
+  }
+}
+
+function recoveryOwnedPath(databasePath: string, component: string, prefix: string): string {
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escapedPrefix}${UUID_FILE_COMPONENT}$`, 'i');
+  if (!pattern.test(component) || basename(component) !== component)
+    throw new Error('Database recovery marker contains an invalid path');
+  return `${dirname(databasePath)}${sep}${component}`;
+}
+
+function readRecoveryMarker(databasePath: string): RecoveryMarkerRecord | null {
+  const prefix = `${basename(databasePath)}.recovery-`;
+  const markerPattern = new RegExp(
+    `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${UUID_FILE_COMPONENT}\\.json$`,
+    'i',
+  );
+  const matches = readdirSync(dirname(databasePath), { withFileTypes: true }).filter(
+    (entry) => entry.name.startsWith(prefix) && markerPattern.test(entry.name),
+  );
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) throw new Error('Multiple database recovery markers found');
+  const match = matches[0];
+  if (match === undefined) throw new Error('Database recovery marker disappeared');
+  const markerPath = `${dirname(databasePath)}${sep}${match.name}`;
+  if (!isRegularFile(markerPath)) throw new Error('Database recovery marker is not a regular file');
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(markerPath, 'utf8'));
+  } catch {
+    throw new Error('Database recovery marker is malformed');
+  }
+  if (typeof value !== 'object' || value === null)
+    throw new Error('Database recovery marker is malformed');
+  const marker = value as Partial<RecoveryMarker>;
+  if (
+    marker.version !== 1 ||
+    marker.phase !== 'recovering' ||
+    typeof marker.source !== 'string' ||
+    typeof marker.staging !== 'string' ||
+    typeof marker.retired !== 'string'
+  )
+    throw new Error('Database recovery marker is malformed');
+  return { marker: marker as RecoveryMarker, path: markerPath };
+}
+
+function writeRecoveryMarker(
+  databasePath: string,
+  markerPath: string,
+  marker: RecoveryMarker,
+): void {
+  const temporaryPath = `${markerPath}.tmp-${randomUUID()}`;
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(marker)}\n`, { encoding: 'utf8', flag: 'wx' });
+    syncFile(temporaryPath);
+    renameSync(temporaryPath, markerPath);
+    syncDirectory(dirname(databasePath));
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+// Probe before real use. Recovery is journaled before the main file is retired, and a validated,
+// synced staging database is atomically published. A restart with no main file must therefore
+// resume the marker instead of letting better-sqlite3 silently create an empty database.
 function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport {
   const report: DatabaseRecoveryReport = {
     corruptionDetected: false,
     restoredFromBackup: false,
     freshStart: false,
     corruptFileMovedTo: null,
+    resumedRecovery: false,
+    recoveryFailure: null,
   };
-  if (!existsSync(databasePath)) return report;
-  const probe = (): boolean => {
-    let handle: Database.Database | null = null;
-    try {
-      handle = new Database(databasePath, { fileMustExist: true });
-      const rows = handle.pragma('quick_check') as { quick_check?: string }[] | string[];
-      const first = rows[0];
-      const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
-      return verdict === 'ok';
-    } catch {
-      return false;
-    } finally {
-      handle?.close();
-    }
-  };
-  if (probe()) return report;
-  report.corruptionDetected = true;
-  const movedTo = `${databasePath}.corrupt-${Date.now()}`;
-  renameSync(databasePath, movedTo);
-  report.corruptFileMovedTo = movedTo;
-  for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
   const backupPath = `${databasePath}.pre-migration.bak`;
-  for (const candidate of [backupPath, `${backupPath}.previous`]) {
-    if (!existsSync(candidate)) continue;
-    copyFileSync(candidate, databasePath);
-    if (probe()) {
-      report.restoredFromBackup = true;
-      return report;
+  try {
+    let markerRecord = readRecoveryMarker(databasePath);
+    if (markerRecord === null) {
+      if (existsSync(databasePath) && databasePassesQuickCheck(databasePath)) return report;
+      const existingCandidates = [backupPath, `${backupPath}.previous`].filter((candidate) =>
+        existsSync(candidate),
+      );
+      report.resumedRecovery = !existsSync(databasePath) && existingCandidates.length > 0;
+      if (report.resumedRecovery) report.corruptionDetected = true;
+      const source = existingCandidates.find(databasePassesQuickCheck);
+      if (source === undefined) {
+        if (!existsSync(databasePath) && existingCandidates.length === 0) return report;
+        if (existingCandidates.length > 0)
+          throw new Error('Database recovery failed: no valid backup candidate');
+        report.corruptionDetected = true;
+        const movedTo = `${databasePath}.corrupt-${Date.now()}`;
+        renameSync(databasePath, movedTo);
+        report.corruptFileMovedTo = movedTo;
+        for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
+        report.freshStart = true;
+        return report;
+      }
+
+      report.corruptionDetected = existsSync(databasePath);
+      const recoveryId = randomUUID();
+      const retired = `${basename(databasePath)}.corrupt-${recoveryId}`;
+      const marker: RecoveryMarker = {
+        version: 1,
+        phase: 'recovering',
+        source: basename(source),
+        staging: `${basename(databasePath)}.recovery-stage-${recoveryId}`,
+        retired,
+      };
+      const markerPath = `${databasePath}.recovery-${recoveryId}.json`;
+      writeRecoveryMarker(databasePath, markerPath, marker);
+      markerRecord = { marker, path: markerPath };
+      if (existsSync(databasePath)) {
+        const retiredPath = recoveryOwnedPath(
+          databasePath,
+          marker.retired,
+          `${basename(databasePath)}.corrupt-`,
+        );
+        renameSync(databasePath, retiredPath);
+        syncDirectory(dirname(databasePath));
+        report.corruptFileMovedTo = retiredPath;
+        for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
+      }
+      recoveryCrashCheckpointForTesting?.('after_main_retired');
+    } else {
+      report.resumedRecovery = true;
+      report.corruptionDetected = true;
     }
-    rmSync(databasePath, { force: true });
+
+    const { marker, path: markerPath } = markerRecord;
+
+    if (![basename(backupPath), basename(`${backupPath}.previous`)].includes(marker.source))
+      throw new Error('Database recovery marker contains an invalid backup');
+    const stagingPath = recoveryOwnedPath(
+      databasePath,
+      marker.staging,
+      `${basename(databasePath)}.recovery-stage-`,
+    );
+    const retiredPath = recoveryOwnedPath(
+      databasePath,
+      marker.retired,
+      `${basename(databasePath)}.corrupt-`,
+    );
+    if (isRegularFile(retiredPath)) report.corruptFileMovedTo = retiredPath;
+    if (existsSync(databasePath)) {
+      if (databasePassesQuickCheck(databasePath)) {
+        for (const suffix of ['', '-wal', '-shm'])
+          rmSync(`${stagingPath}${suffix}`, { force: true });
+        rmSync(markerPath, { force: true });
+        syncDirectory(dirname(databasePath));
+        report.restoredFromBackup = true;
+        return report;
+      }
+      if (existsSync(retiredPath))
+        throw new Error('Database recovery found both main and retired databases');
+      renameSync(databasePath, retiredPath);
+      syncDirectory(dirname(databasePath));
+      report.corruptionDetected = true;
+      report.corruptFileMovedTo = retiredPath;
+      for (const suffix of ['-wal', '-shm']) rmSync(`${databasePath}${suffix}`, { force: true });
+    }
+
+    const sourcePath = `${dirname(databasePath)}${sep}${marker.source}`;
+    if (!databasePassesQuickCheck(sourcePath))
+      throw new Error('Database recovery failed: marker backup is invalid');
+    if (!databasePassesQuickCheck(stagingPath)) {
+      if (existsSync(stagingPath) && !isRegularFile(stagingPath))
+        throw new Error('Database recovery staging path is not a regular file');
+      rmSync(stagingPath, { force: true });
+      if (!isRegularFile(sourcePath))
+        throw new Error('Database recovery backup changed before staging');
+      copyFileSync(sourcePath, stagingPath, COPYFILE_EXCL);
+      if (!databasePassesQuickCheck(stagingPath))
+        throw new Error('Database recovery failed: staging database is invalid');
+      for (const suffix of ['-wal', '-shm']) rmSync(`${stagingPath}${suffix}`, { force: true });
+      syncFile(stagingPath);
+      syncDirectory(dirname(databasePath));
+    }
+    recoveryCrashCheckpointForTesting?.('after_staging_validated');
+    recoveryCrashCheckpointForTesting?.('before_publish');
+    if (existsSync(databasePath))
+      throw new Error('Database recovery refused to replace main database');
+    renameSync(stagingPath, databasePath);
+    for (const suffix of ['-wal', '-shm']) rmSync(`${stagingPath}${suffix}`, { force: true });
+    syncDirectory(dirname(databasePath));
+    rmSync(markerPath, { force: true });
+    syncDirectory(dirname(databasePath));
+    report.restoredFromBackup = true;
+    return report;
+  } catch (error) {
+    report.recoveryFailure = error instanceof Error ? error.message : String(error);
+    throw new DatabaseRecoveryError(report.recoveryFailure, report);
   }
-  report.freshStart = true;
-  return report;
 }
+
+export const __persistenceRecoveryTestables = {
+  setCrashCheckpointForTesting(callback: ((checkpoint: RecoveryCrashCheckpoint) => void) | null) {
+    recoveryCrashCheckpointForTesting = callback;
+  },
+};
 
 const UUID_FILE_COMPONENT = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 
