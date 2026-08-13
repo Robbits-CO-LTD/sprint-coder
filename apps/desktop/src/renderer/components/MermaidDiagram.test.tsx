@@ -85,6 +85,22 @@ describe('Mermaid SVG security boundary', () => {
     await act(async () => root.unmount());
   });
 
+  it('rejects protocol-relative HTML image labels before rendering', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <Markdown
+          content={'```mermaid\nflowchart TD\nA["<img src=//attacker.invalid/leak>"]\n```'}
+        />,
+      ),
+    );
+
+    expect(renderMermaid).not.toHaveBeenCalled();
+    expect(container.querySelector('code.language-mermaid')).not.toBeNull();
+    await act(async () => root.unmount());
+  });
+
   it('renders a completed valid diagram inside the conversation', async () => {
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }

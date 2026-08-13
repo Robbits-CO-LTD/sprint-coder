@@ -4516,11 +4516,29 @@ button.composer-permission-chip[aria-expanded='true'] {
 .md-mermaid .node text,
 .md-mermaid .label text,
 .md-mermaid .edgeLabel text,
-.md-mermaid .cluster-label text {
+.md-mermaid .cluster-label text,
+.md-mermaid text {
   fill: var(--text-primary);
+}
+.md-mermaid .actor,
+.md-mermaid .labelBox,
+.md-mermaid .note,
+.md-mermaid .activation0,
+.md-mermaid .activation1,
+.md-mermaid .activation2,
+.md-mermaid .stateGroup rect,
+.md-mermaid .classGroup rect,
+.md-mermaid .classBox {
+  fill: var(--bg-elevated);
+  stroke: var(--border-strong);
 }
 .md-mermaid .flowchart-link,
 .md-mermaid .edgePath path,
+.md-mermaid .messageLine0,
+.md-mermaid .messageLine1,
+.md-mermaid .loopLine,
+.md-mermaid .relation,
+.md-mermaid .transition,
 .md-mermaid marker path {
   stroke: var(--text-secondary);
 }

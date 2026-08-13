@@ -77,7 +77,7 @@ const MAX_MERMAID_LINES = 300;
 const MAX_MERMAID_DIAGRAMS = 4;
 const MAX_MERMAID_TOTAL_SOURCE_LENGTH = 40_000;
 const MERMAID_RESOURCE_REFERENCE =
-  /(?:https?|data|file|javascript|vbscript):|url\s*\(|@\{[^}]*\bimg\s*:|\b(?:image|icon|themeCSS)\s*:/i;
+  /(?:https?:)?\/\/|(?:data|file|javascript|vbscript):|url\s*\(|<\s*(?:img|image|link|style)\b|@\{[^}]*\bimg\s*:|\b(?:image|icon|themeCSS)\s*:/i;
 let nextMermaidId = 1;
 
 function mermaidSource(children: ReactNode): string | null {
@@ -117,6 +117,7 @@ function MermaidDiagram({ source, fallback }: { source: string; fallback: ReactN
           startOnLoad: false,
           securityLevel: 'strict',
           htmlLabels: false,
+          flowchart: { htmlLabels: false },
           suppressErrorRendering: true,
         });
         const rendered = await mermaid.render(id, source);
