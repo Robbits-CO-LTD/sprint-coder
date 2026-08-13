@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_pro
 import { createReadStream, readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import {
   createExecutionSpec,
@@ -127,8 +127,7 @@ export async function prepareExecutionSpec(
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
-  const allowSourceHardlinks =
-    process.platform === 'win32' && executableCanonicalPath === (await realpath(process.execPath));
+  const allowSourceHardlinks = await isTrustedWindowsMultiLinkExecutable(executableCanonicalPath);
   if (executableStats.nlink !== 1n && !allowSourceHardlinks)
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must have one link');
   const pathGuard = await createPathGuard({
@@ -166,6 +165,16 @@ export async function prepareExecutionSpec(
     allowSourceHardlinks,
   });
   return spec;
+}
+
+async function isTrustedWindowsMultiLinkExecutable(canonicalPath: string): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+  if (canonicalPath.toLowerCase() === (await realpath(process.execPath)).toLowerCase()) return true;
+  const systemRoot = process.env['SystemRoot'];
+  if (systemRoot === undefined || !isAbsolute(systemRoot)) return false;
+  const systemDirectory = await realpath(join(systemRoot, 'System32'));
+  const childPath = relative(systemDirectory, canonicalPath);
+  return childPath !== '' && !childPath.startsWith('..') && !isAbsolute(childPath);
 }
 
 export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {
