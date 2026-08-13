@@ -5945,6 +5945,7 @@ if (runsWithElectronAbi)
       const started = startExecutingTurn(persistence, task.id);
       const spec = createExecutionSpec({
         absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'c'.repeat(64),
         argv: ['--version'],
         cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'a'.repeat(64) },
         envDelta: {},
@@ -6046,6 +6047,7 @@ if (runsWithElectronAbi)
       const started = startExecutingTurn(persistence, task.id);
       const spec = createExecutionSpec({
         absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'd'.repeat(64),
         argv: ['--version'],
         cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'b'.repeat(64) },
         envDelta: {},

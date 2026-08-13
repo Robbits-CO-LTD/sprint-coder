@@ -3,6 +3,7 @@ import { createExecutionSpec, executionSpecDigest, validateExecutionSpec } from 
 
 const base = {
   absoluteExecutable: '/usr/bin/printf',
+  executionIdentityDigest: 'b'.repeat(64),
   argv: ['%s', 'hello'],
   cwdIdentity: {
     canonicalPath: '/workspace',
@@ -39,6 +40,18 @@ describe('immutable ExecutionSpec', () => {
         cwdIdentity: { ...base.cwdIdentity, identityDigest: 'not-a-digest' },
       }),
     ).toThrow('identity');
+    expect(() => createExecutionSpec({ ...base, executionIdentityDigest: 'not-a-digest' })).toThrow(
+      'execution identity',
+    );
+  });
+
+  it('binds the approved executable and interpreter identity', () => {
+    const approved = createExecutionSpec(base);
+    const replacedInterpreter = createExecutionSpec({
+      ...base,
+      executionIdentityDigest: 'c'.repeat(64),
+    });
+    expect(executionSpecDigest(approved)).not.toBe(executionSpecDigest(replacedInterpreter));
   });
 
   it('detects post-approval mutation or digest substitution', () => {

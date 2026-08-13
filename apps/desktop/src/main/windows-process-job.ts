@@ -8,6 +8,7 @@ type WindowsJobAddon = Readonly<{
   assignProcessToOwnedJob(pid: number, jobId: string): boolean;
   terminateOwnedJob(jobId: string): boolean;
   closeOwnedJob(jobId: string): boolean;
+  runPreparedExecutionImage(executable: string, argv: readonly string[]): number;
 }>;
 
 let loadedAddon: WindowsJobAddon | null | undefined;
@@ -35,7 +36,8 @@ function addon(): WindowsJobAddon {
       loadedAddon =
         typeof candidate.assignProcessToOwnedJob === 'function' &&
         typeof candidate.terminateOwnedJob === 'function' &&
-        typeof candidate.closeOwnedJob === 'function'
+        typeof candidate.closeOwnedJob === 'function' &&
+        typeof candidate.runPreparedExecutionImage === 'function'
           ? (candidate as WindowsJobAddon)
           : null;
     } catch {
@@ -52,20 +54,15 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   let request;
+  let boundary;
   try { request = JSON.parse(input); } catch { process.exitCode = 125; return; }
-  const { spawn } = require('node:child_process');
-  const child = spawn(request.executable, request.argv, {
-    cwd: request.cwd,
-    env: request.env,
-    shell: false,
-    stdio: ['ignore', 'inherit', 'inherit'],
-    windowsHide: true,
-  });
-  child.once('error', () => { process.exitCode = 126; });
-  child.once('close', (code, signal) => {
-    if (process.exitCode === 126) return;
-    process.exitCode = typeof code === 'number' ? code : signal ? 128 : 1;
-  });
+  try {
+    boundary = require(request.nativeAddonPath);
+    if (boundary.enableSafeDllSearchPolicy() !== true) throw new Error('policy unavailable');
+  } catch { process.exitCode = 125; return; }
+  try {
+    process.exitCode = boundary.runPreparedExecutionImage(request.executable, request.argv);
+  } catch { process.exitCode = 126; }
 });
 `;
 

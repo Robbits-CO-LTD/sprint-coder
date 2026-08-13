@@ -2,7 +2,10 @@
 #include <windows.h>
 #include <aclapi.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <mutex>
+#include <atomic>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -12,6 +15,13 @@ namespace {
 
 std::mutex jobs_mutex;
 std::unordered_map<std::string, HANDLE> jobs;
+struct PreparedExecutionHandles {
+  HANDLE parent = INVALID_HANDLE_VALUE;
+  HANDLE file = INVALID_HANDLE_VALUE;
+};
+std::mutex prepared_execution_mutex;
+std::unordered_map<std::string, PreparedExecutionHandles> prepared_execution_images;
+std::atomic<uint64_t> prepared_execution_sequence{1};
 
 napi_value MakeString(napi_env env, const char* value) {
   napi_value result;
@@ -59,6 +69,171 @@ napi_value ThrowUnsafeImageFile(napi_env env, const char* code) {
   return nullptr;
 }
 
+napi_value EnableSafeDllSearchPolicy(napi_env env, napi_callback_info info) {
+  (void)info;
+  HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+  if (kernel32 == nullptr) return ThrowWindowsError(env, "GetModuleHandleW");
+  using SetDefaultDllDirectoriesFn = BOOL(WINAPI*)(DWORD);
+  using SetProcessMitigationPolicyFn = BOOL(WINAPI*)(PROCESS_MITIGATION_POLICY, PVOID, SIZE_T);
+  auto set_directories = reinterpret_cast<SetDefaultDllDirectoriesFn>(
+      GetProcAddress(kernel32, "SetDefaultDllDirectories"));
+  auto set_mitigation = reinterpret_cast<SetProcessMitigationPolicyFn>(
+      GetProcAddress(kernel32, "SetProcessMitigationPolicy"));
+  if (set_directories == nullptr || set_mitigation == nullptr) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return ThrowWindowsError(env, "safe DLL policy discovery");
+  }
+  // Remove the current working directory and application directory from implicit LoadLibrary
+  // searches. Static side-by-side imports were already copied and pinned by Main; Windows system
+  // imports must resolve from System32 before any application-directory candidate.
+  if (!set_directories(LOAD_LIBRARY_SEARCH_SYSTEM32))
+    return ThrowWindowsError(env, "SetDefaultDllDirectories");
+  PROCESS_MITIGATION_IMAGE_LOAD_POLICY policy{};
+  policy.NoRemoteImages = 1;
+  policy.NoLowMandatoryLabelImages = 1;
+  policy.PreferSystem32Images = 1;
+  if (!set_mitigation(ProcessImageLoadPolicy, &policy, sizeof(policy)))
+    return ThrowWindowsError(env, "SetProcessMitigationPolicy");
+  napi_value result;
+  napi_get_boolean(env, true, &result);
+  return result;
+}
+
+std::wstring QuoteCommandLineArgument(const std::wstring& value) {
+  if (value.empty()) return L"\"\"";
+  if (value.find_first_of(L" \t\n\v\"") == std::wstring::npos) return value;
+  std::wstring quoted = L"\"";
+  size_t slashes = 0;
+  for (wchar_t character : value) {
+    if (character == L'\\') {
+      ++slashes;
+      continue;
+    }
+    if (character == L'\"') {
+      quoted.append(slashes * 2 + 1, L'\\');
+      quoted.push_back(L'\"');
+    } else {
+      quoted.append(slashes, L'\\');
+      quoted.push_back(character);
+    }
+    slashes = 0;
+  }
+  quoted.append(slashes * 2, L'\\');
+  quoted.push_back(L'\"');
+  return quoted;
+}
+
+bool ReadCommandArgument(napi_env env, napi_value value, std::wstring* output) {
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok || length > 1000000)
+    return false;
+  std::string utf8(length + 1, '\0');
+  if (napi_get_value_string_utf8(env, value, utf8.data(), length + 1, &length) != napi_ok)
+    return false;
+  utf8.resize(length);
+  if (utf8.find('\0') != std::string::npos) return false;
+  if (utf8.empty()) {
+    output->clear();
+    return true;
+  }
+  return Utf8ToWide(utf8, output);
+}
+
+napi_value RunPreparedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 2) {
+    napi_throw_type_error(env, nullptr, "runPreparedExecutionImage requires executable and argv");
+    return nullptr;
+  }
+  std::string executable_utf8;
+  std::wstring executable;
+  bool is_array = false;
+  if (!ReadString(env, argv[0], &executable_utf8) || !Utf8ToWide(executable_utf8, &executable) ||
+      napi_is_array(env, argv[1], &is_array) != napi_ok || !is_array) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared execution request");
+    return nullptr;
+  }
+  uint32_t length = 0;
+  if (napi_get_array_length(env, argv[1], &length) != napi_ok || length > 4096) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared execution argv");
+    return nullptr;
+  }
+  std::wstring command_line = QuoteCommandLineArgument(executable);
+  for (uint32_t index = 0; index < length; ++index) {
+    napi_value item;
+    std::wstring value;
+    if (napi_get_element(env, argv[1], index, &item) != napi_ok ||
+        !ReadCommandArgument(env, item, &value)) {
+      napi_throw_type_error(env, nullptr, "Invalid prepared execution argv entry");
+      return nullptr;
+    }
+    command_line.push_back(L' ');
+    command_line.append(QuoteCommandLineArgument(value));
+  }
+  SIZE_T attribute_bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  std::vector<unsigned char> attribute_storage(attribute_bytes);
+  auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+  if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes))
+    return ThrowWindowsError(env, "InitializeProcThreadAttributeList");
+  ULONG64 mitigation = PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_REMOTE_ALWAYS_ON |
+                       PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON |
+                       PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
+  if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+                                 &mitigation, sizeof(mitigation), nullptr, nullptr)) {
+    DeleteProcThreadAttributeList(attributes);
+    return ThrowWindowsError(env, "UpdateProcThreadAttribute");
+  }
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.lpAttributeList = attributes;
+  HANDLE inherited_standard_handles[3] = {nullptr, nullptr, nullptr};
+  const DWORD standard_handle_ids[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
+  for (size_t index = 0; index < 3; ++index) {
+    HANDLE source = GetStdHandle(standard_handle_ids[index]);
+    if (source == nullptr || source == INVALID_HANDLE_VALUE ||
+        !DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
+                         &inherited_standard_handles[index], 0, TRUE,
+                         DUPLICATE_SAME_ACCESS)) {
+      for (HANDLE handle : inherited_standard_handles) {
+        if (handle != nullptr) CloseHandle(handle);
+      }
+      DeleteProcThreadAttributeList(attributes);
+      return ThrowWindowsError(env, "DuplicateHandle");
+    }
+  }
+  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup.StartupInfo.hStdInput = inherited_standard_handles[0];
+  startup.StartupInfo.hStdOutput = inherited_standard_handles[1];
+  startup.StartupInfo.hStdError = inherited_standard_handles[2];
+  PROCESS_INFORMATION process{};
+  std::vector<wchar_t> mutable_command(command_line.begin(), command_line.end());
+  mutable_command.push_back(L'\0');
+  const BOOL created = CreateProcessW(
+      executable.c_str(), mutable_command.data(), nullptr, nullptr, TRUE,
+      CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+      &startup.StartupInfo, &process);
+  for (HANDLE handle : inherited_standard_handles) CloseHandle(handle);
+  DeleteProcThreadAttributeList(attributes);
+  if (!created) return ThrowWindowsError(env, "CreateProcessW");
+  if (ResumeThread(process.hThread) == static_cast<DWORD>(-1)) {
+    TerminateProcess(process.hProcess, 126);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return ThrowWindowsError(env, "ResumeThread");
+  }
+  CloseHandle(process.hThread);
+  const DWORD wait = WaitForSingleObject(process.hProcess, INFINITE);
+  DWORD exit_code = 126;
+  const BOOL read_exit = wait == WAIT_OBJECT_0 && GetExitCodeProcess(process.hProcess, &exit_code);
+  CloseHandle(process.hProcess);
+  if (!read_exit) return ThrowWindowsError(env, "WaitForSingleObject");
+  napi_value result;
+  napi_create_uint32(env, exit_code, &result);
+  return result;
+}
+
 std::wstring NormalizeFinalPath(std::wstring path) {
   constexpr wchar_t kUncPrefix[] = L"\\\\?\\UNC\\";
   constexpr wchar_t kLongPrefix[] = L"\\\\?\\";
@@ -84,7 +259,8 @@ bool SamePath(const std::wstring& left, const std::wstring& right) {
 }
 
 bool QueryStableImageIdentity(HANDLE file, FILE_ID_INFO* id, FILE_BASIC_INFO* basic,
-                              FILE_STANDARD_INFO* standard) {
+                              FILE_STANDARD_INFO* standard,
+                              bool require_unique_link = true) {
   FILE_ATTRIBUTE_TAG_INFO tag{};
   if (!GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) ||
       (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
@@ -93,7 +269,8 @@ bool QueryStableImageIdentity(HANDLE file, FILE_ID_INFO* id, FILE_BASIC_INFO* ba
       !GetFileInformationByHandleEx(file, FileBasicInfo, basic, sizeof(*basic)) ||
       !GetFileInformationByHandleEx(file, FileStandardInfo, standard, sizeof(*standard)))
     return false;
-  return !standard->Directory && !standard->DeletePending && standard->NumberOfLinks == 1;
+  return !standard->Directory && !standard->DeletePending && standard->NumberOfLinks >= 1 &&
+         (!require_unique_link || standard->NumberOfLinks == 1);
 }
 
 bool SameImageIdentity(const FILE_ID_INFO& first_id, const FILE_BASIC_INFO& first_basic,
@@ -113,16 +290,23 @@ bool SameImageIdentity(const FILE_ID_INFO& first_id, const FILE_BASIC_INFO& firs
 }
 
 napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
-    napi_throw_type_error(env, nullptr, "readNoReparseImageFile requires one absolute path");
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 ||
+      argc > 2) {
+    napi_throw_type_error(env, nullptr,
+                          "readNoReparseImageFile requires a path and optional policy");
     return nullptr;
   }
   std::string path_utf8;
   std::wstring path;
   if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path)) {
     napi_throw_type_error(env, nullptr, "Invalid image path");
+    return nullptr;
+  }
+  bool allow_hardlinks = false;
+  if (argc == 2 && napi_get_value_bool(env, argv[1], &allow_hardlinks) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid image hardlink policy");
     return nullptr;
   }
   const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
@@ -147,8 +331,9 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   FILE_ID_INFO before_id{};
   FILE_BASIC_INFO before_basic{};
   FILE_STANDARD_INFO before_standard{};
-  constexpr LONGLONG kMaximumBytes = 5LL * 1024LL * 1024LL;
-  bool safe = QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard);
+  constexpr LONGLONG kMaximumBytes = 512LL * 1024LL * 1024LL;
+  bool safe = QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard,
+                                       !allow_hardlinks);
   if (!safe || before_standard.EndOfFile.QuadPart < 1 ||
       before_standard.EndOfFile.QuadPart > kMaximumBytes) {
     const bool too_large = safe && before_standard.EndOfFile.QuadPart > kMaximumBytes;
@@ -189,7 +374,8 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   FILE_ID_INFO after_id{};
   FILE_BASIC_INFO after_basic{};
   FILE_STANDARD_INFO after_standard{};
-  safe = QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) &&
+  safe = QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard,
+                                  !allow_hardlinks) &&
          SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
                            after_standard);
   CloseHandle(file);
@@ -199,6 +385,133 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
   if (napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &result) != napi_ok)
     return ThrowUnsafeImageFile(env, "UNSAFE_IMAGE_FILE");
   return result;
+}
+
+napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "holdPreparedExecutionImage requires one absolute path");
+    return nullptr;
+  }
+  std::string path_utf8;
+  std::wstring path;
+  if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path))
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+  if (full_length == 0) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  std::vector<wchar_t> full_buffer(full_length, L'\0');
+  if (GetFullPathNameW(path.c_str(), full_length, full_buffer.data(), nullptr) == 0)
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const std::wstring full_path(full_buffer.data());
+  if (!SamePath(path, full_path)) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const size_t separator = full_path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  const std::wstring parent_path = full_path.substr(0, separator);
+  HANDLE parent = CreateFileW(parent_path.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+                              FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (parent == INVALID_HANDLE_VALUE) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  FILE_ATTRIBUTE_TAG_INFO parent_tag{};
+  if (!GetFileInformationByHandleEx(parent, FileAttributeTagInfo, &parent_tag,
+                                    sizeof(parent_tag)) ||
+      (parent_tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+      (parent_tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || parent_tag.ReparseTag != 0) {
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  HANDLE file = CreateFileW(full_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
+                                               FILE_FLAG_SEQUENTIAL_SCAN,
+                            nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  FILE_ID_INFO before_id{};
+  FILE_BASIC_INFO before_basic{};
+  FILE_STANDARD_INFO before_standard{};
+  constexpr LONGLONG kMaximumExecutionImageBytes = 512LL * 1024LL * 1024LL;
+  if (!QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard) ||
+      before_standard.EndOfFile.QuadPart < 1 ||
+      before_standard.EndOfFile.QuadPart > kMaximumExecutionImageBytes) {
+    CloseHandle(file);
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  const size_t byte_length = static_cast<size_t>(before_standard.EndOfFile.QuadPart);
+  std::vector<unsigned char> bytes(byte_length);
+  size_t offset = 0;
+  while (offset < byte_length) {
+    DWORD bytes_read = 0;
+    const DWORD requested = static_cast<DWORD>(
+        std::min<size_t>(byte_length - offset, static_cast<size_t>(MAXDWORD)));
+    if (!ReadFile(file, bytes.data() + offset, requested, &bytes_read, nullptr) || bytes_read == 0) {
+      CloseHandle(file);
+      CloseHandle(parent);
+      return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+    }
+    offset += bytes_read;
+  }
+  FILE_ID_INFO after_id{};
+  FILE_BASIC_INFO after_basic{};
+  FILE_STANDARD_INFO after_standard{};
+  if (!QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) ||
+      !SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
+                         after_standard)) {
+    CloseHandle(file);
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  const std::string id = std::to_string(GetCurrentProcessId()) + "-" +
+                         std::to_string(prepared_execution_sequence.fetch_add(1));
+  {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    prepared_execution_images.emplace(id, PreparedExecutionHandles{parent, file});
+  }
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "id", MakeString(env, id.c_str()));
+  napi_value buffer;
+  if (napi_create_buffer_copy(env, bytes.size(), bytes.data(), nullptr, &buffer) != napi_ok) {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    prepared_execution_images.erase(id);
+    CloseHandle(file);
+    CloseHandle(parent);
+    return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  }
+  napi_set_named_property(env, result, "bytes", buffer);
+  return result;
+}
+
+napi_value ClosePreparedExecutionImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
+    napi_throw_type_error(env, nullptr, "closePreparedExecutionImage requires one id");
+    return nullptr;
+  }
+  std::string id;
+  if (!ReadString(env, argv[0], &id)) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared execution image id");
+    return nullptr;
+  }
+  PreparedExecutionHandles handles;
+  {
+    std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+    const auto found = prepared_execution_images.find(id);
+    if (found == prepared_execution_images.end()) {
+      napi_throw_error(env, nullptr, "Prepared execution image is stale");
+      return nullptr;
+    }
+    handles = found->second;
+    prepared_execution_images.erase(found);
+  }
+  CloseHandle(handles.file);
+  CloseHandle(handles.parent);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
 }
 
 bool SameParentPath(const std::wstring& first, const std::wstring& second) {
@@ -545,6 +858,16 @@ napi_value Probe(napi_env env, napi_callback_info) {
   return result;
 }
 
+void CleanupPreparedExecutionImages(void*) {
+  std::lock_guard<std::mutex> guard(prepared_execution_mutex);
+  for (const auto& [id, handles] : prepared_execution_images) {
+    (void)id;
+    CloseHandle(handles.file);
+    CloseHandle(handles.parent);
+  }
+  prepared_execution_images.clear();
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -579,8 +902,17 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr},
       {"readNoReparseImageFile", nullptr, ReadNoReparseImageFile, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"holdPreparedExecutionImage", nullptr, HoldPreparedExecutionImage, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"closePreparedExecutionImage", nullptr, ClosePreparedExecutionImage, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
+      {"enableSafeDllSearchPolicy", nullptr, EnableSafeDllSearchPolicy, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"runPreparedExecutionImage", nullptr, RunPreparedExecutionImage, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
+  napi_add_env_cleanup_hook(env, CleanupPreparedExecutionImages, nullptr);
   return exports;
 }
 

@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { renameSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
+  copyFile,
+  link,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   rename,
   rm,
+  truncate,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,6 +28,16 @@ import {
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
 } from './command-runner';
+
+const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
+  if (process.platform !== 'darwin' || input.executable !== process.execPath)
+    return prepareExecutionSpec(input);
+  return prepareExecutionSpec({
+    ...input,
+    executable: '/bin/sh',
+    argv: ['-c', 'exec "$@"', 'sprint-coder-node-test', process.execPath, ...input.argv],
+  });
+};
 import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
@@ -58,6 +73,8 @@ describe('CommandRunner', () => {
       localappdata: 'C:\\Users\\example\\AppData\\Local',
       ProgramFiles: 'C:\\Program Files',
       OPENAI_API_KEY: 'must-not-cross',
+      LD_PRELOAD: '/workspace/attacker.so',
+      LD_LIBRARY_PATH: '/workspace/lib',
       AWS_SECRET_ACCESS_KEY: 'must-not-cross',
     });
 
@@ -71,6 +88,8 @@ describe('CommandRunner', () => {
     });
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
+    expect(environment).not.toHaveProperty('LD_PRELOAD');
+    expect(environment).not.toHaveProperty('LD_LIBRARY_PATH');
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
@@ -149,7 +168,7 @@ describe('CommandRunner', () => {
 
   it('prepares an immutable spec from a canonical Workspace cwd and rejects escapes', async () => {
     const root = await workspace();
-    const spec = await prepareExecutionSpec({
+    const spec = await prepareTestExecutionSpec({
       rootId: 'root-b',
       workspacePath: root,
       executable: process.execPath,
@@ -157,7 +176,9 @@ describe('CommandRunner', () => {
       cwd: '.',
     });
 
-    expect(spec.absoluteExecutable).toBe(process.execPath);
+    expect(spec.absoluteExecutable).toBe(
+      process.platform === 'darwin' ? '/bin/sh' : process.execPath,
+    );
     expect(spec.cwdIdentity.canonicalPath).toBe(await realpath(root));
     expect(executionSpecPathGuard(spec).rootId).toBe('root-b');
     expect(Object.isFrozen(spec)).toBe(true);
@@ -196,7 +217,7 @@ describe('CommandRunner', () => {
     async () => {
       const root = await workspace();
       const chunks: CommandOutputChunk[] = [];
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
@@ -231,12 +252,12 @@ describe('CommandRunner', () => {
       const root = await workspace();
       const dispatchMarker = join(root, 'dispatches.txt');
       const controller = new AbortController();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
           '-e',
-          `require('node:fs').writeFileSync(${JSON.stringify(dispatchMarker)}, String(process.pid) + '\\n', { flag: 'a' }); const child=require('node:child_process').spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']}); child.stdout.once('data',()=>console.log(JSON.stringify({parent:process.pid,child:child.pid}))); setInterval(()=>{},1000)`,
+          `require('node:fs').writeFileSync(${JSON.stringify(dispatchMarker)}, String(process.pid) + '\\n', { flag: 'a' }); const child=require('node:child_process').spawn(process.argv0,['-e',"process.on('SIGTERM',()=>{}); console.log('ready'); setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']}); child.stdout.once('data',()=>console.log(JSON.stringify({parent:process.pid,child:child.pid}))); setInterval(()=>{},1000)`,
         ],
         cwd: '.',
       });
@@ -284,7 +305,7 @@ describe('CommandRunner', () => {
     async () => {
       const root = await workspace();
       const controller = new AbortController();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', "console.log('ready'); setInterval(()=>{},1000)"],
@@ -315,7 +336,7 @@ describe('CommandRunner', () => {
     'does not let the requested command spoof the supervisor outcome through fd 3',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
@@ -336,7 +357,7 @@ describe('CommandRunner', () => {
     'never accepts a forged supervisor outcome attempted through procfs',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
@@ -365,7 +386,7 @@ describe('CommandRunner', () => {
       const executable = join(root, 'missing-interpreter');
       await writeFile(executable, '#!/bin/sh\nexit 0\n');
       await chmod(executable, 0o644);
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable,
         argv: [],
@@ -374,7 +395,7 @@ describe('CommandRunner', () => {
       const runner = new CommandRunner();
 
       await expect(runner.run(spec)).rejects.toMatchObject({
-        code: 'SPAWN_FAILED',
+        code: 'EXECUTION_IDENTITY_CHANGED',
       });
       expect(runner.activeCount).toBe(0);
     },
@@ -384,7 +405,7 @@ describe('CommandRunner', () => {
     'preserves the ambiguous shell status for a naturally self-signaled command',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', "process.kill(process.pid, 'SIGINT')"],
@@ -404,7 +425,7 @@ describe('CommandRunner', () => {
     'preserves an explicit high exit code instead of guessing that it was a signal',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', 'process.exit(130)'],
@@ -424,7 +445,7 @@ describe('CommandRunner', () => {
     'preserves an explicit exit 127 after the target passes the spawn boundary',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', 'process.exit(127)'],
@@ -443,7 +464,7 @@ describe('CommandRunner', () => {
     'drains a redirected background descendant after its direct child exits naturally',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: '/bin/sh',
         argv: ['-c', 'sleep 30 >/dev/null 2>&1 & echo $! > child.pid'],
@@ -482,12 +503,12 @@ describe('CommandRunner', () => {
     'drains a verified descendant after the requested command kills the supervisor leader',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
           '-e',
-          `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>{process.kill(process.ppid,'SIGKILL'); setTimeout(()=>process.exit(0),150)},100); setInterval(()=>{},1000)`,
+          `const {spawn}=require('node:child_process'); const child=spawn(process.argv0,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>{process.kill(process.ppid,'SIGKILL'); setTimeout(()=>process.exit(0),150)},100); setInterval(()=>{},1000)`,
         ],
         cwd: '.',
       });
@@ -522,7 +543,7 @@ describe('CommandRunner', () => {
       const root = await workspace();
       const childScript =
         "const fs=require('node:fs'); fs.writeFileSync('child.pid',String(process.pid)); process.on('SIGTERM',()=>{}); fs.writeFileSync('ready','yes'); setInterval(()=>{},1000)";
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: '/bin/sh',
         argv: [
@@ -568,12 +589,12 @@ describe('CommandRunner', () => {
     async () => {
       const root = await workspace();
       const controller = new AbortController();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
           '-e',
-          "const cp=require('node:child_process'); const child=cp.spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
+          "const cp=require('node:child_process'); const child=cp.spawn(process.argv0,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
         ],
         cwd: '.',
       });
@@ -614,7 +635,7 @@ describe('CommandRunner', () => {
   it('settles a normal command with no descendants before dispose', async () => {
     const root = await workspace();
     const runner = new CommandRunner();
-    const spec = await prepareExecutionSpec({
+    const spec = await prepareTestExecutionSpec({
       workspacePath: root,
       executable: process.execPath,
       argv: ['--version'],
@@ -628,7 +649,7 @@ describe('CommandRunner', () => {
 
   it('fails closed when an unissued or changed ExecutionSpec reaches the execution boundary', async () => {
     const root = await workspace();
-    const spec = await prepareExecutionSpec({
+    const spec = await prepareTestExecutionSpec({
       workspacePath: root,
       executable: process.execPath,
       argv: ['--version'],
@@ -645,7 +666,7 @@ describe('CommandRunner', () => {
     'captures a trustworthy process-start identity before publishing started',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['--version'],
@@ -682,7 +703,7 @@ describe('CommandRunner', () => {
       const root = await workspace();
       const writes = 100;
       const perWrite = 300;
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
@@ -711,7 +732,7 @@ describe('CommandRunner', () => {
     async () => {
       const root = await workspace();
       const expectedBytes = 2 * 1024 * 1024;
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', `process.stdout.write('x'.repeat(${expectedBytes}))`],
@@ -742,12 +763,12 @@ describe('CommandRunner', () => {
     'kills the owned process tree and fails closed when the durable output sink rejects',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
           '-e',
-          "const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
+          "const child=require('node:child_process').spawn(process.argv0,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); console.log(JSON.stringify({parent:process.pid,child:child.pid})); setInterval(()=>{},1000)",
         ],
         cwd: '.',
       });
@@ -774,7 +795,7 @@ describe('CommandRunner', () => {
     async () => {
       const root = await workspace();
       const marker = join(root, 'spawned');
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes')`],
@@ -793,11 +814,33 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'preserves leading, middle, and trailing empty Windows argv entries',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', 'console.log(JSON.stringify(process.argv.slice(1)))', '', 'middle', ''],
+        cwd: '.',
+      });
+      let output = '';
+      await expect(
+        new CommandRunner().run(spec, {
+          onChunk: (chunk) => {
+            output += chunk.text;
+          },
+        }),
+      ).resolves.toMatchObject({ exitCode: 0 });
+      expect(JSON.parse(output.trim())).toEqual(['', 'middle', '']);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
     'runs a short-lived Windows command exactly once after the durable dispatch boundary',
     async () => {
       const root = await workspace();
       const marker = join(root, 'spawned');
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes')`],
@@ -824,7 +867,7 @@ describe('CommandRunner', () => {
     'resolves git, node, and npm from the real Windows PATH used by direct API tools',
     async () => {
       const root = await workspace();
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable: process.execPath,
         argv: [
@@ -848,13 +891,227 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
+    'launches the prepared bytes when the approved path is replaced at the spawn barrier',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'command.sh');
+      const moved = join(root, 'approved-original.sh');
+      const approvedBytes = "#!/bin/sh\nprintf 'original\\n'\n";
+      await writeFile(executable, approvedBytes);
+      await chmod(executable, 0o700);
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+      let output = '';
+      let startedImage: { digest: string; identity: string } | undefined;
+
+      const result = await new CommandRunner().run(spec, {
+        beforeSpawn: () => {
+          renameSync(executable, moved);
+          writeFileSync(executable, "#!/bin/sh\nprintf 'attacker\\n'\n", { mode: 0o700 });
+        },
+        onChunk: (chunk) => {
+          output += chunk.text;
+        },
+        onStarted: ({ executionImageDigest, executionImageIdentity }) => {
+          startedImage = { digest: executionImageDigest, identity: executionImageIdentity };
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(output).toBe('original\n');
+      expect(startedImage).toEqual({
+        digest: createHash('sha256').update(approvedBytes).digest('hex'),
+        identity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'pins a shebang interpreter before the approved interpreter path can be replaced',
+    async () => {
+      const root = await workspace();
+      const bin = join(root, 'bin');
+      const interpreter = process.platform === 'linux' ? join(bin, 'sh') : '/bin/sh';
+      await mkdir(bin);
+      if (process.platform === 'linux') await copyFile('/bin/sh', interpreter);
+      const executable = join(root, 'command.sh');
+      await writeFile(
+        executable,
+        `#!${interpreter}\nprintf 'approved-interpreter:%s\\n' "$(dirname "$0")"\nsleep 0.2\n`,
+      );
+      await chmod(executable, 0o700);
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+      let output = '';
+      let debugOutput = '';
+
+      const result = await new CommandRunner().run(spec, {
+        beforeSpawn: () => {
+          if (process.platform === 'linux') {
+            renameSync(interpreter, `${interpreter}.approved`);
+            writeFileSync(interpreter, 'attacker');
+          }
+        },
+        onChunk: (chunk) => {
+          output += chunk.text;
+          debugOutput += `${chunk.stream}:${chunk.text}`;
+        },
+      });
+
+      expect(result.exitCode, debugOutput).toBe(0);
+      expect(output).toBe(`approved-interpreter:${await realpath(root)}\n`);
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'rejects a shebang interpreter replaced after approval but before revalidation',
+    async () => {
+      const root = await workspace();
+      const interpreter = join(root, 'approved-sh');
+      await copyFile('/bin/sh', interpreter);
+      await chmod(interpreter, 0o700);
+      const executable = join(root, 'command.sh');
+      await writeFile(executable, `#!${interpreter}\nprintf 'must-not-run\\n'\n`);
+      await chmod(executable, 0o700);
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+
+      await rename(interpreter, `${interpreter}.approved`);
+      await copyFile('/bin/false', interpreter);
+      await chmod(interpreter, 0o700);
+
+      await expect(new CommandRunner().run(spec)).rejects.toMatchObject({
+        code: 'EXECUTION_IDENTITY_CHANGED',
+      } satisfies Partial<CommandRunnerError>);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects env shebang aliases before dynamic PATH resolution',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'dynamic.sh');
+      await writeFile(executable, '#!/bin/env node\nconsole.log("unsafe")\n');
+      await chmod(executable, 0o700);
+      await expect(
+        prepareTestExecutionSpec({
+          workspacePath: root,
+          executable,
+          argv: [],
+          cwd: '.',
+        }),
+      ).rejects.toThrow(/shebang/i);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects launcher shebang arguments that could resolve an unsealed executable',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'dynamic-launcher.sh');
+      await writeFile(executable, '#!/usr/bin/nice node\nconsole.log("unsafe")\n');
+      await chmod(executable, 0o700);
+      await expect(
+        prepareTestExecutionSpec({ workspacePath: root, executable, argv: [], cwd: '.' }),
+      ).rejects.toThrow(/shebang/i);
+    },
+  );
+
+  it('rejects an oversized executable before reading its sparse contents', async () => {
+    const root = await workspace();
+    const executable = join(root, process.platform === 'win32' ? 'oversized.exe' : 'oversized');
+    await writeFile(executable, 'x');
+    await truncate(executable, 512 * 1024 * 1024 + 1);
+    await expect(
+      prepareExecutionSpec({ workspacePath: root, executable, argv: [], cwd: '.' }),
+    ).rejects.toThrow(/size limit/i);
+  });
+
+  it.runIf(process.platform === 'darwin')(
+    'fails closed for a mutable native image when descriptor execution is unavailable',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'mutable-native');
+      await copyFile(process.execPath, executable);
+      await chmod(executable, 0o700);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: ['--version'],
+        cwd: '.',
+      });
+
+      await expect(new CommandRunner().run(spec)).rejects.toMatchObject({
+        code: 'EXECUTION_IDENTITY_CHANGED',
+        message: expect.stringMatching(/cannot safely launch/i),
+      });
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'launches a held Windows image when its approved path is replaced at the spawn barrier',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'approved.exe');
+      const moved = join(root, 'approved-original.exe');
+      await copyFile(process.execPath, executable);
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: ['--version'],
+        cwd: '.',
+      });
+      let output = '';
+
+      const result = await new CommandRunner().run(spec, {
+        beforeSpawn: () => {
+          renameSync(executable, moved);
+          writeFileSync(executable, 'not an executable');
+        },
+        onChunk: (chunk) => {
+          output += chunk.text;
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(output).toMatch(/^v\d+/);
+    },
+  );
+
+  it('rejects an executable with a hardlink alias', async () => {
+    const root = await workspace();
+    const executable = join(root, process.platform === 'win32' ? 'command.exe' : 'command.sh');
+    await copyFile(process.execPath, executable);
+    await link(executable, join(root, 'alias'));
+
+    await expect(
+      prepareExecutionSpec({ workspacePath: root, executable, argv: [], cwd: '.' }),
+    ).rejects.toMatchObject({
+      code: 'EXECUTION_SPEC_INVALID',
+    } satisfies Partial<CommandRunnerError>);
+  });
+
+  it.runIf(process.platform !== 'win32')(
     'rejects an executable rewritten in place after preparation',
     async () => {
       const root = await workspace();
       const executable = join(root, 'command.sh');
       await writeFile(executable, '#!/bin/sh\nexit 0\n');
       await chmod(executable, 0o700);
-      const spec = await prepareExecutionSpec({
+      const spec = await prepareTestExecutionSpec({
         workspacePath: root,
         executable,
         argv: [],
