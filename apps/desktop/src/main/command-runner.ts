@@ -431,11 +431,11 @@ export class CommandRunner {
         processStartIdentity,
       });
       if (posixControl !== undefined) {
-        this.startPosixIdentityMonitor(active);
         const targetGate = (
           child.stdio as unknown as readonly (NodeJS.WritableStream | null | undefined)[]
         )[5];
         targetGate?.end('run\n');
+        this.startPosixIdentityMonitor(active);
       }
     } catch (error) {
       try {
@@ -890,6 +890,7 @@ export class CommandRunner {
   }
 
   private startPosixIdentityMonitor(active: ActiveProcess): void {
+    const startedAt = Date.now();
     const capture = async (): Promise<void> => {
       try {
         const members = await readPosixGroupMemberIdentities(active.pid);
@@ -904,12 +905,13 @@ export class CommandRunner {
           active.child.signalCode === null &&
           active.posixIdentityMonitor !== undefined
         ) {
-          active.posixIdentityMonitor = setTimeout(() => void capture(), 100);
+          const intervalMs = Date.now() - startedAt < 500 ? 25 : 100;
+          active.posixIdentityMonitor = setTimeout(() => void capture(), intervalMs);
           active.posixIdentityMonitor.unref();
         }
       }
     };
-    active.posixIdentityMonitor = setTimeout(() => void capture(), 100);
+    active.posixIdentityMonitor = setTimeout(() => void capture(), 0);
     active.posixIdentityMonitor.unref();
   }
 
