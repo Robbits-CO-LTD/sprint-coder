@@ -332,6 +332,50 @@ describe('CommandRunner', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    'rejects a forged supervisor outcome written through procfs',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          `require('node:fs').writeFileSync('/proc/' + process.ppid + '/fd/3', '{"exitCode":0,"signal":null}\\n'); process.exit(7)`,
+        ],
+        cwd: '.',
+      });
+      const runner = new CommandRunner();
+
+      await expect(runner.run(spec)).rejects.toMatchObject({
+        code: 'SPAWN_FAILED',
+      });
+      expect(runner.activeCount).toBe(0);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'reports an exec failure instead of persisting it as a normal exit',
+    async () => {
+      const root = await workspace();
+      const executable = join(root, 'missing-interpreter');
+      await writeFile(executable, '#!/bin/sh\nexit 0\n');
+      await chmod(executable, 0o644);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable,
+        argv: [],
+        cwd: '.',
+      });
+      const runner = new CommandRunner();
+
+      await expect(runner.run(spec)).rejects.toMatchObject({
+        code: 'SPAWN_FAILED',
+      });
+      expect(runner.activeCount).toBe(0);
+    },
+  );
+
   it.runIf(process.platform !== 'win32')(
     'preserves the ambiguous shell status for a naturally self-signaled command',
     async () => {
@@ -406,6 +450,44 @@ describe('CommandRunner', () => {
       } finally {
         if (descendantPid !== undefined) killProcessIfAlive(descendantPid);
         if (processGroupId !== undefined) killProcessGroupIfAlive(processGroupId);
+        await runner.dispose().catch(() => undefined);
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'drains a verified descendant after the requested command kills the supervisor leader',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          `process.on('SIGTERM',()=>{}); const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:'ignore'}); console.log(JSON.stringify({target:process.pid,child:child.pid})); setTimeout(()=>process.kill(process.ppid,'SIGKILL'),100); setInterval(()=>{},1000)`,
+        ],
+        cwd: '.',
+      });
+      const runner = new CommandRunner({ cancelGraceMs: 30 });
+      let output = '';
+      let pids: { target: number; child: number } | undefined;
+
+      try {
+        const result = await runner.run(spec, {
+          onChunk: ({ text }) => {
+            output += text;
+          },
+        });
+        pids = JSON.parse(output.trim()) as { target: number; child: number };
+        expect(result).toMatchObject({ canceled: false, termination: 'natural' });
+        expect(runner.activeCount).toBe(0);
+        await expectProcessDead(pids.target);
+        await expectProcessDead(pids.child);
+      } finally {
+        if (pids !== undefined) {
+          killProcessIfAlive(pids.target);
+          killProcessIfAlive(pids.child);
+        }
         await runner.dispose().catch(() => undefined);
       }
     },

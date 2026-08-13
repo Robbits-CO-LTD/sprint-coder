@@ -72,14 +72,26 @@ const execFileAsync = promisify(execFile);
 // RunAsNode mode. It remains the process-group leader, reports the target outcome on fd 3, then
 // execs an ignored-TERM sleep in place so its captured PID/start identity stays verifiable.
 const POSIX_COMMAND_WRAPPER = String.raw`
+IFS= read -r control_nonce <&4 || exit 125
+exec 4<&-
 trap '' TERM
-(trap - TERM; exec "$@" 3>&-) &
+(
+  trap - TERM
+  IFS= read -r gate <&5 || exit 125
+  exec 5<&-
+  exec "$@" 3>&-
+) &
 target_pid=$!
+printf '{"nonce":"%s","type":"started","pid":%s}\n' "$control_nonce" "$target_pid" >&3
 # Linux shells may diagnose a signal-terminated asynchronous job from wait on the shell's
 # stderr. That supervisor-owned diagnostic must not contaminate the requested command's stderr.
 wait "$target_pid" 2>/dev/null
 status=$?
-printf '{"exitCode":%s,"signal":null}\n' "$status" >&3
+if [ "$status" -eq 126 ] || [ "$status" -eq 127 ]; then
+  printf '{"nonce":"%s","type":"spawnError","status":%s}\n' "$control_nonce" "$status" >&3
+else
+  printf '{"nonce":"%s","type":"outcome","exitCode":%s,"signal":null}\n' "$control_nonce" "$status" >&3
+fi
 exec /bin/sleep 2147483647
 `;
 
@@ -187,6 +199,7 @@ type ActiveProcess = {
   settled: Promise<void>;
   resolveSettled: () => void;
   outcome: Promise<{ exitCode: number | null; signal: string | null }>;
+  posixOwnedMembers?: Map<number, string>;
   windowsJobId?: string;
   windowsOwnedPids?: Promise<readonly Readonly<{ pid: number; processStartIdentity: string }>[]>;
 };
@@ -268,6 +281,7 @@ export class CommandRunner {
       };
     const executionId = randomUUID();
     const lease = randomUUID();
+    const posixControlNonce = randomUUID();
     const startedAt = Date.now();
     options.beforeSpawn?.();
     let child: ChildProcess;
@@ -290,7 +304,9 @@ export class CommandRunner {
           cwd: spec.cwdIdentity.canonicalPath,
           env: buildEnvironment(spec.envDelta),
           shell: false,
-          stdio: windows ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'pipe'],
+          stdio: windows
+            ? ['pipe', 'pipe', 'pipe']
+            : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe'],
           detached: !windows,
           windowsHide: true,
         },
@@ -299,8 +315,11 @@ export class CommandRunner {
       throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
     }
     const processClosePromise = waitForClose(child);
-    const outcomePromise =
-      process.platform === 'win32' ? processClosePromise : waitForPosixCommandOutcome(child);
+    const posixControl =
+      process.platform === 'win32'
+        ? undefined
+        : waitForPosixCommandOutcome(child, posixControlNonce);
+    const outcomePromise = posixControl?.outcome ?? processClosePromise;
     void outcomePromise.catch(() => undefined);
     try {
       await waitForSpawn(child);
@@ -324,6 +343,9 @@ export class CommandRunner {
         child.kill();
         throw new CommandRunnerError('SPAWN_FAILED', errorMessage(error));
       }
+    } else {
+      const nonceInput = child.stdio[4] as NodeJS.WritableStream | null | undefined;
+      nonceInput?.end(`${posixControlNonce}\n`);
     }
     let resolveSettled = (): void => undefined;
     const settled = new Promise<void>((resolve) => {
@@ -338,6 +360,7 @@ export class CommandRunner {
       settled,
       resolveSettled,
       outcome: processClosePromise,
+      ...(process.platform === 'win32' ? {} : { posixOwnedMembers: new Map<number, string>() }),
       ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
     };
     this.active.set(executionId, active);
@@ -372,12 +395,36 @@ export class CommandRunner {
     }
     active.processStartIdentity = processStartIdentity;
     try {
+      if (posixControl !== undefined) {
+        const targetPid = await posixControl.started;
+        const targetStartIdentity = readProcessStartIdentity(targetPid);
+        const targetGroupId = readPosixProcessGroupId(targetPid);
+        if (
+          targetStartIdentity === 'unavailable' ||
+          targetStartIdentity.startsWith('unsupported:') ||
+          targetGroupId !== active.pid
+        )
+          throw new CommandRunnerError('SPAWN_FAILED', 'POSIX target identity is unavailable');
+        active.posixOwnedMembers?.set(targetPid, targetStartIdentity);
+      }
+    } catch (error) {
+      await this.terminateKnownAndWait(executionId, lease, active.outcome);
+      this.releaseActive(executionId, active);
+      throw error;
+    }
+    try {
       options.onStarted?.({
         executionId,
         pid: child.pid,
         startedAt,
         processStartIdentity,
       });
+      if (posixControl !== undefined) {
+        const targetGate = (
+          child.stdio as unknown as readonly (NodeJS.WritableStream | null | undefined)[]
+        )[5];
+        targetGate?.end('run\n');
+      }
     } catch (error) {
       try {
         await this.terminateKnownAndWait(executionId, lease, active.outcome);
@@ -635,6 +682,19 @@ export class CommandRunner {
         truncated,
       });
     } catch (error) {
+      if (
+        process.platform !== 'win32' &&
+        (!(error instanceof CommandRunnerError) || error.code !== 'PROCESS_TREE_TERMINATION_FAILED')
+      ) {
+        if (this.ownedTreeAlive(executionId, lease)) {
+          await this.forceOwnedTree(executionId, lease);
+          await waitWithTimeout(
+            processClosePromise,
+            5_000,
+            'POSIX command supervisor did not close after outcome rejection',
+          );
+        }
+      }
       if (error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED') {
         retainActive = true;
         sinkError = error;
@@ -642,12 +702,12 @@ export class CommandRunner {
           try {
             await finalizeStreams();
           } finally {
-            if (this.active.get(executionId) === active) this.active.delete(executionId);
-            if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
-            active.resolveSettled();
+            this.releaseActive(executionId, active);
           }
         };
         if (!outcomeObserved) void active.outcome.then(release, release);
+        else if (process.platform !== 'win32')
+          void this.releaseWhenOwnedTreeExits(executionId, active).then(release, release);
       }
       throw error;
     } finally {
@@ -655,11 +715,7 @@ export class CommandRunner {
       if (forceTimer !== undefined) clearTimeout(forceTimer);
       if (terminationWatchdog !== undefined) clearTimeout(terminationWatchdog);
       options.signal?.removeEventListener('abort', cancel);
-      if (!retainActive && this.active.get(executionId) === active) this.active.delete(executionId);
-      if (!retainActive) {
-        if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
-        active.resolveSettled();
-      }
+      if (!retainActive) this.releaseActive(executionId, active);
     }
   }
 
@@ -779,16 +835,7 @@ export class CommandRunner {
     if (active === undefined || active.lease !== lease || process.platform === 'win32')
       return false;
     try {
-      return execFileSync('/bin/ps', ['-axo', 'pid=,pgid='], {
-        encoding: 'utf8',
-        timeout: 1_000,
-      })
-        .trim()
-        .split('\n')
-        .some((line) => {
-          const [pidText, groupText] = line.trim().split(/\s+/);
-          return Number(groupText) === active.pid && Number(pidText) !== active.pid;
-        });
+      return readPosixGroupMembers(active.pid).some((pid) => pid !== active.pid);
     } catch {
       // An unverifiable group is treated as still populated; force remains identity-gated.
       return true;
@@ -797,13 +844,27 @@ export class CommandRunner {
 
   private posixGroupSignalIsOwned(active: ActiveProcess, leaderAlive: boolean): boolean {
     if (process.platform === 'win32') return false;
-    return posixGroupSignalIsAuthorized({
-      leaderAlive,
-      expectedGroupId: active.pid,
-      observedGroupId: readPosixProcessGroupId(active.pid),
-      expectedStartIdentity: active.processStartIdentity,
-      observedStartIdentity: readProcessStartIdentity(active.pid),
-    });
+    if (leaderAlive)
+      return posixGroupSignalIsAuthorized({
+        leaderAlive,
+        expectedGroupId: active.pid,
+        observedGroupId: readPosixProcessGroupId(active.pid),
+        expectedStartIdentity: active.processStartIdentity,
+        observedStartIdentity: readProcessStartIdentity(active.pid),
+      });
+    const verifiedWitness = [...(active.posixOwnedMembers ?? [])].some(
+      ([pid, startIdentity]) =>
+        readPosixProcessGroupId(pid) === active.pid &&
+        readProcessStartIdentity(pid) === startIdentity,
+    );
+    if (!verifiedWitness) return false;
+    for (const pid of readPosixGroupMembers(active.pid)) {
+      if (pid === active.pid) continue;
+      const startIdentity = readProcessStartIdentity(pid);
+      if (startIdentity !== 'unavailable' && !startIdentity.startsWith('unsupported:'))
+        active.posixOwnedMembers?.set(pid, startIdentity);
+    }
+    return true;
   }
 
   private async waitForOwnedTreeExit(
@@ -847,12 +908,19 @@ export class CommandRunner {
   }
 
   private retainUntilOutcome(executionId: string, active: ActiveProcess): void {
-    const release = (): void => {
-      if (this.active.get(executionId) === active) this.active.delete(executionId);
-      if (active.windowsJobId !== undefined) closeOwnedJob(active.windowsJobId);
-      active.resolveSettled();
-    };
+    const release = (): void => this.releaseActive(executionId, active);
     void active.outcome.then(release, release);
+  }
+
+  private async releaseWhenOwnedTreeExits(
+    executionId: string,
+    active: ActiveProcess,
+  ): Promise<void> {
+    while (
+      this.active.get(executionId) === active &&
+      this.ownedTreeAlive(executionId, active.lease)
+    )
+      await delay(100);
   }
 
   private releaseActive(executionId: string, active: ActiveProcess): void {
@@ -912,6 +980,20 @@ function readPosixProcessGroupId(pid: number): number | null {
   } catch {
     return null;
   }
+}
+
+function readPosixGroupMembers(groupId: number): number[] {
+  return execFileSync('/bin/ps', ['-axo', 'pid=,pgid='], {
+    encoding: 'utf8',
+    timeout: 1_000,
+  })
+    .trim()
+    .split('\n')
+    .flatMap((line) => {
+      const [pidText, groupText] = line.trim().split(/\s+/);
+      const pid = Number(pidText);
+      return Number(groupText) === groupId && Number.isInteger(pid) && pid > 0 ? [pid] : [];
+    });
 }
 
 async function captureWindowsProcessTree(
@@ -1027,47 +1109,102 @@ function waitForClose(
 
 function waitForPosixCommandOutcome(
   child: ChildProcess,
-): Promise<{ exitCode: number | null; signal: string | null }> {
+  expectedNonce: string,
+): Readonly<{
+  started: Promise<number>;
+  outcome: Promise<{ exitCode: number | null; signal: string | null }>;
+}> {
   const control = child.stdio[3] as NodeJS.ReadableStream | null | undefined;
-  if (control === null || control === undefined) return waitForClose(child);
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let buffer = '';
-    const finish = (outcome: { exitCode: number | null; signal: string | null }): void => {
-      if (settled) return;
-      settled = true;
-      resolve(outcome);
+  if (control === null || control === undefined)
+    return {
+      started: Promise.reject(new CommandRunnerError('SPAWN_FAILED', 'Missing POSIX control pipe')),
+      outcome: waitForClose(child),
     };
-    control.on('data', (chunk: Buffer) => {
-      buffer += chunk.toString('utf8');
-      const newline = buffer.indexOf('\n');
-      if (newline < 0) return;
-      try {
-        const value = JSON.parse(buffer.slice(0, newline)) as Partial<{
-          exitCode: number | null;
-          signal: string | null;
-          spawnError: string;
-        }>;
-        if (typeof value.spawnError === 'string') {
+  let resolveStarted: (pid: number) => void = () => undefined;
+  let rejectStarted: (error: unknown) => void = () => undefined;
+  const started = new Promise<number>((resolve, reject) => {
+    resolveStarted = resolve;
+    rejectStarted = reject;
+  });
+  const outcome = new Promise<{ exitCode: number | null; signal: string | null }>(
+    (resolve, reject) => {
+      let settled = false;
+      let startSettled = false;
+      let buffer = '';
+      const finish = (outcome: { exitCode: number | null; signal: string | null }): void => {
+        if (settled) return;
+        settled = true;
+        resolve(outcome);
+      };
+      control.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8');
+        if (buffer.length > 64 * 1024 && !settled) {
           settled = true;
-          reject(new CommandRunnerError('SPAWN_FAILED', value.spawnError));
+          reject(new CommandRunnerError('SPAWN_FAILED', 'POSIX control message exceeded limit'));
           return;
         }
-        if (!(
-          (typeof value.exitCode === 'number' || value.exitCode === null) &&
-          (typeof value.signal === 'string' || value.signal === null)
-        ))
-          throw new Error('Malformed POSIX command outcome');
-        finish({ exitCode: value.exitCode, signal: value.signal });
-      } catch (error) {
-        if (!settled) reject(new CommandRunnerError('SPAWN_FAILED', errorMessage(error)));
-      }
-    });
-    child.once('error', (error) => {
-      if (!settled) reject(new CommandRunnerError('SPAWN_FAILED', error.message));
-    });
-    child.once('close', (exitCode, signal) => finish({ exitCode, signal }));
-  });
+        let newline = buffer.indexOf('\n');
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          try {
+            const value = JSON.parse(line) as Partial<{
+              nonce: string;
+              type: string;
+              pid: number;
+              status: number;
+              exitCode: number | null;
+              signal: string | null;
+            }>;
+            if (value.nonce !== expectedNonce)
+              throw new Error('POSIX control message authentication failed');
+            if (value.type === 'started' && Number.isInteger(value.pid) && Number(value.pid) > 0) {
+              if (!startSettled) {
+                startSettled = true;
+                resolveStarted(Number(value.pid));
+              }
+            } else if (value.type === 'spawnError' && typeof value.status === 'number') {
+              settled = true;
+              reject(
+                new CommandRunnerError(
+                  'SPAWN_FAILED',
+                  `POSIX target exec failed with status ${value.status}`,
+                ),
+              );
+            } else if (
+              value.type === 'outcome' &&
+              (typeof value.exitCode === 'number' || value.exitCode === null) &&
+              (typeof value.signal === 'string' || value.signal === null)
+            )
+              finish({ exitCode: value.exitCode, signal: value.signal });
+            else throw new Error('Malformed POSIX command outcome');
+          } catch (error) {
+            if (!settled) {
+              settled = true;
+              reject(new CommandRunnerError('SPAWN_FAILED', errorMessage(error)));
+            }
+          }
+          newline = buffer.indexOf('\n');
+        }
+      });
+      child.once('error', (error) => {
+        const spawnError = new CommandRunnerError('SPAWN_FAILED', error.message);
+        if (!startSettled) rejectStarted(spawnError);
+        if (!settled) reject(spawnError);
+      });
+      const finishFromSupervisorExit = (exitCode: number | null, signal: string | null): void => {
+        if (!startSettled)
+          rejectStarted(new CommandRunnerError('SPAWN_FAILED', 'POSIX target did not start'));
+        finish({ exitCode, signal });
+      };
+      // `close` waits for inherited stdout/stderr handles. A hostile target can kill the shell
+      // leader while retaining those handles, so use `exit` to begin the owned-group drain.
+      child.once('exit', finishFromSupervisorExit);
+      child.once('close', finishFromSupervisorExit);
+    },
+  );
+  void started.catch(() => undefined);
+  return { started, outcome };
 }
 
 function outcomeFromOwnedCancellationSignal(
