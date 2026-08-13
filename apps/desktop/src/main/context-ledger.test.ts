@@ -13,6 +13,8 @@ describe('ContextLedger calculations', () => {
     expect(CONTEXT_SYSTEM_PROMPT.startsWith(SPRINT_CODER_IDENTITY_PROMPT)).toBe(true);
     expect(SPRINT_CODER_IDENTITY_PROMPT).toContain('Sprint Coder上で動作');
     expect(SPRINT_CODER_IDENTITY_PROMPT).not.toContain('ログ');
+    expect(CONTEXT_SYSTEM_PROMPT).toContain('Mermaid fenced code block');
+    expect(CONTEXT_SYSTEM_PROMPT).toContain('単純な事実や一段階の説明では図を使わない');
   });
   it('estimates tokens as the ceiling of Unicode character count divided by three', () => {
     expect(estimateTokens('')).toBe(0);

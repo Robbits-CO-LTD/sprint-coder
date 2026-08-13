@@ -4486,6 +4486,25 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-primary);
   border-color: var(--accent-line);
 }
+.md-mermaid {
+  width: 100%;
+  max-height: 560px;
+  margin: 6px 0 12px;
+  padding: 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+}
+.md-mermaid svg {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 520px;
+  margin: 0 auto;
+}
 .md-table-wrap {
   width: 100%;
   margin: 6px 0 12px;
