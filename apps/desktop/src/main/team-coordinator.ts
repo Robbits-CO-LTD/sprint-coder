@@ -1460,6 +1460,15 @@ export class TeamCoordinator {
         executionId: input.executionId,
       });
       await this.verifyWorkspace?.(input.taskId);
+      if (this.executionScheduler.isCancellationRequested(input.executionId)) {
+        await this.cleanupCanceledPreflight(
+          input,
+          worker.id,
+          this.persistence.getTeamMissionWorktree(input.executionId),
+          this.persistence.getTeamExecutionIsolation(input.executionId),
+        );
+        return;
+      }
       if (execution.accessMode === 'workspace-write') {
         const legacyWorktree = this.persistence.getTeamMissionWorktree(input.executionId);
         const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
@@ -1475,6 +1484,12 @@ export class TeamCoordinator {
             input.executionId,
             worker.id,
           );
+      }
+      // Claiming dispatch and observing the tombstone are one synchronous Scheduler operation.
+      // No cancel can land between this decision and the durable running transition below.
+      if (!this.executionScheduler.tryFinishPreflight(input.executionId)) {
+        await this.cleanupCanceledPreflight(input, worker.id, missionWorktree, executionIsolation);
+        return;
       }
       this.persistence.transitionTeamExecution({
         executionId: input.executionId,
@@ -1807,6 +1822,15 @@ export class TeamCoordinator {
       this.finalizeTeamIfWorkersTerminal(input.teamId);
       this.emit(input.taskId, input.teamId);
     } catch (error) {
+      if (this.executionScheduler.isCancellationRequested(input.executionId)) {
+        await this.cleanupCanceledPreflight(
+          input,
+          worker.id,
+          missionWorktree ?? this.persistence.getTeamMissionWorktree(input.executionId),
+          executionIsolation ?? this.persistence.getTeamExecutionIsolation(input.executionId),
+        );
+        return;
+      }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
       this.releaseReservations(reservations);
       if (missionWorktree !== null)
@@ -1939,6 +1963,51 @@ export class TeamCoordinator {
       this.emit(input.taskId, input.teamId);
       throw error;
     }
+  }
+
+  private async cleanupCanceledPreflight(
+    input: {
+      taskId: string;
+      teamId: string;
+      executionId: string;
+    },
+    workerId: string,
+    missionWorktree: TeamMissionWorktreeRecord | null,
+    executionIsolation: TeamExecutionIsolationRecord | null,
+  ): Promise<void> {
+    const canceled = new Error('Execution canceled before runtime dispatch');
+    if (missionWorktree !== null) {
+      try {
+        if (this.worktreeManager !== undefined) {
+          const result = await this.worktreeManager.cleanup({
+            agentId: workerId,
+            worktreeId: missionWorktree.executionId,
+            repoPath: missionWorktree.repoPath,
+          });
+          this.persistence.updateTeamMissionWorktree({
+            executionId: missionWorktree.executionId,
+            to: result.outcome === 'removed' ? 'cleaned' : 'quarantined',
+            reason:
+              result.outcome === 'removed'
+                ? null
+                : 'Canceled preflight worktree remained dirty during cleanup',
+            now: this.isoNow(),
+          });
+        } else this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
+      } catch (error) {
+        this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
+      }
+    }
+    if (executionIsolation !== null) {
+      this.quarantineExecutionIsolation(executionIsolation.executionId, canceled);
+      await this.cleanupIntegratedExecutionIsolation(
+        this.persistence.getTeamExecutionIsolation(executionIsolation.executionId) ??
+          executionIsolation,
+        workerId,
+      );
+    }
+    this.persistence.setWorkerCurrentActivity(workerId, null, this.isoNow());
+    this.emit(input.taskId, input.teamId);
   }
 
   private requeueRateLimitedExecution(
@@ -2820,6 +2889,7 @@ export class TeamCoordinator {
           });
     }
     const { head } = await this.worktreeManager.requireCleanBase(repoPath);
+    this.assertPreflightNotCanceled(executionId);
     const created = await this.worktreeManager.create({
       agentId,
       worktreeId: executionId,
@@ -2860,7 +2930,7 @@ export class TeamCoordinator {
         throw new Error(`Team execution isolation cannot run from ${existing.phase}`);
       if (existing.phase === 'running') return existing;
       for (const repository of existing.repositories)
-        await this.worktreeManager.ensureCreated({
+        await this.ensurePreflightWorktreeCreated(executionId, {
           agentId,
           worktreeId: isolationWorktreeId(executionId, repository.ordinal),
           repoPath: repository.repoPath,
@@ -2876,6 +2946,7 @@ export class TeamCoordinator {
     }
     const workspace = this.persistence.getEffectiveWorkspaceSet(taskId);
     const repositories = await this.requireWorkspaceWriteEligibility(taskId);
+    this.assertPreflightNotCanceled(executionId);
     const bindings = this.persistence.getEffectiveWorkspaceMutationBindings(taskId);
     const repositoryRecords: TeamExecutionIsolation['repositories'] = repositories.map(
       (repository, index) => {
@@ -2899,6 +2970,7 @@ export class TeamCoordinator {
         workspace.roots.map(async (root) => [root.rootId, await fsRealpath(root.path)] as const),
       ),
     );
+    this.assertPreflightNotCanceled(executionId);
     const rootRecords: TeamExecutionIsolation['roots'] = workspace.roots.map((root) => {
       const canonicalRootPath = canonicalRootPaths.get(root.rootId);
       if (canonicalRootPath === undefined)
@@ -2934,7 +3006,7 @@ export class TeamCoordinator {
       now: this.isoNow(),
     });
     for (const repository of recorded.repositories)
-      await this.worktreeManager.ensureCreated({
+      await this.ensurePreflightWorktreeCreated(executionId, {
         agentId,
         worktreeId: isolationWorktreeId(executionId, repository.ordinal),
         repoPath: repository.repoPath,
@@ -2947,6 +3019,20 @@ export class TeamCoordinator {
       reason: null,
       now: this.isoNow(),
     });
+  }
+
+  private assertPreflightNotCanceled(executionId: string): void {
+    if (this.executionScheduler.isCancellationRequested(executionId))
+      throw new Error('Execution canceled during workspace preparation');
+  }
+
+  private async ensurePreflightWorktreeCreated(
+    executionId: string,
+    input: Parameters<WorkerWorktreeManager['ensureCreated']>[0],
+  ): Promise<void> {
+    this.assertPreflightNotCanceled(executionId);
+    await this.worktreeManager!.ensureCreated(input);
+    this.assertPreflightNotCanceled(executionId);
   }
 
   private runtimeWorkspaceForIsolation(

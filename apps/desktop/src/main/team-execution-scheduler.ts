@@ -39,6 +39,8 @@ type QueuedJob = TeamExecutionJob & { ordinal: number };
 export class TeamExecutionScheduler {
   private readonly queued: QueuedJob[] = [];
   private readonly active = new Map<string, QueuedJob>();
+  private readonly preflightExecutionIds = new Set<string>();
+  private readonly cancellationRequests = new Set<string>();
   private readonly requeueAfterRun = new Map<string, TeamExecutionJob>();
   private nextOrdinal = 1;
   private pumpScheduled = false;
@@ -77,10 +79,29 @@ export class TeamExecutionScheduler {
       this.queued.splice(index, 1);
       return true;
     }
+    // Admission moves a job to active before Coordinator preflight changes its durable state to
+    // running. Preserve a cancellation tombstone across that await window so the admitted job can
+    // stop before it dispatches any runtime work.
+    if (this.preflightExecutionIds.has(executionId)) {
+      this.cancellationRequests.add(executionId);
+      this.requeueAfterRun.delete(executionId);
+      return true;
+    }
     // A rate-limited or steered execution can already be durably waiting while its replacement
     // job is parked here until the current run's finally block. Removing that replacement is part
     // of canceling a queued execution; otherwise a stopped Worker could restart moments later.
     return this.requeueAfterRun.delete(executionId);
+  }
+
+  isCancellationRequested(executionId: string): boolean {
+    return this.cancellationRequests.has(executionId);
+  }
+
+  tryFinishPreflight(executionId: string): boolean {
+    if (!this.preflightExecutionIds.has(executionId) || this.cancellationRequests.has(executionId))
+      return false;
+    this.preflightExecutionIds.delete(executionId);
+    return true;
   }
 
   requeueActive(executionId: string, replacement: TeamExecutionJob): boolean {
@@ -120,6 +141,7 @@ export class TeamExecutionScheduler {
       if (job === undefined) return;
       if (job.connection !== undefined) this.connectionAdmission?.admit(toAdmissionCandidate(job));
       this.active.set(job.executionId, job);
+      this.preflightExecutionIds.add(job.executionId);
       // The job owns durable failure recording. Admission control must still release its slot
       // without turning that already-recorded failure into an unhandled process rejection.
       void this.run(job).catch(() => undefined);
@@ -165,6 +187,8 @@ export class TeamExecutionScheduler {
       await job.run();
     } finally {
       this.active.delete(job.executionId);
+      this.preflightExecutionIds.delete(job.executionId);
+      this.cancellationRequests.delete(job.executionId);
       this.connectionAdmission?.release(job.executionId);
       const replacement = this.requeueAfterRun.get(job.executionId);
       if (replacement !== undefined) {
