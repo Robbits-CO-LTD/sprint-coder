@@ -2534,6 +2534,7 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   struct stat created {};
   const std::string staging_leaf = ".sprint-coder-mkdir-stage-" + ownership_token.substr(0, 32);
   bool published = false;
+  bool quarantined_after_publish = false;
   {
     std::lock_guard<std::mutex> guard(state.mutex);
     const auto session = state.sessions.find(session_id);
@@ -2585,7 +2586,7 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
                                   staging_leaf.c_str()) != 0)
             failure = {"NATIVE_FAILURE", "Failed to quarantine mkdir after namespace drift"};
           else
-            published = false;
+            published = false, quarantined_after_publish = true;
         }
         if (failure.code.empty() && fsync(parent_fd) != 0)
           failure = {"NATIVE_FAILURE", ErrnoMessage("fsync mkdir parent")};
@@ -2593,7 +2594,7 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
           if (published &&
               AtomicMoveNoReplace(parent_fd, segments.back().c_str(), parent_fd,
                                   staging_leaf.c_str()) == 0)
-            published = false;
+            published = false, quarantined_after_publish = true;
           int cleanup_fd = openat(parent_fd, staging_leaf.c_str(),
                                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
           std::string cleanup_token;
@@ -2604,6 +2605,10 @@ napi_value CreateDirectory(napi_env env, napi_callback_info info) {
             unlinkat(parent_fd, staging_leaf.c_str(), AT_REMOVEDIR);
           } else {
             CloseFd(&cleanup_fd);
+            if (quarantined_after_publish &&
+                AtomicMoveNoReplace(parent_fd, staging_leaf.c_str(), parent_fd,
+                                    segments.back().c_str()) != 0)
+              failure = {"NATIVE_FAILURE", "Failed to restore substituted mkdir target"};
           }
         }
       }

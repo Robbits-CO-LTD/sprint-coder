@@ -14,6 +14,7 @@ import type {
 import {
   createNativeMutationIntentSeed,
   createNativeMutationIntentSnapshot,
+  nativeMutationDirectoryOwnership,
   type NativeMutationDirection,
   type NativeMutationEffectObservation,
   type NativeMutationEndpointExpectation,
@@ -149,7 +150,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       const owned = await this.native.inspectDirectoryOwnership!(
         session,
         seed.sourceSegments,
-        seed.directoryOwnership!,
+        nativeMutationDirectoryOwnership(seed),
       );
       const observation = directorySagaObservation(owned);
       return owned.state === 'absent'
@@ -233,7 +234,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       this.assertSession(session, resolveToken());
       let effectObservation: NativeMutationEffectObservation;
       if (intent.direction === 'forward') {
-        const ownership = intent.directoryOwnership!;
+        const ownership = nativeMutationDirectoryOwnership(intent);
         let observed = await this.native.inspectDirectoryOwnership!(
           session,
           intent.sourceSegments,
@@ -286,7 +287,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         session,
         intent.sourceSegments,
         source.identityDigest,
-        intent.directoryOwnership!,
+        nativeMutationDirectoryOwnership(intent),
       );
       intent = this.transition(intent, resolveToken, session, {
         state: 'completed',

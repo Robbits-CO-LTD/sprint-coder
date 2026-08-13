@@ -345,7 +345,6 @@ if (runsWithElectronAbi) {
       expect(persistence.getNativeMutationIntent('nmi-forward-1-saga-mkdir')).toMatchObject({
         kind: 'mkdir',
         state: 'completed',
-        directoryOwnership: { token: expect.stringMatching(/^[a-f0-9]{64}$/) },
       });
       await Promise.all([...sessions.values()].map((session) => native.closeSession(session)));
       persistence.close();

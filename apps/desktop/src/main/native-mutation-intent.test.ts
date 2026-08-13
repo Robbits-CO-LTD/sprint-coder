@@ -3,6 +3,7 @@ import {
   InMemoryNativeMutationIntentStore,
   createNativeMutationIntentSeed,
   deriveNativeMutationEffectKind,
+  nativeMutationDirectoryOwnership,
   transitionNativeMutationIntent,
   type NativeMutationEndpointExpectation,
   type NativeMutationIntentKind,
@@ -69,6 +70,28 @@ describe('Native mutation intent journal', () => {
     expect(() =>
       store.prepare(createNativeMutationIntentSeed({ ...input, operationDigest: 'f'.repeat(64) })),
     ).toThrow('reused');
+  });
+
+  it('keeps the mkdir ownership seal stable across journal transitions', () => {
+    let intent = new InMemoryNativeMutationIntentStore(() => 'c'.repeat(32)).prepare(
+      seed('mkdir', absent, null, false),
+    );
+    const ownership = nativeMutationDirectoryOwnership(intent);
+    intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+    expect(nativeMutationDirectoryOwnership(intent)).toEqual(ownership);
+    intent = transitionNativeMutationIntent(intent, {
+      state: 'effect_observed',
+      effectObservation: {
+        source: {
+          state: 'present',
+          entryKind: 'directory',
+          identityDigest: '8'.repeat(64),
+        },
+        destination: absent,
+        auxiliary: absent,
+      },
+    });
+    expect(nativeMutationDirectoryOwnership(intent)).toEqual(ownership);
   });
 
   it('rejects an auxiliary nonce collision across intents in the same workspace', () => {

@@ -79,7 +79,6 @@ export type NativeMutationIntentSeed = Readonly<{
   expectedSource: NativeMutationEndpointExpectation;
   expectedDestination: NativeMutationEndpointExpectation;
   artifact: NativeMutationArtifactBinding | null;
-  directoryOwnership: NativeMutationDirectoryOwnership | null;
   createdAt: string;
   seedDigest: string;
 }>;
@@ -107,7 +106,7 @@ export type NativeMutationIntentSnapshot = NativeMutationIntentSeed &
 
 export type NativeMutationIntentSeedInput = Omit<
   NativeMutationIntentSeed,
-  'version' | 'seedDigest' | 'directoryOwnership'
+  'version' | 'seedDigest'
 >;
 
 export type NativeMutationIntentTransition =
@@ -186,18 +185,13 @@ export class InMemoryNativeMutationIntentStore {
 export function createNativeMutationIntentSeed(
   input: NativeMutationIntentSeedInput,
 ): NativeMutationIntentSeed {
-  const base = {
+  const facts = {
     version: 1 as const,
     ...input,
     sourceSegments: Object.freeze([...input.sourceSegments]),
     destinationSegments:
       input.destinationSegments === null ? null : Object.freeze([...input.destinationSegments]),
   };
-  const directoryOwnership =
-    input.kind === 'mkdir' && input.direction === 'forward'
-      ? directoryOwnershipBinding(base)
-      : null;
-  const facts = { ...base, directoryOwnership };
   validateSeedFacts(facts);
   return freezeSeed({ ...facts, seedDigest: digest(seedDigestFacts(facts)) });
 }
@@ -265,7 +259,9 @@ export function transitionNativeMutationIntent(
   }
   if (transition.state === 'completed') {
     const cleanupRequired =
-      current.temp !== null || current.tombstone !== null || current.directoryOwnership !== null;
+      current.temp !== null ||
+      current.tombstone !== null ||
+      (current.kind === 'mkdir' && current.direction === 'forward');
     if (
       current.state !== 'effect_observed' &&
       !(cleanupRequired && current.state === 'cleanup_pending')
@@ -311,7 +307,6 @@ export function parseNativeMutationIntentSnapshot(value: unknown): NativeMutatio
     'expectedSource',
     'expectedDestination',
     'artifact',
-    'directoryOwnership',
     'createdAt',
     'seedDigest',
     'intentDigest',
@@ -379,7 +374,9 @@ export function parseNativeMutationIntentSnapshot(value: unknown): NativeMutatio
   )
     throw new Error('Native mutation intent is missing its effect observation');
   const cleanupRequired =
-    snapshot.temp !== null || snapshot.tombstone !== null || snapshot.directoryOwnership !== null;
+    snapshot.temp !== null ||
+    snapshot.tombstone !== null ||
+    (snapshot.kind === 'mkdir' && snapshot.direction === 'forward');
   if (
     (snapshot.state === 'completed' && cleanupRequired) !==
       (snapshot.cleanupObservation?.state === 'absent') ||
@@ -411,7 +408,6 @@ export function parseNativeMutationIntentSeed(value: unknown): NativeMutationInt
     expectedSource: value['expectedSource'],
     expectedDestination: value['expectedDestination'],
     artifact: value['artifact'],
-    directoryOwnership: value['directoryOwnership'],
     createdAt: value['createdAt'],
     seedDigest: value['seedDigest'],
   } as NativeMutationIntentSeed;
@@ -510,7 +506,6 @@ function assertImmutableIntent(
     'expectedSource',
     'expectedDestination',
     'artifact',
-    'directoryOwnership',
     'createdAt',
     'seedDigest',
     'intentDigest',
@@ -563,47 +558,30 @@ function validateSeedFacts(
   validateExpectation(value.expectedSource);
   validateExpectation(value.expectedDestination);
   if (value.artifact !== null) validateArtifact(value.artifact);
-  validateDirectoryOwnership(value.directoryOwnership);
-  if (value.kind === 'mkdir' && value.direction === 'forward') {
-    const {
-      directoryOwnership: _ownership,
-      seedDigest: _seedDigest,
-      ...base
-    } = value as NativeMutationIntentSeed;
-    if (
-      JSON.stringify(value.directoryOwnership) !== JSON.stringify(directoryOwnershipBinding(base))
-    )
-      throw new Error('Native mutation directory ownership seal changed');
-  }
   const validShape =
     value.kind === 'add'
       ? value.expectedSource.state === 'absent' &&
         value.destinationSegments === null &&
-        value.artifact !== null &&
-        value.directoryOwnership === null
+        value.artifact !== null
       : value.kind === 'mkdir'
         ? value.expectedSource.state === (value.direction === 'forward' ? 'absent' : 'present') &&
           (value.direction !== 'compensation' ||
             (value.expectedSource.state === 'present' &&
               value.expectedSource.entryKind === 'directory')) &&
           value.destinationSegments === null &&
-          value.artifact === null &&
-          (value.direction === 'forward') === (value.directoryOwnership !== null)
+          value.artifact === null
         : value.kind === 'update'
           ? value.expectedSource.state === 'present' &&
             value.destinationSegments === null &&
-            value.artifact !== null &&
-            value.directoryOwnership === null
+          value.artifact !== null
           : value.kind === 'delete'
             ? value.expectedSource.state === 'present' &&
               value.destinationSegments === null &&
-              value.artifact === null &&
-              value.directoryOwnership === null
+            value.artifact === null
             : value.expectedSource.state === 'present' &&
               value.destinationSegments !== null &&
               value.expectedDestination.state === 'absent' &&
-              value.artifact === null &&
-              value.directoryOwnership === null;
+            value.artifact === null;
   if (!validShape) throw new Error('Invalid Native mutation operation shape');
 }
 
@@ -805,8 +783,6 @@ function freezeSeed(seed: NativeMutationIntentSeed): NativeMutationIntentSeed {
     expectedSource: Object.freeze({ ...seed.expectedSource }),
     expectedDestination: Object.freeze({ ...seed.expectedDestination }),
     artifact: seed.artifact === null ? null : Object.freeze({ ...seed.artifact }),
-    directoryOwnership:
-      seed.directoryOwnership === null ? null : Object.freeze({ ...seed.directoryOwnership }),
   });
 }
 
@@ -855,11 +831,32 @@ function seedDigestFacts(
   return stable;
 }
 
-function directoryOwnershipBinding(
-  seed: Omit<NativeMutationIntentSeedInput, 'createdAt'> &
-    Pick<NativeMutationIntentSeedInput, 'createdAt'> & { version: 1 },
+export function nativeMutationDirectoryOwnership(
+  seed: NativeMutationIntentSeed,
 ): NativeMutationDirectoryOwnership {
-  const { createdAt: _createdAt, ...stable } = seed;
+  if (seed.kind !== 'mkdir' || seed.direction !== 'forward')
+    throw new Error('Native mutation intent has no directory ownership seal');
+  // Callers may hold a full snapshot. Select only immutable seed facts so
+  // transitions cannot silently change the durable ownership token.
+  const stable = {
+    version: seed.version,
+    id: seed.id,
+    sagaId: seed.sagaId,
+    ordinal: seed.ordinal,
+    direction: seed.direction,
+    kind: seed.kind,
+    operationDigest: seed.operationDigest,
+    workspaceKey: seed.workspaceKey,
+    rootIdentityDigest: seed.rootIdentityDigest,
+    policyEpoch: seed.policyEpoch,
+    leaseFence: seed.leaseFence,
+    nativeSessionId: seed.nativeSessionId,
+    sourceSegments: seed.sourceSegments,
+    destinationSegments: seed.destinationSegments,
+    expectedSource: seed.expectedSource,
+    expectedDestination: seed.expectedDestination,
+    artifact: seed.artifact,
+  };
   const token = digest(['native-mkdir-ownership-v1', stable]);
   return Object.freeze({
     markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`,
