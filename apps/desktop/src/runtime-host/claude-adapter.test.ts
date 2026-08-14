@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildClaudeArgs,
   buildClaudePrompt,
+  buildClaudeTeamMcpConfig,
   claudeOutputErrorToPublicError,
   probeClaude,
   resolveClaudeCommand,
@@ -21,6 +22,20 @@ afterEach(async () => {
 });
 
 describe('Claude runtime probe', () => {
+  it('keeps the Team bearer token out of the temporary MCP settings JSON', () => {
+    const config = buildClaudeTeamMcpConfig(
+      '/app/node',
+      '/private/team-mcp-server.cjs',
+      '/private/team.sock',
+    );
+    const serialized = JSON.stringify(config);
+
+    expect(serialized).toContain('TEAM_BRIDGE_SOCKET');
+    expect(serialized).toContain('/private/team.sock');
+    expect(serialized).not.toContain('TEAM_BRIDGE_TOKEN');
+    expect(serialized).not.toContain('turn-token');
+  });
+
   it('resolves the user-local Claude CLI when a packaged macOS app has a system-only PATH', async () => {
     const home = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-home-'));
     temporaryRoots.push(home);

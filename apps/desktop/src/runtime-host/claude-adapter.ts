@@ -23,6 +23,7 @@ import {
 } from './claude-normalizer';
 import type {
   RuntimeCanonicalEvent,
+  RuntimeCodexConfigPolicy,
   RuntimeContextFragment,
   RuntimeFailureDiagnostic,
   RuntimeFailureStage,
@@ -210,6 +211,9 @@ export class ClaudeRuntimeAdapter {
     _skills: readonly RuntimeSkillInput[] = [],
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
+    _localImages?: unknown,
+    _codexConfigPolicy?: RuntimeCodexConfigPolicy,
+    runtimeProcessStarted?: (pid: number) => void,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -266,19 +270,7 @@ export class ClaudeRuntimeAdapter {
       writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE, { mode: 0o600 });
       writeFileSync(
         configPath,
-        JSON.stringify({
-          mcpServers: {
-            team: {
-              type: 'stdio',
-              command: nodeCommand,
-              args: [scriptPath],
-              env: {
-                TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
-                TEAM_BRIDGE_TOKEN: teamMcp.token,
-              },
-            },
-          },
-        }),
+        JSON.stringify(buildClaudeTeamMcpConfig(nodeCommand, scriptPath, teamMcp.socketPath)),
         { mode: 0o600 },
       );
       teamMcpArgs = {
@@ -303,19 +295,33 @@ export class ClaudeRuntimeAdapter {
       buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, runtimeWorkspaceRoots),
       {
         cwd,
-        env: minimalEnvironment(),
+        env: {
+          ...minimalEnvironment(),
+          ...(teamMcp === undefined
+            ? {}
+            : {
+                TEAM_BRIDGE_SOCKET: teamMcp.socketPath,
+                TEAM_BRIDGE_TOKEN: teamMcp.token,
+              }),
+        },
         detached: process.platform !== 'win32',
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
     );
+    if (teamMcp !== undefined)
+      child.once('spawn', () => {
+        if (child.pid === undefined) throw new Error('Claude runtime process id is unavailable');
+        runtimeProcessStarted?.(child.pid);
+        accepted();
+      });
     const cleanup = (): void => {
       if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
       if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
     };
     const control: ActiveProcess = { child, canceled: false, cleanup };
     this.active.set(turnId, control);
-    accepted();
+    if (teamMcp === undefined) accepted();
     child.stdin.end(serializedPayload ?? buildClaudePrompt(input, contextFragments, projectItems));
 
     let failed = false;
@@ -558,6 +564,25 @@ const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
   'workspace-write': 'acceptEdits',
   full: 'bypassPermissions',
 };
+
+export function buildClaudeTeamMcpConfig(
+  nodeCommand: string,
+  scriptPath: string,
+  socketPath: string,
+): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    mcpServers: {
+      team: {
+        type: 'stdio',
+        command: nodeCommand,
+        args: [scriptPath],
+        // The bearer token is inherited from the verified CLI process instead of being copied
+        // into this settings file. The socket path is not a credential and remains declarative.
+        env: { TEAM_BRIDGE_SOCKET: socketPath },
+      },
+    },
+  });
+}
 
 export function buildClaudeArgs(
   model: string,

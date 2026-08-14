@@ -41,6 +41,39 @@ function startEnvelope() {
 }
 
 describe('Runtime Host protocol', () => {
+  it('accepts only bounded runtime process identities with a stable start identity', () => {
+    const valid = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'runtime_process',
+      processIdentity: { pid: 123, parentPid: 12, startIdentity: 'platform-start-id' },
+    } as const;
+
+    expect(isRuntimeToMainEnvelope(valid)).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...valid,
+        processIdentity: { ...valid.processIdentity, pid: 0 },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...valid,
+        processIdentity: { ...valid.processIdentity, startIdentity: '' },
+      }),
+    ).toBe(false);
+    expect(
+      isRuntimeToMainEnvelope({
+        ...valid,
+        processIdentity: { ...valid.processIdentity, startIdentity: 'x'.repeat(129) },
+      }),
+    ).toBe(false);
+  });
+
   it('accepts only a non-empty unique canonical Team MCP tool subset', () => {
     const valid = {
       ...startEnvelope(),

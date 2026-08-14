@@ -213,6 +213,7 @@ export class CodexRuntimeAdapter {
     serializedPayload?: string,
     localImages?: CodexLocalImagePreparation,
     codexConfigPolicy: RuntimeCodexConfigPolicy = { inheritUserConfig: false },
+    runtimeProcessStarted?: (pid: number) => void,
   ): void {
     let localImageReleasePromise: Promise<void> | null = null;
     const releaseLocalImages = (): Promise<void> => {
@@ -367,6 +368,12 @@ export class CodexRuntimeAdapter {
       );
       return;
     }
+    if (teamMcp !== undefined)
+      child.once('spawn', () => {
+        if (child.pid === undefined) throw new Error('Codex runtime process id is unavailable');
+        runtimeProcessStarted?.(child.pid);
+        if (localImages === undefined) accepted();
+      });
     let nextRequestId = 1;
     const pending = new Map<
       number,
@@ -408,7 +415,7 @@ export class CodexRuntimeAdapter {
               bufferedEventBytes += byteLength;
             }
           };
-    if (localImages === undefined) accepted();
+    if (localImages === undefined && teamMcp === undefined) accepted();
 
     let failed = false;
     let sawCompletion = false;

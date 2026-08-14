@@ -20,6 +20,7 @@ import {
   type RuntimeProtocolFailureReasonCode,
   type RuntimeImageAttachmentManifestEntry,
   type RuntimePreparedImageAttachments,
+  type RuntimeProcessIdentity,
   type RuntimeProjectContextItem,
   type ResolvedCliCommand,
   type RuntimeSkillInput,
@@ -51,6 +52,7 @@ type ActiveTurn = {
   startAcceptanceDeadline: RuntimeStartAcceptanceDeadline;
   startFailed: boolean;
   teamMcpEnabled: boolean;
+  teamRuntimeProcessBound: boolean;
 };
 export type RuntimeStopReceipt = Readonly<{
   turnId: string;
@@ -155,6 +157,11 @@ export class RuntimeHostClient {
     private readonly codexConfigPolicyForTurn: () => RuntimeCodexConfigPolicy = () => ({
       inheritUserConfig: false,
     }),
+    private readonly bindTeamRuntimeProcess?: (
+      taskId: string,
+      turnId: string,
+      identity: RuntimeProcessIdentity,
+    ) => boolean,
   ) {
     this.launch();
   }
@@ -294,6 +301,7 @@ export class RuntimeHostClient {
       startAcceptanceDeadline,
       startFailed: false,
       teamMcpEnabled: teamMcp !== undefined,
+      teamRuntimeProcessBound: false,
     });
     startAcceptanceDeadline.start();
     const startPayload = {
@@ -665,9 +673,34 @@ export class RuntimeHostClient {
     active.lastSeq = raw.seq;
     if (active.startFailed && raw.type !== 'stopped' && raw.type !== 'error' && raw.type !== 'exit')
       return;
-    if (raw.type === 'event') {
+    if (raw.type === 'runtime_process') {
+      if (
+        !active.teamMcpEnabled ||
+        this.bindTeamRuntimeProcess?.(raw.taskId, raw.turnId, raw.processIdentity) !== true
+      ) {
+        active.startFailed = true;
+        active.startAcceptanceDeadline.stop();
+        void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
+        this.onFailure(raw.taskId, raw.turnId, {
+          code: 'RUNTIME_PROTOCOL_ERROR',
+          userMessage: 'Team runtimeのprocess identityを確認できません。',
+          retryable: false,
+        });
+      } else active.teamRuntimeProcessBound = true;
+    } else if (raw.type === 'event') {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
     } else if (raw.type === 'started') {
+      if (active.teamMcpEnabled && !active.teamRuntimeProcessBound) {
+        active.startFailed = true;
+        active.startAcceptanceDeadline.stop();
+        void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
+        this.onFailure(raw.taskId, raw.turnId, {
+          code: 'RUNTIME_PROTOCOL_ERROR',
+          userMessage: 'Team runtimeのprocess identity受理前に実行が開始されました。',
+          retryable: false,
+        });
+        return;
+      }
       active.startAcceptanceDeadline.accept();
       if (
         !sameIds(active.contextFragmentIds, raw.acceptedContextFragmentIds) ||

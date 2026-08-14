@@ -16,6 +16,7 @@ import {
 } from './image-attachment-preparer';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { queryNativeProcessIdentity } from '../main/native-process-identity';
 
 // A single Runtime Host UtilityProcess hosts exactly one adapter kind, selected at spawn time by
 // Main (see RuntimeHostClient) via --runtime-kind. Defaults to 'codex' so any pre-existing spawn
@@ -303,6 +304,20 @@ function startAdapter(
       data.payload,
       localImages,
       data.codexConfigPolicy,
+      (pid) => {
+        const processIdentity = queryNativeProcessIdentity(pid);
+        if (processIdentity === null) {
+          send(data.taskId, data.turnId, data.operationId, {
+            type: 'error',
+            error: runtimeImageError('Team runtimeのprocess identityを確認できません。'),
+          });
+          return;
+        }
+        send(data.taskId, data.turnId, data.operationId, {
+          type: 'runtime_process',
+          processIdentity,
+        });
+      },
     );
   } catch {
     activeTurns.delete(data.turnId);
@@ -430,6 +445,7 @@ function send(
         'type' | 'selectionIdentity' | 'manifestDigest' | 'decodedByteLength'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'images_prepare_failed' }>, 'type' | 'error'>
+    | Pick<Extract<RuntimeToMainEnvelope, { type: 'runtime_process' }>, 'type' | 'processIdentity'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'stopped' }>, 'type' | 'forced'>
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'started' }>,

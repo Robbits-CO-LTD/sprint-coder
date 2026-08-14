@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,6 +39,68 @@ napi_value ThrowWindowsError(napi_env env, const char* operation) {
   napi_set_named_property(env, error, "code", MakeString(env, "WINDOWS_NATIVE_FAILURE"));
   napi_throw(env, error);
   return nullptr;
+}
+
+bool QueryWindowsProcessIdentity(DWORD pid, DWORD* parent_pid, uint64_t* start_identity) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (process == nullptr) return false;
+  FILETIME created{}, exited{}, kernel{}, user{};
+  const BOOL read_times = GetProcessTimes(process, &created, &exited, &kernel, &user);
+  struct SprintProcessBasicInformation {
+    LONG exit_status;
+    PVOID peb_base_address;
+    ULONG_PTR affinity_mask;
+    LONG base_priority;
+    ULONG_PTR unique_process_id;
+    ULONG_PTR inherited_from_unique_process_id;
+  } basic{};
+  using NtQueryInformationProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  const auto query_basic =
+      ntdll == nullptr
+          ? nullptr
+          : reinterpret_cast<NtQueryInformationProcessFn>(
+                GetProcAddress(ntdll, "NtQueryInformationProcess"));
+  const LONG basic_status =
+      query_basic == nullptr
+          ? static_cast<LONG>(-1)
+          : query_basic(process, 0, &basic, sizeof(basic), nullptr);
+  CloseHandle(process);
+  if (!read_times || basic_status < 0 || basic.unique_process_id != pid ||
+      basic.inherited_from_unique_process_id > std::numeric_limits<DWORD>::max())
+    return false;
+  ULARGE_INTEGER created_ticks{};
+  created_ticks.LowPart = created.dwLowDateTime;
+  created_ticks.HighPart = created.dwHighDateTime;
+  *parent_pid = static_cast<DWORD>(basic.inherited_from_unique_process_id);
+  *start_identity = created_ticks.QuadPart;
+  return true;
+}
+
+napi_value QueryProcessIdentity(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  uint32_t pid = 0;
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
+      napi_get_value_uint32(env, argv[0], &pid) != napi_ok || pid == 0) {
+    napi_throw_type_error(env, nullptr, "queryProcessIdentity requires a positive pid");
+    return nullptr;
+  }
+  DWORD parent_pid = 0;
+  uint64_t start_identity = 0;
+  if (!QueryWindowsProcessIdentity(pid, &parent_pid, &start_identity))
+    return ThrowWindowsError(env, "queryProcessIdentity");
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_value process_id;
+  napi_create_uint32(env, pid, &process_id);
+  napi_set_named_property(env, result, "pid", process_id);
+  napi_value parent;
+  napi_create_uint32(env, parent_pid, &parent);
+  napi_set_named_property(env, result, "parentPid", parent);
+  const std::string start = "win32:" + std::to_string(start_identity);
+  napi_set_named_property(env, result, "startIdentity", MakeString(env, start.c_str()));
+  return result;
 }
 
 bool ReadString(napi_env env, napi_value value, std::string* output) {
@@ -871,6 +934,8 @@ void CleanupPreparedExecutionImages(void*) {
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"queryProcessIdentity", nullptr, QueryProcessIdentity, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"openSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"invalidateWorkspace", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
        nullptr},

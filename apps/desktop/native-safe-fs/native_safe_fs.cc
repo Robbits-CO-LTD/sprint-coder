@@ -1,12 +1,19 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include <node_api.h>
 
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #if defined(__APPLE__)
+#include <libproc.h>
 #include <sys/stdio.h>
+#include <sys/un.h>
 #elif defined(__linux__)
 #include <linux/fs.h>
 #include <linux/memfd.h>
@@ -23,7 +30,9 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -76,6 +85,128 @@ napi_value MakeString(napi_env env, const std::string& value);
 napi_value ThrowFailure(napi_env env, const std::string& code, const std::string& message);
 bool ReadString(napi_env env, napi_value object, const char* name, std::string* output);
 std::string ErrnoMessage(const char* operation);
+
+struct ProcessIdentity {
+  int64_t pid = 0;
+  int64_t parent_pid = 0;
+  std::string start_identity;
+};
+
+bool ReadInt64Argument(napi_env env, napi_callback_info info, int64_t* output) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1)
+    return false;
+  return napi_get_value_int64(env, argv[0], output) == napi_ok && *output > 0;
+}
+
+bool QueryProcessIdentityValue(int64_t pid, ProcessIdentity* output) {
+#if defined(__linux__)
+  std::ifstream input("/proc/" + std::to_string(pid) + "/stat");
+  std::string stat;
+  if (!std::getline(input, stat)) return false;
+  const size_t close = stat.rfind(')');
+  if (close == std::string::npos || close + 2 >= stat.size()) return false;
+  std::istringstream fields(stat.substr(close + 2));
+  std::string state_field;
+  int64_t parent_pid = 0;
+  if (!(fields >> state_field >> parent_pid)) return false;
+  std::string field;
+  for (int index = 0; index < 17; ++index)
+    if (!(fields >> field)) return false;
+  uint64_t start_ticks = 0;
+  if (!(fields >> start_ticks) || parent_pid < 0) return false;
+  output->pid = pid;
+  output->parent_pid = parent_pid;
+  output->start_identity = "linux:" + std::to_string(start_ticks);
+  return true;
+#elif defined(__APPLE__)
+  proc_bsdinfo info{};
+  if (proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &info, sizeof(info)) !=
+      static_cast<int>(sizeof(info)))
+    return false;
+  output->pid = pid;
+  output->parent_pid = info.pbi_ppid;
+  output->start_identity = "darwin:" + std::to_string(info.pbi_start_tvsec) + ":" +
+                           std::to_string(info.pbi_start_tvusec);
+  return true;
+#else
+  (void)pid;
+  (void)output;
+  return false;
+#endif
+}
+
+napi_value ProcessIdentityObject(napi_env env, const ProcessIdentity& identity) {
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_value pid;
+  napi_create_int64(env, identity.pid, &pid);
+  napi_set_named_property(env, result, "pid", pid);
+  napi_value parent_pid;
+  napi_create_int64(env, identity.parent_pid, &parent_pid);
+  napi_set_named_property(env, result, "parentPid", parent_pid);
+  napi_set_named_property(env, result, "startIdentity", MakeString(env, identity.start_identity));
+  return result;
+}
+
+napi_value QueryProcessIdentity(napi_env env, napi_callback_info info) {
+  int64_t pid = 0;
+  if (!ReadInt64Argument(env, info, &pid)) {
+    napi_throw_type_error(env, nullptr, "queryProcessIdentity requires a positive pid");
+    return nullptr;
+  }
+  ProcessIdentity identity;
+  if (!QueryProcessIdentityValue(pid, &identity))
+    return ThrowFailure(env, "PROCESS_IDENTITY_UNAVAILABLE", "Process identity is unavailable");
+  return ProcessIdentityObject(env, identity);
+}
+
+napi_value QuerySocketPeerIdentity(napi_env env, napi_callback_info info) {
+  int64_t descriptor = 0;
+  if (!ReadInt64Argument(env, info, &descriptor) || descriptor > std::numeric_limits<int>::max()) {
+    napi_throw_type_error(env, nullptr, "querySocketPeerIdentity requires a socket descriptor");
+    return nullptr;
+  }
+  int64_t peer_pid = 0;
+  uint32_t peer_uid = 0;
+  uint32_t peer_gid = 0;
+#if defined(__linux__)
+  struct ucred credentials{};
+  socklen_t length = sizeof(credentials);
+  if (getsockopt(static_cast<int>(descriptor), SOL_SOCKET, SO_PEERCRED, &credentials, &length) != 0 ||
+      length != sizeof(credentials) || credentials.pid <= 0)
+    return ThrowFailure(env, "PEER_IDENTITY_UNAVAILABLE", ErrnoMessage("getsockopt(SO_PEERCRED)"));
+  peer_pid = credentials.pid;
+  peer_uid = credentials.uid;
+  peer_gid = credentials.gid;
+#elif defined(__APPLE__)
+  pid_t credentials_pid = 0;
+  socklen_t length = sizeof(credentials_pid);
+  if (getsockopt(static_cast<int>(descriptor), SOL_LOCAL, LOCAL_PEERPID, &credentials_pid, &length) !=
+          0 ||
+      length != sizeof(credentials_pid) || credentials_pid <= 0)
+    return ThrowFailure(env, "PEER_IDENTITY_UNAVAILABLE", ErrnoMessage("getsockopt(LOCAL_PEERPID)"));
+  uid_t credential_uid = 0;
+  gid_t credential_gid = 0;
+  if (getpeereid(static_cast<int>(descriptor), &credential_uid, &credential_gid) != 0)
+    return ThrowFailure(env, "PEER_IDENTITY_UNAVAILABLE", ErrnoMessage("getpeereid"));
+  peer_pid = credentials_pid;
+  peer_uid = credential_uid;
+  peer_gid = credential_gid;
+#endif
+  ProcessIdentity identity;
+  if (!QueryProcessIdentityValue(peer_pid, &identity))
+    return ThrowFailure(env, "PEER_IDENTITY_UNAVAILABLE", "Peer process identity is unavailable");
+  napi_value result = ProcessIdentityObject(env, identity);
+  napi_value user_id;
+  napi_create_uint32(env, peer_uid, &user_id);
+  napi_set_named_property(env, result, "userId", user_id);
+  napi_value group_id;
+  napi_create_uint32(env, peer_gid, &group_id);
+  napi_set_named_property(env, result, "groupId", group_id);
+  return result;
+}
 
 #if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
 struct TestControlState {
@@ -3308,6 +3439,10 @@ void Cleanup(void*) {
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"queryProcessIdentity", nullptr, QueryProcessIdentity, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"querySocketPeerIdentity", nullptr, QuerySocketPeerIdentity, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"openSession", nullptr, OpenSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"invalidateWorkspace", nullptr, InvalidateWorkspace, nullptr, nullptr, nullptr, napi_default,
        nullptr},
