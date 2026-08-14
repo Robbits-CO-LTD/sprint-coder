@@ -139,13 +139,19 @@ while ($true) {
     Trace-Broker 'accepted'
     $listenerIndex = $completed - 1
     $listener = $listeners[$listenerIndex]
+    Trace-Broker 'listener-selected'
     $listeners.RemoveAt($listenerIndex)
     $pipe = $listener.Pipe
+    Trace-Broker 'pipe-selected'
     $id = [Guid]::NewGuid().ToString('N')
+    Trace-Broker 'id-created'
     $pipeHandle = $pipe.SafePipeHandle.DangerousGetHandle().ToInt64().ToString()
+    Trace-Broker 'handle-read'
     $buffer = [byte[]]::new(65536)
+    Trace-Broker 'buffer-created'
     $connection = @{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $null }
     [void]$connections.Add($connection)
+    Trace-Broker 'connection-registered'
     Send-Frame @{ type = 'open'; connectionId = $id; pipeHandle = $pipeHandle }
     Trace-Broker 'open-sent'
     $connection.Read = $pipe.ReadAsync($buffer, 0, $buffer.Length)
