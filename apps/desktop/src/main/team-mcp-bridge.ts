@@ -80,7 +80,9 @@ function Send-Frame($frame) {
 }
 $listeners = [System.Collections.ArrayList]::new()
 $connections = [System.Collections.ArrayList]::new()
-for ($i = 0; $i -lt 16; $i += 1) { [void]$listeners.Add((New-Listener)) }
+# A listener is replenished immediately after every accept. Pre-allocating all 16
+# instances delays the ready frame significantly on Windows hosts that audit each DACL.
+[void]$listeners.Add((New-Listener))
 [System.Threading.Tasks.Task[string]]$stdinTask = [Console]::In.ReadLineAsync()
 Send-Frame @{ type = 'ready' }
 while ($true) {
