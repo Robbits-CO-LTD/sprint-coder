@@ -510,6 +510,11 @@ export class TeamMcpBridge {
         const connectionId = frame['connectionId'];
         if (typeof connectionId !== 'string' || connectionId.length > 64) return;
         if (frame['type'] === 'open') {
+          if (process.env['CI'] === 'true')
+            secureLogger.info('Windows Team MCP broker open frame received', undefined, {
+              category: 'team',
+              event: 'team.mcp.windows_trace_open',
+            });
           const pipeHandle = frame['pipeHandle'];
           if (
             typeof pipeHandle !== 'string' ||
@@ -544,6 +549,11 @@ export class TeamMcpBridge {
         if (connection === undefined) return;
         if (frame['type'] === 'close') connection.remoteClosed();
         else if (frame['type'] === 'data' && typeof frame['data'] === 'string') {
+          if (process.env['CI'] === 'true')
+            secureLogger.info('Windows Team MCP broker data frame received', undefined, {
+              category: 'team',
+              event: 'team.mcp.windows_trace_data',
+            });
           try {
             connection.receive(Buffer.from(frame['data'], 'base64'));
           } catch {
@@ -662,6 +672,15 @@ export class TeamMcpBridge {
       peerRegistration.runtimeProcessIdentity === null ||
       !isNativeProcessDescendant(peerIdentity, peerRegistration.runtimeProcessIdentity)
     ) {
+      if (process.platform === 'win32' && process.env['CI'] === 'true')
+        secureLogger.info(
+          'Windows Team MCP request rejected by process binding',
+          {
+            hasPeerIdentity: peerIdentity !== null,
+            hasRuntimeIdentity: peerRegistration.runtimeProcessIdentity !== null,
+          },
+          { category: 'team', event: 'team.mcp.windows_trace_process_rejected' },
+        );
       socket.destroy();
       return;
     }
