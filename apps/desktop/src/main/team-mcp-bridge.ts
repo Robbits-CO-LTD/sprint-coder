@@ -137,10 +137,15 @@ while ($true) {
       $commandConnectionId = $Matches[2]
       $commandData = $Matches[3]
       $connection = $connections | Where-Object { $_.Id -eq $commandConnectionId } | Select-Object -First 1
-      if ($null -eq $connection) { continue }
+      if ($null -eq $connection) {
+        Trace-Broker 'connection-not-found'
+        continue
+      }
+      Trace-Broker 'connection-found'
       if ($commandType -eq 'write') {
         try {
           $bytes = [Convert]::FromBase64String($commandData)
+          Trace-Broker 'response-decoded'
           $connection.Pipe.Write($bytes, 0, $bytes.Length)
           $connection.Pipe.Flush()
           Trace-Broker 'pipe-written'
