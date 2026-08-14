@@ -144,9 +144,13 @@ while ($true) {
     $id = [Guid]::NewGuid().ToString('N')
     $pipeHandle = $pipe.SafePipeHandle.DangerousGetHandle().ToInt64().ToString()
     $buffer = [byte[]]::new(65536)
-    [void]$connections.Add(@{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $pipe.ReadAsync($buffer, 0, $buffer.Length) })
-    [void]$listeners.Add((New-Listener))
+    $connection = @{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $null }
+    [void]$connections.Add($connection)
     Send-Frame @{ type = 'open'; connectionId = $id; pipeHandle = $pipeHandle }
+    Trace-Broker 'open-sent'
+    $connection.Read = $pipe.ReadAsync($buffer, 0, $buffer.Length)
+    Trace-Broker 'read-started'
+    [void]$listeners.Add((New-Listener))
     continue
   }
   $connectionIndex = $completed - 1 - $listenerCount
