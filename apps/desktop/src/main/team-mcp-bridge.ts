@@ -1,15 +1,17 @@
 // Main-side bridge between the ephemeral MCP stdio server (runtime-host/team-mcp-server-source.ts,
 // spawned inside the real Claude CLI's own process tree) and TeamCoordinator. The MCP server never
 // talks to persistence/TeamCoordinator directly — it only ever knows a local IPC endpoint and a
-// per-turn bearer token; this class is the sole thing that maps a validated token back to the
-// (taskId, turnId) it was issued for, so a tool call arriving over the wire can never spoof which
-// Task/Team it targets (see executeTeamTool in team-tools.ts, which this forwards into).
+// per-turn bearer token; this class accepts it only from the kernel-identified CLI process tree,
+// then maps it back to the (taskId, turnId) it was issued for. A copied token or settings file is
+// therefore insufficient to spoof which Task/Team a call targets.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { chmodSync, existsSync, unlinkSync } from 'node:fs';
-import { createServer, type Server, type Socket } from 'node:net';
+import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
@@ -19,6 +21,14 @@ import {
   type TeamMcpRole,
   type TeamMcpToolName,
 } from '../runtime-host/team-mcp-tool-contract';
+import {
+  isNativeProcessDescendant,
+  queryNativeNamedPipePeerIdentity,
+  queryNativeProcessIdentity,
+  queryNativeSocketPeerIdentity,
+  sameNativeProcessIdentity,
+  type NativeProcessIdentity,
+} from './native-process-identity';
 
 // macOS's sockaddr_un.sun_path is 104 bytes (Linux allows 108); staying comfortably under that
 // keeps bind() from failing on long app-data paths (a real, previously-hit failure mode on this
@@ -33,8 +43,6 @@ const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powe
 const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
 $name = $env:SPRINT_CODER_PIPE_NAME
-$port = [int]$env:SPRINT_CODER_PIPE_PORT
-$secret = $env:SPRINT_CODER_PIPE_SECRET
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
@@ -66,46 +74,160 @@ function New-Listener {
     Accept = $pipe.WaitForConnectionAsync()
   }
 }
+function Send-Frame($frame) {
+  $type = [string]$frame.type
+  $connectionId = [string]$frame.connectionId
+  if ($connectionId -notmatch '^[a-f0-9]{32}$') { throw 'Invalid broker connection id' }
+  if ($type -eq 'open') {
+    $pipeHandle = [string]$frame.pipeHandle
+    if ($pipeHandle -notmatch '^[1-9][0-9]{0,31}$') { throw 'Invalid broker pipe handle' }
+    $json = '{"type":"open","connectionId":"' + $connectionId + '","pipeHandle":"' + $pipeHandle + '"}'
+  } elseif ($type -eq 'close') {
+    $json = '{"type":"close","connectionId":"' + $connectionId + '"}'
+  } elseif ($type -eq 'data') {
+    $data = [string]$frame.data
+    if ($data -notmatch '^[A-Za-z0-9+/]*={0,2}$') { throw 'Invalid broker data frame' }
+    $json = '{"type":"data","connectionId":"' + $connectionId + '","data":"' + $data + '"}'
+  } else {
+    throw 'Invalid broker frame type'
+  }
+  [Console]::Out.WriteLine($json)
+  [Console]::Out.Flush()
+}
 $listeners = [System.Collections.ArrayList]::new()
-$connections = [System.Collections.ArrayList]::new()
-for ($i = 0; $i -lt 16; $i += 1) { [void]$listeners.Add((New-Listener)) }
-[Console]::Out.WriteLine('READY')
+$connections = @{}
+# One pending listener is sufficient because it is replenished immediately after every accept;
+# the NamedPipeServerStream instance limit still caps total concurrent connections at 16.
+[void]$listeners.Add((New-Listener))
+$stdin = [Console]::OpenStandardInput()
+$stdinBuffer = [byte[]]::new(65536)
+$stdinPending = ''
+$stdinRead = $stdin.ReadAsync($stdinBuffer, 0, $stdinBuffer.Length)
+[Console]::Out.WriteLine('{"type":"ready"}')
+[Console]::Out.Flush()
 while ($true) {
+  if ($listeners.Count -eq 0 -and $connections.Count -lt 16) {
+    [void]$listeners.Add((New-Listener))
+  }
+  $connectionList = @($connections.Values)
   $tasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
+  $tasks.Add($stdinRead)
   foreach ($listener in $listeners) { $tasks.Add($listener.Accept) }
-  foreach ($connection in $connections) { $tasks.Add($connection.Pump) }
+  foreach ($connection in $connectionList) { $tasks.Add($connection.Read) }
   $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
-  if ($completed -lt $listeners.Count) {
-    $listener = $listeners[$completed]
-    $listeners.RemoveAt($completed)
-    $pipe = $listener.Pipe
-    $tcp = [System.Net.Sockets.TcpClient]::new()
-    $tcp.Connect('127.0.0.1', $port)
-    $stream = $tcp.GetStream()
-    $prefix = [System.Text.Encoding]::UTF8.GetBytes(
-      ('{"bridgeToken":"' + $secret + '"}' + [Environment]::NewLine)
-    )
-    $stream.Write($prefix, 0, $prefix.Length)
-    $stream.Flush()
-    $toTcp = $pipe.CopyToAsync($stream)
-    $toPipe = $stream.CopyToAsync($pipe)
-    [void]$connections.Add(@{
-      Pipe = $pipe
-      Tcp = $tcp
-      Stream = $stream
-      Pump = [System.Threading.Tasks.Task]::WhenAny($toTcp, $toPipe)
-    })
+  if ($completed -eq 0) {
+    $count = $stdinRead.Result
+    if ($count -le 0) { break }
+    $stdinPending += [System.Text.Encoding]::UTF8.GetString($stdinBuffer, 0, $count)
+    if ($stdinPending.Length -gt 2097152) { break }
+    $stdinRead = $stdin.ReadAsync($stdinBuffer, 0, $stdinBuffer.Length)
+    while (($newline = $stdinPending.IndexOf([char]10)) -ge 0) {
+      $line = $stdinPending.Substring(0, $newline).TrimEnd([char]13)
+      $stdinPending = $stdinPending.Substring($newline + 1)
+      if ($line.Length -eq 0) { continue }
+      if ($line -notmatch '^\{"type":"(write|close)","connectionId":"([a-f0-9]{32})"(?:,"data":"([A-Za-z0-9+/]*={0,2})")?\}$') {
+        break
+      }
+      $commandType = $Matches[1]
+      $commandConnectionId = $Matches[2]
+      $commandData = $Matches[3]
+      $connection = $connections[$commandConnectionId]
+      if ($null -eq $connection) {
+        continue
+      }
+      if ($commandType -eq 'write') {
+        try {
+          $bytes = [Convert]::FromBase64String($commandData)
+          $connection.Pipe.Write($bytes, 0, $bytes.Length)
+          $connection.Pipe.Flush()
+        } catch {
+          $connections.Remove($connection.Id)
+          $connection.Pipe.Dispose()
+          Send-Frame @{ type = 'close'; connectionId = $connection.Id }
+        }
+      } elseif ($commandType -eq 'close') {
+        $connections.Remove($connection.Id)
+        $connection.Pipe.Dispose()
+      }
+    }
     continue
   }
-  $connectionIndex = $completed - $listeners.Count
-  $connection = $connections[$connectionIndex]
-  $connections.RemoveAt($connectionIndex)
-  $connection.Stream.Dispose()
-  $connection.Tcp.Dispose()
-  $connection.Pipe.Dispose()
-  [void]$listeners.Add((New-Listener))
+  $listenerCount = $listeners.Count
+  if ($completed -le $listenerCount) {
+    $listenerIndex = $completed - 1
+    $listener = $listeners[$listenerIndex]
+    $listeners.RemoveAt($listenerIndex)
+    $pipe = $listener.Pipe
+    $id = [Guid]::NewGuid().ToString('N')
+    $pipeHandle = $pipe.SafePipeHandle.DangerousGetHandle().ToInt64().ToString()
+    $buffer = [byte[]]::new(65536)
+    $connection = @{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $null }
+    $connections[$id] = $connection
+    Send-Frame @{ type = 'open'; connectionId = $id; pipeHandle = $pipeHandle }
+    $connection.Read = $pipe.ReadAsync($buffer, 0, $buffer.Length)
+    continue
+  }
+  $connectionIndex = $completed - 1 - $listenerCount
+  $connection = $connectionList[$connectionIndex]
+  try { $count = $connection.Read.Result } catch { $count = 0 }
+  if ($count -le 0) {
+    $connections.Remove($connection.Id)
+    $connection.Pipe.Dispose()
+    Send-Frame @{ type = 'close'; connectionId = $connection.Id }
+    continue
+  }
+  $bytes = [byte[]]::new($count)
+  [Array]::Copy($connection.Buffer, $bytes, $count)
+  Send-Frame @{ type = 'data'; connectionId = $connection.Id; data = [Convert]::ToBase64String($bytes) }
+  $connection.Read = $connection.Pipe.ReadAsync($connection.Buffer, 0, $connection.Buffer.Length)
 }
 `;
+
+interface BridgeConnection {
+  readonly destroyed: boolean;
+  write(data: string): unknown;
+  destroy(): void;
+  once(event: 'close', listener: () => void): this;
+  on(event: 'data', listener: (chunk: Buffer) => void): this;
+  on(event: 'error', listener: () => void): this;
+}
+
+class WindowsBrokerConnection extends EventEmitter implements BridgeConnection {
+  destroyed = false;
+
+  constructor(
+    readonly id: string,
+    private readonly send: (frame: Readonly<Record<string, unknown>>) => void,
+  ) {
+    super();
+  }
+
+  write(data: string): void {
+    if (this.destroyed) return;
+    this.send({
+      type: 'write',
+      connectionId: this.id,
+      data: Buffer.from(data, 'utf8').toString('base64'),
+    });
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.send({ type: 'close', connectionId: this.id });
+    this.emit('close');
+  }
+
+  receive(data: Buffer): void {
+    if (!this.destroyed) this.emit('data', data);
+  }
+
+  remoteClosed(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.emit('close');
+  }
+}
 
 export function defaultSocketPathFactory(
   preferredDirectory: string,
@@ -154,6 +276,7 @@ type Registered = TeamMcpRegistration & {
   researchedModels: Set<string>;
   authorizedSkillImport?: { cli: 'claude' | 'codex'; skillId: string; digest: string };
   skillImportReadStarted: boolean;
+  runtimeProcessIdentity: NativeProcessIdentity | null;
 };
 
 function modelSelectionKey(selection: {
@@ -208,7 +331,8 @@ function readDigest(result: unknown): string {
 
 export class TeamMcpBridge {
   private readonly registrations = new Map<string, Registered>();
-  private readonly sockets = new Set<Socket>();
+  private readonly sockets = new Set<BridgeConnection>();
+  private readonly windowsConnections = new Map<string, WindowsBrokerConnection>();
   private server: Server | null = null;
   private windowsBroker: ChildProcess | null = null;
   private socketPathValue: string | null = null;
@@ -276,7 +400,15 @@ export class TeamMcpBridge {
           // best effort: a stale socket file from a previous crashed run
         }
       }
-      const server = createServer((socket) => this.handleConnection(socket, null));
+      const server = createServer((socket) => {
+        const peer = queryNativeSocketPeerIdentity(socket);
+        const currentUserId = process.getuid?.();
+        if (peer === null || (currentUserId !== undefined && peer.userId !== currentUserId)) {
+          socket.destroy();
+          return;
+        }
+        this.handleConnection(socket, peer);
+      });
       server.maxConnections = MAX_CONCURRENT_CONNECTIONS;
       server.once('error', (error) => reject(error as Error));
       server.listen(
@@ -303,18 +435,6 @@ export class TeamMcpBridge {
   }
 
   private async startWindowsPipe(path: string): Promise<string> {
-    const bridgeToken = randomBytes(32).toString('hex');
-    const server = createServer((socket) => this.handleConnection(socket, bridgeToken));
-    server.maxConnections = MAX_CONCURRENT_CONNECTIONS;
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen({ host: '127.0.0.1', port: 0, exclusive: true }, resolve);
-    });
-    const address = server.address();
-    if (address === null || typeof address === 'string') {
-      server.close();
-      throw new Error('Windows Team MCP internal endpoint is unavailable');
-    }
     const pipeName = path.replace(/^\\\\[.?]\\pipe\\/, '');
     const encodedScript = Buffer.from(WINDOWS_PIPE_BROKER, 'utf16le').toString('base64');
     const broker = spawn(
@@ -329,24 +449,150 @@ export class TeamMcpBridge {
           TMP: process.env['TMP'] ?? '',
           USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_PIPE_NAME: pipeName,
-          SPRINT_CODER_PIPE_PORT: String(address.port),
-          SPRINT_CODER_PIPE_SECRET: bridgeToken,
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
     );
+    this.windowsBroker = broker;
     try {
-      await waitForBrokerReady(broker);
+      await this.attachWindowsBroker(broker);
     } catch (error) {
+      if (this.windowsBroker === broker) this.windowsBroker = null;
       broker.kill();
-      server.close();
       throw error;
     }
-    this.server = server;
-    this.windowsBroker = broker;
+    if (this.windowsBroker !== broker)
+      throw new Error('Windows pipe broker exited before startup completed');
     this.socketPathValue = path;
     return path;
+  }
+
+  private attachWindowsBroker(broker: ChildProcess): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const output = createInterface({ input: broker.stdout! });
+      let ready = false;
+      let stderr = '';
+      const timeout = setTimeout(
+        () => finish(new Error('Windows pipe broker startup timed out')),
+        10_000,
+      );
+      const finish = (error?: Error): void => {
+        clearTimeout(timeout);
+        if (error === undefined) resolve();
+        else reject(error);
+      };
+      broker.stderr?.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+        if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
+      });
+      broker.stdin?.on('error', (error) => {
+        if (this.windowsBroker !== broker) return;
+        secureLogger.error('Windows Team MCP pipe broker stdin failed', error, {
+          category: 'team',
+          event: 'team.mcp.windows_broker_stdin_failed',
+          status: 'failed',
+        });
+        broker.kill();
+      });
+      broker.once('exit', (code, signal) => {
+        if (!ready) finish(new Error(`Windows pipe broker exited: ${stderr.trim()}`));
+        else if (this.windowsBroker === broker) {
+          for (const connection of this.windowsConnections.values()) connection.remoteClosed();
+          this.windowsConnections.clear();
+          this.windowsBroker = null;
+          this.socketPathValue = null;
+          this.startPromise = null;
+          secureLogger.error(
+            'Windows Team MCP pipe broker exited after startup',
+            { code, signal, stderr: stderr.trim() },
+            { category: 'team', event: 'team.mcp.windows_broker_exited', status: 'failed' },
+          );
+        }
+      });
+      output.on('line', (line) => {
+        if (this.windowsBroker !== broker) return;
+        let frame: Record<string, unknown>;
+        try {
+          frame = JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          secureLogger.error(
+            'Windows Team MCP pipe broker emitted an invalid frame',
+            { lineLength: line.length },
+            { category: 'team', event: 'team.mcp.windows_broker_frame_invalid', status: 'failed' },
+          );
+          broker.kill();
+          return;
+        }
+        if (frame['type'] === 'ready') {
+          if (!ready) {
+            ready = true;
+            finish();
+          }
+          return;
+        }
+        const connectionId = frame['connectionId'];
+        if (typeof connectionId !== 'string' || connectionId.length > 64) return;
+        if (frame['type'] === 'open') {
+          if (this.windowsConnections.size >= MAX_CONCURRENT_CONNECTIONS) {
+            this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
+            return;
+          }
+          const pipeHandle = frame['pipeHandle'];
+          if (
+            typeof pipeHandle !== 'string' ||
+            !/^[1-9][0-9]{0,31}$/.test(pipeHandle) ||
+            broker.pid === undefined
+          ) {
+            this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
+            return;
+          }
+          let nativeFailure: unknown;
+          const peerIdentity = queryNativeNamedPipePeerIdentity(broker.pid, pipeHandle, (error) => {
+            nativeFailure = error;
+          });
+          if (peerIdentity === null) {
+            secureLogger.error(
+              'Windows Team MCP pipe peer identity could not be verified',
+              { brokerPid: broker.pid, pipeHandleLength: pipeHandle.length, nativeFailure },
+              { category: 'team', event: 'team.mcp.windows_peer_unverified', status: 'rejected' },
+            );
+            this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
+            return;
+          }
+          const connection = new WindowsBrokerConnection(connectionId, (message) =>
+            this.sendWindowsBrokerFrame(broker, message),
+          );
+          this.windowsConnections.set(connectionId, connection);
+          connection.once('close', () => this.windowsConnections.delete(connectionId));
+          this.handleConnection(connection, peerIdentity);
+          return;
+        }
+        const connection = this.windowsConnections.get(connectionId);
+        if (connection === undefined) return;
+        if (frame['type'] === 'close') connection.remoteClosed();
+        else if (frame['type'] === 'data' && typeof frame['data'] === 'string') {
+          try {
+            connection.receive(Buffer.from(frame['data'], 'base64'));
+          } catch {
+            connection.destroy();
+          }
+        }
+      });
+    });
+  }
+
+  private sendWindowsBrokerFrame(
+    broker: ChildProcess,
+    frame: Readonly<Record<string, unknown>>,
+  ): void {
+    if (
+      this.windowsBroker === broker &&
+      broker.stdin?.writable === true &&
+      broker.stdin.writableEnded === false &&
+      broker.stdin.destroyed === false
+    )
+      broker.stdin.write(`${JSON.stringify(frame)}\n`);
   }
 
   /** Binds a fresh, random bearer token to (taskId, turnId) for the duration of one Leader turn.
@@ -359,7 +605,17 @@ export class TeamMcpBridge {
       modelCatalogQueried: false,
       researchedModels: new Set(),
       skillImportReadStarted: false,
+      runtimeProcessIdentity: null,
     });
+  }
+
+  bindRuntimeProcess(turnId: string, reported: NativeProcessIdentity): boolean {
+    const registration = this.registrations.get(turnId);
+    if (registration === undefined) return false;
+    const observed = queryNativeProcessIdentity(reported.pid);
+    if (observed === null || !sameNativeProcessIdentity(observed, reported)) return false;
+    registration.runtimeProcessIdentity = observed;
+    return true;
   }
 
   unregister(turnId: string): void {
@@ -370,12 +626,14 @@ export class TeamMcpBridge {
     return randomBytes(32).toString('hex');
   }
 
-  private handleConnection(socket: Socket, requiredBridgeToken: string | null): void {
+  private handleConnection(
+    socket: BridgeConnection,
+    peerIdentity: NativeProcessIdentity | null,
+  ): void {
     this.sockets.add(socket);
     socket.once('close', () => this.sockets.delete(socket));
     let buffer = '';
     let authenticated = false;
-    let bridgeAuthenticated = requiredBridgeToken === null;
     const authenticationTimer = setTimeout(() => socket.destroy(), this.authenticationTimeoutMs);
     authenticationTimer.unref();
     const markAuthenticated = () => {
@@ -394,19 +652,15 @@ export class TeamMcpBridge {
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
-        if (!bridgeAuthenticated) {
-          bridgeAuthenticated = matchesBridgeToken(line, requiredBridgeToken);
-          if (!bridgeAuthenticated) socket.destroy();
-          continue;
-        }
-        if (line.trim() !== '') void this.handleLine(socket, line, markAuthenticated);
+        if (line.trim() !== '') void this.handleLine(socket, peerIdentity, line, markAuthenticated);
       }
     });
     socket.on('error', () => socket.destroy());
   }
 
   private async handleLine(
-    socket: Socket,
+    socket: BridgeConnection,
+    peerIdentity: NativeProcessIdentity | null,
     line: string,
     markAuthenticated: () => void,
   ): Promise<void> {
@@ -433,6 +687,15 @@ export class TeamMcpBridge {
     if (found === undefined) {
       // Unknown/forged token: close without responding rather than confirming or denying which
       // part of the request was wrong (fail-closed, no oracle).
+      socket.destroy();
+      return;
+    }
+    const [, peerRegistration] = found;
+    if (
+      peerIdentity === null ||
+      peerRegistration.runtimeProcessIdentity === null ||
+      !isNativeProcessDescendant(peerIdentity, peerRegistration.runtimeProcessIdentity)
+    ) {
       socket.destroy();
       return;
     }
@@ -659,14 +922,16 @@ export class TeamMcpBridge {
     this.server = null;
     const socketPath = this.socketPathValue;
     this.socketPathValue = null;
-    this.windowsBroker?.kill();
+    const windowsBroker = this.windowsBroker;
     this.windowsBroker = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    this.windowsConnections.clear();
+    windowsBroker?.kill();
     if (server === null) return;
     // net.Server.close waits for every accepted connection. Claude/Codex may keep an authenticated
     // bridge socket open after a completed turn, so destroy those sockets before waiting or app
     // quit can hang indefinitely.
-    for (const socket of this.sockets) socket.destroy();
-    this.sockets.clear();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (socketPath !== null && !isWindowsNamedPipe(socketPath)) {
       try {
@@ -676,47 +941,4 @@ export class TeamMcpBridge {
       }
     }
   }
-}
-
-function matchesBridgeToken(line: string, expected: string | null): boolean {
-  if (expected === null) return true;
-  try {
-    const parsed = JSON.parse(line) as { bridgeToken?: unknown };
-    if (typeof parsed.bridgeToken !== 'string') return false;
-    const actualBytes = Buffer.from(parsed.bridgeToken);
-    const expectedBytes = Buffer.from(expected);
-    return (
-      actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
-    );
-  } catch {
-    return false;
-  }
-}
-
-function waitForBrokerReady(broker: ChildProcess): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let stdout = '';
-    let stderr = '';
-    const timeout = setTimeout(
-      () => finish(new Error('Windows pipe broker startup timed out')),
-      10_000,
-    );
-    const finish = (error?: Error): void => {
-      clearTimeout(timeout);
-      broker.stdout?.removeAllListeners();
-      broker.stderr?.removeAllListeners();
-      broker.removeListener('exit', onExit);
-      if (error === undefined) resolve();
-      else reject(error);
-    };
-    const onExit = (): void => finish(new Error(`Windows pipe broker exited: ${stderr.trim()}`));
-    broker.once('exit', onExit);
-    broker.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-      if (stdout.includes('READY')) finish();
-    });
-    broker.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-  });
 }

@@ -1,8 +1,24 @@
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { TeamMcpBridge, defaultSocketPathFactory } from './team-mcp-bridge';
+import {
+  TeamMcpBridge as ProductionTeamMcpBridge,
+  defaultSocketPathFactory,
+  type TeamMcpRegistration,
+} from './team-mcp-bridge';
 import type { TeamCoordinator } from './team-coordinator';
+import { queryNativeProcessIdentity } from './native-process-identity';
+
+class TeamMcpBridge extends ProductionTeamMcpBridge {
+  override register(turnId: string, registration: TeamMcpRegistration): void {
+    super.register(turnId, registration);
+    const identity = queryNativeProcessIdentity(process.pid);
+    if (identity === null || !this.bindRuntimeProcess(turnId, identity)) {
+      throw new Error('Native process identity is required by Team MCP tests');
+    }
+  }
+}
 
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
@@ -110,6 +126,147 @@ describe('defaultSocketPathFactory', () => {
 });
 
 describe('TeamMcpBridge', () => {
+  it('rejects a copied bearer token until the runtime process is strongly bound', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = ProductionTeamMcpBridge.generateToken();
+    bridge.register('turn-unbound', { taskId: 'task-victim', token });
+
+    const { lines, closed } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      1_000,
+    );
+
+    expect(lines).toHaveLength(0);
+    expect(closed).toBe(true);
+  });
+
+  it('rejects a stolen token from outside the registered CLI process tree', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = ProductionTeamMcpBridge.generateToken();
+    const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {
+      stdio: 'ignore',
+    });
+    await new Promise<void>((resolve, reject) => {
+      victim.once('spawn', resolve);
+      victim.once('error', reject);
+    });
+    try {
+      const victimIdentity = queryNativeProcessIdentity(victim.pid!);
+      expect(victimIdentity).not.toBeNull();
+      bridge.register('turn-victim', { taskId: 'task-victim', token });
+      expect(bridge.bindRuntimeProcess('turn-victim', victimIdentity!)).toBe(true);
+
+      // The test process owns the copied settings/token but is the victim CLI's parent, not one
+      // of its descendants. A token-only bridge would accept this request.
+      const { lines, closed } = await roundTrip(socketPath as string, {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      });
+      expect(lines).toHaveLength(0);
+      expect(closed).toBe(true);
+    } finally {
+      victim.kill();
+      await new Promise<void>((resolve) => victim.once('exit', () => resolve()));
+    }
+  });
+
+  it('rejects stale and PID-reused runtime identities before registration is activated', async () => {
+    const bridge = new ProductionTeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const current = queryNativeProcessIdentity(process.pid);
+    expect(current).not.toBeNull();
+    bridge.register('turn-reused', {
+      taskId: 'task-reused',
+      token: ProductionTeamMcpBridge.generateToken(),
+    });
+    expect(
+      bridge.bindRuntimeProcess('turn-reused', {
+        ...current!,
+        startIdentity: `${current!.startIdentity}-reused`,
+      }),
+    ).toBe(false);
+
+    const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise<void>((resolve, reject) => {
+      exited.once('exit', () => resolve());
+      exited.once('error', reject);
+    });
+    expect(
+      bridge.bindRuntimeProcess('turn-reused', {
+        pid: exited.pid!,
+        parentPid: process.pid,
+        startIdentity: 'already-exited',
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts a legitimate MCP client that is a descendant of the bound CLI process', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-child', { taskId: 'task-child', token });
+    const script = String.raw`
+const { createConnection } = require('node:net');
+const socket = createConnection(process.env.TEST_TEAM_SOCKET);
+const timer = setTimeout(() => process.exit(2), 5000);
+socket.once('connect', () => socket.write(process.env.TEST_TEAM_REQUEST + '\n'));
+socket.once('data', (chunk) => {
+  clearTimeout(timer);
+  process.stdout.write(chunk);
+  socket.destroy();
+});
+socket.once('error', (error) => {
+  clearTimeout(timer);
+  process.stderr.write(error.message);
+  process.exit(1);
+});
+`;
+    const request = JSON.stringify({
+      requestId: 'legitimate-child',
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+    const child = spawn(process.execPath, ['-e', script], {
+      env: {
+        ...process.env,
+        TEST_TEAM_SOCKET: socketPath as string,
+        TEST_TEAM_REQUEST: request,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>(
+      (resolve, reject) => {
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString('utf8')));
+        child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
+        child.once('error', reject);
+        child.once('exit', (code) => resolve({ code, stdout, stderr }));
+      },
+    );
+
+    expect(result, result.stderr).toMatchObject({ code: 0, stderr: '' });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      requestId: 'legitimate-child',
+      ok: true,
+      result: { authenticated: true },
+    });
+  });
+
   it('returns registered tool capabilities during authentication', async () => {
     const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
     bridges.push(bridge);
@@ -849,6 +1006,171 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         ok: true,
         result: { authenticated: true },
       });
+  });
+
+  it('caps active pipe instances and accepts another client after a slot is released', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const socketPath = (await bridge.ensureStarted()) as string;
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-windows-capacity', { taskId: 'task-windows', token });
+    const sockets: ReturnType<typeof createConnection>[] = [];
+
+    try {
+      for (let index = 0; index < 16; index += 1) {
+        const socket = createConnection(socketPath);
+        await new Promise<void>((resolve, reject) => {
+          socket.once('connect', resolve);
+          socket.once('error', reject);
+        });
+        sockets.push(socket);
+      }
+
+      const waitingSocket = createConnection(socketPath);
+      sockets.push(waitingSocket);
+      let connected = false;
+      const connectedAfterRelease = new Promise<void>((resolve, reject) => {
+        waitingSocket.once('connect', () => {
+          connected = true;
+          resolve();
+        });
+        waitingSocket.once('error', reject);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(connected).toBe(false);
+
+      sockets[0]?.destroy();
+      await Promise.race([
+        connectedAfterRelease,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('waiting pipe client was not accepted')), 2_000),
+        ),
+      ]);
+
+      const response = new Promise<string>((resolve, reject) => {
+        let buffer = '';
+        waitingSocket.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString('utf8');
+          const newline = buffer.indexOf('\n');
+          if (newline >= 0) resolve(buffer.slice(0, newline));
+        });
+        waitingSocket.once('error', reject);
+      });
+      waitingSocket.write(
+        `${JSON.stringify({
+          requestId: 'windows-capacity',
+          token,
+          tool: '__authenticate__',
+          args: {},
+        })}\n`,
+      );
+      await expect(response.then((line) => JSON.parse(line))).resolves.toMatchObject({
+        ok: true,
+        result: { authenticated: true },
+      });
+    } finally {
+      for (const socket of sockets) socket.destroy();
+    }
+  });
+
+  it('invalidates and restarts the named-pipe broker after an unexpected exit', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const firstSocketPath = await bridge.ensureStarted();
+    const firstBroker = (bridge as unknown as { windowsBroker: ChildProcess | null }).windowsBroker;
+    expect(firstBroker).not.toBeNull();
+    const exited = new Promise<void>((resolve) => firstBroker?.once('exit', () => resolve()));
+    firstBroker?.kill();
+    await exited;
+
+    expect(bridge.socketPath).toBeNull();
+    const secondSocketPath = await bridge.ensureStarted();
+    expect(secondSocketPath).not.toBeNull();
+    expect(secondSocketPath).not.toBe(firstSocketPath);
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-windows-restarted', { taskId: 'task-windows', token });
+    const response = await roundTrip(secondSocketPath as string, {
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { authenticated: true },
+    });
+  });
+
+  it('does not let a disposed broker close connections owned by its replacement', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const firstSocketPath = await bridge.ensureStarted();
+    const firstBroker = (bridge as unknown as { windowsBroker: ChildProcess | null }).windowsBroker;
+    if (firstBroker === null) throw new Error('expected the first Windows pipe broker');
+    const killFirstBroker = firstBroker.kill.bind(firstBroker);
+    vi.spyOn(firstBroker, 'kill').mockReturnValue(true);
+    const firstBrokerExited = new Promise<void>((resolve) =>
+      firstBroker.once('exit', () => resolve()),
+    );
+
+    await bridge.dispose();
+    const staleSocket = createConnection(firstSocketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      staleSocket.once('connect', resolve);
+      staleSocket.once('error', reject);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const staleConnectionCount = (bridge as unknown as { windowsConnections: Map<string, unknown> })
+      .windowsConnections.size;
+    staleSocket.destroy();
+
+    const secondSocketPath = await bridge.ensureStarted();
+    const socket = createConnection(secondSocketPath as string);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', resolve);
+        socket.once('error', reject);
+      });
+
+      killFirstBroker();
+      await firstBrokerExited;
+      expect(staleConnectionCount).toBe(0);
+
+      const token = TeamMcpBridge.generateToken();
+      bridge.register('turn-windows-replacement', { taskId: 'task-windows', token });
+      const response = new Promise<string>((resolve, reject) => {
+        let buffer = '';
+        socket.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString('utf8');
+          const newline = buffer.indexOf('\n');
+          if (newline >= 0) resolve(buffer.slice(0, newline));
+        });
+        socket.once('close', () => reject(new Error('replacement broker connection closed')));
+        socket.once('error', reject);
+      });
+      socket.write(
+        `${JSON.stringify({
+          requestId: 'windows-replacement',
+          token,
+          tool: '__authenticate__',
+          args: {},
+        })}\n`,
+      );
+      await expect(response.then((line) => JSON.parse(line))).resolves.toMatchObject({
+        ok: true,
+        result: { authenticated: true },
+      });
+    } finally {
+      socket.destroy();
+    }
   });
 
   it('serves Worker messages while the Leader is waiting for reports', async () => {

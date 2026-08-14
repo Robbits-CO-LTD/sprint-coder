@@ -802,6 +802,8 @@ export class IpcRouter {
           ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId)
           : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
+      bindTeamMcpProcess: (turnId, identity) =>
+        this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
       codexUserConfigEnabled: () => this.persistence.getCodexUserConfigEnabled(),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
@@ -1045,6 +1047,7 @@ export class IpcRouter {
       'codex',
       join(app.getPath('userData'), 'codex-isolated'),
       () => ({ inheritUserConfig: this.persistence.getCodexUserConfigEnabled() }),
+      (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1056,6 +1059,8 @@ export class IpcRouter {
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
       join(app.getPath('userData'), 'codex-isolated'),
+      undefined,
+      (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
     );
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>

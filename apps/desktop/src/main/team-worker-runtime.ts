@@ -19,6 +19,7 @@ import type { PreparedContext } from './context-ledger';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
   runtimeWorkspaceSetFromLegacyPath,
+  type RuntimeProcessIdentity,
   type RuntimeTeamMcpOption,
   type RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
@@ -77,6 +78,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     executionId?: string,
   ) => RuntimeTeamMcpOption | undefined;
   releaseTeamMcp?: (turnId: string) => void;
+  bindTeamMcpProcess?: (turnId: string, identity: RuntimeProcessIdentity) => boolean;
   codexIsolationRoot?: string;
   codexUserConfigEnabled?: () => boolean;
   /** Explicit development/test opt-in. Production callers leave this false. */
@@ -185,6 +187,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       kind,
       this.deps.codexIsolationRoot,
       () => ({ inheritUserConfig: this.deps.codexUserConfigEnabled?.() === true }),
+      (_taskId, turnId, identity) => this.deps.bindTeamMcpProcess?.(turnId, identity) === true,
     );
     this.clients.set(kind, created);
     return created;

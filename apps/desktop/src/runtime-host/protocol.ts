@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 import { TEAM_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
 
-export const RUNTIME_PROTOCOL_VERSION = 9;
+export const RUNTIME_PROTOCOL_VERSION = 10;
 
 export type RuntimeImageAttachmentManifestEntry = Readonly<{
   id: string;
@@ -127,6 +127,12 @@ export type RuntimeTeamMcpOption = Readonly<{
   /** Enables the Runtime's native live-Web search only for a Leader/Manager that must research
    * candidate models before hiring. Omitted/false preserves the existing no-Web Team profile. */
   enableWebSearch?: boolean;
+}>;
+
+export type RuntimeProcessIdentity = Readonly<{
+  pid: number;
+  parentPid: number;
+  startIdentity: string;
 }>;
 
 export type RuntimeFailureStage =
@@ -331,6 +337,10 @@ export type RuntimeToMainEnvelope =
       decodedByteLength: number;
     })
   | (EnvelopeBase & { type: 'images_prepare_failed'; error: PublicError })
+  | (EnvelopeBase & {
+      type: 'runtime_process';
+      processIdentity: RuntimeProcessIdentity;
+    })
   | (EnvelopeBase & {
       type: 'started';
       acceptedContextFragmentIds: string[];
@@ -766,6 +776,19 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
     );
   if (value.type === 'images_prepare_failed')
     return 'error' in value && publicErrorSchema.safeParse(value.error).success;
+  if (value.type === 'runtime_process')
+    return (
+      'processIdentity' in value &&
+      typeof value.processIdentity === 'object' &&
+      value.processIdentity !== null &&
+      Number.isSafeInteger((value.processIdentity as Record<string, unknown>)['pid']) &&
+      Number((value.processIdentity as Record<string, unknown>)['pid']) > 0 &&
+      Number.isSafeInteger((value.processIdentity as Record<string, unknown>)['parentPid']) &&
+      Number((value.processIdentity as Record<string, unknown>)['parentPid']) >= 0 &&
+      typeof (value.processIdentity as Record<string, unknown>)['startIdentity'] === 'string' &&
+      String((value.processIdentity as Record<string, unknown>)['startIdentity']).length > 0 &&
+      String((value.processIdentity as Record<string, unknown>)['startIdentity']).length <= 128
+    );
   if (value.type === 'started')
     return (
       'acceptedContextFragmentIds' in value &&

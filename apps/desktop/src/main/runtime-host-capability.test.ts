@@ -418,6 +418,135 @@ describe('RuntimeHostClient image attachment capability state', () => {
   });
 });
 
+describe('RuntimeHostClient Team process binding', () => {
+  async function startTeamTurn(client: RuntimeHostClient): Promise<Record<string, unknown>> {
+    const accepted = client.start(
+      'task-team',
+      'turn-team',
+      'coordinate',
+      null,
+      'gpt-5.6-sol',
+      new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null }),
+      undefined,
+      {
+        socketPath: '/tmp/team.sock',
+        token: 'a'.repeat(64),
+        guidance: 'team',
+        toolNames: ['team_get_status'],
+      },
+    );
+    expect(accepted).toBe(true);
+    await Promise.resolve();
+    const start = electronMock.children[0]!.messages.find(
+      (message) =>
+        typeof message === 'object' &&
+        message !== null &&
+        'turnId' in message &&
+        message.turnId === 'turn-team',
+    ) as Record<string, unknown> | undefined;
+    expect(start).toBeDefined();
+    return start!;
+  }
+
+  it('binds the reported CLI identity before accepting a Team runtime start', async () => {
+    const failures: unknown[] = [];
+    const bindings: unknown[] = [];
+    const client = new RuntimeHostClient(
+      () => undefined,
+      (_taskId, _turnId, error) => failures.push(error),
+      undefined,
+      undefined,
+      'codex',
+      undefined,
+      undefined,
+      (taskId, turnId, identity) => {
+        bindings.push({ taskId, turnId, identity });
+        return true;
+      },
+    );
+    emitReadyHello(0);
+    const start = await startTeamTurn(client);
+    const common = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: electronMock.instances[0],
+      taskId: 'task-team',
+      turnId: 'turn-team',
+      operationId: start['operationId'],
+    };
+    electronMock.children[0]!.emit('message', {
+      ...common,
+      seq: 1,
+      type: 'runtime_process',
+      processIdentity: { pid: 123, parentPid: 12, startIdentity: 'start-123' },
+    });
+    electronMock.children[0]!.emit('message', {
+      ...common,
+      seq: 2,
+      type: 'started',
+      acceptedContextFragmentIds: (start['contextFragments'] as Array<{ id: string }>).map(
+        ({ id }) => id,
+      ),
+      acceptedProjectItemIds: (start['projectItems'] as Array<{ id: string }>).map(({ id }) => id),
+      acceptedProjectSnapshotDigest: start['projectSnapshotDigest'],
+      acceptedPayloadDigest: start['payloadDigest'],
+    });
+
+    expect(bindings).toEqual([
+      {
+        taskId: 'task-team',
+        turnId: 'turn-team',
+        identity: { pid: 123, parentPid: 12, startIdentity: 'start-123' },
+      },
+    ]);
+    expect(failures).toEqual([]);
+    client.dispose();
+  });
+
+  it('fails closed when started arrives before a peer-bound runtime identity', async () => {
+    const failures: Array<{ code?: string }> = [];
+    const client = new RuntimeHostClient(
+      () => undefined,
+      (_taskId, _turnId, error) => failures.push(error),
+      undefined,
+      undefined,
+      'codex',
+      undefined,
+      undefined,
+      () => true,
+    );
+    emitReadyHello(0);
+    const start = await startTeamTurn(client);
+    electronMock.children[0]!.emit('message', {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: electronMock.instances[0],
+      taskId: 'task-team',
+      turnId: 'turn-team',
+      operationId: start['operationId'],
+      seq: 1,
+      type: 'started',
+      acceptedContextFragmentIds: [],
+      acceptedProjectItemIds: [],
+      acceptedProjectSnapshotDigest: null,
+      acceptedPayloadDigest: start['payloadDigest'],
+    });
+
+    expect(failures).toEqual([expect.objectContaining({ code: 'RUNTIME_PROTOCOL_ERROR' })]);
+    await Promise.resolve();
+    expect(
+      electronMock.children[0]!.messages.some(
+        (message) =>
+          typeof message === 'object' &&
+          message !== null &&
+          'type' in message &&
+          message.type === 'cancel' &&
+          'turnId' in message &&
+          message.turnId === 'turn-team',
+      ),
+    ).toBe(true);
+    client.dispose();
+  });
+});
+
 async function pendingRefreshOperationId(client: RuntimeHostClient): Promise<string> {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     await Promise.resolve();
