@@ -96,6 +96,7 @@ export function queryNativeSocketPeerIdentity(socket: Socket): NativeSocketPeerI
 export function queryNativeNamedPipePeerIdentity(
   brokerPid: number,
   pipeHandle: string,
+  onFailure?: (error: unknown) => void,
 ): NativeProcessIdentity | null {
   if (
     process.platform !== 'win32' ||
@@ -108,7 +109,8 @@ export function queryNativeNamedPipePeerIdentity(
     const binding = addon();
     if (binding?.queryNamedPipePeerIdentity === undefined) return null;
     return parseProcessIdentity(binding.queryNamedPipePeerIdentity(brokerPid, pipeHandle));
-  } catch {
+  } catch (error) {
+    onFailure?.(error);
     return null;
   }
 }

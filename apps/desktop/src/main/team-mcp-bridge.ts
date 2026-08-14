@@ -455,16 +455,27 @@ export class TeamMcpBridge {
         stderr += chunk.toString('utf8');
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
       });
-      broker.once('exit', () => {
+      broker.once('exit', (code, signal) => {
         for (const connection of this.windowsConnections.values()) connection.remoteClosed();
         this.windowsConnections.clear();
         if (!ready) finish(new Error(`Windows pipe broker exited: ${stderr.trim()}`));
+        else
+          secureLogger.error(
+            'Windows Team MCP pipe broker exited after startup',
+            { code, signal, stderr: stderr.trim() },
+            { category: 'team', event: 'team.mcp.windows_broker_exited', status: 'failed' },
+          );
       });
       output.on('line', (line) => {
         let frame: Record<string, unknown>;
         try {
           frame = JSON.parse(line) as Record<string, unknown>;
         } catch {
+          secureLogger.error(
+            'Windows Team MCP pipe broker emitted an invalid frame',
+            { lineLength: line.length },
+            { category: 'team', event: 'team.mcp.windows_broker_frame_invalid', status: 'failed' },
+          );
           broker.kill();
           return;
         }
@@ -487,8 +498,16 @@ export class TeamMcpBridge {
             this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
             return;
           }
-          const peerIdentity = queryNativeNamedPipePeerIdentity(broker.pid, pipeHandle);
+          let nativeFailure: unknown;
+          const peerIdentity = queryNativeNamedPipePeerIdentity(broker.pid, pipeHandle, (error) => {
+            nativeFailure = error;
+          });
           if (peerIdentity === null) {
+            secureLogger.error(
+              'Windows Team MCP pipe peer identity could not be verified',
+              { brokerPid: broker.pid, pipeHandleLength: pipeHandle.length, nativeFailure },
+              { category: 'team', event: 'team.mcp.windows_peer_unverified', status: 'rejected' },
+            );
             this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
             return;
           }
