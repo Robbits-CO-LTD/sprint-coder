@@ -80,35 +80,48 @@ function Send-Frame($frame) {
 }
 $listeners = [System.Collections.ArrayList]::new()
 $connections = [System.Collections.ArrayList]::new()
-# A listener is replenished immediately after every accept. Pre-allocating all 16
-# instances delays the ready frame significantly on Windows hosts that audit each DACL.
+# One pending listener is sufficient because it is replenished immediately after every accept;
+# the NamedPipeServerStream instance limit still caps total concurrent connections at 16.
 [void]$listeners.Add((New-Listener))
-[System.Threading.Tasks.Task[string]]$stdinTask = [Console]::In.ReadLineAsync()
-Send-Frame @{ type = 'ready' }
+$stdin = [Console]::OpenStandardInput()
+$stdinBuffer = [byte[]]::new(65536)
+$stdinPending = ''
+$stdinRead = $stdin.ReadAsync($stdinBuffer, 0, $stdinBuffer.Length)
+[Console]::Out.WriteLine('{"type":"ready"}')
+[Console]::Out.Flush()
 while ($true) {
   $tasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
-  $tasks.Add($stdinTask)
+  $tasks.Add($stdinRead)
   foreach ($listener in $listeners) { $tasks.Add($listener.Accept) }
   foreach ($connection in $connections) { $tasks.Add($connection.Read) }
   $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
   if ($completed -eq 0) {
-    $line = $stdinTask.Result
-    if ($null -eq $line) { break }
-    $stdinTask = [Console]::In.ReadLineAsync()
-    $command = $line | ConvertFrom-Json
-    $connection = $connections | Where-Object { $_.Id -eq $command.connectionId } | Select-Object -First 1
-    if ($null -eq $connection) { continue }
-    if ($command.type -eq 'write') {
-      try {
-        $bytes = [Convert]::FromBase64String([string]$command.data)
-        $connection.Pipe.Write($bytes, 0, $bytes.Length)
-        $connection.Pipe.Flush()
-      } catch {
+    $count = $stdinRead.Result
+    if ($count -le 0) { break }
+    $stdinPending += [System.Text.Encoding]::UTF8.GetString($stdinBuffer, 0, $count)
+    if ($stdinPending.Length -gt 2097152) { break }
+    $stdinRead = $stdin.ReadAsync($stdinBuffer, 0, $stdinBuffer.Length)
+    while (($newline = $stdinPending.IndexOf([char]10)) -ge 0) {
+      $line = $stdinPending.Substring(0, $newline).TrimEnd([char]13)
+      $stdinPending = $stdinPending.Substring($newline + 1)
+      if ($line.Length -eq 0) { continue }
+      $command = $line | ConvertFrom-Json
+      $connection = $connections | Where-Object { $_.Id -eq $command.connectionId } | Select-Object -First 1
+      if ($null -eq $connection) { continue }
+      if ($command.type -eq 'write') {
+        try {
+          $bytes = [Convert]::FromBase64String([string]$command.data)
+          $connection.Pipe.Write($bytes, 0, $bytes.Length)
+          $connection.Pipe.Flush()
+        } catch {
+          [void]$connections.Remove($connection)
+          $connection.Pipe.Dispose()
+          Send-Frame @{ type = 'close'; connectionId = $connection.Id }
+        }
+      } elseif ($command.type -eq 'close') {
+        [void]$connections.Remove($connection)
         $connection.Pipe.Dispose()
-        Send-Frame @{ type = 'close'; connectionId = $connection.Id }
       }
-    } elseif ($command.type -eq 'close') {
-      $connection.Pipe.Dispose()
     }
     continue
   }
