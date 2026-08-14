@@ -43,6 +43,12 @@ const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powe
 const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
 $name = $env:SPRINT_CODER_PIPE_NAME
+function Trace-Broker($stage) {
+  if ($env:SPRINT_CODER_PIPE_DIAGNOSTICS -eq '1') {
+    [Console]::Error.WriteLine(('stage:' + $stage))
+    [Console]::Error.Flush()
+  }
+}
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
@@ -112,6 +118,7 @@ while ($true) {
   foreach ($connection in $connections) { $tasks.Add($connection.Read) }
   $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
   if ($completed -eq 0) {
+    Trace-Broker 'stdin-completed'
     $count = $stdinRead.Result
     if ($count -le 0) { break }
     $stdinPending += [System.Text.Encoding]::UTF8.GetString($stdinBuffer, 0, $count)
@@ -121,7 +128,11 @@ while ($true) {
       $line = $stdinPending.Substring(0, $newline).TrimEnd([char]13)
       $stdinPending = $stdinPending.Substring($newline + 1)
       if ($line.Length -eq 0) { continue }
-      if ($line -notmatch '^\{"type":"(write|close)","connectionId":"([a-f0-9]{32})"(?:,"data":"([A-Za-z0-9+/]*={0,2})")?\}$') { break }
+      if ($line -notmatch '^\{"type":"(write|close)","connectionId":"([a-f0-9]{32})"(?:,"data":"([A-Za-z0-9+/]*={0,2})")?\}$') {
+        Trace-Broker 'stdin-invalid-frame'
+        break
+      }
+      Trace-Broker 'stdin-frame-matched'
       $commandType = $Matches[1]
       $commandConnectionId = $Matches[2]
       $commandData = $Matches[3]
@@ -132,6 +143,7 @@ while ($true) {
           $bytes = [Convert]::FromBase64String($commandData)
           $connection.Pipe.Write($bytes, 0, $bytes.Length)
           $connection.Pipe.Flush()
+          Trace-Broker 'pipe-written'
         } catch {
           [void]$connections.Remove($connection)
           $connection.Pipe.Dispose()
@@ -442,6 +454,7 @@ export class TeamMcpBridge {
           TMP: process.env['TMP'] ?? '',
           USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_PIPE_NAME: pipeName,
+          SPRINT_CODER_PIPE_DIAGNOSTICS: process.env['CI'] === 'true' ? '1' : '0',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
