@@ -18,6 +18,7 @@ export type NativeSocketPeerIdentity = NativeProcessIdentity &
 type ProcessIdentityAddon = Readonly<{
   queryProcessIdentity(pid: number): unknown;
   querySocketPeerIdentity?(descriptor: number): unknown;
+  queryNamedPipePeerIdentity?(brokerPid: number, pipeHandle: string): unknown;
 }>;
 
 let cachedAddon: ProcessIdentityAddon | null | undefined;
@@ -87,6 +88,26 @@ export function queryNativeSocketPeerIdentity(socket: Socket): NativeSocketPeerI
       userId: Number(peer['userId']),
       groupId: Number(peer['groupId']),
     });
+  } catch {
+    return null;
+  }
+}
+
+export function queryNativeNamedPipePeerIdentity(
+  brokerPid: number,
+  pipeHandle: string,
+): NativeProcessIdentity | null {
+  if (
+    process.platform !== 'win32' ||
+    !Number.isSafeInteger(brokerPid) ||
+    brokerPid <= 0 ||
+    !/^[1-9][0-9]{0,31}$/.test(pipeHandle)
+  )
+    return null;
+  try {
+    const binding = addon();
+    if (binding?.queryNamedPipePeerIdentity === undefined) return null;
+    return parseProcessIdentity(binding.queryNamedPipePeerIdentity(brokerPid, pipeHandle));
   } catch {
     return null;
   }

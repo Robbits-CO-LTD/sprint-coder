@@ -23,6 +23,7 @@ import {
 } from '../runtime-host/team-mcp-tool-contract';
 import {
   isNativeProcessDescendant,
+  queryNativeNamedPipePeerIdentity,
   queryNativeProcessIdentity,
   queryNativeSocketPeerIdentity,
   sameNativeProcessIdentity,
@@ -43,14 +44,6 @@ const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
 $name = $env:SPRINT_CODER_PIPE_NAME
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-Add-Type -TypeDefinition @'
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-public static class SprintCoderPipeNative {
-  [DllImport("kernel32.dll", SetLastError = true)]
-  public static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint clientPid);
-}
-'@
 $security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
 $rule = [System.IO.Pipes.PipeAccessRule]::new(
@@ -123,26 +116,12 @@ while ($true) {
     $listener = $listeners[$listenerIndex]
     $listeners.RemoveAt($listenerIndex)
     $pipe = $listener.Pipe
-    [uint32]$clientPid = 0
-    if (-not [SprintCoderPipeNative]::GetNamedPipeClientProcessId($pipe.SafePipeHandle, [ref]$clientPid)) {
-      $pipe.Dispose()
-      [void]$listeners.Add((New-Listener))
-      continue
-    }
-    try {
-      $clientProcess = [System.Diagnostics.Process]::GetProcessById([int]$clientPid)
-      $clientStartIdentity = 'win32:' + $clientProcess.StartTime.ToFileTimeUtc().ToString()
-      $clientProcess.Dispose()
-    } catch {
-      $pipe.Dispose()
-      [void]$listeners.Add((New-Listener))
-      continue
-    }
     $id = [Guid]::NewGuid().ToString('N')
+    $pipeHandle = $pipe.SafePipeHandle.DangerousGetHandle().ToInt64().ToString()
     $buffer = [byte[]]::new(65536)
     [void]$connections.Add(@{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $pipe.ReadAsync($buffer, 0, $buffer.Length) })
     [void]$listeners.Add((New-Listener))
-    Send-Frame @{ type = 'open'; connectionId = $id; clientPid = $clientPid; clientStartIdentity = $clientStartIdentity }
+    Send-Frame @{ type = 'open'; connectionId = $id; pipeHandle = $pipeHandle }
     continue
   }
   $connectionIndex = $completed - 1 - $listenerCount
@@ -484,20 +463,17 @@ export class TeamMcpBridge {
         const connectionId = frame['connectionId'];
         if (typeof connectionId !== 'string' || connectionId.length > 64) return;
         if (frame['type'] === 'open') {
-          const clientPid = frame['clientPid'];
-          const clientStartIdentity = frame['clientStartIdentity'];
+          const pipeHandle = frame['pipeHandle'];
           if (
-            !Number.isSafeInteger(clientPid) ||
-            Number(clientPid) <= 0 ||
-            typeof clientStartIdentity !== 'string' ||
-            clientStartIdentity.length === 0 ||
-            clientStartIdentity.length > 128
+            typeof pipeHandle !== 'string' ||
+            !/^[1-9][0-9]{0,31}$/.test(pipeHandle) ||
+            broker.pid === undefined
           ) {
             this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
             return;
           }
-          const peerIdentity = queryNativeProcessIdentity(Number(clientPid));
-          if (peerIdentity === null || peerIdentity.startIdentity !== clientStartIdentity) {
+          const peerIdentity = queryNativeNamedPipePeerIdentity(broker.pid, pipeHandle);
+          if (peerIdentity === null) {
             this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
             return;
           }

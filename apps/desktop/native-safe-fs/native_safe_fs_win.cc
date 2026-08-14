@@ -3,6 +3,7 @@
 #include <aclapi.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <mutex>
 #include <atomic>
@@ -77,6 +78,21 @@ bool QueryWindowsProcessIdentity(DWORD pid, DWORD* parent_pid, uint64_t* start_i
   return true;
 }
 
+napi_value WindowsProcessIdentityObject(napi_env env, DWORD pid, DWORD parent_pid,
+                                        uint64_t start_identity) {
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_value process_id;
+  napi_create_uint32(env, pid, &process_id);
+  napi_set_named_property(env, result, "pid", process_id);
+  napi_value parent;
+  napi_create_uint32(env, parent_pid, &parent);
+  napi_set_named_property(env, result, "parentPid", parent);
+  const std::string start = "win32:" + std::to_string(start_identity);
+  napi_set_named_property(env, result, "startIdentity", MakeString(env, start.c_str()));
+  return result;
+}
+
 napi_value QueryProcessIdentity(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -90,17 +106,59 @@ napi_value QueryProcessIdentity(napi_env env, napi_callback_info info) {
   uint64_t start_identity = 0;
   if (!QueryWindowsProcessIdentity(pid, &parent_pid, &start_identity))
     return ThrowWindowsError(env, "queryProcessIdentity");
-  napi_value result;
-  napi_create_object(env, &result);
-  napi_value process_id;
-  napi_create_uint32(env, pid, &process_id);
-  napi_set_named_property(env, result, "pid", process_id);
-  napi_value parent;
-  napi_create_uint32(env, parent_pid, &parent);
-  napi_set_named_property(env, result, "parentPid", parent);
-  const std::string start = "win32:" + std::to_string(start_identity);
-  napi_set_named_property(env, result, "startIdentity", MakeString(env, start.c_str()));
-  return result;
+  return WindowsProcessIdentityObject(env, pid, parent_pid, start_identity);
+}
+
+napi_value QueryNamedPipePeerIdentity(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  uint32_t broker_pid = 0;
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 2 ||
+      napi_get_value_uint32(env, argv[0], &broker_pid) != napi_ok || broker_pid == 0) {
+    napi_throw_type_error(env, nullptr,
+                          "queryNamedPipePeerIdentity requires broker pid and pipe handle");
+    return nullptr;
+  }
+  size_t handle_length = 0;
+  if (napi_get_value_string_utf8(env, argv[1], nullptr, 0, &handle_length) != napi_ok ||
+      handle_length == 0 || handle_length > 32) {
+    napi_throw_type_error(env, nullptr, "pipe handle must be a decimal string");
+    return nullptr;
+  }
+  std::vector<char> handle_buffer(handle_length + 1, '\0');
+  size_t copied = 0;
+  if (napi_get_value_string_utf8(env, argv[1], handle_buffer.data(), handle_buffer.size(), &copied) !=
+          napi_ok ||
+      copied != handle_length) {
+    napi_throw_type_error(env, nullptr, "pipe handle must be a decimal string");
+    return nullptr;
+  }
+  uint64_t remote_handle_value = 0;
+  const auto parsed = std::from_chars(handle_buffer.data(), handle_buffer.data() + handle_length,
+                                      remote_handle_value);
+  if (parsed.ec != std::errc{} || parsed.ptr != handle_buffer.data() + handle_length ||
+      remote_handle_value == 0 || remote_handle_value > std::numeric_limits<uintptr_t>::max()) {
+    napi_throw_type_error(env, nullptr, "pipe handle must be a positive decimal string");
+    return nullptr;
+  }
+  HANDLE broker = OpenProcess(PROCESS_DUP_HANDLE, FALSE, broker_pid);
+  if (broker == nullptr) return ThrowWindowsError(env, "OpenProcess(pipe broker)");
+  HANDLE local_pipe = INVALID_HANDLE_VALUE;
+  const BOOL duplicated = DuplicateHandle(
+      broker, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(remote_handle_value)),
+      GetCurrentProcess(), &local_pipe, 0, FALSE, DUPLICATE_SAME_ACCESS);
+  CloseHandle(broker);
+  if (!duplicated) return ThrowWindowsError(env, "DuplicateHandle(named pipe)");
+  ULONG client_pid = 0;
+  const BOOL read_peer = GetNamedPipeClientProcessId(local_pipe, &client_pid);
+  CloseHandle(local_pipe);
+  if (!read_peer || client_pid == 0)
+    return ThrowWindowsError(env, "GetNamedPipeClientProcessId");
+  DWORD parent_pid = 0;
+  uint64_t start_identity = 0;
+  if (!QueryWindowsProcessIdentity(client_pid, &parent_pid, &start_identity))
+    return ThrowWindowsError(env, "queryNamedPipePeerIdentity");
+  return WindowsProcessIdentityObject(env, client_pid, parent_pid, start_identity);
 }
 
 bool ReadString(napi_env env, napi_value value, std::string* output) {
@@ -935,6 +993,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"queryProcessIdentity", nullptr, QueryProcessIdentity, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"queryNamedPipePeerIdentity", nullptr, QueryNamedPipePeerIdentity, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"openSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"invalidateWorkspace", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
