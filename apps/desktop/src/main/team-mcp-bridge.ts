@@ -43,12 +43,6 @@ const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powe
 const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
 $name = $env:SPRINT_CODER_PIPE_NAME
-function Trace-Broker($stage) {
-  if ($env:SPRINT_CODER_PIPE_DIAGNOSTICS -eq '1') {
-    [Console]::Error.WriteLine(('stage:' + $stage))
-    [Console]::Error.Flush()
-  }
-}
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
@@ -101,7 +95,7 @@ function Send-Frame($frame) {
   [Console]::Out.Flush()
 }
 $listeners = [System.Collections.ArrayList]::new()
-$connections = [System.Collections.ArrayList]::new()
+$connections = @{}
 # One pending listener is sufficient because it is replenished immediately after every accept;
 # the NamedPipeServerStream instance limit still caps total concurrent connections at 16.
 [void]$listeners.Add((New-Listener))
@@ -112,13 +106,16 @@ $stdinRead = $stdin.ReadAsync($stdinBuffer, 0, $stdinBuffer.Length)
 [Console]::Out.WriteLine('{"type":"ready"}')
 [Console]::Out.Flush()
 while ($true) {
+  if ($listeners.Count -eq 0 -and $connections.Count -lt 16) {
+    [void]$listeners.Add((New-Listener))
+  }
+  $connectionList = @($connections.Values)
   $tasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
   $tasks.Add($stdinRead)
   foreach ($listener in $listeners) { $tasks.Add($listener.Accept) }
-  foreach ($connection in $connections) { $tasks.Add($connection.Read) }
+  foreach ($connection in $connectionList) { $tasks.Add($connection.Read) }
   $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
   if ($completed -eq 0) {
-    Trace-Broker 'stdin-completed'
     $count = $stdinRead.Result
     if ($count -le 0) { break }
     $stdinPending += [System.Text.Encoding]::UTF8.GetString($stdinBuffer, 0, $count)
@@ -129,33 +126,27 @@ while ($true) {
       $stdinPending = $stdinPending.Substring($newline + 1)
       if ($line.Length -eq 0) { continue }
       if ($line -notmatch '^\{"type":"(write|close)","connectionId":"([a-f0-9]{32})"(?:,"data":"([A-Za-z0-9+/]*={0,2})")?\}$') {
-        Trace-Broker 'stdin-invalid-frame'
         break
       }
-      Trace-Broker 'stdin-frame-matched'
       $commandType = $Matches[1]
       $commandConnectionId = $Matches[2]
       $commandData = $Matches[3]
-      $connection = $connections | Where-Object { $_.Id -eq $commandConnectionId } | Select-Object -First 1
+      $connection = $connections[$commandConnectionId]
       if ($null -eq $connection) {
-        Trace-Broker 'connection-not-found'
         continue
       }
-      Trace-Broker 'connection-found'
       if ($commandType -eq 'write') {
         try {
           $bytes = [Convert]::FromBase64String($commandData)
-          Trace-Broker 'response-decoded'
           $connection.Pipe.Write($bytes, 0, $bytes.Length)
           $connection.Pipe.Flush()
-          Trace-Broker 'pipe-written'
         } catch {
-          [void]$connections.Remove($connection)
+          $connections.Remove($connection.Id)
           $connection.Pipe.Dispose()
           Send-Frame @{ type = 'close'; connectionId = $connection.Id }
         }
       } elseif ($commandType -eq 'close') {
-        [void]$connections.Remove($connection)
+        $connections.Remove($connection.Id)
         $connection.Pipe.Dispose()
       }
     }
@@ -171,17 +162,16 @@ while ($true) {
     $pipeHandle = $pipe.SafePipeHandle.DangerousGetHandle().ToInt64().ToString()
     $buffer = [byte[]]::new(65536)
     $connection = @{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $null }
-    [void]$connections.Add($connection)
+    $connections[$id] = $connection
     Send-Frame @{ type = 'open'; connectionId = $id; pipeHandle = $pipeHandle }
     $connection.Read = $pipe.ReadAsync($buffer, 0, $buffer.Length)
-    [void]$listeners.Add((New-Listener))
     continue
   }
   $connectionIndex = $completed - 1 - $listenerCount
-  $connection = $connections[$connectionIndex]
+  $connection = $connectionList[$connectionIndex]
   try { $count = $connection.Read.Result } catch { $count = 0 }
   if ($count -le 0) {
-    $connections.RemoveAt($connectionIndex)
+    $connections.Remove($connection.Id)
     $connection.Pipe.Dispose()
     Send-Frame @{ type = 'close'; connectionId = $connection.Id }
     continue
@@ -459,19 +449,21 @@ export class TeamMcpBridge {
           TMP: process.env['TMP'] ?? '',
           USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_PIPE_NAME: pipeName,
-          SPRINT_CODER_PIPE_DIAGNOSTICS: process.env['CI'] === 'true' ? '1' : '0',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
     );
+    this.windowsBroker = broker;
     try {
       await this.attachWindowsBroker(broker);
     } catch (error) {
+      if (this.windowsBroker === broker) this.windowsBroker = null;
       broker.kill();
       throw error;
     }
-    this.windowsBroker = broker;
+    if (this.windowsBroker !== broker)
+      throw new Error('Windows pipe broker exited before startup completed');
     this.socketPathValue = path;
     return path;
   }
@@ -494,18 +486,32 @@ export class TeamMcpBridge {
         stderr += chunk.toString('utf8');
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
       });
+      broker.stdin?.on('error', (error) => {
+        if (this.windowsBroker !== broker) return;
+        secureLogger.error('Windows Team MCP pipe broker stdin failed', error, {
+          category: 'team',
+          event: 'team.mcp.windows_broker_stdin_failed',
+          status: 'failed',
+        });
+        broker.kill();
+      });
       broker.once('exit', (code, signal) => {
-        for (const connection of this.windowsConnections.values()) connection.remoteClosed();
-        this.windowsConnections.clear();
         if (!ready) finish(new Error(`Windows pipe broker exited: ${stderr.trim()}`));
-        else
+        else if (this.windowsBroker === broker) {
+          for (const connection of this.windowsConnections.values()) connection.remoteClosed();
+          this.windowsConnections.clear();
+          this.windowsBroker = null;
+          this.socketPathValue = null;
+          this.startPromise = null;
           secureLogger.error(
             'Windows Team MCP pipe broker exited after startup',
             { code, signal, stderr: stderr.trim() },
             { category: 'team', event: 'team.mcp.windows_broker_exited', status: 'failed' },
           );
+        }
       });
       output.on('line', (line) => {
+        if (this.windowsBroker !== broker) return;
         let frame: Record<string, unknown>;
         try {
           frame = JSON.parse(line) as Record<string, unknown>;
@@ -528,11 +534,10 @@ export class TeamMcpBridge {
         const connectionId = frame['connectionId'];
         if (typeof connectionId !== 'string' || connectionId.length > 64) return;
         if (frame['type'] === 'open') {
-          if (process.env['CI'] === 'true')
-            secureLogger.info('Windows Team MCP broker open frame received', undefined, {
-              category: 'team',
-              event: 'team.mcp.windows_trace_open',
-            });
+          if (this.windowsConnections.size >= MAX_CONCURRENT_CONNECTIONS) {
+            this.sendWindowsBrokerFrame(broker, { type: 'close', connectionId });
+            return;
+          }
           const pipeHandle = frame['pipeHandle'];
           if (
             typeof pipeHandle !== 'string' ||
@@ -567,11 +572,6 @@ export class TeamMcpBridge {
         if (connection === undefined) return;
         if (frame['type'] === 'close') connection.remoteClosed();
         else if (frame['type'] === 'data' && typeof frame['data'] === 'string') {
-          if (process.env['CI'] === 'true')
-            secureLogger.info('Windows Team MCP broker data frame received', undefined, {
-              category: 'team',
-              event: 'team.mcp.windows_trace_data',
-            });
           try {
             connection.receive(Buffer.from(frame['data'], 'base64'));
           } catch {
@@ -586,7 +586,13 @@ export class TeamMcpBridge {
     broker: ChildProcess,
     frame: Readonly<Record<string, unknown>>,
   ): void {
-    if (broker.stdin?.writable === true) broker.stdin.write(`${JSON.stringify(frame)}\n`);
+    if (
+      this.windowsBroker === broker &&
+      broker.stdin?.writable === true &&
+      broker.stdin.writableEnded === false &&
+      broker.stdin.destroyed === false
+    )
+      broker.stdin.write(`${JSON.stringify(frame)}\n`);
   }
 
   /** Binds a fresh, random bearer token to (taskId, turnId) for the duration of one Leader turn.
@@ -690,15 +696,6 @@ export class TeamMcpBridge {
       peerRegistration.runtimeProcessIdentity === null ||
       !isNativeProcessDescendant(peerIdentity, peerRegistration.runtimeProcessIdentity)
     ) {
-      if (process.platform === 'win32' && process.env['CI'] === 'true')
-        secureLogger.info(
-          'Windows Team MCP request rejected by process binding',
-          {
-            hasPeerIdentity: peerIdentity !== null,
-            hasRuntimeIdentity: peerRegistration.runtimeProcessIdentity !== null,
-          },
-          { category: 'team', event: 'team.mcp.windows_trace_process_rejected' },
-        );
       socket.destroy();
       return;
     }
@@ -925,11 +922,12 @@ export class TeamMcpBridge {
     this.server = null;
     const socketPath = this.socketPathValue;
     this.socketPathValue = null;
+    const windowsBroker = this.windowsBroker;
+    this.windowsBroker = null;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear();
     this.windowsConnections.clear();
-    this.windowsBroker?.kill();
-    this.windowsBroker = null;
+    windowsBroker?.kill();
     if (server === null) return;
     // net.Server.close waits for every accepted connection. Claude/Codex may keep an authenticated
     // bridge socket open after a completed turn, so destroy those sockets before waiting or app

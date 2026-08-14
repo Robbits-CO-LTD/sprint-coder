@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1006,6 +1006,171 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         ok: true,
         result: { authenticated: true },
       });
+  });
+
+  it('caps active pipe instances and accepts another client after a slot is released', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const socketPath = (await bridge.ensureStarted()) as string;
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-windows-capacity', { taskId: 'task-windows', token });
+    const sockets: ReturnType<typeof createConnection>[] = [];
+
+    try {
+      for (let index = 0; index < 16; index += 1) {
+        const socket = createConnection(socketPath);
+        await new Promise<void>((resolve, reject) => {
+          socket.once('connect', resolve);
+          socket.once('error', reject);
+        });
+        sockets.push(socket);
+      }
+
+      const waitingSocket = createConnection(socketPath);
+      sockets.push(waitingSocket);
+      let connected = false;
+      const connectedAfterRelease = new Promise<void>((resolve, reject) => {
+        waitingSocket.once('connect', () => {
+          connected = true;
+          resolve();
+        });
+        waitingSocket.once('error', reject);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(connected).toBe(false);
+
+      sockets[0]?.destroy();
+      await Promise.race([
+        connectedAfterRelease,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('waiting pipe client was not accepted')), 2_000),
+        ),
+      ]);
+
+      const response = new Promise<string>((resolve, reject) => {
+        let buffer = '';
+        waitingSocket.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString('utf8');
+          const newline = buffer.indexOf('\n');
+          if (newline >= 0) resolve(buffer.slice(0, newline));
+        });
+        waitingSocket.once('error', reject);
+      });
+      waitingSocket.write(
+        `${JSON.stringify({
+          requestId: 'windows-capacity',
+          token,
+          tool: '__authenticate__',
+          args: {},
+        })}\n`,
+      );
+      await expect(response.then((line) => JSON.parse(line))).resolves.toMatchObject({
+        ok: true,
+        result: { authenticated: true },
+      });
+    } finally {
+      for (const socket of sockets) socket.destroy();
+    }
+  });
+
+  it('invalidates and restarts the named-pipe broker after an unexpected exit', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const firstSocketPath = await bridge.ensureStarted();
+    const firstBroker = (bridge as unknown as { windowsBroker: ChildProcess | null }).windowsBroker;
+    expect(firstBroker).not.toBeNull();
+    const exited = new Promise<void>((resolve) => firstBroker?.once('exit', () => resolve()));
+    firstBroker?.kill();
+    await exited;
+
+    expect(bridge.socketPath).toBeNull();
+    const secondSocketPath = await bridge.ensureStarted();
+    expect(secondSocketPath).not.toBeNull();
+    expect(secondSocketPath).not.toBe(firstSocketPath);
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-windows-restarted', { taskId: 'task-windows', token });
+    const response = await roundTrip(secondSocketPath as string, {
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { authenticated: true },
+    });
+  });
+
+  it('does not let a disposed broker close connections owned by its replacement', async () => {
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      defaultSocketPathFactory('C:\\ignored', 'win32'),
+    );
+    bridges.push(bridge);
+    const firstSocketPath = await bridge.ensureStarted();
+    const firstBroker = (bridge as unknown as { windowsBroker: ChildProcess | null }).windowsBroker;
+    if (firstBroker === null) throw new Error('expected the first Windows pipe broker');
+    const killFirstBroker = firstBroker.kill.bind(firstBroker);
+    vi.spyOn(firstBroker, 'kill').mockReturnValue(true);
+    const firstBrokerExited = new Promise<void>((resolve) =>
+      firstBroker.once('exit', () => resolve()),
+    );
+
+    await bridge.dispose();
+    const staleSocket = createConnection(firstSocketPath as string);
+    await new Promise<void>((resolve, reject) => {
+      staleSocket.once('connect', resolve);
+      staleSocket.once('error', reject);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const staleConnectionCount = (bridge as unknown as { windowsConnections: Map<string, unknown> })
+      .windowsConnections.size;
+    staleSocket.destroy();
+
+    const secondSocketPath = await bridge.ensureStarted();
+    const socket = createConnection(secondSocketPath as string);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', resolve);
+        socket.once('error', reject);
+      });
+
+      killFirstBroker();
+      await firstBrokerExited;
+      expect(staleConnectionCount).toBe(0);
+
+      const token = TeamMcpBridge.generateToken();
+      bridge.register('turn-windows-replacement', { taskId: 'task-windows', token });
+      const response = new Promise<string>((resolve, reject) => {
+        let buffer = '';
+        socket.on('data', (chunk: Buffer) => {
+          buffer += chunk.toString('utf8');
+          const newline = buffer.indexOf('\n');
+          if (newline >= 0) resolve(buffer.slice(0, newline));
+        });
+        socket.once('close', () => reject(new Error('replacement broker connection closed')));
+        socket.once('error', reject);
+      });
+      socket.write(
+        `${JSON.stringify({
+          requestId: 'windows-replacement',
+          token,
+          tool: '__authenticate__',
+          args: {},
+        })}\n`,
+      );
+      await expect(response.then((line) => JSON.parse(line))).resolves.toMatchObject({
+        ok: true,
+        result: { authenticated: true },
+      });
+    } finally {
+      socket.destroy();
+    }
   });
 
   it('serves Worker messages while the Leader is waiting for reports', async () => {
