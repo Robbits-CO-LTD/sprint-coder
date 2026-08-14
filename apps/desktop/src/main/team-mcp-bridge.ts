@@ -43,6 +43,12 @@ const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powe
 const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
 $name = $env:SPRINT_CODER_PIPE_NAME
+function Trace-Broker($stage) {
+  if ($env:SPRINT_CODER_PIPE_DIAGNOSTICS -eq '1') {
+    [Console]::Error.WriteLine(('stage:' + $stage))
+    [Console]::Error.Flush()
+  }
+}
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
@@ -83,6 +89,7 @@ $connections = [System.Collections.ArrayList]::new()
 # One pending listener is sufficient because it is replenished immediately after every accept;
 # the NamedPipeServerStream instance limit still caps total concurrent connections at 16.
 [void]$listeners.Add((New-Listener))
+Trace-Broker 'listener-ready'
 $stdin = [Console]::OpenStandardInput()
 $stdinBuffer = [byte[]]::new(65536)
 $stdinPending = ''
@@ -94,7 +101,9 @@ while ($true) {
   $tasks.Add($stdinRead)
   foreach ($listener in $listeners) { $tasks.Add($listener.Accept) }
   foreach ($connection in $connections) { $tasks.Add($connection.Read) }
+  Trace-Broker 'waiting'
   $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
+  Trace-Broker ('completed-' + $completed.ToString())
   if ($completed -eq 0) {
     $count = $stdinRead.Result
     if ($count -le 0) { break }
@@ -127,6 +136,7 @@ while ($true) {
   }
   $listenerCount = $listeners.Count
   if ($completed -le $listenerCount) {
+    Trace-Broker 'accepted'
     $listenerIndex = $completed - 1
     $listener = $listeners[$listenerIndex]
     $listeners.RemoveAt($listenerIndex)
@@ -421,6 +431,7 @@ export class TeamMcpBridge {
           TMP: process.env['TMP'] ?? '',
           USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_PIPE_NAME: pipeName,
+          SPRINT_CODER_PIPE_DIAGNOSTICS: process.env['CI'] === 'true' ? '1' : '0',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
