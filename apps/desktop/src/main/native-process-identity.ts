@@ -120,6 +120,31 @@ export function sameNativeProcessIdentity(
   return left.pid === right.pid && left.startIdentity === right.startIdentity;
 }
 
+function processStartedNoLaterThan(
+  parent: NativeProcessIdentity,
+  child: NativeProcessIdentity,
+): boolean {
+  const scalar = /^(linux|win32):([0-9]+)$/;
+  const parentScalar = scalar.exec(parent.startIdentity);
+  const childScalar = scalar.exec(child.startIdentity);
+  if (parentScalar !== null || childScalar !== null) {
+    if (parentScalar === null || childScalar === null || parentScalar[1] !== childScalar[1])
+      return false;
+    return BigInt(parentScalar[2]!) <= BigInt(childScalar[2]!);
+  }
+
+  const darwin = /^darwin:([0-9]+):([0-9]+)$/;
+  const parentDarwin = darwin.exec(parent.startIdentity);
+  const childDarwin = darwin.exec(child.startIdentity);
+  if (parentDarwin === null || childDarwin === null) return false;
+  const parentSeconds = BigInt(parentDarwin[1]!);
+  const childSeconds = BigInt(childDarwin[1]!);
+  return (
+    parentSeconds < childSeconds ||
+    (parentSeconds === childSeconds && BigInt(parentDarwin[2]!) <= BigInt(childDarwin[2]!))
+  );
+}
+
 export function isNativeProcessDescendant(
   peer: NativeProcessIdentity,
   expectedRoot: NativeProcessIdentity,
@@ -132,7 +157,9 @@ export function isNativeProcessDescendant(
     if (visited.has(current.pid) || current.parentPid <= 0 || current.parentPid === current.pid)
       return false;
     visited.add(current.pid);
-    current = query(current.parentPid);
+    const parent = query(current.parentPid);
+    if (parent === null || !processStartedNoLaterThan(parent, current)) return false;
+    current = parent;
   }
   return false;
 }

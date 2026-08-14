@@ -36,12 +36,12 @@ describe('native process identity', () => {
   });
 
   it('walks the process tree while rejecting PID reuse and cycles', () => {
-    const root: NativeProcessIdentity = { pid: 10, parentPid: 1, startIdentity: 'root-a' };
-    const child: NativeProcessIdentity = { pid: 20, parentPid: 10, startIdentity: 'child-a' };
+    const root: NativeProcessIdentity = { pid: 10, parentPid: 1, startIdentity: 'linux:100' };
+    const child: NativeProcessIdentity = { pid: 20, parentPid: 10, startIdentity: 'linux:200' };
     const grandchild: NativeProcessIdentity = {
       pid: 30,
       parentPid: 20,
-      startIdentity: 'grandchild-a',
+      startIdentity: 'linux:300',
     };
     const identities = new Map([
       [10, root],
@@ -52,12 +52,23 @@ describe('native process identity', () => {
 
     expect(isNativeProcessDescendant(grandchild, root, query)).toBe(true);
     expect(
-      isNativeProcessDescendant(grandchild, { ...root, startIdentity: 'root-reused' }, query),
+      isNativeProcessDescendant(grandchild, { ...root, startIdentity: 'linux:101' }, query),
     ).toBe(false);
     expect(sameNativeProcessIdentity(root, { ...root, parentPid: 999 })).toBe(true);
 
     identities.set(20, { ...child, parentPid: 30 });
     expect(isNativeProcessDescendant(grandchild, root, query)).toBe(false);
+
+    identities.set(20, child);
+    identities.set(10, { ...root, startIdentity: 'linux:250' });
+    expect(isNativeProcessDescendant(grandchild, identities.get(10)!, query)).toBe(false);
+  });
+
+  it('fails closed when parent and child start identities cannot be ordered', () => {
+    const root: NativeProcessIdentity = { pid: 10, parentPid: 1, startIdentity: 'unknown' };
+    const child: NativeProcessIdentity = { pid: 20, parentPid: 10, startIdentity: 'unknown-child' };
+
+    expect(isNativeProcessDescendant(child, root, () => root)).toBe(false);
   });
 
   it.runIf(process.platform !== 'win32')(
