@@ -43,12 +43,6 @@ const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powe
 const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
 $name = $env:SPRINT_CODER_PIPE_NAME
-function Trace-Broker($stage) {
-  if ($env:SPRINT_CODER_PIPE_DIAGNOSTICS -eq '1') {
-    [Console]::Error.WriteLine(('stage:' + $stage))
-    [Console]::Error.Flush()
-  }
-}
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $security = [System.IO.Pipes.PipeSecurity]::new()
 $security.SetOwner($sid)
@@ -81,7 +75,23 @@ function New-Listener {
   }
 }
 function Send-Frame($frame) {
-  [Console]::Out.WriteLine(($frame | ConvertTo-Json -Compress))
+  $type = [string]$frame.type
+  $connectionId = [string]$frame.connectionId
+  if ($connectionId -notmatch '^[a-f0-9]{32}$') { throw 'Invalid broker connection id' }
+  if ($type -eq 'open') {
+    $pipeHandle = [string]$frame.pipeHandle
+    if ($pipeHandle -notmatch '^[1-9][0-9]{0,31}$') { throw 'Invalid broker pipe handle' }
+    $json = '{"type":"open","connectionId":"' + $connectionId + '","pipeHandle":"' + $pipeHandle + '"}'
+  } elseif ($type -eq 'close') {
+    $json = '{"type":"close","connectionId":"' + $connectionId + '"}'
+  } elseif ($type -eq 'data') {
+    $data = [string]$frame.data
+    if ($data -notmatch '^[A-Za-z0-9+/]*={0,2}$') { throw 'Invalid broker data frame' }
+    $json = '{"type":"data","connectionId":"' + $connectionId + '","data":"' + $data + '"}'
+  } else {
+    throw 'Invalid broker frame type'
+  }
+  [Console]::Out.WriteLine($json)
   [Console]::Out.Flush()
 }
 $listeners = [System.Collections.ArrayList]::new()
@@ -89,7 +99,6 @@ $connections = [System.Collections.ArrayList]::new()
 # One pending listener is sufficient because it is replenished immediately after every accept;
 # the NamedPipeServerStream instance limit still caps total concurrent connections at 16.
 [void]$listeners.Add((New-Listener))
-Trace-Broker 'listener-ready'
 $stdin = [Console]::OpenStandardInput()
 $stdinBuffer = [byte[]]::new(65536)
 $stdinPending = ''
@@ -101,9 +110,7 @@ while ($true) {
   $tasks.Add($stdinRead)
   foreach ($listener in $listeners) { $tasks.Add($listener.Accept) }
   foreach ($connection in $connections) { $tasks.Add($connection.Read) }
-  Trace-Broker 'waiting'
   $completed = [System.Threading.Tasks.Task]::WaitAny($tasks.ToArray())
-  Trace-Broker ('completed-' + $completed.ToString())
   if ($completed -eq 0) {
     $count = $stdinRead.Result
     if ($count -le 0) { break }
@@ -114,12 +121,15 @@ while ($true) {
       $line = $stdinPending.Substring(0, $newline).TrimEnd([char]13)
       $stdinPending = $stdinPending.Substring($newline + 1)
       if ($line.Length -eq 0) { continue }
-      $command = $line | ConvertFrom-Json
-      $connection = $connections | Where-Object { $_.Id -eq $command.connectionId } | Select-Object -First 1
+      if ($line -notmatch '^\{"type":"(write|close)","connectionId":"([a-f0-9]{32})"(?:,"data":"([A-Za-z0-9+/]*={0,2})")?\}$') { break }
+      $commandType = $Matches[1]
+      $commandConnectionId = $Matches[2]
+      $commandData = $Matches[3]
+      $connection = $connections | Where-Object { $_.Id -eq $commandConnectionId } | Select-Object -First 1
       if ($null -eq $connection) { continue }
-      if ($command.type -eq 'write') {
+      if ($commandType -eq 'write') {
         try {
-          $bytes = [Convert]::FromBase64String([string]$command.data)
+          $bytes = [Convert]::FromBase64String($commandData)
           $connection.Pipe.Write($bytes, 0, $bytes.Length)
           $connection.Pipe.Flush()
         } catch {
@@ -127,7 +137,7 @@ while ($true) {
           $connection.Pipe.Dispose()
           Send-Frame @{ type = 'close'; connectionId = $connection.Id }
         }
-      } elseif ($command.type -eq 'close') {
+      } elseif ($commandType -eq 'close') {
         [void]$connections.Remove($connection)
         $connection.Pipe.Dispose()
       }
@@ -136,26 +146,17 @@ while ($true) {
   }
   $listenerCount = $listeners.Count
   if ($completed -le $listenerCount) {
-    Trace-Broker 'accepted'
     $listenerIndex = $completed - 1
     $listener = $listeners[$listenerIndex]
-    Trace-Broker 'listener-selected'
     $listeners.RemoveAt($listenerIndex)
     $pipe = $listener.Pipe
-    Trace-Broker 'pipe-selected'
     $id = [Guid]::NewGuid().ToString('N')
-    Trace-Broker 'id-created'
     $pipeHandle = $pipe.SafePipeHandle.DangerousGetHandle().ToInt64().ToString()
-    Trace-Broker 'handle-read'
     $buffer = [byte[]]::new(65536)
-    Trace-Broker 'buffer-created'
     $connection = @{ Id = $id; Pipe = $pipe; Buffer = $buffer; Read = $null }
     [void]$connections.Add($connection)
-    Trace-Broker 'connection-registered'
     Send-Frame @{ type = 'open'; connectionId = $id; pipeHandle = $pipeHandle }
-    Trace-Broker 'open-sent'
     $connection.Read = $pipe.ReadAsync($buffer, 0, $buffer.Length)
-    Trace-Broker 'read-started'
     [void]$listeners.Add((New-Listener))
     continue
   }
@@ -441,7 +442,6 @@ export class TeamMcpBridge {
           TMP: process.env['TMP'] ?? '',
           USERPROFILE: process.env['USERPROFILE'] ?? '',
           SPRINT_CODER_PIPE_NAME: pipeName,
-          SPRINT_CODER_PIPE_DIAGNOSTICS: process.env['CI'] === 'true' ? '1' : '0',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
