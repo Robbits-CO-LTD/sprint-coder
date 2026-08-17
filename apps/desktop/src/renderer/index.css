@@ -1140,22 +1140,6 @@ button {
 }
 .sb-new-row {
   display: flex;
-  gap: 6px;
-}
-.sb-icon-primary {
-  width: 36px;
-  height: 36px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  background: var(--bg-elevated);
-  color: var(--accent);
-  box-shadow: var(--shadow-1);
-}
-.sb-icon-primary:hover {
-  background: var(--bg-hover);
 }
 
 /* Recessed rather than raised: this is somewhere to type into, and cutting it into the sidebar

@@ -3,7 +3,14 @@ import type { ElectronApplication, Page } from '@playwright/test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+import {
+  closeApp,
+  completeSetupForFeatureTest,
+  createUserDataDir,
+  firstWindow,
+  launchApp,
+  removeUserDataDir,
+} from './helpers';
 
 test.describe('Project Context Hub sidebar (A2)', () => {
   let userDataDir: string;
@@ -22,6 +29,7 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     mkdirSync(test2);
     app = await launchApp(userDataDir);
     page = await firstWindow(app);
+    await completeSetupForFeatureTest(page);
   });
 
   test.afterAll(async () => {
@@ -31,7 +39,10 @@ test.describe('Project Context Hub sidebar (A2)', () => {
   });
 
   test('creates, moves, archives and restores Projects with keyboard-friendly controls', async () => {
-    const addProject = page.getByRole('button', { name: 'Projectを作成' });
+    await page.getByTestId('sidebar-new-task-button').click();
+    const projectPicker = page.locator('.context-bar .project-picker-trigger');
+    await projectPicker.click();
+    const addProject = page.getByRole('button', { name: '新しいProject' });
     await expect(addProject).toBeVisible();
 
     await addProject.click();
@@ -54,16 +65,18 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     await folderRows.nth(1).getByRole('radio').check();
     await dialog.getByRole('button', { name: '作成' }).click();
     const alphaHeading = page.locator('[data-project-heading]').filter({ hasText: 'Alpha' });
-    await expect(alphaHeading).toBeFocused();
+    await expect(alphaHeading).toBeVisible();
+    await expect(projectPicker).toBeFocused();
 
     const alphaSection = page.locator('.sb-project').filter({ has: alphaHeading });
     const alphaMenu = alphaSection.getByLabel('Alphaのメニュー');
     await alphaSection.getByRole('button', { name: 'AlphaにTaskを作成' }).click();
 
-    const taskRow = alphaSection.locator('[data-task-id]');
+    const taskRow = alphaSection.locator('[data-task-id].active');
     await expect(taskRow).toContainText('未開始');
     await expect(taskRow).toBeFocused();
 
+    await projectPicker.click();
     await addProject.click();
     dialog = page.getByRole('dialog');
     await dialog.getByLabel('Project名').fill('Beta');
@@ -71,7 +84,6 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     const betaHeading = page.locator('[data-project-heading]').filter({ hasText: 'Beta' });
     await expect(betaHeading).toBeVisible();
 
-    const projectPicker = page.locator('.context-bar .project-picker-trigger');
     await projectPicker.click();
     const projectSearch = page.getByLabel('Projectを検索');
     await projectSearch.fill(test2);
@@ -93,7 +105,7 @@ test.describe('Project Context Hub sidebar (A2)', () => {
 
     await projectPicker.click();
     await page.getByRole('button', { name: /Projectなしで作業/ }).click();
-    await expect(projectPicker).toContainText('Projectなし');
+    await expect(projectPicker).toContainText('プロジェクトを選択');
     await projectPicker.click();
     await page.getByRole('menuitemradio', { name: /Beta/ }).click();
 
@@ -105,11 +117,11 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     await projectPicker.click();
     await page.getByRole('menuitemradio', { name: /Alpha/ }).click();
     await expect(projectPicker).toContainText('Alpha');
-    await expect(alphaSection.locator('[data-task-id]')).toHaveCount(1);
+    await expect(alphaSection.locator('[data-task-id]')).toHaveCount(2);
 
     await textarea.fill('/new');
     await textarea.press('Enter');
-    await expect(alphaSection.locator('[data-task-id]')).toHaveCount(2);
+    await expect(alphaSection.locator('[data-task-id]')).toHaveCount(3);
 
     await alphaMenu.click();
     await alphaSection.getByRole('button', { name: 'アーカイブ' }).click();

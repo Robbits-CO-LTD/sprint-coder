@@ -291,21 +291,8 @@ export function Sidebar({
           data-testid="sidebar-new-task-button"
           onClick={() => void createTask()}
         >
-          <Plus size={15} /> 新しいタスク
+          <Plus size={15} /> 新規タスク
         </button>
-        {canManageProjects && (
-          <button
-            type="button"
-            className="sb-icon-primary"
-            aria-label="Projectを作成"
-            title="Projectを作成"
-            onClick={() =>
-              projectMultiFolderUx ? setEditorProject(null) : openDialog({ kind: 'create-project' })
-            }
-          >
-            <Plus size={15} />
-          </button>
-        )}
       </div>
       <div className="sb-search">
         <Search size={14} />
