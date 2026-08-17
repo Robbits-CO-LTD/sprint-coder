@@ -126,15 +126,6 @@ export function PermissionChip({ taskId }: { taskId: string }) {
       >
         <ShieldAlert size={16} />
         {PRESET_LABEL[permission.preset]}
-        {/* Moved here from the TaskHeader when the duplicate chips were removed (issue #47). It must
-            travel with the control, not be dropped: this is the one place the app admits that a
-            write-capable Claude is not sandboxed by anything the app enforces (issue #37). A word,
-            never only a colour. */}
-        {enforcement === 'trusted-unmanaged' && (
-          <span className="access-unmanaged" data-testid="access-unmanaged">
-            非サンドボックス
-          </span>
-        )}
       </button>
       {open && (
         <div className="runtime-menu permission-menu" role="menu" aria-label="Access mode選択">

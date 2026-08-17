@@ -3529,12 +3529,6 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer-permission-chip[data-access-preset='full'] {
   color: var(--accent);
 }
-.composer-permission-chip .access-unmanaged {
-  padding-left: 6px;
-  border-left: 1px solid currentColor;
-  color: var(--warning);
-  font-size: 10px;
-}
 .permission-menu {
   min-width: 290px;
 }
@@ -7644,18 +7638,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--danger);
   border-color: var(--danger-line);
 }
-/* The Access chip carries a capability now, not just a name (issue #37). The unmanaged marker is a
-   word rather than a colour so it survives forced-colors and colour-blind readers alike. */
 .access-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-.access-unmanaged {
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-  padding: 0 5px;
-  border-radius: var(--r-xs);
-  color: var(--warning);
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
 }
