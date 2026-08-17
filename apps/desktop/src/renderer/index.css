@@ -907,7 +907,9 @@ button {
   opacity: 0.94;
 }
 .app-titlebar--macos {
-  padding-left: 78px;
+  /* Native traffic lights end around x=68. Leave a deliberate 32px breathing space before the
+     product name instead of visually grouping the label with the window controls. */
+  padding-left: 100px;
 }
 .app-titlebar--windows {
   padding-right: 0;
