@@ -229,7 +229,7 @@ export function Timeline({
                 <img src={sprintCoderIcon} alt="" draggable={false} />
               </div>
               <div className="timeline-welcome-copy">
-                <p className="timeline-welcome-kicker">SPRINT CODER · LOCAL AI WORKSPACE</p>
+                <p className="timeline-welcome-kicker">SPRINT CODER · AI CODING WORKSPACE</p>
                 <h2 id="timeline-welcome-title">なんでも相談してください</h2>
                 <p>
                   相談だけでも大丈夫です。Workspaceでの実行が必要になったときは、事前に確認します。
