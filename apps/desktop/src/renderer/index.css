@@ -91,13 +91,14 @@
   --t-cinematic: 560ms;
 
   --font-ui:
-    'SF Pro JP', 'SF Pro Text', 'SF Pro Icons', 'Hiragino Kaku Gothic Pro', 'ヒラギノ角ゴ Pro W3',
-    メイリオ, Meiryo, 'ＭＳ Ｐゴシック', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text', 'Segoe UI',
+    'Hiragino Sans', 'Yu Gothic UI', 'Noto Sans JP', Meiryo, sans-serif;
   --font-display:
-    'SF Pro JP', 'SF Pro Display', 'SF Pro Icons', 'Hiragino Kaku Gothic Pro',
-    'ヒラギノ角ゴ Pro W3', メイリオ, Meiryo, 'ＭＳ Ｐゴシック', 'Helvetica Neue', Helvetica, Arial,
-    sans-serif;
-  --font-mono: SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+    'Avenir Next', 'SF Pro Display', 'Segoe UI Variable Display', 'Segoe UI', 'Hiragino Sans',
+    'Yu Gothic UI', 'Noto Sans JP', Meiryo, sans-serif;
+  --font-mono:
+    'SFMono-Regular', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
 }
 
 /* Inline SVG icon set (see components/icons.tsx). Nudged down 1px so the stroke's optical
@@ -126,8 +127,13 @@ body {
   font-family: var(--font-ui);
   font-size: 14px;
   line-height: 1.5;
-  letter-spacing: -0.012em;
-  font-feature-settings: normal;
+  letter-spacing: -0.006em;
+  font-feature-settings:
+    'kern' 1,
+    'liga' 1,
+    'calt' 1;
+  font-optical-sizing: auto;
+  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
   line-break: strict;
@@ -2169,8 +2175,7 @@ button {
   font-size: clamp(28px, 5cqw, 46px);
   font-weight: 620;
   line-height: 1.1;
-  letter-spacing: -0.025em;
-  font-feature-settings: normal;
+  letter-spacing: -0.018em;
 }
 .timeline-welcome p {
   max-width: 500px;
@@ -4624,7 +4629,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .turn-diff-partial {
   color: var(--text-secondary);
-  font-family: var(--font-sans);
+  font-family: var(--font-ui);
   font-size: 11px;
 }
 
