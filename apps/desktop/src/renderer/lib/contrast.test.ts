@@ -17,9 +17,9 @@ import type { RGB } from './contrast';
 // in index.css — computed from the real token values (not hand-copied numbers), so it regresses the
 // moment either side of a pair drifts.
 //
-// The current warm-dark palette restores the approved demo's atmosphere while retaining the
-// expanded surface/foreground system introduced later. Each group states which contrast bar it is
-// held to, so visual direction changes cannot silently weaken readability.
+// The current GitHub Dark-inspired palette keeps the workspace neutral while retaining the expanded
+// surface/foreground system introduced later. Each group states which contrast bar it is held to,
+// so visual direction changes cannot silently weaken readability.
 
 const cssPath = join(__dirname, '..', 'index.css');
 const css = readFileSync(cssPath, 'utf8');

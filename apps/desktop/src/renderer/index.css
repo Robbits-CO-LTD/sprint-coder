@@ -1,48 +1,48 @@
 /* Sprint Coder renderer
-   Visual direction: an obsidian AI atelier, with quiet cinematic imagery, optical blue state
-   light and precision-machined surfaces. */
+   Visual direction: a neutral GitHub Dark-inspired workspace, with near-black surfaces,
+   restrained elevation and colour reserved for meaningful interaction states. */
 
 :root {
-  /* Beautiful UI-inspired graphite system. The reference uses restrained neutral surfaces,
-     hairline edges and one clear blue accent; Sprint Coder keeps that hierarchy while lifting
-     foregrounds enough for the renderer's WCAG 2.2 AA audit. */
+  /* GitHub Dark-inspired graphite system. Backgrounds stay neutral and near-black; blue is an
+     interaction accent rather than a tint applied across every surface. Foregrounds remain lifted
+     enough for the renderer's WCAG 2.2 AA audit. */
 
   /* Surfaces */
-  --bg-app: #0c0f13;
-  --bg-sidebar: #101318;
-  --bg-panel: #14181e;
-  --bg-elevated: #1b2028;
-  --bg-hover: #222832;
-  --bg-selected: #1b2a3a;
+  --bg-app: #0d1117;
+  --bg-sidebar: #010409;
+  --bg-panel: #161b22;
+  --bg-elevated: #1c2128;
+  --bg-hover: #21262d;
+  --bg-selected: #2a2f36;
 
   /* Text */
-  --text-primary: #f5f5f7;
-  --text-secondary: #b8bec8;
-  --text-muted: #d0d3d8;
+  --text-primary: #f0f6fc;
+  --text-secondary: #b1bac4;
+  --text-muted: #d0d7de;
   /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
      confined to genuinely inactive controls; anything a user is expected to read uses
      --text-muted or above. */
-  --text-disabled: #686b72;
+  --text-disabled: #6e7681;
 
   /* Borders. --border-subtle is decorative separation only (1.01-1.33, nowhere near 3:1) and must
      never be the sole indicator of a control's bounds; --border-strong is the one to reach for when
      the boundary carries meaning. */
-  --border-subtle: #29303a;
-  --border-strong: #7f8997;
+  --border-subtle: #30363d;
+  --border-strong: #8c959f;
 
   /* Brand / interaction */
-  --accent: #75c7ff;
-  --accent-hover: #a2dbff;
+  --accent: #58a6ff;
+  --accent-hover: #79c0ff;
   /* An accent-tinted *fill*, not a foreground. Use --text-primary for copy placed on this surface;
      --accent remains an interaction/state colour rather than body text on its own tint. */
-  --accent-muted: #203b52;
-  --focus-ring: #8dd2ff;
+  --accent-muted: #1f3a5f;
+  --focus-ring: #58a6ff;
 
   /* State */
   --success: #7bd89c;
   --warning: #f2c46d;
   --danger: #ff938a;
-  --info: #8ec5e8;
+  --info: #79c0ff;
 
   /* AI */
   --ai-accent: #d4a7ff;
@@ -58,9 +58,8 @@
   --r-lg: 12px; /* cards, dialogs, the composer */
   --r-xl: 16px; /* full panels and floating node surfaces */
 
-  /* Tinted lines and washes, derived from the palette rather than written as literals. Before this
-     the file still carried the pre-warm-palette blue (rgba(115, 152, 246, …)) in 23 places, so
-     hover and focus states glowed cool blue against a warm amber accent. */
+  /* Tinted lines and washes are derived from the interaction palette. They stay local to active,
+     focused and informational elements instead of tinting the workspace background. */
   --accent-line: color-mix(in srgb, var(--accent) 46%, transparent);
   --accent-line-soft: color-mix(in srgb, var(--accent) 30%, transparent);
   --accent-wash: color-mix(in srgb, var(--accent) 10%, transparent);
