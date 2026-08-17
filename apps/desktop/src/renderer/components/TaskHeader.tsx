@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { Hexagon, List, MoreHorizontal } from './icons';
+import { List, MoreHorizontal } from './icons';
 import type { TaskSummary } from '../types/sprint-coder';
-import teamClusterArt from '../../../assets/generated/team-cluster-button.webp';
 
 export function TaskHeader({
   task,
@@ -24,9 +23,6 @@ export function TaskHeader({
   const renameTask = useAppStore((s) => s.renameTask);
   const teamViewOpen = useAppStore((s) => s.teamViewOpen);
   const teamBusy = useAppStore((s) => s.teamBusy);
-  const teamWorkerCount = useAppStore(
-    (s) => s.teamByTask[task.id]?.workers.filter(({ kind }) => kind === 'worker').length ?? 0,
-  );
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(task.title);
   const [syncedTitle, setSyncedTitle] = useState(task.title);
@@ -111,22 +107,11 @@ export function TaskHeader({
         data-testid="team-toggle"
         disabled={teamBusy}
         aria-pressed={teamViewOpen}
-        aria-label={`Team Canvasを開く${teamWorkerCount > 0 ? `、Worker ${teamWorkerCount}人` : ''}`}
-        title="Team Canvasを開く"
+        aria-label="Teamを開く"
+        title="Teamを開く"
         onClick={onToggleTeam}
       >
-        <span className="team-btn-art" aria-hidden="true">
-          <img src={teamClusterArt} alt="" draggable={false} />
-          <Hexagon size={13} />
-        </span>
-        <span className="team-btn-copy">
-          <span>Team</span>
-          <small>
-            {teamWorkerCount > 0
-              ? `${teamWorkerCount} ${teamWorkerCount === 1 ? 'Worker' : 'Workers'}`
-              : 'Canvas'}
-          </small>
-        </span>
+        Team
       </button>
       <button
         type="button"

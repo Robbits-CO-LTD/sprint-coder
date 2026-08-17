@@ -1757,84 +1757,44 @@ button {
 .team-btn {
   position: relative;
   margin-left: auto;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  height: 38px;
-  padding: 3px 12px 3px 4px;
+  justify-content: center;
+  min-width: 76px;
+  height: 36px;
+  padding: 0 18px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
-  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
+  border-radius: 999px;
   background:
-    linear-gradient(110deg, color-mix(in srgb, var(--accent) 11%, transparent), transparent 58%),
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent 72%),
     var(--bg-elevated);
   color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
   box-shadow:
     inset 0 1px rgba(255, 255, 255, 0.08),
-    0 5px 18px rgba(0, 0, 0, 0.28);
+    0 4px 14px rgba(0, 0, 0, 0.24);
   transition:
     transform var(--t-quick) var(--ease-ui),
     border-color var(--t-quick) var(--ease-ui),
     background var(--t-quick) var(--ease-ui),
     box-shadow var(--t-quick) var(--ease-ui);
 }
-.team-btn-art {
-  position: relative;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  flex: none;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
-  border-radius: var(--r-sm);
-  background: #05070a;
-  place-items: center;
-  box-shadow: inset 0 0 12px color-mix(in srgb, var(--accent) 13%, transparent);
-}
-.team-btn-art img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  transform: scale(1.13);
-  transition: transform var(--t-standard) var(--ease-spatial);
-}
-.team-btn-art .icon {
-  position: relative;
-  z-index: 1;
-  color: rgba(245, 245, 247, 0.84);
-  filter: drop-shadow(0 1px 3px #000);
-}
-.team-btn-copy {
-  display: flex;
-  min-width: 48px;
-  flex-direction: column;
-  align-items: flex-start;
-  font-size: 12.5px;
-  font-weight: 650;
-  line-height: 1.05;
-}
-.team-btn-copy small {
-  margin-top: 3px;
-  color: var(--text-secondary);
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-}
 .team-btn:hover:not(:disabled) {
   transform: translateY(-1px);
   border-color: color-mix(in srgb, var(--accent) 68%, var(--border-subtle));
   background:
-    linear-gradient(110deg, color-mix(in srgb, var(--accent) 18%, transparent), transparent 62%),
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 24%, transparent), transparent 75%),
     var(--bg-elevated);
   box-shadow:
     inset 0 1px rgba(255, 255, 255, 0.1),
-    0 8px 24px rgba(0, 0, 0, 0.34),
-    0 0 18px color-mix(in srgb, var(--accent) 13%, transparent);
+    0 7px 20px rgba(0, 0, 0, 0.3),
+    0 0 16px color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.team-btn:hover:not(:disabled) .team-btn-art img {
-  transform: scale(1.26);
+.team-btn:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
 }
 .team-btn:disabled {
   opacity: 0.5;
