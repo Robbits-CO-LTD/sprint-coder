@@ -106,10 +106,10 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
           aria-haspopup="dialog"
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          title={selected?.primaryFolder?.path ?? selected?.name ?? 'Projectなしで作業'}
+          title={selected?.primaryFolder?.path ?? selected?.name ?? 'プロジェクトを選択'}
         >
           <Folder size={15} />
-          {selected?.name ?? 'Projectなし'}
+          {selected?.name ?? 'プロジェクトを選択'}
         </button>
         {open && (
           <div className="project-picker-popover" role="dialog" aria-label="Projectを選択">
