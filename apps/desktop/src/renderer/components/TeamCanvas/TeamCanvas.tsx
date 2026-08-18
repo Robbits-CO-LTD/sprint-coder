@@ -11,8 +11,6 @@ import type { KeyboardEvent as ReactKeyboardEvent, Ref, RefObject } from 'react'
 import { useAppStore } from '../../store/appStore';
 import { WorkerNode } from './WorkerNode';
 import { useCamera } from './useCamera';
-import teamCanvasNetwork from '../../../../assets/generated/team-canvas-network.webp';
-import teamEmptyDocks from '../../../../assets/generated/team-empty-docks.webp';
 import type { CamState, Rect } from './useCamera';
 import { sendCable } from './cables';
 import {
@@ -931,13 +929,6 @@ export function TeamCanvas({
       tabIndex={0}
       onKeyDown={handleCanvasKeyDown}
     >
-      <img
-        className="team-canvas-art"
-        src={teamCanvasNetwork}
-        alt=""
-        aria-hidden="true"
-        draggable={false}
-      />
       {!detail ? (
         <div className="team-canvas-notice">
           <div className="sys-notice">Teamを準備しています</div>
@@ -1016,7 +1007,6 @@ export function TeamCanvas({
               banner below it would begin outside the first viewport and hide the only guidance. */}
           {showEmptyTeamHint && (
             <div className="team-empty-hint">
-              <img src={teamEmptyDocks} alt="" aria-hidden="true" draggable={false} />
               <span className="team-empty-hint-copy">
                 <strong>Teamは待機中</strong>
                 Leaderに依頼すると、必要に応じてWorkerを雇用します

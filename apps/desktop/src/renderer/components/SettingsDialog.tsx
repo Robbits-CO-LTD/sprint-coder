@@ -30,7 +30,6 @@ import {
   writeAccessPresetDefault,
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
-import settingsConnectionsArt from '../../../assets/generated/settings-connections.webp';
 import mitLicenseText from '../../../../../LICENSE?raw';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
@@ -273,10 +272,6 @@ export function WorkspaceBody({
       ) : (
         <>
           <nav className="settings-nav" aria-label="設定カテゴリ">
-            <div className="settings-nav-art" aria-hidden="true">
-              <img src={settingsConnectionsArt} alt="" draggable={false} />
-              <span>LOCAL INTELLIGENCE</span>
-            </div>
             {SETTINGS_SECTIONS.map(({ id, label, description }) => (
               <button
                 key={id}

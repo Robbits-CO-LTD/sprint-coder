@@ -28,7 +28,6 @@ import {
   type WorkspaceChangeSummary,
 } from '../../lib/workspace-change-summary';
 import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png';
-import welcomeStudio from '../../../../assets/generated/welcome-studio.webp';
 import { ProjectMemoryDialog, type ProjectMemoryDialogSource } from '../ProjectMemoryDialog';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
@@ -217,13 +216,6 @@ export function Timeline({
             className="empty-state timeline-welcome"
             aria-labelledby="timeline-welcome-title"
           >
-            <img
-              className="timeline-welcome-art"
-              src={welcomeStudio}
-              alt=""
-              aria-hidden="true"
-              draggable={false}
-            />
             <div className="timeline-welcome-content">
               <div className="timeline-welcome-mark" aria-hidden="true">
                 <img src={sprintCoderIcon} alt="" draggable={false} />

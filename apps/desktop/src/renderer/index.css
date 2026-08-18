@@ -1,62 +1,68 @@
 /* Sprint Coder renderer
-   Visual direction: a neutral GitHub Dark-inspired workspace, with near-black surfaces,
-   restrained elevation and colour reserved for meaningful interaction states. */
+   Visual direction: a matte industrial workspace — neutral charcoal surfaces separated by tone
+   rather than by lines, relief built from a top highlight and a contact shadow rather than from
+   borders, and colour spent only where it carries meaning. Reference points are Linear's ordering,
+   Vercel's quiet, and Braun/Sony's matte hardware, not a dark "gaming" chrome. */
 
 :root {
-  /* GitHub Dark-inspired graphite system. Backgrounds stay neutral and near-black; blue is an
-     interaction accent rather than a tint applied across every surface. Foregrounds remain lifted
-     enough for the renderer's WCAG 2.2 AA audit. */
-
-  /* Surfaces */
-  --bg-app: #0d1117;
-  --bg-sidebar: #010409;
-  --bg-panel: #161b22;
-  --bg-elevated: #1c2128;
-  --bg-hover: #21262d;
-  --bg-selected: #2a2f36;
+  /* Surfaces. A six-step matte charcoal ladder, neutral with only a trace of cool cast so it reads
+     as anodised metal rather than as blue-black. Steps are deliberately small (~4-7 units of
+     relative luminance apart): panels are told apart by tone, not by a border between them, which
+     is what keeps the shell quiet when many of them are on screen at once. The sidebar sits *below*
+     the canvas so navigation recedes and the working surface is the brightest plane. */
+  --bg-app: #1c1c1f;
+  --bg-sidebar: #171719;
+  --bg-panel: #212124;
+  --bg-elevated: #26262a;
+  --bg-hover: #2b2b30;
+  --bg-selected: #313138;
 
   /* Text */
-  --text-primary: #f0f6fc;
-  --text-secondary: #b1bac4;
-  --text-muted: #d0d7de;
+  --text-primary: #ededf0;
+  --text-secondary: #a8a8b2;
+  --text-muted: #c9c9d2;
   /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
      confined to genuinely inactive controls; anything a user is expected to read uses
      --text-muted or above. */
-  --text-disabled: #6e7681;
+  --text-disabled: #6f6f78;
 
-  /* Borders. --border-subtle is decorative separation only (1.01-1.33, nowhere near 3:1) and must
-     never be the sole indicator of a control's bounds; --border-strong is the one to reach for when
-     the boundary carries meaning. */
-  --border-subtle: #30363d;
-  --border-strong: #8c959f;
+  /* Borders. Lines are now the exception rather than the structure: most separation is carried by
+     --hairline (below) or by a tone step. --border-subtle is decorative separation only (1.36:1,
+     nowhere near 3:1) and must never be the sole indicator of a control's bounds; --border-strong
+     is the one to reach for when the boundary carries meaning. */
+  --border-subtle: #33333a;
+  --border-strong: #8a8a95;
 
-  /* Brand / interaction */
-  --accent: #58a6ff;
-  --accent-hover: #79c0ff;
+  /* Brand / interaction. The accent is softened and desaturated from the old signal blue — it is a
+     material highlight, not a light source. Its budget is deliberately small: the send button, the
+     focus ring, in-progress indicators, and the "you are here" rail. Everything that used to be
+     blue merely to look active is now neutral and earns emphasis from tone instead. */
+  --accent: #8ab0f0;
+  --accent-hover: #a8c6f7;
   /* An accent-tinted *fill*, not a foreground. Use --text-primary for copy placed on this surface;
      --accent remains an interaction/state colour rather than body text on its own tint. */
-  --accent-muted: #1f3a5f;
-  --focus-ring: #58a6ff;
+  --accent-muted: #26344a;
+  --focus-ring: #8ab0f0;
 
   /* State */
   --success: #7bd89c;
   --warning: #f2c46d;
   --danger: #ff938a;
-  --info: #79c0ff;
+  --info: #9dc0f5;
 
   /* AI */
   --ai-accent: #d4a7ff;
-  --ai-surface: #25212e;
+  --ai-surface: #262330;
 
-  /* Radius scale. The UI is built from squares with softened corners — no pills, no circles.
-     Five steps, one per structural level, so nothing lands between sizes and every control of the
-     same weight reads as the same family. Anything that used to be `99px`/`999px`/`50%` now picks
-     the step that matches its size, not a shape. */
-  --r-xs: 5px; /* badges, tags, inline code, the smallest buttons */
-  --r-sm: 7px; /* buttons, chips, list rows, menu items */
-  --r-md: 9px; /* popovers, menus, toasts, code blocks */
-  --r-lg: 12px; /* cards, dialogs, the composer */
-  --r-xl: 16px; /* full panels and floating node surfaces */
+  /* Radius scale. The UI is built from squares with softened corners — no pills, no circles except
+     where the shape is literally a dot. Five steps, one per structural level, tightened from the
+     previous scale so nothing reads as a lozenge and every control of the same weight reads as the
+     same family. */
+  --r-xs: 4px; /* badges, tags, inline code, the smallest buttons */
+  --r-sm: 6px; /* buttons, chips, list rows, menu items */
+  --r-md: 8px; /* popovers, menus, toasts, code blocks */
+  --r-lg: 10px; /* cards, dialogs, the composer */
+  --r-xl: 14px; /* full panels and floating node surfaces */
 
   /* Tinted lines and washes are derived from the interaction palette. They stay local to active,
      focused and informational elements instead of tinting the workspace background. */
@@ -72,15 +78,41 @@
   --neutral-wash: color-mix(in srgb, var(--text-primary) 6%, transparent);
   --neutral-wash-strong: color-mix(in srgb, var(--text-primary) 10%, transparent);
 
-  /* Elevation. Three steps, each pairing a tight contact shadow with a wider ambient one so cards
-     read as lifted rather than as a grey blur. */
-  --shadow-1: 0 0 0 1px rgba(255, 255, 255, 0.025), 0 1px 2px rgba(0, 0, 0, 0.3);
+  /* Hairlines. The default separator across the app — light-on-dark at a few percent, so it reads
+     as the edge where one matte plane meets another rather than as a drawn line. --hairline-strong
+     is for edges that also have to survive on top of a raised surface. */
+  --hairline: rgba(255, 255, 255, 0.055);
+  --hairline-strong: rgba(255, 255, 255, 0.09);
+
+  /* Relief. The house recipe for anything pressable: a matte fill, a 1px highlight along the top
+     face where light would catch it, and a tight contact shadow underneath. This is what replaces
+     the old outline-everything approach — a control reads as raised because of how it is lit, not
+     because a border was drawn around it. */
+  --relief:
+    inset 0 1px 0 var(--hairline-strong), inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+    0 1px 1.5px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.18);
+  --relief-hover:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13), inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 1px 1.5px rgba(0, 0, 0, 0.34), 0 4px 12px rgba(0, 0, 0, 0.24);
+  /* Pressed controls lose their highlight and take the shadow inside — the face goes down. */
+  --relief-press: inset 0 1px 3px rgba(0, 0, 0, 0.42), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  /* Recessed: fields and wells, cut into the surface rather than sitting on it. */
+  --inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(0, 0, 0, 0.16);
+
+  /* Elevation. Three steps for detached surfaces (cards, popovers, dialogs). Softer and wider than
+     before so a floating panel reads as hovering over the workspace instead of being cut out of it. */
+  --shadow-1: inset 0 0 0 1px var(--hairline), 0 1px 2px rgba(0, 0, 0, 0.28);
   --shadow-2:
-    0 0 0 1px rgba(255, 255, 255, 0.035), 0 2px 6px rgba(0, 0, 0, 0.28),
-    0 10px 28px rgba(0, 0, 0, 0.28);
+    inset 0 0 0 1px var(--hairline), 0 2px 5px rgba(0, 0, 0, 0.26), 0 12px 32px rgba(0, 0, 0, 0.3);
   --shadow-3:
-    0 0 0 1px rgba(255, 255, 255, 0.045), 0 8px 24px rgba(0, 0, 0, 0.32),
-    0 28px 72px rgba(0, 0, 0, 0.44);
+    inset 0 0 0 1px var(--hairline-strong), 0 8px 24px rgba(0, 0, 0, 0.34),
+    0 32px 80px rgba(0, 0, 0, 0.46);
+
+  /* The one content measure in the app. The conversation, the empty state and the composer all lay
+     out against it, so every block of content in the working surface shares the same two vertical
+     edges from the top of the window to the bottom. --gutter is the breathing room outside it. */
+  --measure: 704px;
+  --gutter: 28px;
 
   --ease-ui: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spatial: cubic-bezier(0.22, 1, 0.36, 1);
@@ -889,12 +921,14 @@ button {
   align-items: center;
   height: 40px;
   padding: 0 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-sidebar) 86%, transparent);
-  backdrop-filter: saturate(150%) blur(18px);
+  border-bottom: 1px solid var(--hairline);
+  /* Opaque and unfiltered: nothing scrolls beneath the window frame, so the translucency and the
+     saturation boost were pure effect — and a saturating bar is exactly the sort of thing that made
+     the chrome feel consumer rather than instrument-grade. */
+  background: var(--bg-sidebar);
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 550;
   letter-spacing: 0.015em;
   line-height: 1;
   user-select: none;
@@ -905,7 +939,7 @@ button {
   position: absolute;
   inset: 0 0 auto;
   height: 1px;
-  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  background: var(--hairline);
   content: '';
   pointer-events: none;
 }
@@ -984,7 +1018,7 @@ button {
   max-width: 420px;
   text-align: center;
   padding: 32px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xl);
   background: var(--bg-panel);
   display: flex;
@@ -1003,15 +1037,17 @@ button {
 }
 
 /* ---------- Sidebar ---------- */
+/* Separated from the canvas by tone alone — the sidebar is a step darker than the working surface,
+   so no dividing line is needed to say where one ends and the other begins. Padding is generous by
+   design: the list is the only dense thing in here, and it reads far better with room around it. */
 .sidebar {
   width: 288px;
   flex: none;
   background: var(--bg-sidebar);
-  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
-  padding: 14px 13px;
-  gap: 5px;
+  padding: 16px 14px 12px;
+  gap: 4px;
   transition:
     transform var(--t-standard) var(--ease-ui),
     opacity var(--t-standard) var(--ease-ui);
@@ -1043,7 +1079,6 @@ button {
   width: 0;
   padding-left: 0;
   padding-right: 0;
-  border-right-width: 0;
   overflow: hidden;
   pointer-events: none;
 }
@@ -1102,12 +1137,13 @@ button {
     color var(--t-quick) var(--ease-ui);
 }
 .sidebar-toggle:hover {
-  background: var(--neutral-wash-strong);
+  background: var(--neutral-wash);
   color: var(--text-primary);
 }
 
-/* The sidebar's primary action stays neutral until interaction. The blue rail is reserved for
-   current location, so the task list keeps a single unambiguous accent meaning. */
+/* The sidebar's primary action is a physical key: matte graphite face, top highlight, contact
+   shadow. It stays fully neutral — including its icon, which used to be the one blue mark in the
+   navigation column and competed with the accent rail that actually means "you are here". */
 .sb-new {
   display: flex;
   align-items: center;
@@ -1115,24 +1151,32 @@ button {
   padding: 9px 11px;
   border-radius: var(--r-sm);
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: none;
   color: var(--text-primary);
-  font-weight: 600;
+  font-weight: 550;
   font-size: 13px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   width: 100%;
   text-align: left;
   transition:
     background var(--t-quick) var(--ease-ui),
-    border-color var(--t-quick) var(--ease-ui);
-  box-shadow: var(--shadow-1);
+    box-shadow var(--t-quick) var(--ease-ui);
+  box-shadow: var(--relief);
 }
 .sb-new .icon {
-  color: var(--accent);
+  color: var(--text-secondary);
+  transition: color var(--t-quick) var(--ease-ui);
 }
 .sb-new:hover:not(:disabled) {
   background: var(--bg-hover);
-  border-color: var(--accent-line-soft);
+  box-shadow: var(--relief-hover);
+}
+.sb-new:hover:not(:disabled) .icon {
+  color: var(--text-primary);
+}
+.sb-new:active:not(:disabled) {
+  background: var(--bg-elevated);
+  box-shadow: var(--relief-press);
 }
 .sb-new:disabled {
   opacity: 0.5;
@@ -1150,20 +1194,17 @@ button {
   gap: 8px;
   padding: 7px 9px;
   border-radius: var(--r-sm);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   background: var(--bg-app);
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.36);
-  transition:
-    border-color var(--t-quick) var(--ease-ui),
-    box-shadow var(--t-quick) var(--ease-ui);
+  border: none;
+  box-shadow: var(--inset-well);
+  transition: box-shadow var(--t-quick) var(--ease-ui);
 }
 .sb-search:focus-within {
-  border-color: var(--accent-line);
   box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.36),
-    0 0 0 2px var(--accent-wash);
+    var(--inset-well),
+    0 0 0 2px var(--accent-wash-strong);
 }
 .sb-search input {
   border: none;
@@ -1189,7 +1230,7 @@ button {
 .sb-status {
   margin: 7px 4px;
   padding: 9px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   color: var(--text-secondary);
   font-size: 12px;
@@ -1270,7 +1311,7 @@ button {
 .sb-project-tasks {
   margin-left: 10px;
   padding-left: 5px;
-  border-left: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--hairline);
 }
 .sb-project-empty {
   padding: 6px 10px 8px;
@@ -1291,9 +1332,9 @@ button {
 .sb-group {
   font-size: 10.5px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   color: var(--text-secondary);
-  padding: 15px 10px 5px;
+  padding: 20px 10px 7px;
   text-transform: uppercase;
 }
 
@@ -1323,11 +1364,11 @@ button {
 .sb-row:hover {
   background: var(--bg-hover);
 }
+/* Selection is carried by the raised fill and the 2px rail alone. The tinted inset edges this
+   replaces put a third accent-coloured mark on the same row, which is what made a single selected
+   Task look like an alert. */
 .sb-row.active {
   background: var(--bg-selected);
-  box-shadow:
-    inset 0 1px var(--accent-line-soft),
-    inset 0 -1px var(--accent-line-soft);
 }
 .sb-row.active::before {
   opacity: 1;
@@ -1340,7 +1381,7 @@ button {
   flex: 1;
   min-width: 0;
   text-align: left;
-  padding: 8px 10px;
+  padding: 9px 11px;
   font-size: 13px;
   line-height: 1.45;
   color: var(--text-secondary);
@@ -1383,9 +1424,10 @@ button {
 }
 .sb-unstarted {
   flex: none;
-  padding: 1px 4px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  padding: 1px 5px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: var(--neutral-wash);
   color: var(--text-secondary);
   font-size: 9.5px;
   font-weight: 500;
@@ -1395,7 +1437,7 @@ button {
 }
 .sb-row.active .sb-item {
   color: var(--text-primary);
-  font-weight: 600;
+  font-weight: 550;
 }
 .sb-item .pin {
   margin-right: 4px;
@@ -1467,7 +1509,7 @@ button {
   min-width: 150px;
   transform: translate(-126px, 2px);
   padding: 4px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-3);
@@ -1491,7 +1533,7 @@ button {
 .project-dialog {
   width: min(440px, calc(100vw - 32px));
   padding: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-elevated);
   color: var(--text-primary);
@@ -1525,11 +1567,20 @@ button {
 .project-dialog select {
   width: 100%;
   padding: 9px 10px;
-  border: 1px solid var(--border-subtle);
+  border: none;
   border-radius: var(--r-sm);
   background: var(--bg-app);
+  box-shadow: var(--inset-well);
   color: var(--text-primary);
   font-size: 13px;
+  outline: none;
+  transition: box-shadow var(--t-quick) var(--ease-ui);
+}
+.project-dialog input:focus,
+.project-dialog select:focus {
+  box-shadow:
+    var(--inset-well),
+    0 0 0 2px var(--accent-wash-strong);
 }
 .project-dialog-actions {
   display: flex;
@@ -1538,7 +1589,7 @@ button {
 }
 .project-dialog-actions button {
   padding: 7px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-app);
   color: var(--text-primary);
@@ -1569,7 +1620,7 @@ button {
 .project-folder-list button,
 .project-folders-clear {
   padding: 6px 9px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   color: var(--text-primary);
 }
@@ -1588,7 +1639,7 @@ button {
   align-items: center;
   gap: 8px;
   padding: 8px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-app);
 }
@@ -1656,7 +1707,8 @@ button {
   text-align: left;
 }
 .sb-footer:hover {
-  background: var(--bg-hover);
+  color: var(--text-primary);
+  background: var(--neutral-wash);
 }
 
 /* ---------- Main / Task header ---------- */
@@ -1667,16 +1719,18 @@ button {
   min-width: 0;
 }
 
+/* Chrome, not content. The header now shares the canvas tone and is separated from it by a single
+   hairline — the old panel fill plus saturating backdrop-blur made a strip of navigation read as a
+   loud object sitting on top of the conversation. */
 .task-header {
-  height: 50px;
+  height: 46px;
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 16px;
-  background: color-mix(in srgb, var(--bg-panel) 84%, transparent);
-  backdrop-filter: saturate(145%) blur(18px);
-  border-bottom: 1px solid var(--border-subtle);
+  gap: 8px;
+  padding: 0 14px;
+  background: transparent;
+  border-bottom: 1px solid var(--hairline);
   transition:
     transform var(--t-standard) var(--ease-ui),
     opacity var(--t-standard) var(--ease-ui);
@@ -1701,18 +1755,22 @@ button {
 /* The title is click-to-rename, which nothing in the old styling said. A hover plate is the
    cheapest way to make an editable label look editable without adding a second control. */
 .task-title {
-  font-weight: 600;
-  font-size: 13.5px;
+  font-weight: 550;
+  font-size: 13px;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 4px 8px;
   margin-left: -4px;
   border-radius: var(--r-xs);
-  transition: background var(--t-quick) var(--ease-ui);
+  transition:
+    background var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui);
 }
 .task-title:hover {
-  background: var(--bg-hover);
+  color: var(--text-primary);
+  background: var(--neutral-wash);
 }
 .task-title-input {
   font: inherit;
@@ -1725,7 +1783,9 @@ button {
   padding: 4px 8px;
   min-width: 160px;
 }
-/* A chip that is pressable gets a solid edge and a surface under it. */
+/* A chip that is pressable gets a surface under it. Hover and open state are both carried by tone
+   — an accent edge on every clickable chip spent the colour budget on affordance rather than on
+   meaning, and left nothing to distinguish the states that matter. */
 .chip-btn {
   cursor: pointer;
   border-style: solid;
@@ -1737,55 +1797,48 @@ button {
 }
 .chip-btn:hover {
   color: var(--text-primary);
-  border-color: var(--accent-line);
+  background: var(--bg-hover);
 }
 /* Expanded disclosures keep their state visible on the button that opened them. */
 .chip-btn[aria-expanded='true'] {
   color: var(--text-primary);
-  background: var(--accent-wash);
-  border-color: var(--accent-line);
+  background: var(--bg-selected);
+  border-color: transparent;
 }
+/* A matte key, not a glowing pill: neutral graphite face, a highlight along the top edge and a
+   contact shadow under it. The accent-gradient capsule it replaces was the single strongest reason
+   the header read as consumer-grade rather than as a tool. */
 .team-btn {
   position: relative;
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 76px;
-  height: 36px;
-  padding: 0 18px;
+  min-width: 72px;
+  height: 30px;
+  padding: 0 14px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
-  border-radius: 999px;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent 72%),
-    var(--bg-elevated);
-  color: var(--text-primary);
-  font-size: 13.5px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  box-shadow:
-    inset 0 1px rgba(255, 255, 255, 0.08),
-    0 4px 14px rgba(0, 0, 0, 0.24);
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 550;
+  letter-spacing: 0.005em;
+  box-shadow: var(--relief);
   transition:
-    transform var(--t-quick) var(--ease-ui),
-    border-color var(--t-quick) var(--ease-ui),
+    color var(--t-quick) var(--ease-ui),
     background var(--t-quick) var(--ease-ui),
     box-shadow var(--t-quick) var(--ease-ui);
 }
 .team-btn:hover:not(:disabled) {
-  transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--accent) 68%, var(--border-subtle));
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--accent) 24%, transparent), transparent 75%),
-    var(--bg-elevated);
-  box-shadow:
-    inset 0 1px rgba(255, 255, 255, 0.1),
-    0 7px 20px rgba(0, 0, 0, 0.3),
-    0 0 16px color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  box-shadow: var(--relief-hover);
 }
 .team-btn:active:not(:disabled) {
-  transform: translateY(0) scale(0.98);
+  background: var(--bg-elevated);
+  box-shadow: var(--relief-press);
 }
 .team-btn:disabled {
   opacity: 0.5;
@@ -1794,8 +1847,10 @@ button {
 /* Team mode is a whole-window mode switch, so the button that entered it stays lit while it is on. */
 .team-btn[aria-pressed='true'] {
   color: var(--text-primary);
-  border-color: var(--accent);
-  background: var(--accent-wash-strong);
+  background: var(--bg-selected);
+  box-shadow:
+    var(--relief-press),
+    inset 2px 0 0 var(--accent);
 }
 /* Post-first-turn nudge toward Team mode (demo/index.html lines 91-100). Not currently wired to
    a trigger in the real app; ported so a future "hint after first turn" affordance is a
@@ -1827,7 +1882,7 @@ button {
   flex: none;
 }
 .icon-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--neutral-wash);
   color: var(--text-primary);
 }
 /* The overflow button is disabled for now, and a disabled control that still lights up on hover is
@@ -1838,20 +1893,15 @@ button {
 }
 
 /* ---------- ChatSurface ---------- */
+/* Flat and untextured on purpose. The working surface is the one plane that should never compete
+   for attention — the old 12px diagonal hatch read as noise behind every conversation. */
 .surface {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
   position: relative;
-  background:
-    linear-gradient(
-        135deg,
-        color-mix(in srgb, var(--text-primary) 1.5%, transparent) 25%,
-        transparent 25%
-      )
-      0 0 / 12px 12px,
-    var(--bg-app);
+  background: var(--bg-app);
 }
 
 .surface-header {
@@ -1859,7 +1909,7 @@ button {
   align-items: center;
   gap: 10px;
   padding: 12px 18px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
   position: relative;
 }
 .surface-header .avatar {
@@ -1919,7 +1969,7 @@ button {
   height: 620px;
   flex: none;
   background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xl);
   box-shadow: var(--shadow-3);
   overflow: hidden;
@@ -1946,13 +1996,15 @@ button {
   min-height: 0;
   container-type: inline-size;
 }
+/* Same measure as .composer-inner, so the conversation column and the input it feeds share one
+   edge down the window instead of being two differently-sized centred blocks. */
 .timeline {
-  max-width: 800px;
+  max-width: calc(var(--measure) + var(--gutter) * 2);
   margin: 0 auto;
-  padding: 30px 28px 18px;
+  padding: 32px var(--gutter) 20px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 22px;
 }
 
 /* Jump-to-latest (issue #3). A sticky, zero-height rail: it pins to the bottom of the scrollport
@@ -2055,148 +2107,132 @@ button {
   font-size: 12.5px;
   color: var(--text-secondary);
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: none;
   padding: 8px 14px;
   border-radius: var(--r-sm);
-  transition: all var(--t-quick) var(--ease-ui);
+  box-shadow: var(--relief);
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui),
+    box-shadow var(--t-quick) var(--ease-ui);
 }
 .chip:hover {
   color: var(--text-primary);
-  border-color: var(--accent-line);
-  background: var(--accent-wash);
+  background: var(--bg-hover);
+  box-shadow: var(--relief-hover);
 }
 
-/* Empty conversation: a full working-surface visual rather than a decorative card. The generated
-   studio image carries the story; copy stays on its calm side and the prompt rows remain direct
-   composer actions. */
+/* The empty state keeps the timeline's own measure. It used to break out to full width so the
+   background artwork could bleed to the edges; with the artwork gone that full-bleed only served to
+   start the greeting on a different left edge than the conversation and the composer that follow
+   it. One column, one edge, top to bottom. */
 .timeline:has(.timeline-welcome) {
-  width: 100%;
-  max-width: none;
   min-height: 100%;
-  padding: 0;
+  padding: 0 var(--gutter);
 }
+/* The empty state is composed from whitespace, not from a picture. The generated studio artwork
+   that used to fill this panel is gone: it fought the conversation for attention every time a Task
+   was opened, and the scrim needed to keep text legible over it was most of what made the canvas
+   look heavy. What is left is one column of type with a lot of air around it. */
 .timeline-welcome {
   position: relative;
   isolation: isolate;
+  flex: 1;
   width: 100%;
-  min-height: 100%;
   margin: 0;
-  padding: clamp(54px, 8vh, 92px) clamp(28px, 7cqw, 100px) 48px;
+  /* Vertical padding is a floor, not a fixed frame: `margin: auto 0` on the content below centres
+     it in whatever height is left over, so tall windows get air and short ones stay uncropped. */
+  padding: 40px 0 32px;
   align-items: stretch;
   overflow: hidden;
   gap: 0;
   text-align: left;
 }
-.timeline-welcome::before {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background:
-    linear-gradient(90deg, rgba(7, 10, 14, 0.96) 0%, rgba(7, 10, 14, 0.76) 47%, transparent 78%),
-    linear-gradient(0deg, rgba(7, 10, 14, 0.92), transparent 38%);
-  content: '';
-  pointer-events: none;
-}
-.timeline-welcome-art {
-  position: absolute;
-  inset: 0;
-  z-index: -2;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center;
-  opacity: 0.8;
-  filter: saturate(0.78) contrast(1.06);
-  animation: welcomeArtIn 1100ms var(--ease-spatial) both;
-  user-select: none;
-}
 .timeline-welcome-content {
-  width: min(100%, 580px);
+  width: 100%;
   margin: auto 0;
 }
+/* Smaller, and with the blue bloom behind it removed — the mark identifies the app, it does not
+   need to glow to do that. */
 .timeline-welcome-mark {
   position: relative;
-  width: 64px;
-  height: 64px;
-  margin-bottom: 28px;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 26px;
   animation: welcomeIn var(--t-cinematic) var(--ease-spatial) both;
-}
-.timeline-welcome-mark::after {
-  position: absolute;
-  inset: 8px -20px -12px 14px;
-  z-index: -1;
-  border-radius: var(--r-xl);
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-  filter: blur(28px);
-  content: '';
-  pointer-events: none;
 }
 .timeline-welcome-mark img {
   display: block;
   width: 100%;
   height: 100%;
-  border-radius: 17px;
+  border-radius: var(--r-lg);
   object-fit: cover;
   box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.12) inset,
-    0 12px 32px rgba(0, 0, 0, 0.28);
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 2px 8px rgba(0, 0, 0, 0.3);
   user-select: none;
 }
 .timeline-welcome-copy {
   animation: welcomeIn var(--t-cinematic) 70ms var(--ease-spatial) both;
 }
+/* The eyebrow is set in the same quiet grey as other section labels. It used to be the only blue
+   thing above the fold, which made a piece of static branding read like a live status. */
 .timeline-welcome-kicker {
-  margin: 0 0 10px !important;
-  color: var(--accent) !important;
-  font-size: 10px !important;
-  font-weight: 650;
+  margin: 0 0 14px !important;
+  color: var(--text-secondary) !important;
+  font-size: 10.5px !important;
+  font-weight: 600;
   line-height: 1 !important;
-  letter-spacing: 0.12em !important;
+  letter-spacing: 0.14em !important;
 }
+/* Dropped from a 46px display headline to something close to a document title. At the old size the
+   greeting was the loudest object in the app on every empty Task; the presence now comes from the
+   space around it rather than from the point size. */
 .timeline-welcome h2 {
   font-family: var(--font-display);
   margin: 0;
-  font-size: clamp(28px, 5cqw, 46px);
-  font-weight: 620;
-  line-height: 1.1;
-  letter-spacing: -0.018em;
+  font-size: clamp(23px, 2.6cqw, 29px);
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.016em;
 }
 .timeline-welcome p {
-  max-width: 500px;
-  margin: 16px 0 0;
-  color: color-mix(in srgb, var(--text-primary) 72%, transparent);
-  font-size: 14px;
-  line-height: 1.72;
-  letter-spacing: -0.012em;
+  max-width: 460px;
+  margin: 14px 0 0;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.75;
+  letter-spacing: -0.008em;
   line-break: strict;
 }
 .timeline-welcome-actions {
   width: 100%;
-  margin-top: 38px;
+  max-width: 520px;
+  margin-top: 44px;
   animation: welcomeIn var(--t-cinematic) 140ms var(--ease-spatial) both;
 }
 .timeline-welcome-actions-label {
   display: block;
-  margin-bottom: 8px;
-  color: color-mix(in srgb, var(--text-primary) 58%, transparent);
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
 }
 .timeline-welcome-suggestions {
-  border-top: 1px solid color-mix(in srgb, var(--text-primary) 15%, transparent);
+  border-top: 1px solid var(--hairline);
 }
 .timeline-welcome-suggestion {
   display: flex;
   width: 100%;
-  min-height: 52px;
+  min-height: 46px;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
   padding: 0 4px;
-  border-bottom: 1px solid color-mix(in srgb, var(--text-primary) 15%, transparent);
-  color: color-mix(in srgb, var(--text-primary) 72%, transparent);
-  font-size: 13.5px;
+  border-bottom: 1px solid var(--hairline);
+  color: var(--text-secondary);
+  font-size: 13px;
   line-height: 1.5;
   text-align: left;
   transition:
@@ -2204,10 +2240,12 @@ button {
     padding var(--t-quick) var(--ease-ui),
     background var(--t-quick) var(--ease-ui);
 }
+/* Hover is a neutral wash, not a blue sweep: these are three ordinary suggestions, and tinting them
+   made them look like the app's primary call to action. */
 .timeline-welcome-suggestion:hover {
   padding-inline: 10px;
   color: var(--text-primary);
-  background: linear-gradient(90deg, var(--accent-wash), transparent 76%);
+  background: var(--neutral-wash);
 }
 .timeline-welcome-suggestion-arrow {
   color: var(--text-disabled);
@@ -2217,7 +2255,7 @@ button {
     transform var(--t-quick) var(--ease-ui);
 }
 .timeline-welcome-suggestion:hover .timeline-welcome-suggestion-arrow {
-  color: var(--accent);
+  color: var(--text-secondary);
   transform: translate(2px, -2px) rotate(45deg);
 }
 @keyframes welcomeIn {
@@ -2230,42 +2268,20 @@ button {
     transform: none;
   }
 }
-@keyframes welcomeArtIn {
-  from {
-    opacity: 0;
-    transform: scale(1.035);
-  }
-  to {
-    opacity: 0.8;
-    transform: none;
-  }
-}
 @media (max-width: 620px) {
+  .timeline:has(.timeline-welcome) {
+    padding: 0 20px;
+  }
   .timeline-welcome {
-    padding: 38px 24px 34px;
-  }
-  .timeline-welcome::before {
-    background:
-      linear-gradient(90deg, rgba(7, 10, 14, 0.96), rgba(7, 10, 14, 0.78)),
-      linear-gradient(0deg, rgba(7, 10, 14, 0.92), transparent 38%);
-  }
-  .timeline-welcome-art {
-    object-position: 66% center;
-    opacity: 0.5;
+    padding: 28px 0 24px;
   }
   .timeline-welcome-mark {
-    width: 56px;
-    height: 56px;
+    width: 40px;
+    height: 40px;
     margin-bottom: 20px;
   }
-  .timeline-welcome-mark img {
-    border-radius: 15px;
-  }
   .timeline-welcome h2 {
-    font-size: 30px;
-  }
-  .timeline-welcome p {
-    font-size: 14px;
+    font-size: 22px;
   }
 }
 
@@ -2293,7 +2309,7 @@ button {
    is orientation, not decoration. */
 .msg-user .bubble {
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 10px 16px;
   border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
   max-width: 82%;
@@ -2369,7 +2385,7 @@ button {
 
 /* Run Card */
 .run-card {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
   overflow: hidden;
@@ -2390,7 +2406,7 @@ button {
   place-items: center;
   width: 48px;
   height: 48px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: var(--bg-elevated);
   color: var(--accent);
@@ -2553,7 +2569,7 @@ button {
 .run-stop {
   font-size: 12px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 3px 11px;
   border-radius: var(--r-sm);
 }
@@ -2683,7 +2699,7 @@ button {
   width: min(680px, calc(100% - 44px));
   margin: 6px 0 16px 44px;
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
   box-shadow: var(--shadow-1);
@@ -2694,7 +2710,7 @@ button {
   align-items: center;
   gap: 9px;
   padding: 10px 16px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .command-card__kind {
   color: var(--info);
@@ -2748,7 +2764,7 @@ button {
 .command-card__copy,
 .command-card__footer button {
   padding: 2px 8px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   color: var(--text-secondary);
   font-size: 11px;
@@ -2763,7 +2779,7 @@ button {
   max-height: 176px;
   overflow: hidden;
   padding: 8px 16px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   background: rgba(0, 0, 0, 0.2);
   color: var(--text-secondary);
   font: 11.5px/22px var(--font-mono);
@@ -2773,7 +2789,7 @@ button {
   grid-template-columns: 78px minmax(0, 1fr);
   gap: 8px;
   padding: 7px 16px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   color: var(--text-secondary);
   font-size: 11px;
 }
@@ -2823,13 +2839,9 @@ button {
   width: min(680px, 100%);
   margin: 8px 0 16px 44px;
   padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--warning) 38%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
   border-radius: var(--r-lg);
-  background: linear-gradient(
-    145deg,
-    color-mix(in srgb, var(--warning) 11%, transparent),
-    var(--bg-elevated)
-  );
+  background: color-mix(in srgb, var(--warning) 6%, var(--bg-elevated));
   box-shadow: var(--shadow-2);
 }
 .approval-card__head {
@@ -2899,7 +2911,7 @@ button {
 }
 .approval-card__actions button {
   padding: 7px 11px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-hover);
   font-size: 12px;
@@ -2927,7 +2939,7 @@ button {
   width: min(680px, calc(100% - 44px));
   margin: 4px 0 10px 44px;
   padding: 7px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   color: var(--success);
   background: var(--success-wash);
@@ -2946,11 +2958,37 @@ button {
 /* ---------- ContextBar + Composer ---------- */
 .composer-zone {
   flex: none;
-  padding: 8px 28px 20px;
+  padding: 10px var(--gutter) 22px;
 }
 .composer-inner {
-  max-width: 800px;
+  max-width: var(--measure);
   margin: 0 auto;
+}
+
+/* ---------- Composer panel ----------
+   One object. The context strip and the input used to be two separately outlined boxes stacked so
+   their edges nearly touched, which is what made the bottom of the window read as a large empty
+   frame. They now share a single matte face, a single edge and a single shadow; the only line
+   inside is the hairline that separates the strip from the field. */
+.composer-panel {
+  position: relative;
+  border-radius: var(--r-lg);
+  background: var(--bg-elevated);
+  box-shadow:
+    inset 0 1px 0 var(--hairline-strong),
+    inset 0 0 0 1px var(--hairline),
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 30px rgba(0, 0, 0, 0.26);
+  transition: box-shadow var(--t-quick) var(--ease-ui);
+}
+/* Focus lifts the whole panel rather than outlining the textarea inside it. */
+.composer-panel:focus-within {
+  box-shadow:
+    inset 0 1px 0 var(--hairline-strong),
+    inset 0 0 0 1px var(--accent-line-soft),
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 30px rgba(0, 0, 0, 0.26),
+    0 0 0 3px var(--accent-wash);
 }
 .goal-progress {
   display: grid;
@@ -2959,7 +2997,7 @@ button {
   gap: 10px;
   margin: 0 10px 7px;
   padding: 9px 10px 9px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: color-mix(in srgb, var(--bg-panel) 92%, var(--accent-wash));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
@@ -3056,20 +3094,20 @@ button {
   cursor: default;
   opacity: 0.45;
 }
+/* A strip inside the panel, not a box on top of it. */
 .context-bar {
   position: relative;
   z-index: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  margin: 0 16px -7px;
-  padding: 7px 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-bottom: 0;
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-  background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-elevated));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  gap: 6px;
+  min-height: 34px;
+  margin: 0;
+  padding: 5px 8px;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0;
+  background: transparent;
   font-size: 11.5px;
   color: var(--text-secondary);
   flex-wrap: wrap;
@@ -3080,7 +3118,7 @@ button {
   gap: 5px;
   padding: 3px 9px;
   border-radius: var(--r-xs);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
 }
 .context-bar .ctx-chip {
@@ -3157,7 +3195,7 @@ button {
 .project-picker-header kbd {
   min-width: 30px;
   padding: 3px 6px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -3173,7 +3211,7 @@ button {
   min-height: 42px;
   margin: 0 12px 12px;
   padding: 0 11px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
   color: var(--text-secondary);
@@ -3227,7 +3265,7 @@ button {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .project-picker-section-label {
   display: flex;
@@ -3276,7 +3314,7 @@ button {
   display: grid;
   flex: none;
   place-items: center;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   background: color-mix(in srgb, var(--bg-panel) 76%, transparent);
   color: var(--text-secondary);
@@ -3346,7 +3384,7 @@ button {
   display: grid;
   gap: 2px;
   padding: 7px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--bg-panel) 42%, transparent);
 }
 .project-picker-action-icon-accent {
@@ -3408,7 +3446,7 @@ button {
 }
 .file-editor-header {
   justify-content: space-between;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .file-editor-header h2 {
   margin: 0 0 4px;
@@ -3430,7 +3468,7 @@ button {
   border-radius: 0;
   padding: 16px;
   outline: none;
-  background: var(--bg-base);
+  background: var(--bg-app);
   color: var(--text-primary);
   font: 13px/1.6 var(--font-mono);
   white-space: pre;
@@ -3438,7 +3476,7 @@ button {
 }
 .file-editor-footer {
   justify-content: flex-end;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .file-editor-footer [role='status'] {
   margin-right: auto;
@@ -3508,10 +3546,10 @@ button {
 button.composer-permission-chip:hover,
 button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-primary);
-  background: var(--bg-hover);
+  background: var(--neutral-wash);
 }
 .composer-permission-chip[data-access-preset='full'] {
-  color: var(--accent);
+  color: var(--warning);
 }
 .permission-menu {
   min-width: 290px;
@@ -3560,7 +3598,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   z-index: 6;
   min-width: 200px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   padding: 10px 12px;
   box-shadow: var(--shadow-2);
@@ -3573,7 +3611,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-variant-numeric: tabular-nums;
   padding-bottom: 8px;
   margin-bottom: 6px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .ctx-usage-list {
   display: flex;
@@ -3612,7 +3650,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-size: 12px;
   color: var(--text-secondary);
   background: var(--neutral-wash);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   padding: 5px 10px;
 }
@@ -3648,19 +3686,14 @@ button.composer-permission-chip[aria-expanded='true'] {
 /* The composer is where the user spends their whole session, so it is the one element allowed to
    sit slightly above the page: a real border, a soft lift, and a focus state that ring-lights the
    whole box instead of just recolouring one hairline. */
+/* The surface, edge and shadow now belong to .composer-panel — this is just the input region. */
 .composer {
   position: relative;
   z-index: 1;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-lg);
-  padding: 12px 13px 10px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
-    var(--shadow-2);
-  transition:
-    border-color var(--t-quick) var(--ease-ui),
-    box-shadow var(--t-quick) var(--ease-ui);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 12px 14px 10px;
 }
 .slash-command-menu {
   position: absolute;
@@ -3671,7 +3704,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   max-height: min(350px, 52vh);
   overflow: hidden;
   padding: 5px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-2);
@@ -3729,8 +3762,8 @@ button.composer-permission-chip[aria-expanded='true'] {
 .slash-command-group {
   justify-self: end;
   padding: 2px 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xs);
   color: var(--text-secondary);
   font-size: 9.5px;
   white-space: nowrap;
@@ -3743,13 +3776,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 14px 10px;
   text-align: center;
 }
-.composer:focus-within {
-  border-color: var(--accent);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
-    var(--shadow-2),
-    0 0 0 2px var(--accent-wash-strong);
-}
+
 .composer-input {
   width: 100%;
   background: none;
@@ -3769,7 +3796,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 5px;
   margin: -1px 0 7px;
   padding-bottom: 7px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .composer-skill-chip {
   display: inline-flex;
@@ -3778,7 +3805,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   max-width: min(280px, 100%);
   padding: 4px 7px;
   border: 1px solid var(--accent-line);
-  border-radius: 999px;
+  border-radius: var(--r-xs);
   color: var(--text-primary);
   background: var(--accent-wash);
   font-size: 11.5px;
@@ -3805,7 +3832,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 6px;
   margin: -1px 0 7px;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .composer-attachment-scope,
 .composer-attachment-status {
@@ -3877,10 +3904,10 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 9px;
+  gap: 2px;
+  margin-top: 10px;
   padding-top: 9px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .composer-run-controls {
   display: flex;
@@ -3899,8 +3926,12 @@ button.composer-permission-chip[aria-expanded='true'] {
   right: 0;
   left: auto;
 }
+/* flex: none, or the row's free-space negotiation shrinks the primary action below its own content
+   at narrow measures — the "キュー" label then paints outside the button's own background, which is
+   both wrong to look at and a real contrast failure against whatever shows through behind it. */
 .composer-action-buttons {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 6px;
   margin-left: 6px;
@@ -3915,18 +3946,20 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .composer-interrupt-btn {
   min-width: 24px;
-  min-height: 32px;
+  min-height: 30px;
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  padding: 4px 8px;
-  border: 1px solid var(--danger-line);
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
   border-radius: var(--r-sm);
-  background: var(--bg-app);
+  background: var(--bg-elevated);
   color: var(--danger);
   font-size: 11.5px;
   white-space: nowrap;
+  box-shadow: var(--relief);
 }
 .composer-interrupt-btn:hover:not(:disabled) {
   background: var(--danger-wash);
@@ -3951,15 +3984,15 @@ button.composer-permission-chip[aria-expanded='true'] {
 .cmp-chip {
   font-size: 11.5px;
   color: var(--text-secondary);
-  padding: 4px 9px;
-  border-radius: var(--r-xs);
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
   border: 1px solid transparent;
   transition:
     background var(--t-quick) var(--ease-ui),
     color var(--t-quick) var(--ease-ui);
 }
 .cmp-chip:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--neutral-wash);
   color: var(--text-primary);
 }
 .cmp-chip:disabled {
@@ -3986,7 +4019,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   z-index: 6;
   min-width: 220px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   padding: 4px;
   box-shadow: var(--shadow-2);
@@ -4068,7 +4101,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-size: 12.5px;
   color: var(--text-primary);
   background: var(--bg-app);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
 }
 .mpv2-search::placeholder {
@@ -4081,7 +4114,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 2px;
   border-radius: var(--r-sm);
   background: var(--bg-app);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
 }
 .mpv2-access-btn {
   flex: 1;
@@ -4162,7 +4195,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: center;
   min-width: 0;
   padding-right: 9px;
-  border-right: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--hairline);
 }
 /* Catalog text, only cased by CSS: the label is whatever the connection or the model author is
    called upstream, so no brand name is written down here. */
@@ -4241,23 +4274,37 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .send-btn {
   margin-left: 0;
-  width: 32px;
-  height: 32px;
+  flex: none;
+  width: 30px;
+  height: 30px;
   border-radius: var(--r-sm);
   background: var(--accent);
   color: var(--bg-app);
   display: grid;
   place-items: center;
   font-size: 15px;
-  transition: all var(--t-quick) var(--ease-ui);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 1px 2px rgba(0, 0, 0, 0.32);
+  /* Deliberately not transitioning `background`. This button swaps between "unavailable" and "the
+     primary action" as the turn state changes, and interpolating that swap paints a stretch of
+     in-between colour that is neither state and that its label cannot be read against — axe catches
+     it at 1.6:1 if it samples mid-flight. The state change is information, so it lands at once;
+     only the tactile properties ease. */
+  transition:
+    box-shadow var(--t-quick) var(--ease-ui),
+    transform var(--t-quick) var(--ease-ui);
 }
+/* No ring. The queue variant used to draw a border mixed *down* from the accent, which sat darker
+   than the fill it surrounded — a muddy edge on a filled button, and the surface axe resolved
+   behind the label, putting the 11px "キュー" at 3.15:1. The face carries the button on its own. */
 .send-btn.queue {
   width: auto;
-  min-width: 32px;
+  min-width: 30px;
   grid-auto-flow: column;
   gap: 5px;
-  padding-inline: 8px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-subtle));
+  padding-inline: 9px;
+  border: none;
 }
 .send-btn-label {
   font-size: 11px;
@@ -4268,17 +4315,22 @@ button.composer-permission-chip[aria-expanded='true'] {
   background: var(--accent-hover);
 }
 .send-btn:active:not(:disabled) {
-  transform: scale(0.94);
+  transform: scale(0.96);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.32);
 }
+/* An opaque matte face rather than a translucent wash, so the unavailable state is a real surface
+   that reads the same wherever the button sits. */
 .send-btn:disabled {
-  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  background: var(--bg-hover);
   color: var(--text-secondary);
+  box-shadow: var(--relief);
   cursor: default;
 }
 .send-btn.stop {
-  background: var(--bg-app);
+  background: var(--bg-elevated);
   color: var(--danger);
-  border: 1px solid var(--danger-line);
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+  box-shadow: var(--relief);
 }
 .send-btn.stop:hover:not(:disabled) {
   background: var(--danger-wash);
@@ -4391,7 +4443,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 14px 16px;
   border-radius: var(--r-md);
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   overflow-x: auto;
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -4413,7 +4465,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   right: 8px;
   font-size: 11px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 3px 9px;
   border-radius: var(--r-sm);
   background: var(--bg-panel);
@@ -4437,7 +4489,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 12px;
   overflow: auto;
   overscroll-behavior: contain;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: var(--bg-panel);
 }
@@ -4494,7 +4546,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 6px 0 12px;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
 }
 .md-body table {
@@ -4505,8 +4557,8 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .md-body th,
 .md-body td {
-  border-right: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
   padding: 8px 10px;
   text-align: left;
   vertical-align: top;
@@ -4524,7 +4576,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .md-body hr {
   border: none;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   margin: 12px 0;
 }
 
@@ -4547,7 +4599,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 8px 0 16px 48px;
   min-width: 0;
   padding: 11px 13px 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-1);
@@ -4649,7 +4701,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .turn-diff-drift {
   flex: none;
   padding: 1px 6px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   color: var(--text-secondary);
   font-size: 10.5px;
@@ -4670,7 +4722,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .turn-diff-workers {
   margin-top: 10px;
   padding-top: 9px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .turn-diff-workers-title {
   color: var(--text-secondary);
@@ -4707,7 +4759,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 
 .turn-diff-action {
   padding: 4px 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-panel);
   color: var(--text-secondary);
@@ -4834,29 +4886,21 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-canvas::before {
   background: radial-gradient(
-    color-mix(in srgb, var(--accent) 13%, transparent) 1px,
+    color-mix(in srgb, var(--text-primary) 10%, transparent) 1px,
     transparent 1.4px
   );
   background-size: 28px 28px;
-  opacity: 0.34;
-  mask-image: radial-gradient(circle at center, black, transparent 76%);
+  opacity: 0.3;
+  mask-image: radial-gradient(circle at center, black, transparent 78%);
 }
+/* A shallow vignette so nodes near the edge stay readable, drawn from the canvas's own background
+   rather than from a hardcoded near-black that no longer matches any surface in the palette. */
 .team-canvas::after {
-  background:
-    radial-gradient(circle at center, transparent 42%, rgba(3, 5, 8, 0.58) 100%),
-    linear-gradient(180deg, rgba(3, 5, 8, 0.52), transparent 18%);
-}
-.team-canvas-art {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.48;
-  filter: saturate(0.76) contrast(1.08);
-  pointer-events: none;
-  user-select: none;
+  background: radial-gradient(
+    circle at center,
+    transparent 52%,
+    color-mix(in srgb, var(--bg-sidebar) 62%, transparent) 100%
+  );
 }
 @keyframes teamCanvasIn {
   from {
@@ -4900,45 +4944,26 @@ button.composer-permission-chip[aria-expanded='true'] {
   left: 18px;
   z-index: 5;
   display: grid;
-  width: 400px;
-  max-width: calc(100% - 438px);
-  height: 108px;
+  /* Sized to its copy now that the illustration on its right is gone — the old 400x108 plate was
+     mostly there to hold the picture, and keeping it would leave a large empty panel on the canvas. */
+  width: max-content;
+  max-width: min(340px, calc(100% - 438px));
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border-subtle));
+  border: none;
   border-radius: var(--r-lg);
   background: var(--bg-panel);
   box-shadow: var(--shadow-2);
   pointer-events: none;
 }
-.team-empty-hint::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    rgba(10, 13, 17, 0.98) 0%,
-    rgba(10, 13, 17, 0.78) 56%,
-    transparent 84%
-  );
-  content: '';
-}
-.team-empty-hint > img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center 58%;
-  opacity: 0.76;
-}
 .team-empty-hint-copy {
   position: relative;
   z-index: 1;
   display: flex;
-  width: 276px;
+  max-width: 300px;
   flex-direction: column;
   align-self: center;
   gap: 6px;
-  padding: 0 18px;
+  padding: 16px 18px;
   color: var(--text-secondary);
   font-size: 12.5px;
   line-height: 1.55;
@@ -5056,7 +5081,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .cc-btn {
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   padding: 7px 12px;
   font-size: 12.5px;
@@ -5081,7 +5106,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-secondary);
   opacity: 0.9;
   background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   box-shadow: var(--shadow-1);
   padding: 6px 10px;
   border-radius: var(--r-sm);
@@ -5112,7 +5137,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-secondary);
   padding: 6px 12px;
   border-radius: var(--r-sm);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   background: var(--bg-elevated);
 }
 .team-back-btn:hover {
@@ -5136,7 +5161,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-status-chip {
   font-size: 11px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 2px 9px;
   border-radius: var(--r-xs);
   flex: none;
@@ -5145,7 +5170,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin-left: auto;
   font-size: 12px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 5px 12px;
   border-radius: var(--r-sm);
   flex: none;
@@ -5167,7 +5192,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   width: 480px;
   height: 420px;
   background: var(--bg-panel);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-3);
   overflow: hidden;
@@ -5180,7 +5205,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .w-activity {
   flex: none;
   padding: 7px 15px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
   color: var(--text-secondary);
   font-size: 12px;
   overflow: hidden;
@@ -5201,11 +5226,11 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-exec-canvas {
   flex: none;
   padding: 7px 15px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .team-exec-list {
   padding: 7px 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--neutral-wash);
 }
@@ -5246,7 +5271,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 3px;
   margin-top: 3px;
   padding-top: 5px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .team-exec-repositories summary {
   width: fit-content;
@@ -5271,7 +5296,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-activity-group {
   width: min(680px, calc(100% - 44px));
   margin: 2px 0 8px 44px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .team-activity-group > summary {
   display: flex;
@@ -5310,7 +5335,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-work-transcript {
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--neutral-wash);
   color: var(--text-secondary);
@@ -5346,7 +5371,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   width: min(680px, calc(100% - 44px));
   margin: 0 0 0 44px;
   padding: 7px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--neutral-wash);
   font-size: 12px;
@@ -5388,7 +5413,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: center;
   gap: 10px;
   padding: 11px 15px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
   position: relative;
 }
 .w-avatar {
@@ -5454,7 +5479,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .w-stop-btn {
   font-size: 11px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 2px 9px;
   border-radius: var(--r-sm);
   margin-left: 8px;
@@ -5503,7 +5528,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex: none;
   min-height: 34px;
   padding: 6px 15px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -5523,7 +5548,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   bottom: 22px;
   width: 260px;
   padding: 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-panel);
   box-shadow: var(--shadow-2);
@@ -5647,7 +5672,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 6px;
   font-size: 12px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   padding: 5px 12px;
   border-radius: var(--r-sm);
   flex: none;
@@ -5664,7 +5689,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-list-view {
   width: 460px;
   flex: none;
-  border-left: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--hairline);
   background: var(--bg-panel);
   display: flex;
   flex-direction: column;
@@ -5692,7 +5717,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 8px;
   padding: 8px 16px;
   min-height: 52px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .tlv-header-main,
 .tlv-header-actions {
@@ -5732,7 +5757,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 12px;
 }
 .tlv-worker {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-elevated);
   padding: 12px 14px;
@@ -5782,7 +5807,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   list-style: none;
   margin: 0;
   padding: 8px 0 0;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -5801,7 +5826,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 10px;
 }
 .tlv-timeline li {
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
   padding-bottom: 8px;
   font-size: 12.5px;
 }
@@ -6039,7 +6064,7 @@ button.composer-permission-chip[aria-expanded='true'] {
    them without the normal state ever needing to compete. */
 .sf-row--notice {
   color: var(--warning);
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   padding-top: 6px;
 }
 .sf-dismiss {
@@ -6091,7 +6116,7 @@ button.composer-permission-chip[aria-expanded='true'] {
  stacking come from the platform rather than from hand-rolled JS. Top-layer matters here: the
  dialog must not be clipped by `.team-canvas`'s `overflow: clip` when opened in Team mode. */
 .settings-dialog {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
   color: var(--text-primary);
@@ -6112,7 +6137,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 /* Team Policy reuses the settings form controls below, but has its own native top-layer dialog so
    Canvas and List can mount the same editor without coupling it to the global Runtime settings. */
 .team-policy-dialog {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
   color: var(--text-primary);
@@ -6130,7 +6155,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   padding: 8px;
   background: var(--bg-app);
@@ -6263,7 +6288,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-workspace > .settings-header {
   grid-area: header;
   padding: 16px 18px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--bg-panel) 92%, var(--bg-app));
 }
 .settings-workspace > .settings-header > div:first-child {
@@ -6283,47 +6308,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   min-height: 0;
   overflow-y: auto;
   padding: 13px 12px;
-  border-right: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--hairline);
   background: var(--bg-sidebar);
-}
-.settings-nav-art {
-  position: relative;
-  flex: none;
-  height: 98px;
-  margin-bottom: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-md);
-  background: #080b0f;
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.05);
-}
-.settings-nav-art::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(0deg, rgba(6, 9, 13, 0.95), transparent 68%);
-  content: '';
-}
-.settings-nav-art img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  opacity: 0.78;
-  filter: saturate(0.8);
-  transition: transform var(--t-standard) var(--ease-spatial);
-}
-.settings-nav-art span {
-  position: absolute;
-  right: 10px;
-  bottom: 8px;
-  left: 10px;
-  z-index: 1;
-  color: color-mix(in srgb, var(--text-primary) 68%, transparent);
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.11em;
-}
-.settings-nav:hover .settings-nav-art img {
-  transform: scale(1.035);
 }
 .settings-nav button {
   position: relative;
@@ -6342,15 +6328,12 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-primary);
   background: var(--neutral-wash);
 }
-/* The one accented surface in the sheet. Everything else here is neutral on purpose, so "where am
-   I" is the only thing the accent is ever saying. */
+/* The accent appears once here, as the 2px rail below. Everything else stays neutral on purpose, so
+   "where am I" is the only thing the colour is ever saying. */
 .settings-nav button.active {
   color: var(--text-primary);
-  border-color: var(--accent-line-soft);
-  background: var(--accent-wash);
-  box-shadow:
-    inset 0 1px var(--accent-line-soft),
-    inset 0 -1px var(--accent-line-soft);
+  border-color: transparent;
+  background: var(--bg-selected);
 }
 .settings-nav button.active::before {
   position: absolute;
@@ -6412,7 +6395,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   gap: 4px;
   padding-bottom: 14px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
 }
 .settings-page-heading h3,
 .settings-page-heading p {
@@ -6428,9 +6411,9 @@ button.composer-permission-chip[aria-expanded='true'] {
   line-height: 1.55;
 }
 .settings-eyebrow {
-  color: var(--accent);
+  color: var(--text-secondary);
   font-size: 10px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -6442,20 +6425,20 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-default-policy {
   gap: 12px;
   padding: 14px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
 }
 .team-model-settings {
   gap: 12px;
   padding: 14px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
 }
 .team-model-guidance,
 .pre-prompt-settings {
   gap: 12px;
   padding: 14px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
 }
 .team-model-guidance textarea,
@@ -6464,21 +6447,26 @@ button.composer-permission-chip[aria-expanded='true'] {
   min-height: 112px;
   resize: vertical;
   padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
+  border: none;
   border-radius: var(--r-sm);
-  background: var(--bg-input);
+  background: var(--bg-app);
+  box-shadow: var(--inset-well);
+  color: var(--text-primary);
   font-size: 13px;
   line-height: 1.5;
+  transition: box-shadow var(--t-quick) var(--ease-ui);
 }
 .team-model-guidance textarea:focus,
 .pre-prompt-settings textarea:focus {
-  border-color: var(--accent);
+  box-shadow:
+    var(--inset-well),
+    0 0 0 2px var(--accent-wash-strong);
   outline: none;
 }
 .settings-count-badge {
   flex: none;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--r-xs);
   color: var(--text-secondary);
   background: var(--neutral-wash);
   font-size: 11px;
@@ -6494,7 +6482,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: flex-start;
   gap: 9px;
   padding: 9px 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   cursor: pointer;
 }
@@ -6507,14 +6495,14 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   max-height: 360px;
   overflow-y: auto;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
 }
 .team-model-connection {
   min-width: 0;
 }
 .team-model-connection + .team-model-connection {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .team-provider-summary {
   display: flex;
@@ -6592,7 +6580,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-model-list {
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .team-model-row {
   display: flex;
@@ -6602,7 +6590,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   cursor: pointer;
 }
 .team-model-row + .team-model-row {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .team-model-row > span {
   display: flex;
@@ -6702,10 +6690,7 @@ button.composer-permission-chip[aria-expanded='true'] {
     padding: 9px 12px;
     overflow-x: auto;
     border-right: none;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-  .settings-nav-art {
-    display: none;
+    border-bottom: 1px solid var(--hairline);
   }
   .settings-nav button {
     flex: none;
@@ -6743,9 +6728,6 @@ button.composer-permission-chip[aria-expanded='true'] {
   .settings-page {
     animation: none;
   }
-  .settings-nav-art img {
-    transition: none;
-  }
   .team-provider-expand > span {
     transition: none;
   }
@@ -6756,7 +6738,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: flex-start;
   gap: 10px;
   padding: 9px 11px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   cursor: pointer;
   transition: border-color var(--t-quick) var(--ease-ui);
@@ -6831,7 +6813,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   background: var(--bg-panel);
 }
@@ -6896,7 +6878,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-size: 13px;
   color: var(--text-primary);
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   padding: 7px 10px;
   width: 100%;
@@ -6935,7 +6917,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   justify-content: space-between;
   gap: 14px;
   padding: 12px 14px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-elevated);
 }
@@ -6959,7 +6941,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   letter-spacing: 0.08em;
 }
 .settings-license-details {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   padding-top: 8px;
 }
 .settings-license-details summary {
@@ -6977,7 +6959,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 8px 0 0;
   overflow: auto;
   padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-app);
   color: var(--text-secondary);
@@ -7004,7 +6986,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   gap: 10px;
   padding-top: 18px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .settings-section-heading {
   display: flex;
@@ -7054,8 +7036,8 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .settings-builtin-skill {
   padding: 8px 0;
-  border-top: 1px solid var(--border-subtle);
-  border-bottom: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
 }
 .settings-builtin-skill > span:first-child,
 .settings-skill-row > span {
@@ -7129,7 +7111,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .settings-secondary-button,
 .settings-primary-button {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   padding: 6px 9px;
   font-size: 12px;
@@ -7260,7 +7242,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   gap: 10px;
   padding-top: 18px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
 }
 .settings-heading-actions {
   display: flex;
@@ -7301,7 +7283,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: center;
   gap: 8px;
   padding: 10px 11px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   background: var(--bg-elevated);
   font-size: 12.5px;
@@ -7322,7 +7304,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex: none;
   padding: 3px 7px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-xs);
   background: none;
   font-size: 11.5px;
   white-space: nowrap;
@@ -7380,7 +7362,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-provider-form {
   align-self: stretch;
   padding: 0;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: var(--bg-panel);
   overflow: hidden;
@@ -7397,7 +7379,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   justify-content: space-between;
   gap: 16px;
   padding: 13px 14px;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--hairline);
   background: var(--bg-elevated);
 }
 .settings-provider-form-heading h4,
@@ -7425,7 +7407,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 /* Optional per-Provider extras only. Anything a Provider requires stays above this line, where a
    user can see the field their submit is waiting on. */
 .settings-provider-advanced {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   padding-top: 9px;
 }
 .settings-provider-advanced > summary {
@@ -7451,14 +7433,17 @@ button.composer-permission-chip[aria-expanded='true'] {
   min-width: 0;
   padding: 7px 10px;
   color: var(--text-primary);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+  border: none;
   border-radius: var(--r-sm);
-  transition: border-color var(--t-quick) var(--ease-ui);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.28);
+  outline: none;
+  transition: box-shadow var(--t-quick) var(--ease-ui);
+  box-shadow: var(--inset-well);
 }
 .settings-text-input:focus {
-  border-color: var(--accent-line);
+  box-shadow:
+    var(--inset-well),
+    0 0 0 2px var(--accent-wash-strong);
 }
 .settings-text-input:disabled {
   opacity: 0.5;
@@ -7513,7 +7498,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 8px;
   margin: 2px -14px -14px;
   padding: 11px 14px;
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--bg-panel) 90%, transparent);
 }
 /* Why the submit is unpressable, on the same line as the submit. */
@@ -7569,7 +7554,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   max-width: 100%;
   min-width: 0;
   padding: 9px 12px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   border-radius: var(--r-md);
   background: var(--bg-elevated);
 }
@@ -7610,7 +7595,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--r-xs);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--hairline);
   color: var(--text-secondary);
 }
 /* Colour is never the only signal — each chip also carries its own word (新規/変更/削除). */
