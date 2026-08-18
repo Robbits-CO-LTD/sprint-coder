@@ -4,7 +4,10 @@ use std::net::{Ipv4Addr, TcpListener};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
+    SetHandleInformation,
+};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
@@ -296,9 +299,20 @@ unsafe fn spawn_appcontainer(
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    startup.StartupInfo.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-    startup.StartupInfo.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    let std_handles = [
+        unsafe { GetStdHandle(STD_INPUT_HANDLE) },
+        unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+        unsafe { GetStdHandle(STD_ERROR_HANDLE) },
+    ];
+    for handle in std_handles {
+        if !make_handle_inheritable(handle, true) {
+            unsafe { DeleteProcThreadAttributeList(list) };
+            return Err(unsafe { GetLastError() });
+        }
+    }
+    startup.StartupInfo.hStdInput = std_handles[0];
+    startup.StartupInfo.hStdOutput = std_handles[1];
+    startup.StartupInfo.hStdError = std_handles[2];
     startup.lpAttributeList = list;
     let executable = win32_process_path(executable);
     let cwd = win32_process_path(&cwd.to_string_lossy());
@@ -320,6 +334,9 @@ unsafe fn spawn_appcontainer(
             &mut process,
         )
     };
+    for handle in std_handles {
+        let _ = make_handle_inheritable(handle, false);
+    }
     unsafe { DeleteProcThreadAttributeList(list) };
     if ok == 0 {
         return Err(unsafe { GetLastError() });
@@ -333,6 +350,14 @@ unsafe fn spawn_appcontainer(
         return Err(unsafe { GetLastError() });
     }
     Ok(exit_code.min(255) as u8)
+}
+
+fn make_handle_inheritable(handle: HANDLE, inheritable: bool) -> bool {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
+    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) != 0 }
 }
 
 fn windows_command_line(executable: &str, argv: &[String]) -> String {
