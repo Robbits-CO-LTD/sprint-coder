@@ -264,12 +264,12 @@ fn macos_probe_command(
 
 #[cfg(target_os = "windows")]
 fn probe() -> ProbeResult {
-    let available = windows_backend::restricted_token_probe();
+    let result = windows_backend::restricted_token_probe();
     ProbeResult {
         protocol_version: PROTOCOL_VERSION,
-        available,
+        available: result.is_ok(),
         backend: "windows-appcontainer",
-        reason: (!available).then_some("appcontainer_probe_failed"),
+        reason: result.err(),
     }
 }
 
