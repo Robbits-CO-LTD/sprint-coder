@@ -292,7 +292,7 @@ export class ClaudeRuntimeAdapter {
     // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp
     // directory, so nothing may be written there whatever Main asked for.
     const effectiveScope: RuntimeWriteScope = primaryRoot === undefined ? 'read-only' : writeScope;
-    const managedMode = _toolCatalogSnapshot !== undefined;
+    const managedMode = true;
     const normalizer = new ClaudeJsonlNormalizer(
       claudeExpectedCapabilities(
         effectiveScope,
@@ -573,15 +573,15 @@ export function buildClaudePrompt(
  * not usable; that is exactly the trade the label exists to disclose.
  */
 const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, readonly string[] | 'default'> = {
-  'read-only': ['Read', 'Glob', 'Grep'],
-  'workspace-write': ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'NotebookEdit', 'Bash'],
-  full: 'default',
+  'read-only': [],
+  'workspace-write': [],
+  full: [],
 };
 
 const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
   'read-only': 'default',
-  'workspace-write': 'acceptEdits',
-  full: 'bypassPermissions',
+  'workspace-write': 'default',
+  full: 'default',
 };
 
 export function buildClaudeTeamMcpConfig(
@@ -615,7 +615,7 @@ export function buildClaudeArgs(
   effort?: string,
   writeScope: RuntimeWriteScope = 'read-only',
   workspaceRoots: readonly string[] = [],
-  managedMode = teamMcp?.managedMode === true,
+  managedMode = true,
 ): string[] {
   const configuredTools = managedMode ? ([] as const) : CLAUDE_TOOLS_BY_SCOPE[writeScope];
   const tools =

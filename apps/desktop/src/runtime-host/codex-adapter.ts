@@ -436,7 +436,7 @@ export class CodexRuntimeAdapter {
     let teamDynamicTools: readonly CodexDynamicToolSpec[] = [];
     const managedDynamicTools =
       toolCatalogSnapshot === undefined ? [] : buildCodexManagedDynamicTools(toolCatalogSnapshot);
-    const managedMode = toolCatalogSnapshot !== undefined;
+    const managedMode = true;
     let activeThreadId: string | null = null;
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {

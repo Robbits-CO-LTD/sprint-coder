@@ -160,7 +160,7 @@ describe('Claude runtime probe', () => {
       '--verbose',
       '--include-partial-messages',
       '--tools',
-      'Read,Glob,Grep',
+      '',
       '--permission-mode',
       'default',
       '--strict-mcp-config',
@@ -173,18 +173,17 @@ describe('Claude runtime probe', () => {
     // The list is asserted as a whole rather than by absence of one name: a future addition that
     // happens to write would otherwise slip in unnoticed.
     const args = buildClaudeArgs('auto', undefined, undefined, 'read-only', ['/tmp/ws']);
-    expect(args[args.indexOf('--tools') + 1]).toBe('Read,Glob,Grep');
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
     expect(args[args.indexOf('--add-dir') + 1]).toBe('/tmp/ws');
   });
 
-  it('publishes edit tools and accepts edits only at workspace-write, pinned to the Workspace', () => {
+  it('keeps native edit tools disabled at workspace-write and pins only the managed Workspace', () => {
     const args = buildClaudeArgs('auto', undefined, undefined, 'workspace-write', [
       '/tmp/ws',
       '/tmp/secondary',
     ]);
-    expect(args[args.indexOf('--tools') + 1]).toContain('Edit');
-    expect(args[args.indexOf('--tools') + 1]).toContain('Write');
-    expect(args[args.indexOf('--permission-mode') + 1]).toBe('acceptEdits');
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
     expect(args[args.indexOf('--add-dir') + 1]).toBe('/tmp/ws');
     expect(args.filter((arg) => arg === '--add-dir')).toHaveLength(2);
     expect(args).toContain('/tmp/secondary');
@@ -278,18 +277,11 @@ describe('Claude runtime probe', () => {
     );
   });
 
-  it('only bypasses permissions at the full scope', () => {
-    expect(
-      buildClaudeArgs('auto', undefined, undefined, 'full', ['/tmp/ws'])[
-        buildClaudeArgs('auto', undefined, undefined, 'full', ['/tmp/ws']).indexOf(
-          '--permission-mode',
-        ) + 1
-      ],
-    ).toBe('bypassPermissions');
-    for (const scope of ['read-only', 'workspace-write'] as const)
-      expect(buildClaudeArgs('auto', undefined, undefined, scope, ['/tmp/ws'])).not.toContain(
-        'bypassPermissions',
-      );
+  it('never bypasses native permissions at any scope', () => {
+    for (const scope of ['read-only', 'workspace-write', 'full'] as const) {
+      const args = buildClaudeArgs('auto', undefined, undefined, scope, ['/tmp/ws']);
+      expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
+    }
   });
 
   it('passes an explicit model without changing the immutable execution profile', () => {
@@ -324,7 +316,7 @@ describe('Claude runtime probe', () => {
       const args = buildClaudeArgs(model);
       const toolsFlagIndex = args.indexOf('--tools');
       expect(toolsFlagIndex).toBeGreaterThanOrEqual(0);
-      expect(args[toolsFlagIndex + 1]).toBe('Read,Glob,Grep');
+      expect(args[toolsFlagIndex + 1]).toBe('');
       expect(args).toContain('--strict-mcp-config');
       expect(args).toContain('--safe-mode');
     }
