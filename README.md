@@ -1,5 +1,8 @@
 # Sprint Coder
 
+[![GitHub Stars](https://img.shields.io/github/stars/Robbits-CO-LTD/sprint-coder?style=flat&logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/stargazers)
+[![GitHub Downloads](https://img.shields.io/github/downloads/Robbits-CO-LTD/sprint-coder/total?style=flat&logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/releases)
+
 チャットから始め、必要なときだけ複数のAIへ仕事を分担できる、ローカルファーストのデスクトップAIコーディング環境です。
 
 Sprint Coderは、1対1のAIチャット、ワークスペース上のファイル編集・コマンド実行、複数WorkerによるTeam実行をひとつのTaskにまとめます。Codex CLIやClaude Code CLIに加え、クラウドAPIとローカルLLMをTaskごとに選択できます。
