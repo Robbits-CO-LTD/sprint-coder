@@ -666,7 +666,7 @@ describe('Main ToolBroker', () => {
     await Promise.all(calls);
   });
 
-  it('enforces sealed output and background capability metadata', async () => {
+  it('enforces sealed output metadata without inferring background authority for other tools', async () => {
     const { registry, echo, command } = createRegistry();
     const broker = new ToolBroker(registry, () => 3, authorizeAll);
     broker.registerImplementation({
@@ -697,7 +697,7 @@ describe('Main ToolBroker', () => {
         providerName: 'run_command',
         input: { executable: '/bin/echo', argv: [] },
       }),
-    ).rejects.toThrow('without catalog capability');
+    ).resolves.toEqual({ state: 'running', sessionId: 'forged-session' });
   });
 
   it('emits one ordered terminal lifecycle for a successful managed call', async () => {

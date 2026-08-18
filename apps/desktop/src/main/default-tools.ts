@@ -360,6 +360,7 @@ export function registerCommandRunnerTool(
   command?: CommandToolBoundary,
   definition = COMMAND_RUNNER_TOOL,
   sessions?: ManagedCommandSessions,
+  foregroundToBackgroundMs = 10_000,
 ): void {
   const commandIds = new WeakMap<object, string>();
   const backgroundSpecs = new WeakSet<object>();
@@ -472,28 +473,33 @@ export function registerCommandRunnerTool(
           for (const event of events) command.publish(event);
         },
       };
-      if (backgroundSpecs.has(spec)) {
-        if (sessions === undefined) throw new Error('Managed command sessions are unavailable');
+      if (sessions !== undefined) {
         const owner = { taskId: _context.taskId, turnId: _context.turnId };
-        const activityId = randomUUID();
-        command.persistence.createBackgroundActivity({
-          id: activityId,
-          taskId: owner.taskId,
-          ownerThreadId: owner.turnId,
-          ownerTurnId: owner.turnId,
-          kind: 'command',
-          wakePolicy: 'nextSafePoint',
-          requiredCapabilities: ['shell.execute'],
-          volumeQuotaBytes: 1_048_576,
-          createdAt: new Date().toISOString(),
-        });
-        const started = await sessions.start(spec, owner, hooks, activityId);
-        command.persistence.transitionBackgroundActivity(
-          activityId,
-          'running',
-          new Date().toISOString(),
-        );
-        void sessions.wait(started.sessionId, owner).then((snapshot) => {
+        const sessionId = randomUUID();
+        let backgroundPersisted = false;
+        const persistBackground = (): void => {
+          if (backgroundPersisted) return;
+          backgroundPersisted = true;
+          command.persistence.createBackgroundActivity({
+            id: sessionId,
+            taskId: owner.taskId,
+            ownerThreadId: owner.turnId,
+            ownerTurnId: owner.turnId,
+            kind: 'command',
+            wakePolicy: 'nextSafePoint',
+            requiredCapabilities: ['shell.execute'],
+            volumeQuotaBytes: 1_048_576,
+            createdAt: new Date().toISOString(),
+          });
+          command.persistence.transitionBackgroundActivity(
+            sessionId,
+            'running',
+            new Date().toISOString(),
+          );
+        };
+        if (backgroundSpecs.has(spec)) persistBackground();
+        const started = await sessions.start(spec, owner, hooks, sessionId);
+        const finalize = (snapshot: Awaited<ReturnType<ManagedCommandSessions['wait']>>): void => {
           const persisted =
             snapshot.result === null
               ? command.persistence.completeCommand({
@@ -517,7 +523,7 @@ export function registerCommandRunnerTool(
             });
           if (snapshot.state !== 'canceled')
             command.persistence.completeBackgroundActivity({
-              activityId,
+              activityId: sessionId,
               completionId: randomUUID(),
               outcome: snapshot.state === 'exited' ? 'completed' : 'failed',
               payload: JSON.stringify({
@@ -529,8 +535,49 @@ export function registerCommandRunnerTool(
               outputCursor: snapshot.nextCursor,
               completedAt: new Date().toISOString(),
             });
-        });
-        return started;
+        };
+        if (backgroundSpecs.has(spec)) {
+          void sessions.wait(started.sessionId, owner).then(finalize);
+          return started;
+        }
+        const completed = await sessions.waitFor(
+          started.sessionId,
+          owner,
+          foregroundToBackgroundMs,
+        );
+        if (completed === null) {
+          persistBackground();
+          void sessions.wait(started.sessionId, owner).then(finalize);
+          return sessions.poll(started.sessionId, owner);
+        }
+        const persisted =
+          completed.result === null
+            ? command.persistence.completeCommand({
+                commandId,
+                state: completed.state === 'canceled' ? 'canceled' : 'failed',
+                exitCode: null,
+                signal: null,
+                outputBytes: command.persistence.getCommand(commandId).outputBytes,
+                truncated: false,
+                finishedAt: new Date().toISOString(),
+              })
+            : completePersistedCommand(command.persistence, commandId, completed.result);
+        command.publish(persisted.event);
+        if (completed.result === null)
+          throw new Error(completed.error ?? 'Managed command failed before completion');
+        if (verificationSpecs.has(spec) && completed.result.exitCode === 0)
+          command.persistence.recordCommandVerification({
+            taskId: owner.taskId,
+            turnId: owner.turnId,
+            commandId,
+            exitCode: 0,
+            createdAt: new Date().toISOString(),
+          });
+        return {
+          ...completed.result,
+          ...toolOutput,
+          truncated: commandToolTruncated(completed.result.truncated, toolOutput.truncated),
+        };
       }
       try {
         const result = await commandRunner.run(spec, hooks);

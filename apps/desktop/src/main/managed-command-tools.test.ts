@@ -111,6 +111,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         boundary,
         MANAGED_EXEC_COMMAND_TOOL,
         sessions,
+        10,
       );
       registerManagedCommandControlTools(broker, sessions, boundary);
       const owner = {
@@ -152,6 +153,22 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       expect(() =>
         sessions.poll(started.sessionId, { taskId: 'task-2', turnId: 'turn-2' }),
       ).toThrow('owner mismatch');
+
+      const autoBackgrounded = (await broker.dispatch({
+        ...owner,
+        callId: 'exec-auto-background',
+        providerName: 'exec_command',
+        input: {
+          executable: '/bin/sh',
+          argv: ['-c', 'sleep 0.2; printf done'],
+          purpose: 'foreground promotion contract',
+        },
+      })) as { sessionId: string; state: string };
+      expect(autoBackgrounded).toMatchObject({ state: 'running' });
+      expect(autoBackgrounded.sessionId).toBeTruthy();
+      await expect(sessions.wait(autoBackgrounded.sessionId, owner)).resolves.toMatchObject({
+        state: 'exited',
+      });
       await broker.dispose();
     });
   },

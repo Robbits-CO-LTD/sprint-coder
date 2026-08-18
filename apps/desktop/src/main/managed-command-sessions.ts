@@ -141,6 +141,24 @@ export class ManagedCommandSessions {
     return this.snapshot(session, 0);
   }
 
+  async waitFor(
+    sessionId: string,
+    owner: Readonly<{ taskId: string; turnId: string }>,
+    timeoutMs: number,
+  ): Promise<ManagedCommandSnapshot | null> {
+    const session = this.require(sessionId, owner);
+    if (session.state !== 'starting' && session.state !== 'running')
+      return this.snapshot(session, 0);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), timeoutMs);
+      timer.unref?.();
+      void session.completion.then(() => {
+        clearTimeout(timer);
+        resolve(this.snapshot(session, 0));
+      });
+    });
+  }
+
   async dispose(): Promise<void> {
     for (const session of this.sessions.values()) session.controller.abort();
     await Promise.allSettled([...this.sessions.values()].map(({ completion }) => completion));

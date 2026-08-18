@@ -274,13 +274,13 @@ export class ToolBroker {
       if (Buffer.byteLength(JSON.stringify(output), 'utf8') > entry.maxOutputBytes)
         throw new Error('Tool output exceeded the pinned output limit');
       if (
+        entry.supportsBackground &&
         typeof output === 'object' &&
         output !== null &&
         (output as Record<string, unknown>)['state'] === 'running' &&
         typeof (output as Record<string, unknown>)['sessionId'] === 'string'
       )
-        if (entry.supportsBackground) transition('backgrounded');
-        else throw new Error('Tool returned a background session without catalog capability');
+        transition('backgrounded');
       else transition('succeeded');
       await bound.resultGate.complete(ordinal);
       return output;
