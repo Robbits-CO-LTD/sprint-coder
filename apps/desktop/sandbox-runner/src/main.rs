@@ -17,18 +17,93 @@ struct ProbeResult {
 
 fn main() -> ExitCode {
     let args = std::env::args().collect::<Vec<_>>();
-    if args.len() != 2 || args[1] != "--probe-json" {
-        eprintln!("usage: sprint-coder-sandbox-runner --probe-json");
-        return ExitCode::from(64);
+    if args.len() == 2 && args[1] == "--probe-json" {
+        let result = probe();
+        return match serde_json::to_string(&result) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => ExitCode::from(70),
+        };
     }
-    let result = probe();
-    match serde_json::to_string(&result) {
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
+    if args.len() >= 6 && args[1] == "--exec" && args[2] == "workspace-write" && args[4] == "--" {
+        return execute_workspace_command(Path::new(&args[3]), &args[5], &args[6..]);
+    }
+    eprintln!(
+        "usage: sprint-coder-sandbox-runner --probe-json | --exec workspace-write ROOT -- EXECUTABLE [ARG...]"
+    );
+    ExitCode::from(64)
+}
+
+#[cfg(target_os = "macos")]
+fn execute_workspace_command(root: &Path, executable: &str, argv: &[String]) -> ExitCode {
+    use std::os::unix::process::CommandExt;
+    let Ok(root) = fs::canonicalize(root) else {
+        return ExitCode::from(66);
+    };
+    let mut policy = format!(
+        "(version 1) (allow default) (deny file-write* (require-not (subpath {:?}))) (deny network*)",
+        root
+    );
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for protected in [".ssh", ".aws", ".gnupg", "Library/Keychains"] {
+            policy.push_str(&format!(
+                " (deny file-read* file-write* (subpath {:?}))",
+                home.join(protected)
+            ));
         }
-        Err(_) => ExitCode::from(70),
     }
+    let error = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", &policy, "--", executable])
+        .args(argv)
+        .exec();
+    eprintln!("sandbox exec failed: {error}");
+    ExitCode::from(70)
+}
+
+#[cfg(target_os = "linux")]
+fn execute_workspace_command(root: &Path, executable: &str, argv: &[String]) -> ExitCode {
+    use std::os::unix::process::CommandExt;
+    let Ok(root) = fs::canonicalize(root) else {
+        return ExitCode::from(66);
+    };
+    let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+    else {
+        return ExitCode::from(69);
+    };
+    let error = Command::new(bwrap)
+        .args([
+            "--unshare-all",
+            "--new-session",
+            "--die-with-parent",
+            "--ro-bind",
+            "/",
+            "/",
+            "--bind",
+        ])
+        .arg(&root)
+        .arg(&root)
+        .args(["--proc", "/proc", "--dev", "/dev", "--chdir"])
+        .arg(&root)
+        .arg("--")
+        .arg(executable)
+        .args(argv)
+        .exec();
+    eprintln!("sandbox exec failed: {error}");
+    ExitCode::from(70)
+}
+
+#[cfg(target_os = "windows")]
+fn execute_workspace_command(_root: &Path, _executable: &str, _argv: &[String]) -> ExitCode {
+    ExitCode::from(69)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn execute_workspace_command(_root: &Path, _executable: &str, _argv: &[String]) -> ExitCode {
+    ExitCode::from(69)
 }
 
 #[cfg(target_os = "macos")]
@@ -106,7 +181,7 @@ fn macos_probe_command(
     outside_marker: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
     let policy = format!(
-        "(version 1) (deny default) (allow process-exec) (allow process-fork) (allow file-read*) (allow file-write* (subpath {:?}))",
+        "(version 1) (allow default) (deny file-write* (require-not (subpath {:?}))) (deny network*)",
         inside
     );
     Command::new(executable)

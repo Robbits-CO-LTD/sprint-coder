@@ -51,8 +51,11 @@ export function sandboxRunnerPath(): string {
     process.platform === 'win32'
       ? 'sprint-coder-sandbox-runner.exe'
       : 'sprint-coder-sandbox-runner';
-  const packaged = join(process.resourcesPath, name);
-  if (__dirname.includes('app.asar')) return packaged;
+  if (__dirname.includes('app.asar')) {
+    if (typeof process.resourcesPath !== 'string' || process.resourcesPath.length === 0)
+      throw new Error('Packaged sandbox runner resource root is unavailable');
+    return join(process.resourcesPath, name);
+  }
   return join(__dirname, '..', '..', 'sandbox-runner', 'build', 'Release', name);
 }
 

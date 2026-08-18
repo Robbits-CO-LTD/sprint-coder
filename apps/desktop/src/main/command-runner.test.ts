@@ -192,6 +192,32 @@ describe('CommandRunner', () => {
     ).rejects.toThrow();
   });
 
+  it.runIf(process.platform === 'darwin')(
+    'enforces workspace-write and network-deny through the packaged sandbox helper',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-command-'));
+      const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-outside-'));
+      roots.push(workspace, outside);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: [
+          '-c',
+          'printf inside > "$1"; printf outside > "$2"',
+          'sandbox-test',
+          join(workspace, 'inside.txt'),
+          join(outside, 'outside.txt'),
+        ],
+      });
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).not.toBe(0);
+      await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
   it('rejects a replacement inode at a persisted Project root path', async () => {
     const root = await workspace();
     const binding = await workspaceMutationBinding(root);

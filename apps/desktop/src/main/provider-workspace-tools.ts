@@ -205,6 +205,7 @@ export class ManagedCodingHarness {
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
   private readonly providersByTurn = new Map<string, string>();
+  private commandSandboxAvailable = false;
 
   constructor(private readonly deps: WorkspaceToolDeps) {
     this.revisions = deps.workspaceEdit?.revisions ?? new FileRevisionRegistry();
@@ -221,7 +222,7 @@ export class ManagedCodingHarness {
     }
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     if (deps.command !== undefined)
-      registerCommandRunnerTool(this.broker, new CommandRunner(), deps.command);
+      registerCommandRunnerTool(this.broker, new CommandRunner({ sandboxed: true }), deps.command);
     this.broker.registerImplementation({
       toolId: LIST_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
@@ -306,6 +307,9 @@ export class ManagedCodingHarness {
       LIST_WORKSPACE_TOOL.toolId,
       READ_FILE_TOOL.toolId,
       SEARCH_WORKSPACE_TOOL.toolId,
+      ...(this.commandSandboxAvailable && this.deps.command !== undefined
+        ? [COMMAND_RUNNER_TOOL.toolId]
+        : []),
       ...(this.deps.workspaceEdit === undefined
         ? []
         : [
@@ -318,6 +322,10 @@ export class ManagedCodingHarness {
     ]);
     this.providersByTurn.set(JSON.stringify([context.taskId, context.turnId]), providerId);
     return snapshot;
+  }
+
+  setCommandSandboxAvailable(available: boolean): void {
+    this.commandSandboxAvailable = available;
   }
 
   finishTurn(taskId: string, turnId: string): void {

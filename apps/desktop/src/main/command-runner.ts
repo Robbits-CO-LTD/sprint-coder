@@ -33,6 +33,7 @@ import {
   WINDOWS_JOB_WRAPPER,
   windowsJobWrapperCommand,
 } from './windows-process-job';
+import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
 
 export type CommandOutputChunk = Readonly<{
   seq: number;
@@ -185,6 +186,7 @@ type RunnerOptions = Readonly<{
   maxBufferedBytes?: number;
   maxOutputBytes?: number;
   cancelGraceMs?: number;
+  sandboxed?: boolean;
 }>;
 
 type RunOptions = Readonly<{
@@ -226,6 +228,7 @@ export class CommandRunner {
   private readonly maxBufferedBytes: number;
   private readonly maxOutputBytes: number;
   private readonly cancelGraceMs: number;
+  private readonly sandboxed: boolean;
   private readonly active = new Map<string, ActiveProcess>();
 
   constructor(options: RunnerOptions = {}) {
@@ -234,6 +237,7 @@ export class CommandRunner {
     this.maxBufferedBytes = options.maxBufferedBytes ?? 1024 * 1024;
     this.maxOutputBytes = options.maxOutputBytes ?? 16 * 1024 * 1024;
     this.cancelGraceMs = options.cancelGraceMs ?? 1_500;
+    this.sandboxed = options.sandboxed ?? false;
     if (
       this.batchIntervalMs < 1 ||
       this.maxBatchBytes < 1 ||
@@ -284,6 +288,12 @@ export class CommandRunner {
 
   async run(spec: ExecutionSpec, options: RunOptions = {}): Promise<CommandResult> {
     const executionImage = await this.revalidate(spec);
+    const preparedIdentity = issuedSpecs.get(spec);
+    if (preparedIdentity === undefined)
+      throw new CommandRunnerError(
+        'EXECUTION_SPEC_INVALID',
+        'ExecutionSpec identity is unavailable',
+      );
     let retainedExecutionImage = false;
     try {
       if (options.signal?.aborted)
@@ -305,6 +315,8 @@ export class CommandRunner {
       let child: ChildProcess;
       try {
         const windows = process.platform === 'win32';
+        const sandboxExecutable = windows || !this.sandboxed ? null : sandboxRunnerPath();
+        if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
         child = spawn(
           windows ? windowsJobWrapperCommand() : posixSupervisorCommand(),
           [
@@ -314,6 +326,15 @@ export class CommandRunner {
                   '-c',
                   POSIX_COMMAND_WRAPPER,
                   'sprint-coder-command-supervisor',
+                  ...(sandboxExecutable === null
+                    ? []
+                    : [
+                        sandboxExecutable,
+                        '--exec',
+                        'workspace-write',
+                        preparedIdentity.pathGuard.workspacePath,
+                        '--',
+                      ]),
                   executionImage.launchPath,
                   ...executionImage.argvPrefix,
                   ...spec.argv,

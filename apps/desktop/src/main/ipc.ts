@@ -401,6 +401,7 @@ import {
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
 import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
+import { probeSandboxRunner } from './sandbox-runner';
 import {
   BUILTIN_CODEX_CONNECTION_ID,
   builtinRuntimeForModelSelection,
@@ -2992,6 +2993,7 @@ export class IpcRouter {
       this.attachmentCustodyReady = false;
     }
     await this.permissionBroker.drainPolicyEpochOutbox();
+    this.managedCodingHarness.setCommandSandboxAvailable((await probeSandboxRunner()).available);
     await this.teamMcpBridge.ensureStarted();
     try {
       const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
