@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -11,6 +19,7 @@ import config, {
   DMG_WINDOW_SIZE,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
+  refreshPackagedSandboxRunnerDigest,
   verifyBundledNodeResources,
 } from './forge.config';
 import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
@@ -119,6 +128,29 @@ describe('macOS auto-update signing gate', () => {
     expect(macAutoUpdateEligibleForIdentity('')).toBe(false);
     expect(macAutoUpdateEligibleForIdentity('-')).toBe(false);
     expect(macAutoUpdateEligibleForIdentity('Developer ID Application: Sprint Coder')).toBe(true);
+  });
+});
+
+describe('macOS sandbox runner sealing', () => {
+  it('regenerates the packaged digest from the post-signing runner bytes', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-runner-seal-'));
+    try {
+      const appPath = resolve(root, 'Sprint Coder.app');
+      const resources = resolve(appPath, 'Contents', 'Resources');
+      const runner = resolve(resources, 'sprint-coder-sandbox-runner');
+      mkdirSync(resources, { recursive: true });
+      writeFileSync(runner, 'post-signing-runner-bytes');
+      writeFileSync(`${runner}.sha256`, `${'0'.repeat(64)}\n`);
+
+      const digest = refreshPackagedSandboxRunnerDigest(appPath);
+
+      expect(digest).toBe(
+        createHash('sha256').update('post-signing-runner-bytes').digest('hex'),
+      );
+      expect(readFileSync(`${runner}.sha256`, 'utf8')).toBe(`${digest}\n`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

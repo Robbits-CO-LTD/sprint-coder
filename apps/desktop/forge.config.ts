@@ -6,7 +6,7 @@ import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
 import { createHash } from 'node:crypto';
-import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
@@ -88,6 +88,37 @@ function sandboxRunnerResources(): string[] {
       : 'sprint-coder-sandbox-runner';
   const executable = resolve(__dirname, 'sandbox-runner', 'build', 'Release', name);
   return [executable, `${executable}.sha256`];
+}
+
+export function refreshPackagedSandboxRunnerDigest(appPath: string): string {
+  const executable = join(
+    appPath,
+    'Contents',
+    'Resources',
+    'sprint-coder-sandbox-runner',
+  );
+  if (!lstatSync(executable).isFile())
+    throw new Error('Packaged macOS sandbox runner was not found');
+  const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
+  writeFileSync(`${executable}.sha256`, `${digest}\n`, { mode: 0o600 });
+  return digest;
+}
+
+function resealMacAppBundle(appPath: string): void {
+  execFileSync(
+    '/usr/bin/codesign',
+    [
+      '--force',
+      '--options',
+      'runtime',
+      ...(macCodeSignIdentity === '-' ? ['--timestamp=none'] : ['--timestamp']),
+      '--preserve-metadata=identifier,entitlements,requirements',
+      '--sign',
+      macCodeSignIdentity,
+      appPath,
+    ],
+    { stdio: 'inherit' },
+  );
 }
 
 export function verifyBundledNodeResources(): void {
@@ -296,6 +327,11 @@ const config: ForgeConfig = {
           );
         const appPath = join(outputPath, appBundles[0]!.name);
         if (macCodeSignIdentity === '-') signAdhocBundle(appPath);
+        // Mach-O signing mutates the sandbox runner after its build-time digest is generated.
+        // Seal the signed bytes, then refresh only the outer app signature so CodeResources
+        // covers the new manifest without rewriting the already-signed nested executable.
+        refreshPackagedSandboxRunnerDigest(appPath);
+        resealMacAppBundle(appPath);
         execFileSync(
           '/usr/bin/codesign',
           ['--verify', '--deep', '--strict', '--verbose=2', appPath],
