@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  accessDescription,
-  accessEnforcement,
-  commandSandboxDescription,
-} from './access-labels';
+import { accessDescription, accessEnforcement, commandSandboxDescription } from './access-labels';
 
 describe('managed access labels', () => {
   it('shows the measured sandbox backend instead of the selected Runtime', () => {
