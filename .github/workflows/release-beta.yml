@@ -232,6 +232,9 @@ jobs:
         env:
           ELECTRON_RUN_AS_NODE: '1'
 
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
+
       - name: Rebuild native modules for Electron ABI
         working-directory: apps/desktop
         run: npx --yes @electron/rebuild -f -w better-sqlite3

@@ -19,7 +19,11 @@ describe('release signing and notarization', () => {
 
   it('always rebuilds distributable native binaries instead of consuming CI caches', () => {
     const makeJob = workflow.slice(workflow.indexOf('\n  make:'), workflow.indexOf('\n  release:'));
+    const sandboxBuild = makeJob.indexOf('npm run build:sandbox-runner');
+    const macPackaging = makeJob.indexOf('npx electron-forge package');
 
+    expect(sandboxBuild).toBeGreaterThan(-1);
+    expect(macPackaging).toBeGreaterThan(sandboxBuild);
     expect(makeJob).toContain('npx --yes @electron/rebuild -f -w better-sqlite3');
     expect(makeJob).toContain('npm run build:native-safe-fs');
     expect(makeJob).not.toContain('actions/cache');
