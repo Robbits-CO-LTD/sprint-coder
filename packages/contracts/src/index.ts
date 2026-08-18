@@ -1932,6 +1932,13 @@ export const openRouterConnectionCreateInputSchema = z
   })
   .strict();
 export type OpenRouterConnectionCreateInput = z.infer<typeof openRouterConnectionCreateInputSchema>;
+export const orcaRouterConnectionCreateInputSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(100),
+    apiKey: z.string().min(1).max(16_384),
+  })
+  .strict();
+export type OrcaRouterConnectionCreateInput = z.infer<typeof orcaRouterConnectionCreateInputSchema>;
 export const anthropicConnectionCreateInputSchema = z
   .object({
     displayName: z.string().trim().min(1).max(100),
@@ -2063,6 +2070,8 @@ export const providerModelSchema = z
     connectionId: connectionIdSchema,
     connectionDisplayName: z.string().min(1).max(100).optional(),
     providerId: providerIdSchema,
+    /** Stable provider/gateway name supplied by Main. Optional across mixed-version boundaries. */
+    providerDisplayName: z.string().min(1).max(100).optional(),
     modelAuthor: catalogValueSchema(z.string().min(1).max(128)).optional(),
     modelId: z.string().min(1).max(256),
     displayName: z.string().min(1).max(256),
@@ -3365,6 +3374,7 @@ export interface SprintCoderApi {
     listProfiles(): Promise<ProviderProfile[]>;
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
     createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;
+    createOrcaRouterConnection(input: OrcaRouterConnectionCreateInput): Promise<ProviderConnection>;
     createAnthropicConnection(input: AnthropicConnectionCreateInput): Promise<ProviderConnection>;
     createGeminiConnection(input: GeminiConnectionCreateInput): Promise<ProviderConnection>;
     createXAIConnection(input: XAIConnectionCreateInput): Promise<ProviderConnection>;
@@ -3539,6 +3549,7 @@ export const IPC_CHANNELS = {
   providersListProfiles: 'sprint-coder:providers:list-profiles',
   providersCreateOpenAIConnection: 'sprint-coder:providers:create-openai-connection',
   providersCreateOpenRouterConnection: 'sprint-coder:providers:create-openrouter-connection',
+  providersCreateOrcaRouterConnection: 'sprint-coder:providers:create-orcarouter-connection',
   providersCreateAnthropicConnection: 'sprint-coder:providers:create-anthropic-connection',
   providersCreateGeminiConnection: 'sprint-coder:providers:create-gemini-connection',
   providersCreateXAIConnection: 'sprint-coder:providers:create-xai-connection',

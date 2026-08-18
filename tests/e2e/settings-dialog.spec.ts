@@ -165,6 +165,9 @@ test.describe('settings dialog', () => {
     await addToggle.click();
     await expect(addToggle).toHaveAttribute('aria-expanded', 'true');
     await expect(page.getByTestId('settings-provider-kind')).toBeVisible();
+    expect(
+      await page.getByTestId('settings-provider-kind').locator('option').allTextContents(),
+    ).toContain('OrcaRouter API');
     await expect(page.getByTestId('settings-provider-name')).toBeVisible();
     const apiKey = page.getByTestId('settings-provider-api-key');
     await expect(apiKey).toBeVisible();

@@ -59,6 +59,7 @@ import {
   type NormalizedProviderError,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
+  orcaRouterConnectionCreateInputSchema,
   providerConnectionSchema,
   providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
@@ -433,6 +434,7 @@ import { UpdateInstallMutationGate } from './update-install-mutation-gate';
 import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
+import { OrcaRouterProviderClient } from './orcarouter-provider-client';
 import { AnthropicProviderClient, parseAnthropicCredential } from './anthropic-provider-client';
 import { GeminiProviderClient, parseGeminiCredential } from './gemini-provider-client';
 import { XAIProviderClient, parseXAICredential } from './xai-provider-client';
@@ -710,6 +712,16 @@ export class IpcRouter {
       runtimeKind: 'official_api',
       providerId: 'openrouter',
       runtime: openRouter,
+    });
+    const orcaRouter = new OrcaRouterProviderClient((connection) => {
+      if (connection.secretReference === null)
+        throw new Error('OrcaRouter Connection has no secret reference');
+      return parseOpenAICredential(providerSecrets.get(connection.secretReference));
+    });
+    this.providerRegistry.register({
+      runtimeKind: 'official_api',
+      providerId: 'orcarouter',
+      runtime: orcaRouter,
     });
     const anthropic = new AnthropicProviderClient((connection) => {
       if (connection.secretReference === null)
@@ -1623,6 +1635,21 @@ export class IpcRouter {
           '',
           IPC_CHANNELS.providersCreateOpenRouterConnection,
           () => this.providerConnections.createOpenRouter(input),
+        ).value;
+        return this.providerVerification.verify(created);
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.providersCreateOrcaRouterConnection,
+      orcaRouterConnectionCreateInputSchema,
+      providerConnectionSchema,
+      async (input, event, envelope) => {
+        const created = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersCreateOrcaRouterConnection,
+          () => this.providerConnections.createOrcaRouter(input),
         ).value;
         return this.providerVerification.verify(created);
       },
@@ -4579,9 +4606,15 @@ export class IpcRouter {
           const models = await this.providerRegistry
             .resolve(verified)
             .listModels(verified, new AbortController().signal);
+          const providerDisplayName =
+            connection.runtimeKind === 'openai_compatible'
+              ? this.providerProfiles.get(connection.providerId).displayName
+              : officialProviderDisplayName(connection.providerId);
           return models.map((model) => ({
             ...model,
             connectionDisplayName: connection.displayName,
+            providerDisplayName: model.providerDisplayName ?? providerDisplayName,
+            modelAuthor: model.modelAuthor ?? modelAuthorForProvider(connection.providerId),
           }));
         }),
     );
@@ -6355,6 +6388,8 @@ export function providerModelsForBuiltin(
     connectionId,
     connectionDisplayName,
     providerId,
+    providerDisplayName: officialProviderDisplayName(providerId),
+    modelAuthor: modelAuthorForProvider(providerId),
     modelId: model.id,
     displayName: model.displayName,
     available,
@@ -6366,6 +6401,41 @@ export function providerModelsForBuiltin(
     multimodalInput: model.capabilities?.multimodalInput ?? unknown,
     reasoning: model.capabilities?.reasoning ?? unknown,
   }));
+}
+
+function officialProviderDisplayName(providerId: string): string {
+  switch (providerId) {
+    case 'openai':
+      return 'OpenAI';
+    case 'anthropic':
+      return 'Anthropic';
+    case 'google':
+      return 'Google Gemini';
+    case 'xai':
+      return 'xAI';
+    case 'openrouter':
+      return 'OpenRouter';
+    case 'orcarouter':
+      return 'OrcaRouter';
+    default:
+      return providerId;
+  }
+}
+
+function modelAuthorForProvider(providerId: string): ProviderModel['modelAuthor'] | undefined {
+  const aliases: Readonly<Record<string, string>> = {
+    openai: 'openai',
+    anthropic: 'anthropic',
+    google: 'google',
+    xai: 'xai',
+    mistral: 'mistral',
+    deepseek: 'deepseek',
+    moonshot: 'kimi',
+    minimax: 'minimax',
+    zhipu: 'z-ai',
+  };
+  const author = aliases[providerId];
+  return author === undefined ? undefined : { value: author, source: 'runtime_metadata' };
 }
 
 function assertUniqueProviderTools<T extends { name: string }>(tools: readonly T[]): readonly T[] {

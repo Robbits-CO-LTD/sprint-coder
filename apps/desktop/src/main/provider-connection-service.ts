@@ -4,12 +4,14 @@ import {
   geminiConnectionCreateInputSchema,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
+  orcaRouterConnectionCreateInputSchema,
   providerProfileConnectionCreateInputSchema,
   xAIConnectionCreateInputSchema,
   type AnthropicConnectionCreateInput,
   type GeminiConnectionCreateInput,
   type OpenAIConnectionCreateInput,
   type OpenRouterConnectionCreateInput,
+  type OrcaRouterConnectionCreateInput,
   type ProviderConnection,
   type ProviderProfileConnectionCreateInput,
   type XAIConnectionCreateInput,
@@ -105,6 +107,40 @@ export class ProviderConnectionService {
       return this.repository.createProviderConnection({
         id: `openrouter:${this.id()}`,
         providerId: 'openrouter',
+        runtimeKind: 'official_api',
+        displayName: parsed.displayName,
+        enabled: true,
+        secretReference,
+        verification: {
+          status: 'unverified',
+          verifiedAt: null,
+          expiresAt: null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: 2,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    } catch (error) {
+      this.secrets.delete(secretReference);
+      throw error;
+    }
+  }
+
+  createOrcaRouter(input: OrcaRouterConnectionCreateInput): ProviderConnection {
+    const parsed = orcaRouterConnectionCreateInputSchema.parse(input);
+    const secretReference = this.secrets.put(serializeOpenAICredential({ apiKey: parsed.apiKey }));
+    const timestamp = this.now().toISOString();
+    try {
+      return this.repository.createProviderConnection({
+        id: `orcarouter:${this.id()}`,
+        providerId: 'orcarouter',
         runtimeKind: 'official_api',
         displayName: parsed.displayName,
         enabled: true,

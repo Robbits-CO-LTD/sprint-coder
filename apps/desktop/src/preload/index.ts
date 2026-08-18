@@ -26,6 +26,7 @@ import {
   modelSelectionSchema,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
+  orcaRouterConnectionCreateInputSchema,
   providerConnectionSchema,
   providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
@@ -852,6 +853,13 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersCreateOpenRouterConnection,
         openRouterConnectionCreateInputSchema,
+        providerConnectionSchema,
+        input,
+      ),
+    createOrcaRouterConnection: (input) =>
+      invoke(
+        IPC_CHANNELS.providersCreateOrcaRouterConnection,
+        orcaRouterConnectionCreateInputSchema,
         providerConnectionSchema,
         input,
       ),

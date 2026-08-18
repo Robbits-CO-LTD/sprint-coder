@@ -4221,8 +4221,12 @@ button.composer-permission-chip[aria-expanded='true'] {
    which account a row belongs to is not a detail to truncate away first. */
 .mpv2-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
+}
+.mpv2-author-icon {
+  flex: 0 0 16px;
+  color: var(--text-primary);
 }
 .mpv2-title {
   flex: 1 1 auto;
@@ -4234,16 +4238,37 @@ button.composer-permission-chip[aria-expanded='true'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.mpv2-provider-badge {
+  flex: 0 1 auto;
+  max-width: 42%;
+  padding: 1px 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--bg-app);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mpv2-meta-line {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+}
 .mpv2-conn {
   flex: 0 1 auto;
-  max-width: 45%;
-  font-size: 11px;
+  max-width: 42%;
+  font-size: 10.5px;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .mpv2-meta {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 11px;
   color: var(--text-secondary);
   overflow: hidden;

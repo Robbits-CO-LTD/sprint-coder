@@ -10,7 +10,7 @@ const TEAM_CORE_FILES = [
 ] as const;
 
 const FORBIDDEN_IMPORT =
-  /(?:^|\/)(?:openai|anthropic|gemini|openrouter|xai)(?:-provider)?-(?:client|adapter)(?:$|\.)|^(?:openai|@anthropic-ai\/|@google\/generative-ai)/;
+  /(?:^|\/)(?:openai|anthropic|gemini|openrouter|orcarouter|xai)(?:-provider)?-(?:client|adapter)(?:$|\.)|^(?:openai|@anthropic-ai\/|@google\/generative-ai)/;
 const PROVIDER_BRANCH_VALUE = new Set([
   'openai',
   'anthropic',
@@ -18,6 +18,7 @@ const PROVIDER_BRANCH_VALUE = new Set([
   'gemini',
   'xai',
   'openrouter',
+  'orcarouter',
 ]);
 
 function sourceFile(name: string): ts.SourceFile {

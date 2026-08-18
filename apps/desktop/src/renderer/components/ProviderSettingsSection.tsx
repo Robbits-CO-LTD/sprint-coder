@@ -108,6 +108,7 @@ export const KEY_BOUNDARY_HINT =
 export const PROVIDER_FORM_OPTIONS = [
   { key: 'openai', label: 'OpenAI API', scoped: true },
   { key: 'openrouter', label: 'OpenRouter API', scoped: false },
+  { key: 'orcarouter', label: 'OrcaRouter API', scoped: false },
   { key: 'anthropic', label: 'Anthropic API', scoped: false },
   { key: 'google', label: 'Google Gemini API', scoped: false },
   { key: 'xai', label: 'xAI API', scoped: false },
@@ -363,6 +364,8 @@ export function connectionKindLabel(connection: ProviderConnection): string {
       return 'xAI API';
     case 'openrouter':
       return 'OpenRouter API';
+    case 'orcarouter':
+      return 'OrcaRouter API';
     default:
       return connection.runtimeKind === 'openai_compatible' ? 'OpenAI互換API' : '外部API';
   }
@@ -493,6 +496,8 @@ export async function createConnection(
     }
     case 'openrouter':
       return api.createOpenRouterConnection({ displayName, apiKey });
+    case 'orcarouter':
+      return api.createOrcaRouterConnection({ displayName, apiKey });
     case 'anthropic':
       return api.createAnthropicConnection({ displayName, apiKey });
     case 'google':

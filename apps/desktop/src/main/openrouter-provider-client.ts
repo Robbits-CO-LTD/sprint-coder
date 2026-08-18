@@ -80,6 +80,7 @@ export class OpenRouterCatalogClient implements ProviderRuntime {
       return {
         connectionId: connection.id,
         providerId: connection.providerId,
+        providerDisplayName: 'OpenRouter',
         modelAuthor: providerValue(openRouterModelAuthor(model.id)),
         modelId: model.id,
         displayName: model.name?.trim() || model.id,

@@ -11,6 +11,7 @@ import { GeminiProviderClient } from './gemini-provider-client';
 import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
 import { OpenAIProviderClient } from './openai-provider-client';
 import { OpenRouterCatalogClient } from './openrouter-provider-client';
+import { OrcaRouterProviderClient } from './orcarouter-provider-client';
 import { MainProviderProfileRegistry, type OpenAICompatibleCredential } from './provider-profile';
 import type { ProviderRuntime } from './provider-runtime';
 import { XAIProviderClient } from './xai-provider-client';
@@ -70,6 +71,18 @@ const officialCases: readonly SmokeCase[] = [
     createRuntime: () =>
       new OpenRouterCatalogClient(() => ({
         apiKey: requireEnvironment('OPENROUTER_API_KEY'),
+      })),
+  },
+  {
+    providerId: 'orcarouter',
+    displayName: 'OrcaRouter API',
+    runtimeKind: 'official_api',
+    keyEnvironment: 'ORCAROUTER_API_KEY',
+    modelEnvironment: 'ORCAROUTER_SMOKE_MODEL',
+    credentialAvailable: () => hasEnvironment('ORCAROUTER_API_KEY'),
+    createRuntime: () =>
+      new OrcaRouterProviderClient(() => ({
+        apiKey: requireEnvironment('ORCAROUTER_API_KEY'),
       })),
   },
   {
