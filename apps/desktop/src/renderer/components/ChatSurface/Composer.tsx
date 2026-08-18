@@ -708,157 +708,160 @@ export function Composer({ taskId }: { taskId: string }) {
             onClear={() => runGoalControl(() => clearGoal(taskId))}
           />
         )}
-        <ContextBar taskId={taskId} />
-        <div className="composer">
-          {slashOpen && (
-            <SlashCommandMenu
-              items={slashItems}
-              selectedIndex={activeSlashSelection}
-              onHover={setSlashSelection}
-              onSelect={selectSlashItem}
-            />
-          )}
-          {selectedSkills.length > 0 && (
-            <div className="composer-skill-chips" aria-label="この送信で使用するSkill">
-              {selectedSkills.map((selection) => {
-                const item = skillCatalog.find(
-                  ({ ref }) =>
-                    ref.source === selection.ref.source &&
-                    ref.skillId === selection.ref.skillId &&
-                    ref.digest === selection.ref.digest,
-                );
-                const key = `${selection.ref.source}:${selection.ref.skillId}:${selection.ref.digest}`;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`composer-skill-chip ${selection.kind}`}
-                    title={`${item?.name ?? selection.ref.skillId}をこの送信から外す`}
-                    onClick={() =>
-                      void setSkillSelection(
-                        taskId,
-                        selectedSkills.filter(
-                          ({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}` !== key,
-                        ),
-                      )
-                    }
-                  >
-                    <span>{selection.kind === 'team' ? 'Team' : 'Skill'}</span>
-                    {item?.name ?? selection.ref.skillId}
-                    <X size={12} />
-                  </button>
-                );
-              })}
+        {/* One matte panel: the run context strip and the input share a single surface, edge and
+            shadow rather than stacking two framed boxes on top of each other. */}
+        <div className="composer-panel">
+          <ContextBar taskId={taskId} />
+          <div className="composer">
+            {slashOpen && (
+              <SlashCommandMenu
+                items={slashItems}
+                selectedIndex={activeSlashSelection}
+                onHover={setSlashSelection}
+                onSelect={selectSlashItem}
+              />
+            )}
+            {selectedSkills.length > 0 && (
+              <div className="composer-skill-chips" aria-label="この送信で使用するSkill">
+                {selectedSkills.map((selection) => {
+                  const item = skillCatalog.find(
+                    ({ ref }) =>
+                      ref.source === selection.ref.source &&
+                      ref.skillId === selection.ref.skillId &&
+                      ref.digest === selection.ref.digest,
+                  );
+                  const key = `${selection.ref.source}:${selection.ref.skillId}:${selection.ref.digest}`;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`composer-skill-chip ${selection.kind}`}
+                      title={`${item?.name ?? selection.ref.skillId}をこの送信から外す`}
+                      onClick={() =>
+                        void setSkillSelection(
+                          taskId,
+                          selectedSkills.filter(
+                            ({ ref }) => `${ref.source}:${ref.skillId}:${ref.digest}` !== key,
+                          ),
+                        )
+                      }
+                    >
+                      <span>{selection.kind === 'team' ? 'Team' : 'Skill'}</span>
+                      {item?.name ?? selection.ref.skillId}
+                      <X size={12} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {draftAttachments.length > 0 && (
+              <AttachmentDraftList
+                attachments={draftAttachments}
+                busy={attachmentBusy}
+                removeRefs={attachmentRemoveRefs}
+                onRemove={(attachmentId) => void handleRemoveAttachment(attachmentId)}
+                errorId={attachmentErrorId}
+                status={
+                  turnActive
+                    ? '画像添付は実行中のTurnにはキュー追加できません。完了後に送信してください'
+                    : '画像添付の送信は準備中です。画像を削除すると通常のメッセージを送信できます。'
+                }
+              />
+            )}
+            <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {attachmentAnnouncement ?? ''}
             </div>
-          )}
-          {draftAttachments.length > 0 && (
-            <AttachmentDraftList
-              attachments={draftAttachments}
-              busy={attachmentBusy}
-              removeRefs={attachmentRemoveRefs}
-              onRemove={(attachmentId) => void handleRemoveAttachment(attachmentId)}
-              errorId={attachmentErrorId}
-              status={
-                turnActive
-                  ? '画像添付は実行中のTurnにはキュー追加できません。完了後に送信してください'
-                  : '画像添付の送信は準備中です。画像を削除すると通常のメッセージを送信できます。'
+            {attachmentError && (
+              <div id={attachmentErrorId} className="composer-attachment-error" role="alert">
+                {attachmentError}
+              </div>
+            )}
+            {turnActionError && (
+              <div className="composer-operation-error" role="alert">
+                {turnActionError}
+              </div>
+            )}
+            <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {turnActionPending === 'queue'
+                ? 'キューに追加しています'
+                : turnActionPending === 'interrupt'
+                  ? '現在の実行を停止して送信しています'
+                  : turnActionPending === 'cancel' || turn?.status === 'canceling'
+                    ? '実行を停止しています'
+                    : ''}
+            </div>
+            <textarea
+              ref={textareaRef}
+              className="composer-input"
+              data-testid="composer-textarea"
+              rows={1}
+              placeholder={
+                goalRequested
+                  ? 'Goalを入力（Enterで開始 / Escでキャンセル）'
+                  : turnActive
+                    ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
+                    : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
+              }
+              value={draft}
+              disabled={sending}
+              onChange={(e) => {
+                const nextDraft = e.target.value;
+                const nextCursor = e.target.selectionStart;
+                if (slashTokenAtCursor(nextDraft, nextCursor)?.query !== slashQuery)
+                  setSlashSelection(0);
+                setComposerCursor(nextCursor);
+                setDraft(taskId, nextDraft);
+              }}
+              onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+              onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
+              onKeyDown={handleKeyDown}
+              aria-label="メッセージ入力"
+              aria-describedby={attachmentErrorId}
+              aria-autocomplete="list"
+              aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
+              aria-activedescendant={
+                slashOpen && slashItems[activeSlashSelection]
+                  ? `slash-item-${slashItems[activeSlashSelection].key}`
+                  : undefined
               }
             />
-          )}
-          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-            {attachmentAnnouncement ?? ''}
-          </div>
-          {attachmentError && (
-            <div id={attachmentErrorId} className="composer-attachment-error" role="alert">
-              {attachmentError}
-            </div>
-          )}
-          {turnActionError && (
-            <div className="composer-operation-error" role="alert">
-              {turnActionError}
-            </div>
-          )}
-          <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-            {turnActionPending === 'queue'
-              ? 'キューに追加しています'
-              : turnActionPending === 'interrupt'
-                ? '現在の実行を停止して送信しています'
-                : turnActionPending === 'cancel' || turn?.status === 'canceling'
-                  ? '実行を停止しています'
-                  : ''}
-          </div>
-          <textarea
-            ref={textareaRef}
-            className="composer-input"
-            data-testid="composer-textarea"
-            rows={1}
-            placeholder={
-              goalRequested
-                ? 'Goalを入力（Enterで開始 / Escでキャンセル）'
-                : turnActive
-                  ? 'Turn実行中です。既定ではキューに追加されます (Enter)'
-                  : 'メッセージを送信 (Enterで送信 / Shift+Enterで改行)'
-            }
-            value={draft}
-            disabled={sending}
-            onChange={(e) => {
-              const nextDraft = e.target.value;
-              const nextCursor = e.target.selectionStart;
-              if (slashTokenAtCursor(nextDraft, nextCursor)?.query !== slashQuery)
-                setSlashSelection(0);
-              setComposerCursor(nextCursor);
-              setDraft(taskId, nextDraft);
-            }}
-            onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
-            onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
-            onKeyDown={handleKeyDown}
-            aria-label="メッセージ入力"
-            aria-describedby={attachmentErrorId}
-            aria-autocomplete="list"
-            aria-controls={slashOpen ? 'composer-slash-commands' : undefined}
-            aria-activedescendant={
-              slashOpen && slashItems[activeSlashSelection]
-                ? `slash-item-${slashItems[activeSlashSelection].key}`
-                : undefined
-            }
-          />
-          <div className="composer-row">
-            <PlusMenu
-              capabilityReason={attachmentPolicy.attachUnavailableReason ?? ''}
-              attachmentSupported={attachmentPolicy.attachSupported}
-              errorId={attachmentErrorId}
-              triggerRef={plusTriggerRef}
-              onRequestAttachment={() => void pickDraftAttachment(taskId)}
-              onRequestImage={() => {
-                cancelGoalRequest();
-                updateImageRequested(true);
-              }}
-            />
-            <PermissionChip taskId={taskId} />
-            {goalRequested && (
-              <button
-                type="button"
-                className="cmp-chip goal-armed"
-                data-testid="composer-goal-armed"
-                title="次の送信内容でGoalを開始します。クリックで取り消し"
-                onClick={cancelGoalRequest}
-              >
-                <Target size={13} /> Goal <X size={12} />
-              </button>
-            )}
-            {imageRequested && (
-              <button
-                type="button"
-                className="cmp-chip imagegen-armed"
-                data-testid="composer-imagegen-armed"
-                title="この送信で画像生成を呼び出します。クリックで取り消し"
-                onClick={() => updateImageRequested(false)}
-              >
-                画像生成 <X size={12} />
-              </button>
-            )}
-            <div className="composer-run-controls" data-testid="composer-run-controls">
-              {/* One AI control, not two: under V2 the picker names a connection *and* a model in a
+            <div className="composer-row">
+              <PlusMenu
+                capabilityReason={attachmentPolicy.attachUnavailableReason ?? ''}
+                attachmentSupported={attachmentPolicy.attachSupported}
+                errorId={attachmentErrorId}
+                triggerRef={plusTriggerRef}
+                onRequestAttachment={() => void pickDraftAttachment(taskId)}
+                onRequestImage={() => {
+                  cancelGoalRequest();
+                  updateImageRequested(true);
+                }}
+              />
+              <PermissionChip taskId={taskId} />
+              {goalRequested && (
+                <button
+                  type="button"
+                  className="cmp-chip goal-armed"
+                  data-testid="composer-goal-armed"
+                  title="次の送信内容でGoalを開始します。クリックで取り消し"
+                  onClick={cancelGoalRequest}
+                >
+                  <Target size={13} /> Goal <X size={12} />
+                </button>
+              )}
+              {imageRequested && (
+                <button
+                  type="button"
+                  className="cmp-chip imagegen-armed"
+                  data-testid="composer-imagegen-armed"
+                  title="この送信で画像生成を呼び出します。クリックで取り消し"
+                  onClick={() => updateImageRequested(false)}
+                >
+                  画像生成 <X size={12} />
+                </button>
+              )}
+              <div className="composer-run-controls" data-testid="composer-run-controls">
+                {/* One AI control, not two: under V2 the picker names a connection *and* a model in a
                   single choice, so a separate Runtime chip would be a second, coarser control over
                   the same decision — and one the picker deliberately cannot read. With the flag
                   off the pair is exactly what it was.
@@ -867,32 +870,33 @@ export function Composer({ taskId }: { taskId: string }) {
                   the loaded page window, the display name of the row just chosen) all belongs to
                   one Task, so switching Tasks remounts it rather than adjusting that state during
                   render. */}
-              {modelPickerV2 ? (
-                <ModelPickerV2 key={taskId} taskId={taskId} />
-              ) : (
-                <>
-                  <RuntimeChip />
-                  <ModelChip />
-                </>
-              )}
-              <EffortChip />
+                {modelPickerV2 ? (
+                  <ModelPickerV2 key={taskId} taskId={taskId} />
+                ) : (
+                  <>
+                    <RuntimeChip />
+                    <ModelChip />
+                  </>
+                )}
+                <EffortChip />
+              </div>
+              <ComposerActionButtons
+                policy={
+                  goalRequested && actionPolicy.primary.kind === 'send'
+                    ? {
+                        ...actionPolicy,
+                        primary: {
+                          ...actionPolicy.primary,
+                          label: 'Goalを開始',
+                          title: 'Goalを開始',
+                        },
+                      }
+                    : actionPolicy
+                }
+                onPrimary={handlePrimaryAction}
+                onInterrupt={handleInterrupt}
+              />
             </div>
-            <ComposerActionButtons
-              policy={
-                goalRequested && actionPolicy.primary.kind === 'send'
-                  ? {
-                      ...actionPolicy,
-                      primary: {
-                        ...actionPolicy.primary,
-                        label: 'Goalを開始',
-                        title: 'Goalを開始',
-                      },
-                    }
-                  : actionPolicy
-              }
-              onPrimary={handlePrimaryAction}
-              onInterrupt={handleInterrupt}
-            />
           </div>
         </div>
       </div>
