@@ -296,7 +296,6 @@ export class CodexRuntimeAdapter {
           command: nodeCommand,
           scriptPath,
           toolNames: teamMcp.toolNames,
-          enableWebSearch: teamMcp.enableWebSearch === true,
         };
       }
       prepared = {
@@ -336,18 +335,17 @@ export class CodexRuntimeAdapter {
       teamMcpProfile,
       skillIsolation,
     } = prepared;
-    // No Workspace means the cwd is a throwaway temp directory, so a write scope there would
-    // produce edits the user can never see. Main already refuses to send anything but 'read-only'
-    // in that case; this is the adapter refusing independently, so the two would have to fail
-    // together for a write to escape.
-    const effectiveScope: RuntimeWriteScope = primaryRootPresent ? writeScope : 'read-only';
+    // Native Codex filesystem and command execution are permanently disabled. Main's sealed
+    // catalog is the only source of write scope; the outer Codex process always stays read-only.
+    void primaryRootPresent;
+    void writeScope;
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(
         this.cli?.executable ?? resolveCodexCommand(this.command),
         [
           ...this.commandPrefixArgs,
-          ...buildCodexArgs(model, effort, effectiveScope, teamMcpProfile, skillIsolation),
+          ...buildCodexArgs(model, effort, teamMcpProfile, skillIsolation),
         ],
         {
           cwd,
@@ -436,7 +434,6 @@ export class CodexRuntimeAdapter {
     let teamDynamicTools: readonly CodexDynamicToolSpec[] = [];
     const managedDynamicTools =
       toolCatalogSnapshot === undefined ? [] : buildCodexManagedDynamicTools(toolCatalogSnapshot);
-    const managedMode = true;
     let activeThreadId: string | null = null;
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
@@ -600,7 +597,6 @@ export class CodexRuntimeAdapter {
             sawCompletion = true;
             child.stdin.end();
           },
-          managedMode,
         );
       } catch {
         failed = true;
@@ -628,10 +624,7 @@ export class CodexRuntimeAdapter {
           // Multi-root and client-hosted dynamic Team tools are both gated by the app-server's
           // experimentalApi client capability. The latter is required even though dynamicTools is
           // present in the generated v2 schema.
-          capabilities: codexInitializeCapabilities(
-            multiRoot,
-            managedMode || teamMcp !== undefined || managedDynamicTools.length > 0,
-          ),
+          capabilities: codexInitializeCapabilities(multiRoot, true),
         });
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
@@ -666,8 +659,8 @@ export class CodexRuntimeAdapter {
             cwd,
             ...(multiRoot ? { runtimeWorkspaceRoots } : {}),
             approvalPolicy: 'never',
-            sandbox: managedMode ? 'read-only' : CODEX_SANDBOX_BY_SCOPE[effectiveScope],
-            ...(managedMode ? { environments: [] } : {}),
+            sandbox: 'read-only',
+            environments: [],
             ephemeral: true,
             ...(teamDynamicTools.length + managedDynamicTools.length === 0
               ? {}
@@ -815,7 +808,6 @@ function handleCodexNotification(
   agentMessageBoundary: CodexAgentMessageBoundary,
   advanceStage: (stage: TurnStage) => void,
   completed: () => void,
-  managedMode = false,
 ): void {
   const method = message['method'];
   if (typeof method !== 'string') return;
@@ -841,7 +833,7 @@ function handleCodexNotification(
   }
   if (method === 'item/started') {
     const item = asRecord(params['item']);
-    if (managedMode && (item['type'] === 'commandExecution' || item['type'] === 'fileChange'))
+    if (item['type'] === 'commandExecution' || item['type'] === 'fileChange')
       throw new Error('Codex attempted to bypass the Managed Coding Harness');
     const operation = codexOperationForItem(item, 'started');
     if (operation !== null) {
@@ -852,29 +844,12 @@ function handleCodexNotification(
   }
   if (method === 'item/completed') {
     const item = asRecord(params['item']);
-    if (managedMode && (item['type'] === 'commandExecution' || item['type'] === 'fileChange'))
+    if (item['type'] === 'commandExecution' || item['type'] === 'fileChange')
       throw new Error('Codex attempted to bypass the Managed Coding Harness');
     const operation = codexOperationForItem(item, 'completed');
     if (operation !== null) {
       advanceStage('executing');
       emit(operation);
-    }
-    if (item['type'] === 'fileChange' && Array.isArray(item['changes'])) {
-      advanceStage('executing');
-      const changes = item['changes']
-        .map((change) => asRecord(change))
-        .filter(
-          (change) =>
-            typeof change['path'] === 'string' &&
-            (change['kind'] === 'add' ||
-              change['kind'] === 'update' ||
-              change['kind'] === 'delete'),
-        )
-        .map((change) => ({
-          path: change['path'] as string,
-          kind: change['kind'] as 'add' | 'update' | 'delete',
-        }));
-      if (changes.length > 0) emit({ type: 'fileChange', changes });
     }
     return;
   }
@@ -1033,7 +1008,6 @@ export type CodexTeamMcpProfile = Readonly<{
   command: string;
   scriptPath: string;
   toolNames: readonly TeamMcpToolName[];
-  enableWebSearch?: boolean;
 }>;
 
 export type CodexTeamMcpInventoryValidation = Readonly<{
@@ -1146,20 +1120,6 @@ export function codexDynamicToolResponseFromMcp(response: unknown): {
 class CodexTeamMcpUnavailableError extends Error {}
 
 /**
- * The Access preset's write scope as a Codex sandbox mode.
- *
- * These are OS-enforced on macOS (Seatbelt), not advisory: verified 2026-07-25 on codex-cli 0.144.4
- * that `workspace-write` writes inside the cwd and that `read-only` refuses `apply_patch` outright.
- * That is what lets the Codex path be presented as a real boundary rather than as a promise the
- * model is asked to keep.
- */
-const CODEX_SANDBOX_BY_SCOPE: Record<RuntimeWriteScope, string> = {
-  'read-only': 'read-only',
-  'workspace-write': 'workspace-write',
-  full: 'danger-full-access',
-};
-
-/**
  * `effort` maps to the `model_reasoning_effort` config key via `-c`, the same override mechanism
  * already used for `approval_policy` and `shell_environment_policy.inherit`.
  *
@@ -1175,7 +1135,6 @@ const CODEX_SANDBOX_BY_SCOPE: Record<RuntimeWriteScope, string> = {
 export function buildCodexArgs(
   model: string,
   effort?: string,
-  _writeScope: RuntimeWriteScope = 'read-only',
   teamMcp?: CodexTeamMcpProfile,
   skillIsolation?: CodexSkillIsolation,
 ): string[] {
@@ -1218,7 +1177,8 @@ export function buildCodexArgs(
           // hatch. Team turns inventory this pinned server and expose only the expected tools as
           // non-deferred dynamic tools. Do not pass the removed feature override: --strict-config
           // must remain valid across supported CLIs.
-          ...(teamMcp.enableWebSearch === true ? ['-c', 'web_search="live"'] : []),
+          // Native Web search is intentionally not enabled. Web is outside this Harness slice and
+          // must enter through the same registry/policy boundary when implemented.
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['-c', `model="${model}"`]),

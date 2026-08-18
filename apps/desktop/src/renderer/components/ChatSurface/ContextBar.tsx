@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { ShieldAlert } from '../icons';
 import { useAppStore } from '../../store/appStore';
-import { accessDescription, accessEnforcement } from '../../lib/access-labels';
+import {
+  accessDescription,
+  accessEnforcement,
+  commandSandboxDescription,
+} from '../../lib/access-labels';
 import type { ContextUsage } from '../../types/sprint-coder';
 import type { AccessPreset } from '../../types/sprint-coder';
 import { ProjectPicker } from '../ProjectPicker';
@@ -59,8 +63,8 @@ export function PermissionChip({ taskId }: { taskId: string }) {
     policyEpoch: 0,
   };
   const setAccessPreset = useAppStore((state) => state.setAccessPreset);
-  const runtimeKind = useAppStore((state) => state.runtime.kind);
-  const enforcement = accessEnforcement(permission.preset, runtimeKind);
+  const commandSandbox = useAppStore((state) => state.commandSandbox);
+  const enforcement = accessEnforcement(commandSandbox);
   const [open, setOpen] = useState(false);
   const [confirmingFull, setConfirmingFull] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -122,13 +126,14 @@ export function PermissionChip({ taskId }: { taskId: string }) {
         }}
         data-access-preset={permission.preset}
         data-access-enforcement={enforcement}
-        title={accessDescription(permission.preset, runtimeKind)}
+        title={accessDescription(permission.preset, commandSandbox)}
       >
         <ShieldAlert size={16} />
         {PRESET_LABEL[permission.preset]}
       </button>
       {open && (
         <div className="runtime-menu permission-menu" role="menu" aria-label="Access mode選択">
+          <span className="runtime-menu-desc">{commandSandboxDescription(commandSandbox)}</span>
           {confirmingFull ? (
             <div className="permission-confirm">
               <span className="runtime-menu-title">フルアクセスの影響</span>

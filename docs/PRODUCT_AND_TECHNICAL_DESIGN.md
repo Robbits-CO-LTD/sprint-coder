@@ -538,7 +538,7 @@ ThreadActorはDB、Runtime、Tool、Approvalの完了をmailbox処理中にawait
 
 ### 11.2 Tool execution boundary
 
-Team MVPのmanaged accessへ採用するRuntimeは、全副作用をTool Broker経由にでき、Mainが外部観測するOS sandbox probeに合格することを必須条件とする。Broker非対応またはsandbox不能なRuntimeをread-onlyと呼ばず、`trusted-unmanaged`として通常presetと分離する。CapabilityReportの自己申告だけを信用せず、binary digest/version allowlist、direct file open/direct connectのnegative testをPhase 0 gateにする。
+Team MVPのmanaged accessへ採用するRuntimeは、全副作用を共通Managed Coding Harness経由にする。CLI native file/shell toolsは常に無効化し、OS sandbox probeに合格しない環境ではcommand toolsをsealed catalogから除外してfail closedにする。CapabilityReportの自己申告だけを信用せず、binary identity、起動引数、process-bound bridge認証、direct file open/direct connectのnegative testをgateにする。
 
 Tool Brokerはprovider inference通信によるdata egressを防がない。`provider.egress`をtool network capabilityと分け、providerごとに送信可能fragment分類、data residency/trust、sensitive path/secret scan、最大bytesをpolicy化する。local-only Taskではremote providerを起動拒否し、file内容がcloud providerへ送られることをUIとauditへ明示する。
 
@@ -672,7 +672,7 @@ Full Accessでもadministrator deny、credential/secret保護、audit、Renderer
 
 Worktreeは変更競合を分ける仕組みでありsecurity sandboxではない。write-capable Workerは専用worktreeに加えて、そのrootだけをwrite可能にしたOS sandboxを必須とする。Git実行時はrepository hook、global/system config、credential helper、pager、external diff/merge、protocol extensionを無効化したsanitized environmentを使う。submodule、LFS pointer、symlink/hardlink、special file、gitdir、workspace外pathをartifact acceptanceで検査し、Workerが親workspaceを直接変更せずBrokerがreview済みpatchだけを適用する。
 
-Managed Runtimeは実行前probeでOS sandboxとdirect filesystem/process/network denialを実証できるものだけを指す。単なる`read-only` promptやtool非公開はsecurity boundaryに数えない。外部CLIはbinary digest/version allowlist、起動引数、environment、IPC challengeを固定し、満たさないadapterは`trusted-unmanaged`と表示して機密Taskでは拒否する。
+Managed Runtimeは、Mainの共通Harnessがtool実行・承認・監査を所有し、commandを公開する場合は実行前probeでOS sandboxとdirect filesystem/process/network denialを実証できるものだけを指す。単なる`read-only` promptやtool非公開はsecurity boundaryに数えない。外部CLIは起動引数、isolated environment、process-bound IPC challengeを固定し、protocolを満たさないversionは更新案内付きで起動を拒否する。unsafeな自動降格経路は持たない。
 
 ## 13. UI system
 

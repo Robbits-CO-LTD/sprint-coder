@@ -150,9 +150,7 @@ describe('Claude runtime probe', () => {
     });
   });
 
-  it('defaults to the read-only, no-write-tools, no-MCP profile when no scope is given', () => {
-    // The default matters as much as the values: every caller that predates issue #37, and any
-    // future one that forgets the argument, must land on the profile that cannot write.
+  it('defaults to the immutable no-native-tools, no-MCP profile', () => {
     expect(buildClaudeArgs('auto')).toEqual([
       '-p',
       '--output-format',
@@ -169,19 +167,14 @@ describe('Claude runtime probe', () => {
     ]);
   });
 
-  it('publishes no writing tool at the read-only scope', () => {
-    // The list is asserted as a whole rather than by absence of one name: a future addition that
-    // happens to write would otherwise slip in unnoticed.
-    const args = buildClaudeArgs('auto', undefined, undefined, 'read-only', ['/tmp/ws']);
+  it('publishes no native tool and pins the managed Workspace', () => {
+    const args = buildClaudeArgs('auto', undefined, undefined, ['/tmp/ws']);
     expect(args[args.indexOf('--tools') + 1]).toBe('');
     expect(args[args.indexOf('--add-dir') + 1]).toBe('/tmp/ws');
   });
 
-  it('keeps native edit tools disabled at workspace-write and pins only the managed Workspace', () => {
-    const args = buildClaudeArgs('auto', undefined, undefined, 'workspace-write', [
-      '/tmp/ws',
-      '/tmp/secondary',
-    ]);
+  it('pins every managed Workspace root without changing the native tool profile', () => {
+    const args = buildClaudeArgs('auto', undefined, undefined, ['/tmp/ws', '/tmp/secondary']);
     expect(args[args.indexOf('--tools') + 1]).toBe('');
     expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
     expect(args[args.indexOf('--add-dir') + 1]).toBe('/tmp/ws');
@@ -196,10 +189,8 @@ describe('Claude runtime probe', () => {
         configPath: '/tmp/managed.json',
         guidance: 'managed',
         toolNames: ['read_file', 'search_workspace'],
-        managedMode: true,
       },
       undefined,
-      'full',
       ['/tmp/ws'],
     );
     expect(args[args.indexOf('--tools') + 1]).toBe('');
@@ -211,17 +202,15 @@ describe('Claude runtime probe', () => {
     expect(args).toContain('--disable-slash-commands');
   });
 
-  it('enables native WebSearch only for an explicitly research-enabled Team turn', () => {
+  it('never enables native WebSearch for Team turns', () => {
     const withoutResearch = buildClaudeArgs(
       'auto',
       {
         configPath: '/tmp/team.json',
         guidance: 'team',
         toolNames: TEAM_CORE_MCP_TOOL_NAMES,
-        enableWebSearch: false,
       },
       undefined,
-      'read-only',
       ['/tmp/ws'],
     );
     const withResearch = buildClaudeArgs(
@@ -230,10 +219,8 @@ describe('Claude runtime probe', () => {
         configPath: '/tmp/team.json',
         guidance: 'team',
         toolNames: TEAM_CORE_MCP_TOOL_NAMES,
-        enableWebSearch: true,
       },
       undefined,
-      'read-only',
       ['/tmp/ws'],
     );
     expect(withoutResearch[withoutResearch.indexOf('--tools') + 1]).not.toContain('WebSearch');
@@ -247,8 +234,8 @@ describe('Claude runtime probe', () => {
     expect(withoutResearch[withoutResearch.indexOf('--allowedTools') + 1]).not.toContain(
       'skill_draft_create',
     );
-    expect(withResearch[withResearch.indexOf('--tools') + 1]).toContain('WebSearch');
-    expect(withResearch[withResearch.indexOf('--allowedTools') + 1]).toContain('WebSearch');
+    expect(withResearch[withResearch.indexOf('--tools') + 1]).toBe('');
+    expect(withResearch[withResearch.indexOf('--allowedTools') + 1]).not.toContain('WebSearch');
   });
 
   it('keeps the complete Team guidance in Claude system authority', () => {
@@ -259,10 +246,8 @@ describe('Claude runtime probe', () => {
         configPath: '/tmp/team.json',
         guidance,
         toolNames: TEAM_CORE_MCP_TOOL_NAMES,
-        enableWebSearch: false,
       },
       undefined,
-      'read-only',
       ['/tmp/ws'],
     );
 
@@ -272,16 +257,12 @@ describe('Claude runtime probe', () => {
   it('does not pin a directory it was not given, rather than inventing one', () => {
     // A wrong --add-dir would widen the writable set, so the absence of a Workspace has to mean the
     // flag is absent — never a fallback like cwd.
-    expect(buildClaudeArgs('auto', undefined, undefined, 'workspace-write', [])).not.toContain(
-      '--add-dir',
-    );
+    expect(buildClaudeArgs('auto', undefined, undefined, [])).not.toContain('--add-dir');
   });
 
-  it('never bypasses native permissions at any scope', () => {
-    for (const scope of ['read-only', 'workspace-write', 'full'] as const) {
-      const args = buildClaudeArgs('auto', undefined, undefined, scope, ['/tmp/ws']);
-      expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
-    }
+  it('never bypasses native permissions', () => {
+    const args = buildClaudeArgs('auto', undefined, undefined, ['/tmp/ws']);
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
   });
 
   it('passes an explicit model without changing the immutable execution profile', () => {

@@ -126,9 +126,6 @@ export type RuntimeTeamMcpOption = Readonly<{
   toolNames: readonly TeamMcpToolName[];
   managedTools?: readonly RuntimeManagedToolDefinition[];
   toolCatalogDigest?: string;
-  /** Enables the Runtime's native live-Web search only for a Leader/Manager that must research
-   * candidate models before hiring. Omitted/false preserves the existing no-Web Team profile. */
-  enableWebSearch?: boolean;
 }>;
 
 export type RuntimeManagedToolDefinition = Readonly<{
@@ -275,21 +272,10 @@ export type RuntimeCanonicalEvent =
   // ~/.ssh/id_rsa and the app would copy it into an artifact the user then opens. Verified on
   // codex-cli 0.144.4 that `thread.started`'s `thread_id` matches the directory name exactly, so
   // Main can enumerate a bounded directory and never parse a path at all.
-  | { type: 'thread'; threadId: string }
-  // Files the Runtime changed (issue #37). Taken from the CLI's own structured report — Codex's
-  // `item.type: "file_change"` and Claude's `tool_use` input — and never from model prose, for the
-  // same reason the thread id above is an id rather than a path.
-  //
-  // Paths arrive absolute here and are made workspace-relative in Main, which is the only side that
-  // knows the Workspace root: the runtime-host process is deliberately not told policy.
-  | { type: 'fileChange'; changes: { path: string; kind: 'add' | 'update' | 'delete' }[] }
-  // The body of a file as the model writes it (issue #39). `text` is the whole value decoded so
-  // far, not a delta: the producer already holds the accumulated buffer, and sending the total
-  // makes a dropped or reordered frame cost a repaint instead of a corrupted file view.
-  //
-  // Transient, like reasoning — never a TurnEvent. A file body at typing speed would flood
-  // `turn_events` and be replayed on every re-subscribe.
-  | { type: 'fileEdit'; path: string; text: string; complete: boolean };
+  | { type: 'thread'; threadId: string };
+
+// File changes never cross this Runtime boundary. Main records them from the Managed Harness
+// post-image after the Edit Saga commits, so provider output cannot forge Timeline evidence.
 
 type RuntimeStartRequest = {
   input: string;
@@ -672,8 +658,7 @@ function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
           ),
         ).size === record['managedTools'].length &&
         record['managedTools'].every(isRuntimeManagedToolDefinition))) &&
-    (record['toolCatalogDigest'] === undefined || isSha256(record['toolCatalogDigest'])) &&
-    (record['enableWebSearch'] === undefined || typeof record['enableWebSearch'] === 'boolean')
+    (record['toolCatalogDigest'] === undefined || isSha256(record['toolCatalogDigest']))
   );
 }
 
@@ -1211,34 +1196,6 @@ function isRuntimeCanonicalEvent(value: unknown): value is RuntimeCanonicalEvent
     );
   // Constrained to a UUID shape rather than any string: this value is interpolated into a
   // filesystem path by Main, so it must not be able to carry separators or traversal segments.
-  if (value.type === 'fileEdit')
-    return (
-      'path' in value &&
-      typeof value.path === 'string' &&
-      value.path.length > 0 &&
-      value.path.length <= 4096 &&
-      'text' in value &&
-      typeof value.text === 'string' &&
-      value.text.length <= 1_048_576 &&
-      'complete' in value &&
-      typeof value.complete === 'boolean'
-    );
-  if (value.type === 'fileChange')
-    return (
-      'changes' in value &&
-      Array.isArray(value.changes) &&
-      value.changes.length > 0 &&
-      value.changes.length <= 200 &&
-      value.changes.every(
-        (change) =>
-          typeof change === 'object' &&
-          change !== null &&
-          typeof (change as { path?: unknown }).path === 'string' &&
-          (change as { path: string }).path.length > 0 &&
-          (change as { path: string }).path.length <= 4096 &&
-          ['add', 'update', 'delete'].includes(String((change as { kind?: unknown }).kind)),
-      )
-    );
   if (value.type === 'thread')
     return (
       'threadId' in value &&

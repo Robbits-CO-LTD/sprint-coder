@@ -3059,12 +3059,23 @@ export const databaseRecoverySchema = z
   .strict();
 export type DatabaseRecovery = z.infer<typeof databaseRecoverySchema>;
 
+export const commandSandboxCapabilitySchema = z
+  .object({
+    available: z.boolean(),
+    backend: z.string().min(1).max(128),
+    reason: z.string().min(1).max(128).nullable(),
+    probedAt: z.string().datetime(),
+  })
+  .strict();
+export type CommandSandboxCapability = z.infer<typeof commandSandboxCapabilitySchema>;
+
 export const appInfoSchema = z
   .object({
     version: z.string(),
     platform: z.string(),
     recovery: databaseRecoverySchema,
     updateHealth: updateHealthSchema,
+    commandSandbox: commandSandboxCapabilitySchema.optional(),
     settingsWorkspaceV2: z.boolean().optional(),
     projectMultiFolderUx: z.boolean().optional(),
   })

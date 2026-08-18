@@ -20,7 +20,7 @@ struct ProbeResult {
     protocol_version: u32,
     available: bool,
     backend: &'static str,
-    reason: Option<&'static str>,
+    reason: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -123,7 +123,7 @@ fn probe() -> ProbeResult {
         protocol_version: PROTOCOL_VERSION,
         available,
         backend: "macos-seatbelt",
-        reason: (!available).then_some("seatbelt_probe_failed"),
+        reason: (!available).then(|| "seatbelt_probe_failed".to_owned()),
     }
 }
 
@@ -138,7 +138,7 @@ fn probe() -> ProbeResult {
         protocol_version: PROTOCOL_VERSION,
         available,
         backend: "linux-bubblewrap-landlock",
-        reason: (!available).then_some("bubblewrap_probe_failed"),
+        reason: (!available).then(|| "bubblewrap_probe_failed".to_owned()),
     }
 }
 
@@ -279,6 +279,6 @@ fn probe() -> ProbeResult {
         protocol_version: PROTOCOL_VERSION,
         available: false,
         backend: "unsupported",
-        reason: Some("unsupported_platform"),
+        reason: Some("unsupported_platform".to_owned()),
     }
 }

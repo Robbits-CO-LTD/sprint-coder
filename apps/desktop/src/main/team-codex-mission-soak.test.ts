@@ -107,8 +107,6 @@ class DirectCodexTeamRuntime implements TeamWorkerRuntime {
             }
             if (event.type === 'reasoning')
               input.onEvent?.({ type: 'reasoningPresence', active: true });
-            if (event.type === 'fileChange')
-              input.onEvent?.({ type: 'fileChange', changes: event.changes });
             if (event.type === 'completed')
               finish(() => {
                 input.onEvent?.({ type: 'completed' });

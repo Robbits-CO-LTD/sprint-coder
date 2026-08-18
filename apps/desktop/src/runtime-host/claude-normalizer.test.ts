@@ -121,12 +121,10 @@ describe('ClaudeJsonlNormalizer', () => {
     expect(normalizer.push('{"type":"system","subtype":"post_turn_summary"}')).toEqual([]);
   });
 
-  it('accepts the exact read-only tools reported by the real Claude CLI', () => {
+  it('accepts the exact empty native tool set reported by the managed Claude profile', () => {
     const normalizer = new ClaudeJsonlNormalizer();
     expect(() =>
-      normalizer.push(
-        '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"],"mcp_servers":[]}',
-      ),
+      normalizer.push('{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}'),
     ).not.toThrow();
   });
 
@@ -140,13 +138,11 @@ describe('ClaudeJsonlNormalizer', () => {
   it('treats a non-empty mcp_servers report as a fatal profile violation', () => {
     const normalizer = new ClaudeJsonlNormalizer();
     expect(() =>
-      normalizer.push(
-        '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"],"mcp_servers":[{"name":"x"}]}',
-      ),
+      normalizer.push('{"type":"system","subtype":"init","tools":[],"mcp_servers":[{"name":"x"}]}'),
     ).toThrow(ClaudeCapabilityViolationError);
   });
 
-  it('accepts the exact read-only plus Team MCP capability surface', () => {
+  it('accepts the exact managed Team MCP capability surface', () => {
     const teamTools = [
       'mcp__team__team_list_models',
       'mcp__team__team_hire_worker',
@@ -162,7 +158,7 @@ describe('ClaudeJsonlNormalizer', () => {
       'mcp__team__team_stop_worker',
     ];
     const normalizer = new ClaudeJsonlNormalizer({
-      builtInTools: ['Read', 'Glob', 'Grep'],
+      builtInTools: [],
       teamMcp: { serverName: 'team', toolNames: teamTools },
     });
     expect(() =>
@@ -170,7 +166,7 @@ describe('ClaudeJsonlNormalizer', () => {
         JSON.stringify({
           type: 'system',
           subtype: 'init',
-          tools: ['Glob', 'Grep', 'Read', ...teamTools],
+          tools: [...teamTools],
           mcp_servers: [{ name: 'team', status: 'connected' }],
         }),
       ),
@@ -183,7 +179,7 @@ describe('ClaudeJsonlNormalizer', () => {
     ['skill import', ['mcp__team__skill_import_read', 'mcp__team__skill_import_install']],
   ])('accepts the exact %s MCP subset', (_kind, toolNames) => {
     const normalizer = new ClaudeJsonlNormalizer({
-      builtInTools: ['Read', 'Glob', 'Grep'],
+      builtInTools: [],
       teamMcp: { serverName: 'team', toolNames },
     });
     expect(() =>
@@ -191,7 +187,7 @@ describe('ClaudeJsonlNormalizer', () => {
         JSON.stringify({
           type: 'system',
           subtype: 'init',
-          tools: ['Glob', 'Grep', 'Read', ...toolNames],
+          tools: [...toolNames],
           mcp_servers: [{ name: 'team', status: 'connected' }],
         }),
       ),
@@ -201,7 +197,7 @@ describe('ClaudeJsonlNormalizer', () => {
   it('reports bounded missing and unexpected tool differences on exact-match failure', () => {
     const expected = ['mcp__team__team_hire_worker'];
     const normalizer = new ClaudeJsonlNormalizer({
-      builtInTools: ['Read'],
+      builtInTools: [],
       teamMcp: { serverName: 'team', toolNames: expected },
     });
     try {
@@ -209,7 +205,7 @@ describe('ClaudeJsonlNormalizer', () => {
         JSON.stringify({
           type: 'system',
           subtype: 'init',
-          tools: ['Read', 'mcp__team__skill_draft_create'],
+          tools: ['mcp__team__skill_draft_create'],
           mcp_servers: [{ name: 'team', status: 'connected' }],
         }),
       );
@@ -225,7 +221,7 @@ describe('ClaudeJsonlNormalizer', () => {
 
   it('accepts the real Claude CLI Team MCP initialization while the configured server is pending', () => {
     const normalizer = new ClaudeJsonlNormalizer({
-      builtInTools: ['Read', 'Glob', 'Grep'],
+      builtInTools: [],
       teamMcp: {
         serverName: 'team',
         toolNames: [
@@ -249,16 +245,16 @@ describe('ClaudeJsonlNormalizer', () => {
         JSON.stringify({
           type: 'system',
           subtype: 'init',
-          tools: ['Glob', 'Grep', 'Read'],
+          tools: [],
           mcp_servers: [{ name: 'team', status: 'pending' }],
         }),
       ),
     ).not.toThrow();
   });
 
-  it('rejects an extra MCP tool even when the full built-in profile is allowed', () => {
+  it('rejects an extra MCP tool with the native tool profile empty', () => {
     const normalizer = new ClaudeJsonlNormalizer({
-      builtInTools: 'default',
+      builtInTools: [],
       teamMcp: {
         serverName: 'team',
         toolNames: ['mcp__team__team_hire_worker'],
@@ -269,7 +265,7 @@ describe('ClaudeJsonlNormalizer', () => {
         JSON.stringify({
           type: 'system',
           subtype: 'init',
-          tools: ['Read', 'Bash', 'mcp__team__team_hire_worker', 'mcp__team__unexpected'],
+          tools: ['mcp__team__team_hire_worker', 'mcp__team__unexpected'],
           mcp_servers: [{ name: 'team', status: 'connected' }],
         }),
       ),
@@ -288,9 +284,7 @@ describe('ClaudeJsonlNormalizer', () => {
 
   it('does not emit a second completed event for a duplicate result', () => {
     const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(
-      '{"type":"system","subtype":"init","tools":["Glob","Grep","Read"],"mcp_servers":[]}',
-    );
+    normalizer.push('{"type":"system","subtype":"init","tools":[],"mcp_servers":[]}');
     const first = normalizer.push('{"type":"result","is_error":false,"result":"ok"}');
     expect(first.at(-1)).toEqual({ type: 'completed' });
     const second = normalizer.push('{"type":"result","is_error":false,"result":"ok"}');
@@ -349,181 +343,40 @@ describe('ClaudeJsonlNormalizer reasoning (issue #17)', () => {
   });
 });
 
-describe('file writes (issue #37)', () => {
-  const toolUse = (id: string, name: string, filePath: string): string =>
-    JSON.stringify({
+describe('managed MCP tool calls', () => {
+  it('surfaces the call as an operation but never derives file changes from Claude output', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    const toolUse = JSON.stringify({
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'tool_use', id, name, input: { file_path: filePath } }],
-      },
-    });
-  const toolResult = (id: string, content: string, isError = false): string =>
-    JSON.stringify({
-      type: 'user',
-      message: {
-        role: 'user',
         content: [
-          { type: 'tool_result', tool_use_id: id, content, ...(isError ? { is_error: true } : {}) },
+          {
+            type: 'tool_use',
+            id: 't1',
+            name: 'mcp__team__apply_patch',
+            input: { path: '/outside/untrusted.ts' },
+          },
         ],
       },
     });
-
-  it('reports a write only after its tool_result confirms it', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    // The intent alone proves nothing: under the ask preset the CLI denies every one of these, and
-    // the denial arrives as the tool_result. Emitting on the intent would report edits that a
-    // read-only Turn never made.
-    expect(normalizer.push(toolUse('t1', 'Edit', '/ws/a.ts'))).toContainEqual({
+    expect(normalizer.push(toolUse)).toContainEqual({
       type: 'operation',
       phase: 'tool_call_start',
-      label: 'Claude tool call started (Edit)',
+      label: 'Claude tool call started (mcp__team__apply_patch)',
       sideEffect: true,
     });
-    expect(normalizer.push(toolResult('t1', 'The file has been updated.'))).toContainEqual({
-      type: 'fileChange',
-      changes: [{ path: '/ws/a.ts', kind: 'update' }],
-    });
-  });
-
-  it('does not report a write whose tool_result is an error', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(toolUse('t1', 'Write', '/ws/a.ts'));
     expect(
       normalizer.push(
-        toolResult(
-          't1',
-          "Claude requested permissions to write, but you haven't granted it yet.",
-          true,
-        ),
+        JSON.stringify({
+          type: 'user',
+          message: {
+            content: [
+              { type: 'tool_result', tool_use_id: 't1', content: 'File created successfully' },
+            ],
+          },
+        }),
       ),
     ).toEqual([]);
-  });
-
-  it('distinguishes a created file from a replaced one using the CLI’s own wording', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(toolUse('t1', 'Write', '/ws/new.ts'));
-    expect(
-      normalizer.push(toolResult('t1', 'File created successfully at: /ws/new.ts')),
-    ).toContainEqual({
-      type: 'fileChange',
-      changes: [{ path: '/ws/new.ts', kind: 'add' }],
-    });
-    // Without that wording it stays `update`, which claims less: that the file now differs, not
-    // that this Turn brought it into existence.
-    normalizer.push(toolUse('t2', 'Write', '/ws/old.ts'));
-    expect(normalizer.push(toolResult('t2', 'Wrote 3 lines.'))).toContainEqual({
-      type: 'fileChange',
-      changes: [{ path: '/ws/old.ts', kind: 'update' }],
-    });
-  });
-
-  it('ignores tools that do not write and results with no matching intent', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    expect(normalizer.push(toolUse('t1', 'Read', '/ws/a.ts'))).toContainEqual({
-      type: 'operation',
-      phase: 'tool_call_start',
-      label: 'Claude tool call started (Read)',
-      sideEffect: false,
-    });
-    expect(normalizer.push(toolResult('t1', '1\tcontents'))).toEqual([]);
-    expect(normalizer.push(toolResult('unknown', 'done'))).toEqual([]);
-  });
-
-  it('surfaces Team MCP tool use so a failed attempt is not retried after side effects', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-
-    expect(normalizer.push(toolUse('t1', 'mcp__team__team_hire', '/unused'))).toContainEqual({
-      type: 'operation',
-      phase: 'tool_call_start',
-      label: 'Claude tool call started (mcp__team__team_hire)',
-      sideEffect: true,
-    });
-  });
-});
-
-describe('live file bodies (issue #39)', () => {
-  const start = (index: number, name: string, id = 'toolu_1'): string =>
-    JSON.stringify({
-      type: 'stream_event',
-      event: { type: 'content_block_start', index, content_block: { type: 'tool_use', id, name } },
-    });
-  const fragment = (index: number, partial_json: string): string =>
-    JSON.stringify({
-      type: 'stream_event',
-      event: {
-        type: 'content_block_delta',
-        index,
-        delta: { type: 'input_json_delta', partial_json },
-      },
-    });
-
-  it('streams the file body as the arguments arrive, once the path is known', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(start(2, 'Write'));
-    // Nothing until the path is closed: a half-typed path names a different file than the one being
-    // written, and the view is labelled with it.
-    expect(normalizer.push(fragment(2, '{"file_path": "/ws/a'))).toEqual([]);
-    expect(normalizer.push(fragment(2, '.ts", "content": "const'))).toContainEqual({
-      type: 'fileEdit',
-      path: '/ws/a.ts',
-      text: 'const',
-      complete: false,
-    });
-    expect(normalizer.push(fragment(2, ' a = 1;'))).toContainEqual({
-      type: 'fileEdit',
-      path: '/ws/a.ts',
-      text: 'const a = 1;',
-      complete: false,
-    });
-    expect(normalizer.push(fragment(2, '"}'))).toContainEqual({
-      type: 'fileEdit',
-      path: '/ws/a.ts',
-      text: 'const a = 1;',
-      complete: true,
-    });
-  });
-
-  it('reads new_string for an Edit, which is what that tool is producing for the file', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(start(0, 'Edit'));
-    expect(
-      normalizer.push(
-        fragment(0, '{"file_path": "/ws/a.ts", "old_string": "1", "new_string": "2"}'),
-      ),
-    ).toContainEqual({ type: 'fileEdit', path: '/ws/a.ts', text: '2', complete: true });
-  });
-
-  it('ignores tool blocks that do not write a file', () => {
-    // A Read's arguments stream too. Showing a path being typed as though it were a file being
-    // written would misdescribe what the model is doing.
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(start(0, 'Read'));
-    expect(normalizer.push(fragment(0, '{"file_path": "/ws/a.ts"}'))).toEqual([]);
-  });
-
-  it('emits nothing for a fragment that ends mid-escape, then emits once it resolves', () => {
-    // A lone trailing backslash could still become \\n or \\\\; decoding it early and correcting it on
-    // the next fragment would make the live view flicker between wrong and right.
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(start(0, 'Write'));
-    normalizer.push(fragment(0, '{"file_path": "/ws/a.ts", "content": "a'));
-    expect(normalizer.push(fragment(0, '\\'))).toEqual([]);
-    expect(normalizer.push(fragment(0, 'n'))).toContainEqual({
-      type: 'fileEdit',
-      path: '/ws/a.ts',
-      text: 'a\n',
-      complete: false,
-    });
-  });
-
-  it('stops tracking a block once it closes, so a later index reuse cannot resume it', () => {
-    const normalizer = new ClaudeJsonlNormalizer();
-    normalizer.push(start(0, 'Write'));
-    normalizer.push(fragment(0, '{"file_path": "/ws/a.ts", "content": "x"}'));
-    normalizer.push(
-      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }),
-    );
-    expect(normalizer.push(fragment(0, 'ignored'))).toEqual([]);
   });
 });

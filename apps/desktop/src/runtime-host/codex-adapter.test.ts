@@ -876,20 +876,14 @@ describe('Codex runtime probe', () => {
     ).toBeGreaterThanOrEqual(4);
   });
 
-  it('uses the interactive app-server transport for every write scope', () => {
-    for (const scope of ['read-only', 'workspace-write', 'full'] as const)
-      expect(buildCodexArgs('auto', undefined, scope).slice(0, 3)).toEqual([
-        'app-server',
-        '--listen',
-        'stdio://',
-      ]);
+  it('uses the interactive app-server transport for the immutable managed profile', () => {
+    expect(buildCodexArgs('auto').slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
   });
 
-  it('never asks for approval, at any scope', () => {
+  it('never asks the native runtime for approval', () => {
     // `on-request` in exec mode stalls the tool instead of surfacing anything answerable, so a scope
     // that flipped this would hang a Turn rather than prompt anyone.
-    for (const scope of ['read-only', 'workspace-write', 'full'] as const)
-      expect(buildCodexArgs('auto', undefined, scope)).toContain('approval_policy="never"');
+    expect(buildCodexArgs('auto')).toContain('approval_policy="never"');
   });
 
   it('passes an explicit model without changing the immutable execution profile', () => {
@@ -908,7 +902,7 @@ describe('Codex runtime probe', () => {
   });
 
   it('pins the per-turn Team MCP server through explicit config overrides', () => {
-    const args = buildCodexArgs('auto', undefined, 'read-only', {
+    const args = buildCodexArgs('auto', undefined, {
       command: 'node',
       scriptPath: '/tmp/team-mcp-server.cjs',
       toolNames: TEAM_CORE_MCP_TOOL_NAMES,
@@ -1044,16 +1038,13 @@ describe('Codex runtime probe', () => {
     });
   });
 
-  it('enables live Web search only for an explicitly research-enabled Team turn', () => {
+  it('never enables native Web search for a Team turn', () => {
     const base = {
       command: 'node',
       scriptPath: '/tmp/team-mcp-server.cjs',
       toolNames: TEAM_CORE_MCP_TOOL_NAMES,
     };
-    expect(buildCodexArgs('auto', undefined, 'read-only', base)).not.toContain('web_search="live"');
-    expect(
-      buildCodexArgs('auto', undefined, 'read-only', { ...base, enableWebSearch: true }),
-    ).toContain('web_search="live"');
+    expect(buildCodexArgs('auto', undefined, base)).not.toContain('web_search="live"');
   });
 
   it('prepends Team guidance to the real Codex Leader prompt', () => {

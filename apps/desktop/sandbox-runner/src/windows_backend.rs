@@ -28,7 +28,7 @@ impl Drop for OwnedSid {
     }
 }
 
-pub fn restricted_token_probe() -> Result<(), &'static str> {
+pub fn restricted_token_probe() -> Result<(), String> {
     let base = std::env::temp_dir().join(format!(
         "sprint-coder-windows-sandbox-{}",
         std::process::id()
@@ -36,7 +36,7 @@ pub fn restricted_token_probe() -> Result<(), &'static str> {
     let inside = base.join("inside");
     let outside = base.join("outside");
     if std::fs::create_dir_all(&inside).is_err() || std::fs::create_dir_all(&outside).is_err() {
-        return Err("appcontainer_probe_setup_failed");
+        return Err("appcontainer_probe_setup_failed".to_owned());
     }
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
@@ -52,9 +52,11 @@ pub fn restricted_token_probe() -> Result<(), &'static str> {
     );
     let result = match execution {
         Ok(0) if inside_marker.is_file() && !outside_marker.exists() => Ok(()),
-        Ok(0) if !inside_marker.is_file() => Err("appcontainer_probe_workspace_write_failed"),
-        Ok(0) => Err("appcontainer_probe_outside_write_succeeded"),
-        Ok(_) => Err("appcontainer_probe_command_failed"),
+        Ok(0) if !inside_marker.is_file() => {
+            Err("appcontainer_probe_workspace_write_failed".to_owned())
+        }
+        Ok(0) => Err("appcontainer_probe_outside_write_succeeded".to_owned()),
+        Ok(code) => Err(format!("appcontainer_probe_command_failed_{code}")),
         Err(reason) => Err(reason),
     };
     let _ = std::fs::remove_dir_all(base);
@@ -65,18 +67,18 @@ pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {
     execute_impl(root, executable, argv).unwrap_or(70)
 }
 
-fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, &'static str> {
+fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, String> {
     let Ok(root) = std::fs::canonicalize(root) else {
-        return Err("appcontainer_workspace_resolution_failed");
+        return Err("appcontainer_workspace_resolution_failed".to_owned());
     };
     let mut hasher = DefaultHasher::new();
     root.to_string_lossy().to_lowercase().hash(&mut hasher);
     let profile = format!("SprintCoder.ManagedCommand.{:016x}", hasher.finish());
     let Some(sid) = appcontainer_sid(&profile) else {
-        return Err("appcontainer_profile_failed");
+        return Err("appcontainer_profile_failed".to_owned());
     };
     let Some(sid_string) = sid_string(sid.0) else {
-        return Err("appcontainer_sid_string_failed");
+        return Err("appcontainer_sid_string_failed".to_owned());
     };
     let executable_path = Path::new(executable);
     let executable_acl_required = !is_windows_system_path(executable_path);
@@ -87,14 +89,14 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, &'
         if executable_acl_required {
             remove_acl(executable_path, &sid_string, false);
         }
-        return Err("appcontainer_acl_failed");
+        return Err("appcontainer_acl_failed".to_owned());
     }
     let result = unsafe { spawn_appcontainer(sid.0, &root, executable, argv) };
     remove_acl(&root, &sid_string, true);
     if executable_acl_required {
         remove_acl(executable_path, &sid_string, false);
     }
-    result.map_err(|_| "appcontainer_process_failed")
+    result.map_err(|code| format!("appcontainer_process_failed_{code}"))
 }
 
 fn is_windows_system_path(path: &Path) -> bool {

@@ -17,6 +17,7 @@ import type {
   CodexModelOption,
   CommandSummary,
   CommandOutputRecord,
+  CommandSandboxCapability,
   FileChange,
   GeneratedImage,
   ImageAttachmentCapability,
@@ -237,6 +238,7 @@ type AppState = {
   recovery: DatabaseRecovery | null;
   /** Installed application version reported by Electron. Null until app.getInfo resolves. */
   appVersion: string | null;
+  commandSandbox: CommandSandboxCapability | null;
   /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
    * should not require persistence — it simply stops being shown for this session. */
   recoveryAcknowledged: boolean;
@@ -917,6 +919,7 @@ export const useAppStore = create<AppState>((set, get) => {
     reasoningSeenByTurn: {},
     recovery: null,
     appVersion: null,
+    commandSandbox: null,
     recoveryAcknowledged: false,
     settingsWorkspaceV2: true,
     projectMultiFolderUx: true,
@@ -1011,6 +1014,7 @@ export const useAppStore = create<AppState>((set, get) => {
             set({
               ...(info.recovery === undefined ? {} : { recovery: info.recovery }),
               ...(typeof info.version === 'string' ? { appVersion: info.version } : {}),
+              ...(info.commandSandbox === undefined ? {} : { commandSandbox: info.commandSandbox }),
               settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
               projectMultiFolderUx: info.projectMultiFolderUx ?? true,
             });

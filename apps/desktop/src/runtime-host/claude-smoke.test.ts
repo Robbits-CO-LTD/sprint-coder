@@ -1,7 +1,4 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { claudeEffortSchema, type PublicError } from '@sprint-coder/contracts';
 import { ClaudeRuntimeAdapter, probeClaude } from './claude-adapter';
@@ -126,44 +123,6 @@ describe.skipIf(!enabled)('Claude runtime adapter (REAL CLI smoke)', () => {
     expect(events.at(-1)).toMatchObject({ type: 'completed', resolvedModel: expect.any(String) });
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
   }, 60_000);
-
-  it('reads and writes both roots through repeated --add-dir arguments', async () => {
-    const primary = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-primary-'));
-    const secondary = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-secondary-'));
-    try {
-      const adapter = new ClaudeRuntimeAdapter();
-      const failures: PublicError[] = [];
-      await new Promise<void>((resolve) => {
-        adapter.start(
-          'claude-smoke-multi-root',
-          `Use shell commands to write exactly "primary-ok" to ${join(primary, 'result.txt')} and exactly "secondary-ok" to ${join(secondary, 'result.txt')}. Do not modify any other file.`,
-          [],
-          () => undefined,
-          {
-            primaryRootId: 'primary',
-            roots: [
-              { rootId: 'primary', path: primary, label: 'primary', role: 'primary' },
-              { rootId: 'secondary', path: secondary, label: 'secondary', role: 'secondary' },
-            ],
-            digest: 'a'.repeat(64),
-          },
-          'auto',
-          () => undefined,
-          (error) => failures.push(error),
-          () => resolve(),
-          undefined,
-          undefined,
-          'workspace-write',
-        );
-      });
-      expect(failures).toEqual([]);
-      expect(readFileSync(join(primary, 'result.txt'), 'utf8')).toBe('primary-ok');
-      expect(readFileSync(join(secondary, 'result.txt'), 'utf8')).toBe('secondary-ok');
-    } finally {
-      rmSync(primary, { recursive: true, force: true });
-      rmSync(secondary, { recursive: true, force: true });
-    }
-  }, 120_000);
 
   it('kills the process tree on cancel mid-turn, leaving no orphan claude process', async () => {
     const baseline = liveClaudeProcessCount();

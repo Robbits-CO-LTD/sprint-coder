@@ -1,20 +1,9 @@
 import { watch, type FSWatcher } from 'node:fs';
 import { isAbsolute, relative } from 'node:path';
 
-// Watches a Workspace for files a Runtime changes, so the UI can show contents the CLI never
-// reports (issue #39).
-//
-// Why a watcher and not just the CLI's events: Codex emits `file_change` with a path and a kind and
-// no body at all, and it applies patches by writing a temp file and renaming — so there is nothing
-// to stream and nothing to tail.
-//
-// Note what this is NOT for. Measured on macOS against codex-cli 0.144.4, a watcher notification
-// arrives ~270ms AFTER the CLI's own `item.completed` for the same write (14341ms vs 14175ms from
-// turn start), because FSEvents has its own latency on top of this debounce. Reading the file when
-// the CLI reports the change is the faster path, and Main does that too.
-//
-// The watcher earns its place on coverage, not speed: it sees writes no CLI reports at all — a file
-// a shell command rewrote, a formatter that ran on save, anything outside a reported tool call.
+// Watches a Workspace only for transient live-content previews. Durable file-change Timeline and
+// diff evidence come exclusively from the Managed Harness post-image after a committed Edit Saga;
+// watcher notifications are never treated as proof that a Runtime changed a file.
 //
 // `fs.watch` with `recursive: true` rather than a dependency: it is native on macOS (FSEvents) and
 // Windows (ReadDirectoryChangesW), which are the platforms this ships on. Linux does not support

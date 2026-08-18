@@ -503,6 +503,13 @@ export type DatabaseRecovery = {
   possibleCommittedDataLoss: boolean;
   interruptedTurns: number;
 };
+
+export type CommandSandboxCapability = {
+  available: boolean;
+  backend: string;
+  reason: string | null;
+  probedAt: string;
+};
 export type RuntimeConnectionState = 'idle' | 'running' | 'failed';
 /** Runtime process liveness. Pushed, never persisted — see contracts' runtimeStatusSchema. */
 export type RuntimeStatus = {
@@ -820,6 +827,7 @@ export interface SprintCoderApi {
       platform: string;
       recovery: DatabaseRecovery;
       updateHealth: UpdateHealth;
+      commandSandbox?: CommandSandboxCapability;
       settingsWorkspaceV2?: boolean;
       projectMultiFolderUx?: boolean;
     }>;
