@@ -261,9 +261,11 @@ unsafe fn spawn_appcontainer(
     startup.StartupInfo.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     startup.StartupInfo.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
     startup.lpAttributeList = list;
-    let application = wide(executable);
-    let mut command_line = wide(windows_command_line(executable, argv));
-    let cwd = wide(cwd.as_os_str());
+    let executable = win32_process_path(executable);
+    let cwd = win32_process_path(&cwd.to_string_lossy());
+    let application = wide(&executable);
+    let mut command_line = wide(windows_command_line(&executable, argv));
+    let cwd = wide(&cwd);
     let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let ok = unsafe {
         CreateProcessW(
@@ -300,6 +302,13 @@ fn windows_command_line(executable: &str, argv: &[String]) -> String {
         .map(quote_arg)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn win32_process_path(value: &str) -> String {
+    if let Some(path) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{path}");
+    }
+    value.strip_prefix(r"\\?\").unwrap_or(value).to_owned()
 }
 
 fn quote_arg(value: &str) -> String {
