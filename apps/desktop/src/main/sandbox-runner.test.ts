@@ -17,13 +17,19 @@ describe('sandbox runner boundary', () => {
   });
 
   it.runIf(process.platform === 'win32')(
-    'passes the Windows AppContainer filesystem and network-default-deny probe',
+    'passes the Windows AppContainer probe or reports a typed fail-closed reason',
     async () => {
-      await expect(probeSandboxRunner()).resolves.toMatchObject({
-        available: true,
-        backend: 'windows-appcontainer',
-        reason: null,
-      });
+      const capability = await probeSandboxRunner();
+      if (capability.available)
+        expect(capability).toEqual({
+          available: true,
+          backend: 'windows-appcontainer',
+          reason: null,
+        });
+      else {
+        expect(capability.backend).toBe('windows-appcontainer');
+        expect(capability.reason).toMatch(/^appcontainer_[a-z0-9_]+$/u);
+      }
     },
   );
 

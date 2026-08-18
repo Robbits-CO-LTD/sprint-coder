@@ -69,6 +69,33 @@ async function harness() {
 }
 
 describe('Provider workspace read tools', () => {
+  it('omits command tools until the OS sandbox probe succeeds', async () => {
+    const { tools, context } = await harness();
+    const commandTools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'deny', reason: 'test' }),
+      command: { persistence: {} as never, publish: () => undefined },
+    });
+    const unavailable = commandTools.startTurn(
+      { ...context, turnId: 'turn-command-unavailable' },
+      'codex',
+    );
+    expect(unavailable.entries.map(({ providerName }) => providerName)).not.toContain(
+      'exec_command',
+    );
+    commandTools.finishTurn(context.taskId, 'turn-command-unavailable');
+    commandTools.setCommandSandboxAvailable(true);
+    const available = commandTools.startTurn(
+      { ...context, turnId: 'turn-command-available' },
+      'codex',
+    );
+    expect(available.entries.map(({ providerName }) => providerName)).toContain('exec_command');
+    await commandTools.dispose();
+    await tools.dispose();
+  });
+
   it('publishes a deterministic immutable catalog for API Providers', async () => {
     const { tools, context, snapshot } = await harness();
     expect(providerToolsFromSnapshot(snapshot).map(({ name }) => name)).toEqual([
