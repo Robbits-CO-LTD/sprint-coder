@@ -8,6 +8,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { afterEach, describe, expect, it } from 'vitest';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { TEAM_HIRE_WORKER_TOOL } from '../main/team-tools';
+import { WORKER_TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 // Exercises the exact script string the Claude adapter writes to disk and hands to the real
 // Claude CLI as an MCP stdio server (see claude-adapter.ts). The JSON-RPC handshake shape asserted
@@ -49,6 +50,7 @@ async function startHarness(
       skillImports: boolean;
       teamTools: boolean;
     };
+    allowedTools?: readonly string[] | null;
     managedTools?: readonly { name: string; description: string; inputSchema: object }[];
   } = {},
 ): Promise<Harness> {
@@ -95,6 +97,9 @@ async function startHarness(
               result: {
                 authenticated: true,
                 managedTools: options.managedTools ?? [],
+                ...(options.allowedTools === null
+                  ? {}
+                  : { allowedTools: options.allowedTools ?? TEAM_MCP_TOOL_NAMES }),
                 capabilities: options.capabilities ?? {
                   projectMemory: true,
                   skillDrafts: true,
@@ -276,6 +281,26 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     });
   });
 
+  it('publishes exactly the Worker inventory and excludes the Manager-only hire tool', async () => {
+    const harness = await startHarness({ allowedTools: WORKER_TEAM_MCP_TOOL_NAMES });
+    harness.send({ jsonrpc: '2.0', id: 30, method: 'tools/list' });
+    const reply = await harness.nextMessage();
+    const tools = (reply['result'] as { tools: { name: string }[] }).tools;
+    expect(tools.map(({ name }) => name)).toEqual(WORKER_TEAM_MCP_TOOL_NAMES);
+    expect(tools.map(({ name }) => name)).not.toContain('team_hire_worker');
+  });
+
+  it.each([
+    ['missing', null],
+    ['unknown', [...WORKER_TEAM_MCP_TOOL_NAMES, 'team_unknown_tool']],
+    ['duplicate', [...WORKER_TEAM_MCP_TOOL_NAMES, 'team_list_models']],
+  ] as const)('fails closed for a %s allowed tool inventory', async (_label, allowedTools) => {
+    const harness = await startHarness({ allowedTools });
+    harness.send({ jsonrpc: '2.0', id: 32, method: 'tools/list' });
+    const reply = await harness.nextMessage();
+    expect(reply['result']).toEqual({ tools: [] });
+  });
+
   it('deduplicates a static capability when the same tool comes from the managed catalog', async () => {
     const harness = await startHarness({
       managedTools: [
@@ -358,13 +383,14 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     ]);
   });
 
-  it('lists only Project memory for a non-Team Project turn', async () => {
+  it('treats the exact allowed list as authoritative over broad capability booleans', async () => {
     const harness = await startHarness({
+      allowedTools: ['project_memory_remember'],
       capabilities: {
         projectMemory: true,
-        skillDrafts: false,
-        skillImports: false,
-        teamTools: false,
+        skillDrafts: true,
+        skillImports: true,
+        teamTools: true,
       },
     });
     harness.send({ jsonrpc: '2.0', id: 11, method: 'tools/list' });

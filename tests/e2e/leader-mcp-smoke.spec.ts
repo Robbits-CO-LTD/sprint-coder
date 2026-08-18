@@ -18,6 +18,21 @@ const DETERMINISTIC_ROLES = JSON.stringify(['調査', '実装', 'レビュー'])
 const DETERMINISTIC_TEMPLATE = /が依頼「.*」を完了しました。/;
 
 async function selectClaudeRuntime(page: Page): Promise<void> {
+  const unifiedPicker = page.getByTestId('model-picker-v2-trigger');
+  if ((await unifiedPicker.count()) > 0) {
+    await expect(unifiedPicker).toBeVisible({ timeout: 60_000 });
+    await unifiedPicker.click();
+    const search = page.getByTestId('model-picker-v2-search');
+    await expect(search).toBeVisible();
+    await search.fill('sonnet');
+    await expect(async () => {
+      const sonnet = page.getByTestId('model-picker-v2-option-sonnet');
+      await expect(sonnet).toBeVisible({ timeout: 2_000 });
+      await sonnet.click({ timeout: 2_000 });
+    }).toPass({ timeout: 60_000 });
+    await expect(unifiedPicker).toContainText(/Sonnet 5/i);
+    return;
+  }
   await expect(async () => {
     await page.getByTestId('runtime-selector').click();
     await expect(page.getByRole('menuitemradio', { name: /Claude Code/ })).toBeVisible({
@@ -85,7 +100,10 @@ test.describe('leader MCP smoke (real CLI)', () => {
     expect(JSON.stringify(roles)).not.toBe(DETERMINISTIC_ROLES);
     expect(roles.length).toBeGreaterThanOrEqual(1);
     expect(roles.length).toBeLessThanOrEqual(3);
-    for (const text of reportTexts) expect(text).not.toMatch(DETERMINISTIC_TEMPLATE);
+    for (const text of reportTexts) {
+      expect(text).not.toMatch(DETERMINISTIC_TEMPLATE);
+      expect(text).not.toContain('読み取り専用プロファイルを逸脱');
+    }
 
     // 3) The leader synthesizes a final chat answer after the reports.
     await expect(page.locator('.msg-assistant .bubble').last()).toContainText(/2|１＋１|1\+1/, {
