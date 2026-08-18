@@ -1,10 +1,18 @@
 use serde::Serialize;
-use std::fs;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::fs;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::process::Command;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PROTOCOL_VERSION: u32 = 1;
+
+#[cfg(target_os = "windows")]
+mod windows_backend;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,11 +264,16 @@ fn macos_probe_command(
 
 #[cfg(target_os = "windows")]
 fn probe() -> ProbeResult {
+    let token_available = windows_backend::restricted_token_probe();
     ProbeResult {
         protocol_version: PROTOCOL_VERSION,
         available: false,
         backend: "windows-restricted-token",
-        reason: Some("restricted_token_backend_not_installed"),
+        reason: Some(if token_available {
+            "workspace_acl_and_network_probe_pending"
+        } else {
+            "restricted_token_probe_failed"
+        }),
     }
 }
 
