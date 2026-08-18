@@ -763,13 +763,18 @@ describe('Provider workspace read tools', () => {
     };
     const revisions = new FileRevisionRegistry();
     const applied: unknown[] = [];
+    let readAuthorizationFacts: ReturnType<typeof approvalFactsForTool> | undefined;
     const tools = new ProviderWorkspaceTools({
       workspaceFor: () => workspace,
       rootIdentityFor: () => undefined,
       policyEpochFor: () => 1,
-      authorizer: ({ input }) => {
-        if (workspaceToolAuthorizationGuards(input, 'write').length > 0)
+      authorizer: (request) => {
+        const { input } = request;
+        if (request.entry.providerName === 'apply_patch') {
           expect(workspaceToolAuthorizationGuards(input, 'write')).toHaveLength(2);
+          expect(workspaceToolAuthorizationGuards(input, 'read')).toHaveLength(2);
+          readAuthorizationFacts = approvalFactsForTool(request, 'workspace.read');
+        }
         return { decision: 'allow', reason: 'test', beforeExecute: () => true };
       },
       workspaceEdit: {
@@ -815,5 +820,9 @@ describe('Provider workspace read tools', () => {
       }),
     ).resolves.toMatchObject({ state: 'committed', operations: 2 });
     expect(applied).toHaveLength(1);
+    expect(readAuthorizationFacts).toMatchObject({
+      resource: { kind: 'workspace-path' },
+      operation: 'read',
+    });
   });
 });

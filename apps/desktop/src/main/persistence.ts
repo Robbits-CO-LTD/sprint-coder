@@ -14179,7 +14179,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent {
     return this.db.transaction(() => {
       const turn = this.getTurn(taskId, turnId);
-      if (turn.state !== 'synthesizing') throw new Error('Turn is not streaming');
+      // Official Providers may stream a short preamble before returning a managed tool call.
+      // Keep that text durable while the Turn remains approval-eligible in `executing`; the caller
+      // advances to `synthesizing` only after the final tool-free Provider round.
+      if (turn.state !== 'executing' && turn.state !== 'synthesizing')
+        throw new Error('Turn is not streaming');
       const addedBytes = Buffer.byteLength(delta, 'utf8');
       const persistedBytes =
         turn.assistant_message_id === null

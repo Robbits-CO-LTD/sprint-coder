@@ -5374,10 +5374,7 @@ export class IpcRouter {
             }
             if (providerEvent.type === 'output_delta') {
               roundOutput.push(providerEvent.text);
-              if (!synthesizing) {
-                synthesizing = true;
-                this.publish(this.persistence.changeStage(taskId, started.turnId, 'synthesizing'));
-              }
+              synthesizing = true;
               this.publish(
                 this.persistence.appendDelta(taskId, started.turnId, messageId, providerEvent.text),
               );
@@ -5490,6 +5487,7 @@ export class IpcRouter {
       }
       if (!finished)
         throw new Error(`Provider Leader exceeded ${MAX_PROVIDER_LEADER_ROUNDS} provider rounds`);
+      await this.beginProviderSynthesis(taskId, started.turnId);
       await this.completeProviderTeamTurn(
         taskId,
         started.turnId,
@@ -5540,6 +5538,13 @@ export class IpcRouter {
         this.providerAbortByTurn.delete(started.turnId);
       this.providerExecutionIdByTurn.delete(started.turnId);
     }
+  }
+
+  private async beginProviderSynthesis(taskId: string, turnId: string): Promise<void> {
+    await this.mailbox.run(taskId, () => {
+      if (this.turnRuntimes.get(turnId) !== 'provider') return;
+      this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing'));
+    });
   }
 
   private async completeProviderTeamTurn(

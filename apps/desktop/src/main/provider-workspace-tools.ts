@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { EffectiveWorkspaceSet, ProviderTool } from '@sprint-coder/contracts';
 import {
   ToolRegistry,
@@ -385,6 +385,7 @@ type PreparedWorkspaceInput = Readonly<{
   guard: PathGuard;
   guards?: readonly PathGuard[];
   readGuard?: PathGuard;
+  readGuards?: readonly PathGuard[];
   disclosure?: Omit<ProviderDisclosureAssessment, 'redactedContent'> & { providerId: string };
   raw?: unknown;
   workspace: EffectiveWorkspaceSet;
@@ -1077,6 +1078,26 @@ export class ManagedCodingHarness {
         }),
       ),
     );
+    const readPaths = [
+      ...new Set(
+        request.operations.map((operation) =>
+          operation.kind === 'add' || operation.kind === 'mkdir'
+            ? dirname(operation.path)
+            : operation.path,
+        ),
+      ),
+    ];
+    const readGuards = await Promise.all(
+      readPaths.map((targetPath) =>
+        createPathGuard({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+          targetPath,
+          operation: 'read',
+        }),
+      ),
+    );
     const first = guards[0];
     if (first === undefined) throw new Error('Workspace batch mutation has no target');
     const mutationBindingValue = this.deps.mutationBindingFor?.(
@@ -1095,6 +1116,7 @@ export class ManagedCodingHarness {
       workspace,
       ...(mutationBinding === undefined ? {} : { mutationBinding }),
       guards: Object.freeze(guards),
+      readGuards: Object.freeze(readGuards),
       raw: Object.freeze({ ...input, rootId: root.rootId }),
     });
     issuedPreparedInputs.add(prepared);
@@ -1160,6 +1182,7 @@ export function workspaceToolAuthorizationGuard(
     return undefined;
   const prepared = input as PreparedWorkspaceInput;
   if (operation === 'read' && prepared.readGuard !== undefined) return prepared.readGuard;
+  if (operation === 'read' && prepared.readGuards !== undefined) return prepared.readGuards[0];
   return prepared.guard.operation === operation || operation === undefined
     ? prepared.guard
     : undefined;
@@ -1174,6 +1197,7 @@ export function workspaceToolAuthorizationGuards(
   const guards = [
     ...(prepared.guards ?? [prepared.guard]),
     ...(prepared.readGuard === undefined ? [] : [prepared.readGuard]),
+    ...(prepared.readGuards ?? []),
   ];
   return guards.filter((guard) => operation === undefined || guard.operation === operation);
 }

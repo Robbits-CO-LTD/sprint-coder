@@ -911,6 +911,26 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps a Provider preamble approval-eligible until final synthesis', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'update a file');
+      const messageId = randomUUID();
+      for (const stage of ['understanding', 'planning', 'executing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+
+      expect(() =>
+        persistence.appendDelta(task.id, turn.turnId, messageId, '内容を確認します。'),
+      ).not.toThrow();
+      const requested = persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, { callId: 'provider-tool-after-preamble' }),
+      );
+      expect(requested.approval.state).toBe('pending');
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+
+      persistence.close();
+    });
+
     it('atomically rejects a delta that would exceed the persisted turn byte quota', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();

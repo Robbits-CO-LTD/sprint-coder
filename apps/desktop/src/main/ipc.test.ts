@@ -907,6 +907,27 @@ describe('Provider Team completion and model errors', () => {
     expect(finishAndAdvance).toHaveBeenLastCalledWith('task-191', 'turn-191', 'failed');
   });
 
+  it('enters Provider synthesis only at the final tool-free boundary', async () => {
+    const changeStage = vi.fn(() => ({ type: 'stage.changed' }));
+    const publish = vi.fn();
+    const fakeRouter = {
+      persistence: { changeStage },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      turnRuntimes: new Map([['turn-provider', 'provider']]),
+      publish,
+    };
+    const beginProviderSynthesis = Reflect.get(IpcRouter.prototype, 'beginProviderSynthesis') as (
+      this: typeof fakeRouter,
+      taskId: string,
+      turnId: string,
+    ) => Promise<void>;
+
+    await beginProviderSynthesis.call(fakeRouter, 'task-provider', 'turn-provider');
+
+    expect(changeStage).toHaveBeenCalledWith('task-provider', 'turn-provider', 'synthesizing');
+    expect(publish).toHaveBeenCalledWith({ type: 'stage.changed' });
+  });
+
   it('settles CLI canonical completion through its real terminal adapter', async () => {
     const finishAndAdvance = vi.fn();
     const handleRuntimeFailure = vi.fn();
