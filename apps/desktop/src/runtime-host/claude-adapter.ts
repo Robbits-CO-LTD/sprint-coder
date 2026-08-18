@@ -282,7 +282,12 @@ export class ClaudeRuntimeAdapter {
       teamMcpArgs = {
         configPath,
         guidance: teamMcp.guidance,
-        toolNames: [...teamMcp.toolNames, ...(teamMcp.managedTools ?? []).map(({ name }) => name)],
+        toolNames: [
+          ...new Set([
+            ...teamMcp.toolNames,
+            ...(teamMcp.managedTools ?? []).map(({ name }) => name),
+          ]),
+        ],
       };
     }
     // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp

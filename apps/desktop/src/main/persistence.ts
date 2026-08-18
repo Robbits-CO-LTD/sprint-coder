@@ -12926,6 +12926,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // Retained rather than discarded: the count is the only evidence a user has that a Turn they
       // left running was reaped by a crash, and the SurfaceFooter reports it (issue #9).
       this.startupInterruptedTurns = this.interruptActiveTurns();
+      this.quarantineBackgroundAfterRestart();
       this.recoverInterruptedTeamExecutions(now);
       return quarantines;
     })();
@@ -14883,6 +14884,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
       for (const turn of turns)
         this.completeTurnAndFinishGoal(turn.task_id, turn.id, 'interrupted');
       return turns.length;
+    })();
+  }
+
+  private quarantineBackgroundAfterRestart(): void {
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE background_activities SET state = 'canceled', finished_at = ?
+           WHERE state IN ('registered', 'running')`,
+        )
+        .run(now);
+      this.db
+        .prepare(
+          `UPDATE background_completions
+           SET state = 'quarantined', target_turn_id = NULL, attached_at = NULL
+           WHERE state IN ('persisted', 'attached')`,
+        )
+        .run();
     })();
   }
 

@@ -339,7 +339,6 @@ import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
   LEADER_MCP_SYSTEM_PROMPT,
-  LEADER_PROVIDER_TOOLS,
   MANAGER_PROVIDER_TOOLS,
   MANAGER_MCP_SYSTEM_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
@@ -386,7 +385,6 @@ import {
 } from '../runtime-host/team-mcp-tool-contract';
 import {
   PROJECT_MEMORY_MCP_GUIDANCE,
-  PROJECT_MEMORY_PROVIDER_TOOL,
   appendProjectMemoryCandidate,
   parseProjectMemoryCandidate,
 } from './project-memory-guidance';
@@ -1085,6 +1083,42 @@ export class IpcRouter {
         coordinator: this.teamCoordinator,
         listModelCandidates: (query) => this.listTeamModelCandidates(query),
       },
+      auxiliary: {
+        createSkillDraft: async (input, context) => {
+          const draft = await this.skillSettings
+            .createDraft(skillDraftCreateInputSchema.parse(input))
+            .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+          this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
+          return draft;
+        },
+        queueProjectMemory: (input, context) => this.queueProjectMemoryCandidate(input, context),
+        installSkillImport: async (input) =>
+          this.skillSettings
+            .installPrepared(
+              skillDraftCreateInputSchema.parse(
+                typeof input === 'object' && input !== null
+                  ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'source'))
+                  : input,
+              ),
+            )
+            .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+        readSkillImport: async (input) => {
+          const parsed = z
+            .object({
+              cli: z.enum(['claude', 'codex']),
+              skillId: z
+                .string()
+                .min(1)
+                .max(128)
+                .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+            })
+            .strict()
+            .parse(input);
+          return this.skillSettings
+            .readImportSource(parsed)
+            .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        },
+      },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
     this.mockRuntime = new MockRuntimeAdapter(
@@ -1121,6 +1155,7 @@ export class IpcRouter {
             source: 'stream',
           },
         ),
+      this.managedCodingHarness,
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -3880,6 +3915,12 @@ export class IpcRouter {
         policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
       },
       kind,
+      {
+        projectMemory: memoryTurn,
+        skillDrafts: skillCreatorTurn,
+        skillImports: importSkillTurn,
+        ...(importSkillTurn ? { skillImportUserText: started.text } : {}),
+      },
     );
     if (kind === 'claude' && toolCatalogSnapshot.entries.length > 0) {
       const managedTools = providerToolsFromSnapshot(toolCatalogSnapshot);
@@ -4330,12 +4371,14 @@ export class IpcRouter {
         },
         kind,
       );
-    const teamNames = new Set(canDelegate ? TEAM_CORE_MCP_TOOL_NAMES : WORKER_TEAM_MCP_TOOL_NAMES);
-    const readable = new Set(['list_workspace', 'read_file', 'search_workspace']);
+    // Role-bound Team communication stays on the authenticated MCP adapter. The common coding
+    // snapshot has no requester-agent field, so exposing team_* here would execute with Leader
+    // authority instead of the Worker's capability ceiling.
+    void canDelegate;
+    const readable = new Set(['list_workspace', 'read_file', 'search_workspace', 'view_image']);
     const writable = new Set(['create_file', 'create_directory', 'apply_patch']);
     const allowed = new Set([
       'update_plan',
-      ...teamNames,
       ...(workspace.roots.length === 0 ? [] : readable),
       ...(writeScope === 'read-only' ? [] : writable),
     ]);
@@ -5111,26 +5154,20 @@ export class IpcRouter {
   ): Promise<void> {
     const taskId = started.event.taskId;
     const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
+    const skillCreatorTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
+    );
+    const importSkillTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
+    );
     const controller = new AbortController();
     this.providerAbortByTurn.set(started.turnId, controller);
     let synthesizing = false;
     const messageId = randomUUID();
-    let reportCursorValue = this.teamCoordinator.latestTeamMessageSeq(taskId);
-    let modelCatalogQueried = false;
     let runtime: ProviderRuntime | undefined;
     let modelLease: ProviderModelLease | undefined;
-    const reportCursor = {
-      read: () => reportCursorValue,
-      advance: (seq: number) => {
-        reportCursorValue = Math.max(reportCursorValue, seq);
-      },
-    };
-    const modelCatalogAudit = {
-      wasQueried: () => modelCatalogQueried,
-      markQueried: () => {
-        modelCatalogQueried = true;
-      },
-    };
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     const streamBudget = new ProviderStreamBudget();
     try {
@@ -5177,15 +5214,24 @@ export class IpcRouter {
         started.workspaceSet.roots.length,
         selectedModel?.toolCalling.value,
       );
-      workspaceToolSnapshot = workspaceToolsEligible
+      const managedToolsEligible =
+        workspaceToolsEligible || teamTurn || memoryTurn || skillCreatorTurn || importSkillTurn;
+      workspaceToolSnapshot = managedToolsEligible
         ? this.managedCodingHarness.startTurn(
             {
               taskId,
               turnId: started.turnId,
-              workspaceId: started.workspaceSet.digest,
+              workspaceId:
+                started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
               policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
             },
             connection.providerId,
+            {
+              projectMemory: memoryTurn,
+              skillDrafts: skillCreatorTurn,
+              skillImports: importSkillTurn,
+              ...(importSkillTurn ? { skillImportUserText: started.text } : {}),
+            },
           )
         : undefined;
       if (!teamTurn)
@@ -5194,7 +5240,6 @@ export class IpcRouter {
           content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
         });
       let roundTools = assertUniqueProviderTools([
-        ...(memoryTurn ? [PROJECT_MEMORY_PROVIDER_TOOL] : []),
         ...(workspaceToolSnapshot === undefined
           ? []
           : providerToolsFromSnapshot(workspaceToolSnapshot)),
@@ -5261,14 +5306,10 @@ export class IpcRouter {
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
           if (providerEvent.type === 'tool_call') {
-            const knownTeamTool =
-              teamTurn && LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name);
-            const knownMemoryTool =
-              memoryTurn && providerEvent.name === PROJECT_MEMORY_PROVIDER_TOOL.name;
             const knownWorkspaceTool = workspaceToolSnapshot?.entries.some(
               (tool) => tool.providerName === providerEvent.name,
             );
-            if (!knownTeamTool && !knownMemoryTool && !knownWorkspaceTool)
+            if (!knownWorkspaceTool)
               throw new Error(`Provider Leader requested unknown tool: ${providerEvent.name}`);
             if (seenProviderToolCallIds.has(providerEvent.callId))
               throw new Error(`Provider Leader repeated tool call ID: ${providerEvent.callId}`);
@@ -5384,47 +5425,23 @@ export class IpcRouter {
           const workspaceTool = workspaceToolSnapshot?.entries.some(
             ({ providerName }) => providerName === toolCall.name,
           );
+          if (!workspaceTool) throw new Error('Provider tool escaped the managed catalog');
           let content: string;
-          if (workspaceTool) {
-            try {
-              const result = await this.dispatchManagedRuntimeTool(
-                taskId,
-                started.turnId,
-                {
-                  callId: toolCall.callId,
-                  toolName: toolCall.name,
-                  arguments: toolCall.input,
-                },
-                controller.signal,
-              );
-              content = redactSecrets(JSON.stringify({ ok: true, result }));
-            } catch (error) {
-              if (controller.signal.aborted) throw error;
-              content = providerWorkspaceToolFailure(error);
-            }
-          } else {
-            const result =
-              toolCall.name === PROJECT_MEMORY_PROVIDER_TOOL.name
-                ? await this.queueProjectMemoryCandidate(toolCall.input, {
-                    taskId,
-                    turnId: started.turnId,
-                  })
-                : await executeTeamTool(
-                    this.teamCoordinator,
-                    taskId,
-                    toolCall.name,
-                    toolCall.input,
-                    {
-                      contextOwner: { type: 'turn', id: started.turnId },
-                      longPoll:
-                        toolCall.name === 'team_wait_reports' ||
-                        toolCall.name === 'team_wait_events',
-                      waitReportsCursor: reportCursor,
-                      listModelCandidates: (query) => this.listTeamModelCandidates(query),
-                      modelCatalogAudit,
-                    },
-                  );
-            content = redactSecrets(JSON.stringify(result ?? null));
+          try {
+            const result = await this.dispatchManagedRuntimeTool(
+              taskId,
+              started.turnId,
+              {
+                callId: toolCall.callId,
+                toolName: toolCall.name,
+                arguments: toolCall.input,
+              },
+              controller.signal,
+            );
+            content = redactSecrets(JSON.stringify({ ok: true, result }));
+          } catch (error) {
+            if (controller.signal.aborted) throw error;
+            content = providerWorkspaceToolFailure(error);
           }
           streamBudget.consumeToolResult(content);
           messages.push({

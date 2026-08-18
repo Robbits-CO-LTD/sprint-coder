@@ -55,7 +55,7 @@ type ActiveTurn = {
   startFailed: boolean;
   teamMcpEnabled: boolean;
   teamRuntimeProcessBound: boolean;
-  toolControllers: Set<AbortController>;
+  toolControllers: Map<string, AbortController>;
 };
 export type RuntimeStopReceipt = Readonly<{
   turnId: string;
@@ -313,7 +313,7 @@ export class RuntimeHostClient {
       startFailed: false,
       teamMcpEnabled: teamMcp !== undefined,
       teamRuntimeProcessBound: false,
-      toolControllers: new Set(),
+      toolControllers: new Map(),
     });
     startAcceptanceDeadline.start();
     const startPayload = {
@@ -437,7 +437,7 @@ export class RuntimeHostClient {
         stoppedAt: new Date().toISOString(),
       });
     active.startAcceptanceDeadline.stop();
-    for (const controller of active.toolControllers) controller.abort();
+    for (const controller of active.toolControllers.values()) controller.abort();
     this.post({
       ...this.base(taskId, turnId, active.operationId, active.lastSeq + 1),
       type: 'cancel',
@@ -506,7 +506,7 @@ export class RuntimeHostClient {
     this.expectedProbeOperationId = null;
     for (const active of this.active.values()) {
       active.startAcceptanceDeadline.stop();
-      for (const controller of active.toolControllers) controller.abort();
+      for (const controller of active.toolControllers.values()) controller.abort();
     }
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
@@ -718,7 +718,8 @@ export class RuntimeHostClient {
         return;
       }
       const controller = new AbortController();
-      active.toolControllers.add(controller);
+      if (active.toolControllers.has(raw.request.callId)) return;
+      active.toolControllers.set(raw.request.callId, controller);
       void this.onToolRequest(raw.taskId, raw.turnId, raw.request, controller.signal)
         .then((output) => {
           if (this.active.get(raw.turnId) !== active) return;
@@ -743,7 +744,11 @@ export class RuntimeHostClient {
             },
           });
         })
-        .finally(() => active.toolControllers.delete(controller));
+        .finally(() => active.toolControllers.delete(raw.request.callId));
+    } else if (raw.type === 'tool_cancel') {
+      active.toolControllers
+        .get(raw.callId)
+        ?.abort(new Error('Runtime canceled managed tool call'));
     } else if (raw.type === 'event') {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
     } else if (raw.type === 'started') {
@@ -794,7 +799,7 @@ export class RuntimeHostClient {
       this.finishCancel(raw.turnId, raw.forced);
     } else if (raw.type === 'error') {
       active.startAcceptanceDeadline.stop();
-      for (const controller of active.toolControllers) controller.abort();
+      for (const controller of active.toolControllers.values()) controller.abort();
       this.active.delete(raw.turnId);
       if (!active.startFailed)
         this.onFailure(
@@ -858,7 +863,7 @@ export class RuntimeHostClient {
     const failures = [...this.active.entries()];
     for (const active of this.active.values()) {
       active.startAcceptanceDeadline.stop();
-      for (const controller of active.toolControllers) controller.abort();
+      for (const controller of active.toolControllers.values()) controller.abort();
     }
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
@@ -953,7 +958,7 @@ export class RuntimeHostClient {
     const failures = [...this.active.entries()];
     for (const active of this.active.values()) {
       active.startAcceptanceDeadline.stop();
-      for (const controller of active.toolControllers) controller.abort();
+      for (const controller of active.toolControllers.values()) controller.abort();
     }
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {

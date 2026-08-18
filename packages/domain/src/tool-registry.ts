@@ -117,6 +117,11 @@ export type ToolExecutionControl = Readonly<{
   authorizationDecision?: string;
 }>;
 
+export type ToolResourceClaim = Readonly<{
+  key: string;
+  mode: 'read' | 'write';
+}>;
+
 export type ToolImplementation = Readonly<{
   toolId: ToolId;
   implementationKind: ToolImplementationKind;
@@ -126,6 +131,7 @@ export type ToolImplementation = Readonly<{
     control: Readonly<{ callId: string }>,
   ) => Promise<unknown> | unknown;
   authorizationDenied?: (input: unknown, context: ToolExecutionContext) => Promise<void> | void;
+  resourceClaims?: (input: unknown, context: ToolExecutionContext) => readonly ToolResourceClaim[];
   execute: (
     input: unknown,
     context: ToolExecutionContext,

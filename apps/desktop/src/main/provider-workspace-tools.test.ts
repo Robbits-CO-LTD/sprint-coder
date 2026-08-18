@@ -69,6 +69,72 @@ async function harness() {
 }
 
 describe('Provider workspace read tools', () => {
+  it('exposes Project Memory and Skill import only through the selected managed catalog', async () => {
+    const calls: string[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      auxiliary: {
+        queueProjectMemory: async () => {
+          calls.push('memory');
+          return { queued: true };
+        },
+        createSkillDraft: async () => ({ draft: true }),
+        readSkillImport: async () => {
+          calls.push('read');
+          return { digest: 'a'.repeat(64), files: [] };
+        },
+        installSkillImport: async () => {
+          calls.push('install');
+          return { installed: true };
+        },
+      },
+    });
+    const context = {
+      taskId: 'task-aux',
+      turnId: 'turn-aux',
+      workspaceId: null,
+      policyEpoch: 1,
+    } as const;
+    const snapshot = tools.startTurn(context, 'codex', {
+      projectMemory: true,
+      skillImports: true,
+      skillImportUserText: 'IMPORT_SKILL claude writer',
+    });
+    expect(snapshot.entries.map(({ providerName }) => providerName)).toEqual(
+      expect.arrayContaining([
+        'project_memory_remember',
+        'skill_import_read',
+        'skill_import_install',
+      ]),
+    );
+    expect(snapshot.entries.map(({ providerName }) => providerName)).not.toContain(
+      'skill_draft_create',
+    );
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'memory',
+      providerName: 'project_memory_remember',
+      input: { content: 'durable fact' },
+    });
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'import-read',
+      providerName: 'skill_import_read',
+      input: { cli: 'claude', skillId: 'writer' },
+    });
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'import-install',
+      providerName: 'skill_import_install',
+      input: { source: { cli: 'claude', skillId: 'writer', digest: 'a'.repeat(64) }, files: [] },
+    });
+    expect(calls).toEqual(['memory', 'read', 'install']);
+    await tools.dispose();
+  });
+
   it('omits command tools until the OS sandbox probe succeeds', async () => {
     const { tools, context } = await harness();
     const commandTools = new ProviderWorkspaceTools({
@@ -104,6 +170,7 @@ describe('Provider workspace read tools', () => {
       'request_user_input',
       'search_workspace',
       'update_plan',
+      'view_image',
     ]);
     expect(Object.isFrozen(snapshot)).toBe(true);
     tools.finishTurn(context.taskId, context.turnId);
@@ -270,7 +337,60 @@ describe('Provider workspace read tools', () => {
     ).resolves.toMatchObject({
       path: 'hello.txt',
       content: 'こんにちは\n',
-      revision: { version: 1 },
+      encoding: 'utf-8',
+      byteLength: Buffer.byteLength('こんにちは\n'),
+      truncated: false,
+      range: { unit: 'byte', start: 0, end: Buffer.byteLength('こんにちは\n') },
+      revision: { version: 1, tokenId: expect.any(String) },
+    });
+  });
+
+  it('returns explicit line and UTF-8 byte ranges with truncation metadata', async () => {
+    const { root, tools, context } = await harness();
+    await writeFile(join(root, 'ranges.txt'), 'one\ntwo\n三\n');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'line-range',
+        providerName: 'read_file',
+        input: { path: 'ranges.txt', lineStart: 2, lineEnd: 3 },
+      }),
+    ).resolves.toMatchObject({
+      content: 'two\n三',
+      truncated: true,
+      range: { unit: 'line', start: 2, end: 3 },
+      encoding: 'utf-8',
+    });
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'byte-range',
+        providerName: 'read_file',
+        input: { path: 'ranges.txt', byteStart: 0, byteEnd: 3 },
+      }),
+    ).resolves.toMatchObject({
+      content: 'one',
+      truncated: true,
+      range: { unit: 'byte', start: 0, end: 3 },
+    });
+  });
+
+  it('views a bounded image by magic bytes through a guarded handle', async () => {
+    const { root, tools, context } = await harness();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    await writeFile(join(root, 'pixel.bin'), png);
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'view-image',
+        providerName: 'view_image',
+        input: { path: 'pixel.bin' },
+      }),
+    ).resolves.toMatchObject({
+      path: 'pixel.bin',
+      mimeType: 'image/png',
+      byteLength: png.length,
+      dataUrl: `data:image/png;base64,${png.toString('base64')}`,
     });
   });
 
@@ -296,6 +416,25 @@ describe('Provider workspace read tools', () => {
       path: 'src',
       matches: [{ path: 'src/one.ts', line: 2, text: 'needle here' }],
       withheldFiles: 1,
+    });
+  });
+
+  it('searches file paths without reading file contents', async () => {
+    const { root, tools, context } = await harness();
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'managed-harness.ts'), Buffer.from([0xff, 0xfe]));
+    await writeFile(join(root, 'src', 'other.ts'), 'text');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'file-search',
+        providerName: 'search_workspace',
+        input: { mode: 'files', query: 'harness', glob: '**/*.ts' },
+      }),
+    ).resolves.toMatchObject({
+      files: ['src/managed-harness.ts'],
+      matches: [],
+      withheldFiles: 0,
     });
   });
 

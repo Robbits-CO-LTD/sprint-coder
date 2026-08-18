@@ -66,7 +66,7 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
-  it('inherits Windows command-discovery and user paths case-insensitively but excludes secrets', () => {
+  it('uses a fixed Windows command PATH while inheriting user paths case-insensitively', () => {
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
       UserProfile: 'C:\\Users\\example',
@@ -80,7 +80,7 @@ describe('CommandRunner', () => {
     });
 
     expect(environment).toMatchObject({
-      PATH: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
+      PATH: 'C:\\Windows\\System32;C:\\Windows',
       HOME: 'C:\\Users\\example',
       USERPROFILE: 'C:\\Users\\example',
       APPDATA: 'C:\\Users\\example\\AppData\\Roaming',
@@ -191,6 +191,19 @@ describe('CommandRunner', () => {
         cwd: '..',
       }),
     ).rejects.toThrow();
+  });
+
+  it('resolves one bare executable on the sanitized PATH before sealing its identity', async () => {
+    const root = await workspace();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: process.platform === 'win32' ? 'cmd' : 'sh',
+      argv: [],
+    });
+    expect(spec.absoluteExecutable).toMatch(
+      process.platform === 'win32' ? /\\cmd\.exe$/iu : /\/sh$/u,
+    );
+    expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(

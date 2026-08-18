@@ -49,6 +49,7 @@ async function startHarness(
       skillImports: boolean;
       teamTools: boolean;
     };
+    managedTools?: readonly { name: string; description: string; inputSchema: object }[];
   } = {},
 ): Promise<Harness> {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-mcp-test-'));
@@ -93,6 +94,7 @@ async function startHarness(
               ok: true,
               result: {
                 authenticated: true,
+                managedTools: options.managedTools ?? [],
                 capabilities: options.capabilities ?? {
                   projectMemory: true,
                   skillDrafts: true,
@@ -274,6 +276,24 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     });
   });
 
+  it('deduplicates a static capability when the same tool comes from the managed catalog', async () => {
+    const harness = await startHarness({
+      managedTools: [
+        {
+          name: 'project_memory_remember',
+          description: 'managed memory',
+          inputSchema: { type: 'object' },
+        },
+      ],
+    });
+    harness.send({ jsonrpc: '2.0', id: 31, method: 'tools/list' });
+    const reply = await harness.nextMessage();
+    const tools = (reply['result'] as { tools: { name: string; description: string }[] }).tools;
+    expect(tools.filter(({ name }) => name === 'project_memory_remember')).toEqual([
+      expect.objectContaining({ description: 'managed memory' }),
+    ]);
+  });
+
   it('forwards tools/call to the bridge socket with the configured token and relays a success result', async () => {
     const harness = await startHarness();
     harness.send({
@@ -302,6 +322,40 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     const content = (reply['result'] as { content: { type: string; text: string }[] }).content;
     expect(JSON.parse(content[0]?.text ?? '{}')).toMatchObject({ workerId: 'w1' });
     expect(reply['result']).not.toHaveProperty('isError', true);
+  });
+
+  it('relays a managed Workspace image as MCP image content', async () => {
+    const harness = await startHarness();
+    harness.send({
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'tools/call',
+      params: { name: 'view_image', arguments: { path: 'diagram.png' } },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 1);
+    harness.bridgeRespond({
+      ok: true,
+      result: {
+        path: 'diagram.png',
+        mimeType: 'image/png',
+        byteLength: 3,
+        sha256: 'a'.repeat(64),
+        dataUrl: 'data:image/png;base64,QUFB',
+      },
+    });
+    const reply = await harness.nextMessage();
+    expect((reply['result'] as { content: unknown[] }).content).toEqual([
+      {
+        type: 'text',
+        text: JSON.stringify({
+          path: 'diagram.png',
+          mimeType: 'image/png',
+          byteLength: 3,
+          sha256: 'a'.repeat(64),
+        }),
+      },
+      { type: 'image', mimeType: 'image/png', data: 'QUFB' },
+    ]);
   });
 
   it('lists only Project memory for a non-Team Project turn', async () => {

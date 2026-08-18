@@ -82,18 +82,21 @@ fn execute_workspace_command(root: &Path, executable: &str, argv: &[String]) -> 
     else {
         return ExitCode::from(69);
     };
-    let error = Command::new(bwrap)
-        .args([
-            "--unshare-all",
-            "--new-session",
-            "--die-with-parent",
-            "--ro-bind",
-            "/",
-            "/",
-            "--bind",
-        ])
-        .arg(&root)
-        .arg(&root)
+    let mut command = Command::new(bwrap);
+    command.args([
+        "--unshare-all",
+        "--new-session",
+        "--die-with-parent",
+        "--ro-bind",
+        "/",
+        "/",
+        "--bind",
+    ]);
+    command.arg(&root).arg(&root);
+    for protected in linux_protected_paths() {
+        command.arg("--tmpfs").arg(protected);
+    }
+    let error = command
         .args(["--proc", "/proc", "--dev", "/dev", "--chdir"])
         .arg(&root)
         .arg("--")
@@ -102,6 +105,25 @@ fn execute_workspace_command(root: &Path, executable: &str, argv: &[String]) -> 
         .exec();
     eprintln!("sandbox exec failed: {error}");
     ExitCode::from(70)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_protected_paths() -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    [
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".azure",
+        ".kube",
+        ".config/gcloud",
+    ]
+    .into_iter()
+    .map(|path| home.join(path))
+    .filter(|path| path.is_dir())
+    .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -161,20 +183,34 @@ fn probe_filesystem_boundary(executable: &Path, backend: SandboxBackend) -> bool
     ));
     let inside = base.join("inside");
     let outside = base.join("outside");
-    if fs::create_dir_all(&inside).is_err() || fs::create_dir_all(&outside).is_err() {
+    let protected = base.join("protected");
+    if fs::create_dir_all(&inside).is_err()
+        || fs::create_dir_all(&outside).is_err()
+        || fs::create_dir_all(&protected).is_err()
+        || fs::write(protected.join("secret.txt"), b"secret").is_err()
+    {
         return false;
     }
     let inside = fs::canonicalize(&inside).unwrap_or(inside);
     let outside = fs::canonicalize(&outside).unwrap_or(outside);
+    let protected = fs::canonicalize(&protected).unwrap_or(protected);
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
     let status = match backend {
-        SandboxBackend::Macos => {
-            macos_probe_command(executable, &inside, &inside_marker, &outside_marker)
-        }
-        SandboxBackend::Linux => {
-            linux_probe_command(executable, &inside, &inside_marker, &outside_marker)
-        }
+        SandboxBackend::Macos => macos_probe_command(
+            executable,
+            &inside,
+            &inside_marker,
+            &outside_marker,
+            &protected,
+        ),
+        SandboxBackend::Linux => linux_probe_command(
+            executable,
+            &inside,
+            &inside_marker,
+            &outside_marker,
+            &protected,
+        ),
     };
     let result = status.is_ok() && inside_marker.is_file() && !outside_marker.exists();
     let _ = fs::remove_dir_all(&base);
@@ -187,10 +223,11 @@ fn macos_probe_command(
     inside: &Path,
     inside_marker: &Path,
     outside_marker: &Path,
+    protected: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
     let policy = format!(
-        "(version 1) (allow default) (deny file-write* (require-not (subpath {:?}))) (deny network*)",
-        inside
+        "(version 1) (allow default) (deny file-write* (require-not (subpath {:?}))) (deny file-read* (subpath {:?})) (deny network*)",
+        inside, protected
     );
     Command::new(executable)
         .args([
@@ -199,11 +236,12 @@ fn macos_probe_command(
             "--",
             "/bin/sh",
             "-c",
-            "printf ok > \"$1\"; printf denied > \"$2\"",
+            "printf ok > \"$1\"; printf denied > \"$2\"; ! cat \"$3/secret.txt\" >/dev/null 2>&1",
             "probe",
         ])
         .arg(inside_marker)
         .arg(outside_marker)
+        .arg(protected)
         .status()
 }
 
@@ -213,6 +251,7 @@ fn linux_probe_command(
     inside: &Path,
     inside_marker: &Path,
     outside_marker: &Path,
+    protected: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
     Command::new(executable)
         .args([
@@ -226,6 +265,8 @@ fn linux_probe_command(
         ])
         .arg(inside)
         .arg(inside)
+        .arg("--tmpfs")
+        .arg(protected)
         .args([
             "--proc",
             "/proc",
@@ -234,11 +275,12 @@ fn linux_probe_command(
             "--",
             "/bin/sh",
             "-c",
-            "printf ok > \"$1\"; printf denied > \"$2\"",
+            "printf ok > \"$1\"; printf denied > \"$2\"; test ! -e \"$3/secret.txt\"",
             "probe",
         ])
         .arg(inside_marker)
         .arg(outside_marker)
+        .arg(protected)
         .status()
 }
 
@@ -248,6 +290,7 @@ fn linux_probe_command(
     _inside: &Path,
     _inside_marker: &Path,
     _outside_marker: &Path,
+    _protected: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
     unreachable!()
 }
@@ -258,6 +301,7 @@ fn macos_probe_command(
     _inside: &Path,
     _inside_marker: &Path,
     _outside_marker: &Path,
+    _protected: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
     unreachable!()
 }

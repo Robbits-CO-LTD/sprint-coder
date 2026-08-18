@@ -489,15 +489,18 @@ function connectSocket() {
             response.result && Array.isArray(response.result.managedTools)
               ? response.result.managedTools
               : [];
-          availableTools = managedTools.concat(TOOLS.filter((tool) =>
-            tool.name === 'project_memory_remember'
-              ? capabilities && capabilities.projectMemory === true
-              : tool.name === 'skill_draft_create'
-                ? capabilities && capabilities.skillDrafts === true
-                : tool.name === 'skill_import_read' || tool.name === 'skill_import_install'
-                  ? capabilities && capabilities.skillImports === true
-                : capabilities && capabilities.teamTools === true,
-          ));
+          const managedNames = new Set(managedTools.map((tool) => tool && tool.name));
+          availableTools = managedTools.concat(
+            TOOLS.filter((tool) => !managedNames.has(tool.name)).filter((tool) =>
+              tool.name === 'project_memory_remember'
+                ? capabilities && capabilities.projectMemory === true
+                : tool.name === 'skill_draft_create'
+                  ? capabilities && capabilities.skillDrafts === true
+                  : tool.name === 'skill_import_read' || tool.name === 'skill_import_install'
+                    ? capabilities && capabilities.skillImports === true
+                    : capabilities && capabilities.teamTools === true,
+            ),
+          );
           resolve(s);
         },
         reject,
@@ -549,6 +552,27 @@ process.stdin.on('data', (chunk) => {
 
 function send(message) {
   process.stdout.write(JSON.stringify(message) + '\\n');
+}
+
+function contentForResult(result) {
+  const dataUrl = result && result.dataUrl;
+  const match =
+    typeof dataUrl === 'string' && dataUrl.length <= 8 * 1024 * 1024
+      ? /^data:(image\\/(?:png|jpeg|webp));base64,([a-zA-Z0-9+/=]+)$/.exec(dataUrl)
+      : null;
+  if (!match) return [{ type: 'text', text: JSON.stringify(result) }];
+  return [
+    {
+      type: 'text',
+      text: JSON.stringify({
+        path: result.path,
+        mimeType: result.mimeType,
+        byteLength: result.byteLength,
+        sha256: result.sha256,
+      }),
+    },
+    { type: 'image', mimeType: match[1], data: match[2] },
+  ];
 }
 
 function handleLine(line) {
@@ -603,7 +627,7 @@ function handleLine(line) {
           send({
             jsonrpc: '2.0',
             id: message.id,
-            result: { content: [{ type: 'text', text: JSON.stringify(response.result) }] },
+            result: { content: contentForResult(response.result) },
           });
         } else {
           send({

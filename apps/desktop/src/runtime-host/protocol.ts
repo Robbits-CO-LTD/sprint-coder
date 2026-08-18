@@ -358,6 +358,7 @@ export type RuntimeToMainEnvelope =
   | (EnvelopeBase & { type: 'stopped'; forced: boolean })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
   | (EnvelopeBase & { type: 'tool_request'; request: RuntimeToolRequest })
+  | (EnvelopeBase & { type: 'tool_cancel'; callId: string })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
   | (EnvelopeBase & {
       type: 'error';
@@ -853,6 +854,7 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
   if (value.type === 'event') return 'event' in value && isRuntimeCanonicalEvent(value.event);
   if (value.type === 'tool_request')
     return 'request' in value && isRuntimeToolRequest(value.request);
+  if (value.type === 'tool_cancel') return 'callId' in value && isBoundedCallId(value.callId);
   if (value.type === 'stopped') return 'forced' in value && typeof value.forced === 'boolean';
   if (value.type === 'exit')
     return (

@@ -363,6 +363,7 @@ export function registerCommandRunnerTool(
   foregroundToBackgroundMs = 10_000,
 ): void {
   const commandIds = new WeakMap<object, string>();
+  const resourceKeys = new WeakMap<object, string>();
   const backgroundSpecs = new WeakSet<object>();
   const verificationSpecs = new WeakSet<object>();
   broker.registerImplementation({
@@ -413,10 +414,14 @@ export function registerCommandRunnerTool(
         createdAt: new Date().toISOString(),
       });
       commandIds.set(spec, persisted.id);
+      resourceKeys.set(spec, `workspace:${workspace.digest}`);
       if (request.background === true) backgroundSpecs.add(spec);
       if (request.verification === true) verificationSpecs.add(spec);
       return spec;
     },
+    resourceClaims: (input) => [
+      { key: resourceKeys.get(input as object) ?? 'workspace:unbound', mode: 'write' },
+    ],
     authorizationDenied: (input) => {
       if (command === undefined) return;
       const commandId = commandIds.get(input as object);

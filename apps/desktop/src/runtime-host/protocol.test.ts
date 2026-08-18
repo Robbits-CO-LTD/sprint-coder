@@ -276,6 +276,7 @@ describe('Runtime Host protocol', () => {
         output: { content: 'ok' },
       }),
     ).toBe(true);
+    expect(isRuntimeToMainEnvelope({ ...base, type: 'tool_cancel', callId: 'call-1' })).toBe(true);
   });
 
   it('rejects old protocol versions', () => {

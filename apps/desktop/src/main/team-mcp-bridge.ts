@@ -290,9 +290,9 @@ function modelSelectionKey(selection: {
   return `${selection.connectionId ?? ''}\0${selection.requestedProvider ?? ''}\0${selection.requestedModel ?? ''}`;
 }
 
-type SkillImportSource = { cli: 'claude' | 'codex'; skillId: string };
+export type SkillImportSource = { cli: 'claude' | 'codex'; skillId: string };
 
-function parseSkillImportReadInput(input: unknown): SkillImportSource {
+export function parseSkillImportReadInput(input: unknown): SkillImportSource {
   if (typeof input !== 'object' || input === null) throw new Error('invalid skill import source');
   const value = input as { cli?: unknown; skillId?: unknown };
   if (
@@ -304,7 +304,7 @@ function parseSkillImportReadInput(input: unknown): SkillImportSource {
   return { cli: value.cli, skillId: value.skillId };
 }
 
-function parseSkillImportSource(input: unknown): SkillImportSource & { digest: string } {
+export function parseSkillImportSource(input: unknown): SkillImportSource & { digest: string } {
   if (typeof input !== 'object' || input === null) throw new Error('invalid skill import source');
   const source = (input as { source?: unknown }).source;
   const parsed = parseSkillImportReadInput(source);
@@ -314,7 +314,10 @@ function parseSkillImportSource(input: unknown): SkillImportSource & { digest: s
   return { ...parsed, digest };
 }
 
-function userConfirmedSkillImport(text: string | undefined, source: SkillImportSource): boolean {
+export function userConfirmedSkillImport(
+  text: string | undefined,
+  source: SkillImportSource,
+): boolean {
   if (text === undefined) return false;
   const confirmation = parseSkillImportConfirmation(text);
   return (
@@ -324,7 +327,7 @@ function userConfirmedSkillImport(text: string | undefined, source: SkillImportS
   );
 }
 
-function readDigest(result: unknown): string {
+export function readDigest(result: unknown): string {
   if (typeof result !== 'object' || result === null) throw new Error('invalid skill import result');
   const digest = (result as { digest?: unknown }).digest;
   if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest))

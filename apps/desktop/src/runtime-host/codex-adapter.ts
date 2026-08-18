@@ -506,7 +506,7 @@ export class CodexRuntimeAdapter {
                 if (params['namespace'] !== null || threadId !== activeThreadId)
                   throw new Error('Unexpected dynamic tool identity');
                 const managed = managedDynamicTools.some(({ name }) => name === tool);
-                let response: ReturnType<typeof codexDynamicToolResponseFromMcp>;
+                let response: CodexDynamicToolResponse;
                 if (managed) {
                   if (invokeManagedTool === undefined || toolCatalogSnapshot === undefined)
                     throw new Error('Managed tool bridge is unavailable');
@@ -516,15 +516,7 @@ export class CodexRuntimeAdapter {
                     arguments: params['arguments'],
                     catalogDigest: toolCatalogSnapshot.digest,
                   });
-                  response = {
-                    success: result.success,
-                    contentItems: [
-                      {
-                        type: 'inputText',
-                        text: JSON.stringify(result.output ?? null).slice(0, 1024 * 1024),
-                      },
-                    ],
-                  };
+                  response = codexDynamicToolResponseFromManaged(result);
                 } else {
                   if (teamMcp === undefined || !teamMcp.toolNames.includes(tool as TeamMcpToolName))
                     throw new Error('Unexpected dynamic Team tool');
@@ -1093,10 +1085,51 @@ export function buildCodexTeamDynamicTools(
   });
 }
 
-export function codexDynamicToolResponseFromMcp(response: unknown): {
+type CodexDynamicToolResponse = {
   success: boolean;
-  contentItems: { type: 'inputText'; text: string }[];
-} {
+  contentItems: ({ type: 'inputText'; text: string } | { type: 'inputImage'; imageUrl: string })[];
+};
+
+export function codexDynamicToolResponseFromManaged(response: unknown): CodexDynamicToolResponse {
+  const result = asRecord(response);
+  const output =
+    typeof result['output'] === 'object' && result['output'] !== null
+      ? (result['output'] as Record<string, unknown>)
+      : {};
+  const dataUrl = output['dataUrl'];
+  if (
+    result['success'] === true &&
+    typeof dataUrl === 'string' &&
+    dataUrl.length <= 8 * 1024 * 1024 &&
+    /^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/=]+$/u.test(dataUrl)
+  )
+    return {
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: JSON.stringify({
+            path: output['path'],
+            mimeType: output['mimeType'],
+            byteLength: output['byteLength'],
+            sha256: output['sha256'],
+          }).slice(0, 16_384),
+        },
+        { type: 'inputImage', imageUrl: dataUrl },
+      ],
+    };
+  return {
+    success: result['success'] === true,
+    contentItems: [
+      {
+        type: 'inputText',
+        text: JSON.stringify(result['output'] ?? null).slice(0, 1024 * 1024),
+      },
+    ],
+  };
+}
+
+export function codexDynamicToolResponseFromMcp(response: unknown): CodexDynamicToolResponse {
   const result = asRecord(response);
   if (result['isError'] === true)
     return {

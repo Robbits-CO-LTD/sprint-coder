@@ -1,5 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { EffectiveWorkspaceSet, ProviderTool } from '@sprint-coder/contracts';
 import {
@@ -10,7 +11,12 @@ import {
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
 import { FileRevisionRegistry } from './file-revision';
-import { createPathGuard, revalidatePathGuard, type PathGuard } from './path-guard';
+import {
+  createPathGuard,
+  openGuardedExistingFile,
+  revalidatePathGuard,
+  type PathGuard,
+} from './path-guard';
 import {
   assessProviderDisclosure,
   type ProviderDisclosureAssessment,
@@ -48,12 +54,20 @@ import {
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
+import {
+  parseSkillImportReadInput,
+  parseSkillImportSource,
+  readDigest,
+  userConfirmedSkillImport,
+} from './team-mcp-bridge';
 
 const MAX_LIST_ENTRIES = 500;
-const MAX_READ_BYTES = 1024 * 1024;
+const MAX_READ_BYTES = 4 * 1024 * 1024;
+const MAX_READ_OUTPUT_BYTES = 1024 * 1024;
 const MAX_SEARCH_FILES = 2_000;
 const MAX_SEARCH_RESULTS = 200;
 const MAX_SEARCH_DEPTH = 32;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export const PROVIDER_WORKSPACE_GUIDANCE = `You are operating as a coding agent through a Provider API.
 Use the provided workspace tools when the user asks you to inspect or change files. Never claim that
@@ -113,6 +127,10 @@ export const READ_FILE_TOOL = createToolDefinition({
     properties: {
       rootId: { type: 'string' },
       path: { type: 'string' },
+      lineStart: { type: 'integer', minimum: 1 },
+      lineEnd: { type: 'integer', minimum: 1 },
+      byteStart: { type: 'integer', minimum: 0 },
+      byteEnd: { type: 'integer', minimum: 1 },
     },
     required: ['path'],
     additionalProperties: false,
@@ -144,6 +162,7 @@ export const SEARCH_WORKSPACE_TOOL = createToolDefinition({
       rootId: { type: 'string' },
       path: { type: 'string' },
       query: { type: 'string' },
+      mode: { type: 'string', enum: ['text', 'files'] },
       glob: { type: 'string' },
       maxResults: { type: 'integer', minimum: 1, maximum: MAX_SEARCH_RESULTS },
     },
@@ -161,6 +180,96 @@ export const SEARCH_WORKSPACE_TOOL = createToolDefinition({
   providerCompatibility: ['*'],
 });
 
+export const VIEW_IMAGE_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'provider-workspace',
+    name: 'view-image',
+    version: '1',
+  }),
+  providerName: 'view_image',
+  kind: 'fileRead',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: { rootId: { type: 'string' }, path: { type: 'string' } },
+    required: ['path'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object' },
+  sideEffect: 'read',
+  risk: 'low',
+  requiredCapabilities: ['workspace.read'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'any' },
+  providerCompatibility: ['*'],
+  description: 'Read one bounded PNG, JPEG, or WebP image from the selected Workspace.',
+  maxOutputBytes: 8 * 1024 * 1024,
+});
+
+function auxiliaryTool(
+  name: string,
+  providerName: string,
+  description: string,
+  inputSchema: Parameters<typeof createToolDefinition>[0]['inputSchema'],
+) {
+  return createToolDefinition({
+    toolId: createToolId({ provider: 'builtin', namespace: 'auxiliary', name, version: '1' }),
+    providerName,
+    kind: 'agentControl',
+    schemaVersion: 1,
+    inputSchema,
+    outputSchema: { type: 'object' },
+    sideEffect: 'control',
+    risk: 'medium',
+    requiredCapabilities: ['external.open'],
+    executionTarget: 'main',
+    implementationKind: 'built-in',
+    priority: 10,
+    workspaceBinding: { kind: 'none' },
+    providerCompatibility: ['*'],
+    description,
+    parallelism: 'serial',
+  });
+}
+
+export const PROJECT_MEMORY_TOOL = auxiliaryTool(
+  'project-memory-remember',
+  'project_memory_remember',
+  'Queue one durable Project Memory candidate after this Turn succeeds.',
+  {
+    type: 'object',
+    properties: { content: { type: 'string' } },
+    required: ['content'],
+    additionalProperties: false,
+  },
+);
+export const SKILL_DRAFT_TOOL = auxiliaryTool(
+  'skill-draft-create',
+  'skill_draft_create',
+  'Create one validated Skill Draft for user review without installing it.',
+  { type: 'object' },
+);
+export const SKILL_IMPORT_READ_TOOL = auxiliaryTool(
+  'skill-import-read',
+  'skill_import_read',
+  'Read one user-confirmed Claude or Codex Skill through the managed import boundary.',
+  {
+    type: 'object',
+    properties: { cli: { type: 'string', enum: ['claude', 'codex'] }, skillId: { type: 'string' } },
+    required: ['cli', 'skillId'],
+    additionalProperties: false,
+  },
+);
+export const SKILL_IMPORT_INSTALL_TOOL = auxiliaryTool(
+  'skill-import-install',
+  'skill_import_install',
+  'Install a prepared Skill only when it matches the preceding managed import read.',
+  { type: 'object' },
+);
+
 const descriptions = new Map([
   [
     LIST_WORKSPACE_TOOL.providerName,
@@ -173,6 +282,10 @@ const descriptions = new Map([
   [
     SEARCH_WORKSPACE_TOOL.providerName,
     'Search UTF-8 text files inside the selected workspace without following symlinks. Results are bounded and sensitive matches are withheld.',
+  ],
+  [
+    VIEW_IMAGE_TOOL.providerName,
+    'View one PNG, JPEG, or WebP image inside the selected workspace. Symlinks and oversized files are refused.',
   ],
   [
     WORKSPACE_CREATE_FILE_TOOL.providerName,
@@ -210,6 +323,10 @@ const descriptions = new Map([
     REQUEST_USER_INPUT_TOOL.providerName,
     'Pause the Turn and ask one question with two or three explicit choices.',
   ],
+  [PROJECT_MEMORY_TOOL.providerName, PROJECT_MEMORY_TOOL.description],
+  [SKILL_DRAFT_TOOL.providerName, SKILL_DRAFT_TOOL.description],
+  [SKILL_IMPORT_READ_TOOL.providerName, SKILL_IMPORT_READ_TOOL.description],
+  [SKILL_IMPORT_INSTALL_TOOL.providerName, SKILL_IMPORT_INSTALL_TOOL.description],
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -230,14 +347,33 @@ type WorkspaceToolDeps = Readonly<{
     coordinator: TeamCoordinator;
     listModelCandidates?: ExecuteTeamToolOptions['listModelCandidates'];
   };
+  auxiliary?: Readonly<{
+    queueProjectMemory(input: unknown, context: ToolExecutionContext): Promise<unknown>;
+    createSkillDraft(input: unknown, context: ToolExecutionContext): Promise<unknown>;
+    readSkillImport(input: unknown, context: ToolExecutionContext): Promise<unknown>;
+    installSkillImport(input: unknown, context: ToolExecutionContext): Promise<unknown>;
+  }>;
   recordPlan?: (
     context: ToolExecutionContext,
     items: readonly { step: string; status: 'pending' | 'in_progress' | 'completed' }[],
   ) => { revision: number };
 }>;
 
+export type ManagedHarnessTurnOptions = Readonly<{
+  projectMemory?: boolean;
+  skillDrafts?: boolean;
+  skillImports?: boolean;
+  skillImportUserText?: string;
+}>;
+
+type AuxiliaryTurnState = {
+  options: ManagedHarnessTurnOptions;
+  skillImportReadStarted: boolean;
+  authorizedSkillImport?: { cli: 'claude' | 'codex'; skillId: string; digest: string };
+};
+
 type PreparedWorkspaceInput = Readonly<{
-  kind: 'list' | 'read' | 'search' | 'create' | 'create-directory' | 'patch';
+  kind: 'list' | 'read' | 'search' | 'view-image' | 'create' | 'create-directory' | 'patch';
   rootId: string;
   rootLabel: string;
   relativePath: string;
@@ -256,6 +392,7 @@ export class ManagedCodingHarness {
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
   private readonly providersByTurn = new Map<string, string>();
+  private readonly auxiliaryByTurn = new Map<string, AuxiliaryTurnState>();
   private readonly commandSessions?: ManagedCommandSessions;
   private commandSandboxAvailable = false;
 
@@ -265,6 +402,7 @@ export class ManagedCodingHarness {
     registry.register(LIST_WORKSPACE_TOOL);
     registry.register(READ_FILE_TOOL);
     registry.register(SEARCH_WORKSPACE_TOOL);
+    registry.register(VIEW_IMAGE_TOOL);
     registry.register(UPDATE_PLAN_TOOL);
     registry.register(REQUEST_USER_INPUT_TOOL);
     if (deps.command !== undefined)
@@ -282,6 +420,14 @@ export class ManagedCodingHarness {
         registry.register(WORKSPACE_CREATE_DIRECTORY_TOOL);
     }
     if (deps.team !== undefined) for (const definition of TEAM_TOOLS) registry.register(definition);
+    if (deps.auxiliary !== undefined)
+      for (const definition of [
+        PROJECT_MEMORY_TOOL,
+        SKILL_DRAFT_TOOL,
+        SKILL_IMPORT_READ_TOOL,
+        SKILL_IMPORT_INSTALL_TOOL,
+      ])
+        registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
@@ -301,10 +447,12 @@ export class ManagedCodingHarness {
           ? {}
           : { listModelCandidates: deps.team.listModelCandidates }),
       });
+    if (deps.auxiliary !== undefined) this.registerAuxiliaryTools(deps.auxiliary);
     this.broker.registerImplementation({
       toolId: LIST_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
       prepare: (input, context, control) => this.prepare('list', input, context, control.callId),
+      resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'read'),
       execute: async (input) => listWorkspace(input as PreparedWorkspaceInput),
     });
     registerManagedControlTools(this.broker, deps.recordPlan);
@@ -312,13 +460,23 @@ export class ManagedCodingHarness {
       toolId: READ_FILE_TOOL.toolId,
       implementationKind: 'built-in',
       prepare: (input, context, control) => this.prepare('read', input, context, control.callId),
+      resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'read'),
       execute: async (input, context) => this.read(input as PreparedWorkspaceInput, context),
     });
     this.broker.registerImplementation({
       toolId: SEARCH_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
       prepare: (input, context, control) => this.prepareSearch(input, context, control.callId),
+      resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'read'),
       execute: async (input, context) => this.search(input as PreparedWorkspaceInput, context),
+    });
+    this.broker.registerImplementation({
+      toolId: VIEW_IMAGE_TOOL.toolId,
+      implementationKind: 'built-in',
+      prepare: (input, context, control) =>
+        this.prepare('view-image', input, context, control.callId),
+      resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'read'),
+      execute: async (input) => viewWorkspaceImage(input as PreparedWorkspaceInput),
     });
     if (deps.workspaceEdit !== undefined) {
       this.broker.registerImplementation({
@@ -326,6 +484,7 @@ export class ManagedCodingHarness {
         implementationKind: 'built-in',
         prepare: (input, context, control) =>
           this.prepareMutation('create', input, context, control.callId),
+        resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'write'),
         execute: (input, context) => {
           const prepared = input as PreparedWorkspaceInput;
           return executeWorkspaceCreateFile(
@@ -347,6 +506,7 @@ export class ManagedCodingHarness {
         implementationKind: 'built-in',
         prepare: (input, context, control) =>
           this.prepareMutation('patch', input, context, control.callId),
+        resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'write'),
         execute: (input, context) => {
           const prepared = input as PreparedWorkspaceInput;
           if (
@@ -389,6 +549,7 @@ export class ManagedCodingHarness {
           implementationKind: 'built-in',
           prepare: (input, context, control) =>
             this.prepareMutation('create-directory', input, context, control.callId),
+          resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'write'),
           execute: async (input, context) => {
             const prepared = input as PreparedWorkspaceInput;
             assertPreparedWorkspaceInput(prepared, 'create-directory');
@@ -410,11 +571,16 @@ export class ManagedCodingHarness {
     }
   }
 
-  startTurn(context: ToolExecutionContext, providerId: string): ToolCatalogSnapshot {
+  startTurn(
+    context: ToolExecutionContext,
+    providerId: string,
+    options: ManagedHarnessTurnOptions = {},
+  ): ToolCatalogSnapshot {
     const snapshot = this.broker.startTurn(context, providerId, [
       LIST_WORKSPACE_TOOL.toolId,
       READ_FILE_TOOL.toolId,
       SEARCH_WORKSPACE_TOOL.toolId,
+      VIEW_IMAGE_TOOL.toolId,
       UPDATE_PLAN_TOOL.toolId,
       REQUEST_USER_INPUT_TOOL.toolId,
       ...(this.commandSandboxAvailable && this.deps.command !== undefined
@@ -435,8 +601,22 @@ export class ManagedCodingHarness {
               : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),
           ]),
       ...(this.deps.team === undefined ? [] : TEAM_TOOLS.map(({ toolId }) => toolId)),
+      ...(this.deps.auxiliary === undefined || options.projectMemory !== true
+        ? []
+        : [PROJECT_MEMORY_TOOL.toolId]),
+      ...(this.deps.auxiliary === undefined || options.skillDrafts !== true
+        ? []
+        : [SKILL_DRAFT_TOOL.toolId]),
+      ...(this.deps.auxiliary === undefined || options.skillImports !== true
+        ? []
+        : [SKILL_IMPORT_READ_TOOL.toolId, SKILL_IMPORT_INSTALL_TOOL.toolId]),
     ]);
-    this.providersByTurn.set(JSON.stringify([context.taskId, context.turnId]), providerId);
+    const key = JSON.stringify([context.taskId, context.turnId]);
+    this.providersByTurn.set(key, providerId);
+    this.auxiliaryByTurn.set(key, {
+      options: Object.freeze({ ...options }),
+      skillImportReadStarted: false,
+    });
     return snapshot;
   }
 
@@ -452,10 +632,74 @@ export class ManagedCodingHarness {
     this.broker.finishTurn(taskId, turnId);
     this.revisions.finishTurn({ taskId, turnId });
     this.providersByTurn.delete(JSON.stringify([taskId, turnId]));
+    this.auxiliaryByTurn.delete(JSON.stringify([taskId, turnId]));
   }
 
   async dispose(): Promise<void> {
     await this.broker.dispose();
+  }
+
+  private registerAuxiliaryTools(auxiliary: NonNullable<WorkspaceToolDeps['auxiliary']>): void {
+    const stateFor = (context: ToolExecutionContext): AuxiliaryTurnState => {
+      const state = this.auxiliaryByTurn.get(JSON.stringify([context.taskId, context.turnId]));
+      if (state === undefined) throw new Error('Auxiliary tool Turn state is unavailable');
+      return state;
+    };
+    this.broker.registerImplementation({
+      toolId: PROJECT_MEMORY_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: (input, context) => {
+        if (stateFor(context).options.projectMemory !== true)
+          throw new Error('project_memory_remember is not available for this Turn');
+        return auxiliary.queueProjectMemory(input, context);
+      },
+    });
+    this.broker.registerImplementation({
+      toolId: SKILL_DRAFT_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: (input, context) => {
+        if (stateFor(context).options.skillDrafts !== true)
+          throw new Error('skill_draft_create is not available for this Turn');
+        return auxiliary.createSkillDraft(input, context);
+      },
+    });
+    this.broker.registerImplementation({
+      toolId: SKILL_IMPORT_READ_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: async (input, context) => {
+        const state = stateFor(context);
+        const source = parseSkillImportReadInput(input);
+        if (
+          state.options.skillImports !== true ||
+          !userConfirmedSkillImport(state.options.skillImportUserText, source)
+        )
+          throw new Error('skill_import_read requires the user to name the CLI and Skill together');
+        if (state.skillImportReadStarted)
+          throw new Error('skill_import_read authorization was already consumed for this Turn');
+        state.skillImportReadStarted = true;
+        const result = await auxiliary.readSkillImport(input, context);
+        state.authorizedSkillImport = { ...source, digest: readDigest(result) };
+        return result;
+      },
+    });
+    this.broker.registerImplementation({
+      toolId: SKILL_IMPORT_INSTALL_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: (input, context) => {
+        const state = stateFor(context);
+        const source = parseSkillImportSource(input);
+        if (
+          state.options.skillImports !== true ||
+          state.authorizedSkillImport === undefined ||
+          source.cli !== state.authorizedSkillImport.cli ||
+          source.skillId !== state.authorizedSkillImport.skillId ||
+          source.digest !== state.authorizedSkillImport.digest
+        )
+          throw new Error('skill_import_install source was not authorized by skill_import_read');
+        delete state.authorizedSkillImport;
+        return auxiliary.installSkillImport(input, context);
+      },
+    });
   }
 
   private async prepare(
@@ -464,7 +708,7 @@ export class ManagedCodingHarness {
     context: ToolExecutionContext,
     callId: string,
   ): Promise<PreparedWorkspaceInput> {
-    const request = parseWorkspaceInput(input, kind === 'read');
+    const request = parseWorkspaceInput(input, kind === 'read' || kind === 'view-image');
     const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
     if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const workspace = sealWorkspace(workspaceValue);
@@ -509,6 +753,7 @@ export class ManagedCodingHarness {
       relativePath: request.path,
       guard,
       workspace,
+      ...(kind === 'read' ? { raw: Object.freeze({ ...request }) } : {}),
       ...(disclosure === undefined ? {} : { disclosure }),
     });
     issuedPreparedInputs.add(prepared);
@@ -524,6 +769,11 @@ export class ManagedCodingHarness {
     path: string;
     content: string;
     revision: { version: 1; tokenId: string };
+    encoding: 'utf-8';
+    byteLength: number;
+    lineCount: number;
+    truncated: boolean;
+    range: { unit: 'line' | 'byte'; start: number; end: number };
   }> {
     assertPreparedWorkspaceInput(input, 'read');
     const read = await this.revisions.readGuarded({
@@ -548,12 +798,21 @@ export class ManagedCodingHarness {
         'DISCLOSURE_CHANGED',
         'File content changed after disclosure authorization',
       );
+    const ranged = selectReadRange(
+      assessed.redactedContent,
+      input.raw as ReturnType<typeof parseWorkspaceInput>,
+    );
     return {
       rootId: input.rootId,
       rootLabel: input.rootLabel,
       path: input.relativePath,
-      content: assessed.redactedContent,
+      content: ranged.content,
       revision: read.reference,
+      encoding: 'utf-8',
+      byteLength: Buffer.byteLength(assessed.redactedContent, 'utf8'),
+      lineCount: assessed.redactedContent.split(/\r?\n/u).length,
+      truncated: ranged.truncated,
+      range: ranged.range,
     };
   }
 
@@ -607,6 +866,7 @@ export class ManagedCodingHarness {
     rootLabel: string;
     path: string;
     matches: readonly { path: string; line: number; text: string }[];
+    files: readonly string[];
     searchedFiles: number;
     withheldFiles: number;
     truncated: boolean;
@@ -620,6 +880,21 @@ export class ManagedCodingHarness {
       request.glob,
     );
     const matches: { path: string; line: number; text: string }[] = [];
+    if (request.mode === 'files') {
+      const files = candidates.files
+        .filter((path) => path.includes(request.query))
+        .slice(0, request.maxResults);
+      return {
+        rootId: input.rootId,
+        rootLabel: input.rootLabel,
+        path: input.relativePath,
+        matches,
+        files,
+        searchedFiles: candidates.files.length,
+        withheldFiles: 0,
+        truncated: candidates.truncated || files.length >= request.maxResults,
+      };
+    }
     let searchedFiles = 0;
     let withheldFiles = 0;
     for (const relativePath of candidates.files) {
@@ -668,6 +943,7 @@ export class ManagedCodingHarness {
       rootLabel: input.rootLabel,
       path: input.relativePath,
       matches,
+      files: [],
       searchedFiles,
       withheldFiles,
       truncated:
@@ -820,6 +1096,14 @@ function sealWorkspace(workspace: EffectiveWorkspaceSet): EffectiveWorkspaceSet 
   });
 }
 
+function workspaceClaims(
+  input: PreparedWorkspaceInput,
+  mode: 'read' | 'write',
+): readonly { key: string; mode: 'read' | 'write' }[] {
+  assertPreparedWorkspaceInput(input, input.kind);
+  return Object.freeze([Object.freeze({ key: `workspace:${input.workspace.digest}`, mode })]);
+}
+
 export function providerToolsFromSnapshot(snapshot: ToolCatalogSnapshot): readonly ProviderTool[] {
   const names = new Set<string>();
   return Object.freeze(
@@ -907,6 +1191,62 @@ function disclosureFacts(
   return Object.freeze({ ...facts, providerId });
 }
 
+async function viewWorkspaceImage(input: PreparedWorkspaceInput): Promise<{
+  rootId: string;
+  rootLabel: string;
+  path: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  byteLength: number;
+  sha256: string;
+  dataUrl: string;
+}> {
+  assertPreparedWorkspaceInput(input, 'view-image');
+  const handle = await openGuardedExistingFile(input.guard, 'read');
+  try {
+    const stat = await handle.stat();
+    if (stat.size < 1 || stat.size > MAX_IMAGE_BYTES)
+      throw new WorkspaceToolRejection(
+        'IMAGE_SIZE_UNSUPPORTED',
+        `view_image accepts files from 1 to ${MAX_IMAGE_BYTES} bytes`,
+      );
+    const bytes = await handle.readFile();
+    const mimeType = imageMimeType(bytes);
+    if (mimeType === null)
+      throw new WorkspaceToolRejection(
+        'IMAGE_FORMAT_UNSUPPORTED',
+        'view_image accepts PNG, JPEG, or WebP bytes',
+      );
+    return {
+      rootId: input.rootId,
+      rootLabel: input.rootLabel,
+      path: input.relativePath,
+      mimeType,
+      byteLength: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      dataUrl: `data:${mimeType};base64,${bytes.toString('base64')}`,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+function imageMimeType(bytes: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | null {
+  if (
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  )
+    return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    return 'image/jpeg';
+  if (
+    bytes.length >= 12 &&
+    bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    bytes.subarray(8, 12).toString('ascii') === 'WEBP'
+  )
+    return 'image/webp';
+  return null;
+}
+
 async function listWorkspace(input: PreparedWorkspaceInput): Promise<{
   rootId: string;
   rootLabel: string;
@@ -942,10 +1282,76 @@ function directoryEntryKind(entry: Dirent): 'file' | 'directory' | 'symlink' | '
   return 'other';
 }
 
+function selectReadRange(
+  content: string,
+  request: ReturnType<typeof parseWorkspaceInput>,
+): {
+  content: string;
+  truncated: boolean;
+  range: { unit: 'line' | 'byte'; start: number; end: number };
+} {
+  if (request.lineStart !== undefined || request.lineEnd !== undefined) {
+    const lines = content.split('\n');
+    const start = Math.min(request.lineStart ?? 1, Math.max(1, lines.length));
+    const requestedEnd = Math.min(request.lineEnd ?? lines.length, lines.length);
+    const end = Math.max(start - 1, requestedEnd);
+    const selected = end < start ? '' : lines.slice(start - 1, end).join('\n');
+    const bounded = truncateUtf8(selected, MAX_READ_OUTPUT_BYTES);
+    return {
+      content: bounded.content,
+      truncated: bounded.truncated || start !== 1 || end !== lines.length,
+      range: { unit: 'line', start, end },
+    };
+  }
+  const bytes = Buffer.from(content, 'utf8');
+  const start = Math.min(request.byteStart ?? 0, bytes.length);
+  const requestedEnd = Math.min(request.byteEnd ?? bytes.length, bytes.length);
+  let end = Math.max(start, Math.min(requestedEnd, start + MAX_READ_OUTPUT_BYTES));
+  let selected: string;
+  while (true) {
+    try {
+      selected = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(start, end));
+      break;
+    } catch {
+      if (end <= start) throw new Error('read_file byte range does not align to UTF-8');
+      end -= 1;
+    }
+  }
+  return {
+    content: selected,
+    truncated: start !== 0 || end !== bytes.length,
+    range: { unit: 'byte', start, end },
+  };
+}
+
+function truncateUtf8(content: string, maxBytes: number): { content: string; truncated: boolean } {
+  const bytes = Buffer.from(content, 'utf8');
+  if (bytes.length <= maxBytes) return { content, truncated: false };
+  let end = maxBytes;
+  while (end > 0) {
+    try {
+      return {
+        content: new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end)),
+        truncated: true,
+      };
+    } catch {
+      end -= 1;
+    }
+  }
+  return { content: '', truncated: true };
+}
+
 function parseWorkspaceInput(
   input: unknown,
   requirePath: boolean,
-): { rootId?: string; path: string } {
+): {
+  rootId?: string;
+  path: string;
+  lineStart?: number;
+  lineEnd?: number;
+  byteStart?: number;
+  byteEnd?: number;
+} {
   if (typeof input !== 'object' || input === null || Array.isArray(input))
     throw new Error('Workspace tool input must be an object');
   const record = input as Record<string, unknown>;
@@ -957,9 +1363,41 @@ function parseWorkspaceInput(
   if (requirePath && typeof record['path'] !== 'string') throw new Error('path must be a string');
   if (record['path'] !== undefined && typeof record['path'] !== 'string')
     throw new Error('path must be a string');
+  for (const [key, minimum] of [
+    ['lineStart', 1],
+    ['lineEnd', 1],
+    ['byteStart', 0],
+    ['byteEnd', 1],
+  ] as const) {
+    const value = record[key];
+    if (
+      value !== undefined &&
+      (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum)
+    )
+      throw new Error(`${key} is invalid`);
+  }
+  const hasLine = record['lineStart'] !== undefined || record['lineEnd'] !== undefined;
+  const hasByte = record['byteStart'] !== undefined || record['byteEnd'] !== undefined;
+  if (hasLine && hasByte) throw new Error('read_file line and byte ranges are mutually exclusive');
+  if (
+    typeof record['lineStart'] === 'number' &&
+    typeof record['lineEnd'] === 'number' &&
+    record['lineEnd'] < record['lineStart']
+  )
+    throw new Error('read_file line range is reversed');
+  if (
+    typeof record['byteStart'] === 'number' &&
+    typeof record['byteEnd'] === 'number' &&
+    record['byteEnd'] < record['byteStart']
+  )
+    throw new Error('read_file byte range is reversed');
   return {
     ...(typeof record['rootId'] === 'string' ? { rootId: record['rootId'] } : {}),
     path: typeof record['path'] === 'string' ? record['path'] : '.',
+    ...(typeof record['lineStart'] === 'number' ? { lineStart: record['lineStart'] } : {}),
+    ...(typeof record['lineEnd'] === 'number' ? { lineEnd: record['lineEnd'] } : {}),
+    ...(typeof record['byteStart'] === 'number' ? { byteStart: record['byteStart'] } : {}),
+    ...(typeof record['byteEnd'] === 'number' ? { byteEnd: record['byteEnd'] } : {}),
   };
 }
 
@@ -967,6 +1405,7 @@ function parseSearchInput(input: unknown): {
   rootId?: string;
   path: string;
   query: string;
+  mode: 'text' | 'files';
   glob?: string;
   maxResults: number;
 } {
@@ -979,6 +1418,8 @@ function parseSearchInput(input: unknown): {
     record['query'].length > 1_000
   )
     throw new Error('search_workspace query must be 1 to 1000 characters');
+  if (record['mode'] !== undefined && record['mode'] !== 'text' && record['mode'] !== 'files')
+    throw new Error('search_workspace mode is invalid');
   if (record['path'] !== undefined && typeof record['path'] !== 'string')
     throw new Error('search_workspace path must be a string');
   if (
@@ -1002,6 +1443,7 @@ function parseSearchInput(input: unknown): {
     ...(typeof record['rootId'] === 'string' ? { rootId: record['rootId'] } : {}),
     path: typeof record['path'] === 'string' ? record['path'] : '.',
     query: record['query'],
+    mode: record['mode'] === 'files' ? 'files' : 'text',
     ...(typeof record['glob'] === 'string' && record['glob'].length > 0
       ? { glob: record['glob'] }
       : {}),

@@ -5780,52 +5780,25 @@ if (runsWithElectronAbi)
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
-      const interruptedTarget = reopened.startTurn(task.id, 'crash before runtime acknowledgement');
+      reopened.initializeMutationRecovery('restart-holder', '2026-07-23T00:01:00.000Z');
       expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
-        state: 'attached',
-        targetTurnId: interruptedTarget.turnId,
-        fragmentId: 'completion-durable',
+        state: 'quarantined',
+        targetTurnId: null,
+      });
+      reopened.startTurn(task.id, 'crash before runtime acknowledgement');
+      expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
+        state: 'quarantined',
+        targetTurnId: null,
       });
       expect(reopened.interruptActiveTurns()).toBe(1);
       expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
-        state: 'persisted',
+        state: 'quarantined',
         targetTurnId: null,
       });
       const target = reopened.startTurn(task.id, 'consume completion');
       const prepared = reopened.prepareContext(task.id, target.turnId);
-      expect(prepared.fragments).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            id: 'completion-durable',
-            source: 'background',
-            trust: 'assistant',
-            content: expect.stringContaining('background result'),
-          }),
-        ]),
-      );
-      expect(prepared.fragments.map((fragment) => fragment.content).join('\n')).not.toContain(
-        'hunter2',
-      );
-      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('attached');
-      const acknowledged = reopened.acknowledgeBackgroundFragments(task.id, target.turnId, [
-        'completion-durable',
-      ]);
-      expect(acknowledged).toEqual([
-        expect.objectContaining({
-          type: 'delivery.acknowledged',
-          completionId: 'completion-durable',
-        }),
-      ]);
-      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('runtimeAcked');
-      const repeated = reopened.prepareContext(task.id, target.turnId);
-      expect(repeated.fragments.some((fragment) => fragment.id === 'completion-durable')).toBe(
-        true,
-      );
-      expect(
-        reopened
-          .listEventsAfter(task.id, 0)
-          .filter((event) => event.type === 'delivery.acknowledged'),
-      ).toHaveLength(1);
+      expect(prepared.fragments.some(({ id }) => id === 'completion-durable')).toBe(false);
+      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('quarantined');
       reopened.close();
     });
 

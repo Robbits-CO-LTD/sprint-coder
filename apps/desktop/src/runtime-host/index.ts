@@ -33,7 +33,10 @@ const activeTurns = new Map<string, { taskId: string; operationId: string }>();
 const pendingToolCalls = new Map<
   string,
   {
+    taskId: string;
     turnId: string;
+    operationId: string;
+    callId: string;
     resolve: (result: { success: boolean; output: unknown }) => void;
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
@@ -462,10 +465,22 @@ function invokeManagedTool(
       const pending = pendingToolCalls.get(key);
       if (pending === undefined) return;
       pendingToolCalls.delete(key);
+      send(pending.taskId, pending.turnId, pending.operationId, {
+        type: 'tool_cancel',
+        callId: pending.callId,
+      });
       reject(new Error('Managed tool call timed out'));
     }, 60 * 60_000);
     timer.unref();
-    pendingToolCalls.set(key, { turnId: data.turnId, resolve, reject, timer });
+    pendingToolCalls.set(key, {
+      taskId: data.taskId,
+      turnId: data.turnId,
+      operationId: data.operationId,
+      callId: request.callId,
+      resolve,
+      reject,
+      timer,
+    });
     send(data.taskId, data.turnId, data.operationId, { type: 'tool_request', request });
   });
 }
@@ -475,6 +490,10 @@ function rejectPendingToolCalls(turnId: string, error: Error): void {
     if (pending.turnId !== turnId) continue;
     clearTimeout(pending.timer);
     pendingToolCalls.delete(key);
+    send(pending.taskId, pending.turnId, pending.operationId, {
+      type: 'tool_cancel',
+      callId: pending.callId,
+    });
     pending.reject(error);
   }
 }
@@ -502,6 +521,7 @@ function send(
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'tool_request' }>, 'type' | 'request'>
+    | Pick<Extract<RuntimeToMainEnvelope, { type: 'tool_cancel' }>, 'type' | 'callId'>
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'images_prepared' }>,
         'type' | 'selectionIdentity' | 'manifestDigest' | 'decodedByteLength'

@@ -5,6 +5,7 @@ import {
   type ToolImplementation,
   type ToolRegistry,
   type ToolCatalogEntry,
+  type ToolResourceClaim,
   toolValueMatchesSchema,
 } from '@sprint-coder/domain';
 
@@ -247,10 +248,15 @@ export class ToolBroker {
           : new Error('Tool dispatch was canceled before execution');
       }
       transition('queued');
-      const release = await bound.gate.acquire(
-        entry.parallelism === 'parallel' ? 'read' : 'write',
-        request.signal,
+      const claims = normalizeResourceClaims(
+        implementation.resourceClaims?.(pinnedInput, bound.context) ?? [
+          {
+            key: `workspace:${bound.context.workspaceId ?? bound.context.taskId}`,
+            mode: entry.parallelism === 'parallel' ? 'read' : 'write',
+          },
+        ],
       );
+      const release = await bound.gate.acquire(claims, request.signal);
       let output: unknown;
       try {
         if (
@@ -292,9 +298,8 @@ export class ToolBroker {
   }
 }
 
-type GateMode = 'read' | 'write';
 type GateWaiter = {
-  mode: GateMode;
+  claims: readonly ToolResourceClaim[];
   resolve: (release: () => void) => void;
   reject: (error: Error) => void;
   signal?: AbortSignal;
@@ -303,7 +308,7 @@ type GateWaiter = {
 
 class ToolResourceGate {
   private readers = 0;
-  private writer = false;
+  private readonly active = new Map<string, { readers: number; writer: boolean }>();
   private readonly queue: GateWaiter[] = [];
 
   constructor(private readonly maxReaders: number) {
@@ -311,11 +316,11 @@ class ToolResourceGate {
       throw new Error('Tool resource gate requires a positive reader bound');
   }
 
-  acquire(mode: GateMode, signal?: AbortSignal): Promise<() => void> {
+  acquire(claims: readonly ToolResourceClaim[], signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) return Promise.reject(abortError(signal));
     return new Promise((resolve, reject) => {
       const waiter: GateWaiter = {
-        mode,
+        claims,
         resolve,
         reject,
         ...(signal === undefined ? {} : { signal }),
@@ -334,31 +339,48 @@ class ToolResourceGate {
   }
 
   private drain(): void {
-    if (this.writer || this.queue.length === 0) return;
-    if (this.readers > 0 && this.queue[0]?.mode === 'write') return;
-    if (this.queue[0]?.mode === 'write') {
-      if (this.readers > 0) return;
-      const waiter = this.queue.shift()!;
+    while (this.queue.length > 0) {
+      const waiter = this.queue[0]!;
+      if (!this.canAcquire(waiter.claims)) return;
+      this.queue.shift();
       this.detach(waiter);
-      this.writer = true;
-      waiter.resolve(this.releaseOnce('write'));
-      return;
-    }
-    while (!this.writer && this.readers < this.maxReaders && this.queue[0]?.mode === 'read') {
-      const waiter = this.queue.shift()!;
-      this.detach(waiter);
-      this.readers += 1;
-      waiter.resolve(this.releaseOnce('read'));
+      this.activate(waiter.claims);
+      waiter.resolve(this.releaseOnce(waiter.claims));
     }
   }
 
-  private releaseOnce(mode: GateMode): () => void {
+  private canAcquire(claims: readonly ToolResourceClaim[]): boolean {
+    if (claims.some(({ mode }) => mode === 'read') && this.readers >= this.maxReaders) return false;
+    return claims.every((claim) => {
+      const state = this.active.get(claim.key);
+      if (state === undefined) return true;
+      return claim.mode === 'read' ? !state.writer : !state.writer && state.readers === 0;
+    });
+  }
+
+  private activate(claims: readonly ToolResourceClaim[]): void {
+    if (claims.some(({ mode }) => mode === 'read')) this.readers += 1;
+    for (const claim of claims) {
+      const state = this.active.get(claim.key) ?? { readers: 0, writer: false };
+      if (claim.mode === 'read') state.readers += 1;
+      else state.writer = true;
+      this.active.set(claim.key, state);
+    }
+  }
+
+  private releaseOnce(claims: readonly ToolResourceClaim[]): () => void {
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      if (mode === 'write') this.writer = false;
-      else this.readers = Math.max(0, this.readers - 1);
+      if (claims.some(({ mode }) => mode === 'read')) this.readers = Math.max(0, this.readers - 1);
+      for (const claim of claims) {
+        const state = this.active.get(claim.key);
+        if (state === undefined) continue;
+        if (claim.mode === 'read') state.readers = Math.max(0, state.readers - 1);
+        else state.writer = false;
+        if (state.readers === 0 && !state.writer) this.active.delete(claim.key);
+      }
       this.drain();
     };
   }
@@ -367,6 +389,29 @@ class ToolResourceGate {
     if (waiter.signal !== undefined && waiter.abort !== undefined)
       waiter.signal.removeEventListener('abort', waiter.abort);
   }
+}
+
+function normalizeResourceClaims(
+  claims: readonly ToolResourceClaim[],
+): readonly ToolResourceClaim[] {
+  if (claims.length < 1 || claims.length > 32) throw new Error('Invalid tool resource claims');
+  const byKey = new Map<string, 'read' | 'write'>();
+  for (const claim of claims) {
+    if (
+      typeof claim.key !== 'string' ||
+      claim.key.length < 1 ||
+      claim.key.length > 4_096 ||
+      (claim.mode !== 'read' && claim.mode !== 'write')
+    )
+      throw new Error('Invalid tool resource claim');
+    const existing = byKey.get(claim.key);
+    byKey.set(claim.key, claim.mode === 'write' || existing === 'write' ? 'write' : 'read');
+  }
+  return Object.freeze(
+    [...byKey]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, mode]) => Object.freeze({ key, mode })),
+  );
 }
 
 class OrderedToolResultGate {

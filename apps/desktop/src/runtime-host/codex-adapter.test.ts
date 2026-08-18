@@ -23,6 +23,7 @@ import {
   mergeCodexDynamicTools,
   validateCodexTeamMcpInventory,
   codexDynamicToolResponseFromMcp,
+  codexDynamicToolResponseFromManaged,
   codexInitializeCapabilities,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
@@ -1058,6 +1059,35 @@ describe('Codex runtime probe', () => {
     expect(codexDynamicToolResponseFromMcp({ content: [], isError: true })).toEqual({
       success: false,
       contentItems: [{ type: 'inputText', text: 'Team tool failed.' }],
+    });
+  });
+
+  it('returns a managed Workspace image as an inline dynamic-tool image', () => {
+    expect(
+      codexDynamicToolResponseFromManaged({
+        success: true,
+        output: {
+          path: 'diagram.png',
+          mimeType: 'image/png',
+          byteLength: 3,
+          sha256: 'a'.repeat(64),
+          dataUrl: 'data:image/png;base64,QUFB',
+        },
+      }),
+    ).toEqual({
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: JSON.stringify({
+            path: 'diagram.png',
+            mimeType: 'image/png',
+            byteLength: 3,
+            sha256: 'a'.repeat(64),
+          }),
+        },
+        { type: 'inputImage', imageUrl: 'data:image/png;base64,QUFB' },
+      ],
     });
   });
 

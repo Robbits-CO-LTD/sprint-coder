@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_pro
 import { readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
 import { StringDecoder } from 'node:string_decoder';
-import { isAbsolute, join, relative } from 'node:path';
+import { delimiter, extname, isAbsolute, join, relative, win32 as windowsPath } from 'node:path';
 import { promisify } from 'node:util';
 import {
   createExecutionSpec,
@@ -120,9 +120,11 @@ export class CommandRunnerError extends Error {
 export async function prepareExecutionSpec(
   input: PrepareExecutionSpecInput,
 ): Promise<ExecutionSpec> {
-  if (!isAbsolute(input.executable))
-    throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be absolute');
-  const executableCanonicalPath = await realpath(input.executable);
+  const controlledEnvironment = buildControlledEnvironment();
+  const executablePath = isAbsolute(input.executable)
+    ? input.executable
+    : await resolveBareExecutable(input.executable, controlledEnvironment);
+  const executableCanonicalPath = await realpath(executablePath);
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
@@ -150,7 +152,7 @@ export async function prepareExecutionSpec(
       canonicalPath: pathGuard.resolvedPath,
       identityDigest: pathGuardIdentityDigest(pathGuard),
     },
-    envDelta: buildControlledEnvironment(),
+    envDelta: controlledEnvironment,
     stdinMode: 'closed',
     shell: 'none',
   });
@@ -159,6 +161,48 @@ export async function prepareExecutionSpec(
     executable: executableIdentity,
   });
   return spec;
+}
+
+async function resolveBareExecutable(
+  executable: string,
+  environment: Readonly<Record<string, string>>,
+): Promise<string> {
+  if (
+    executable.length < 1 ||
+    executable.length > 255 ||
+    executable.includes('/') ||
+    executable.includes('\\') ||
+    !/^[a-zA-Z0-9._+-]+$/u.test(executable)
+  )
+    throw new CommandRunnerError(
+      'EXECUTION_SPEC_INVALID',
+      'Executable must be absolute or one sanitized bare name',
+    );
+  const searchPath = environment['PATH'];
+  if (searchPath === undefined)
+    throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Sanitized executable PATH is empty');
+  const names =
+    process.platform === 'win32' && extname(executable) === ''
+      ? [`${executable}.exe`, `${executable}.com`]
+      : [executable];
+  for (const directory of searchPath.split(delimiter)) {
+    if (!isAbsolute(directory)) continue;
+    for (const name of names) {
+      const candidate = join(directory, name);
+      try {
+        const candidateStats = await stat(candidate);
+        if (!candidateStats.isFile()) continue;
+        if (process.platform !== 'win32' && (candidateStats.mode & 0o111) === 0) continue;
+        return candidate;
+      } catch {
+        // Continue through the sealed, fixed PATH. No shell lookup or cwd fallback is allowed.
+      }
+    }
+  }
+  throw new CommandRunnerError(
+    'EXECUTION_SPEC_INVALID',
+    'Executable was not found on the sanitized PATH',
+  );
 }
 
 async function isTrustedWindowsMultiLinkExecutable(canonicalPath: string): Promise<boolean> {
@@ -1483,7 +1527,8 @@ export function buildControlledEnvironment(
     if (value !== undefined) environment[key] = value;
   }
   if (platform === 'win32') {
-    environment['PATH'] ??= ['C:\\Windows\\System32', 'C:\\Windows'].join(';');
+    const windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
+    environment['PATH'] = [windowsPath.join(windowsRoot, 'System32'), windowsRoot].join(';');
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;

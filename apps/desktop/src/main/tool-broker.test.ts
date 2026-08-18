@@ -587,6 +587,48 @@ describe('Main ToolBroker', () => {
     expect(maximum).toBe(1);
   });
 
+  it('derives independent scheduler keys from prepared tool input', async () => {
+    const { registry, command } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizeAll);
+    let active = 0;
+    let maximum = 0;
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      resourceClaims: (input) => [
+        {
+          key: `workspace:${(input as { argv: string[] }).argv[0]}`,
+          mode: 'write',
+        },
+      ],
+      execute: async () => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return {};
+      },
+    });
+    broker.startTurn(context, 'mock');
+    await Promise.all([
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'independent-one',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['root-a'] },
+      }),
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'independent-two',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['root-b'] },
+      }),
+    ]);
+    expect(maximum).toBe(2);
+  });
+
   it('returns concurrently completed results to the Runtime in call ordinal order', async () => {
     const { registry, echo } = createRegistry();
     let releaseFirst!: () => void;
