@@ -161,6 +161,7 @@ function fakeApi() {
     createProfileConnection: vi.fn(async () => created),
     createOpenAIConnection: vi.fn(async () => created),
     createOpenRouterConnection: vi.fn(async () => created),
+    createOrcaRouterConnection: vi.fn(async () => created),
     createAnthropicConnection: vi.fn(async () => created),
     createGeminiConnection: vi.fn(async () => created),
     createXAIConnection: vi.fn(async () => created),
@@ -239,6 +240,7 @@ describe('connectionKindLabel', () => {
         connection({ providerId: 'openrouter', runtimeKind: 'openai_compatible' }),
       ),
     ).toBe('OpenRouter API');
+    expect(connectionKindLabel(connection({ providerId: 'orcarouter' }))).toBe('OrcaRouter API');
     expect(connectionKindLabel(connection({ providerId: 'mock', runtimeKind: 'mock' }))).toBe(
       'モックProvider',
     );
@@ -302,6 +304,7 @@ describe('createConnection', () => {
       const calls = [
         api.createOpenAIConnection,
         api.createOpenRouterConnection,
+        api.createOrcaRouterConnection,
         api.createAnthropicConnection,
         api.createGeminiConnection,
         api.createXAIConnection,
@@ -486,6 +489,7 @@ describe('a Profile that leaves the listing', () => {
       api.createOpenAIConnection,
       api.createProfileConnection,
       api.createOpenRouterConnection,
+      api.createOrcaRouterConnection,
       api.createAnthropicConnection,
       api.createGeminiConnection,
       api.createXAIConnection,

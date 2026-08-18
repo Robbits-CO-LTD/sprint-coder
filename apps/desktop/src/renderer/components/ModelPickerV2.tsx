@@ -23,6 +23,7 @@ import {
   scrollTopForIndex,
   virtualRange,
 } from '../lib/model-picker-virtualization';
+import { ModelAuthorIcon, modelAuthorBrand, modelAuthorDisplayName } from './ModelAuthorIcon';
 
 /**
  * The multi-provider Model Picker (UI slice U1b), shown in place of the legacy Runtime *and* Model
@@ -113,6 +114,11 @@ export function connectionLabel(model: ProviderModel): string {
   return model.connectionDisplayName ?? model.connectionId;
 }
 
+/** Stable provider/gateway name, distinct from the user-editable connection name. */
+export function providerLabel(model: ProviderModel): string {
+  return model.providerDisplayName ?? model.providerId;
+}
+
 /** A band of adjacent rows that come from the same provider, as the list draws it: `key` decides
  * where one band ends and the next begins, `label` is what the rail prints. */
 export type ModelGroup = { key: string; label: string };
@@ -140,8 +146,14 @@ export function modelGroup(model: ProviderModel, accessType: ModelCatalogAccessT
   if (accessType === 'subscription') {
     return { key: model.connectionId, label: connectionLabel(model) };
   }
-  const label = model.modelAuthor?.value ?? model.providerId;
-  return { key: label, label };
+  const author = model.modelAuthor?.value;
+  if (author === null || author === undefined)
+    return { key: model.providerId, label: providerLabel(model) };
+  const brand = modelAuthorBrand(author);
+  return {
+    key: brand === 'unknown' ? author.toLocaleLowerCase() : brand,
+    label: modelAuthorDisplayName(author),
+  };
 }
 
 /** Whether the row at `index` opens a band — that is, whether the row before it came from another
@@ -181,11 +193,9 @@ export function groupAtScrollTop(args: {
   return model === undefined ? null : modelGroup(model, accessType);
 }
 
-/** The one-line summary under a row's name: which provider serves the model, then what it can do.
- * The connection is named on the row's first line instead of repeated here. */
+/** One-line capability summary. Provider and connection identity have dedicated fields beside it. */
 export function describeModel(model: ProviderModel): string {
   return [
-    model.providerId,
     contextLabel(model.contextWindow.value),
     capabilityLabel('ツール', model.toolCalling.value),
     capabilityLabel('推論', model.reasoning.value),
@@ -614,6 +624,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             {page.items.slice(range.startIndex, range.endIndex).map((model, offset) => {
               const index = range.startIndex + offset;
               const selected = isSelected(model, selection);
+              const author = model.modelAuthor?.value;
               // Grouping is drawn *inside* the row — a rail column that names its band where the
               // band starts, and a hairline above that row. No header entry, because a header would
               // be a list item of a different height and the window arithmetic rests on every row
@@ -626,6 +637,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                   id={optionId(index)}
                   role="option"
                   aria-selected={selected}
+                  aria-label={`${modelAuthorDisplayName(author)} ${model.displayName}、${providerLabel(model)}経由、接続 ${connectionLabel(model)}`}
                   data-testid={`model-picker-v2-option-${model.modelId}`}
                   className={`mpv2-row${selected ? ' selected' : ''}${
                     index === activeIndex ? ' active' : ''
@@ -644,16 +656,23 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                   </span>
                   <span className="mpv2-body">
                     <span className="mpv2-head">
+                      <ModelAuthorIcon
+                        author={author}
+                        width={16}
+                        height={16}
+                        className="mpv2-author-icon"
+                      />
                       <span className="mpv2-title">{model.displayName}</span>
-                      {/* Which connection this row is reached through, on the line the user reads
-                          first. It is the answer to "which of my accounts is this?" — two rows can
-                          otherwise carry the same model name — and under the サブスク toggle it is
-                          what makes the built-in rows legible as 「Claude Code」/「Codex CLI」. It
-                          stays on every row even where the rail names the same connection: a row
-                          the user arrows onto mid-band must still say which account it is. */}
-                      <span className="mpv2-conn">{connectionLabel(model)}</span>
+                      {/* The stable provider/gateway badge cannot be renamed by the user, so the
+                          same Claude model stays distinguishable as OpenRouter or OrcaRouter. */}
+                      <span className="mpv2-provider-badge">{providerLabel(model)}</span>
                     </span>
-                    <span className="mpv2-meta">{describeModel(model)}</span>
+                    <span className="mpv2-meta-line">
+                      {/* Keep the user-editable account name too: two keys for one gateway are
+                          distinct selections even when they expose the same model id. */}
+                      <span className="mpv2-conn">接続: {connectionLabel(model)}</span>
+                      <span className="mpv2-meta">{describeModel(model)}</span>
+                    </span>
                   </span>
                 </div>
               );

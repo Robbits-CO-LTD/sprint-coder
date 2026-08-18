@@ -109,6 +109,36 @@ describe('ModelCatalogService', () => {
     ]);
   });
 
+  it('searches stable provider names and model authors as well as connection names', () => {
+    const service = new ModelCatalogService();
+    const orcaModel = {
+      ...model(2),
+      connectionId: 'orcarouter:work',
+      connectionDisplayName: '本番ゲートウェイ',
+      providerId: 'orcarouter',
+      providerDisplayName: 'OrcaRouter',
+      modelAuthor: { value: 'grok', source: 'provider_api' as const },
+    };
+    service.replaceCatalog([orcaModel]);
+
+    const query = (text: string) =>
+      service.query({
+        taskId: 'task-1',
+        text,
+        connectionIds: [],
+        providerIds: [],
+        accessTypes: [],
+        capabilities: [],
+        availableOnly: true,
+        cursor: null,
+        limit: 10,
+      });
+    expect(query('OrcaRouter').items).toHaveLength(1);
+    expect(query('grok').items).toHaveLength(1);
+    expect(query('xAI').items).toHaveLength(1);
+    expect(query('本番ゲートウェイ').items).toHaveLength(1);
+  });
+
   it('applies a Team model allowlist before pagination and total calculation', () => {
     const service = new ModelCatalogService();
     service.replaceCatalog([model(1), model(2), model(3)]);

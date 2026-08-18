@@ -83,6 +83,12 @@ describe('ProviderConnectionService', () => {
       'db failed',
     );
     expect(deleted).toBe('provider-secret:00000000-0000-4000-8000-000000000001');
+
+    deleted = null;
+    expect(() =>
+      service.createOrcaRouter({ displayName: 'OrcaRouter', apiKey: 'orca-secret-canary' }),
+    ).toThrow('db failed');
+    expect(deleted).toBe('provider-secret:00000000-0000-4000-8000-000000000001');
   });
 
   it('creates an OpenRouter Connection with a Main-only secret reference', () => {
@@ -117,6 +123,40 @@ describe('ProviderConnectionService', () => {
     });
     expect(stored).toHaveLength(1);
     expect(stored[0]).toContain('openrouter-secret');
+  });
+
+  it('creates an independent OrcaRouter Connection with a Main-only secret reference', () => {
+    const stored: string[] = [];
+    const service = new ProviderConnectionService(
+      {
+        listProviderConnections: () => [],
+        createProviderConnection: (connection) => connection,
+      },
+      {
+        put: (secret) => {
+          stored.push(secret);
+          return 'provider-secret:00000000-0000-4000-8000-000000000004';
+        },
+        delete: () => undefined,
+      },
+      () => new Date('2026-08-18T00:00:00.000Z'),
+      () => 'connection-4',
+    );
+
+    const connection = service.createOrcaRouter({
+      displayName: 'OrcaRouter',
+      apiKey: 'orca-secret',
+    });
+
+    expect(connection).toMatchObject({
+      id: 'orcarouter:connection-4',
+      providerId: 'orcarouter',
+      runtimeKind: 'official_api',
+      secretReference: 'provider-secret:00000000-0000-4000-8000-000000000004',
+      rateLimit: { mode: 'auto', maxConcurrentRequests: 2 },
+    });
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toContain('orca-secret');
   });
 
   it.each(PACK_A_PROVIDER_PROFILES)(

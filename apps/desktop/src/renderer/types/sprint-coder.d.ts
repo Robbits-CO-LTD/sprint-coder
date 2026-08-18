@@ -1152,6 +1152,9 @@ export interface SprintCoderApi {
     createOpenRouterConnection(
       input: import('@sprint-coder/contracts').OpenRouterConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
+    createOrcaRouterConnection(
+      input: import('@sprint-coder/contracts').OrcaRouterConnectionCreateInput,
+    ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
     createAnthropicConnection(
       input: import('@sprint-coder/contracts').AnthropicConnectionCreateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;

@@ -73,7 +73,7 @@ export class ModelCatalogService {
       model,
       accessType,
       searchText:
-        `${model.displayName}\0${model.modelId}\0${model.providerId}\0${model.connectionDisplayName ?? ''}`.toLocaleLowerCase(),
+        `${model.displayName}\0${model.modelId}\0${model.providerId}\0${model.providerDisplayName ?? ''}\0${modelAuthorSearchText(model.modelAuthor?.value)}\0${model.connectionDisplayName ?? ''}`.toLocaleLowerCase(),
     }));
     this.revisionValue += 1;
     this.indexBuildCountValue += 1;
@@ -112,6 +112,23 @@ export class ModelCatalogService {
       nextCursor: nextOffset < filtered.length ? `cursor:${nextOffset}` : null,
     };
   }
+}
+
+function modelAuthorSearchText(author: string | null | undefined): string {
+  if (author === null || author === undefined) return '';
+  const normalized = author.toLocaleLowerCase();
+  const aliases: Readonly<Record<string, string>> = {
+    grok: 'xai x-ai',
+    'x-ai': 'xai grok',
+    xai: 'x-ai grok',
+    'meta-llama': 'meta llama',
+    mistralai: 'mistral',
+    moonshot: 'kimi',
+    moonshotai: 'kimi',
+    zhipu: 'z-ai zai',
+    zhipuai: 'z-ai zai',
+  };
+  return `${author}\0${aliases[normalized] ?? ''}`;
 }
 
 export function teamModelIdentityKey(model: {

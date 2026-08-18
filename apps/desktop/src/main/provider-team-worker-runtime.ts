@@ -148,7 +148,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const availableTools = input.worker.canDelegate
       ? this.deps.managerTools
       : this.deps.workerTools;
-    const webSearch = connection.providerId === 'openrouter' || connection.providerId === 'xai';
+    const webSearch =
+      connection.providerId === 'openrouter' ||
+      connection.providerId === 'orcarouter' ||
+      connection.providerId === 'xai';
     const toolGuidance = input.worker.canDelegate
       ? typeof this.deps.managerGuidance === 'function'
         ? this.deps.managerGuidance(input.worker)

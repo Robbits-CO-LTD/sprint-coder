@@ -10,8 +10,10 @@ import {
   describeModel,
   groupAtScrollTop,
   modelGroup,
+  providerLabel,
   startsGroup,
 } from './ModelPickerV2';
+import { ModelAuthorIcon, modelAuthorBrand, modelAuthorDisplayName } from './ModelAuthorIcon';
 
 // The unified AI picker (UI slice U1b follow-up): one control for connection *and* model, with the
 // API / サブスク toggle deciding which half of the catalog is on screen. What is covered here is
@@ -121,11 +123,47 @@ describe('connectionLabel', () => {
 describe('describeModel', () => {
   it('describes the model, leaving the connection to its own line', () => {
     const meta = describeModel(model());
-    expect(meta.startsWith('anthropic · ')).toBe(true);
+    expect(meta.startsWith('コンテキスト:')).toBe(true);
     expect(meta).toContain('コンテキスト: 不明');
     // The row shows the connection once, by name — repeating the raw id in the meta line would put
     // the same fact on screen twice, in its least readable form.
     expect(meta).not.toContain('builtin:claude-cli');
+  });
+});
+
+describe('provider and author identity', () => {
+  it('keeps the stable gateway name separate from the user-editable connection name', () => {
+    const openRouter = model({
+      connectionId: 'openrouter:one',
+      connectionDisplayName: '本番',
+      providerId: 'openrouter',
+      providerDisplayName: 'OpenRouter',
+      modelId: 'anthropic/claude-sonnet-4.6',
+      modelAuthor: author('anthropic'),
+    });
+    const orcaRouter = model({
+      ...openRouter,
+      connectionId: 'orcarouter:one',
+      providerId: 'orcarouter',
+      providerDisplayName: 'OrcaRouter',
+    });
+    expect(connectionLabel(openRouter)).toBe('本番');
+    expect(connectionLabel(orcaRouter)).toBe('本番');
+    expect(providerLabel(openRouter)).toBe('OpenRouter');
+    expect(providerLabel(orcaRouter)).toBe('OrcaRouter');
+    expect(modelGroup(openRouter, 'api')).toEqual({ key: 'anthropic', label: 'Anthropic' });
+    expect(modelGroup(orcaRouter, 'api')).toEqual({ key: 'anthropic', label: 'Anthropic' });
+  });
+
+  it('normalizes documented author aliases and renders a decorative SVG fallback', () => {
+    expect(modelAuthorBrand('grok')).toBe('xai');
+    expect(modelAuthorBrand('x-ai')).toBe('xai');
+    expect(modelAuthorDisplayName('grok')).toBe('xAI');
+    expect(modelAuthorBrand('new-vendor')).toBe('unknown');
+    expect(renderToStaticMarkup(<ModelAuthorIcon author="anthropic" />)).toContain('<svg');
+    expect(renderToStaticMarkup(<ModelAuthorIcon author="new-vendor" />)).toContain(
+      'aria-hidden="true"',
+    );
   });
 });
 
@@ -189,11 +227,11 @@ describe('modelGroup under API', () => {
     // the provider's own answer and the only one the picker will accept.
     expect(modelGroup(model({ ...aggregator, modelAuthor: author('anthropic') }), 'api')).toEqual({
       key: 'anthropic',
-      label: 'anthropic',
+      label: 'Anthropic',
     });
     expect(modelGroup(model({ ...aggregator, modelAuthor: author('meta-llama') }), 'api')).toEqual({
-      key: 'meta-llama',
-      label: 'meta-llama',
+      key: 'meta',
+      label: 'Meta',
     });
   });
 
