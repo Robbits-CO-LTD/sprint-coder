@@ -1163,6 +1163,7 @@ export const useAppStore = create<AppState>((set, get) => {
           // Composer back to the legacy chip for no reason.
           set({ modelPicker: { taskId, enabled: get().modelPicker.enabled, selection: saved } });
         await get().loadRuntime();
+        await get().refreshDraftAttachments(taskId);
       } catch (err) {
         // Task-safe: only undoes this write, and only while the store still holds it. A rejection
         // that arrives after the user switched Tasks must not restore the old Task's snapshot over
@@ -1184,12 +1185,14 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder || typeof window.sprintCoder.settings?.setRuntime !== 'function')
         return;
       const previous = get().runtime;
+      const taskId = get().selectedTaskId;
       if (previous.kind === kind) return;
       set({ runtime: { ...previous, kind } });
       try {
-        await window.sprintCoder.settings.setRuntime(kind, get().selectedTaskId ?? undefined);
+        await window.sprintCoder.settings.setRuntime(kind, taskId ?? undefined);
         await get().loadRuntime();
         await refreshModelPicker(get);
+        if (taskId !== null) await get().refreshDraftAttachments(taskId);
       } catch (err) {
         set({ runtime: previous });
         const code = errorCode(err);
@@ -1209,12 +1212,14 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!window.sprintCoder || typeof window.sprintCoder.settings?.setModel !== 'function')
         return;
       const previous = get().runtime;
+      const taskId = get().selectedTaskId;
       if (previous.model === model || !previous.models.some(({ id }) => id === model)) return;
       set({ runtime: { ...previous, model } });
       try {
-        await window.sprintCoder.settings.setModel(model, get().selectedTaskId ?? undefined);
+        await window.sprintCoder.settings.setModel(model, taskId ?? undefined);
         await get().loadRuntime();
         await refreshModelPicker(get);
+        if (taskId !== null) await get().refreshDraftAttachments(taskId);
       } catch (err) {
         set({ runtime: previous });
         set({ error: describeError(err) });

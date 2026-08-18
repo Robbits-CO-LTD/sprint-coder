@@ -263,19 +263,25 @@ export class MockRuntimeAdapter {
         ({ selection }) =>
           selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
       );
+      const teamFixtureActive =
+        this.teamCoordinator !== undefined && isTeamScenarioFixtureInput(input);
       const toolCatalogSnapshot =
         this.managedHarness?.startTurn(toolContext, 'mock', {
           projectMemory: (this.persistence.getTask?.(taskId)?.projectId ?? null) !== null,
           skillDrafts: skillCreatorTurn,
           skillImports: importSkillTurn,
           ...(importSkillTurn ? { skillImportUserText: input } : {}),
+          ...(input.includes('承認テスト')
+            ? { mockFixture: 'approval' as const }
+            : input.includes('コマンドテスト')
+              ? { mockFixture: 'command' as const }
+              : {}),
+          ...(teamFixtureActive ? { mockTeamFixture: true } : {}),
         }) ?? startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
       // The fixed three-Worker orchestration is an E2E fixture, never a fallback for a natural
       // Team request. Mock cannot interpret arbitrary Team operations such as reading a
       // conversation or changing a member, so those requests fail closed with a truthful reply.
-      const teamFixtureActive =
-        this.teamCoordinator !== undefined && isTeamScenarioFixtureInput(input);
       const mockReply = teamTurn
         ? 'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。架空のメンバーや別のsubagentには置き換えていません。CodexまたはClaude Runtimeで再試行してください。'
         : buildReply(input);

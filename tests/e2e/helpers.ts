@@ -443,9 +443,16 @@ export async function launchApp(
   });
 }
 
-export async function firstWindow(app: ElectronApplication): Promise<Page> {
+export async function firstWindow(
+  app: ElectronApplication,
+  options: Readonly<{ completeSetup?: boolean }> = {},
+): Promise<Page> {
   const page = await app.firstWindow();
   await page.waitForLoadState('domcontentloaded');
+  // A fresh isolated profile always starts on onboarding. Feature specs should exercise the main
+  // shell by default; the setup-wizard spec is the single explicit opt-out. Keeping this at the
+  // shared window boundary prevents new specs from silently timing out behind onboarding.
+  if (options.completeSetup !== false) await completeSetupForFeatureTest(page);
   return page;
 }
 

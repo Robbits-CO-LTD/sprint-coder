@@ -117,26 +117,34 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
       restartApp = await launchApp(restartDir);
       page = await firstWindow(restartApp);
       await page.getByTestId('team-toggle').click();
-      await expect(page.getByText('paused · Worker 1人')).toBeVisible();
-      await expect(page.locator('.team-status')).toHaveText('stopped');
+      await expect(page.getByText('paused · Worker 0人')).toBeVisible();
+      await expect(page.getByTestId('team-worker')).toHaveCount(0);
+      await expect(page.getByTestId('team-activity-headline')).toHaveText(
+        'leaderが「復元確認」を雇いました',
+      );
     } finally {
       await closeApp(restartApp);
       removeUserDataDir(restartDir);
     }
   });
 
-  test('natural team intent auto-promotes and auto-opens the canvas', async () => {
+  test('natural team intent fails closed under Mock without fabricating Workers', async () => {
     const dir = createUserDataDir('phase-5-team-intent');
     let intentApp: ElectronApplication | null = null;
     try {
       intentApp = await launchApp(dir);
       const page = await firstWindow(intentApp);
       await page.getByTestId('sidebar-new-task-button').click();
-      // No ⬡ Team click: saying 「チームで…」 must promote, open the canvas, and hire on its own.
+      // The deterministic three-Worker scenario is reserved for the explicit チームテスト marker.
+      // Natural Team intent under Mock must stay truthful and must not fabricate Workers.
       await page.getByTestId('composer-textarea').fill('チームでこの仕事を進めてください');
       await page.getByTestId('composer-send-button').click();
-      await expect(page.getByTestId('team-list')).toBeVisible({ timeout: 20_000 });
-      await expect(page.getByTestId('team-worker')).toHaveCount(3, { timeout: 20_000 });
+      await expect(page.getByTestId('team-list')).toHaveCount(0);
+      await expect(page.getByTestId('team-worker')).toHaveCount(0);
+      await expect(page.getByTestId('assistant-message')).toContainText(
+        'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。',
+        { timeout: 20_000 },
+      );
     } finally {
       await closeApp(intentApp);
       removeUserDataDir(dir);

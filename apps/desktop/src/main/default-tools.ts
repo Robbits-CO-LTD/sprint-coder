@@ -327,15 +327,7 @@ export function createDefaultToolBroker(
           reason: 'capability authorization is unavailable until Slice 4.3',
         };
   const broker = new ToolBroker(registry, getCurrentPolicyEpoch, authorizer ?? defaultAuthorizer);
-  broker.registerImplementation({
-    toolId: APPROVAL_PROBE_TOOL.toolId,
-    implementationKind: 'built-in',
-    execute: (input) => {
-      const origin = (input as { origin?: unknown }).origin;
-      if (typeof origin !== 'string') throw new Error('approval_probe requires an origin');
-      return `承認された確認対象: ${origin}（外部通信は実行していません）`;
-    },
-  });
+  registerApprovalProbeTool(broker);
   broker.registerImplementation({
     toolId: MOCK_ECHO_TOOL.toolId,
     implementationKind: 'built-in',
@@ -352,6 +344,18 @@ export function createDefaultToolBroker(
   registerCommandRunnerTool(broker, commandRunner, command);
   if (team !== undefined) registerTeamTools(broker, team.coordinator);
   return broker;
+}
+
+export function registerApprovalProbeTool(broker: ToolBroker): void {
+  broker.registerImplementation({
+    toolId: APPROVAL_PROBE_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input) => {
+      const origin = (input as { origin?: unknown }).origin;
+      if (typeof origin !== 'string') throw new Error('approval_probe requires an origin');
+      return `承認された確認対象: ${origin}（外部通信は実行していません）`;
+    },
+  });
 }
 
 export function registerCommandRunnerTool(

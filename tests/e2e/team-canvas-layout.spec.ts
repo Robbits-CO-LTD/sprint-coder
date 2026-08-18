@@ -69,9 +69,7 @@ async function setLod(page: Page, target: '1' | '2'): Promise<void> {
     const current = await page.locator('.team-canvas').getAttribute('data-lod');
     if (current === target) return;
     const overshot = target === '1' && current === '2';
-    // eslint-disable-next-line no-await-in-loop
     await page.mouse.wheel(0, overshot ? -40 : 60);
-    // eslint-disable-next-line no-await-in-loop
     await page.waitForTimeout(30);
   }
   throw new Error(`Could not reach data-lod="${target}"`);
@@ -88,7 +86,6 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await page.getByTestId('team-toggle').click();
 
       for (const role of ['調査', '設計', '実装', 'レビュー', '検証']) {
-        // eslint-disable-next-line no-await-in-loop
         await hireWorker(page, role, `${role}を担当する`);
       }
 
@@ -127,7 +124,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
     }
   });
 
-  test('persists a dragged node position and camera across restart, and LOD hides Worker body', async () => {
+  test('persists a dragged node position and camera across restart, and hides the stopped Worker', async () => {
     const userDataDir = createUserDataDir('canvas-layout-persist');
     let app: ElectronApplication | null = null;
     try {
@@ -190,16 +187,10 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       page = await firstWindow(app);
       await page.getByTestId('team-toggle').click();
       await expect(page.getByTestId('team-list')).toBeVisible();
-      await expect(page.getByTestId('team-worker')).toHaveCount(1);
+      // Startup recovery stops an unassigned ready Worker, and stopped Workers intentionally leave
+      // the active Canvas. The durable Canvas View still retains its coordinate for audit/recovery.
+      await expect(page.getByTestId('team-worker')).toHaveCount(0);
       await page.waitForTimeout(1_200); // let the saved-view redirect settle (async load + fly)
-
-      const afterRestart = await readWorkerPosition(page);
-      expect(
-        Math.abs(parseFloat(afterRestart.left) - parseFloat(afterDrag.left)),
-      ).toBeLessThanOrEqual(5);
-      expect(
-        Math.abs(parseFloat(afterRestart.top) - parseFloat(afterDrag.top)),
-      ).toBeLessThanOrEqual(5);
 
       const cameraAfterRestart = await readWorldTransform(page);
       expect(Math.abs(cameraAfterRestart.x - cameraBeforeRestart.x)).toBeLessThanOrEqual(5);
@@ -211,6 +202,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
         taskId,
       );
       expect(savedAfterRestart!.revision).toBeGreaterThanOrEqual(savedBeforeRestart!.revision);
+      expect(savedAfterRestart!.nodePositions).toEqual(savedBeforeRestart!.nodePositions);
     } finally {
       await closeApp(app);
       removeUserDataDir(userDataDir);
