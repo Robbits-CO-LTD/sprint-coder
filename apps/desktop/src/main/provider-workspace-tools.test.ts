@@ -552,8 +552,19 @@ describe('Provider workspace read tools', () => {
         input: { path: 'worker-only.txt', content: 'isolated\n' },
       }),
     ).resolves.toMatchObject({ state: 'committed', kind: 'add' });
-    expect(JSON.stringify(applied)).toContain(workerRoot);
-    expect(JSON.stringify(applied)).not.toContain(parentRoot);
+    expect(applied[0]).toMatchObject({
+      mutationBinding: {
+        workspaceKey: binding.workspaceKey,
+        rootIdentityDigest: binding.rootIdentityDigest,
+      },
+      plan: {
+        operations: [
+          expect.objectContaining({
+            canonicalPath: join(binding.canonicalPath, 'worker-only.txt'),
+          }),
+        ],
+      },
+    });
   });
 
   it('dispatches a revision-bound multi-file apply_patch batch through one Saga', async () => {

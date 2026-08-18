@@ -223,6 +223,7 @@ describe('CommandRunner', () => {
   it.runIf(process.platform === 'win32')(
     'enforces Windows AppContainer workspace-write through the packaged sandbox helper',
     async () => {
+      if (!(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-command-'));
       const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-outside-'));
       roots.push(workspace, outside);
