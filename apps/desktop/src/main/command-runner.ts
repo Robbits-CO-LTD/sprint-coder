@@ -1533,7 +1533,7 @@ export function buildControlledEnvironment(
   }
   if (platform === 'win32') {
     const windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
-    environment['PATH'] = [windowsPath.join(windowsRoot, 'System32'), windowsRoot].join(';');
+    environment['PATH'] = sanitizedWindowsPath(environment['PATH'], windowsRoot);
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;
@@ -1542,6 +1542,28 @@ export function buildControlledEnvironment(
     environment['PATH'] = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
   }
   return environment;
+}
+
+function sanitizedWindowsPath(sourcePath: string | undefined, windowsRoot: string): string {
+  const candidates = [
+    windowsPath.join(windowsRoot, 'System32'),
+    windowsRoot,
+    ...(sourcePath?.split(';') ?? []),
+  ];
+  const seen = new Set<string>();
+  const accepted: string[] = [];
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim();
+    if (!/^[a-zA-Z]:[\\/]/u.test(trimmed) || trimmed.includes('\0')) continue;
+    const normalizedPath = windowsPath.normalize(trimmed);
+    const normalized =
+      normalizedPath.length > 3 ? normalizedPath.replace(/[\\/]+$/u, '') : normalizedPath;
+    const identity = normalized.toLowerCase();
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    accepted.push(normalized);
+  }
+  return accepted.join(';');
 }
 
 function splitUtf8(text: string, maxBytes: number): string[] {

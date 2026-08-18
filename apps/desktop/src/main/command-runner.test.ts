@@ -67,7 +67,7 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
-  it('uses a fixed Windows command PATH while inheriting user paths case-insensitively', () => {
+  it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
       UserProfile: 'C:\\Users\\example',
@@ -81,7 +81,12 @@ describe('CommandRunner', () => {
     });
 
     expect(environment).toMatchObject({
-      PATH: 'C:\\Windows\\System32;C:\\Windows',
+      PATH: [
+        'C:\\Windows\\System32',
+        'C:\\Windows',
+        'C:\\Program Files\\nodejs',
+        'C:\\Program Files\\Git\\cmd',
+      ].join(';'),
       HOME: 'C:\\Users\\example',
       USERPROFILE: 'C:\\Users\\example',
       APPDATA: 'C:\\Users\\example\\AppData\\Roaming',
@@ -92,6 +97,14 @@ describe('CommandRunner', () => {
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
     expect(environment).not.toHaveProperty('LD_PRELOAD');
     expect(environment).not.toHaveProperty('LD_LIBRARY_PATH');
+  });
+
+  it('drops relative, UNC, duplicate, and empty Windows PATH entries before executable lookup', () => {
+    const environment = buildControlledEnvironment('win32', {
+      SystemRoot: 'C:\\Windows',
+      PATH: 'relative\\bin;C:\\Windows\\System32;\\\\server\\tools;D:\\Tools;;d:\\tools\\',
+    });
+    expect(environment['PATH']).toBe('C:\\Windows\\System32;C:\\Windows;D:\\Tools');
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
