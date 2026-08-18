@@ -248,6 +248,7 @@ export class ManagedCodingHarness {
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
   private readonly providersByTurn = new Map<string, string>();
+  private readonly commandSessions?: ManagedCommandSessions;
   private commandSandboxAvailable = false;
 
   constructor(private readonly deps: WorkspaceToolDeps) {
@@ -276,6 +277,7 @@ export class ManagedCodingHarness {
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
+      this.commandSessions = sessions;
       registerCommandRunnerTool(
         this.broker,
         new CommandRunner({ sandboxed: true }),
@@ -403,6 +405,10 @@ export class ManagedCodingHarness {
 
   setCommandSandboxAvailable(available: boolean): void {
     this.commandSandboxAvailable = available;
+  }
+
+  async policyEpochChanged(taskId: string): Promise<void> {
+    await this.commandSessions?.terminateTask(taskId);
   }
 
   finishTurn(taskId: string, turnId: string): void {

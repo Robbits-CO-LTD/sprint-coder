@@ -1018,6 +1018,7 @@ export class IpcRouter {
     this.permissionBroker = new PermissionBroker(persistence, {
       policyEpochChanged: (taskId, policyEpoch) => {
         this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
+        void this.managedCodingHarness.policyEpochChanged(taskId);
         this.persistence.quarantineBackgroundForPolicyEpoch(
           taskId,
           policyEpoch,

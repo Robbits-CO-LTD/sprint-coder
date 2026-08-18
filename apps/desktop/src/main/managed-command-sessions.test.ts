@@ -56,5 +56,28 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       });
       await sessions.dispose();
     });
+
+    it('stops every session owned by a Task when its policy epoch changes', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-policy-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: ['-c', 'while :; do sleep 1; done'],
+      });
+      const sessions = new ManagedCommandSessions();
+      const first = await sessions.start(spec, { taskId: 'task-1', turnId: 'turn-1' });
+      const second = await sessions.start(spec, { taskId: 'task-2', turnId: 'turn-2' });
+      await sessions.terminateTask('task-1');
+      expect(sessions.poll(first.sessionId, { taskId: 'task-1', turnId: 'turn-1' }).state).toBe(
+        'canceled',
+      );
+      expect(sessions.poll(second.sessionId, { taskId: 'task-2', turnId: 'turn-2' }).state).toBe(
+        'running',
+      );
+      sessions.terminate(second.sessionId, { taskId: 'task-2', turnId: 'turn-2' });
+      await sessions.dispose();
+    });
   },
 );

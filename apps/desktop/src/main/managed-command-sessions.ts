@@ -148,6 +148,16 @@ export class ManagedCommandSessions {
     this.sessions.clear();
   }
 
+  async terminateTask(taskId: string): Promise<void> {
+    const owned = [...this.sessions.values()].filter(
+      (session) =>
+        session.taskId === taskId && (session.state === 'starting' || session.state === 'running'),
+    );
+    for (const session of owned)
+      session.controller.abort(new Error('Managed command permission epoch changed'));
+    await Promise.allSettled(owned.map(({ completion }) => completion));
+  }
+
   private snapshot(session: Session, afterSeq: number): ManagedCommandSnapshot {
     const chunks = session.chunks.filter(({ seq }) => seq > afterSeq);
     return Object.freeze({
