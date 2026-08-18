@@ -2126,6 +2126,9 @@ export class IpcRouter {
           turnId: approval.turnId,
           approvalId: input.approvalId,
           decision: input.decision,
+          ...(input.userInputSelection === undefined
+            ? {}
+            : { userInputSelection: input.userInputSelection }),
           expectedRevision: input.expectedRevision,
           challenge: input.challenge,
           operationId: envelope.operationId,

@@ -9,7 +9,7 @@ export function ApprovalCard({
 }: {
   approval: ApprovalSummary;
   busy: boolean;
-  onDecision: (decision: ApprovalDecision) => void;
+  onDecision: (decision: ApprovalDecision, userInputSelection?: number) => void;
 }) {
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
@@ -85,7 +85,7 @@ export function ApprovalCard({
           className="primary"
           data-testid="approval-allow-once"
           disabled={busy}
-          onClick={() => onDecision('allow_once')}
+          onClick={() => onDecision('allow_once', userInput === null ? undefined : 0)}
         >
           {userInput?.choices[0] ?? '今回のみ許可'}
         </button>
@@ -93,7 +93,7 @@ export function ApprovalCard({
           data-testid="approval-allow-task"
           type="button"
           disabled={busy}
-          onClick={() => onDecision('allow_task')}
+          onClick={() => onDecision('allow_task', userInput === null ? undefined : 1)}
         >
           {userInput?.choices[1] ?? 'Task中許可'}
         </button>
@@ -103,7 +103,7 @@ export function ApprovalCard({
             data-testid="approval-deny"
             type="button"
             disabled={busy}
-            onClick={() => onDecision('deny')}
+            onClick={() => onDecision('deny', userInput === null ? undefined : 2)}
           >
             {userInput?.choices[2] ?? '拒否'}
           </button>

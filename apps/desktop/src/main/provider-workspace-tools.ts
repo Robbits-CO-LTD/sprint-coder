@@ -438,6 +438,8 @@ export class ManagedCodingHarness {
         deps.command,
         MANAGED_EXEC_COMMAND_TOOL,
         sessions,
+        10_000,
+        false,
       );
       registerManagedCommandControlTools(this.broker, sessions, deps.command);
     }
@@ -636,6 +638,7 @@ export class ManagedCodingHarness {
   }
 
   async dispose(): Promise<void> {
+    await this.commandSessions?.dispose();
     await this.broker.dispose();
   }
 

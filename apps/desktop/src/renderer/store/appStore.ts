@@ -264,7 +264,12 @@ type AppState = {
   setEffort(effort: ClaudeEffort): Promise<void>;
   setCodexEffort(effort: string): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
-  resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
+  resolveApproval(
+    taskId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    userInputSelection?: number,
+  ): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(projectId?: string): Promise<TaskSummary | null>;
   refreshProjects(): Promise<void>;
@@ -1291,7 +1296,12 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision) {
+    async resolveApproval(
+      taskId: string,
+      approvalId: string,
+      decision: ApprovalDecision,
+      userInputSelection?: number,
+    ) {
       if (!window.sprintCoder || typeof window.sprintCoder.approvals?.resolve !== 'function')
         return;
       const approval = (get().approvalsByTask[taskId] ?? []).find(({ id }) => id === approvalId);
@@ -1304,6 +1314,7 @@ export const useAppStore = create<AppState>((set, get) => {
           taskId,
           approvalId,
           decision,
+          ...(userInputSelection === undefined ? {} : { userInputSelection }),
           expectedRevision: approval.revision,
           expectedPolicyEpoch: approval.policyEpoch,
           challenge: approval.challenge,

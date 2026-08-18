@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import { FileRevisionRegistry } from './file-revision';
 import { commandToolTruncated } from './default-tools';
 import { approvalFactsForTool } from './approval-coordinator';
 import { workspaceMutationBinding } from './path-guard';
+import { ManagedCommandSessions } from './managed-command-sessions';
 
 const roots: string[] = [];
 
@@ -137,6 +138,7 @@ describe('Provider workspace read tools', () => {
 
   it('omits command tools until the OS sandbox probe succeeds', async () => {
     const { tools, context } = await harness();
+    const disposeSessions = vi.spyOn(ManagedCommandSessions.prototype, 'dispose');
     const commandTools = new ProviderWorkspaceTools({
       workspaceFor: () => null,
       rootIdentityFor: () => undefined,
@@ -159,6 +161,8 @@ describe('Provider workspace read tools', () => {
     );
     expect(available.entries.map(({ providerName }) => providerName)).toContain('exec_command');
     await commandTools.dispose();
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+    disposeSessions.mockRestore();
     await tools.dispose();
   });
 
@@ -195,7 +199,9 @@ describe('Provider workspace read tools', () => {
       authorizer: ({ entry }) => ({
         decision: 'allow',
         reason: 'test-choice',
-        approvalDecision: entry.providerName === 'request_user_input' ? 'allow_task' : 'allow_once',
+        ...(entry.providerName === 'request_user_input'
+          ? { userInputSelection: 1 }
+          : { approvalDecision: 'allow_once' as const }),
         beforeExecute: () => true,
       }),
     });

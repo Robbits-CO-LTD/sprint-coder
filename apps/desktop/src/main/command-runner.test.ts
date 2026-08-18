@@ -287,6 +287,36 @@ describe('CommandRunner', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'holds the per-workspace AppContainer ACL lease until concurrent helpers finish',
+    async () => {
+      if (!(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const early = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', 'setTimeout(() => process.exit(0), 200)'],
+      });
+      const late = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(join(root, 'late.txt'))}, 'ok'), 600)`,
+        ],
+      });
+      const first = new CommandRunner({ sandboxed: true });
+      const second = new CommandRunner({ sandboxed: true });
+      try {
+        const results = await Promise.all([first.run(early), second.run(late)]);
+        expect(results.map(({ exitCode }) => exitCode)).toEqual([0, 0]);
+        await expect(readFile(join(root, 'late.txt'), 'utf8')).resolves.toBe('ok');
+      } finally {
+        await Promise.all([first.dispose(), second.dispose()]);
+      }
+    },
+  );
+
   it('rejects a replacement inode at a persisted Project root path', async () => {
     const root = await workspace();
     const binding = await workspaceMutationBinding(root);

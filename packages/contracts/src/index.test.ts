@@ -1266,6 +1266,16 @@ describe('public contracts', () => {
       challenge: 'approval-challenge-0001',
     };
     expect(approvalContracts.approvalResolveInputSchema.parse(resolve)).toEqual(resolve);
+    expect(
+      approvalContracts.approvalResolveInputSchema.parse({ ...resolve, userInputSelection: 1 }),
+    ).toEqual({ ...resolve, userInputSelection: 1 });
+    for (const userInputSelection of [-1, 3, 1.5])
+      expect(() =>
+        approvalContracts.approvalResolveInputSchema.parse({
+          ...resolve,
+          userInputSelection,
+        }),
+      ).toThrow();
     for (const forged of [
       { ...resolve, capability: 'shell.execute' },
       { ...resolve, resource: { kind: 'all' } },

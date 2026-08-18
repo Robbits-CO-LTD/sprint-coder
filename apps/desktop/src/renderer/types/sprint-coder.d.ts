@@ -389,6 +389,7 @@ export type TurnEvent =
       seq: number;
       approvalId: string;
       decision: ApprovalDecision;
+      userInputSelection?: number;
       approval: ApprovalSummary;
     }
   | {

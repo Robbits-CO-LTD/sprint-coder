@@ -5,8 +5,8 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LocalFree,
-    SetHandleInformation,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
@@ -17,17 +17,89 @@ use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+    CreateMutexW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 struct OwnedSid(PSID);
 impl Drop for OwnedSid {
     fn drop(&mut self) {
         if !self.0.is_null() {
+            // SAFETY: Both AppContainer SID creation APIs transfer one SID allocation whose
+            // documented release function is FreeSid. OwnedSid has unique ownership.
             unsafe { FreeSid(self.0) };
+        }
+    }
+}
+
+struct WorkspaceMutex(HANDLE);
+
+impl Drop for WorkspaceMutex {
+    fn drop(&mut self) {
+        // SAFETY: The handle is a successfully acquired mutex owned by this guard. ReleaseMutex
+        // relinquishes this thread's ownership and CloseHandle releases the unique handle value.
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
+}
+
+struct OwnedHandles([HANDLE; 3]);
+
+impl OwnedHandles {
+    fn duplicate_standard_handles() -> Result<Self, u32> {
+        // SAFETY: GetCurrentProcess returns the documented pseudo-handle valid in this process.
+        let process = unsafe { GetCurrentProcess() };
+        let sources = [
+            // SAFETY: GetStdHandle accepts these three constant selector values.
+            unsafe { GetStdHandle(STD_INPUT_HANDLE) },
+            unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
+            unsafe { GetStdHandle(STD_ERROR_HANDLE) },
+        ];
+        if sources
+            .iter()
+            .any(|handle| handle.is_null() || *handle == INVALID_HANDLE_VALUE)
+        {
+            // SAFETY: GetLastError has no preconditions and captures the failing Win32 call.
+            return Err(unsafe { GetLastError() });
+        }
+        let mut duplicates = [std::ptr::null_mut(); 3];
+        for (index, source) in sources.into_iter().enumerate() {
+            // SAFETY: source and process are valid handles; duplicates[index] is writable storage.
+            // The new handle is explicitly inheritable and is closed by OwnedHandles.
+            if unsafe {
+                DuplicateHandle(
+                    process,
+                    source,
+                    process,
+                    &mut duplicates[index],
+                    0,
+                    1,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            } == 0
+            {
+                // SAFETY: Only non-null handles from earlier successful iterations are closed.
+                for handle in duplicates.into_iter().filter(|handle| !handle.is_null()) {
+                    unsafe { CloseHandle(handle) };
+                }
+                // SAFETY: GetLastError has no preconditions and captures DuplicateHandle failure.
+                return Err(unsafe { GetLastError() });
+            }
+        }
+        Ok(Self(duplicates))
+    }
+}
+
+impl Drop for OwnedHandles {
+    fn drop(&mut self) {
+        for handle in self.0 {
+            // SAFETY: Each entry is a unique handle returned by DuplicateHandle.
+            unsafe { CloseHandle(handle) };
         }
     }
 }
@@ -106,6 +178,7 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
     let mut hasher = DefaultHasher::new();
     root.to_string_lossy().to_lowercase().hash(&mut hasher);
     let profile = format!("SprintCoder.ManagedCommand.{:016x}", hasher.finish());
+    let _workspace_mutex = acquire_workspace_mutex(&profile)?;
     let Some(sid) = appcontainer_sid(&profile) else {
         return Err("appcontainer_profile_failed".to_owned());
     };
@@ -141,7 +214,7 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
         }
         return Err("appcontainer_acl_failed".to_owned());
     }
-    let result = unsafe { spawn_appcontainer(sid.0, &root, executable, argv) };
+    let result = spawn_appcontainer(sid.0, &root, executable, argv);
     remove_acl(&root, &sid_string, true);
     if executable_acl_required {
         remove_acl(executable_path, &sid_string, false);
@@ -150,6 +223,25 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
         remove_acl(path, &sid_string, false);
     }
     result.map_err(|code| format!("appcontainer_process_failed_{code}"))
+}
+
+fn acquire_workspace_mutex(profile: &str) -> Result<WorkspaceMutex, String> {
+    let name = wide(format!(r"Local\{profile}.AclLease"));
+    // SAFETY: The security descriptor is null (current-user defaults), the name is NUL-terminated,
+    // and the returned handle is uniquely owned by WorkspaceMutex.
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err("appcontainer_mutex_create_failed".to_owned());
+    }
+    // SAFETY: handle is a valid mutex handle. An abandoned mutex still grants ownership and is
+    // safe to use; it indicates that the previous helper exited before ACL cleanup.
+    let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
+    if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+        // SAFETY: Ownership was not acquired, so only the handle itself must be closed.
+        unsafe { CloseHandle(handle) };
+        return Err("appcontainer_mutex_wait_failed".to_owned());
+    }
+    Ok(WorkspaceMutex(handle))
 }
 
 fn is_windows_system_path(path: &Path) -> bool {
@@ -180,6 +272,8 @@ fn is_path_inside(root: &Path, candidate: &Path) -> bool {
 
 fn appcontainer_sid(name: &str) -> Option<OwnedSid> {
     let name_wide = wide(name);
+    // SAFETY: Every string is NUL-terminated, all output pointers are valid, and both APIs return
+    // a SID allocation with ownership transferred to the caller for release via FreeSid.
     unsafe {
         let mut sid: PSID = std::ptr::null_mut();
         if DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut sid) < 0 {
@@ -202,14 +296,20 @@ fn appcontainer_sid(name: &str) -> Option<OwnedSid> {
 }
 
 fn sid_string(sid: PSID) -> Option<String> {
+    // SAFETY: sid comes from a successful AppContainer API. ConvertSidToStringSidW writes one
+    // LocalAlloc-owned NUL-terminated UTF-16 pointer, released exactly once with LocalFree.
     unsafe {
         let mut value = std::ptr::null_mut();
         if ConvertSidToStringSidW(sid, &mut value) == 0 {
             return None;
         }
         let mut len = 0usize;
-        while *value.add(len) != 0 {
+        while len < 256 && *value.add(len) != 0 {
             len += 1;
+        }
+        if len == 256 {
+            LocalFree(value as *mut c_void);
+            return None;
         }
         let result = String::from_utf16_lossy(std::slice::from_raw_parts(value, len));
         LocalFree(value as *mut c_void);
@@ -244,20 +344,23 @@ fn remove_acl(path: &Path, sid: &str, recursive: bool) {
     let _ = command.status();
 }
 
-unsafe fn spawn_appcontainer(
-    sid: PSID,
-    cwd: &Path,
-    executable: &str,
-    argv: &[String],
-) -> Result<u8, u32> {
+fn spawn_appcontainer(sid: PSID, cwd: &Path, executable: &str, argv: &[String]) -> Result<u8, u32> {
+    let std_handles = OwnedHandles::duplicate_standard_handles()?;
     let mut size = 0usize;
-    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+    // SAFETY: A null list is the documented size query. Two attributes are installed below.
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut size) };
     if size == 0 {
+        // SAFETY: GetLastError has no preconditions and captures the size-query failure.
         return Err(unsafe { GetLastError() });
     }
-    let mut buffer = vec![0u8; size];
+    // PROC_THREAD_ATTRIBUTE_LIST is opaque but pointer-aligned. usize storage provides alignment
+    // while the rounded word count provides at least the exact byte size requested by Windows.
+    let mut buffer = vec![0usize; size.div_ceil(std::mem::size_of::<usize>())];
     let list = buffer.as_mut_ptr().cast();
-    if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut size) } == 0 {
+    // SAFETY: list points to aligned writable storage of at least size bytes and lives until after
+    // DeleteProcThreadAttributeList and CreateProcessW finish.
+    if unsafe { InitializeProcThreadAttributeList(list, 2, 0, &mut size) } == 0 {
+        // SAFETY: GetLastError has no preconditions and captures initialization failure.
         return Err(unsafe { GetLastError() });
     }
     let mut capabilities = SECURITY_CAPABILITIES {
@@ -267,6 +370,8 @@ unsafe fn spawn_appcontainer(
         Reserved: 0,
     };
     let updated = unsafe {
+        // SAFETY: list is initialized, capabilities and sid remain alive through CreateProcessW,
+        // and the byte size exactly matches SECURITY_CAPABILITIES.
         UpdateProcThreadAttribute(
             list,
             0,
@@ -278,33 +383,49 @@ unsafe fn spawn_appcontainer(
         )
     };
     if updated == 0 {
+        // SAFETY: list was initialized successfully and has not yet been deleted.
         unsafe { DeleteProcThreadAttributeList(list) };
+        // SAFETY: GetLastError captures UpdateProcThreadAttribute failure.
         return Err(unsafe { GetLastError() });
     }
+    // SAFETY: The list is initialized; the three duplicated handles are valid, explicitly
+    // inheritable, and remain alive through CreateProcessW. HANDLE_LIST ensures no other
+    // inheritable handle from the runner can cross the AppContainer boundary.
+    let handles_updated = unsafe {
+        UpdateProcThreadAttribute(
+            list,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            std_handles.0.as_ptr().cast_mut().cast(),
+            std::mem::size_of_val(&std_handles.0),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if handles_updated == 0 {
+        // SAFETY: list was initialized successfully and has not yet been deleted.
+        unsafe { DeleteProcThreadAttributeList(list) };
+        // SAFETY: GetLastError captures HANDLE_LIST installation failure.
+        return Err(unsafe { GetLastError() });
+    }
+    // SAFETY: STARTUPINFOEXW and PROCESS_INFORMATION are plain Win32 output structures whose all-
+    // zero representation is their documented initialization state before setting required fields.
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    let std_handles = [
-        unsafe { GetStdHandle(STD_INPUT_HANDLE) },
-        unsafe { GetStdHandle(STD_OUTPUT_HANDLE) },
-        unsafe { GetStdHandle(STD_ERROR_HANDLE) },
-    ];
-    for handle in std_handles {
-        if !make_handle_inheritable(handle, true) {
-            unsafe { DeleteProcThreadAttributeList(list) };
-            return Err(unsafe { GetLastError() });
-        }
-    }
-    startup.StartupInfo.hStdInput = std_handles[0];
-    startup.StartupInfo.hStdOutput = std_handles[1];
-    startup.StartupInfo.hStdError = std_handles[2];
+    startup.StartupInfo.hStdInput = std_handles.0[0];
+    startup.StartupInfo.hStdOutput = std_handles.0[1];
+    startup.StartupInfo.hStdError = std_handles.0[2];
     startup.lpAttributeList = list;
     let executable = win32_process_path(executable);
     let cwd = win32_process_path(&cwd.to_string_lossy());
     let application = wide(&executable);
     let mut command_line = wide(windows_command_line(&executable, argv));
     let cwd = wide(&cwd);
+    // SAFETY: PROCESS_INFORMATION's all-zero state is the documented output initialization.
     let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: All pointers reference live NUL-terminated or writable buffers; startup contains the
+    // initialized two-attribute list; only the three HANDLE_LIST entries may be inherited.
     let ok = unsafe {
         CreateProcessW(
             application.as_ptr(),
@@ -319,30 +440,26 @@ unsafe fn spawn_appcontainer(
             &mut process,
         )
     };
-    for handle in std_handles {
-        let _ = make_handle_inheritable(handle, false);
-    }
+    // SAFETY: list was initialized successfully and CreateProcessW has consumed its attributes.
     unsafe { DeleteProcThreadAttributeList(list) };
     if ok == 0 {
+        // SAFETY: GetLastError captures CreateProcessW failure.
         return Err(unsafe { GetLastError() });
     }
+    // SAFETY: CreateProcessW succeeded and returned two uniquely owned valid handles.
     unsafe { CloseHandle(process.hThread) };
+    // SAFETY: process.hProcess remains valid until the wait and exit-code read complete.
     unsafe { WaitForSingleObject(process.hProcess, INFINITE) };
     let mut exit_code = 1u32;
+    // SAFETY: process.hProcess is valid and exit_code points to writable storage.
     let read = unsafe { GetExitCodeProcess(process.hProcess, &mut exit_code) };
+    // SAFETY: This is the unique remaining process handle returned by CreateProcessW.
     unsafe { CloseHandle(process.hProcess) };
     if read == 0 {
+        // SAFETY: GetLastError captures GetExitCodeProcess failure.
         return Err(unsafe { GetLastError() });
     }
     Ok(exit_code.min(255) as u8)
-}
-
-fn make_handle_inheritable(handle: HANDLE, inheritable: bool) -> bool {
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return false;
-    }
-    let flags = if inheritable { HANDLE_FLAG_INHERIT } else { 0 };
-    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) != 0 }
 }
 
 fn windows_command_line(executable: &str, argv: &[String]) -> String {

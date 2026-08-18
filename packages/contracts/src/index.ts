@@ -1519,6 +1519,7 @@ export const approvalResolveInputSchema = z
     taskId: idSchema,
     approvalId: idSchema,
     decision: approvalDecisionSchema,
+    userInputSelection: z.number().int().min(0).max(2).optional(),
     expectedRevision: z.number().int().nonnegative(),
     expectedPolicyEpoch: z.number().int().nonnegative(),
     challenge: z.string().min(8).max(256),

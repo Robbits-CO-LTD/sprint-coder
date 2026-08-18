@@ -246,13 +246,13 @@ export function registerManagedControlTools(
     implementationKind: 'built-in',
     execute: (input, _context, control) => {
       const request = input as { question: string; choices: string[] };
-      const index =
-        control.authorizationDecision === 'allow_once'
-          ? 0
-          : control.authorizationDecision === 'allow_task'
-            ? 1
-            : 2;
-      const selectedIndex = Math.min(index, request.choices.length - 1);
+      if (
+        !Number.isInteger(control.userInputSelection) ||
+        control.userInputSelection! < 0 ||
+        control.userInputSelection! >= request.choices.length
+      )
+        throw new Error('request_user_input requires a separately authorized choice');
+      const selectedIndex = control.userInputSelection!;
       return {
         question: request.question,
         selectedIndex,
@@ -361,6 +361,7 @@ export function registerCommandRunnerTool(
   definition = COMMAND_RUNNER_TOOL,
   sessions?: ManagedCommandSessions,
   foregroundToBackgroundMs = 10_000,
+  disposeSessions = true,
 ): void {
   const commandIds = new WeakMap<object, string>();
   const resourceKeys = new WeakMap<object, string>();
@@ -370,7 +371,10 @@ export function registerCommandRunnerTool(
     toolId: definition.toolId,
     implementationKind: 'command-runner',
     dispose: async () => {
-      await Promise.all([commandRunner.dispose(), sessions?.dispose()]);
+      await Promise.all([
+        commandRunner.dispose(),
+        ...(disposeSessions ? [sessions?.dispose()] : []),
+      ]);
     },
     prepare: async (input, context, control) => {
       if (command === undefined)
@@ -526,7 +530,13 @@ export function registerCommandRunnerTool(
               exitCode: 0,
               createdAt: new Date().toISOString(),
             });
-          if (snapshot.state !== 'canceled')
+          if (snapshot.state === 'canceled')
+            command.persistence.transitionBackgroundActivity(
+              sessionId,
+              'canceled',
+              new Date().toISOString(),
+            );
+          else
             command.persistence.completeBackgroundActivity({
               activityId: sessionId,
               completionId: randomUUID(),

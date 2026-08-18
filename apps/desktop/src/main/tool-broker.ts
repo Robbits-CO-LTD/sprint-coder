@@ -29,6 +29,7 @@ export type ToolAuthorizationDecision = Readonly<{
   reason: string;
   beforeExecute?: () => boolean;
   approvalDecision?: 'allow_once' | 'allow_task' | 'deny';
+  userInputSelection?: number;
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
@@ -271,6 +272,9 @@ export class ToolBroker {
           ...(authorization.approvalDecision === undefined
             ? {}
             : { authorizationDecision: authorization.approvalDecision }),
+          ...(authorization.userInputSelection === undefined
+            ? {}
+            : { userInputSelection: authorization.userInputSelection }),
         });
       } finally {
         release();

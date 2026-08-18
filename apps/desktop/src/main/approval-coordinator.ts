@@ -71,6 +71,7 @@ type ResolveCommand = {
   turnId: string;
   approvalId: string;
   decision: ApprovalDecision;
+  userInputSelection?: number;
   expectedRevision: number;
   challenge: string;
   operationId: string;
@@ -122,6 +123,8 @@ export class ApprovalCoordinator {
     if (evaluations.some(({ decision }) => decision.decision === 'deny'))
       return { decision: 'deny', reason: 'permission_denied' };
     const revalidators: (() => boolean)[] = [];
+    let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
+    let userInputSelection: number | undefined;
     for (const evaluation of evaluations) {
       if (evaluation.decision.decision === 'allow') {
         revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
@@ -131,12 +134,28 @@ export class ApprovalCoordinator {
         revalidators.push(evaluation.decision.beforeExecute);
       const decision = await this.requestCapabilityApproval(request, evaluation.capability);
       if (decision.decision !== 'allow') return decision;
+      if (
+        approvalDecision !== undefined &&
+        decision.approvalDecision !== undefined &&
+        approvalDecision !== decision.approvalDecision
+      )
+        throw new Error('APPROVAL_DECISION_CONFLICT');
+      approvalDecision ??= decision.approvalDecision;
+      if (
+        userInputSelection !== undefined &&
+        decision.userInputSelection !== undefined &&
+        userInputSelection !== decision.userInputSelection
+      )
+        throw new Error('APPROVAL_USER_INPUT_SELECTION_CONFLICT');
+      userInputSelection ??= decision.userInputSelection;
       revalidators.push(decision.beforeExecute ?? (() => false));
     }
     return {
       decision: 'allow',
       reason: 'all_capabilities_allowed',
       beforeExecute: () => revalidators.every((revalidate) => revalidate()),
+      ...(approvalDecision === undefined ? {} : { approvalDecision }),
+      ...(userInputSelection === undefined ? {} : { userInputSelection }),
     };
   }
 
@@ -239,6 +258,28 @@ export class ApprovalCoordinator {
     const current = this.options.persistence.getApproval(command.taskId, command.approvalId);
     if (current === undefined) throw new Error('APPROVAL_NOT_FOUND');
     if (current.turnId !== command.turnId) throw new Error('APPROVAL_TASK_OR_TURN_MISMATCH');
+    const waiter = this.waiters.get(command.approvalId);
+    const userInputRequest = waiter?.request.entry.providerName === 'request_user_input';
+    if (userInputRequest) {
+      const choices = (waiter.request.input as { choices?: unknown }).choices;
+      if (
+        !Array.isArray(choices) ||
+        !Number.isInteger(command.userInputSelection) ||
+        command.userInputSelection! < 0 ||
+        command.userInputSelection! >= choices.length
+      )
+        throw new Error('APPROVAL_USER_INPUT_SELECTION_INVALID');
+      const auditDecision =
+        command.userInputSelection === 0
+          ? 'allow_once'
+          : command.userInputSelection === 1
+            ? 'allow_task'
+            : 'deny';
+      if (command.decision !== auditDecision)
+        throw new Error('APPROVAL_USER_INPUT_DECISION_MISMATCH');
+    } else if (command.userInputSelection !== undefined)
+      throw new Error('APPROVAL_USER_INPUT_SELECTION_UNEXPECTED');
+    const selectedUserInput = userInputRequest ? command.userInputSelection! : undefined;
     const policyChanged =
       current.policyEpoch !== this.options.getCurrentPolicyEpoch(command.taskId);
     if (!this.options.isTurnActive(command.taskId, command.turnId)) {
@@ -269,7 +310,6 @@ export class ApprovalCoordinator {
       throw new Error(`APPROVAL_${result.approval.state.toUpperCase()}`);
     }
 
-    const waiter = this.waiters.get(command.approvalId);
     if (
       command.decision === 'allow_task' &&
       waiter !== undefined &&
@@ -281,12 +321,13 @@ export class ApprovalCoordinator {
         policyEpoch: current.policyEpoch,
         expiresAt: this.options.expiresAt(),
       });
-    const userInputSelection = waiter?.request.entry.providerName === 'request_user_input';
     this.release(command.approvalId, {
-      decision: command.decision === 'deny' && !userInputSelection ? 'deny' : 'allow',
+      decision: command.decision === 'deny' && !userInputRequest ? 'deny' : 'allow',
       reason: `approval_${command.decision}`,
-      approvalDecision: command.decision,
-      ...(userInputSelection && waiter !== undefined
+      ...(selectedUserInput !== undefined
+        ? { userInputSelection: selectedUserInput }
+        : { approvalDecision: command.decision }),
+      ...(userInputRequest && waiter !== undefined
         ? {
             beforeExecute: () =>
               this.options.isTurnActive(command.taskId, command.turnId) &&

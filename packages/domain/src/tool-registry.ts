@@ -115,6 +115,7 @@ export type ToolExecutionControl = Readonly<{
   callId: string;
   signal?: AbortSignal;
   authorizationDecision?: string;
+  userInputSelection?: number;
 }>;
 
 export type ToolResourceClaim = Readonly<{

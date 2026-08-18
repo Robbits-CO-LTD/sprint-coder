@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolBroker } from './tool-broker';
 import { ToolRegistry } from '@sprint-coder/domain';
 import {
@@ -38,6 +38,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       ])
         registry.register(definition);
       const commandRows = new Map<string, { state: string; outputBytes: number }>();
+      const backgroundTransitions: string[] = [];
       const boundary = {
         persistence: {
           readTurnWorkspaceSet: () => ({
@@ -89,7 +90,10 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
           },
           getCommand: (id: string) => ({ id, ...commandRows.get(id)! }) as never,
           createBackgroundActivity: () => ({}) as never,
-          transitionBackgroundActivity: () => ({}) as never,
+          transitionBackgroundActivity: (_id: string, state: string) => {
+            backgroundTransitions.push(state);
+            return {} as never;
+          },
           completeBackgroundActivity: () => ({}) as never,
           recordCommandVerification: () => null,
         },
@@ -153,6 +157,28 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       expect(() =>
         sessions.poll(started.sessionId, { taskId: 'task-2', turnId: 'turn-2' }),
       ).toThrow('owner mismatch');
+
+      const canceled = (await broker.dispatch({
+        ...owner,
+        callId: 'exec-canceled',
+        providerName: 'exec_command',
+        input: {
+          executable: '/bin/sh',
+          argv: ['-c', 'while :; do sleep 1; done'],
+          purpose: 'cancel persistence contract',
+          background: true,
+        },
+      })) as { sessionId: string };
+      await broker.dispatch({
+        ...owner,
+        callId: 'terminate-canceled',
+        providerName: 'terminate_command',
+        input: { sessionId: canceled.sessionId },
+      });
+      await expect(sessions.wait(canceled.sessionId, owner)).resolves.toMatchObject({
+        state: 'canceled',
+      });
+      await vi.waitFor(() => expect(backgroundTransitions).toContain('canceled'));
 
       const autoBackgrounded = (await broker.dispatch({
         ...owner,

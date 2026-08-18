@@ -19,6 +19,11 @@ import {
 } from './tool-broker';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
+import {
+  REQUEST_USER_INPUT_TOOL,
+  UPDATE_PLAN_TOOL,
+  registerManagedControlTools,
+} from './default-tools';
 
 const NOW = '2026-07-22T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-22T13:00:00.000Z';
@@ -283,6 +288,40 @@ function resolveCommand(approval: StoredApproval, decision: Decision) {
 }
 
 describe('ApprovalCoordinator', () => {
+  it('keeps a user choice separate from permission scope and never creates a Task grant', async () => {
+    const harness = createHarness();
+    const registry = new ToolRegistry();
+    registry.register(UPDATE_PLAN_TOOL);
+    registry.register(REQUEST_USER_INPUT_TOOL);
+    const broker = new ToolBroker(
+      registry,
+      () => 7,
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    registerManagedControlTools(broker);
+    broker.startTurn(toolContext, 'mock');
+    const dispatch = broker.dispatch({
+      ...toolContext,
+      callId: 'user-input-call',
+      providerName: 'request_user_input',
+      input: { question: 'Choose', choices: ['Safe', 'Fast', 'Compatible'] },
+    });
+    const approval = await waitForPublished(harness);
+    expect(() => harness.coordinator.resolve(resolveCommand(approval, 'allow_task'))).toThrow(
+      'APPROVAL_USER_INPUT_SELECTION_INVALID',
+    );
+    harness.coordinator.resolve({
+      ...resolveCommand(approval, 'allow_task'),
+      userInputSelection: 1,
+    });
+    await expect(dispatch).resolves.toEqual({
+      question: 'Choose',
+      selectedIndex: 1,
+      selected: 'Fast',
+    });
+    expect(harness.persistence.grants).toEqual([]);
+  });
+
   it('never persists file content or patch text in an approval display', async () => {
     const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-approval-redaction-'));
     try {
