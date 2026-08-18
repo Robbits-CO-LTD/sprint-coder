@@ -101,12 +101,29 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
     };
     let executable_path = Path::new(executable);
     let executable_acl_required = !is_windows_system_path(executable_path);
+    let executable_ancestors = if executable_acl_required {
+        executable_path
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .filter(|path| path.parent().is_some())
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     if !set_acl(&root, &sid_string, true)
         || (executable_acl_required && !set_acl(executable_path, &sid_string, false))
+        || executable_ancestors
+            .iter()
+            .any(|path| !set_acl(path, &sid_string, false))
     {
         remove_acl(&root, &sid_string, true);
         if executable_acl_required {
             remove_acl(executable_path, &sid_string, false);
+        }
+        for path in executable_ancestors.iter().rev() {
+            remove_acl(path, &sid_string, false);
         }
         return Err("appcontainer_acl_failed".to_owned());
     }
@@ -114,6 +131,9 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
     remove_acl(&root, &sid_string, true);
     if executable_acl_required {
         remove_acl(executable_path, &sid_string, false);
+    }
+    for path in executable_ancestors.iter().rev() {
+        remove_acl(path, &sid_string, false);
     }
     result.map_err(|code| format!("appcontainer_process_failed_{code}"))
 }
