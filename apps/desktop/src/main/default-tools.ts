@@ -105,13 +105,15 @@ function managedCommandControlTool(
   return createToolDefinition({
     toolId: createToolId({ provider: 'builtin', namespace: 'command', name, version: '1' }),
     providerName,
-    kind: 'backgroundTask',
+    // These calls can only address a random, Task/Turn-bound session that was already authorized
+    // by exec_command. They do not mint new process authority, so ownership is the boundary.
+    kind: 'search',
     schemaVersion: 1,
     inputSchema: { type: 'object', properties, required, additionalProperties: false },
     outputSchema: { type: 'object' },
-    sideEffect: 'control',
-    risk: 'high',
-    requiredCapabilities: ['shell.execute'],
+    sideEffect: 'none',
+    risk: 'low',
+    requiredCapabilities: [],
     executionTarget: 'main',
     implementationKind: 'built-in',
     priority: 10,
