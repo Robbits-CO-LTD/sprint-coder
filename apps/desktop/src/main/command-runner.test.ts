@@ -192,7 +192,7 @@ describe('CommandRunner', () => {
     ).rejects.toThrow();
   });
 
-  it.runIf(process.platform === 'darwin')(
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     'enforces workspace-write and network-deny through the packaged sandbox helper',
     async () => {
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-command-'));
