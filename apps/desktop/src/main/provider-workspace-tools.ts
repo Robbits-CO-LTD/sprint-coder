@@ -18,7 +18,6 @@ import {
 import { ToolBroker, type ManagedToolLifecycleEvent, type ToolAuthorizer } from './tool-broker';
 import { CommandRunner } from './command-runner';
 import {
-  COMMAND_RUNNER_TOOL,
   MANAGED_EXEC_COMMAND_TOOL,
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,

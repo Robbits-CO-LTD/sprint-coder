@@ -18,7 +18,7 @@ import {
 import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
-import { ManagedCommandSessions } from './managed-command-sessions';
+import type { ManagedCommandSessions } from './managed-command-sessions';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
