@@ -711,6 +711,34 @@ describe('CommandRunner', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'streams stdin to the owned foreground command',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          "process.stdin.setEncoding('utf8'); let s=''; process.stdin.on('data', c => s += c); process.stdin.on('end', () => process.stdout.write(s.toUpperCase()))",
+        ],
+        cwd: '.',
+      });
+      const runner = new CommandRunner();
+      let output = '';
+      const result = await runner.run(spec, {
+        onStarted: ({ executionId }) => {
+          expect(runner.writeStdin(executionId, 'managed input', true)).toBe(true);
+        },
+        onChunk: ({ stream, text }) => {
+          if (stream === 'stdout') output += text;
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(output).toBe('MANAGED INPUT');
+    },
+  );
+
   // Regression (CI-only flake on ubuntu, chased down to a real data-loss bug): while a batch is
   // awaiting a slow sink, more output can arrive. `queueText` merged that arrival into the LAST
   // pending segment — but when that segment is already inside the in-flight batch, the batch the

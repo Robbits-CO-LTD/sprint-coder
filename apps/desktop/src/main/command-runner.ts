@@ -77,6 +77,7 @@ const POSIX_COMMAND_WRAPPER = String.raw`
 IFS= read -r control_nonce <&4 || exit 125
 exec 4<&-
 trap '' TERM
+exec 6<&0
 if [ ! -x "$1" ]; then
   printf '{"nonce":"%s","type":"spawnError","status":126}\n' "$control_nonce" >&3
   exec /bin/sleep 2147483647
@@ -85,7 +86,7 @@ fi
   trap - TERM
   IFS= read -r gate <&5 || exit 125
   exec 5<&-
-  exec "$@" 3>&-
+  exec "$@" 3>&- <&6 6<&-
 ) &
 target_pid=$!
 printf '{"nonce":"%s","type":"started","pid":%s}\n' "$control_nonce" "$target_pid" >&3
@@ -253,6 +254,21 @@ export class CommandRunner {
     return this.active.size;
   }
 
+  writeStdin(executionId: string, chars: string, close = false): boolean {
+    const active = this.active.get(executionId);
+    if (active === undefined || active.child.stdin === null || active.child.stdin.destroyed)
+      return false;
+    if (chars.length > 0) active.child.stdin.write(chars);
+    if (close) active.child.stdin.end();
+    return true;
+  }
+
+  terminate(executionId: string, force = false): boolean {
+    const active = this.active.get(executionId);
+    if (active === undefined) return false;
+    return this.signalOwnedTree(executionId, active.lease, force ? 'SIGKILL' : 'SIGTERM');
+  }
+
   async dispose(): Promise<void> {
     const entries = [...this.active.entries()];
     const forceResults = await Promise.allSettled(
@@ -345,8 +361,8 @@ export class CommandRunner {
             env: buildEnvironment(spec.envDelta, executionImage.environment),
             shell: false,
             stdio: windows
-              ? ['pipe', 'pipe', 'pipe']
-              : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
+              ? ['pipe', 'pipe', 'pipe', 'pipe']
+              : ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
             detached: !windows,
             windowsHide: true,
           },
@@ -371,7 +387,8 @@ export class CommandRunner {
       if (process.platform === 'win32') {
         try {
           assignProcessToOwnedJob(child.pid, executionId);
-          child.stdin?.end(
+          const controlInput = child.stdio[3] as NodeJS.WritableStream | null | undefined;
+          controlInput?.end(
             JSON.stringify({
               executable: executionImage.launchPath,
               nativeAddonPath: nativeSafeFsAddonPath(),
