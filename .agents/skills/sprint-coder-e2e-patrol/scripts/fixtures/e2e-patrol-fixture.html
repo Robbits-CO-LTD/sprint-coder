@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>E2E Patrol Fixture</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; margin: 3rem; max-width: 42rem; }
+    label, button, output { display: block; margin-top: 1rem; }
+    input { padding: 0.5rem; width: 20rem; }
+    button { padding: 0.6rem 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Preference fixture</h1>
+    <p id="contract">Saving a preference must show Saved.</p>
+    <label for="preference">Preference</label>
+    <input id="preference" data-testid="preference-input" value="Compact">
+    <button id="save" data-testid="save-preference" type="button">Save preference</button>
+    <output id="status" data-testid="save-status" aria-live="polite">Not saved</output>
+  </main>
+  <script>
+    const normal = new URLSearchParams(location.search).get("mode") === "normal";
+    document.querySelector("#save").addEventListener("click", () => {
+      document.querySelector("#status").textContent = normal ? "Saved" : "Not saved";
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sprint Coder E2E Patrol"
+  short_description: "開発buildを可視E2Eし再現済み不具合だけをIssue化"
+  default_prompt: "Use $sprint-coder-e2e-patrol to inspect the Sprint Coder development build and file only verified, deduplicated issues."

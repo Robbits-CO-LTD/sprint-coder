@@ -1,0 +1,4 @@
+interface:
+  display_name: "Robbits Countercheck"
+  short_description: "完了条件、根拠、範囲、品質を反証し、重要な見落としを検出する"
+  default_prompt: "Use $robbits-countercheck to challenge this work for missed requirements, weak evidence, overreach, and incomplete closeout."
