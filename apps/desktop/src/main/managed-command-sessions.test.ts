@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { prepareExecutionSpec } from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
+import { probeSandboxRunner } from './sandbox-runner';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -14,6 +15,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'ManagedCommandSessions',
   () => {
     it('backgrounds, polls, writes stdin, and returns the terminal result', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-session-'));
       roots.push(workspace);
       const spec = await prepareExecutionSpec({
@@ -37,6 +39,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     });
 
     it('terminates one owned background session without affecting another', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-terminate-'));
       roots.push(workspace);
       const spec = await prepareExecutionSpec({

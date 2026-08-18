@@ -15,6 +15,7 @@ import {
 } from './default-tools';
 import { CommandRunner } from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
+import { probeSandboxRunner } from './sandbox-runner';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -25,6 +26,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'managed command tool contract',
   () => {
     it('executes, writes, polls, and enforces Turn ownership through one Broker', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-tools-'));
       roots.push(workspace);
       const registry = new ToolRegistry();

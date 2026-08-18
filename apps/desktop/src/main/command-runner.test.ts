@@ -28,6 +28,7 @@ import {
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
 } from './command-runner';
+import { probeSandboxRunner } from './sandbox-runner';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -195,6 +196,7 @@ describe('CommandRunner', () => {
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     'enforces workspace-write and network-deny through the packaged sandbox helper',
     async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-command-'));
       const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-outside-'));
       roots.push(workspace, outside);
