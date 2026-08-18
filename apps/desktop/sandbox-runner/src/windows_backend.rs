@@ -52,28 +52,6 @@ pub fn restricted_token_probe() -> Result<(), String> {
     if std::fs::copy(command_source, &command_executable).is_err() {
         return Err("appcontainer_probe_executable_failed".to_owned());
     }
-    let script = format!(
-        "(echo inside>\"{}\" & echo outside>\"{}\") >NUL 2>NUL",
-        inside_marker.display(),
-        outside_marker.display()
-    );
-    let filesystem_execution = execute_impl(
-        &inside,
-        &command_executable.to_string_lossy(),
-        &["/D".into(), "/S".into(), "/C".into(), script],
-    );
-    let filesystem_result = match filesystem_execution {
-        Ok(_) if inside_marker.is_file() && !outside_marker.exists() => Ok(()),
-        Ok(_) if !inside_marker.is_file() => {
-            Err("appcontainer_probe_workspace_write_failed".to_owned())
-        }
-        Ok(_) => Err("appcontainer_probe_outside_write_succeeded".to_owned()),
-        Err(reason) => Err(reason),
-    };
-    if let Err(reason) = filesystem_result {
-        let _ = std::fs::remove_dir_all(base);
-        return Err(reason);
-    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .map_err(|_| "appcontainer_probe_listener_failed".to_owned())?;
     listener
@@ -89,21 +67,28 @@ pub fn restricted_token_probe() -> Result<(), String> {
         let _ = std::fs::remove_dir_all(base);
         return Err("appcontainer_probe_network_executable_failed".to_owned());
     }
-    let network_execution = execute_impl(
-        &inside,
-        &curl_executable.to_string_lossy(),
-        &[
-            "--silent".into(),
-            "--output".into(),
-            "NUL".into(),
-            "--max-time".into(),
-            "1".into(),
-            format!("http://127.0.0.1:{port}/"),
-        ],
+    let script = format!(
+        "(echo inside>\"{}\" & echo outside>\"{}\") >NUL 2>NUL & \"{}\" --silent --output NUL --max-time 1 http://127.0.0.1:{port}/ >NUL 2>NUL",
+        inside_marker.display(),
+        outside_marker.display(),
+        curl_executable.display(),
     );
-    let result = match network_execution {
-        Ok(_) if listener.accept().is_err() => Ok(()),
-        Ok(_) => Err("appcontainer_probe_network_succeeded".to_owned()),
+    let execution = execute_impl(
+        &inside,
+        &command_executable.to_string_lossy(),
+        &["/D".into(), "/S".into(), "/C".into(), script],
+    );
+    let result = match execution {
+        Ok(_) if !inside_marker.is_file() => {
+            Err("appcontainer_probe_workspace_write_failed".to_owned())
+        }
+        Ok(_) if outside_marker.exists() => {
+            Err("appcontainer_probe_outside_write_succeeded".to_owned())
+        }
+        Ok(_) if listener.accept().is_ok() => {
+            Err("appcontainer_probe_network_succeeded".to_owned())
+        }
+        Ok(_) => Ok(()),
         Err(reason) => Err(reason),
     };
     let _ = std::fs::remove_dir_all(base);
