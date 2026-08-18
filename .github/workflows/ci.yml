@@ -144,6 +144,9 @@ jobs:
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
+
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@v6
@@ -309,6 +312,13 @@ jobs:
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
+
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@v6
@@ -371,6 +381,10 @@ jobs:
         run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
+      - name: Install Linux sandbox dependency
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@v6
@@ -413,6 +427,8 @@ jobs:
         run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@v6

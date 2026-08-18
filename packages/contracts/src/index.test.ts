@@ -1190,6 +1190,11 @@ describe('public contracts', () => {
           requiredCapabilities: ['workspace.read'],
           executionTarget: 'main',
           implementationKind: 'built-in',
+          description: 'Read one Workspace file',
+          parallelism: 'parallel',
+          maxOutputBytes: 1_048_576,
+          supportsCancellation: false,
+          supportsBackground: false,
         },
       ],
       digest,
@@ -1199,6 +1204,8 @@ describe('public contracts', () => {
       { ...snapshot, entries: [{ ...snapshot.entries[0], risk: 'root' }] },
       { ...snapshot, entries: [{ ...snapshot.entries[0], sideEffect: 'unknown' }] },
       { ...snapshot, entries: [{ ...snapshot.entries[0], schemaVersion: 0 }] },
+      { ...snapshot, entries: [{ ...snapshot.entries[0], parallelism: 'unbounded' }] },
+      { ...snapshot, entries: [{ ...snapshot.entries[0], maxOutputBytes: 0 }] },
       { ...snapshot, entries: [{ ...snapshot.entries[0], requiredCapabilities: ['root'] }] },
       { ...snapshot, entries: [{ ...snapshot.entries[0], version: '2' }] },
       {
@@ -1259,6 +1266,16 @@ describe('public contracts', () => {
       challenge: 'approval-challenge-0001',
     };
     expect(approvalContracts.approvalResolveInputSchema.parse(resolve)).toEqual(resolve);
+    expect(
+      approvalContracts.approvalResolveInputSchema.parse({ ...resolve, userInputSelection: 1 }),
+    ).toEqual({ ...resolve, userInputSelection: 1 });
+    for (const userInputSelection of [-1, 3, 1.5])
+      expect(() =>
+        approvalContracts.approvalResolveInputSchema.parse({
+          ...resolve,
+          userInputSelection,
+        }),
+      ).toThrow();
     for (const forged of [
       { ...resolve, capability: 'shell.execute' },
       { ...resolve, resource: { kind: 'all' } },

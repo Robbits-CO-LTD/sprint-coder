@@ -15,6 +15,8 @@ import {
 } from './intelligence-loop';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { ToolAuthorizationDeniedError, type ToolAuthorizer } from './tool-broker';
+import type { ToolBroker } from './tool-broker';
+import type { ManagedCodingHarness } from './provider-workspace-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { createTeamScenarioSampler, isTeamScenarioFixtureInput } from './team-tools';
 
@@ -42,6 +44,8 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
     Pick<
       PersistenceClient,
       | 'getWorkspace'
+      | 'getTask'
+      | 'getTurnSkills'
       | 'getEffectiveWorkspaceSet'
       | 'readTurnWorkspaceSet'
       | 'getTurnWorkspaceRootIdentities'
@@ -57,6 +61,10 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       | 'appendCommandOutputBatch'
       | 'completeCommand'
       | 'getCommand'
+      | 'createBackgroundActivity'
+      | 'transitionBackgroundActivity'
+      | 'completeBackgroundActivity'
+      | 'recordCommandVerification'
       | 'getTeamByTask'
       | 'recordFileChanges'
     >
@@ -66,7 +74,8 @@ const executionStages: TurnStage[] = ['understanding', 'planning', 'executing'];
 
 export class MockRuntimeAdapter {
   private readonly active = new Map<string, ActiveTurn>();
-  private readonly toolBroker;
+  private readonly toolBroker: ToolBroker;
+  private readonly ownsToolBroker: boolean;
 
   constructor(
     private readonly persistence: RuntimePersistence,
@@ -94,27 +103,35 @@ export class MockRuntimeAdapter {
       text: string,
       complete: boolean,
     ) => void,
+    private readonly managedHarness?: ManagedCodingHarness,
   ) {
-    this.toolBroker = createDefaultToolBroker(
-      (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
-      authorizer,
-      {
-        persistence: this.persistence as Pick<
-          PersistenceClient,
-          | 'readTurnWorkspaceSet'
-          | 'getTurnWorkspaceRootIdentities'
-          | 'prepareCommand'
-          | 'beginCommand'
-          | 'startCommand'
-          | 'appendCommandOutput'
-          | 'appendCommandOutputBatch'
-          | 'completeCommand'
-          | 'getCommand'
-        >,
-        publish: this.publish,
-      },
-      this.teamCoordinator === undefined ? undefined : { coordinator: this.teamCoordinator },
-    );
+    this.ownsToolBroker = managedHarness === undefined;
+    this.toolBroker =
+      managedHarness?.broker ??
+      createDefaultToolBroker(
+        (taskId) => this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0,
+        authorizer,
+        {
+          persistence: this.persistence as Pick<
+            PersistenceClient,
+            | 'readTurnWorkspaceSet'
+            | 'getTurnWorkspaceRootIdentities'
+            | 'prepareCommand'
+            | 'beginCommand'
+            | 'startCommand'
+            | 'appendCommandOutput'
+            | 'appendCommandOutputBatch'
+            | 'completeCommand'
+            | 'getCommand'
+            | 'createBackgroundActivity'
+            | 'transitionBackgroundActivity'
+            | 'completeBackgroundActivity'
+            | 'recordCommandVerification'
+          >,
+          publish: this.publish,
+        },
+        this.teamCoordinator === undefined ? undefined : { coordinator: this.teamCoordinator },
+      );
   }
 
   start(taskId: string, turnId: string, input: string, teamTurn = false): void {
@@ -163,7 +180,10 @@ export class MockRuntimeAdapter {
       control.canceled = true;
       control.abortController.abort();
     }
-    await Promise.all([this.toolBroker.dispose(), ...settlements]);
+    await Promise.all([
+      ...(this.ownsToolBroker ? [this.toolBroker.dispose()] : []),
+      ...settlements,
+    ]);
   }
 
   private async run(
@@ -234,7 +254,22 @@ export class MockRuntimeAdapter {
       const contractRevision =
         this.persistence.getAcceptanceContract?.(taskId, turnId).revision ?? null;
       const toolContext = { taskId, turnId, workspaceId, policyEpoch } as const;
-      const toolCatalogSnapshot = startMockTurnCatalog(this.toolBroker, toolContext);
+      const turnSkills = this.persistence.getTurnSkills?.(taskId, turnId) ?? [];
+      const skillCreatorTurn = turnSkills.some(
+        ({ selection }) =>
+          selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
+      );
+      const importSkillTurn = turnSkills.some(
+        ({ selection }) =>
+          selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
+      );
+      const toolCatalogSnapshot =
+        this.managedHarness?.startTurn(toolContext, 'mock', {
+          projectMemory: (this.persistence.getTask?.(taskId)?.projectId ?? null) !== null,
+          skillDrafts: skillCreatorTurn,
+          skillImports: importSkillTurn,
+          ...(importSkillTurn ? { skillImportUserText: input } : {}),
+        }) ?? startMockTurnCatalog(this.toolBroker, toolContext);
       const recorder = intelligenceRecorder(this.persistence, this.serialize, taskId);
       // The fixed three-Worker orchestration is an E2E fixture, never a fallback for a natural
       // Team request. Mock cannot interpret arbitrary Team operations such as reading a
@@ -244,6 +279,12 @@ export class MockRuntimeAdapter {
       const mockReply = teamTurn
         ? 'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。架空のメンバーや別のsubagentには置き換えていません。CodexまたはClaude Runtimeで再試行してください。'
         : buildReply(input);
+      const mockMode =
+        this.managedHarness !== undefined &&
+        !input.includes('承認テスト') &&
+        !input.includes('コマンドテスト')
+          ? ('answer-only' as const)
+          : ('mock-tool' as const);
       const loop = await runIntelligenceLoop({
         taskId,
         turnId,
@@ -257,7 +298,7 @@ export class MockRuntimeAdapter {
         toolCatalogSnapshot,
         sample: teamFixtureActive
           ? createTeamScenarioSampler(input)
-          : createDeterministicMockSampler(input, mockReply),
+          : createDeterministicMockSampler(input, mockReply, mockMode),
         executeTool: async (call) => {
           let result: unknown;
           try {
@@ -311,7 +352,8 @@ export class MockRuntimeAdapter {
         }
       }
     } finally {
-      this.toolBroker.finishTurn(taskId, turnId);
+      if (this.managedHarness !== undefined) this.managedHarness.finishTurn(taskId, turnId);
+      else this.toolBroker.finishTurn(taskId, turnId);
       this.active.delete(turnId);
       control.resolveSettled();
     }

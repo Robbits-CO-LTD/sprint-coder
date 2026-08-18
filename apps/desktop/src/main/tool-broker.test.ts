@@ -550,4 +550,227 @@ describe('Main ToolBroker', () => {
       }),
     ).toThrow('reserved for Public Beta');
   });
+
+  it('serializes process and mutation claims within one Turn', async () => {
+    const { registry, command } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizeAll);
+    let active = 0;
+    let maximum = 0;
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      execute: async () => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return {};
+      },
+    });
+    broker.startTurn(context, 'mock');
+    await Promise.all([
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'command-one',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['one'] },
+      }),
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'command-two',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['two'] },
+      }),
+    ]);
+    expect(maximum).toBe(1);
+  });
+
+  it('derives independent scheduler keys from prepared tool input', async () => {
+    const { registry, command } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizeAll);
+    let active = 0;
+    let maximum = 0;
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      resourceClaims: (input) => [
+        {
+          key: `workspace:${(input as { argv: string[] }).argv[0]}`,
+          mode: 'write',
+        },
+      ],
+      execute: async () => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return {};
+      },
+    });
+    broker.startTurn(context, 'mock');
+    await Promise.all([
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'independent-one',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['root-a'] },
+      }),
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'independent-two',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['root-b'] },
+      }),
+    ]);
+    expect(maximum).toBe(2);
+  });
+
+  it('returns concurrently completed results to the Runtime in call ordinal order', async () => {
+    const { registry, echo } = createRegistry();
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const broker = new ToolBroker(registry, () => 3, authorizePure);
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => {
+        const value = input as { text: string };
+        if (value.text === 'first') await firstGate;
+        return value;
+      },
+    });
+    broker.startTurn(context, 'mock');
+    const returned: string[] = [];
+    const first = broker
+      .dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'ordered-1',
+        providerName: 'mock_echo',
+        input: { text: 'first' },
+      })
+      .then(() => returned.push('first'));
+    const second = broker
+      .dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'ordered-2',
+        providerName: 'mock_echo',
+        input: { text: 'second' },
+      })
+      .then(() => returned.push('second'));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(returned).toEqual([]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(returned).toEqual(['first', 'second']);
+  });
+
+  it('bounds parallel read-only tool execution', async () => {
+    const { registry, echo } = createRegistry();
+    let active = 0;
+    let maximum = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const broker = new ToolBroker(registry, () => 3, authorizePure);
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await gate;
+        active -= 1;
+        return input;
+      },
+    });
+    broker.startTurn(context, 'mock');
+    const calls = Array.from({ length: 9 }, (_, index) =>
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: `bounded-${index}`,
+        providerName: 'mock_echo',
+        input: { text: String(index) },
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(maximum).toBe(8);
+    release();
+    await Promise.all(calls);
+  });
+
+  it('enforces sealed output metadata without inferring background authority for other tools', async () => {
+    const { registry, echo, command } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizeAll);
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: () => ({ text: 'x'.repeat(1024 * 1024) }),
+    });
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      execute: () => ({ state: 'running', sessionId: 'forged-session' }),
+    });
+    broker.startTurn(context, 'mock');
+    await expect(
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'oversized-output',
+        providerName: 'mock_echo',
+        input: { text: 'go' },
+      }),
+    ).rejects.toThrow('pinned output limit');
+    await expect(
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'forged-background',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: [] },
+      }),
+    ).resolves.toEqual({ state: 'running', sessionId: 'forged-session' });
+  });
+
+  it('emits one ordered terminal lifecycle for a successful managed call', async () => {
+    const { registry, echo } = createRegistry();
+    const states: string[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizePure,
+      (event) => states.push(event.state),
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: (input) => input,
+    });
+    broker.startTurn(context, 'mock');
+    await broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'lifecycle-one',
+      providerName: 'mock_echo',
+      input: { text: 'ok' },
+    });
+    expect(states).toEqual([
+      'requested',
+      'prepared',
+      'awaiting_approval',
+      'queued',
+      'running',
+      'succeeded',
+    ]);
+  });
 });

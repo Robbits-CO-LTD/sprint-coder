@@ -662,6 +662,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       expect.objectContaining({ id: 'manager-1', canDelegate: true }),
       expect.any(String),
       undefined,
+      expect.objectContaining({ entries: expect.any(Array), digest: expect.any(String) }),
     );
     expect(runtimeHostMock.starts).toHaveLength(1);
     expect(runtimeHostMock.starts[0]?.args[7]).toEqual({
@@ -687,6 +688,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       expect.objectContaining({ id: 'worker-1', canDelegate: false }),
       expect.any(String),
       undefined,
+      expect.objectContaining({ entries: expect.any(Array), digest: expect.any(String) }),
     );
     expect(runtimeHostMock.starts[0]?.args[7]).toBeUndefined();
 

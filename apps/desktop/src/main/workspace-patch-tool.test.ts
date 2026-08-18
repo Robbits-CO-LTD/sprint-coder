@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
 import {
   executeWorkspacePatch,
+  executeWorkspacePatchBatch,
   executeWorkspaceCreateFile,
   executeWorkspaceCreateDirectory,
   WorkspacePatchRejection,
@@ -136,6 +137,36 @@ describe('the agent edit tool', () => {
     });
     // The tool is not an effect boundary: the file is untouched until the Saga applies the plan.
     expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
+  });
+
+  it('plans add and revision-bound update as one batch Saga', async () => {
+    const { deps, applied, patchWriteGuard, patchReadGuard, createGuard } = await harness();
+    const revision = await deps.revisions.readGuarded({
+      owner: context,
+      guard: patchReadGuard,
+      policyEpoch: 1,
+    });
+    const result = await executeWorkspacePatchBatch(
+      {
+        operations: [
+          {
+            kind: 'update',
+            path: 'src/a.txt',
+            revision: revision.reference,
+            edits: [{ oldText: 'return input + 1', newText: 'return input + 2' }],
+          },
+          { kind: 'add', path: 'src/new.txt', content: 'new\n' },
+        ],
+      },
+      context,
+      deps,
+      [patchWriteGuard, createGuard],
+    );
+    expect(result).toMatchObject({ state: 'committed', operations: 2 });
+    expect(applied[0]?.plan.operations).toMatchObject([
+      { kind: 'update', path: 'src/a.txt' },
+      { kind: 'add', path: 'src/new.txt' },
+    ]);
   });
 
   it('plans an exclusive add through the same Saga boundary', async () => {

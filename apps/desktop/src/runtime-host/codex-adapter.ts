@@ -23,6 +23,7 @@ import type {
   RuntimeWriteScope,
   TurnStage,
 } from '@sprint-coder/contracts';
+import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type {
   RuntimeCanonicalEvent,
   RuntimeCodexConfigPolicy,
@@ -72,6 +73,12 @@ type ActiveProcess = {
 };
 type EmitEvent = (event: RuntimeCanonicalEvent) => void;
 type EmitError = (error: PublicError, diagnostic?: RuntimeFailureDiagnostic) => void;
+type InvokeManagedTool = (input: {
+  callId: string;
+  toolName: string;
+  arguments: unknown;
+  catalogDigest: string;
+}) => Promise<{ success: boolean; output: unknown }>;
 export type CodexLocalImagePreparation = Readonly<{
   paths: readonly string[];
   beforeTurnStart: () => Promise<void>;
@@ -214,6 +221,8 @@ export class CodexRuntimeAdapter {
     localImages?: CodexLocalImagePreparation,
     codexConfigPolicy: RuntimeCodexConfigPolicy = { inheritUserConfig: false },
     runtimeProcessStarted?: (pid: number) => void,
+    toolCatalogSnapshot?: ToolCatalogSnapshot,
+    invokeManagedTool?: InvokeManagedTool,
   ): void {
     let localImageReleasePromise: Promise<void> | null = null;
     const releaseLocalImages = (): Promise<void> => {
@@ -287,7 +296,6 @@ export class CodexRuntimeAdapter {
           command: nodeCommand,
           scriptPath,
           toolNames: teamMcp.toolNames,
-          enableWebSearch: teamMcp.enableWebSearch === true,
         };
       }
       prepared = {
@@ -327,18 +335,17 @@ export class CodexRuntimeAdapter {
       teamMcpProfile,
       skillIsolation,
     } = prepared;
-    // No Workspace means the cwd is a throwaway temp directory, so a write scope there would
-    // produce edits the user can never see. Main already refuses to send anything but 'read-only'
-    // in that case; this is the adapter refusing independently, so the two would have to fail
-    // together for a write to escape.
-    const effectiveScope: RuntimeWriteScope = primaryRootPresent ? writeScope : 'read-only';
+    // Native Codex filesystem and command execution are permanently disabled. Main's sealed
+    // catalog is the only source of write scope; the outer Codex process always stays read-only.
+    void primaryRootPresent;
+    void writeScope;
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(
         this.cli?.executable ?? resolveCodexCommand(this.command),
         [
           ...this.commandPrefixArgs,
-          ...buildCodexArgs(model, effort, effectiveScope, teamMcpProfile, skillIsolation),
+          ...buildCodexArgs(model, effort, teamMcpProfile, skillIsolation),
         ],
         {
           cwd,
@@ -425,6 +432,8 @@ export class CodexRuntimeAdapter {
     let skillIsolationReady = false;
     let skillIsolationVerificationPending = false;
     let teamDynamicTools: readonly CodexDynamicToolSpec[] = [];
+    const managedDynamicTools =
+      toolCatalogSnapshot === undefined ? [] : buildCodexManagedDynamicTools(toolCatalogSnapshot);
     let activeThreadId: string | null = null;
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
@@ -476,7 +485,10 @@ export class CodexRuntimeAdapter {
           (typeof message['id'] === 'number' || typeof message['id'] === 'string') &&
           typeof message['method'] === 'string'
         ) {
-          if (message['method'] === 'item/tool/call' && teamMcp !== undefined) {
+          if (
+            message['method'] === 'item/tool/call' &&
+            (teamMcp !== undefined || managedDynamicTools.length > 0)
+          ) {
             const responseId = message['id'];
             void (async () => {
               const canRespond = (): boolean =>
@@ -491,20 +503,33 @@ export class CodexRuntimeAdapter {
                 const threadId = requiredString(params['threadId'], 'dynamic tool thread id');
                 requiredString(params['turnId'], 'dynamic tool turn id');
                 requiredString(params['callId'], 'dynamic tool call id');
-                if (
-                  params['namespace'] !== null ||
-                  threadId !== activeThreadId ||
-                  !teamMcp.toolNames.includes(tool as TeamMcpToolName)
-                )
-                  throw new Error('Unexpected dynamic Team tool');
-                const result = await send('mcpServer/tool/call', {
-                  server: 'team',
-                  threadId,
-                  tool,
-                  arguments: params['arguments'],
-                });
+                if (params['namespace'] !== null || threadId !== activeThreadId)
+                  throw new Error('Unexpected dynamic tool identity');
+                const managed = managedDynamicTools.some(({ name }) => name === tool);
+                let response: CodexDynamicToolResponse;
+                if (managed) {
+                  if (invokeManagedTool === undefined || toolCatalogSnapshot === undefined)
+                    throw new Error('Managed tool bridge is unavailable');
+                  const result = await invokeManagedTool({
+                    callId: requiredString(params['callId'], 'dynamic tool call id'),
+                    toolName: tool,
+                    arguments: params['arguments'],
+                    catalogDigest: toolCatalogSnapshot.digest,
+                  });
+                  response = codexDynamicToolResponseFromManaged(result);
+                } else {
+                  if (teamMcp === undefined || !teamMcp.toolNames.includes(tool as TeamMcpToolName))
+                    throw new Error('Unexpected dynamic Team tool');
+                  const result = await send('mcpServer/tool/call', {
+                    server: 'team',
+                    threadId,
+                    tool,
+                    arguments: params['arguments'],
+                  });
+                  response = codexDynamicToolResponseFromMcp(result);
+                }
                 if (!canRespond()) return;
-                sendResponse(responseId, codexDynamicToolResponseFromMcp(result));
+                sendResponse(responseId, response);
               } catch {
                 if (!canRespond()) return;
                 sendResponse(responseId, {
@@ -591,7 +616,7 @@ export class CodexRuntimeAdapter {
           // Multi-root and client-hosted dynamic Team tools are both gated by the app-server's
           // experimentalApi client capability. The latter is required even though dynamicTools is
           // present in the generated v2 schema.
-          capabilities: codexInitializeCapabilities(multiRoot, teamMcp !== undefined),
+          capabilities: codexInitializeCapabilities(multiRoot, true),
         });
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
@@ -621,14 +646,16 @@ export class CodexRuntimeAdapter {
           verified: true,
         });
         skillIsolationReady = true;
+        const dynamicTools = mergeCodexDynamicTools(managedDynamicTools, teamDynamicTools);
         const threadResult = asRecord(
           await send('thread/start', {
             cwd,
             ...(multiRoot ? { runtimeWorkspaceRoots } : {}),
             approvalPolicy: 'never',
-            sandbox: CODEX_SANDBOX_BY_SCOPE[effectiveScope],
+            sandbox: 'read-only',
+            environments: [],
             ephemeral: true,
-            ...(teamMcp === undefined ? {} : { dynamicTools: teamDynamicTools }),
+            ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
             ...(model === 'auto' ? {} : { model }),
           }),
         );
@@ -797,6 +824,8 @@ function handleCodexNotification(
   }
   if (method === 'item/started') {
     const item = asRecord(params['item']);
+    if (item['type'] === 'commandExecution' || item['type'] === 'fileChange')
+      throw new Error('Codex attempted to bypass the Managed Coding Harness');
     const operation = codexOperationForItem(item, 'started');
     if (operation !== null) {
       advanceStage('executing');
@@ -806,27 +835,12 @@ function handleCodexNotification(
   }
   if (method === 'item/completed') {
     const item = asRecord(params['item']);
+    if (item['type'] === 'commandExecution' || item['type'] === 'fileChange')
+      throw new Error('Codex attempted to bypass the Managed Coding Harness');
     const operation = codexOperationForItem(item, 'completed');
     if (operation !== null) {
       advanceStage('executing');
       emit(operation);
-    }
-    if (item['type'] === 'fileChange' && Array.isArray(item['changes'])) {
-      advanceStage('executing');
-      const changes = item['changes']
-        .map((change) => asRecord(change))
-        .filter(
-          (change) =>
-            typeof change['path'] === 'string' &&
-            (change['kind'] === 'add' ||
-              change['kind'] === 'update' ||
-              change['kind'] === 'delete'),
-        )
-        .map((change) => ({
-          path: change['path'] as string,
-          kind: change['kind'] as 'add' | 'update' | 'delete',
-        }));
-      if (changes.length > 0) emit({ type: 'fileChange', changes });
     }
     return;
   }
@@ -985,7 +999,6 @@ export type CodexTeamMcpProfile = Readonly<{
   command: string;
   scriptPath: string;
   toolNames: readonly TeamMcpToolName[];
-  enableWebSearch?: boolean;
 }>;
 
 export type CodexTeamMcpInventoryValidation = Readonly<{
@@ -1001,6 +1014,31 @@ export type CodexDynamicToolSpec = Readonly<{
   inputSchema: unknown;
   deferLoading: false;
 }>;
+
+export function mergeCodexDynamicTools(
+  managed: readonly CodexDynamicToolSpec[],
+  mcp: readonly CodexDynamicToolSpec[],
+): CodexDynamicToolSpec[] {
+  const names = new Set(managed.map(({ name }) => name));
+  return [...managed, ...mcp.filter(({ name }) => !names.has(name))];
+}
+
+export function buildCodexManagedDynamicTools(
+  snapshot: ToolCatalogSnapshot,
+): CodexDynamicToolSpec[] {
+  const names = new Set<string>();
+  return snapshot.entries.map((entry) => {
+    if (names.has(entry.providerName)) throw new Error('Duplicate managed dynamic tool name');
+    names.add(entry.providerName);
+    return {
+      type: 'function',
+      name: entry.providerName,
+      description: entry.description,
+      inputSchema: JSON.parse(JSON.stringify(entry.inputSchema)) as unknown,
+      deferLoading: false,
+    };
+  });
+}
 
 export function codexInitializeCapabilities(
   multiRoot: boolean,
@@ -1047,10 +1085,51 @@ export function buildCodexTeamDynamicTools(
   });
 }
 
-export function codexDynamicToolResponseFromMcp(response: unknown): {
+type CodexDynamicToolResponse = {
   success: boolean;
-  contentItems: { type: 'inputText'; text: string }[];
-} {
+  contentItems: ({ type: 'inputText'; text: string } | { type: 'inputImage'; imageUrl: string })[];
+};
+
+export function codexDynamicToolResponseFromManaged(response: unknown): CodexDynamicToolResponse {
+  const result = asRecord(response);
+  const output =
+    typeof result['output'] === 'object' && result['output'] !== null
+      ? (result['output'] as Record<string, unknown>)
+      : {};
+  const dataUrl = output['dataUrl'];
+  if (
+    result['success'] === true &&
+    typeof dataUrl === 'string' &&
+    dataUrl.length <= 8 * 1024 * 1024 &&
+    /^data:image\/(?:png|jpeg|webp);base64,[a-zA-Z0-9+/=]+$/u.test(dataUrl)
+  )
+    return {
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: JSON.stringify({
+            path: output['path'],
+            mimeType: output['mimeType'],
+            byteLength: output['byteLength'],
+            sha256: output['sha256'],
+          }).slice(0, 16_384),
+        },
+        { type: 'inputImage', imageUrl: dataUrl },
+      ],
+    };
+  return {
+    success: result['success'] === true,
+    contentItems: [
+      {
+        type: 'inputText',
+        text: JSON.stringify(result['output'] ?? null).slice(0, 1024 * 1024),
+      },
+    ],
+  };
+}
+
+export function codexDynamicToolResponseFromMcp(response: unknown): CodexDynamicToolResponse {
   const result = asRecord(response);
   if (result['isError'] === true)
     return {
@@ -1081,20 +1160,6 @@ export function codexDynamicToolResponseFromMcp(response: unknown): {
 class CodexTeamMcpUnavailableError extends Error {}
 
 /**
- * The Access preset's write scope as a Codex sandbox mode.
- *
- * These are OS-enforced on macOS (Seatbelt), not advisory: verified 2026-07-25 on codex-cli 0.144.4
- * that `workspace-write` writes inside the cwd and that `read-only` refuses `apply_patch` outright.
- * That is what lets the Codex path be presented as a real boundary rather than as a promise the
- * model is asked to keep.
- */
-const CODEX_SANDBOX_BY_SCOPE: Record<RuntimeWriteScope, string> = {
-  'read-only': 'read-only',
-  'workspace-write': 'workspace-write',
-  full: 'danger-full-access',
-};
-
-/**
  * `effort` maps to the `model_reasoning_effort` config key via `-c`, the same override mechanism
  * already used for `approval_policy` and `shell_environment_policy.inherit`.
  *
@@ -1110,7 +1175,6 @@ const CODEX_SANDBOX_BY_SCOPE: Record<RuntimeWriteScope, string> = {
 export function buildCodexArgs(
   model: string,
   effort?: string,
-  _writeScope: RuntimeWriteScope = 'read-only',
   teamMcp?: CodexTeamMcpProfile,
   skillIsolation?: CodexSkillIsolation,
 ): string[] {
@@ -1153,7 +1217,8 @@ export function buildCodexArgs(
           // hatch. Team turns inventory this pinned server and expose only the expected tools as
           // non-deferred dynamic tools. Do not pass the removed feature override: --strict-config
           // must remain valid across supported CLIs.
-          ...(teamMcp.enableWebSearch === true ? ['-c', 'web_search="live"'] : []),
+          // Native Web search is intentionally not enabled. Web is outside this Harness slice and
+          // must enter through the same registry/policy boundary when implemented.
         ]),
     ...(effort === undefined || effort === '' ? [] : ['-c', `model_reasoning_effort="${effort}"`]),
     ...(model === 'auto' ? [] : ['-c', `model="${model}"`]),

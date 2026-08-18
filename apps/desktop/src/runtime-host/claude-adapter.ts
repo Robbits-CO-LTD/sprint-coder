@@ -13,6 +13,7 @@ import { delimiter, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
+import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import desktopPackage from '../../package.json';
 import {
   ClaudeAuthenticationError,
@@ -37,7 +38,6 @@ import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
-import type { TeamMcpToolName } from './team-mcp-tool-contract';
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -214,6 +214,13 @@ export class ClaudeRuntimeAdapter {
     _localImages?: unknown,
     _codexConfigPolicy?: RuntimeCodexConfigPolicy,
     runtimeProcessStarted?: (pid: number) => void,
+    _toolCatalogSnapshot?: ToolCatalogSnapshot,
+    _invokeManagedTool?: (input: {
+      callId: string;
+      toolName: string;
+      arguments: unknown;
+      catalogDigest: string;
+    }) => Promise<{ success: boolean; output: unknown }>,
   ): void {
     if (this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
@@ -243,8 +250,7 @@ export class ClaudeRuntimeAdapter {
       | {
           configPath: string;
           guidance: string;
-          toolNames: readonly TeamMcpToolName[];
-          enableWebSearch: boolean;
+          toolNames: readonly string[];
         }
       | undefined;
     if (teamMcp !== undefined) {
@@ -276,23 +282,23 @@ export class ClaudeRuntimeAdapter {
       teamMcpArgs = {
         configPath,
         guidance: teamMcp.guidance,
-        toolNames: teamMcp.toolNames,
-        enableWebSearch: teamMcp.enableWebSearch === true,
+        toolNames: [
+          ...new Set([
+            ...teamMcp.toolNames,
+            ...(teamMcp.managedTools ?? []).map(({ name }) => name),
+          ]),
+        ],
       };
     }
     // Same independent refusal as the Codex adapter: with no Workspace the cwd is a throwaway temp
     // directory, so nothing may be written there whatever Main asked for.
-    const effectiveScope: RuntimeWriteScope = primaryRoot === undefined ? 'read-only' : writeScope;
+    void writeScope;
     const normalizer = new ClaudeJsonlNormalizer(
-      claudeExpectedCapabilities(
-        effectiveScope,
-        teamMcp?.toolNames,
-        teamMcp?.enableWebSearch === true,
-      ),
+      claudeExpectedCapabilities(teamMcpArgs?.toolNames),
     );
     const child = spawn(
       this.cli?.executable ?? resolveClaudeCommand('claude'),
-      buildClaudeArgs(model, teamMcpArgs, effort, effectiveScope, runtimeWorkspaceRoots),
+      buildClaudeArgs(model, teamMcpArgs, effort, runtimeWorkspaceRoots),
       {
         cwd,
         env: {
@@ -473,17 +479,10 @@ function claudeRateLimitRetryAt(resetAtEpochSeconds: number | null): string | un
 const TEAM_MCP_SERVER_NAME = 'team';
 
 function claudeExpectedCapabilities(
-  writeScope: RuntimeWriteScope,
-  teamMcpToolNames: readonly TeamMcpToolName[] | undefined,
-  enableWebSearch: boolean,
+  teamMcpToolNames: readonly string[] | undefined,
 ): ClaudeExpectedCapabilities {
-  const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
-  const builtInTools =
-    configuredTools === 'default' || !enableWebSearch
-      ? configuredTools
-      : [...configuredTools, 'WebSearch'];
   return {
-    builtInTools,
+    builtInTools: [],
     ...(teamMcpToolNames !== undefined
       ? {
           teamMcp: {
@@ -527,7 +526,7 @@ export function buildClaudePrompt(
 // commands (`"slash_commands":[]`) — while `--mcp-config`'s explicit server (not a "setting
 // source") still connects and `--tools ""` still empties the built-in tool set exactly as
 // without `--safe-mode`. `--strict-mcp-config` then pins the MCP surface to exactly that one
-// server, and `--allowedTools mcp__team__*` further pins it to exactly the 4 team tools.
+// server, and `--allowedTools` further pins it to the sealed per-Turn Team/Managed catalog.
 //
 // `effort` (reasoning effort control, see the ADR amendment) maps straight to `--effort <level>`.
 // Verified directly against the installed CLI: `claude --help` documents "Effort level for the
@@ -536,34 +535,8 @@ export function buildClaudePrompt(
 // a non-fatal warning and falls back to the CLI's own default rather than erroring — so an
 // out-of-range value here degrades gracefully even if it ever reached the CLI unvalidated (Main
 // still validates against `claudeEffortSchema` before it gets this far).
-/**
- * The built-in tool set for each write scope.
- *
- * Read-only gets the read tools rather than the empty set it had before issue #37. The empty set was
- * the stronger statement, but it made the default preset useless in a way that was actively
- * misleading: with no tools at all the model still believes it has them (the system prompt describes
- * them), so it narrates invented tool calls in prose — observed directly, a turn that answered "Let
- * me find the file first. **Tool: bash** …" and then stopped. Read/Glob/Grep cannot write, and
- * `--permission-mode default` is accepted by the supported legacy CLI while this explicit tool
- * allowlist keeps write-capable tools out of the model's runtime surface.
- *
- * The wider sets are an allowlist the CLI applies to itself, NOT an OS boundary —
- * §Managed Runtime is explicit that "単なるtool非公開はsecurity boundaryに数えない", so a Turn run
- * at either of the wider scopes is labelled trusted-unmanaged in the UI. Bash is included from
- * workspace-write up because a code assistant that can edit but not run the test it just changed is
- * not usable; that is exactly the trade the label exists to disclose.
- */
-const CLAUDE_TOOLS_BY_SCOPE: Record<RuntimeWriteScope, readonly string[] | 'default'> = {
-  'read-only': ['Read', 'Glob', 'Grep'],
-  'workspace-write': ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'NotebookEdit', 'Bash'],
-  full: 'default',
-};
-
-const CLAUDE_PERMISSION_MODE_BY_SCOPE: Record<RuntimeWriteScope, string> = {
-  'read-only': 'default',
-  'workspace-write': 'acceptEdits',
-  full: 'bypassPermissions',
-};
+// Native Claude tools stay empty at every Access preset. The authenticated per-turn MCP bridge is
+// the only model-visible tool surface and delegates every operation to Main's Managed Harness.
 
 export function buildClaudeTeamMcpConfig(
   nodeCommand: string,
@@ -589,18 +562,11 @@ export function buildClaudeArgs(
   teamMcp?: {
     configPath: string;
     guidance: string;
-    toolNames: readonly TeamMcpToolName[];
-    enableWebSearch?: boolean;
+    toolNames: readonly string[];
   },
   effort?: string,
-  writeScope: RuntimeWriteScope = 'read-only',
   workspaceRoots: readonly string[] = [],
 ): string[] {
-  const configuredTools = CLAUDE_TOOLS_BY_SCOPE[writeScope];
-  const tools =
-    configuredTools === 'default'
-      ? configuredTools
-      : [...configuredTools, ...(teamMcp?.enableWebSearch === true ? ['WebSearch'] : [])].join(',');
   return [
     '-p',
     '--output-format',
@@ -608,12 +574,9 @@ export function buildClaudeArgs(
     '--verbose',
     '--include-partial-messages',
     '--tools',
-    tools,
-    // Only meaningful once tools exist. `acceptEdits` lets the edit tools through without an
-    // interactive prompt there is no channel for. Read-only uses the legacy-compatible `default`
-    // mode plus the explicit Read/Glob/Grep allowlist, so write tools are never exposed.
+    '',
     '--permission-mode',
-    CLAUDE_PERMISSION_MODE_BY_SCOPE[writeScope],
+    'default',
     // Pins writable paths to the Workspace even at workspace-write. Without it the CLI's own notion
     // of the project root is the cwd, which is the same directory — this makes the intent explicit
     // and survives a future change to how cwd is chosen.
@@ -629,10 +592,7 @@ export function buildClaudeArgs(
           '--mcp-config',
           teamMcp.configPath,
           '--allowedTools',
-          [
-            ...teamMcp.toolNames.map((name) => `mcp__team__${name}`),
-            ...(teamMcp.enableWebSearch === true ? ['WebSearch'] : []),
-          ].join(','),
+          teamMcp.toolNames.map((name) => `mcp__team__${name}`).join(','),
           '--append-system-prompt',
           teamMcp.guidance,
         ]),

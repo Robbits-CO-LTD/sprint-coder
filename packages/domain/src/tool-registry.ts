@@ -50,11 +50,24 @@ export type ToolDefinitionInput = {
   priority: number;
   workspaceBinding: WorkspaceBinding;
   providerCompatibility: readonly string[];
+  description?: string;
+  parallelism?: 'parallel' | 'serial';
+  maxOutputBytes?: number;
+  supportsCancellation?: boolean;
+  supportsBackground?: boolean;
 };
 
 export type ToolDefinition = Readonly<
-  ToolDefinitionInput & {
+  Omit<
+    ToolDefinitionInput,
+    'description' | 'parallelism' | 'maxOutputBytes' | 'supportsCancellation' | 'supportsBackground'
+  > & {
     version: string;
+    description: string;
+    parallelism: 'parallel' | 'serial';
+    maxOutputBytes: number;
+    supportsCancellation: boolean;
+    supportsBackground: boolean;
     inputSchemaDigest: string;
     outputSchemaDigest: string;
     schemaDigest: string;
@@ -76,6 +89,11 @@ export type ToolCatalogEntry = Readonly<{
   requiredCapabilities: readonly Capability[];
   executionTarget: ToolExecutionTarget;
   implementationKind: ToolImplementationKind;
+  description: string;
+  parallelism: 'parallel' | 'serial';
+  maxOutputBytes: number;
+  supportsCancellation: boolean;
+  supportsBackground: boolean;
 }>;
 
 export type ToolCatalogSnapshot = Readonly<{
@@ -96,6 +114,13 @@ export type ToolExecutionContext = Readonly<{
 export type ToolExecutionControl = Readonly<{
   callId: string;
   signal?: AbortSignal;
+  authorizationDecision?: string;
+  userInputSelection?: number;
+}>;
+
+export type ToolResourceClaim = Readonly<{
+  key: string;
+  mode: 'read' | 'write';
 }>;
 
 export type ToolImplementation = Readonly<{
@@ -107,6 +132,7 @@ export type ToolImplementation = Readonly<{
     control: Readonly<{ callId: string }>,
   ) => Promise<unknown> | unknown;
   authorizationDenied?: (input: unknown, context: ToolExecutionContext) => Promise<void> | void;
+  resourceClaims?: (input: unknown, context: ToolExecutionContext) => readonly ToolResourceClaim[];
   execute: (
     input: unknown,
     context: ToolExecutionContext,
@@ -158,6 +184,18 @@ export function createToolDefinition(input: ToolDefinitionInput): ToolDefinition
     throw new Error('Invalid tool schema version');
   if (!Number.isInteger(input.priority)) throw new Error('Invalid tool priority');
   if (
+    input.description !== undefined &&
+    (input.description.trim().length === 0 || input.description.length > 2_000)
+  )
+    throw new Error('Invalid tool description');
+  if (input.parallelism !== undefined && !['parallel', 'serial'].includes(input.parallelism))
+    throw new Error('Invalid tool parallelism');
+  if (
+    input.maxOutputBytes !== undefined &&
+    (!Number.isSafeInteger(input.maxOutputBytes) || input.maxOutputBytes < 1)
+  )
+    throw new Error('Invalid tool output limit');
+  if (
     input.providerCompatibility.length === 0 ||
     new Set(input.providerCompatibility).size !== input.providerCompatibility.length ||
     input.providerCompatibility.some(
@@ -182,8 +220,20 @@ export function createToolDefinition(input: ToolDefinitionInput): ToolDefinition
   const outputSchema = cloneJson(input.outputSchema);
   const inputSchemaDigest = digestToolCatalogValue(inputSchema);
   const outputSchemaDigest = digestToolCatalogValue(outputSchema);
+  const description = input.description?.trim() || input.providerName;
+  const parallelism =
+    input.parallelism ??
+    (input.sideEffect === 'none' || input.sideEffect === 'read' ? 'parallel' : 'serial');
+  const maxOutputBytes = input.maxOutputBytes ?? 1024 * 1024;
+  const supportsCancellation = input.supportsCancellation ?? input.kind === 'shell';
+  const supportsBackground = input.supportsBackground ?? input.kind === 'backgroundTask';
   return deepFreeze({
     ...input,
+    description,
+    parallelism,
+    maxOutputBytes,
+    supportsCancellation,
+    supportsBackground,
     version: id.version,
     inputSchema,
     outputSchema,
@@ -371,6 +421,13 @@ export function verifyToolCatalogSnapshot(snapshot: ToolCatalogSnapshot): boolea
         !DIGEST.test(entry.inputSchemaDigest) ||
         !DIGEST.test(entry.outputSchemaDigest) ||
         !DIGEST.test(entry.schemaDigest) ||
+        entry.description.length < 1 ||
+        entry.description.length > 2_000 ||
+        !['parallel', 'serial'].includes(entry.parallelism) ||
+        !Number.isSafeInteger(entry.maxOutputBytes) ||
+        entry.maxOutputBytes < 1 ||
+        typeof entry.supportsCancellation !== 'boolean' ||
+        typeof entry.supportsBackground !== 'boolean' ||
         new Set(entry.requiredCapabilities).size !== entry.requiredCapabilities.length ||
         entry.requiredCapabilities.some((capability) => !capabilities.includes(capability))
       )
@@ -423,6 +480,11 @@ function toCatalogEntry(definition: ToolDefinition): ToolCatalogEntry {
     requiredCapabilities: [...definition.requiredCapabilities],
     executionTarget: definition.executionTarget,
     implementationKind: definition.implementationKind,
+    description: definition.description,
+    parallelism: definition.parallelism,
+    maxOutputBytes: definition.maxOutputBytes,
+    supportsCancellation: definition.supportsCancellation,
+    supportsBackground: definition.supportsBackground,
   });
 }
 

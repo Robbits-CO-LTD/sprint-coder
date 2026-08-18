@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
-import { isAbsolute, join, relative } from 'node:path';
+import { delimiter, extname, isAbsolute, join, relative, win32 as windowsPath } from 'node:path';
 import { promisify } from 'node:util';
 import {
   createExecutionSpec,
@@ -33,6 +34,7 @@ import {
   WINDOWS_JOB_WRAPPER,
   windowsJobWrapperCommand,
 } from './windows-process-job';
+import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
 
 export type CommandOutputChunk = Readonly<{
   seq: number;
@@ -76,6 +78,7 @@ const POSIX_COMMAND_WRAPPER = String.raw`
 IFS= read -r control_nonce <&4 || exit 125
 exec 4<&-
 trap '' TERM
+exec 6<&0
 if [ ! -x "$1" ]; then
   printf '{"nonce":"%s","type":"spawnError","status":126}\n' "$control_nonce" >&3
   exec /bin/sleep 2147483647
@@ -84,7 +87,7 @@ fi
   trap - TERM
   IFS= read -r gate <&5 || exit 125
   exec 5<&-
-  exec "$@" 3>&-
+  exec "$@" 3>&- <&6 6<&-
 ) &
 target_pid=$!
 printf '{"nonce":"%s","type":"started","pid":%s}\n' "$control_nonce" "$target_pid" >&3
@@ -118,9 +121,11 @@ export class CommandRunnerError extends Error {
 export async function prepareExecutionSpec(
   input: PrepareExecutionSpecInput,
 ): Promise<ExecutionSpec> {
-  if (!isAbsolute(input.executable))
-    throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be absolute');
-  const executableCanonicalPath = await realpath(input.executable);
+  const controlledEnvironment = buildControlledEnvironment();
+  const executablePath = isAbsolute(input.executable)
+    ? input.executable
+    : await resolveBareExecutable(input.executable, controlledEnvironment);
+  const executableCanonicalPath = await realpath(executablePath);
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
@@ -148,7 +153,7 @@ export async function prepareExecutionSpec(
       canonicalPath: pathGuard.resolvedPath,
       identityDigest: pathGuardIdentityDigest(pathGuard),
     },
-    envDelta: buildControlledEnvironment(),
+    envDelta: controlledEnvironment,
     stdinMode: 'closed',
     shell: 'none',
   });
@@ -157,6 +162,48 @@ export async function prepareExecutionSpec(
     executable: executableIdentity,
   });
   return spec;
+}
+
+async function resolveBareExecutable(
+  executable: string,
+  environment: Readonly<Record<string, string>>,
+): Promise<string> {
+  if (
+    executable.length < 1 ||
+    executable.length > 255 ||
+    executable.includes('/') ||
+    executable.includes('\\') ||
+    !/^[a-zA-Z0-9._+-]+$/u.test(executable)
+  )
+    throw new CommandRunnerError(
+      'EXECUTION_SPEC_INVALID',
+      'Executable must be absolute or one sanitized bare name',
+    );
+  const searchPath = environment['PATH'];
+  if (searchPath === undefined)
+    throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Sanitized executable PATH is empty');
+  const names =
+    process.platform === 'win32' && extname(executable) === ''
+      ? [`${executable}.exe`, `${executable}.com`]
+      : [executable];
+  for (const directory of searchPath.split(delimiter)) {
+    if (!isAbsolute(directory)) continue;
+    for (const name of names) {
+      const candidate = join(directory, name);
+      try {
+        const candidateStats = await stat(candidate);
+        if (!candidateStats.isFile()) continue;
+        if (process.platform !== 'win32' && (candidateStats.mode & 0o111) === 0) continue;
+        return candidate;
+      } catch {
+        // Continue through the sealed, fixed PATH. No shell lookup or cwd fallback is allowed.
+      }
+    }
+  }
+  throw new CommandRunnerError(
+    'EXECUTION_SPEC_INVALID',
+    'Executable was not found on the sanitized PATH',
+  );
 }
 
 async function isTrustedWindowsMultiLinkExecutable(canonicalPath: string): Promise<boolean> {
@@ -185,9 +232,10 @@ type RunnerOptions = Readonly<{
   maxBufferedBytes?: number;
   maxOutputBytes?: number;
   cancelGraceMs?: number;
+  sandboxed?: boolean;
 }>;
 
-type RunOptions = Readonly<{
+export type RunOptions = Readonly<{
   signal?: AbortSignal;
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
@@ -226,6 +274,7 @@ export class CommandRunner {
   private readonly maxBufferedBytes: number;
   private readonly maxOutputBytes: number;
   private readonly cancelGraceMs: number;
+  private readonly sandboxed: boolean;
   private readonly active = new Map<string, ActiveProcess>();
 
   constructor(options: RunnerOptions = {}) {
@@ -234,6 +283,7 @@ export class CommandRunner {
     this.maxBufferedBytes = options.maxBufferedBytes ?? 1024 * 1024;
     this.maxOutputBytes = options.maxOutputBytes ?? 16 * 1024 * 1024;
     this.cancelGraceMs = options.cancelGraceMs ?? 1_500;
+    this.sandboxed = options.sandboxed ?? false;
     if (
       this.batchIntervalMs < 1 ||
       this.maxBatchBytes < 1 ||
@@ -247,6 +297,21 @@ export class CommandRunner {
 
   get activeCount(): number {
     return this.active.size;
+  }
+
+  writeStdin(executionId: string, chars: string, close = false): boolean {
+    const active = this.active.get(executionId);
+    if (active === undefined || active.child.stdin === null || active.child.stdin.destroyed)
+      return false;
+    if (chars.length > 0) active.child.stdin.write(chars);
+    if (close) active.child.stdin.end();
+    return true;
+  }
+
+  terminate(executionId: string, force = false): boolean {
+    const active = this.active.get(executionId);
+    if (active === undefined) return false;
+    return this.signalOwnedTree(executionId, active.lease, force ? 'SIGKILL' : 'SIGTERM');
   }
 
   async dispose(): Promise<void> {
@@ -284,6 +349,12 @@ export class CommandRunner {
 
   async run(spec: ExecutionSpec, options: RunOptions = {}): Promise<CommandResult> {
     const executionImage = await this.revalidate(spec);
+    const preparedIdentity = issuedSpecs.get(spec);
+    if (preparedIdentity === undefined)
+      throw new CommandRunnerError(
+        'EXECUTION_SPEC_INVALID',
+        'ExecutionSpec identity is unavailable',
+      );
     let retainedExecutionImage = false;
     try {
       if (options.signal?.aborted)
@@ -303,8 +374,10 @@ export class CommandRunner {
       const startedAt = Date.now();
       options.beforeSpawn?.();
       let child: ChildProcess;
+      const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
       try {
         const windows = process.platform === 'win32';
+        if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
         child = spawn(
           windows ? windowsJobWrapperCommand() : posixSupervisorCommand(),
           [
@@ -314,6 +387,17 @@ export class CommandRunner {
                   '-c',
                   POSIX_COMMAND_WRAPPER,
                   'sprint-coder-command-supervisor',
+                  ...(sandboxExecutable === null
+                    ? []
+                    : [
+                        sandboxExecutable,
+                        '--exec',
+                        'workspace-write',
+                        preparedIdentity.pathGuard.workspacePath,
+                        '--protected-home',
+                        homedir(),
+                        '--',
+                      ]),
                   executionImage.launchPath,
                   ...executionImage.argvPrefix,
                   ...spec.argv,
@@ -324,8 +408,8 @@ export class CommandRunner {
             env: buildEnvironment(spec.envDelta, executionImage.environment),
             shell: false,
             stdio: windows
-              ? ['pipe', 'pipe', 'pipe']
-              : ['ignore', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
+              ? ['pipe', 'pipe', 'pipe', 'pipe']
+              : ['pipe', 'pipe', 'pipe', 'pipe', 'pipe', 'pipe', ...executionImage.descriptors],
             detached: !windows,
             windowsHide: true,
           },
@@ -350,11 +434,25 @@ export class CommandRunner {
       if (process.platform === 'win32') {
         try {
           assignProcessToOwnedJob(child.pid, executionId);
-          child.stdin?.end(
+          const controlInput = child.stdio[3] as NodeJS.WritableStream | null | undefined;
+          controlInput?.end(
             JSON.stringify({
-              executable: executionImage.launchPath,
+              executable: sandboxExecutable ?? executionImage.launchPath,
               nativeAddonPath: nativeSafeFsAddonPath(),
-              argv: [...executionImage.argvPrefix, ...spec.argv],
+              argv:
+                sandboxExecutable === null
+                  ? [...executionImage.argvPrefix, ...spec.argv]
+                  : [
+                      '--exec',
+                      'workspace-write',
+                      preparedIdentity.pathGuard.workspacePath,
+                      '--protected-home',
+                      homedir(),
+                      '--',
+                      executionImage.launchPath,
+                      ...executionImage.argvPrefix,
+                      ...spec.argv,
+                    ],
               cwd: spec.cwdIdentity.canonicalPath,
               env: buildEnvironment(spec.envDelta, executionImage.environment),
             }),
@@ -1434,7 +1532,8 @@ export function buildControlledEnvironment(
     if (value !== undefined) environment[key] = value;
   }
   if (platform === 'win32') {
-    environment['PATH'] ??= ['C:\\Windows\\System32', 'C:\\Windows'].join(';');
+    const windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
+    environment['PATH'] = sanitizedWindowsPath(environment['PATH'], windowsRoot);
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;
@@ -1443,6 +1542,28 @@ export function buildControlledEnvironment(
     environment['PATH'] = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
   }
   return environment;
+}
+
+function sanitizedWindowsPath(sourcePath: string | undefined, windowsRoot: string): string {
+  const candidates = [
+    windowsPath.join(windowsRoot, 'System32'),
+    windowsRoot,
+    ...(sourcePath?.split(';') ?? []),
+  ];
+  const seen = new Set<string>();
+  const accepted: string[] = [];
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim();
+    if (!/^[a-zA-Z]:[\\/]/u.test(trimmed) || trimmed.includes('\0')) continue;
+    const normalizedPath = windowsPath.normalize(trimmed);
+    const normalized =
+      normalizedPath.length > 3 ? normalizedPath.replace(/[\\/]+$/u, '') : normalizedPath;
+    const identity = normalized.toLowerCase();
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    accepted.push(normalized);
+  }
+  return accepted.join(';');
 }
 
 function splitUtf8(text: string, maxBytes: number): string[] {

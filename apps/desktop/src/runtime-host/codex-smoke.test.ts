@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,8 @@ import type { PublicError } from '@sprint-coder/contracts';
 import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
 import { collectThreadImages } from '../main/generated-image-collector';
 import type { RuntimeCanonicalEvent } from './protocol';
+import { ToolRegistry } from '@sprint-coder/domain';
+import { WORKSPACE_CREATE_FILE_TOOL } from '../main/workspace-patch-tool';
 
 // Opt-in REAL smoke test (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4 5a/5b): drives real turns
 // through the actual adapter code path against the locally installed `codex` CLI, following
@@ -107,17 +109,21 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
   }, 60_000);
 
-  it('emits progress for a real Codex dynamic shell tool', async () => {
+  it('uses the client-hosted managed create_file tool instead of a native shell tool', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-operation-'));
     cleanupDirs.push(workspace);
     const adapter = await createProbedCodexAdapter();
     const events: RuntimeCanonicalEvent[] = [];
     const failures: PublicError[] = [];
+    const registry = new ToolRegistry();
+    registry.register(WORKSPACE_CREATE_FILE_TOOL);
+    const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
+    const calls: string[] = [];
 
     await new Promise<void>((resolve) => {
       adapter.start(
         'codex-smoke-dynamic-operation',
-        'Run pwd with a shell command, wait for it to finish, and report the output.',
+        'Call create_file with path "result.txt" and content exactly "managed-ok". Then report success.',
         [],
         () => undefined,
         workspace,
@@ -125,17 +131,31 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
         (event) => events.push(event),
         (error) => failures.push(error),
         () => resolve(),
+        undefined,
+        undefined,
+        'workspace-write',
+        [],
+        [],
+        undefined,
+        undefined,
+        { inheritUserConfig: false },
+        undefined,
+        snapshot,
+        async ({ toolName, arguments: input }) => {
+          calls.push(toolName);
+          const request = input as { path: string; content: string };
+          writeFileSync(join(workspace, request.path), request.content);
+          return { success: true, output: { state: 'committed', path: request.path } };
+        },
       );
     });
 
     expect(failures).toEqual([]);
     expect(
-      events.some(
-        (event) =>
-          event.type === 'operation' &&
-          (event.phase === 'command_start' || event.phase === 'tool_call_start'),
-      ),
+      events.some((event) => event.type === 'operation' && event.phase === 'tool_call_start'),
     ).toBe(true);
+    expect(calls).toEqual(['create_file']);
+    expect(readFileSync(join(workspace, 'result.txt'), 'utf8')).toBe('managed-ok');
     expect(events.at(-1)).toMatchObject({ type: 'completed' });
   }, 60_000);
 
@@ -145,11 +165,14 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     cleanupDirs.push(primary, secondary);
     const adapter = await createProbedCodexAdapter();
     const failures: PublicError[] = [];
+    const registry = new ToolRegistry();
+    registry.register(WORKSPACE_CREATE_FILE_TOOL);
+    const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'multi-root' });
 
     await new Promise<void>((resolve) => {
       adapter.start(
         'codex-smoke-multi-root',
-        `Use shell commands to write exactly "primary-ok" to ${join(primary, 'result.txt')} and exactly "secondary-ok" to ${join(secondary, 'result.txt')}. Do not modify any other file.`,
+        'Call create_file twice: rootId "primary", path "result.txt", content "primary-ok"; then rootId "secondary", path "result.txt", content "secondary-ok".',
         [],
         () => undefined,
         {
@@ -167,6 +190,20 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
         undefined,
         undefined,
         'workspace-write',
+        [],
+        [],
+        undefined,
+        undefined,
+        { inheritUserConfig: false },
+        undefined,
+        snapshot,
+        async ({ toolName, arguments: input }) => {
+          expect(toolName).toBe('create_file');
+          const request = input as { rootId: string; path: string; content: string };
+          const root = request.rootId === 'primary' ? primary : secondary;
+          writeFileSync(join(root, request.path), request.content);
+          return { success: true, output: { state: 'committed', path: request.path } };
+        },
       );
     });
 

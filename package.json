@@ -16,6 +16,7 @@
     "make:windows": "npm run make:windows --workspace @sprint-coder/desktop",
     "build:native-safe-fs": "node build-native-safe-fs.mjs",
     "build:native-safe-fs:test": "node build-native-safe-fs.mjs --test",
+    "build:sandbox-runner": "node build-sandbox-runner.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:provider-smoke": "vitest run apps/desktop/src/main/provider-release-smoke.test.ts",

@@ -306,6 +306,7 @@ import type {
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
+  digestToolCatalogValue,
   permissionRequestFingerprint,
   toolValueMatchesSchema,
   type Capability,
@@ -338,7 +339,6 @@ import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
   LEADER_MCP_SYSTEM_PROMPT,
-  LEADER_PROVIDER_TOOLS,
   MANAGER_PROVIDER_TOOLS,
   MANAGER_MCP_SYSTEM_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
@@ -385,22 +385,22 @@ import {
 } from '../runtime-host/team-mcp-tool-contract';
 import {
   PROJECT_MEMORY_MCP_GUIDANCE,
-  PROJECT_MEMORY_PROVIDER_TOOL,
   appendProjectMemoryCandidate,
   parseProjectMemoryCandidate,
 } from './project-memory-guidance';
-import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import type { RuntimeManagedToolDefinition, RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-service';
 import {
   PROVIDER_NO_TOOL_GUIDANCE,
   PROVIDER_WORKSPACE_GUIDANCE,
-  ProviderWorkspaceTools,
+  ManagedCodingHarness,
   WorkspaceToolRejection,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
 import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
+import { probeSandboxRunner, type SandboxRunnerCapability } from './sandbox-runner';
 import {
   BUILTIN_CODEX_CONNECTION_ID,
   builtinRuntimeForModelSelection,
@@ -513,6 +513,7 @@ export class IpcRouter {
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
+  private readonly cliTeamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
   private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
   private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
@@ -520,6 +521,30 @@ export class IpcRouter {
   private disposed = false;
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  private readonly managedWorkerTurn = new Map<
+    string,
+    Readonly<{
+      taskId: string;
+      parentTurnId: string;
+      snapshot: ToolCatalogSnapshot;
+      workspace: EffectiveWorkspaceSet;
+      mutationBindings: ReadonlyMap<
+        string,
+        Readonly<{ workspaceKey: string; rootIdentityDigest: string }>
+      >;
+    }>
+  >();
+  private readonly managedWorkerCall = new Map<
+    string,
+    Readonly<{
+      providerId: string;
+      workspace: EffectiveWorkspaceSet;
+      mutationBindings: ReadonlyMap<
+        string,
+        Readonly<{ workspaceKey: string; rootIdentityDigest: string }>
+      >;
+    }>
+  >();
   private readonly turnLogCategoryByTurn = new Map<string, 'chat' | 'team'>();
   private readonly turnLogStartedAtByTurn = new Map<string, number>();
   private readonly turnLogRuntimeByTurn = new Map<
@@ -583,7 +608,7 @@ export class IpcRouter {
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
   private readonly approvalCoordinator: ApprovalCoordinator;
-  private readonly providerWorkspaceTools: ProviderWorkspaceTools;
+  private readonly managedCodingHarness: ManagedCodingHarness;
   private readonly autoReviewer = AutoReviewer.createProduction();
   private readonly teamCoordinator: TeamCoordinator;
   private readonly teamSubscriptions = new TeamSubscriptionRegistry();
@@ -620,6 +645,12 @@ export class IpcRouter {
     string,
     { projectId: string; content: string }[]
   >();
+  private commandSandboxCapability: SandboxRunnerCapability & { probedAt: string } = {
+    available: false,
+    backend: 'not-probed',
+    reason: 'not_probed',
+    probedAt: new Date(0).toISOString(),
+  };
 
   constructor(
     private readonly window: BrowserWindow,
@@ -727,7 +758,7 @@ export class IpcRouter {
     this.persistence.setSkillCatalogContextProvider?.((selections, includeBuiltinTeamSkill) =>
       this.skillSettings.contextCatalogForTurn(selections, includeBuiltinTeamSkill),
     );
-    const cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
+    this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
       // and simulated Team output is never used in production.
@@ -769,10 +800,14 @@ export class IpcRouter {
       },
       availability: this.teamRuntimeAvailability,
       workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
-      catalogFor: (kind, workspacePath) =>
-        createEmptyToolCatalogSnapshot(
+      catalogFor: (kind, taskId, runtimeTurnId, workspace, worker, writeScope) =>
+        this.prepareWorkerManagedCatalog(
           kind,
-          workspacePath === null ? null : digestCanonical({ workspacePath }),
+          taskId,
+          runtimeTurnId,
+          workspace,
+          worker.canDelegate,
+          writeScope,
         ),
       authorizeEgress: (kind, taskId, turnId, prompt, context) => {
         const authorize =
@@ -797,11 +832,14 @@ export class IpcRouter {
               workspacePath,
             )
           : 'read-only',
-      teamMcpFor: (worker, turnId, executionId) =>
+      teamMcpFor: (worker, turnId, executionId, toolCatalog) =>
         worker.canDelegate
-          ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId)
-          : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId),
+          ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog)
+          : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
+      releaseManagedTurn: (turnId) => this.managedWorkerTurn.delete(turnId),
+      invokeManagedTool: (taskId, turnId, request, signal) =>
+        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
       bindTeamMcpProcess: (turnId, identity) =>
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
@@ -809,7 +847,7 @@ export class IpcRouter {
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
-      fallback: cliTeamWorkerRuntime,
+      fallback: this.cliTeamWorkerRuntime,
       verification: this.providerVerification,
       registry: this.providerRegistry,
       getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
@@ -962,6 +1000,25 @@ export class IpcRouter {
           .readImportSource(parsed)
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
       },
+      async (input, context) => {
+        const worker = this.managedWorkerTurn.get(context.turnId);
+        const snapshot =
+          worker?.snapshot ??
+          this.managedCodingHarness.broker.getTurnSnapshot(context.taskId, context.turnId);
+        if (snapshot?.digest !== context.catalogDigest)
+          throw new Error('Managed tool catalog digest changed');
+        return this.dispatchManagedRuntimeTool(
+          context.taskId,
+          context.turnId,
+          {
+            callId: context.callId,
+            toolName: context.toolName,
+            arguments: input,
+            catalogDigest: context.catalogDigest,
+          },
+          new AbortController().signal,
+        );
+      },
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -979,6 +1036,7 @@ export class IpcRouter {
     this.permissionBroker = new PermissionBroker(persistence, {
       policyEpochChanged: (taskId, policyEpoch) => {
         this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
+        void this.managedCodingHarness.policyEpochChanged(taskId);
         this.persistence.quarantineBackgroundForPolicyEpoch(
           taskId,
           policyEpoch,
@@ -986,16 +1044,80 @@ export class IpcRouter {
         );
       },
     });
-    this.providerWorkspaceTools = new ProviderWorkspaceTools({
-      workspaceFor: (taskId, turnId) =>
+    this.managedCodingHarness = new ManagedCodingHarness({
+      workspaceFor: (taskId, turnId, callId) =>
+        (callId === undefined
+          ? undefined
+          : this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.workspace) ??
         this.persistence.readTurnWorkspaceSetForTask(taskId, turnId),
-      rootIdentityFor: (turnId, rootId) =>
+      rootIdentityFor: (turnId, rootId, callId) =>
+        (callId === undefined
+          ? undefined
+          : this.managedWorkerCall
+              .get(JSON.stringify([turnId, callId]))
+              ?.mutationBindings.get(rootId)?.rootIdentityDigest) ??
         this.persistence.getTurnWorkspaceRootIdentities(turnId).get(rootId),
+      mutationBindingFor: (turnId, rootId, callId) =>
+        callId === undefined
+          ? undefined
+          : this.managedWorkerCall
+              .get(JSON.stringify([turnId, callId]))
+              ?.mutationBindings.get(rootId),
+      providerFor: (turnId, callId) =>
+        this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.providerId,
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
+      lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
+      recordPlan: (context, items) =>
+        this.persistence.recordManagedTurnPlan({
+          taskId: context.taskId,
+          turnId: context.turnId,
+          items,
+          updatedAt: new Date().toISOString(),
+        }),
       command: {
         persistence: this.persistence,
         publish: (event) => this.publish(event),
+      },
+      team: {
+        coordinator: this.teamCoordinator,
+        listModelCandidates: (query) => this.listTeamModelCandidates(query),
+      },
+      auxiliary: {
+        createSkillDraft: async (input, context) => {
+          const draft = await this.skillSettings
+            .createDraft(skillDraftCreateInputSchema.parse(input))
+            .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+          this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
+          return draft;
+        },
+        queueProjectMemory: (input, context) => this.queueProjectMemoryCandidate(input, context),
+        installSkillImport: async (input) =>
+          this.skillSettings
+            .installPrepared(
+              skillDraftCreateInputSchema.parse(
+                typeof input === 'object' && input !== null
+                  ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'source'))
+                  : input,
+              ),
+            )
+            .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+        readSkillImport: async (input) => {
+          const parsed = z
+            .object({
+              cli: z.enum(['claude', 'codex']),
+              skillId: z
+                .string()
+                .min(1)
+                .max(128)
+                .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+            })
+            .strict()
+            .parse(input);
+          return this.skillSettings
+            .readImportSource(parsed)
+            .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        },
       },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
@@ -1033,6 +1155,7 @@ export class IpcRouter {
             source: 'stream',
           },
         ),
+      this.managedCodingHarness,
     );
     this.codexRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1048,6 +1171,8 @@ export class IpcRouter {
       join(app.getPath('userData'), 'codex-isolated'),
       () => ({ inheritUserConfig: this.persistence.getCodexUserConfigEnabled() }),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
+      (taskId, turnId, request, signal) =>
+        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1061,6 +1186,8 @@ export class IpcRouter {
       join(app.getPath('userData'), 'codex-isolated'),
       undefined,
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
+      (taskId, turnId, request, signal) =>
+        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
     );
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>
@@ -1085,6 +1212,7 @@ export class IpcRouter {
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
       updateHealth: this.persistence.getUpdateHealth(),
+      commandSandbox: this.commandSandboxCapability,
     }));
     this.handle(
       IPC_CHANNELS.runtimeFailureDiagnosticGet,
@@ -1998,6 +2126,9 @@ export class IpcRouter {
           turnId: approval.turnId,
           approvalId: input.approvalId,
           decision: input.decision,
+          ...(input.userInputSelection === undefined
+            ? {}
+            : { userInputSelection: input.userInputSelection }),
           expectedRevision: input.expectedRevision,
           challenge: input.challenge,
           operationId: envelope.operationId,
@@ -2973,6 +3104,12 @@ export class IpcRouter {
       this.attachmentCustodyReady = false;
     }
     await this.permissionBroker.drainPolicyEpochOutbox();
+    const commandSandbox = await probeSandboxRunner();
+    this.commandSandboxCapability = {
+      ...commandSandbox,
+      probedAt: new Date().toISOString(),
+    };
+    this.managedCodingHarness.setCommandSandboxAvailable(commandSandbox.available);
     await this.teamMcpBridge.ensureStarted();
     try {
       const skillHome = process.env['SPRINT_CODER_SKILL_HOME'] ?? app.getPath('home');
@@ -3053,7 +3190,7 @@ export class IpcRouter {
     this.closeAllPorts();
     this.teamSubscriptions.clear();
     this.approvalCoordinator.dispose();
-    await this.providerWorkspaceTools.dispose();
+    await this.managedCodingHarness.dispose();
     // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
     // process can actually exit (issue #39).
     for (const watchers of this.workspaceWatchByTurn.values())
@@ -3211,6 +3348,78 @@ export class IpcRouter {
     };
   }
 
+  private async dispatchManagedRuntimeTool(
+    taskId: string,
+    turnId: string,
+    request: Readonly<{
+      callId: string;
+      toolName: string;
+      arguments: unknown;
+      catalogDigest?: string;
+    }>,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    const worker = this.managedWorkerTurn.get(turnId);
+    if (worker !== undefined) {
+      if (worker.taskId !== taskId) throw new Error('Managed Worker task binding changed');
+      if (
+        (request.catalogDigest !== undefined && request.catalogDigest !== worker.snapshot.digest) ||
+        !worker.snapshot.entries.some(({ providerName }) => providerName === request.toolName)
+      )
+        throw new Error('Managed Worker tool is outside its capability ceiling');
+    }
+    const ownerTurnId = worker?.parentTurnId ?? turnId;
+    const brokerCallId =
+      worker === undefined
+        ? request.callId
+        : `${createHash('sha256').update(turnId).digest('hex').slice(0, 16)}:${request.callId}`.slice(
+            0,
+            128,
+          );
+    const workerCallKey = JSON.stringify([ownerTurnId, brokerCallId]);
+    if (worker !== undefined)
+      this.managedWorkerCall.set(workerCallKey, {
+        providerId: worker.snapshot.providerId,
+        workspace: worker.workspace,
+        mutationBindings: worker.mutationBindings,
+      });
+    let result: unknown;
+    try {
+      result = await this.managedCodingHarness.broker.dispatch({
+        taskId,
+        turnId: ownerTurnId,
+        callId: brokerCallId,
+        providerName: request.toolName,
+        input: request.arguments,
+        signal,
+      });
+    } finally {
+      if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
+    }
+    const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, ownerTurnId);
+    if (worker === undefined && workspace !== null && isCommittedProviderWorkspaceChange(result)) {
+      const root = workspace.roots.find(({ rootId }) => rootId === result.rootId);
+      if (root !== undefined)
+        this.recordFileChanges(taskId, ownerTurnId, [
+          { path: resolvePath(root.path, result.path), kind: result.kind },
+        ]);
+    }
+    if (worker === undefined && workspace !== null && isCommittedProviderWorkspaceBatch(result)) {
+      const root = workspace.roots.find(({ rootId }) => rootId === result.rootId);
+      if (root !== undefined)
+        this.recordFileChanges(
+          taskId,
+          ownerTurnId,
+          result.changes.map((change) => ({
+            path: resolvePath(root.path, change.path),
+            kind: change.kind,
+          })),
+        );
+    }
+    if (worker !== undefined) this.cliTeamWorkerRuntime.recordManagedToolResult(turnId, result);
+    return result;
+  }
+
   private finishAndAdvance(
     taskId: string,
     turnId: string,
@@ -3221,6 +3430,7 @@ export class IpcRouter {
     this.pendingTaskTitles.delete(turnId);
     const kind = this.turnRuntimes.get(turnId);
     this.turnRuntimes.delete(turnId);
+    this.managedCodingHarness.finishTurn(taskId, turnId);
     void this.releaseTurnAttachmentCustody(turnId);
     // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
     // lost to the 120ms window and no timer outlives the turn.
@@ -3279,6 +3489,8 @@ export class IpcRouter {
   }
 
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
+    if (request.entry.providerName === 'request_user_input')
+      return { decision: 'approval_required' as const, reason: 'user_choice_required' };
     const facts = approvalFactsForTool(request, capability);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     const commandRunner = request.entry.implementationKind === 'command-runner';
@@ -3654,10 +3866,8 @@ export class IpcRouter {
     // Watch the Workspace for the duration of the Turn (issue #39). Above the mock early-return on
     // purpose: this is about what the Turn writes, not about which Runtime writes it.
     //
-    // This is the coverage net, not the fast path — measured, a watcher notification lands ~270ms
-    // after the CLI's own report of the same write. What it catches is the writes no Runtime reports
-    // at all: a file a shell command rewrote, a formatter that ran on save. The reported ones are
-    // read back in recordFileChanges, which is quicker.
+    // This is only a live-content preview. The durable file-change Timeline is recorded from the
+    // Managed Harness post-image after commit; watcher notifications never become evidence.
     //
     // Only started when the Turn can actually write: at read-only there is nothing to watch for, and
     // a recursive watch on a large repository is not free.
@@ -3700,7 +3910,54 @@ export class IpcRouter {
       path: skill.packagePath,
     }));
     const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
-    const toolCatalogSnapshot = createEmptyToolCatalogSnapshot(kind, workspaceId);
+    const toolCatalogSnapshot = this.managedCodingHarness.startTurn(
+      {
+        taskId,
+        turnId: started.turnId,
+        workspaceId,
+        policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+      },
+      kind,
+      {
+        projectMemory: memoryTurn,
+        skillDrafts: skillCreatorTurn,
+        skillImports: importSkillTurn,
+        ...(importSkillTurn ? { skillImportUserText: started.text } : {}),
+      },
+    );
+    if (kind === 'claude' && toolCatalogSnapshot.entries.length > 0) {
+      const managedTools = providerToolsFromSnapshot(toolCatalogSnapshot);
+      if (teamMcp === undefined)
+        teamMcp = this.registerManagedMcp(
+          started.turnId,
+          taskId,
+          managedTools,
+          toolCatalogSnapshot.digest,
+        );
+      else {
+        if (
+          !this.teamMcpBridge.attachManagedTools(
+            started.turnId,
+            managedTools,
+            toolCatalogSnapshot.digest,
+          )
+        )
+          throw new Error('Managed MCP registration is unavailable');
+        teamMcp = {
+          ...teamMcp,
+          managedTools,
+          toolCatalogDigest: toolCatalogSnapshot.digest,
+        };
+      }
+      if (teamMcp === undefined) {
+        this.handleRuntimeFailure('claude', taskId, started.turnId, {
+          code: 'RUNTIME_FAILED',
+          userMessage: 'Managed Coding Harnessへ接続できません。',
+          retryable: true,
+        });
+        return;
+      }
+    }
     const runtimeContextFragments = contextFragmentsForRuntime(
       kind,
       injectPromptGuidance(
@@ -3962,7 +4219,7 @@ export class IpcRouter {
       ...(options.importSkillTurn ? { allowSkillImports: true } : {}),
       ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
-      ...leaderMcpCapabilities(options.teamTurn),
+      ...leaderMcpCapabilities(false),
     };
     const registration: TeamMcpRegistration = {
       ...baseRegistration,
@@ -3992,7 +4249,34 @@ export class IpcRouter {
       token,
       guidance,
       toolNames: teamMcpToolNamesForCapabilities(registration),
-      enableWebSearch: options.teamTurn && requireModelResearch,
+    };
+  }
+
+  private registerManagedMcp(
+    turnId: string,
+    taskId: string,
+    managedTools: readonly RuntimeManagedToolDefinition[],
+    toolCatalogDigest: string,
+  ): RuntimeTeamMcpOption | undefined {
+    const socketPath = this.teamMcpBridge.socketPath;
+    if (socketPath === null || managedTools.length === 0) return undefined;
+    const token = TeamMcpBridge.generateToken();
+    this.teamMcpBridge.register(turnId, {
+      taskId,
+      token,
+      allowTeamTools: false,
+      allowedTools: [],
+      managedTools,
+      managedToolCatalogDigest: toolCatalogDigest,
+      contextOwner: { type: 'turn', id: turnId },
+    });
+    return {
+      socketPath,
+      token,
+      guidance: PROVIDER_WORKSPACE_GUIDANCE,
+      toolNames: [],
+      managedTools,
+      toolCatalogDigest,
     };
   }
 
@@ -4032,11 +4316,102 @@ export class IpcRouter {
     }
   }
 
+  private async prepareWorkerManagedCatalog(
+    kind: 'claude' | 'codex',
+    taskId: string,
+    runtimeTurnId: string,
+    runtimeWorkspace: RuntimeWorkspaceSet,
+    canDelegate: boolean,
+    writeScope: 'read-only' | 'workspace-write' | 'full',
+  ): Promise<ToolCatalogSnapshot> {
+    const parentTurnId = this.persistence.getActiveTurnId(taskId);
+    if (parentTurnId === null) throw new Error('Team Worker has no active parent Turn');
+    const parentWorkspace = this.persistence.readTurnWorkspaceSetForTask(taskId, parentTurnId);
+    const boundRoots = await Promise.all(
+      runtimeWorkspace.roots.map(async (root) => ({
+        root,
+        binding: await workspaceMutationBinding(root.path),
+      })),
+    );
+    const workspace: EffectiveWorkspaceSet = {
+      source: boundRoots.length === 0 ? 'none' : 'task',
+      projectId: null,
+      primaryRootId: runtimeWorkspace.primaryRootId,
+      roots: boundRoots.map(({ root, binding }) => ({
+        rootId: root.rootId,
+        path: binding.canonicalPath,
+        label: root.label,
+        role: root.role,
+        status: 'available',
+      })),
+      digest: digestCanonical({
+        source: 'team-worker',
+        primaryRootId: runtimeWorkspace.primaryRootId,
+        roots: boundRoots.map(({ root, binding }) => [
+          root.rootId,
+          binding.canonicalPath,
+          binding.rootIdentityDigest,
+        ]),
+      }),
+    };
+    const mutationBindings = new Map(
+      boundRoots.map(({ root, binding }) => [
+        root.rootId,
+        {
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        },
+      ]),
+    );
+    let parent = this.managedCodingHarness.broker.getTurnSnapshot(taskId, parentTurnId);
+    if (parent === undefined)
+      parent = this.managedCodingHarness.startTurn(
+        {
+          taskId,
+          turnId: parentTurnId,
+          workspaceId: parentWorkspace?.digest ?? null,
+          policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+        },
+        kind,
+      );
+    // Role-bound Team communication stays on the authenticated MCP adapter. The common coding
+    // snapshot has no requester-agent field, so exposing team_* here would execute with Leader
+    // authority instead of the Worker's capability ceiling.
+    void canDelegate;
+    const readable = new Set(['list_workspace', 'read_file', 'search_workspace', 'view_image']);
+    const writable = new Set(['create_file', 'create_directory', 'apply_patch']);
+    const allowed = new Set([
+      'update_plan',
+      ...(workspace.roots.length === 0 ? [] : readable),
+      ...(writeScope === 'read-only' ? [] : writable),
+    ]);
+    const facts = {
+      revision: parent.revision,
+      providerId: kind,
+      workspaceId: parent.workspaceId,
+      entries: parent.entries.filter(({ providerName }) => allowed.has(providerName)),
+    };
+    const snapshot: ToolCatalogSnapshot = Object.freeze({
+      ...facts,
+      entries: Object.freeze([...facts.entries]),
+      digest: digestToolCatalogValue(facts as never),
+    });
+    this.managedWorkerTurn.set(runtimeTurnId, {
+      taskId,
+      parentTurnId,
+      snapshot,
+      workspace,
+      mutationBindings,
+    });
+    return snapshot;
+  }
+
   private registerManagerMcp(
     turnId: string,
     taskId: string,
     requesterAgentId: string,
     executionId?: string,
+    toolCatalog?: ToolCatalogSnapshot,
   ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
@@ -4060,6 +4435,17 @@ export class IpcRouter {
       requireModelResearch,
     };
     this.teamMcpBridge.register(turnId, registration);
+    const managedTools =
+      toolCatalog === undefined
+        ? []
+        : providerToolsFromSnapshot(toolCatalog).filter(
+            ({ name }) => !new Set<string>(registration.allowedTools ?? []).has(name),
+          );
+    if (
+      managedTools.length > 0 &&
+      !this.teamMcpBridge.attachManagedTools(turnId, managedTools, toolCatalog!.digest)
+    )
+      throw new Error('Manager Managed Harness registration is unavailable');
     return {
       socketPath,
       token,
@@ -4069,7 +4455,9 @@ export class IpcRouter {
         requireModelResearch,
         this.persistence.getTeamModelSelectionGuidance(),
       ),
-      enableWebSearch: requireModelResearch,
+      ...(managedTools.length === 0
+        ? {}
+        : { managedTools, toolCatalogDigest: toolCatalog!.digest }),
     };
   }
 
@@ -4078,6 +4466,7 @@ export class IpcRouter {
     taskId: string,
     requesterAgentId: string,
     executionId?: string,
+    toolCatalog?: ToolCatalogSnapshot,
   ): RuntimeTeamMcpOption | undefined {
     const socketPath = this.teamMcpBridge.socketPath;
     if (socketPath === null) return undefined;
@@ -4095,11 +4484,25 @@ export class IpcRouter {
         : { contextOwner: { type: 'team_execution' as const, id: executionId } }),
     };
     this.teamMcpBridge.register(turnId, registration);
+    const managedTools =
+      toolCatalog === undefined
+        ? []
+        : providerToolsFromSnapshot(toolCatalog).filter(
+            ({ name }) => !new Set<string>(registration.allowedTools ?? []).has(name),
+          );
+    if (
+      managedTools.length > 0 &&
+      !this.teamMcpBridge.attachManagedTools(turnId, managedTools, toolCatalog!.digest)
+    )
+      throw new Error('Worker Managed Harness registration is unavailable');
     return {
       socketPath,
       token,
       guidance: WORKER_MCP_SYSTEM_PROMPT,
       toolNames: teamMcpToolNamesForCapabilities(registration),
+      ...(managedTools.length === 0
+        ? {}
+        : { managedTools, toolCatalogDigest: toolCatalog!.digest }),
     };
   }
 
@@ -4754,26 +5157,20 @@ export class IpcRouter {
   ): Promise<void> {
     const taskId = started.event.taskId;
     const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
+    const skillCreatorTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
+    );
+    const importSkillTurn = started.skills.some(
+      ({ selection }) =>
+        selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
+    );
     const controller = new AbortController();
     this.providerAbortByTurn.set(started.turnId, controller);
     let synthesizing = false;
     const messageId = randomUUID();
-    let reportCursorValue = this.teamCoordinator.latestTeamMessageSeq(taskId);
-    let modelCatalogQueried = false;
     let runtime: ProviderRuntime | undefined;
     let modelLease: ProviderModelLease | undefined;
-    const reportCursor = {
-      read: () => reportCursorValue,
-      advance: (seq: number) => {
-        reportCursorValue = Math.max(reportCursorValue, seq);
-      },
-    };
-    const modelCatalogAudit = {
-      wasQueried: () => modelCatalogQueried,
-      markQueried: () => {
-        modelCatalogQueried = true;
-      },
-    };
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     const streamBudget = new ProviderStreamBudget();
     try {
@@ -4820,15 +5217,24 @@ export class IpcRouter {
         started.workspaceSet.roots.length,
         selectedModel?.toolCalling.value,
       );
-      workspaceToolSnapshot = workspaceToolsEligible
-        ? this.providerWorkspaceTools.startTurn(
+      const managedToolsEligible =
+        workspaceToolsEligible || teamTurn || memoryTurn || skillCreatorTurn || importSkillTurn;
+      workspaceToolSnapshot = managedToolsEligible
+        ? this.managedCodingHarness.startTurn(
             {
               taskId,
               turnId: started.turnId,
-              workspaceId: started.workspaceSet.digest,
+              workspaceId:
+                started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
               policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
             },
             connection.providerId,
+            {
+              projectMemory: memoryTurn,
+              skillDrafts: skillCreatorTurn,
+              skillImports: importSkillTurn,
+              ...(importSkillTurn ? { skillImportUserText: started.text } : {}),
+            },
           )
         : undefined;
       if (!teamTurn)
@@ -4837,8 +5243,6 @@ export class IpcRouter {
           content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
         });
       let roundTools = assertUniqueProviderTools([
-        ...(teamTurn ? LEADER_PROVIDER_TOOLS : []),
-        ...(memoryTurn ? [PROJECT_MEMORY_PROVIDER_TOOL] : []),
         ...(workspaceToolSnapshot === undefined
           ? []
           : providerToolsFromSnapshot(workspaceToolSnapshot)),
@@ -4905,14 +5309,10 @@ export class IpcRouter {
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
           if (providerEvent.type === 'tool_call') {
-            const knownTeamTool =
-              teamTurn && LEADER_PROVIDER_TOOLS.some((tool) => tool.name === providerEvent.name);
-            const knownMemoryTool =
-              memoryTurn && providerEvent.name === PROJECT_MEMORY_PROVIDER_TOOL.name;
             const knownWorkspaceTool = workspaceToolSnapshot?.entries.some(
               (tool) => tool.providerName === providerEvent.name,
             );
-            if (!knownTeamTool && !knownMemoryTool && !knownWorkspaceTool)
+            if (!knownWorkspaceTool)
               throw new Error(`Provider Leader requested unknown tool: ${providerEvent.name}`);
             if (seenProviderToolCallIds.has(providerEvent.callId))
               throw new Error(`Provider Leader repeated tool call ID: ${providerEvent.callId}`);
@@ -5028,69 +5428,23 @@ export class IpcRouter {
           const workspaceTool = workspaceToolSnapshot?.entries.some(
             ({ providerName }) => providerName === toolCall.name,
           );
+          if (!workspaceTool) throw new Error('Provider tool escaped the managed catalog');
           let content: string;
-          if (workspaceTool) {
-            try {
-              const result = await this.providerWorkspaceTools.broker.dispatch({
-                taskId,
-                turnId: started.turnId,
+          try {
+            const result = await this.dispatchManagedRuntimeTool(
+              taskId,
+              started.turnId,
+              {
                 callId: toolCall.callId,
-                providerName: toolCall.name,
-                input: toolCall.input,
-                signal: controller.signal,
-              });
-              if (isCommittedProviderWorkspaceChange(result)) {
-                const root = started.workspaceSet.roots.find(
-                  ({ rootId }) => rootId === result.rootId,
-                );
-                if (root !== undefined)
-                  this.recordFileChanges(taskId, started.turnId, [
-                    { path: resolvePath(root.path, result.path), kind: result.kind },
-                  ]);
-              }
-              if (isCommittedProviderWorkspaceMutation(result)) {
-                // The native Edit Saga re-observes the sealed post-image immediately before it
-                // commits. For provider workspace tools that deterministic, Main-owned check is
-                // the assurance verification boundary; persist it before the provider can finish
-                // the Turn so the evidence-gated completion contract cannot strand the Turn in
-                // `synthesizing`.
-                this.persistence.recordAssuranceVerification({
-                  taskId,
-                  turnId: started.turnId,
-                  sagaId: result.sagaId,
-                  outcome: 'passed',
-                  failureClass: null,
-                  createdAt: new Date().toISOString(),
-                });
-              }
-              content = redactSecrets(JSON.stringify({ ok: true, result }));
-            } catch (error) {
-              if (controller.signal.aborted) throw error;
-              content = providerWorkspaceToolFailure(error);
-            }
-          } else {
-            const result =
-              toolCall.name === PROJECT_MEMORY_PROVIDER_TOOL.name
-                ? await this.queueProjectMemoryCandidate(toolCall.input, {
-                    taskId,
-                    turnId: started.turnId,
-                  })
-                : await executeTeamTool(
-                    this.teamCoordinator,
-                    taskId,
-                    toolCall.name,
-                    toolCall.input,
-                    {
-                      contextOwner: { type: 'turn', id: started.turnId },
-                      longPoll:
-                        toolCall.name === 'team_wait_reports' ||
-                        toolCall.name === 'team_wait_events',
-                      waitReportsCursor: reportCursor,
-                      listModelCandidates: (query) => this.listTeamModelCandidates(query),
-                      modelCatalogAudit,
-                    },
-                  );
-            content = redactSecrets(JSON.stringify(result ?? null));
+                toolName: toolCall.name,
+                arguments: toolCall.input,
+              },
+              controller.signal,
+            );
+            content = redactSecrets(JSON.stringify({ ok: true, result }));
+          } catch (error) {
+            if (controller.signal.aborted) throw error;
+            content = providerWorkspaceToolFailure(error);
           }
           streamBudget.consumeToolResult(content);
           messages.push({
@@ -5148,7 +5502,7 @@ export class IpcRouter {
     } finally {
       await modelLease?.release();
       if (workspaceToolSnapshot !== undefined)
-        this.providerWorkspaceTools.finishTurn(taskId, started.turnId);
+        this.managedCodingHarness.finishTurn(taskId, started.turnId);
       if (this.providerAbortByTurn.get(started.turnId) === controller)
         this.providerAbortByTurn.delete(started.turnId);
       this.providerExecutionIdByTurn.delete(started.turnId);
@@ -5249,13 +5603,6 @@ export class IpcRouter {
           );
         else if (runtimeEvent.type === 'thread')
           this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
-        else if (runtimeEvent.type === 'fileChange')
-          this.recordFileChanges(taskId, turnId, runtimeEvent.changes);
-        else if (runtimeEvent.type === 'fileEdit')
-          this.pushFileEdit(taskId, turnId, runtimeEvent.path, runtimeEvent.text, {
-            complete: runtimeEvent.complete,
-            source: 'stream',
-          });
         else if (runtimeEvent.type === 'operation') return;
         else {
           await this.completeCanonicalTeamTurn(
@@ -5473,12 +5820,8 @@ export class IpcRouter {
       })),
     });
     if (event !== null) this.publish(event);
-    // Codex reports no body at all while it writes (verified on 0.144.4: `file_change` carries only
-    // path and kind, and apply_patch writes to a temp file and renames, so there is nothing to tail
-    // either). Reading the result back is the only way to show its content — clearly marked
-    // `source: 'disk'` so the UI does not present it as live typing. Claude streams instead, and its
-    // frames have already arrived by now, so re-reading would only overwrite the live body with the
-    // same bytes.
+    // The committed post-image is the only authoritative body. Reading it back after the Saga
+    // commit keeps the file preview aligned with the Timeline and diff evidence.
     for (const change of inside) {
       if (change.kind === 'delete') continue;
       if (this.fileEditByKey.has(fileEditTrackingKey(turnId, change.rootId, change.path))) continue;
@@ -6039,7 +6382,7 @@ export function providerWorkspaceToolsEligible(
   workspaceRootCount: number,
   toolCalling: boolean | null | undefined,
 ): boolean {
-  return !teamTurn && workspaceRootCount > 0 && toolCalling !== false;
+  return toolCalling !== false && (workspaceRootCount > 0 || teamTurn);
 }
 
 export function requireExplicitProviderCommandApproval(
@@ -6115,6 +6458,29 @@ export function isCommittedProviderWorkspaceMutation(result: unknown): result is
   return (
     isCommittedProviderWorkspaceChange(result) &&
     typeof (result as Record<string, unknown>)['sagaId'] === 'string'
+  );
+}
+
+export function isCommittedProviderWorkspaceBatch(result: unknown): result is Readonly<{
+  rootId: string;
+  sagaId: string;
+  state: 'committed';
+  changes: readonly { path: string; kind: 'add' | 'update' | 'delete' }[];
+}> {
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) return false;
+  const record = result as Record<string, unknown>;
+  return (
+    record['state'] === 'committed' &&
+    typeof record['rootId'] === 'string' &&
+    typeof record['sagaId'] === 'string' &&
+    Array.isArray(record['changes']) &&
+    record['changes'].every(
+      (change) =>
+        typeof change === 'object' &&
+        change !== null &&
+        typeof (change as Record<string, unknown>)['path'] === 'string' &&
+        ['add', 'update', 'delete'].includes(String((change as Record<string, unknown>)['kind'])),
+    )
   );
 }
 

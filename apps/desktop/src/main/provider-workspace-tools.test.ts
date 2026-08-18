@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,10 +9,13 @@ import {
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
+  workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
 import { commandToolTruncated } from './default-tools';
 import { approvalFactsForTool } from './approval-coordinator';
+import { workspaceMutationBinding } from './path-guard';
+import { ManagedCommandSessions } from './managed-command-sessions';
 
 const roots: string[] = [];
 
@@ -67,14 +70,156 @@ async function harness() {
 }
 
 describe('Provider workspace read tools', () => {
+  it('exposes Project Memory and Skill import only through the selected managed catalog', async () => {
+    const calls: string[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      auxiliary: {
+        queueProjectMemory: async () => {
+          calls.push('memory');
+          return { queued: true };
+        },
+        createSkillDraft: async () => ({ draft: true }),
+        readSkillImport: async () => {
+          calls.push('read');
+          return { digest: 'a'.repeat(64), files: [] };
+        },
+        installSkillImport: async () => {
+          calls.push('install');
+          return { installed: true };
+        },
+      },
+    });
+    const context = {
+      taskId: 'task-aux',
+      turnId: 'turn-aux',
+      workspaceId: null,
+      policyEpoch: 1,
+    } as const;
+    const snapshot = tools.startTurn(context, 'codex', {
+      projectMemory: true,
+      skillImports: true,
+      skillImportUserText: 'IMPORT_SKILL claude writer',
+    });
+    expect(snapshot.entries.map(({ providerName }) => providerName)).toEqual(
+      expect.arrayContaining([
+        'project_memory_remember',
+        'skill_import_read',
+        'skill_import_install',
+      ]),
+    );
+    expect(snapshot.entries.map(({ providerName }) => providerName)).not.toContain(
+      'skill_draft_create',
+    );
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'memory',
+      providerName: 'project_memory_remember',
+      input: { content: 'durable fact' },
+    });
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'import-read',
+      providerName: 'skill_import_read',
+      input: { cli: 'claude', skillId: 'writer' },
+    });
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'import-install',
+      providerName: 'skill_import_install',
+      input: { source: { cli: 'claude', skillId: 'writer', digest: 'a'.repeat(64) }, files: [] },
+    });
+    expect(calls).toEqual(['memory', 'read', 'install']);
+    await tools.dispose();
+  });
+
+  it('omits command tools until the OS sandbox probe succeeds', async () => {
+    const { tools, context } = await harness();
+    const disposeSessions = vi.spyOn(ManagedCommandSessions.prototype, 'dispose');
+    const commandTools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'deny', reason: 'test' }),
+      command: { persistence: {} as never, publish: () => undefined },
+    });
+    const unavailable = commandTools.startTurn(
+      { ...context, turnId: 'turn-command-unavailable' },
+      'codex',
+    );
+    expect(unavailable.entries.map(({ providerName }) => providerName)).not.toContain(
+      'exec_command',
+    );
+    commandTools.finishTurn(context.taskId, 'turn-command-unavailable');
+    commandTools.setCommandSandboxAvailable(true);
+    const available = commandTools.startTurn(
+      { ...context, turnId: 'turn-command-available' },
+      'codex',
+    );
+    expect(available.entries.map(({ providerName }) => providerName)).toContain('exec_command');
+    await commandTools.dispose();
+    expect(disposeSessions).toHaveBeenCalledTimes(1);
+    disposeSessions.mockRestore();
+    await tools.dispose();
+  });
+
   it('publishes a deterministic immutable catalog for API Providers', async () => {
     const { tools, context, snapshot } = await harness();
     expect(providerToolsFromSnapshot(snapshot).map(({ name }) => name)).toEqual([
       'list_workspace',
       'read_file',
+      'request_user_input',
+      'search_workspace',
+      'update_plan',
+      'view_image',
     ]);
     expect(Object.isFrozen(snapshot)).toBe(true);
     tools.finishTurn(context.taskId, context.turnId);
+  });
+
+  it('returns the durable approval decision as a user-input choice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-user-input-tool-'));
+    roots.push(root);
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: '9'.repeat(64),
+    };
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: ({ entry }) => ({
+        decision: 'allow',
+        reason: 'test-choice',
+        ...(entry.providerName === 'request_user_input'
+          ? { userInputSelection: 1 }
+          : { approvalDecision: 'allow_once' as const }),
+        beforeExecute: () => true,
+      }),
+    });
+    const context = {
+      taskId: 'task-choice',
+      turnId: 'turn-choice',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'choice-call',
+        providerName: 'request_user_input',
+        input: { question: 'Choose', choices: ['one', 'two', 'three'] },
+      }),
+    ).resolves.toEqual({ question: 'Choose', selectedIndex: 1, selected: 'two' });
   });
 
   it('publishes and dispatches the native directory tool only when mutation is available', async () => {
@@ -91,7 +236,10 @@ describe('Provider workspace read tools', () => {
     };
     const created: string[] = [];
     const tools = new ProviderWorkspaceTools({
-      workspaceFor: () => workspace,
+      workspaceFor: (_taskId, _turnId, callId) => {
+        if (callId !== undefined) expect(callId).toBe('call-mkdir');
+        return workspace;
+      },
       rootIdentityFor: () => undefined,
       policyEpochFor: () => 2,
       authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
@@ -102,9 +250,10 @@ describe('Provider workspace read tools', () => {
         apply: async () => {
           throw new Error('not used');
         },
-        createDirectory: async ({ path, guard }) => {
+        createDirectory: async ({ path, guard, boundary }) => {
           expect(workspaceToolAuthorizationGuard({})).toBeUndefined();
           expect(guard.operation).toBe('write');
+          expect(boundary?.workspace).toEqual(workspace);
           created.push(path);
           return {
             rootId: 'root-a',
@@ -194,7 +343,104 @@ describe('Provider workspace read tools', () => {
     ).resolves.toMatchObject({
       path: 'hello.txt',
       content: 'こんにちは\n',
-      revision: { version: 1 },
+      encoding: 'utf-8',
+      byteLength: Buffer.byteLength('こんにちは\n'),
+      truncated: false,
+      range: { unit: 'byte', start: 0, end: Buffer.byteLength('こんにちは\n') },
+      revision: { version: 1, tokenId: expect.any(String) },
+    });
+  });
+
+  it('returns explicit line and UTF-8 byte ranges with truncation metadata', async () => {
+    const { root, tools, context } = await harness();
+    await writeFile(join(root, 'ranges.txt'), 'one\ntwo\n三\n');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'line-range',
+        providerName: 'read_file',
+        input: { path: 'ranges.txt', lineStart: 2, lineEnd: 3 },
+      }),
+    ).resolves.toMatchObject({
+      content: 'two\n三',
+      truncated: true,
+      range: { unit: 'line', start: 2, end: 3 },
+      encoding: 'utf-8',
+    });
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'byte-range',
+        providerName: 'read_file',
+        input: { path: 'ranges.txt', byteStart: 0, byteEnd: 3 },
+      }),
+    ).resolves.toMatchObject({
+      content: 'one',
+      truncated: true,
+      range: { unit: 'byte', start: 0, end: 3 },
+    });
+  });
+
+  it('views a bounded image by magic bytes through a guarded handle', async () => {
+    const { root, tools, context } = await harness();
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    await writeFile(join(root, 'pixel.bin'), png);
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'view-image',
+        providerName: 'view_image',
+        input: { path: 'pixel.bin' },
+      }),
+    ).resolves.toMatchObject({
+      path: 'pixel.bin',
+      mimeType: 'image/png',
+      byteLength: png.length,
+      dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+    });
+  });
+
+  it('searches bounded UTF-8 files without following symlinks or disclosing secrets', async () => {
+    const { root, tools, context } = await harness();
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'one.ts'), 'first\nneedle here\n');
+    await writeFile(join(root, 'src', 'two.txt'), 'needle ignored by glob\n');
+    await writeFile(
+      join(root, 'src', 'secret.ts'),
+      'API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456\nneedle\n',
+    );
+    if (process.platform !== 'win32') await symlink('/tmp', join(root, 'src', 'outside'));
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-search',
+        providerName: 'search_workspace',
+        input: { path: 'src', query: 'needle', glob: '**/*.ts', maxResults: 20 },
+      }),
+    ).resolves.toMatchObject({
+      path: 'src',
+      matches: [{ path: 'src/one.ts', line: 2, text: 'needle here' }],
+      withheldFiles: 1,
+    });
+  });
+
+  it('searches file paths without reading file contents', async () => {
+    const { root, tools, context } = await harness();
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'managed-harness.ts'), Buffer.from([0xff, 0xfe]));
+    await writeFile(join(root, 'src', 'other.ts'), 'text');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'file-search',
+        providerName: 'search_workspace',
+        input: { mode: 'files', query: 'harness', glob: '**/*.ts' },
+      }),
+    ).resolves.toMatchObject({
+      files: ['src/managed-harness.ts'],
+      matches: [],
+      withheldFiles: 0,
     });
   });
 
@@ -401,5 +647,137 @@ describe('Provider workspace read tools', () => {
       }),
     ).resolves.toMatchObject({ state: 'committed', kind: 'update' });
     expect(applied).toBe(true);
+  });
+
+  it('executes a Worker mutation against its call-bound isolated Workspace', async () => {
+    const parentRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-parent-'));
+    const workerRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-worker-'));
+    roots.push(parentRoot, workerRoot);
+    const makeWorkspace = (path: string, digest: string): EffectiveWorkspaceSet => ({
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [{ rootId: 'root-a', path, label: 'Workspace', role: 'primary', status: 'available' }],
+      digest,
+    });
+    const parent = makeWorkspace(parentRoot, '1'.repeat(64));
+    const worker = makeWorkspace(workerRoot, '2'.repeat(64));
+    const binding = await workspaceMutationBinding(workerRoot);
+    const applied: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: (_taskId, _turnId, callId) => (callId === 'worker-create' ? worker : parent),
+      rootIdentityFor: () => undefined,
+      mutationBindingFor: (_turnId, _rootId, callId) =>
+        callId === 'worker-create' ? binding : undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => parent,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions: new FileRevisionRegistry(),
+        apply: async (request) => {
+          applied.push(request);
+          return { id: 'worker-saga', state: 'committed' } as never;
+        },
+        policyEpochFor: () => 1,
+      },
+    });
+    const context = {
+      taskId: 'task-worker',
+      turnId: 'turn-parent',
+      workspaceId: parent.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'worker-create',
+        providerName: 'create_file',
+        input: { path: 'worker-only.txt', content: 'isolated\n' },
+      }),
+    ).resolves.toMatchObject({ state: 'committed', kind: 'add' });
+    expect(applied[0]).toMatchObject({
+      mutationBinding: {
+        workspaceKey: binding.workspaceKey,
+        rootIdentityDigest: binding.rootIdentityDigest,
+      },
+      plan: {
+        operations: [
+          expect.objectContaining({
+            canonicalPath: join(binding.canonicalPath, 'worker-only.txt'),
+          }),
+        ],
+      },
+    });
+  });
+
+  it('dispatches a revision-bound multi-file apply_patch batch through one Saga', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-batch-'));
+    roots.push(root);
+    await writeFile(join(root, 'one.txt'), 'before\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'f'.repeat(64),
+    };
+    const revisions = new FileRevisionRegistry();
+    const applied: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: ({ input }) => {
+        if (workspaceToolAuthorizationGuards(input, 'write').length > 0)
+          expect(workspaceToolAuthorizationGuards(input, 'write')).toHaveLength(2);
+        return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      },
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions,
+        apply: async (request) => {
+          applied.push(request);
+          return { id: 'batch-saga', state: 'committed' } as never;
+        },
+        policyEpochFor: () => 1,
+      },
+    });
+    const context = {
+      taskId: 'task-batch',
+      turnId: 'turn-batch',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'ollama');
+    const read = (await tools.broker.dispatch({
+      ...context,
+      callId: 'batch-read',
+      providerName: 'read_file',
+      input: { path: 'one.txt' },
+    })) as { revision: { version: 1; tokenId: string } };
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'batch-patch',
+        providerName: 'apply_patch',
+        input: {
+          operations: [
+            {
+              kind: 'update',
+              path: 'one.txt',
+              revision: read.revision,
+              edits: [{ oldText: 'before', newText: 'after' }],
+            },
+            { kind: 'add', path: 'two.txt', content: 'new\n' },
+          ],
+        },
+      }),
+    ).resolves.toMatchObject({ state: 'committed', operations: 2 });
+    expect(applied).toHaveLength(1);
   });
 });

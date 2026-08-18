@@ -16,6 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import {
   CommandRunner,
@@ -28,6 +29,7 @@ import {
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
 } from './command-runner';
+import { probeSandboxRunner } from './sandbox-runner';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -65,7 +67,7 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
-  it('inherits Windows command-discovery and user paths case-insensitively but excludes secrets', () => {
+  it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
       UserProfile: 'C:\\Users\\example',
@@ -79,7 +81,12 @@ describe('CommandRunner', () => {
     });
 
     expect(environment).toMatchObject({
-      PATH: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
+      PATH: [
+        'C:\\Windows\\System32',
+        'C:\\Windows',
+        'C:\\Program Files\\nodejs',
+        'C:\\Program Files\\Git\\cmd',
+      ].join(';'),
       HOME: 'C:\\Users\\example',
       USERPROFILE: 'C:\\Users\\example',
       APPDATA: 'C:\\Users\\example\\AppData\\Roaming',
@@ -90,6 +97,14 @@ describe('CommandRunner', () => {
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
     expect(environment).not.toHaveProperty('LD_PRELOAD');
     expect(environment).not.toHaveProperty('LD_LIBRARY_PATH');
+  });
+
+  it('drops relative, UNC, duplicate, and empty Windows PATH entries before executable lookup', () => {
+    const environment = buildControlledEnvironment('win32', {
+      SystemRoot: 'C:\\Windows',
+      PATH: 'relative\\bin;C:\\Windows\\System32;\\\\server\\tools;D:\\Tools;;d:\\tools\\',
+    });
+    expect(environment['PATH']).toBe('C:\\Windows\\System32;C:\\Windows;D:\\Tools');
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
@@ -191,6 +206,129 @@ describe('CommandRunner', () => {
       }),
     ).rejects.toThrow();
   });
+
+  it('resolves one bare executable on the sanitized PATH before sealing its identity', async () => {
+    const root = await workspace();
+    const spec = await prepareExecutionSpec({
+      workspacePath: root,
+      executable: process.platform === 'win32' ? 'cmd' : 'sh',
+      argv: [],
+    });
+    expect(spec.absoluteExecutable).toMatch(
+      process.platform === 'win32' ? /\\cmd\.exe$/iu : /\/(?:ba|da|z)?sh$/u,
+    );
+    expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
+  });
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'enforces workspace-write through the packaged sandbox helper',
+    async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-command-'));
+      const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-outside-'));
+      roots.push(workspace, outside);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: [
+          '-c',
+          'printf inside > "$1"; printf outside > "$2"',
+          'sandbox-test',
+          join(workspace, 'inside.txt'),
+          join(outside, 'outside.txt'),
+        ],
+      });
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).not.toBe(0);
+      await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'denies an unapproved network connection through the packaged sandbox helper',
+    async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const server = createServer((socket) => socket.end());
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === 'string') throw new Error('Missing test port');
+        const spec = await prepareTestExecutionSpec({
+          workspacePath: root,
+          executable: process.execPath,
+          argv: [
+            '-e',
+            `const net=require('node:net'); const socket=net.connect(${address.port},'127.0.0.1'); socket.once('connect',()=>process.exit(42)); socket.once('error',()=>process.exit(7)); setTimeout(()=>process.exit(8),2000).unref();`,
+          ],
+        });
+        const result = await new CommandRunner({ sandboxed: true }).run(spec);
+        expect(result.exitCode).toBe(7);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'enforces Windows AppContainer workspace-write through the packaged sandbox helper',
+    async () => {
+      if (!(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-command-'));
+      const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-outside-'));
+      roots.push(workspace, outside);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
+        ],
+      });
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(7);
+      await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'holds the per-workspace AppContainer ACL lease until concurrent helpers finish',
+    async () => {
+      if (!(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const early = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['-e', 'setTimeout(() => process.exit(0), 200)'],
+      });
+      const late = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(join(root, 'late.txt'))}, 'ok'), 600)`,
+        ],
+      });
+      const first = new CommandRunner({ sandboxed: true });
+      const second = new CommandRunner({ sandboxed: true });
+      try {
+        const results = await Promise.all([first.run(early), second.run(late)]);
+        expect(results.map(({ exitCode }) => exitCode)).toEqual([0, 0]);
+        await expect(readFile(join(root, 'late.txt'), 'utf8')).resolves.toBe('ok');
+      } finally {
+        await Promise.all([first.dispose(), second.dispose()]);
+      }
+    },
+  );
 
   it('rejects a replacement inode at a persisted Project root path', async () => {
     const root = await workspace();
@@ -682,6 +820,34 @@ describe('CommandRunner', () => {
 
       expect(identity).not.toBe('');
       expect(identity).not.toBe('unavailable');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'streams stdin to the owned foreground command',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareTestExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          "process.stdin.setEncoding('utf8'); let s=''; process.stdin.on('data', c => s += c); process.stdin.on('end', () => process.stdout.write(s.toUpperCase()))",
+        ],
+        cwd: '.',
+      });
+      const runner = new CommandRunner();
+      let output = '';
+      const result = await runner.run(spec, {
+        onStarted: ({ executionId }) => {
+          expect(runner.writeStdin(executionId, 'managed input', true)).toBe(true);
+        },
+        onChunk: ({ stream, text }) => {
+          if (stream === 'stdout') output += text;
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(output).toBe('MANAGED INPUT');
     },
   );
 

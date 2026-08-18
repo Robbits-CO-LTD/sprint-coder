@@ -538,7 +538,7 @@ ThreadActorはDB、Runtime、Tool、Approvalの完了をmailbox処理中にawait
 
 ### 11.2 Tool execution boundary
 
-Team MVPのmanaged accessへ採用するRuntimeは、全副作用をTool Broker経由にでき、Mainが外部観測するOS sandbox probeに合格することを必須条件とする。Broker非対応またはsandbox不能なRuntimeをread-onlyと呼ばず、`trusted-unmanaged`として通常presetと分離する。CapabilityReportの自己申告だけを信用せず、binary digest/version allowlist、direct file open/direct connectのnegative testをPhase 0 gateにする。
+Team MVPのmanaged accessへ採用するRuntimeは、全副作用を共通Managed Coding Harness経由にする。CLI native file/shell toolsは常に無効化し、OS sandbox probeに合格しない環境ではcommand toolsをsealed catalogから除外してfail closedにする。CapabilityReportの自己申告だけを信用せず、binary identity、起動引数、process-bound bridge認証、direct file open/direct connectのnegative testをgateにする。
 
 Tool Brokerはprovider inference通信によるdata egressを防がない。`provider.egress`をtool network capabilityと分け、providerごとに送信可能fragment分類、data residency/trust、sensitive path/secret scan、最大bytesをpolicy化する。local-only Taskではremote providerを起動拒否し、file内容がcloud providerへ送られることをUIとauditへ明示する。
 
@@ -602,19 +602,19 @@ Safe rewind前にworkspace mutation lease、free-space check、restore rehearsal
 
 Access presetはCapability policyのUI shortcutにすぎず、保存時は個別policyへ展開する。「安全時は自動」は判定理由をeventへ残し、不明な操作は確認へ倒す。
 
-外部CLI Runtimeについては、presetはさらにRuntimeのwrite scopeへ写像する（`main/write-scope.ts`）。写像はpresetとWorkspaceの有無の両方に依存し、Workspace未選択なら常に`read-only`である — Workspace無しのcwdは使い捨てのtemp directoryであり、そこへの書き込みはユーザーが二度と見られない編集を「成功」として報告することになるためである。
+Codex／Claude CLIは推論transportだけを担当し、内蔵File／Shell toolを常に無効化する。API、CLI、MockはすべてMainの`ManagedCodingHarness`が生成する同一`ToolCatalogSnapshot`を使い、Access presetはRuntime別flagではなくTool Brokerのcapability policyへだけ写像する。Workspace無しではworkspace-bound toolをcatalogへ載せない。
 
-| preset | Codex | Claude |
-| --- | --- | --- |
-| 確認する | `--sandbox read-only` | `--tools Read,Glob,Grep` + `--permission-mode manual` |
-| 安全時は自動 | `--sandbox workspace-write` | 編集ツール + `--permission-mode acceptEdits` + `--add-dir <workspace>` |
-| フルアクセス | `--sandbox danger-full-access` | `--tools default` + `--permission-mode bypassPermissions` |
+| preset | 共通Harness動作 |
+| --- | --- |
+| 確認する | read/searchはpolicy評価し、edit・commandはdurable Approval CardでTurn内確認 |
+| 安全時は自動 | Workspace内のNativeSafeFs/Edit Sagaとprobe済みcommand sandboxだけを自動許可 |
+| フルアクセス | 広い操作を許可するが、credential、app-private、signing/update key、provider egress denyは維持 |
 
-この二列は強度が異なり、その差をUIへ明示する義務がある。Codexの`workspace-write`はmacOSではSeatbeltが強制するOS境界であり、実測でWorkspace外への書き込みは拒否される。一方Claudeの同じscopeはCLIが自身へ適用するtool allowlistにすぎず、上の§Managed Runtimeが言う「単なるtool非公開はsecurity boundaryに数えない」に該当する。したがって書き込み可能なClaude Turnは`trusted-unmanaged`としてAccess chipに「非サンドボックス」を表示する。
+Command sandboxはmacOS Seatbelt、Linux bubblewrap、Windows AppContainerを使い、Workspace外writeと未許可networkのnegative probeが成功した環境でだけ`exec_command`をcatalogへ載せる。probe不合格時にunsafe fallbackは行わない。
 
-ターン内の対話的承認は行わない。`codex exec`はone-shot stdinで応答できる承認channelを持たず、Claude CLI 2.1.218にはpermission prompt hookが無い（`--permission-mode manual`は拒否したうえで`permission_denials`に構造化して返すのみ）。「確認する」を「尋ねる」と実装できない以上、「提案するが書かない」として実装し、読み取りツールは与えて具体的な提案ができるようにする。
+ターン内承認と`request_user_input`はMain-owned approval lifecycleで待機・再開できる。CLI自身のpermission promptは使用せず、選択結果、policy epoch、call ID、catalog digestをSQLiteへ保存する。
 
-Runtimeが書いたファイルは`files.changed` TurnEventとして永続化する。pathはCLI自身の構造化eventからのみ取得し、model proseからは決して読まない（issue #11のimage pathと同じ理由）。MainがWorkspace rootの内側であることを検証し、外へ解決するpathは表示しない。
+Harnessがcommitしたファイルは`files.changed` TurnEventとして永続化する。pathとpost-imageはBroker／Edit Sagaの結果だけを正本とし、CLI eventやmodel proseから推測しない。
 
 2026-08-01時点で、Inspectorパネルとその専用UI（ライブ本文、差分、手動編集、Project Context表示）は製品から削除した。ユーザーに見せるファイル変更の正本はTimelineの`files.changed`カードである。Main側のtransient file-edit channelとworkspace read/save IPCは既存Runtimeとの互換性のため現状維持するが、現行rendererからは利用しない。
 
@@ -672,7 +672,7 @@ Full Accessでもadministrator deny、credential/secret保護、audit、Renderer
 
 Worktreeは変更競合を分ける仕組みでありsecurity sandboxではない。write-capable Workerは専用worktreeに加えて、そのrootだけをwrite可能にしたOS sandboxを必須とする。Git実行時はrepository hook、global/system config、credential helper、pager、external diff/merge、protocol extensionを無効化したsanitized environmentを使う。submodule、LFS pointer、symlink/hardlink、special file、gitdir、workspace外pathをartifact acceptanceで検査し、Workerが親workspaceを直接変更せずBrokerがreview済みpatchだけを適用する。
 
-Managed Runtimeは実行前probeでOS sandboxとdirect filesystem/process/network denialを実証できるものだけを指す。単なる`read-only` promptやtool非公開はsecurity boundaryに数えない。外部CLIはbinary digest/version allowlist、起動引数、environment、IPC challengeを固定し、満たさないadapterは`trusted-unmanaged`と表示して機密Taskでは拒否する。
+Managed Runtimeは、Mainの共通Harnessがtool実行・承認・監査を所有し、commandを公開する場合は実行前probeでOS sandboxとdirect filesystem/process/network denialを実証できるものだけを指す。単なる`read-only` promptやtool非公開はsecurity boundaryに数えない。外部CLIは起動引数、isolated environment、process-bound IPC challengeを固定し、protocolを満たさないversionは更新案内付きで起動を拒否する。unsafeな自動降格経路は持たない。
 
 ## 13. UI system
 

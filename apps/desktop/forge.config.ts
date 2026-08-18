@@ -81,6 +81,15 @@ function bundledNodeResources(): string[] {
   return [nodeExecutable, join(resolve(nodeExecutable, '..'), 'LICENSE')];
 }
 
+function sandboxRunnerResources(): string[] {
+  const name =
+    process.platform === 'win32'
+      ? 'sprint-coder-sandbox-runner.exe'
+      : 'sprint-coder-sandbox-runner';
+  const executable = resolve(__dirname, 'sandbox-runner', 'build', 'Release', name);
+  return [executable, `${executable}.sha256`];
+}
+
 export function verifyBundledNodeResources(): void {
   if (process.platform !== 'win32') return;
   if (process.versions.node !== BUNDLED_NODE_VERSION)
@@ -239,7 +248,7 @@ const config: ForgeConfig = {
     // Linux libvips is version-suffixed (for example libvips-cpp.so.8.18.3), so matching only
     // files that end in `.so` leaves Sharp's shared library trapped inside app.asar.
     asar: { unpack: NATIVE_ASAR_UNPACK_GLOB },
-    extraResource: bundledNodeResources(),
+    extraResource: [...bundledNodeResources(), ...sandboxRunnerResources()],
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,

@@ -126,6 +126,67 @@ describe('defaultSocketPathFactory', () => {
 });
 
 describe('TeamMcpBridge', () => {
+  it('authenticates and dispatches a catalog-bound managed coding tool', async () => {
+    const executeManaged = vi.fn(async (input, context) => ({ input, context }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      executeManaged,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-managed', {
+      taskId: 'task-managed',
+      token,
+      allowTeamTools: false,
+      allowedTools: [],
+      managedTools: [
+        {
+          name: 'read_file',
+          description: 'Read a managed file',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      managedToolCatalogDigest: 'a'.repeat(64),
+    });
+
+    const authentication = await roundTrip(socketPath as string, {
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+    expect(JSON.parse(authentication.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { managedTools: [{ name: 'read_file' }], toolCatalogDigest: 'a'.repeat(64) },
+    });
+
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: 'read_file',
+      args: { path: 'README.md' },
+    });
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { input: { path: 'README.md' } },
+    });
+    expect(executeManaged).toHaveBeenCalledWith(
+      { path: 'README.md' },
+      expect.objectContaining({
+        taskId: 'task-managed',
+        turnId: 'turn-managed',
+        toolName: 'read_file',
+        catalogDigest: 'a'.repeat(64),
+      }),
+    );
+  });
+
   it('rejects a copied bearer token until the runtime process is strongly bound', async () => {
     const coordinator = fakeCoordinator();
     const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath());

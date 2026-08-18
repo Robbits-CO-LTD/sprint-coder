@@ -2642,14 +2642,48 @@ if (runsWithElectronAbi)
           createdAt: '2026-07-23T00:00:04.000Z',
         }),
       ).toMatchObject({ decision: 'repair', repairRoundsUsed: 1 });
+      const verificationSpec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'd'.repeat(64),
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'e'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      persistence.prepareCommand({
+        id: 'verification-command',
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'verification-call',
+        spec: verificationSpec,
+        purpose: 'targeted verification',
+        risk: 'high',
+        createdAt: '2026-07-23T00:00:05.000Z',
+      });
+      persistence.beginCommand('verification-command');
+      persistence.startCommand({
+        commandId: 'verification-command',
+        pid: 123,
+        processStartTime: 'verification-process',
+        startedAt: '2026-07-23T00:00:05.100Z',
+      });
+      persistence.completeCommand({
+        commandId: 'verification-command',
+        state: 'exited',
+        exitCode: 0,
+        signal: null,
+        outputBytes: 0,
+        truncated: false,
+        finishedAt: '2026-07-23T00:00:05.200Z',
+      });
       expect(
-        persistence.recordAssuranceVerification({
+        persistence.recordCommandVerification({
           taskId: task.id,
           turnId: turn.turnId,
-          sagaId: 'cleanup-saga',
-          outcome: 'passed',
-          failureClass: null,
-          createdAt: '2026-07-23T00:00:05.000Z',
+          commandId: 'verification-command',
+          exitCode: 0,
+          createdAt: '2026-07-23T00:00:05.300Z',
         }),
       ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });
       expect(persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga')).toHaveLength(3);
@@ -5746,52 +5780,25 @@ if (runsWithElectronAbi)
       persistence.close();
 
       const reopened = new SqlitePersistenceClient(path);
-      const interruptedTarget = reopened.startTurn(task.id, 'crash before runtime acknowledgement');
+      reopened.initializeMutationRecovery('restart-holder', '2026-07-23T00:01:00.000Z');
       expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
-        state: 'attached',
-        targetTurnId: interruptedTarget.turnId,
-        fragmentId: 'completion-durable',
+        state: 'quarantined',
+        targetTurnId: null,
+      });
+      reopened.startTurn(task.id, 'crash before runtime acknowledgement');
+      expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
+        state: 'quarantined',
+        targetTurnId: null,
       });
       expect(reopened.interruptActiveTurns()).toBe(1);
       expect(reopened.listBackgroundCompletions(task.id)[0]).toMatchObject({
-        state: 'persisted',
+        state: 'quarantined',
         targetTurnId: null,
       });
       const target = reopened.startTurn(task.id, 'consume completion');
       const prepared = reopened.prepareContext(task.id, target.turnId);
-      expect(prepared.fragments).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            id: 'completion-durable',
-            source: 'background',
-            trust: 'assistant',
-            content: expect.stringContaining('background result'),
-          }),
-        ]),
-      );
-      expect(prepared.fragments.map((fragment) => fragment.content).join('\n')).not.toContain(
-        'hunter2',
-      );
-      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('attached');
-      const acknowledged = reopened.acknowledgeBackgroundFragments(task.id, target.turnId, [
-        'completion-durable',
-      ]);
-      expect(acknowledged).toEqual([
-        expect.objectContaining({
-          type: 'delivery.acknowledged',
-          completionId: 'completion-durable',
-        }),
-      ]);
-      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('runtimeAcked');
-      const repeated = reopened.prepareContext(task.id, target.turnId);
-      expect(repeated.fragments.some((fragment) => fragment.id === 'completion-durable')).toBe(
-        true,
-      );
-      expect(
-        reopened
-          .listEventsAfter(task.id, 0)
-          .filter((event) => event.type === 'delivery.acknowledged'),
-      ).toHaveLength(1);
+      expect(prepared.fragments.some(({ id }) => id === 'completion-durable')).toBe(false);
+      expect(reopened.listBackgroundCompletions(task.id)[0]?.state).toBe('quarantined');
       reopened.close();
     });
 
@@ -6039,6 +6046,88 @@ if (runsWithElectronAbi)
         'Command output integrity check failed',
       );
       compromised.close();
+    });
+
+    it('persists the canonical managed tool lifecycle and rejects invalid transitions', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const started = startExecutingTurn(persistence, task.id);
+      const base = {
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'managed-call-1',
+        ordinal: 1,
+        providerName: 'read_file',
+        catalogDigest: 'd'.repeat(64),
+      } as const;
+      for (const [index, state] of [
+        'requested',
+        'prepared',
+        'awaiting_approval',
+        'queued',
+        'running',
+        'succeeded',
+      ].entries())
+        persistence.recordManagedToolLifecycle({
+          ...base,
+          state: state as never,
+          occurredAt: new Date(Date.UTC(2026, 7, 18, 0, 0, index)).toISOString(),
+        });
+      expect(() =>
+        persistence.recordManagedToolLifecycle({
+          ...base,
+          state: 'running',
+          occurredAt: '2026-08-18T00:01:00.000Z',
+        }),
+      ).toThrow('Invalid managed tool lifecycle transition');
+      persistence.close();
+
+      const db = new Database(path, { readonly: true });
+      expect(db.prepare('SELECT state, finished_at FROM managed_tool_calls').get()).toMatchObject({
+        state: 'succeeded',
+        finished_at: '2026-08-18T00:00:05.000Z',
+      });
+      expect(db.prepare('SELECT state FROM managed_tool_call_events ORDER BY seq').all()).toEqual([
+        { state: 'requested' },
+        { state: 'prepared' },
+        { state: 'awaiting_approval' },
+        { state: 'queued' },
+        { state: 'running' },
+        { state: 'succeeded' },
+      ]);
+      db.close();
+    });
+
+    it('persists one revisioned managed plan per Turn', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'managed plan');
+      expect(
+        persistence.recordManagedTurnPlan({
+          taskId: task.id,
+          turnId: turn.turnId,
+          items: [
+            { step: 'inspect', status: 'completed' },
+            { step: 'implement', status: 'in_progress' },
+          ],
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ).toEqual({ revision: 1 });
+      expect(
+        persistence.recordManagedTurnPlan({
+          taskId: task.id,
+          turnId: turn.turnId,
+          items: [{ step: 'verify', status: 'in_progress' }],
+          updatedAt: '2026-08-18T00:01:00.000Z',
+        }),
+      ).toEqual({ revision: 2 });
+      persistence.close();
+      const db = new Database(path, { readonly: true });
+      expect(db.prepare('SELECT revision, items_json FROM managed_turn_plans').get()).toEqual({
+        revision: 2,
+        items_json: JSON.stringify([{ step: 'verify', status: 'in_progress' }]),
+      });
+      db.close();
     });
 
     it('marks a running command interrupted on restart and never reconnects by PID', () => {
@@ -6658,6 +6747,8 @@ if (runsWithElectronAbi)
         { version: 68 },
         { version: 69 },
         { version: 70 },
+        { version: 71 },
+        { version: 72 },
       ]);
       for (const [table, columns] of [
         [

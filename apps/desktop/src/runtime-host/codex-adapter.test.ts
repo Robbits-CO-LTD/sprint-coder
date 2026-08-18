@@ -3,11 +3,13 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
   CodexAgentMessageBoundary,
   CodexRuntimeAdapter,
   advanceCodexAppServerStage,
   buildCodexArgs,
+  buildCodexManagedDynamicTools,
   buildCodexPrompt,
   buildCodexTeamDynamicTools,
   buildCodexTurnInput,
@@ -18,8 +20,10 @@ import {
   resolveCodexCommand,
   terminateCodexProcessTree,
   isUnsupportedMultiRootError,
+  mergeCodexDynamicTools,
   validateCodexTeamMcpInventory,
   codexDynamicToolResponseFromMcp,
+  codexDynamicToolResponseFromManaged,
   codexInitializeCapabilities,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
@@ -325,6 +329,100 @@ describe('Codex runtime probe', () => {
 
     expect(failures).toEqual([]);
     expect(events.at(-1)).toMatchObject({ type: 'completed' });
+  });
+
+  it('routes a managed dynamic tool to the client and disables Codex native environments', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'managed-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
+        "  if (message.method === 'thread/start') {",
+        "    if (message.params.sandbox !== 'read-only' || message.params.environments?.length !== 0) process.exit(21);",
+        "    if (message.params.dynamicTools?.[0]?.name !== 'read_file') process.exit(22);",
+        "    send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-managed' } } });",
+        '  }',
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    send({ jsonrpc: '2.0', id: 'managed-call', method: 'item/tool/call', params: { threadId: 'thread-managed', turnId: 'turn-1', callId: 'call-read', namespace: null, tool: 'read_file', arguments: { path: 'README.md' } } });",
+        '  }',
+        "  if (message.id === 'managed-call' && message.result?.success === true) {",
+        "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'workspace',
+          name: 'read',
+          version: '1',
+        }),
+        providerName: 'read_file',
+        kind: 'fileRead',
+        schemaVersion: 1,
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+        outputSchema: { type: 'object' },
+        sideEffect: 'read',
+        risk: 'low',
+        requiredCapabilities: ['workspace.read'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['*'],
+      }),
+    );
+    const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
+    const calls: unknown[] = [];
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'managed-tool-turn',
+        'request',
+        [],
+        () => undefined,
+        root,
+        'auto',
+        () => undefined,
+        () => undefined,
+        () => resolve(),
+        undefined,
+        undefined,
+        'workspace-write',
+        [],
+        [],
+        undefined,
+        undefined,
+        { inheritUserConfig: false },
+        undefined,
+        snapshot,
+        async (call) => {
+          calls.push(call);
+          return { success: true, output: { content: 'managed' } };
+        },
+      );
+    });
+    expect(calls).toEqual([
+      {
+        callId: 'call-read',
+        toolName: 'read_file',
+        arguments: { path: 'README.md' },
+        catalogDigest: snapshot.digest,
+      },
+    ]);
   });
 
   it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
@@ -780,20 +878,14 @@ describe('Codex runtime probe', () => {
     ).toBeGreaterThanOrEqual(4);
   });
 
-  it('uses the interactive app-server transport for every write scope', () => {
-    for (const scope of ['read-only', 'workspace-write', 'full'] as const)
-      expect(buildCodexArgs('auto', undefined, scope).slice(0, 3)).toEqual([
-        'app-server',
-        '--listen',
-        'stdio://',
-      ]);
+  it('uses the interactive app-server transport for the immutable managed profile', () => {
+    expect(buildCodexArgs('auto').slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
   });
 
-  it('never asks for approval, at any scope', () => {
+  it('never asks the native runtime for approval', () => {
     // `on-request` in exec mode stalls the tool instead of surfacing anything answerable, so a scope
     // that flipped this would hang a Turn rather than prompt anyone.
-    for (const scope of ['read-only', 'workspace-write', 'full'] as const)
-      expect(buildCodexArgs('auto', undefined, scope)).toContain('approval_policy="never"');
+    expect(buildCodexArgs('auto')).toContain('approval_policy="never"');
   });
 
   it('passes an explicit model without changing the immutable execution profile', () => {
@@ -812,7 +904,7 @@ describe('Codex runtime probe', () => {
   });
 
   it('pins the per-turn Team MCP server through explicit config overrides', () => {
-    const args = buildCodexArgs('auto', undefined, 'read-only', {
+    const args = buildCodexArgs('auto', undefined, {
       command: 'node',
       scriptPath: '/tmp/team-mcp-server.cjs',
       toolNames: TEAM_CORE_MCP_TOOL_NAMES,
@@ -886,6 +978,68 @@ describe('Codex runtime probe', () => {
     ]);
   });
 
+  it('publishes the sealed managed catalog as client-hosted dynamic tools', () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'workspace',
+          name: 'read',
+          version: '1',
+        }),
+        providerName: 'read_file',
+        kind: 'fileRead',
+        schemaVersion: 1,
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+        outputSchema: { type: 'object' },
+        sideEffect: 'read',
+        risk: 'low',
+        requiredCapabilities: ['workspace.read'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['*'],
+      }),
+    );
+    expect(
+      buildCodexManagedDynamicTools(
+        registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' }),
+      ),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'read_file',
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+        deferLoading: false,
+      },
+    ]);
+  });
+
+  it('keeps the Managed Harness route when an MCP inventory repeats the same tool name', () => {
+    const managed = [
+      {
+        type: 'function' as const,
+        name: 'team_list_models',
+        description: 'managed',
+        inputSchema: { type: 'object' },
+        deferLoading: false as const,
+      },
+    ];
+    const mcp = [
+      { ...managed[0]!, description: 'mcp duplicate' },
+      { ...managed[0]!, name: 'team_wait_reports', description: 'mcp unique' },
+    ];
+    expect(
+      mergeCodexDynamicTools(managed, mcp).map(({ name, description }) => [name, description]),
+    ).toEqual([
+      ['team_list_models', 'managed'],
+      ['team_wait_reports', 'mcp unique'],
+    ]);
+  });
+
   it('enables the app-server experimental API for dynamic Team tools', () => {
     expect(codexInitializeCapabilities(false, false)).toEqual({});
     expect(codexInitializeCapabilities(true, false)).toEqual({ experimentalApi: true });
@@ -908,16 +1062,42 @@ describe('Codex runtime probe', () => {
     });
   });
 
-  it('enables live Web search only for an explicitly research-enabled Team turn', () => {
+  it('returns a managed Workspace image as an inline dynamic-tool image', () => {
+    expect(
+      codexDynamicToolResponseFromManaged({
+        success: true,
+        output: {
+          path: 'diagram.png',
+          mimeType: 'image/png',
+          byteLength: 3,
+          sha256: 'a'.repeat(64),
+          dataUrl: 'data:image/png;base64,QUFB',
+        },
+      }),
+    ).toEqual({
+      success: true,
+      contentItems: [
+        {
+          type: 'inputText',
+          text: JSON.stringify({
+            path: 'diagram.png',
+            mimeType: 'image/png',
+            byteLength: 3,
+            sha256: 'a'.repeat(64),
+          }),
+        },
+        { type: 'inputImage', imageUrl: 'data:image/png;base64,QUFB' },
+      ],
+    });
+  });
+
+  it('never enables native Web search for a Team turn', () => {
     const base = {
       command: 'node',
       scriptPath: '/tmp/team-mcp-server.cjs',
       toolNames: TEAM_CORE_MCP_TOOL_NAMES,
     };
-    expect(buildCodexArgs('auto', undefined, 'read-only', base)).not.toContain('web_search="live"');
-    expect(
-      buildCodexArgs('auto', undefined, 'read-only', { ...base, enableWebSearch: true }),
-    ).toContain('web_search="live"');
+    expect(buildCodexArgs('auto', undefined, base)).not.toContain('web_search="live"');
   });
 
   it('prepends Team guidance to the real Codex Leader prompt', () => {

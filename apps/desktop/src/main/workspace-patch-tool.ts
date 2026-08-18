@@ -1,9 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import { createToolDefinition, createToolId, type ToolDefinition } from '@sprint-coder/domain';
-import { fileRevisionIdentityDigest, type FileRevisionRegistry } from './file-revision';
+import {
+  fileRevisionIdentityDigest,
+  type FileRevisionReference,
+  type FileRevisionRegistry,
+} from './file-revision';
 import type { EditSagaApplyRequest, EditSagaSnapshot } from './edit-saga';
-import { PatchValidationError, prepareStructuredPatch } from './structured-patch';
+import {
+  PatchValidationError,
+  prepareStructuredPatch,
+  type StructuredPatchOperation,
+} from './structured-patch';
 import { describeAnchorFailure } from './anchor-failure-message';
 import { isIssuedPathGuard, type PathGuard } from './path-guard';
 
@@ -46,8 +54,42 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
           additionalProperties: false,
         },
       },
+      operations: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 100,
+        items: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: ['add', 'update', 'delete', 'rename', 'mkdir'] },
+            path: { type: 'string' },
+            destination: { type: 'string' },
+            content: { type: 'string' },
+            revision: {
+              type: 'object',
+              properties: {
+                version: { type: 'integer', const: 1 },
+                tokenId: { type: 'string' },
+              },
+              required: ['version', 'tokenId'],
+              additionalProperties: false,
+            },
+            edits: {
+              type: 'array',
+              minItems: 1,
+              items: {
+                type: 'object',
+                properties: { oldText: { type: 'string' }, newText: { type: 'string' } },
+                required: ['oldText', 'newText'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['kind', 'path'],
+          additionalProperties: false,
+        },
+      },
     },
-    required: ['path', 'edits'],
     additionalProperties: false,
   },
   outputSchema: { type: 'object' },
@@ -132,6 +174,7 @@ export type WorkspacePatchDeps = Readonly<{
     rootId: string;
     path: string;
     guard: PathGuard;
+    boundary?: PreparedWorkspaceBoundary;
   }) => Promise<unknown>;
   policyEpochFor: (taskId: string) => number;
   newId?: () => string;
@@ -139,6 +182,10 @@ export type WorkspacePatchDeps = Readonly<{
 }>;
 
 export type WorkspacePatchContext = Readonly<{ taskId: string; turnId: string }>;
+export type PreparedWorkspaceBoundary = Readonly<{
+  workspace: EffectiveWorkspaceSet;
+  mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
+}>;
 
 /**
  * Raised for a failure the model can act on, carrying the text it should be shown.
@@ -160,6 +207,7 @@ export async function executeWorkspacePatch(
   deps: WorkspacePatchDeps,
   approvedGuard: PathGuard,
   approvedReadGuard: PathGuard,
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{
   rootId: string;
   path: string;
@@ -169,16 +217,17 @@ export async function executeWorkspacePatch(
   kind: 'update';
 }> {
   const request = parseInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null) throw new Error('apply_patch requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0) throw new Error('apply_patch requires a selected Workspace');
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('apply_patch Turn Workspace identity is incomplete');
   const expectedRootIdentityDigest = mutationBinding?.rootIdentityDigest;
@@ -252,23 +301,127 @@ export async function executeWorkspacePatch(
   };
 }
 
+export async function executeWorkspacePatchBatch(
+  input: unknown,
+  context: WorkspacePatchContext,
+  deps: WorkspacePatchDeps,
+  approvedGuards: readonly PathGuard[],
+  boundary?: PreparedWorkspaceBoundary,
+): Promise<{
+  rootId: string;
+  paths: readonly string[];
+  sagaId: string;
+  state: string;
+  operations: number;
+  changes: readonly { path: string; kind: 'add' | 'update' | 'delete' }[];
+}> {
+  const request = parseBatchInput(input);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  if (workspace === null) throw new Error('apply_patch requires a sealed Turn Workspace snapshot');
+  const requestedRootId = request.rootId ?? workspace.primaryRootId;
+  const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
+  if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
+  const mutationBinding =
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
+      ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
+      : undefined);
+  if (workspace.source === 'project' && mutationBinding === undefined)
+    throw new Error('apply_patch Turn Workspace identity is incomplete');
+  const plan = await prepareStructuredPatch({
+    owner: { taskId: context.taskId, turnId: context.turnId },
+    rootId: root.rootId,
+    workspacePath: root.path,
+    ...(mutationBinding === undefined
+      ? {}
+      : { expectedRootIdentityDigest: mutationBinding.rootIdentityDigest }),
+    policyEpoch: deps.policyEpochFor(context.taskId),
+    registry: deps.revisions,
+    operations: request.operations,
+  });
+  assertApprovedBatchTargets(plan, approvedGuards);
+  const saga = await deps.apply({
+    id: (deps.newId ?? randomUUID)(),
+    taskId: context.taskId,
+    turnId: context.turnId,
+    operationId: (deps.newId ?? randomUUID)(),
+    plan,
+    ...(mutationBinding === undefined
+      ? {}
+      : {
+          mutationBinding: {
+            rootId: root.rootId,
+            workspacePath: root.path,
+            workspaceKey: mutationBinding.workspaceKey,
+            rootIdentityDigest: mutationBinding.rootIdentityDigest,
+          },
+        }),
+    createdAt: (deps.now ?? (() => new Date().toISOString()))(),
+  });
+  return {
+    rootId: root.rootId,
+    paths: plan.operations.flatMap((operation) =>
+      operation.destination === null ? [operation.path] : [operation.path, operation.destination],
+    ),
+    sagaId: saga.id,
+    state: saga.state,
+    operations: plan.operations.length,
+    changes: plan.operations.flatMap((operation) => {
+      if (operation.kind === 'mkdir') return [];
+      if (operation.kind === 'rename')
+        return [
+          { path: operation.path, kind: 'delete' as const },
+          { path: operation.destination!, kind: 'add' as const },
+        ];
+      return [
+        {
+          path: operation.path,
+          kind: operation.kind === 'add' ? ('add' as const) : operation.kind,
+        },
+      ];
+    }),
+  };
+}
+
+function assertApprovedBatchTargets(
+  plan: Awaited<ReturnType<typeof prepareStructuredPatch>>,
+  guards: readonly PathGuard[],
+): void {
+  const approved = new Set(
+    guards
+      .filter((guard) => isIssuedPathGuard(guard))
+      .map((guard) => `${guard.operation}\0${guard.resolvedPath}`),
+  );
+  for (const operation of plan.operations) {
+    if (!approved.has(`write\0${operation.canonicalPath}`))
+      throw new Error('Workspace batch mutation source was not authorized');
+    if (
+      operation.canonicalDestination !== null &&
+      !approved.has(`write\0${operation.canonicalDestination}`)
+    )
+      throw new Error('Workspace batch mutation destination was not authorized');
+  }
+}
+
 export async function executeWorkspaceCreateFile(
   input: unknown,
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
   approvedGuard: PathGuard,
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{ rootId: string; path: string; sagaId: string; state: string; kind: 'add' }> {
   const request = parseCreateFileInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null) throw new Error('create_file requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0) throw new Error('create_file requires a selected Workspace');
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('create_file requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('create_file Turn Workspace identity is incomplete');
   const plan = await prepareStructuredPatch({
@@ -315,9 +468,10 @@ export async function executeWorkspaceCreateDirectory(
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
   approvedGuard: PathGuard,
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{ rootId: string; path: string; sagaId: string; state: string; kind: 'mkdir' }> {
   const request = parseCreateDirectoryInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null)
     throw new Error('create_directory requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0)
@@ -326,9 +480,10 @@ export async function executeWorkspaceCreateDirectory(
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('create_directory requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('create_directory Turn Workspace identity is incomplete');
   const plan = await prepareStructuredPatch({
@@ -430,6 +585,86 @@ function parseInput(input: unknown): {
       return { oldText, newText };
     }),
   };
+}
+
+export function parseBatchInput(input: unknown): {
+  rootId?: string;
+  operations: StructuredPatchOperation[];
+} {
+  if (typeof input !== 'object' || input === null || Array.isArray(input))
+    throw new Error('apply_patch requires an object');
+  const record = input as Record<string, unknown>;
+  if (
+    record['rootId'] !== undefined &&
+    (typeof record['rootId'] !== 'string' || record['rootId'].length === 0)
+  )
+    throw new Error('apply_patch rootId must be a non-empty string');
+  if (
+    !Array.isArray(record['operations']) ||
+    record['operations'].length < 1 ||
+    record['operations'].length > 100
+  )
+    throw new Error('apply_patch operations must contain 1 to 100 items');
+  const operations = record['operations'].map((candidate): StructuredPatchOperation => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate))
+      throw new Error('apply_patch operation must be an object');
+    const operation = candidate as Record<string, unknown>;
+    if (typeof operation['path'] !== 'string' || operation['path'].length === 0)
+      throw new Error('apply_patch operation requires a path');
+    if (operation['kind'] === 'add') {
+      if (typeof operation['content'] !== 'string') throw new Error('add requires content');
+      return { kind: 'add', path: operation['path'], content: operation['content'] };
+    }
+    if (operation['kind'] === 'mkdir') return { kind: 'mkdir', path: operation['path'] };
+    const revision = parseRevision(operation['revision']);
+    if (operation['kind'] === 'delete')
+      return { kind: 'delete', path: operation['path'], revision };
+    if (operation['kind'] === 'rename') {
+      if (typeof operation['destination'] !== 'string' || operation['destination'].length === 0)
+        throw new Error('rename requires destination');
+      return {
+        kind: 'rename',
+        path: operation['path'],
+        destination: operation['destination'],
+        revision,
+      };
+    }
+    if (
+      operation['kind'] !== 'update' ||
+      !Array.isArray(operation['edits']) ||
+      operation['edits'].length === 0
+    )
+      throw new Error('update requires edits');
+    return {
+      kind: 'update',
+      path: operation['path'],
+      revision,
+      edits: operation['edits'].map((edit) => {
+        if (typeof edit !== 'object' || edit === null) throw new Error('invalid update edit');
+        const value = edit as Record<string, unknown>;
+        if (typeof value['oldText'] !== 'string' || typeof value['newText'] !== 'string')
+          throw new Error('update edits require oldText and newText');
+        return { oldText: value['oldText'], newText: value['newText'] };
+      }),
+    };
+  });
+  return {
+    ...(typeof record['rootId'] === 'string' ? { rootId: record['rootId'] } : {}),
+    operations,
+  };
+}
+
+function parseRevision(value: unknown): FileRevisionReference {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw new Error('existing-file operations require a revision');
+  const revision = value as Record<string, unknown>;
+  if (
+    revision['version'] !== 1 ||
+    typeof revision['tokenId'] !== 'string' ||
+    revision['tokenId'].length === 0
+  )
+    throw new Error('invalid file revision');
+  return { version: 1, tokenId: revision['tokenId'] };
 }
 
 function parseCreateFileInput(input: unknown): { rootId?: string; path: string; content: string } {

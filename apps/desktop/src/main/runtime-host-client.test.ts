@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolRegistry } from '@sprint-coder/domain';
+import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 
 class FakeUtilityProcess extends EventEmitter {
   readonly messages: unknown[] = [];
@@ -27,6 +27,34 @@ import { RuntimeHostClient } from './runtime-host';
 
 function emptyCatalog() {
   return new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null });
+}
+
+function managedCatalog() {
+  const registry = new ToolRegistry();
+  registry.register(
+    createToolDefinition({
+      toolId: createToolId({
+        provider: 'builtin',
+        namespace: 'workspace',
+        name: 'read',
+        version: '1',
+      }),
+      providerName: 'read_file',
+      kind: 'fileRead',
+      schemaVersion: 1,
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+      outputSchema: { type: 'object' },
+      sideEffect: 'read',
+      risk: 'low',
+      requiredCapabilities: ['workspace.read'],
+      executionTarget: 'main',
+      implementationKind: 'built-in',
+      priority: 1,
+      workspaceBinding: { kind: 'any' },
+      providerCompatibility: ['*'],
+    }),
+  );
+  return registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
 }
 
 describe('RuntimeHostClient start acknowledgement', () => {
@@ -248,6 +276,71 @@ describe('RuntimeHostClient start acknowledgement', () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(failed).not.toHaveBeenCalled();
     expect(child.messages.map(messageType)).toEqual(['hello', 'start']);
+    client.dispose();
+  });
+
+  it('dispatches a catalog-bound Runtime tool request and returns its result', async () => {
+    const handleTool = vi.fn(async (_taskId, _turnId, request) => ({
+      path: request.arguments.path,
+    }));
+    const client = new RuntimeHostClient(
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      'codex',
+      undefined,
+      undefined,
+      undefined,
+      handleTool,
+    );
+    const child = children[0]!;
+    child.emit('spawn');
+    const catalog = managedCatalog();
+    client.start('task-tools', 'turn-tools', 'hello', null, 'auto', catalog);
+    await Promise.resolve();
+    const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+      string,
+      unknown
+    >;
+    child.emit('message', {
+      protocolVersion: start['protocolVersion'],
+      runtimeInstanceId: start['runtimeInstanceId'],
+      taskId: start['taskId'],
+      turnId: start['turnId'],
+      operationId: start['operationId'],
+      seq: 1,
+      type: 'started',
+      acceptedContextFragmentIds: [],
+      acceptedProjectItemIds: [],
+      acceptedProjectSnapshotDigest: null,
+      acceptedPayloadDigest: start['payloadDigest'],
+    });
+    child.emit('message', {
+      protocolVersion: start['protocolVersion'],
+      runtimeInstanceId: start['runtimeInstanceId'],
+      taskId: start['taskId'],
+      turnId: start['turnId'],
+      operationId: start['operationId'],
+      seq: 2,
+      type: 'tool_request',
+      request: {
+        callId: 'call-read',
+        toolName: 'read_file',
+        arguments: { path: 'README.md' },
+        catalogDigest: catalog.digest,
+      },
+    });
+    await vi.waitFor(() => expect(handleTool).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        child.messages.find((message) => messageType(message) === 'tool_result'),
+      ).toMatchObject({
+        callId: 'call-read',
+        success: true,
+        output: { path: 'README.md' },
+      }),
+    );
     client.dispose();
   });
 

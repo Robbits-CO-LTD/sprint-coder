@@ -21,6 +21,7 @@ import {
   runtimeWorkspaceSetFromLegacyPath,
   type RuntimeProcessIdentity,
   type RuntimeTeamMcpOption,
+  type RuntimeToolRequest,
   type RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
 import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
@@ -61,7 +62,14 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   selectRuntimes: (worker: AgentRecord) => readonly RealRuntimeChoice[];
   availability: TeamRuntimeAvailabilityTracker;
   workspaceFor: (taskId: string) => string | null;
-  catalogFor: (kind: 'claude' | 'codex', workspacePath: string | null) => unknown;
+  catalogFor: (
+    kind: 'claude' | 'codex',
+    taskId: string,
+    runtimeTurnId: string,
+    workspace: RuntimeWorkspaceSet,
+    worker: AgentRecord,
+    writeScope: RuntimeWriteScope,
+  ) => unknown | Promise<unknown>;
   /** Provider egress gate; returns false when policy denies the dispatch. */
   authorizeEgress: (
     kind: 'claude' | 'codex',
@@ -76,8 +84,16 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     worker: AgentRecord,
     turnId: string,
     executionId?: string,
+    toolCatalog?: ToolCatalogSnapshot,
   ) => RuntimeTeamMcpOption | undefined;
   releaseTeamMcp?: (turnId: string) => void;
+  releaseManagedTurn?: (turnId: string) => void;
+  invokeManagedTool?: (
+    taskId: string,
+    turnId: string,
+    request: RuntimeToolRequest,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
   bindTeamMcpProcess?: (turnId: string, identity: RuntimeProcessIdentity) => boolean;
   codexIsolationRoot?: string;
   codexUserConfigEnabled?: () => boolean;
@@ -157,10 +173,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           run.reasoningActive = true;
           run.onEvent?.({ type: 'reasoningPresence', active: true });
         }
-        if (event.type === 'fileChange') {
-          run.sideEffectsObserved = true;
-          run.onEvent?.({ type: 'fileChange', changes: event.changes });
-        }
         if (event.type === 'completed') {
           flushDelta(run);
           if (run.reasoningActive) run.onEvent?.({ type: 'reasoningPresence', active: false });
@@ -188,6 +200,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       this.deps.codexIsolationRoot,
       () => ({ inheritUserConfig: this.deps.codexUserConfigEnabled?.() === true }),
       (_taskId, turnId, identity) => this.deps.bindTeamMcpProcess?.(turnId, identity) === true,
+      (taskId, turnId, request, signal) => {
+        if (this.deps.invokeManagedTool === undefined)
+          return Promise.reject(new Error('Managed Coding Harness is unavailable'));
+        return this.deps.invokeManagedTool(taskId, turnId, request, signal);
+      },
     );
     this.clients.set(kind, created);
     return created;
@@ -325,7 +342,18 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     writeScope: RuntimeWriteScope,
   ): Promise<string> {
     const turnId = randomUUID();
-    const toolCatalog = this.deps.catalogFor(choice.kind, workspacePath);
+    const normalizedWorkspace =
+      typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
+        ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
+        : runtimeWorkspace;
+    const toolCatalog = await this.deps.catalogFor(
+      choice.kind,
+      taskId,
+      turnId,
+      normalizedWorkspace,
+      input.worker,
+      writeScope,
+    );
     const promptToolCatalog: ToolCatalogSnapshot = isToolCatalogSnapshot(toolCatalog)
       ? toolCatalog
       : {
@@ -335,13 +363,17 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           entries: [],
           digest: 'unavailable',
         };
-    const normalizedWorkspace =
-      typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
-        ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
-        : runtimeWorkspace;
-    const teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId);
-    if (input.worker.canDelegate === true && teamMcp === undefined)
+    let teamMcp: RuntimeTeamMcpOption | undefined;
+    try {
+      teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
+    } catch (error) {
+      this.deps.releaseManagedTurn?.(turnId);
+      throw error;
+    }
+    if (input.worker.canDelegate === true && teamMcp === undefined) {
+      this.deps.releaseManagedTurn?.(turnId);
       throw new Error('Manager Team MCP is unavailable');
+    }
     const contextFragments = injectPromptGuidance(
       context.fragments
         .filter(({ source }) => choice.kind !== 'codex' || source !== 'skill')
@@ -385,6 +417,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     });
     if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, serializedPayload.text, context)) {
       if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
+      this.deps.releaseManagedTurn?.(turnId);
       throw new Error(`${choice.kind} Team Worker egress was denied`);
     }
     const abort = (): void => {
@@ -434,8 +467,18 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         if (this.activeByAgent.get(input.worker.id)?.turnId === turnId)
           this.activeByAgent.delete(input.worker.id);
         if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
+        this.deps.releaseManagedTurn?.(turnId);
       }
     }
+  }
+
+  recordManagedToolResult(turnId: string, result: unknown): void {
+    const run = this.pending.get(turnId);
+    if (run === undefined) return;
+    const changes = managedResultChanges(result);
+    if (changes.length === 0) return;
+    run.sideEffectsObserved = true;
+    run.onEvent?.({ type: 'fileChange', changes });
   }
 
   async stop(agentId: string): Promise<void> {
@@ -460,6 +503,29 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+function managedResultChanges(
+  result: unknown,
+): { path: string; kind: 'add' | 'update' | 'delete' }[] {
+  if (typeof result !== 'object' || result === null) return [];
+  const record = result as Record<string, unknown>;
+  const raw = Array.isArray(record['changes'])
+    ? record['changes']
+    : typeof record['path'] === 'string'
+      ? [record]
+      : [];
+  return raw.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const change = item as Record<string, unknown>;
+    const path = change['path'];
+    const kind = change['kind'];
+    return typeof path === 'string' &&
+      path.length > 0 &&
+      (kind === 'add' || kind === 'update' || kind === 'delete')
+      ? [{ path, kind }]
+      : [];
+  });
 }
 
 function uniqueRuntimeChoices(choices: readonly RealRuntimeChoice[]): RealRuntimeChoice[] {

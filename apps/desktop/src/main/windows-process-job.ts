@@ -49,10 +49,11 @@ function addon(): WindowsJobAddon {
 }
 
 export const WINDOWS_JOB_WRAPPER = String.raw`
+const fs = require('node:fs');
 let input = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => { input += chunk; });
-process.stdin.on('end', () => {
+const control = fs.createReadStream(null, { fd: 3, encoding: 'utf8', autoClose: false });
+control.on('data', (chunk) => { input += chunk; });
+control.on('end', () => {
   let request;
   let boundary;
   try { request = JSON.parse(input); } catch { process.exitCode = 125; return; }

@@ -389,6 +389,7 @@ export type TurnEvent =
       seq: number;
       approvalId: string;
       decision: ApprovalDecision;
+      userInputSelection?: number;
       approval: ApprovalSummary;
     }
   | {
@@ -502,6 +503,13 @@ export type DatabaseRecovery = {
   corruptBundlePath: string | null;
   possibleCommittedDataLoss: boolean;
   interruptedTurns: number;
+};
+
+export type CommandSandboxCapability = {
+  available: boolean;
+  backend: string;
+  reason: string | null;
+  probedAt: string;
 };
 export type RuntimeConnectionState = 'idle' | 'running' | 'failed';
 /** Runtime process liveness. Pushed, never persisted — see contracts' runtimeStatusSchema. */
@@ -820,6 +828,7 @@ export interface SprintCoderApi {
       platform: string;
       recovery: DatabaseRecovery;
       updateHealth: UpdateHealth;
+      commandSandbox?: CommandSandboxCapability;
       settingsWorkspaceV2?: boolean;
       projectMultiFolderUx?: boolean;
     }>;

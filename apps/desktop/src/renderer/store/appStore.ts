@@ -17,6 +17,7 @@ import type {
   CodexModelOption,
   CommandSummary,
   CommandOutputRecord,
+  CommandSandboxCapability,
   FileChange,
   GeneratedImage,
   ImageAttachmentCapability,
@@ -237,6 +238,7 @@ type AppState = {
   recovery: DatabaseRecovery | null;
   /** Installed application version reported by Electron. Null until app.getInfo resolves. */
   appVersion: string | null;
+  commandSandbox: CommandSandboxCapability | null;
   /** Whether the recovery notice has been dismissed. A launch-scoped fact, so acknowledging it
    * should not require persistence — it simply stops being shown for this session. */
   recoveryAcknowledged: boolean;
@@ -262,7 +264,12 @@ type AppState = {
   setEffort(effort: ClaudeEffort): Promise<void>;
   setCodexEffort(effort: string): Promise<void>;
   setAccessPreset(taskId: string, preset: AccessPreset): Promise<void>;
-  resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision): Promise<void>;
+  resolveApproval(
+    taskId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    userInputSelection?: number,
+  ): Promise<void>;
   selectTask(taskId: string): Promise<void>;
   createTask(projectId?: string): Promise<TaskSummary | null>;
   refreshProjects(): Promise<void>;
@@ -917,6 +924,7 @@ export const useAppStore = create<AppState>((set, get) => {
     reasoningSeenByTurn: {},
     recovery: null,
     appVersion: null,
+    commandSandbox: null,
     recoveryAcknowledged: false,
     settingsWorkspaceV2: true,
     projectMultiFolderUx: true,
@@ -1011,6 +1019,7 @@ export const useAppStore = create<AppState>((set, get) => {
             set({
               ...(info.recovery === undefined ? {} : { recovery: info.recovery }),
               ...(typeof info.version === 'string' ? { appVersion: info.version } : {}),
+              ...(info.commandSandbox === undefined ? {} : { commandSandbox: info.commandSandbox }),
               settingsWorkspaceV2: info.settingsWorkspaceV2 ?? true,
               projectMultiFolderUx: info.projectMultiFolderUx ?? true,
             });
@@ -1287,7 +1296,12 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     },
 
-    async resolveApproval(taskId: string, approvalId: string, decision: ApprovalDecision) {
+    async resolveApproval(
+      taskId: string,
+      approvalId: string,
+      decision: ApprovalDecision,
+      userInputSelection?: number,
+    ) {
       if (!window.sprintCoder || typeof window.sprintCoder.approvals?.resolve !== 'function')
         return;
       const approval = (get().approvalsByTask[taskId] ?? []).find(({ id }) => id === approvalId);
@@ -1300,6 +1314,7 @@ export const useAppStore = create<AppState>((set, get) => {
           taskId,
           approvalId,
           decision,
+          ...(userInputSelection === undefined ? {} : { userInputSelection }),
           expectedRevision: approval.revision,
           expectedPolicyEpoch: approval.policyEpoch,
           challenge: approval.challenge,

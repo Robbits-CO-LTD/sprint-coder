@@ -1,4 +1,4 @@
-{"type":"system","subtype":"init","cwd":"/workspace","session_id":"session-1","tools":["Glob","Grep","Read"],"mcp_servers":[],"model":"claude-sonnet-5","permissionMode":"manual","apiKeySource":"none"}
+{"type":"system","subtype":"init","cwd":"/workspace","session_id":"session-1","tools":[],"mcp_servers":[],"model":"claude-sonnet-5","permissionMode":"manual","apiKeySource":"none"}
 {"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-5","id":"msg-1","type":"message","role":"assistant","content":[]}},"session_id":"session-1"}
 {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"session_id":"session-1"}
 {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Canonical "}},"session_id":"session-1"}

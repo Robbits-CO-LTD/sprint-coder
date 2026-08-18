@@ -64,6 +64,11 @@ export const toolCatalogEntrySchema = z
     requiredCapabilities: z.array(toolCapabilitySchema),
     executionTarget: z.enum(['main', 'utility', 'command-runner', 'mcp-gateway']),
     implementationKind: z.enum(['built-in', 'command-runner', 'mcp-gateway']),
+    description: z.string().min(1).max(2_000),
+    parallelism: z.enum(['parallel', 'serial']),
+    maxOutputBytes: z.number().int().positive(),
+    supportsCancellation: z.boolean(),
+    supportsBackground: z.boolean(),
   })
   .strict();
 export const toolCatalogSnapshotSchema = z
@@ -1514,6 +1519,7 @@ export const approvalResolveInputSchema = z
     taskId: idSchema,
     approvalId: idSchema,
     decision: approvalDecisionSchema,
+    userInputSelection: z.number().int().min(0).max(2).optional(),
     expectedRevision: z.number().int().nonnegative(),
     expectedPolicyEpoch: z.number().int().nonnegative(),
     challenge: z.string().min(8).max(256),
@@ -3059,12 +3065,23 @@ export const databaseRecoverySchema = z
   .strict();
 export type DatabaseRecovery = z.infer<typeof databaseRecoverySchema>;
 
+export const commandSandboxCapabilitySchema = z
+  .object({
+    available: z.boolean(),
+    backend: z.string().min(1).max(128),
+    reason: z.string().min(1).max(128).nullable(),
+    probedAt: z.string().datetime(),
+  })
+  .strict();
+export type CommandSandboxCapability = z.infer<typeof commandSandboxCapabilitySchema>;
+
 export const appInfoSchema = z
   .object({
     version: z.string(),
     platform: z.string(),
     recovery: databaseRecoverySchema,
     updateHealth: updateHealthSchema,
+    commandSandbox: commandSandboxCapabilitySchema.optional(),
     settingsWorkspaceV2: z.boolean().optional(),
     projectMultiFolderUx: z.boolean().optional(),
   })
