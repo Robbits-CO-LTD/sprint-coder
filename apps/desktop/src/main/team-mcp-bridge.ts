@@ -747,6 +747,7 @@ export class TeamMcpBridge {
             skillImports: registration.allowSkillImports === true,
             teamTools: registration.allowTeamTools !== false,
           },
+          allowedTools: teamMcpToolNamesForCapabilities(registration),
           managedTools: registration.managedTools ?? [],
           toolCatalogDigest: registration.managedToolCatalogDigest ?? null,
         },

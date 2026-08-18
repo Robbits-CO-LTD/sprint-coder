@@ -484,21 +484,25 @@ function connectSocket() {
             reject(new Error('team bridge authentication failed'));
             return;
           }
-          const capabilities = response.result && response.result.capabilities;
+          const allowedTools = response.result && response.result.allowedTools;
           const managedTools =
             response.result && Array.isArray(response.result.managedTools)
               ? response.result.managedTools
               : [];
+          const knownStaticNames = new Set(TOOLS.map((tool) => tool.name));
+          if (
+            !Array.isArray(allowedTools) ||
+            allowedTools.some((name) => typeof name !== 'string' || !knownStaticNames.has(name)) ||
+            new Set(allowedTools).size !== allowedTools.length
+          ) {
+            reject(new Error('team bridge returned an invalid allowed tool inventory'));
+            return;
+          }
+          const allowedNames = new Set(allowedTools);
           const managedNames = new Set(managedTools.map((tool) => tool && tool.name));
           availableTools = managedTools.concat(
-            TOOLS.filter((tool) => !managedNames.has(tool.name)).filter((tool) =>
-              tool.name === 'project_memory_remember'
-                ? capabilities && capabilities.projectMemory === true
-                : tool.name === 'skill_draft_create'
-                  ? capabilities && capabilities.skillDrafts === true
-                  : tool.name === 'skill_import_read' || tool.name === 'skill_import_install'
-                    ? capabilities && capabilities.skillImports === true
-                    : capabilities && capabilities.teamTools === true,
+            TOOLS.filter(
+              (tool) => !managedNames.has(tool.name) && allowedNames.has(tool.name),
             ),
           );
           resolve(s);

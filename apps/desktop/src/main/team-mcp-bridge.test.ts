@@ -9,6 +9,10 @@ import {
 } from './team-mcp-bridge';
 import type { TeamCoordinator } from './team-coordinator';
 import { queryNativeProcessIdentity } from './native-process-identity';
+import {
+  PROJECT_MEMORY_MCP_TOOL_NAMES,
+  WORKER_TEAM_MCP_TOOL_NAMES,
+} from '../runtime-host/team-mcp-tool-contract';
 
 class TeamMcpBridge extends ProductionTeamMcpBridge {
   override register(turnId: string, registration: TeamMcpRegistration): void {
@@ -164,7 +168,11 @@ describe('TeamMcpBridge', () => {
     });
     expect(JSON.parse(authentication.lines[0] as string)).toMatchObject({
       ok: true,
-      result: { managedTools: [{ name: 'read_file' }], toolCatalogDigest: 'a'.repeat(64) },
+      result: {
+        allowedTools: [],
+        managedTools: [{ name: 'read_file' }],
+        toolCatalogDigest: 'a'.repeat(64),
+      },
     });
 
     const response = await roundTrip(socketPath as string, {
@@ -351,8 +359,35 @@ socket.once('error', (error) => {
       result: {
         authenticated: true,
         capabilities: { projectMemory: true, skillDrafts: false, teamTools: false },
+        allowedTools: PROJECT_MEMORY_MCP_TOOL_NAMES,
       },
     });
+  });
+
+  it('returns the exact Worker role inventory without the Manager-only hire tool', async () => {
+    const bridge = new TeamMcpBridge(fakeCoordinator(), testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-worker-inventory', {
+      taskId: 'task-1',
+      token,
+      role: 'worker',
+      allowTeamTools: true,
+      allowedTools: WORKER_TEAM_MCP_TOOL_NAMES,
+    });
+
+    const response = await roundTrip(socketPath as string, {
+      token,
+      tool: '__authenticate__',
+      args: {},
+    });
+
+    const result = JSON.parse(response.lines[0] as string).result as {
+      allowedTools: string[];
+    };
+    expect(result.allowedTools).toEqual(WORKER_TEAM_MCP_TOOL_NAMES);
+    expect(result.allowedTools).not.toContain('team_hire_worker');
   });
 
   it('closes accepted sockets during dispose instead of hanging app shutdown', async () => {
