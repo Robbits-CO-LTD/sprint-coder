@@ -64,7 +64,7 @@ Local-firstは、Task履歴、設定、実行状態を端末内で管理する�
 - API keyは送信後にRendererから消去し、Main processがElectron `safeStorage`を使って端末内へ保存します。
 - Rendererはsandbox / context isolationを有効にし、Node.js APIを直接公開しません。
 - ワークスペース操作とProviderへのegressは、Taskの権限設定と監査対象になります。
-- CLI Runtimeのsandbox境界はRuntimeとAccess presetによって異なるため、Composerに表示される実行モードを確認してください。
+- Codex／Claude／APIのTool Useは共通Managed Harnessを通り、ファイル操作・command sandbox・承認・監査を同じ契約で強制します。OS sandbox probeに失敗した環境ではcommand toolを公開しません。
 
 セキュリティ設計と確認項目は[Security Checklist](docs/SECURITY_CHECKLIST.md)を参照してください。
 
