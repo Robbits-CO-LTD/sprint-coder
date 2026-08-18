@@ -81,6 +81,12 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
     version: '1',
   }),
   providerName: 'exec_command',
+  description:
+    'Execute one sealed executable and argv in the managed OS sandbox. Long-running work may continue as an owned background session.',
+  parallelism: 'serial',
+  maxOutputBytes: 2 * 1024 * 1024,
+  supportsCancellation: true,
+  supportsBackground: true,
   inputSchema: {
     type: 'object',
     properties: {

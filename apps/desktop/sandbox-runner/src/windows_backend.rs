@@ -1,8 +1,10 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::net::{SocketAddr, TcpStream};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
@@ -40,15 +42,18 @@ pub fn restricted_token_probe() -> Result<(), String> {
     }
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
-    let script = format!(
-        "(echo inside>\"{}\" & echo outside>\"{}\") >NUL 2>NUL",
-        inside_marker.display(),
-        outside_marker.display()
-    );
+    let executable = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return Err("appcontainer_probe_executable_failed".to_owned()),
+    };
     let execution = execute_impl(
         &inside,
-        r"C:\Windows\System32\cmd.exe",
-        &["/D".into(), "/S".into(), "/C".into(), script],
+        &executable.to_string_lossy(),
+        &[
+            "--probe-child".into(),
+            inside_marker.to_string_lossy().into_owned(),
+            outside_marker.to_string_lossy().into_owned(),
+        ],
     );
     let result = match execution {
         Ok(0) if inside_marker.is_file() && !outside_marker.exists() => Ok(()),
@@ -61,6 +66,20 @@ pub fn restricted_token_probe() -> Result<(), String> {
     };
     let _ = std::fs::remove_dir_all(base);
     result
+}
+
+pub fn probe_child(inside_marker: &Path, outside_marker: &Path) -> u8 {
+    if std::fs::write(inside_marker, b"inside").is_err() {
+        return 71;
+    }
+    if std::fs::write(outside_marker, b"outside").is_ok() {
+        return 72;
+    }
+    let target = SocketAddr::from(([1, 1, 1, 1], 53));
+    if TcpStream::connect_timeout(&target, Duration::from_millis(500)).is_ok() {
+        return 73;
+    }
+    0
 }
 
 pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {

@@ -64,6 +64,11 @@ export const toolCatalogEntrySchema = z
     requiredCapabilities: z.array(toolCapabilitySchema),
     executionTarget: z.enum(['main', 'utility', 'command-runner', 'mcp-gateway']),
     implementationKind: z.enum(['built-in', 'command-runner', 'mcp-gateway']),
+    description: z.string().min(1).max(2_000),
+    parallelism: z.enum(['parallel', 'serial']),
+    maxOutputBytes: z.number().int().positive(),
+    supportsCancellation: z.boolean(),
+    supportsBackground: z.boolean(),
   })
   .strict();
 export const toolCatalogSnapshotSchema = z

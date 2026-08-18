@@ -666,6 +666,40 @@ describe('Main ToolBroker', () => {
     await Promise.all(calls);
   });
 
+  it('enforces sealed output and background capability metadata', async () => {
+    const { registry, echo, command } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizeAll);
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: () => ({ text: 'x'.repeat(1024 * 1024) }),
+    });
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      execute: () => ({ state: 'running', sessionId: 'forged-session' }),
+    });
+    broker.startTurn(context, 'mock');
+    await expect(
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'oversized-output',
+        providerName: 'mock_echo',
+        input: { text: 'go' },
+      }),
+    ).rejects.toThrow('pinned output limit');
+    await expect(
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'forged-background',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: [] },
+      }),
+    ).rejects.toThrow('without catalog capability');
+  });
+
   it('emits one ordered terminal lifecycle for a successful managed call', async () => {
     const { registry, echo } = createRegistry();
     const states: string[] = [];

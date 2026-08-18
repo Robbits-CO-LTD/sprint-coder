@@ -35,6 +35,13 @@ fn main() -> ExitCode {
             Err(_) => ExitCode::from(70),
         };
     }
+    #[cfg(target_os = "windows")]
+    if args.len() == 4 && args[1] == "--probe-child" {
+        return ExitCode::from(windows_backend::probe_child(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+        ));
+    }
     if args.len() >= 6 && args[1] == "--exec" && args[2] == "workspace-write" && args[4] == "--" {
         return execute_workspace_command(Path::new(&args[3]), &args[5], &args[6..]);
     }

@@ -248,7 +248,7 @@ export class ToolBroker {
       }
       transition('queued');
       const release = await bound.gate.acquire(
-        entry.sideEffect === 'none' || entry.sideEffect === 'read' ? 'read' : 'write',
+        entry.parallelism === 'parallel' ? 'read' : 'write',
         request.signal,
       );
       let output: unknown;
@@ -271,13 +271,16 @@ export class ToolBroker {
       }
       if (!toolValueMatchesSchema(definition.outputSchema, output))
         throw new Error('Tool output does not match the pinned schema');
+      if (Buffer.byteLength(JSON.stringify(output), 'utf8') > entry.maxOutputBytes)
+        throw new Error('Tool output exceeded the pinned output limit');
       if (
         typeof output === 'object' &&
         output !== null &&
         (output as Record<string, unknown>)['state'] === 'running' &&
         typeof (output as Record<string, unknown>)['sessionId'] === 'string'
       )
-        transition('backgrounded');
+        if (entry.supportsBackground) transition('backgrounded');
+        else throw new Error('Tool returned a background session without catalog capability');
       else transition('succeeded');
       await bound.resultGate.complete(ordinal);
       return output;
