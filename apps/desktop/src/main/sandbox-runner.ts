@@ -37,11 +37,27 @@ export async function probeSandboxRunner(
       backend: parsed['backend'],
       reason: parsed['reason'] as string | null,
     });
-  } catch {
+  } catch (error) {
+    const failure =
+      typeof error === 'object' && error !== null
+        ? (error as { code?: unknown; signal?: unknown; killed?: unknown })
+        : {};
+    const detail =
+      failure.killed === true
+        ? 'timeout'
+        : typeof failure.code === 'number' || typeof failure.code === 'string'
+          ? `exit_${String(failure.code)
+              .replace(/[^a-zA-Z0-9_-]/gu, '_')
+              .slice(0, 32)}`
+          : typeof failure.signal === 'string'
+            ? `signal_${failure.signal.replace(/[^a-zA-Z0-9_-]/gu, '_').slice(0, 32)}`
+            : error instanceof SyntaxError
+              ? 'invalid_response'
+              : 'unknown';
     return Object.freeze({
       available: false,
       backend: `${process.platform}-unavailable`,
-      reason: 'sandbox_runner_probe_failed',
+      reason: `sandbox_runner_probe_failed_${detail}`,
     });
   }
 }
