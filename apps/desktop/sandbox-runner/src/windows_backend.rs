@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -46,6 +46,14 @@ pub fn restricted_token_probe() -> Result<(), String> {
         Ok(path) => path,
         Err(_) => return Err("appcontainer_probe_executable_failed".to_owned()),
     };
+    let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
+        Ok(listener) => listener,
+        Err(_) => return Err("appcontainer_probe_listener_failed".to_owned()),
+    };
+    let port = match listener.local_addr() {
+        Ok(address) => address.port(),
+        Err(_) => return Err("appcontainer_probe_listener_failed".to_owned()),
+    };
     let execution = execute_impl(
         &inside,
         &executable.to_string_lossy(),
@@ -53,6 +61,7 @@ pub fn restricted_token_probe() -> Result<(), String> {
             "--probe-child".into(),
             inside_marker.to_string_lossy().into_owned(),
             outside_marker.to_string_lossy().into_owned(),
+            port.to_string(),
         ],
     );
     let result = match execution {
@@ -68,14 +77,14 @@ pub fn restricted_token_probe() -> Result<(), String> {
     result
 }
 
-pub fn probe_child(inside_marker: &Path, outside_marker: &Path) -> u8 {
+pub fn probe_child(inside_marker: &Path, outside_marker: &Path, loopback_port: u16) -> u8 {
     if std::fs::write(inside_marker, b"inside").is_err() {
         return 71;
     }
     if std::fs::write(outside_marker, b"outside").is_ok() {
         return 72;
     }
-    let target = SocketAddr::from(([1, 1, 1, 1], 53));
+    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, loopback_port));
     if TcpStream::connect_timeout(&target, Duration::from_millis(500)).is_ok() {
         return 73;
     }

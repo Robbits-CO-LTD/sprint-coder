@@ -36,10 +36,14 @@ fn main() -> ExitCode {
         };
     }
     #[cfg(target_os = "windows")]
-    if args.len() == 4 && args[1] == "--probe-child" {
+    if args.len() == 5 && args[1] == "--probe-child" {
+        let Ok(port) = args[4].parse::<u16>() else {
+            return ExitCode::from(64);
+        };
         return ExitCode::from(windows_backend::probe_child(
             Path::new(&args[2]),
             Path::new(&args[3]),
+            port,
         ));
     }
     if args.len() >= 6 && args[1] == "--exec" && args[2] == "workspace-write" && args[4] == "--" {
