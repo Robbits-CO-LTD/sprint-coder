@@ -10,7 +10,7 @@ test('first launch moves through setup once and lands in a usable Task', async (
   let app: ElectronApplication | null = null;
   try {
     app = await launchApp(userDataDir);
-    let page = await firstWindow(app);
+    let page = await firstWindow(app, { completeSetup: false });
 
     const wizard = page.getByTestId('setup-wizard');
     await expect(wizard).toBeVisible();

@@ -87,15 +87,15 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     await projectPicker.click();
     const projectSearch = page.getByLabel('Projectを検索');
     await projectSearch.fill(test2);
-    await expect(page.getByRole('menuitemradio', { name: /Alpha/ })).toBeVisible();
+    await expect(page.getByRole('option', { name: /Alpha/ })).toBeVisible();
     await projectSearch.fill('Beta');
     await projectSearch.press('ArrowDown');
-    const betaOption = page.getByRole('menuitemradio', { name: /Beta/ });
+    const betaOption = page.getByRole('option', { name: /Beta/ });
     await expect(betaOption).toBeFocused();
     await betaOption.press('Escape');
     await expect(projectPicker).toBeFocused();
     await projectPicker.click();
-    await page.getByRole('menuitemradio', { name: /Beta/ }).click();
+    await page.getByRole('option', { name: /Beta/ }).click();
     const movedTask = page
       .locator('.sb-project')
       .filter({ has: betaHeading })
@@ -107,7 +107,7 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     await page.getByRole('button', { name: /Projectなしで作業/ }).click();
     await expect(projectPicker).toContainText('プロジェクトを選択');
     await projectPicker.click();
-    await page.getByRole('menuitemradio', { name: /Beta/ }).click();
+    await page.getByRole('option', { name: /Beta/ }).click();
 
     const textarea = page.getByTestId('composer-textarea');
     await textarea.fill('Project picker started-task test');
@@ -115,7 +115,7 @@ test.describe('Project Context Hub sidebar (A2)', () => {
     await expect(page.getByText('Project picker started-task test').first()).toBeVisible();
     await expect(textarea).toBeEnabled();
     await projectPicker.click();
-    await page.getByRole('menuitemradio', { name: /Alpha/ }).click();
+    await page.getByRole('option', { name: /Alpha/ }).click();
     await expect(projectPicker).toContainText('Alpha');
     await expect(alphaSection.locator('[data-task-id]')).toHaveCount(2);
 

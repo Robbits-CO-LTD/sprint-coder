@@ -70,6 +70,33 @@ async function harness() {
 }
 
 describe('Provider workspace read tools', () => {
+  it('exposes legacy Mock fixtures only to the exact Mock fixture Turn', async () => {
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+    });
+    const base = {
+      taskId: 'task-fixture',
+      workspaceId: null,
+      policyEpoch: 1,
+    } as const;
+    const approval = tools.startTurn({ ...base, turnId: 'turn-mock-approval' }, 'mock', {
+      mockFixture: 'approval',
+    });
+    expect(approval.entries.map(({ providerName }) => providerName)).toContain('approval_probe');
+    tools.finishTurn(base.taskId, 'turn-mock-approval');
+
+    const realProvider = tools.startTurn({ ...base, turnId: 'turn-real-provider' }, 'codex', {
+      mockFixture: 'approval',
+    });
+    expect(realProvider.entries.map(({ providerName }) => providerName)).not.toContain(
+      'approval_probe',
+    );
+    await tools.dispose();
+  });
+
   it('exposes Project Memory and Skill import only through the selected managed catalog', async () => {
     const calls: string[] = [];
     const tools = new ProviderWorkspaceTools({
@@ -160,6 +187,15 @@ describe('Provider workspace read tools', () => {
       'codex',
     );
     expect(available.entries.map(({ providerName }) => providerName)).toContain('exec_command');
+    expect(available.entries.map(({ providerName }) => providerName)).not.toContain('run_command');
+    commandTools.finishTurn(context.taskId, 'turn-command-available');
+    const mockFixture = commandTools.startTurn(
+      { ...context, turnId: 'turn-command-mock-fixture' },
+      'mock',
+      { mockFixture: 'command' },
+    );
+    expect(mockFixture.entries.map(({ providerName }) => providerName)).toContain('run_command');
+    commandTools.finishTurn(context.taskId, 'turn-command-mock-fixture');
     await commandTools.dispose();
     expect(disposeSessions).toHaveBeenCalledTimes(1);
     disposeSessions.mockRestore();

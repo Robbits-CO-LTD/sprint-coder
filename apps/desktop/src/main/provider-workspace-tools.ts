@@ -24,6 +24,8 @@ import {
 import { ToolBroker, type ManagedToolLifecycleEvent, type ToolAuthorizer } from './tool-broker';
 import { CommandRunner } from './command-runner';
 import {
+  APPROVAL_PROBE_TOOL,
+  COMMAND_RUNNER_TOOL,
   MANAGED_EXEC_COMMAND_TOOL,
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,
@@ -31,6 +33,7 @@ import {
   REQUEST_USER_INPUT_TOOL,
   UPDATE_PLAN_TOOL,
   registerCommandRunnerTool,
+  registerApprovalProbeTool,
   registerManagedControlTools,
   registerManagedCommandControlTools,
   type CommandToolBoundary,
@@ -364,6 +367,8 @@ export type ManagedHarnessTurnOptions = Readonly<{
   skillDrafts?: boolean;
   skillImports?: boolean;
   skillImportUserText?: string;
+  mockFixture?: 'approval' | 'command';
+  mockTeamFixture?: boolean;
 }>;
 
 type AuxiliaryTurnState = {
@@ -405,6 +410,8 @@ export class ManagedCodingHarness {
     registry.register(VIEW_IMAGE_TOOL);
     registry.register(UPDATE_PLAN_TOOL);
     registry.register(REQUEST_USER_INPUT_TOOL);
+    registry.register(APPROVAL_PROBE_TOOL);
+    if (deps.command !== undefined) registry.register(COMMAND_RUNNER_TOOL);
     if (deps.command !== undefined)
       for (const definition of [
         MANAGED_EXEC_COMMAND_TOOL,
@@ -429,6 +436,7 @@ export class ManagedCodingHarness {
       ])
         registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
+    registerApprovalProbeTool(this.broker);
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
       this.commandSessions = sessions;
@@ -441,6 +449,12 @@ export class ManagedCodingHarness {
         10_000,
         false,
       );
+      registerCommandRunnerTool(
+        this.broker,
+        new CommandRunner({ sandboxed: true }),
+        deps.command,
+        COMMAND_RUNNER_TOOL,
+      );
       registerManagedCommandControlTools(this.broker, sessions, deps.command);
     }
     if (deps.team !== undefined)
@@ -448,6 +462,13 @@ export class ManagedCodingHarness {
         ...(deps.team.listModelCandidates === undefined
           ? {}
           : { listModelCandidates: deps.team.listModelCandidates }),
+        modelSelectionRequired: (context) => {
+          const key = JSON.stringify([context.taskId, context.turnId]);
+          return !(
+            this.providersByTurn.get(key) === 'mock' &&
+            this.auxiliaryByTurn.get(key)?.options.mockTeamFixture === true
+          );
+        },
       });
     if (deps.auxiliary !== undefined) this.registerAuxiliaryTools(deps.auxiliary);
     this.broker.registerImplementation({
@@ -578,6 +599,7 @@ export class ManagedCodingHarness {
     providerId: string,
     options: ManagedHarnessTurnOptions = {},
   ): ToolCatalogSnapshot {
+    const mockFixture = providerId === 'mock' ? options.mockFixture : undefined;
     const snapshot = this.broker.startTurn(context, providerId, [
       LIST_WORKSPACE_TOOL.toolId,
       READ_FILE_TOOL.toolId,
@@ -585,6 +607,10 @@ export class ManagedCodingHarness {
       VIEW_IMAGE_TOOL.toolId,
       UPDATE_PLAN_TOOL.toolId,
       REQUEST_USER_INPUT_TOOL.toolId,
+      ...(mockFixture === 'approval' ? [APPROVAL_PROBE_TOOL.toolId] : []),
+      ...(mockFixture === 'command' && this.commandSandboxAvailable
+        ? [COMMAND_RUNNER_TOOL.toolId]
+        : []),
       ...(this.commandSandboxAvailable && this.deps.command !== undefined
         ? [
             MANAGED_EXEC_COMMAND_TOOL.toolId,

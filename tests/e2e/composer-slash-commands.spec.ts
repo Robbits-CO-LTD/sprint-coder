@@ -34,13 +34,13 @@ test.describe('composer slash commands', () => {
     await expect(textarea).toHaveValue('');
     await expect(textarea).toHaveAttribute(
       'placeholder',
-      'Goalを入力 (Enterで保存 / Escでキャンセル)',
+      'Goalを入力（Enterで開始 / Escでキャンセル）',
     );
 
     await textarea.fill('認証まわりのリファクタを完了させる');
     await textarea.press('Enter');
     await expect(page.getByTestId('composer-goal-armed')).toHaveCount(0);
-    await expect(page.getByTestId('task-goal-chip')).toContainText(
+    await expect(page.getByRole('region', { name: 'Goal: 完了' })).toContainText(
       '認証まわりのリファクタを完了させる',
     );
     await expect(page.getByTestId('composer-goal-input')).toHaveCount(0);

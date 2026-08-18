@@ -116,7 +116,7 @@ test.describe('composer plus menu', () => {
       // Mock runtime is selected, so image generation states the Runtime requirement rather than a
       // generic "unavailable".
       await expect(page.getByTestId('composer-menu-imagegen')).toContainText('Codex Runtime');
-      await expect(page.getByTestId('composer-menu-attach')).toContainText('Codex Runtime');
+      await expect(page.getByTestId('composer-menu-attach')).toContainText('Codex CLI Runtime');
 
       // Activating an unavailable item does nothing and the menu stays put.
       // `force` because Playwright's actionability check treats aria-disabled as disabled and would
@@ -144,8 +144,10 @@ test.describe('composer plus menu', () => {
       await page.getByTestId('sidebar-new-task-button').click();
       await page.getByTestId('runtime-selector').click();
       await page.getByTestId('runtime-option-codex').click();
+      await expect(page.getByTestId('runtime-selector')).toHaveText('Codex');
       await page.getByTestId('model-selector').click();
       await page.getByTestId('model-option-gpt-5.6-terra').click();
+      await expect(page.getByTestId('model-selector')).toHaveText('GPT-5.6-Terra');
       await app.evaluate(({ dialog }, selectedFile) => {
         Object.defineProperty(dialog, 'showOpenDialog', {
           configurable: true,
@@ -155,7 +157,7 @@ test.describe('composer plus menu', () => {
 
       const attach = page.getByTestId('composer-menu-attach');
       await page.getByTestId('composer-plus').click();
-      await expect(attach).toHaveAttribute('aria-disabled', 'false');
+      await expect(attach).toBeEnabled();
       await attach.click();
       await expect(page.getByLabel('この送信に添付する画像')).toContainText('fixture.png');
       await page.getByRole('button', { name: 'fixture.pngを削除' }).click();
@@ -166,13 +168,17 @@ test.describe('composer plus menu', () => {
       await page.getByTestId('composer-textarea').fill('この画像を確認してください');
       await page.getByTestId('composer-send-button').click();
       await expect(page.getByLabel('この送信で参照した画像')).toContainText('fixture.png');
-      await expect(page.getByText('この画像を確認してください')).toBeVisible();
+      await expect(
+        page.getByTestId('user-message').filter({ hasText: 'この画像を確認してください' }).first(),
+      ).toBeVisible();
 
       await closeApp(app);
       app = await launchApp(dir, undefined, pickerEnvironment);
       page = await firstWindow(app);
       await expect(page.getByLabel('この送信で参照した画像')).toContainText('fixture.png');
-      await expect(page.getByText('この画像を確認してください')).toBeVisible();
+      await expect(
+        page.getByTestId('user-message').filter({ hasText: 'この画像を確認してください' }).first(),
+      ).toBeVisible();
     } finally {
       await closeApp(app);
       removeUserDataDir(dir);

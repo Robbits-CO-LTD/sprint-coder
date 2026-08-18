@@ -17,6 +17,7 @@ import {
   createToolDefinition,
   createToolId,
   TeamDelegationError,
+  type ToolExecutionContext,
   type JsonValue,
   type ToolDefinition,
 } from '@sprint-coder/domain';
@@ -533,6 +534,9 @@ export type ExecuteTeamToolOptions = Readonly<{
     cursor: string | null;
     limit: number;
   }): Promise<unknown> | unknown;
+  /** False only for the isolated deterministic Mock Team fixture. Real Leaders and Managers must
+   * keep the catalog query + explicit model-selection contract. */
+  modelSelectionRequired?: boolean;
   /** Per real Leader/Manager turn. A successful catalog read must precede an audited hire. */
   modelCatalogAudit?: Readonly<{
     wasQueried(): boolean;
@@ -652,6 +656,7 @@ export async function executeTeamTool(
       if (!parsed.success) return teamToolError(parsed.error);
       const request = parsed.data;
       if (
+        options.modelSelectionRequired !== false &&
         options.listModelCandidates !== undefined &&
         (request.modelSelection === undefined ||
           request.modelSelectionReason === undefined ||
@@ -966,7 +971,9 @@ export async function executeTeamTool(
 export function registerTeamTools(
   broker: ToolBroker,
   coordinator: TeamCoordinator,
-  options: Pick<ExecuteTeamToolOptions, 'listModelCandidates'> = {},
+  options: Pick<ExecuteTeamToolOptions, 'listModelCandidates'> & {
+    modelSelectionRequired?: (context: ToolExecutionContext) => boolean;
+  } = {},
 ): void {
   const modelCatalogQueried = new WeakSet<object>();
   broker.registerImplementation({
@@ -974,7 +981,9 @@ export function registerTeamTools(
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_list_models', input, {
-        ...options,
+        ...(options.listModelCandidates === undefined
+          ? {}
+          : { listModelCandidates: options.listModelCandidates }),
         modelCatalogAudit: {
           wasQueried: () => modelCatalogQueried.has(context),
           markQueried: () => modelCatalogQueried.add(context),
@@ -986,7 +995,10 @@ export function registerTeamTools(
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_hire_worker', input, {
-        ...options,
+        ...(options.listModelCandidates === undefined
+          ? {}
+          : { listModelCandidates: options.listModelCandidates }),
+        modelSelectionRequired: options.modelSelectionRequired?.(context) ?? true,
         modelCatalogAudit: {
           wasQueried: () => modelCatalogQueried.has(context),
           markQueried: () => modelCatalogQueried.add(context),
@@ -1306,6 +1318,17 @@ export function createTeamScenarioSampler(input: string): ModelSampler {
       };
 
     if (assignments.length === 0) {
+      const failedHire = hires.find(({ result }) => asRecord(result)?.ok === false);
+      if (failedHire !== undefined) {
+        const failure = asRecord(failedHire.result);
+        const message =
+          typeof failure?.message === 'string'
+            ? failure.message
+            : typeof failure?.error === 'string'
+              ? failure.error
+              : 'unknown Team hire error';
+        throw new Error(`Deterministic Team fixture hire failed: ${message}`);
+      }
       const calls: ModelToolCall[] = [];
       hires.forEach(({ arguments: args, result }, index) => {
         const workerId = asRecord(result)?.workerId;

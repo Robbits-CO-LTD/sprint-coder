@@ -148,15 +148,15 @@ export function ProjectPicker({ taskId }: { taskId: string }) {
               </div>
               <div
                 className="project-picker-options"
-                role={filtered.length > 0 ? 'menu' : undefined}
+                role={filtered.length > 0 ? 'listbox' : undefined}
                 aria-label={filtered.length > 0 ? 'Project一覧' : undefined}
               >
                 {filtered.map((project) => (
                   <button
                     key={project.id}
                     type="button"
-                    role="menuitemradio"
-                    aria-checked={task?.projectId === project.id}
+                    role="option"
+                    aria-selected={task?.projectId === project.id}
                     disabled={pending}
                     onClick={() => void choose(project)}
                   >
