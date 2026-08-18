@@ -10,6 +10,19 @@ import {
 } from './claude-normalizer';
 
 describe('ClaudeJsonlNormalizer', () => {
+  it('classifies an expired OAuth session as authentication required', () => {
+    const normalizer = new ClaudeJsonlNormalizer({ builtInTools: [] });
+    expect(() =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'result',
+          is_error: true,
+          result: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        }),
+      ),
+    ).toThrow(ClaudeAuthenticationError);
+  });
+
   it('converts Claude stream-json JSONL into canonical events without exposing provider payloads', () => {
     const fixture = readFileSync(join(__dirname, 'fixtures/claude-normal.jsonl'), 'utf8');
     const normalizer = new ClaudeJsonlNormalizer();

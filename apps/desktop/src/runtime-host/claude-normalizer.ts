@@ -278,7 +278,11 @@ export class ClaudeJsonlNormalizer {
   private pushResult(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
     if (value['is_error'] === true) {
       const message = readString(value, 'result') ?? 'Claude reported a failed turn';
-      if (/not logged in|authentication[_ ]failed/iu.test(message))
+      if (
+        /not logged in|authentication[_ ]failed|failed to authenticate|oauth session expired/iu.test(
+          message,
+        )
+      )
         throw new ClaudeAuthenticationError(message);
       if (
         this.rateLimitRejected ||

@@ -630,7 +630,7 @@ export class CodexRuntimeAdapter {
           // present in the generated v2 schema.
           capabilities: codexInitializeCapabilities(
             multiRoot,
-            teamMcp !== undefined || managedDynamicTools.length > 0,
+            managedMode || teamMcp !== undefined || managedDynamicTools.length > 0,
           ),
         });
         child.stdin.write(
