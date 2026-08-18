@@ -1033,7 +1033,7 @@ export function buildCodexManagedDynamicTools(
     return {
       type: 'function',
       name: entry.providerName,
-      description: `Sprint Coder managed ${entry.kind} tool: ${entry.providerName}`,
+      description: entry.description,
       inputSchema: JSON.parse(JSON.stringify(entry.inputSchema)) as unknown,
       deferLoading: false,
     };

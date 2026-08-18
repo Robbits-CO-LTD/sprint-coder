@@ -526,7 +526,7 @@ export function buildClaudePrompt(
 // commands (`"slash_commands":[]`) — while `--mcp-config`'s explicit server (not a "setting
 // source") still connects and `--tools ""` still empties the built-in tool set exactly as
 // without `--safe-mode`. `--strict-mcp-config` then pins the MCP surface to exactly that one
-// server, and `--allowedTools mcp__team__*` further pins it to exactly the 4 team tools.
+// server, and `--allowedTools` further pins it to the sealed per-Turn Team/Managed catalog.
 //
 // `effort` (reasoning effort control, see the ADR amendment) maps straight to `--effort <level>`.
 // Verified directly against the installed CLI: `claude --help` documents "Effort level for the

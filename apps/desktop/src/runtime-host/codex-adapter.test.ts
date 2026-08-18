@@ -1011,7 +1011,7 @@ describe('Codex runtime probe', () => {
       {
         type: 'function',
         name: 'read_file',
-        description: 'Sprint Coder managed fileRead tool: read_file',
+        description: 'read_file',
         inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
         deferLoading: false,
       },

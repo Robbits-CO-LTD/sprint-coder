@@ -279,6 +279,12 @@ export class MockRuntimeAdapter {
       const mockReply = teamTurn
         ? 'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。架空のメンバーや別のsubagentには置き換えていません。CodexまたはClaude Runtimeで再試行してください。'
         : buildReply(input);
+      const mockMode =
+        this.managedHarness !== undefined &&
+        !input.includes('承認テスト') &&
+        !input.includes('コマンドテスト')
+          ? ('answer-only' as const)
+          : ('mock-tool' as const);
       const loop = await runIntelligenceLoop({
         taskId,
         turnId,
@@ -292,7 +298,7 @@ export class MockRuntimeAdapter {
         toolCatalogSnapshot,
         sample: teamFixtureActive
           ? createTeamScenarioSampler(input)
-          : createDeterministicMockSampler(input, mockReply),
+          : createDeterministicMockSampler(input, mockReply, mockMode),
         executeTool: async (call) => {
           let result: unknown;
           try {

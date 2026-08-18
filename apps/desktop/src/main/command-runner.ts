@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { delimiter, extname, isAbsolute, join, relative, win32 as windowsPath } from 'node:path';
 import { promisify } from 'node:util';
@@ -393,6 +394,8 @@ export class CommandRunner {
                         '--exec',
                         'workspace-write',
                         preparedIdentity.pathGuard.workspacePath,
+                        '--protected-home',
+                        homedir(),
                         '--',
                       ]),
                   executionImage.launchPath,
@@ -443,6 +446,8 @@ export class CommandRunner {
                       '--exec',
                       'workspace-write',
                       preparedIdentity.pathGuard.workspacePath,
+                      '--protected-home',
+                      homedir(),
                       '--',
                       executionImage.launchPath,
                       ...executionImage.argvPrefix,

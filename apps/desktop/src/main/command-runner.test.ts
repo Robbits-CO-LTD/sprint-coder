@@ -16,6 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import {
   CommandRunner,
@@ -201,13 +202,13 @@ describe('CommandRunner', () => {
       argv: [],
     });
     expect(spec.absoluteExecutable).toMatch(
-      process.platform === 'win32' ? /\\cmd\.exe$/iu : /\/sh$/u,
+      process.platform === 'win32' ? /\\cmd\.exe$/iu : /\/(?:ba|da|z)?sh$/u,
     );
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
-    'enforces workspace-write and network-deny through the packaged sandbox helper',
+    'enforces workspace-write through the packaged sandbox helper',
     async () => {
       if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-sandbox-command-'));
@@ -230,6 +231,35 @@ describe('CommandRunner', () => {
       await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       });
+    },
+  );
+
+  it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+    'denies an unapproved network connection through the packaged sandbox helper',
+    async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const server = createServer((socket) => socket.end());
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      try {
+        const address = server.address();
+        if (address === null || typeof address === 'string') throw new Error('Missing test port');
+        const spec = await prepareTestExecutionSpec({
+          workspacePath: root,
+          executable: process.execPath,
+          argv: [
+            '-e',
+            `const net=require('node:net'); const socket=net.connect(${address.port},'127.0.0.1'); socket.once('connect',()=>process.exit(42)); socket.once('error',()=>process.exit(7)); setTimeout(()=>process.exit(8),2000).unref();`,
+          ],
+        });
+        const result = await new CommandRunner({ sandboxed: true }).run(spec);
+        expect(result.exitCode).toBe(7);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
     },
   );
 

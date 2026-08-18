@@ -17,7 +17,7 @@ describe('managed access labels', () => {
   it('reports fail-closed command removal with the probe reason', () => {
     const capability = {
       available: false,
-      backend: 'linux-bubblewrap-landlock',
+      backend: 'linux-bubblewrap-landlock-seccomp',
       reason: 'bubblewrap_probe_failed',
       probedAt: '2026-08-18T00:00:00.000Z',
     };
