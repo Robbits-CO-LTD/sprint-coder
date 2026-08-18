@@ -1013,6 +1013,10 @@ export class IpcRouter {
         persistence: this.persistence,
         publish: (event) => this.publish(event),
       },
+      team: {
+        coordinator: this.teamCoordinator,
+        listModelCandidates: (query) => this.listTeamModelCandidates(query),
+      },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
     this.mockRuntime = new MockRuntimeAdapter(
@@ -4075,7 +4079,7 @@ export class IpcRouter {
       ...(options.importSkillTurn ? { allowSkillImports: true } : {}),
       ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
-      ...leaderMcpCapabilities(options.teamTurn),
+      ...leaderMcpCapabilities(false),
     };
     const registration: TeamMcpRegistration = {
       ...baseRegistration,
@@ -4978,7 +4982,6 @@ export class IpcRouter {
           content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
         });
       let roundTools = assertUniqueProviderTools([
-        ...(teamTurn ? LEADER_PROVIDER_TOOLS : []),
         ...(memoryTurn ? [PROJECT_MEMORY_PROVIDER_TOOL] : []),
         ...(workspaceToolSnapshot === undefined
           ? []
@@ -6158,7 +6161,7 @@ export function providerWorkspaceToolsEligible(
   workspaceRootCount: number,
   toolCalling: boolean | null | undefined,
 ): boolean {
-  return !teamTurn && workspaceRootCount > 0 && toolCalling !== false;
+  return toolCalling !== false && (workspaceRootCount > 0 || teamTurn);
 }
 
 export function requireExplicitProviderCommandApproval(

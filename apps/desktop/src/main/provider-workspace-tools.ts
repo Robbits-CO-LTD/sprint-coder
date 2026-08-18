@@ -39,6 +39,13 @@ import {
 } from './workspace-patch-tool';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 import { ManagedCommandSessions } from './managed-command-sessions';
+import {
+  TEAM_TOOLS,
+  TEAM_TOOL_DESCRIPTIONS,
+  registerTeamTools,
+  type ExecuteTeamToolOptions,
+} from './team-tools';
+import type { TeamCoordinator } from './team-coordinator';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 1024 * 1024;
@@ -203,6 +210,10 @@ type WorkspaceToolDeps = Readonly<{
   lifecycle?: (event: ManagedToolLifecycleEvent) => void;
   command?: CommandToolBoundary;
   workspaceEdit?: WorkspacePatchDeps;
+  team?: {
+    coordinator: TeamCoordinator;
+    listModelCandidates?: ExecuteTeamToolOptions['listModelCandidates'];
+  };
 }>;
 
 type PreparedWorkspaceInput = Readonly<{
@@ -245,6 +256,7 @@ export class ManagedCodingHarness {
       if (deps.workspaceEdit.createDirectory !== undefined)
         registry.register(WORKSPACE_CREATE_DIRECTORY_TOOL);
     }
+    if (deps.team !== undefined) for (const definition of TEAM_TOOLS) registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
@@ -257,6 +269,12 @@ export class ManagedCodingHarness {
       );
       registerManagedCommandControlTools(this.broker, sessions, deps.command);
     }
+    if (deps.team !== undefined)
+      registerTeamTools(this.broker, deps.team.coordinator, {
+        ...(deps.team.listModelCandidates === undefined
+          ? {}
+          : { listModelCandidates: deps.team.listModelCandidates }),
+      });
     this.broker.registerImplementation({
       toolId: LIST_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
@@ -358,6 +376,7 @@ export class ManagedCodingHarness {
               ? []
               : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),
           ]),
+      ...(this.deps.team === undefined ? [] : TEAM_TOOLS.map(({ toolId }) => toolId)),
     ]);
     this.providersByTurn.set(JSON.stringify([context.taskId, context.turnId]), providerId);
     return snapshot;
@@ -710,10 +729,12 @@ export function providerToolsFromSnapshot(snapshot: ToolCatalogSnapshot): readon
       if (names.has(entry.providerName)) throw new Error('Provider tool name collision');
       names.add(entry.providerName);
       const description = descriptions.get(entry.providerName);
-      if (description === undefined) throw new Error('Provider tool description is unavailable');
+      const resolvedDescription = description ?? TEAM_TOOL_DESCRIPTIONS[entry.providerName];
+      if (resolvedDescription === undefined)
+        throw new Error('Provider tool description is unavailable');
       return Object.freeze({
         name: entry.providerName,
-        description,
+        description: resolvedDescription,
         inputSchema: JSON.parse(JSON.stringify(entry.inputSchema)) as ProviderTool['inputSchema'],
       });
     }),

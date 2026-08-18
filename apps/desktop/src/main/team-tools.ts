@@ -59,7 +59,7 @@ const teamToolDefinition = (
     implementationKind: 'built-in',
     priority: 10,
     workspaceBinding: { kind: 'none' },
-    providerCompatibility: ['mock'],
+    providerCompatibility: ['*'],
   });
 
 export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
@@ -234,7 +234,7 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
   TEAM_STOP_WORKER_TOOL,
 ]);
 
-const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
+export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
     '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
   team_hire_worker:
@@ -963,12 +963,35 @@ export async function executeTeamTool(
  * implementation only ever calls executeTeamTool/TeamCoordinator — it never touches persistence
  * directly and never accepts source/target identity from the tool input, so a tool call can't
  * spoof an envelope's source/target (the coordinator resolves the Leader/Worker itself). */
-export function registerTeamTools(broker: ToolBroker, coordinator: TeamCoordinator): void {
+export function registerTeamTools(
+  broker: ToolBroker,
+  coordinator: TeamCoordinator,
+  options: Pick<ExecuteTeamToolOptions, 'listModelCandidates'> = {},
+): void {
+  const modelCatalogQueried = new WeakSet<object>();
+  broker.registerImplementation({
+    toolId: TEAM_LIST_MODELS_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_list_models', input, {
+        ...options,
+        modelCatalogAudit: {
+          wasQueried: () => modelCatalogQueried.has(context),
+          markQueried: () => modelCatalogQueried.add(context),
+        },
+      }),
+  });
   broker.registerImplementation({
     toolId: TEAM_HIRE_WORKER_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
-      executeTeamTool(coordinator, context.taskId, 'team_hire_worker', input),
+      executeTeamTool(coordinator, context.taskId, 'team_hire_worker', input, {
+        ...options,
+        modelCatalogAudit: {
+          wasQueried: () => modelCatalogQueried.has(context),
+          markQueried: () => modelCatalogQueried.add(context),
+        },
+      }),
   });
   broker.registerImplementation({
     toolId: TEAM_ASSIGN_TASK_TOOL.toolId,

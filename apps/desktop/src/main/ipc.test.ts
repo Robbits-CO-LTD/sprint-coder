@@ -999,7 +999,8 @@ describe('Provider workspace tool capability fallback', () => {
     expect(providerWorkspaceToolsEligible(false, 1, null)).toBe(true);
     expect(providerWorkspaceToolsEligible(false, 1, undefined)).toBe(true);
     expect(providerWorkspaceToolsEligible(false, 1, false)).toBe(false);
-    expect(providerWorkspaceToolsEligible(true, 1, true)).toBe(false);
+    expect(providerWorkspaceToolsEligible(true, 1, true)).toBe(true);
+    expect(providerWorkspaceToolsEligible(true, 0, true)).toBe(true);
     expect(providerWorkspaceToolsEligible(false, 0, true)).toBe(false);
   });
 
