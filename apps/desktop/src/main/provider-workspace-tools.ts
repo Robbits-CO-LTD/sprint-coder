@@ -19,6 +19,7 @@ import { ToolBroker, type ManagedToolLifecycleEvent, type ToolAuthorizer } from 
 import { CommandRunner } from './command-runner';
 import {
   COMMAND_RUNNER_TOOL,
+  MANAGED_EXEC_COMMAND_TOOL,
   registerCommandRunnerTool,
   type CommandToolBoundary,
 } from './default-tools';
@@ -172,7 +173,7 @@ const descriptions = new Map([
     'Apply one revision-bound batch of add, update, delete, rename, and mkdir operations through the recoverable Edit Saga.',
   ],
   [
-    COMMAND_RUNNER_TOOL.providerName,
+    MANAGED_EXEC_COMMAND_TOOL.providerName,
     'Run one executable by absolute path inside the selected workspace. Shell syntax and command-name lookup are not accepted; execution requires approval.',
   ],
 ]);
@@ -213,7 +214,7 @@ export class ManagedCodingHarness {
     registry.register(LIST_WORKSPACE_TOOL);
     registry.register(READ_FILE_TOOL);
     registry.register(SEARCH_WORKSPACE_TOOL);
-    if (deps.command !== undefined) registry.register(COMMAND_RUNNER_TOOL);
+    if (deps.command !== undefined) registry.register(MANAGED_EXEC_COMMAND_TOOL);
     if (deps.workspaceEdit !== undefined) {
       registry.register(WORKSPACE_CREATE_FILE_TOOL);
       registry.register(WORKSPACE_PATCH_TOOL);
@@ -222,7 +223,12 @@ export class ManagedCodingHarness {
     }
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     if (deps.command !== undefined)
-      registerCommandRunnerTool(this.broker, new CommandRunner({ sandboxed: true }), deps.command);
+      registerCommandRunnerTool(
+        this.broker,
+        new CommandRunner({ sandboxed: true }),
+        deps.command,
+        MANAGED_EXEC_COMMAND_TOOL,
+      );
     this.broker.registerImplementation({
       toolId: LIST_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
@@ -308,7 +314,7 @@ export class ManagedCodingHarness {
       READ_FILE_TOOL.toolId,
       SEARCH_WORKSPACE_TOOL.toolId,
       ...(this.commandSandboxAvailable && this.deps.command !== undefined
-        ? [COMMAND_RUNNER_TOOL.toolId]
+        ? [MANAGED_EXEC_COMMAND_TOOL.toolId]
         : []),
       ...(this.deps.workspaceEdit === undefined
         ? []

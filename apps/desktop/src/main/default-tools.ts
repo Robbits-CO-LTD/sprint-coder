@@ -70,6 +70,17 @@ export const COMMAND_RUNNER_TOOL = createToolDefinition({
   providerCompatibility: ['*'],
 });
 
+export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
+  ...COMMAND_RUNNER_TOOL,
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'command',
+    name: 'exec',
+    version: '1',
+  }),
+  providerName: 'exec_command',
+});
+
 export type CommandToolBoundary = Readonly<{
   persistence: Pick<
     PersistenceClient,
@@ -162,10 +173,11 @@ export function registerCommandRunnerTool(
   broker: ToolBroker,
   commandRunner: CommandRunner,
   command?: CommandToolBoundary,
+  definition = COMMAND_RUNNER_TOOL,
 ): void {
   const commandIds = new WeakMap<object, string>();
   broker.registerImplementation({
-    toolId: COMMAND_RUNNER_TOOL.toolId,
+    toolId: definition.toolId,
     implementationKind: 'command-runner',
     dispose: () => commandRunner.dispose(),
     prepare: async (input, context, control) => {
@@ -204,7 +216,7 @@ export function registerCommandRunnerTool(
         callId: control.callId,
         spec,
         purpose: request.purpose,
-        risk: COMMAND_RUNNER_TOOL.risk,
+        risk: definition.risk,
         createdAt: new Date().toISOString(),
       });
       commandIds.set(spec, persisted.id);
