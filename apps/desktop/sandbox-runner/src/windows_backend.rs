@@ -1,10 +1,9 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
@@ -42,57 +41,70 @@ pub fn restricted_token_probe() -> Result<(), String> {
     }
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
-    let source_executable = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(_) => return Err("appcontainer_probe_executable_failed".to_owned()),
-    };
-    let executable = inside.join("probe-child.exe");
-    if std::fs::copy(source_executable, &executable).is_err() {
+    let system_root = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "appcontainer_probe_system_root_failed".to_owned())?;
+    let command_source = system_root.join("System32").join("cmd.exe");
+    let command_executable = inside.join("probe-cmd.exe");
+    if std::fs::copy(command_source, &command_executable).is_err() {
         return Err("appcontainer_probe_executable_failed".to_owned());
     }
-    let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
-        Ok(listener) => listener,
-        Err(_) => return Err("appcontainer_probe_listener_failed".to_owned()),
-    };
-    let port = match listener.local_addr() {
-        Ok(address) => address.port(),
-        Err(_) => return Err("appcontainer_probe_listener_failed".to_owned()),
-    };
-    let execution = execute_impl(
-        &inside,
-        &executable.to_string_lossy(),
-        &[
-            "--probe-child".into(),
-            inside_marker.to_string_lossy().into_owned(),
-            outside_marker.to_string_lossy().into_owned(),
-            port.to_string(),
-        ],
+    let script = format!(
+        "(echo inside>\"{}\" & echo outside>\"{}\") >NUL 2>NUL",
+        inside_marker.display(),
+        outside_marker.display()
     );
-    let result = match execution {
-        Ok(0) if inside_marker.is_file() && !outside_marker.exists() => Ok(()),
-        Ok(0) if !inside_marker.is_file() => {
+    let filesystem_execution = execute_impl(
+        &inside,
+        &command_executable.to_string_lossy(),
+        &["/D".into(), "/S".into(), "/C".into(), script],
+    );
+    let filesystem_result = match filesystem_execution {
+        Ok(_) if inside_marker.is_file() && !outside_marker.exists() => Ok(()),
+        Ok(_) if !inside_marker.is_file() => {
             Err("appcontainer_probe_workspace_write_failed".to_owned())
         }
-        Ok(0) => Err("appcontainer_probe_outside_write_succeeded".to_owned()),
-        Ok(code) => Err(format!("appcontainer_probe_command_failed_{code}")),
+        Ok(_) => Err("appcontainer_probe_outside_write_succeeded".to_owned()),
+        Err(reason) => Err(reason),
+    };
+    if let Err(reason) = filesystem_result {
+        let _ = std::fs::remove_dir_all(base);
+        return Err(reason);
+    }
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .map_err(|_| "appcontainer_probe_listener_failed".to_owned())?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| "appcontainer_probe_listener_failed".to_owned())?;
+    let port = listener
+        .local_addr()
+        .map_err(|_| "appcontainer_probe_listener_failed".to_owned())?
+        .port();
+    let curl_source = system_root.join("System32").join("curl.exe");
+    let curl_executable = inside.join("probe-curl.exe");
+    if std::fs::copy(curl_source, &curl_executable).is_err() {
+        let _ = std::fs::remove_dir_all(base);
+        return Err("appcontainer_probe_network_executable_failed".to_owned());
+    }
+    let network_execution = execute_impl(
+        &inside,
+        &curl_executable.to_string_lossy(),
+        &[
+            "--silent".into(),
+            "--output".into(),
+            "NUL".into(),
+            "--max-time".into(),
+            "1".into(),
+            format!("http://127.0.0.1:{port}/"),
+        ],
+    );
+    let result = match network_execution {
+        Ok(_) if listener.accept().is_err() => Ok(()),
+        Ok(_) => Err("appcontainer_probe_network_succeeded".to_owned()),
         Err(reason) => Err(reason),
     };
     let _ = std::fs::remove_dir_all(base);
     result
-}
-
-pub fn probe_child(inside_marker: &Path, outside_marker: &Path, loopback_port: u16) -> u8 {
-    if std::fs::write(inside_marker, b"inside").is_err() {
-        return 71;
-    }
-    if std::fs::write(outside_marker, b"outside").is_ok() {
-        return 72;
-    }
-    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, loopback_port));
-    if TcpStream::connect_timeout(&target, Duration::from_millis(500)).is_ok() {
-        return 73;
-    }
-    0
 }
 
 pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {
