@@ -42,10 +42,14 @@ pub fn restricted_token_probe() -> Result<(), String> {
     }
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
-    let executable = match std::env::current_exe() {
+    let source_executable = match std::env::current_exe() {
         Ok(path) => path,
         Err(_) => return Err("appcontainer_probe_executable_failed".to_owned()),
     };
+    let executable = inside.join("probe-child.exe");
+    if std::fs::copy(source_executable, &executable).is_err() {
+        return Err("appcontainer_probe_executable_failed".to_owned());
+    }
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
         Ok(listener) => listener,
         Err(_) => return Err("appcontainer_probe_listener_failed".to_owned()),
@@ -109,7 +113,8 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
         return Err("appcontainer_sid_string_failed".to_owned());
     };
     let executable_path = Path::new(executable);
-    let executable_acl_required = !is_windows_system_path(executable_path);
+    let executable_acl_required =
+        !is_windows_system_path(executable_path) && !is_path_inside(&root, executable_path);
     let executable_ancestors = if executable_acl_required {
         executable_path
             .parent()
@@ -156,6 +161,19 @@ fn is_windows_system_path(path: &Path) -> bool {
         .to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
+        .to_lowercase();
+    candidate == root || candidate.starts_with(&format!("{root}\\"))
+}
+
+fn is_path_inside(root: &Path, candidate: &Path) -> bool {
+    let root = root
+        .to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase();
+    let candidate = candidate
+        .to_string_lossy()
+        .replace('/', "\\")
         .to_lowercase();
     candidate == root || candidate.starts_with(&format!("{root}\\"))
 }
