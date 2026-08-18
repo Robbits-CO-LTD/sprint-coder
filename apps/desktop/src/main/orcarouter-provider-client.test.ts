@@ -59,7 +59,7 @@ describe('OrcaRouterProviderClient', () => {
       providerId: 'orcarouter',
       providerDisplayName: 'OrcaRouter',
       modelAuthor: { value: 'anthropic', source: 'provider_api' },
-      toolCalling: { value: true, source: 'provider_api' },
+      toolCalling: { value: null, source: 'unknown' },
       gateway: { providerId: 'orcarouter', upstreamProvider: { value: null } },
     });
     expect(models[1]?.modelAuthor?.value).toBe('grok');

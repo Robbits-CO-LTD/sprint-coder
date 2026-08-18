@@ -85,7 +85,7 @@ export class OrcaRouterProviderClient implements ProviderRuntime {
       availabilityCheckedAt: observedAt,
       contextWindow: unknown,
       maxOutputTokens: unknown,
-      toolCalling: providerValue(true),
+      toolCalling: unknown,
       structuredOutput: unknown,
       multimodalInput: unknown,
       reasoning: unknown,
