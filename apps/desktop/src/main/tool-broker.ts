@@ -27,6 +27,7 @@ export type ToolAuthorizationDecision = Readonly<{
   decision: 'allow' | 'deny' | 'approval_required';
   reason: string;
   beforeExecute?: () => boolean;
+  approvalDecision?: 'allow_once' | 'allow_task' | 'deny';
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
@@ -259,6 +260,9 @@ export class ToolBroker {
         output = await implementation.execute(pinnedInput, bound.context, {
           callId: request.callId,
           ...(request.signal === undefined ? {} : { signal: request.signal }),
+          ...(authorization.approvalDecision === undefined
+            ? {}
+            : { authorizationDecision: authorization.approvalDecision }),
         });
       } finally {
         release();

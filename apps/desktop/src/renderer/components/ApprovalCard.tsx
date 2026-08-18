@@ -14,6 +14,8 @@ export function ApprovalCard({
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
   const executionIsLong = approval.execution.length > 512;
+  const userInput =
+    approval.toolName === 'request_user_input' ? parseUserInput(approval.execution) : null;
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -23,7 +25,7 @@ export function ApprovalCard({
     <section
       ref={cardRef}
       className="approval-card"
-      aria-label="ツール実行の承認"
+      aria-label={userInput === null ? 'ツール実行の承認' : 'AIからの確認'}
       aria-busy={busy}
       data-testid="approval-card"
       tabIndex={-1}
@@ -33,14 +35,14 @@ export function ApprovalCard({
           <TriangleAlert size={16} />
         </span>
         <div>
-          <strong>実行の承認が必要です</strong>
+          <strong>{userInput === null ? '実行の承認が必要です' : userInput.question}</strong>
           <div className="approval-card__tool">
             {approval.toolName} · {approval.capability}
           </div>
         </div>
         <span className={`approval-card__risk risk-${approval.risk}`}>{approval.risk}</span>
       </div>
-      <p>{approval.reason}</p>
+      {userInput === null ? <p>{approval.reason}</p> : null}
       {approval.capability === 'shell.execute' ? (
         <p className="approval-card__warning" role="note">
           OS
@@ -85,7 +87,7 @@ export function ApprovalCard({
           disabled={busy}
           onClick={() => onDecision('allow_once')}
         >
-          今回のみ許可
+          {userInput?.choices[0] ?? '今回のみ許可'}
         </button>
         <button
           data-testid="approval-allow-task"
@@ -93,17 +95,19 @@ export function ApprovalCard({
           disabled={busy}
           onClick={() => onDecision('allow_task')}
         >
-          Task中許可
+          {userInput?.choices[1] ?? 'Task中許可'}
         </button>
-        <button
-          className="danger"
-          data-testid="approval-deny"
-          type="button"
-          disabled={busy}
-          onClick={() => onDecision('deny')}
-        >
-          拒否
-        </button>
+        {userInput === null || userInput.choices.length === 3 ? (
+          <button
+            className={userInput === null ? 'danger' : undefined}
+            data-testid="approval-deny"
+            type="button"
+            disabled={busy}
+            onClick={() => onDecision('deny')}
+          >
+            {userInput?.choices[2] ?? '拒否'}
+          </button>
+        ) : null}
       </div>
       {busy ? (
         <span className="sr-only" role="status">
@@ -112,4 +116,27 @@ export function ApprovalCard({
       ) : null}
     </section>
   );
+}
+
+function parseUserInput(execution: string): { question: string; choices: string[] } | null {
+  try {
+    const value = JSON.parse(execution) as {
+      question?: unknown;
+      choices?: unknown;
+      raw?: { question?: unknown; choices?: unknown };
+    };
+    const question = value.question ?? value.raw?.question;
+    const choices = value.choices ?? value.raw?.choices;
+    if (
+      typeof question !== 'string' ||
+      !Array.isArray(choices) ||
+      choices.length < 2 ||
+      choices.length > 3 ||
+      !choices.every((choice) => typeof choice === 'string')
+    )
+      return null;
+    return { question, choices: choices as string[] };
+  } catch {
+    return null;
+  }
 }

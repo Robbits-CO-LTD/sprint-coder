@@ -23,7 +23,10 @@ import {
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,
   WRITE_STDIN_TOOL,
+  REQUEST_USER_INPUT_TOOL,
+  UPDATE_PLAN_TOOL,
   registerCommandRunnerTool,
+  registerManagedControlTools,
   registerManagedCommandControlTools,
   type CommandToolBoundary,
 } from './default-tools';
@@ -200,6 +203,14 @@ const descriptions = new Map([
     TERMINATE_COMMAND_TOOL.providerName,
     'Terminate one owned command session and its complete process tree.',
   ],
+  [
+    UPDATE_PLAN_TOOL.providerName,
+    'Publish the current bounded implementation plan and statuses for this Turn.',
+  ],
+  [
+    REQUEST_USER_INPUT_TOOL.providerName,
+    'Pause the Turn and ask one question with two or three explicit choices.',
+  ],
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -214,6 +225,10 @@ type WorkspaceToolDeps = Readonly<{
     coordinator: TeamCoordinator;
     listModelCandidates?: ExecuteTeamToolOptions['listModelCandidates'];
   };
+  recordPlan?: (
+    context: ToolExecutionContext,
+    items: readonly { step: string; status: 'pending' | 'in_progress' | 'completed' }[],
+  ) => { revision: number };
 }>;
 
 type PreparedWorkspaceInput = Readonly<{
@@ -242,6 +257,8 @@ export class ManagedCodingHarness {
     registry.register(LIST_WORKSPACE_TOOL);
     registry.register(READ_FILE_TOOL);
     registry.register(SEARCH_WORKSPACE_TOOL);
+    registry.register(UPDATE_PLAN_TOOL);
+    registry.register(REQUEST_USER_INPUT_TOOL);
     if (deps.command !== undefined)
       for (const definition of [
         MANAGED_EXEC_COMMAND_TOOL,
@@ -281,6 +298,7 @@ export class ManagedCodingHarness {
       prepare: (input, context) => this.prepare('list', input, context),
       execute: async (input) => listWorkspace(input as PreparedWorkspaceInput),
     });
+    registerManagedControlTools(this.broker, deps.recordPlan);
     this.broker.registerImplementation({
       toolId: READ_FILE_TOOL.toolId,
       implementationKind: 'built-in',
@@ -359,6 +377,8 @@ export class ManagedCodingHarness {
       LIST_WORKSPACE_TOOL.toolId,
       READ_FILE_TOOL.toolId,
       SEARCH_WORKSPACE_TOOL.toolId,
+      UPDATE_PLAN_TOOL.toolId,
+      REQUEST_USER_INPUT_TOOL.toolId,
       ...(this.commandSandboxAvailable && this.deps.command !== undefined
         ? [
             MANAGED_EXEC_COMMAND_TOOL.toolId,

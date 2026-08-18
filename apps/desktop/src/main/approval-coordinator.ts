@@ -270,56 +270,68 @@ export class ApprovalCoordinator {
     }
 
     const waiter = this.waiters.get(command.approvalId);
-    if (command.decision === 'allow_task' && waiter !== undefined)
+    if (
+      command.decision === 'allow_task' &&
+      waiter !== undefined &&
+      waiter.request.entry.providerName !== 'request_user_input'
+    )
       this.options.persistence.saveTaskGrant?.({
         taskId: command.taskId,
         requestDigest: waiter.requestDigest,
         policyEpoch: current.policyEpoch,
         expiresAt: this.options.expiresAt(),
       });
+    const userInputSelection = waiter?.request.entry.providerName === 'request_user_input';
     this.release(command.approvalId, {
-      decision: command.decision === 'deny' ? 'deny' : 'allow',
+      decision: command.decision === 'deny' && !userInputSelection ? 'deny' : 'allow',
       reason: `approval_${command.decision}`,
-      ...(command.decision === 'deny' || waiter === undefined
-        ? {}
-        : {
-            beforeExecute: () => {
-              if (
-                !this.options.isTurnActive(command.taskId, command.turnId) ||
-                this.options.getCurrentPolicyEpoch(command.taskId) !== current.policyEpoch
-              )
+      approvalDecision: command.decision,
+      ...(userInputSelection && waiter !== undefined
+        ? {
+            beforeExecute: () =>
+              this.options.isTurnActive(command.taskId, command.turnId) &&
+              this.options.getCurrentPolicyEpoch(command.taskId) === current.policyEpoch,
+          }
+        : command.decision === 'deny' || waiter === undefined
+          ? {}
+          : {
+              beforeExecute: () => {
+                if (
+                  !this.options.isTurnActive(command.taskId, command.turnId) ||
+                  this.options.getCurrentPolicyEpoch(command.taskId) !== current.policyEpoch
+                )
+                  return false;
+                if (command.decision === 'allow_once')
+                  return (
+                    result.oneTimePermitToken !== undefined &&
+                    (this.options.persistence.consumePermissionOneTimeToken?.(
+                      command.taskId,
+                      result.oneTimePermitToken,
+                      current.policyEpoch,
+                      this.options.now(),
+                      {
+                        approvalId: command.approvalId,
+                        turnId: command.turnId,
+                        callId: waiter.request.callId,
+                        subjectId: `tool:${waiter.request.entry.toolId}`,
+                        specDigest: approvalFactsForTool(waiter.request, waiter.capability)
+                          .specDigest,
+                      },
+                    ) ??
+                      true)
+                  );
+                if (
+                  this.options.persistence.hasTaskGrant?.({
+                    taskId: command.taskId,
+                    requestDigest: waiter.requestDigest,
+                    policyEpoch: current.policyEpoch,
+                    now: this.options.now(),
+                  })
+                )
+                  return true;
                 return false;
-              if (command.decision === 'allow_once')
-                return (
-                  result.oneTimePermitToken !== undefined &&
-                  (this.options.persistence.consumePermissionOneTimeToken?.(
-                    command.taskId,
-                    result.oneTimePermitToken,
-                    current.policyEpoch,
-                    this.options.now(),
-                    {
-                      approvalId: command.approvalId,
-                      turnId: command.turnId,
-                      callId: waiter.request.callId,
-                      subjectId: `tool:${waiter.request.entry.toolId}`,
-                      specDigest: approvalFactsForTool(waiter.request, waiter.capability)
-                        .specDigest,
-                    },
-                  ) ??
-                    true)
-                );
-              if (
-                this.options.persistence.hasTaskGrant?.({
-                  taskId: command.taskId,
-                  requestDigest: waiter.requestDigest,
-                  policyEpoch: current.policyEpoch,
-                  now: this.options.now(),
-                })
-              )
-                return true;
-              return false;
-            },
-          }),
+              },
+            }),
     });
     return result.approval;
   }

@@ -142,6 +142,120 @@ export const TERMINATE_COMMAND_TOOL = managedCommandControlTool(
   ['sessionId'],
 );
 
+export const UPDATE_PLAN_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'control',
+    name: 'update-plan',
+    version: '1',
+  }),
+  providerName: 'update_plan',
+  kind: 'search',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 20,
+        items: {
+          type: 'object',
+          properties: {
+            step: { type: 'string' },
+            status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+          },
+          required: ['step', 'status'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['items'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object' },
+  sideEffect: 'none',
+  risk: 'low',
+  requiredCapabilities: [],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'none' },
+  providerCompatibility: ['*'],
+});
+
+export const REQUEST_USER_INPUT_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'control',
+    name: 'request-user-input',
+    version: '1',
+  }),
+  providerName: 'request_user_input',
+  kind: 'agentControl',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      question: { type: 'string' },
+      choices: { type: 'array', minItems: 2, maxItems: 3, items: { type: 'string' } },
+    },
+    required: ['question', 'choices'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object' },
+  sideEffect: 'control',
+  risk: 'low',
+  requiredCapabilities: ['external.open'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'none' },
+  providerCompatibility: ['*'],
+});
+
+export function registerManagedControlTools(
+  broker: ToolBroker,
+  recordPlan?: (
+    context: ToolExecutionContext,
+    items: readonly { step: string; status: 'pending' | 'in_progress' | 'completed' }[],
+  ) => { revision: number },
+): void {
+  const plans = new WeakMap<object, unknown>();
+  broker.registerImplementation({
+    toolId: UPDATE_PLAN_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) => {
+      const items = (input as { items: unknown[] }).items;
+      plans.set(context, items);
+      const persisted = recordPlan?.(
+        context,
+        items as { step: string; status: 'pending' | 'in_progress' | 'completed' }[],
+      );
+      return { updated: true, revision: persisted?.revision ?? 0, items };
+    },
+  });
+  broker.registerImplementation({
+    toolId: REQUEST_USER_INPUT_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, _context, control) => {
+      const request = input as { question: string; choices: string[] };
+      const index =
+        control.authorizationDecision === 'allow_once'
+          ? 0
+          : control.authorizationDecision === 'allow_task'
+            ? 1
+            : 2;
+      const selectedIndex = Math.min(index, request.choices.length - 1);
+      return {
+        question: request.question,
+        selectedIndex,
+        selected: request.choices[selectedIndex],
+      };
+    },
+  });
+}
+
 export type CommandToolBoundary = Readonly<{
   persistence: Pick<
     PersistenceClient,

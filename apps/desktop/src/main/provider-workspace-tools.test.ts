@@ -73,10 +73,52 @@ describe('Provider workspace read tools', () => {
     expect(providerToolsFromSnapshot(snapshot).map(({ name }) => name)).toEqual([
       'list_workspace',
       'read_file',
+      'request_user_input',
       'search_workspace',
+      'update_plan',
     ]);
     expect(Object.isFrozen(snapshot)).toBe(true);
     tools.finishTurn(context.taskId, context.turnId);
+  });
+
+  it('returns the durable approval decision as a user-input choice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-user-input-tool-'));
+    roots.push(root);
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: '9'.repeat(64),
+    };
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: ({ entry }) => ({
+        decision: 'allow',
+        reason: 'test-choice',
+        approvalDecision: entry.providerName === 'request_user_input' ? 'allow_task' : 'allow_once',
+        beforeExecute: () => true,
+      }),
+    });
+    const context = {
+      taskId: 'task-choice',
+      turnId: 'turn-choice',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'choice-call',
+        providerName: 'request_user_input',
+        input: { question: 'Choose', choices: ['one', 'two', 'three'] },
+      }),
+    ).resolves.toEqual({ question: 'Choose', selectedIndex: 1, selected: 'two' });
   });
 
   it('publishes and dispatches the native directory tool only when mutation is available', async () => {

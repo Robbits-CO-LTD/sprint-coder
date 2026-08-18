@@ -6125,6 +6125,38 @@ if (runsWithElectronAbi)
       db.close();
     });
 
+    it('persists one revisioned managed plan per Turn', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, 'managed plan');
+      expect(
+        persistence.recordManagedTurnPlan({
+          taskId: task.id,
+          turnId: turn.turnId,
+          items: [
+            { step: 'inspect', status: 'completed' },
+            { step: 'implement', status: 'in_progress' },
+          ],
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ).toEqual({ revision: 1 });
+      expect(
+        persistence.recordManagedTurnPlan({
+          taskId: task.id,
+          turnId: turn.turnId,
+          items: [{ step: 'verify', status: 'in_progress' }],
+          updatedAt: '2026-08-18T00:01:00.000Z',
+        }),
+      ).toEqual({ revision: 2 });
+      persistence.close();
+      const db = new Database(path, { readonly: true });
+      expect(db.prepare('SELECT revision, items_json FROM managed_turn_plans').get()).toEqual({
+        revision: 2,
+        items_json: JSON.stringify([{ step: 'verify', status: 'in_progress' }]),
+      });
+      db.close();
+    });
+
     it('marks a running command interrupted on restart and never reconnects by PID', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -6743,6 +6775,7 @@ if (runsWithElectronAbi)
         { version: 69 },
         { version: 70 },
         { version: 71 },
+        { version: 72 },
       ]);
       for (const [table, columns] of [
         [

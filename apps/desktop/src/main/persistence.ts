@@ -3313,6 +3313,20 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 72,
+    checksum: 'managed-coding-harness-v72-turn-plans',
+    sql: `
+      CREATE TABLE managed_turn_plans (
+        turn_id TEXT PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        items_json TEXT NOT NULL CHECK (length(CAST(items_json AS BLOB)) <= 65536),
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX managed_turn_plans_task_idx ON managed_turn_plans(task_id, updated_at);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4424,6 +4438,12 @@ export interface PersistenceClient {
     invalidatedAt: string,
   ): ApprovalPersistenceResult[];
   recordManagedToolLifecycle(event: ManagedToolLifecycleEvent): void;
+  recordManagedTurnPlan(input: {
+    taskId: string;
+    turnId: string;
+    items: readonly { step: string; status: 'pending' | 'in_progress' | 'completed' }[];
+    updatedAt: string;
+  }): { revision: number };
   prepareCommand(input: {
     id: string;
     taskId: string;
@@ -12142,6 +12162,37 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(existing.id, nextSeq, event.state, occurredAt);
     })();
+  }
+
+  recordManagedTurnPlan(input: {
+    taskId: string;
+    turnId: string;
+    items: readonly { step: string; status: 'pending' | 'in_progress' | 'completed' }[];
+    updatedAt: string;
+  }): { revision: number } {
+    if (
+      input.items.length < 1 ||
+      input.items.length > 20 ||
+      input.items.filter(({ status }) => status === 'in_progress').length > 1 ||
+      input.items.some(({ step }) => step.length < 1 || step.length > 2_000)
+    )
+      throw new Error('Invalid managed Turn plan');
+    this.getTurn(input.taskId, input.turnId);
+    const updatedAt = new Date(input.updatedAt).toISOString();
+    const current = this.db
+      .prepare('SELECT revision FROM managed_turn_plans WHERE turn_id = ?')
+      .get(input.turnId) as { revision: number } | undefined;
+    const revision = (current?.revision ?? 0) + 1;
+    this.db
+      .prepare(
+        `INSERT INTO managed_turn_plans(turn_id, task_id, revision, items_json, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(turn_id) DO UPDATE SET
+           revision = excluded.revision, items_json = excluded.items_json,
+           updated_at = excluded.updated_at`,
+      )
+      .run(input.turnId, input.taskId, revision, JSON.stringify(input.items), updatedAt);
+    return { revision };
   }
 
   prepareCommand(input: {

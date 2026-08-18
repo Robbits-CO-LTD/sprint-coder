@@ -96,6 +96,7 @@ export type ToolExecutionContext = Readonly<{
 export type ToolExecutionControl = Readonly<{
   callId: string;
   signal?: AbortSignal;
+  authorizationDecision?: string;
 }>;
 
 export type ToolImplementation = Readonly<{

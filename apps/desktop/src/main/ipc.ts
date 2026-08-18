@@ -1009,6 +1009,13 @@ export class IpcRouter {
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
+      recordPlan: (context, items) =>
+        this.persistence.recordManagedTurnPlan({
+          taskId: context.taskId,
+          turnId: context.turnId,
+          items,
+          updatedAt: new Date().toISOString(),
+        }),
       command: {
         persistence: this.persistence,
         publish: (event) => this.publish(event),
@@ -3342,6 +3349,8 @@ export class IpcRouter {
   }
 
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
+    if (request.entry.providerName === 'request_user_input')
+      return { decision: 'approval_required' as const, reason: 'user_choice_required' };
     const facts = approvalFactsForTool(request, capability);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     const commandRunner = request.entry.implementationKind === 'command-runner';
