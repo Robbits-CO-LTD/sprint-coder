@@ -197,6 +197,13 @@ jobs:
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
+      # forge.config.ts lists the runner in `extraResource` unconditionally, so packaging cannot
+      # succeed without it. Every other job that packages or launches the app already builds it;
+      # this one was missed, which made the fast-lane package smoke fail on any renderer-only PR —
+      # exactly the PRs it is the only packaging coverage for.
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
+
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@v6
