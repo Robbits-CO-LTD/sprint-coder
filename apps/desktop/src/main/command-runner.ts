@@ -190,7 +190,7 @@ type RunnerOptions = Readonly<{
   sandboxed?: boolean;
 }>;
 
-type RunOptions = Readonly<{
+export type RunOptions = Readonly<{
   signal?: AbortSignal;
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;

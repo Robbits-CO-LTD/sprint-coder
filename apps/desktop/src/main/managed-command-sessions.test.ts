@@ -25,10 +25,11 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         ],
       });
       const sessions = new ManagedCommandSessions();
-      const started = await sessions.start(spec);
+      const owner = { taskId: 'task-1', turnId: 'turn-1' };
+      const started = await sessions.start(spec, owner);
       expect(started.state).toBe('running');
-      expect(sessions.writeStdin(started.sessionId, 'hello\n', true)).toBe(true);
-      const completed = await sessions.wait(started.sessionId);
+      expect(sessions.writeStdin(started.sessionId, owner, 'hello\n', true)).toBe(true);
+      const completed = await sessions.wait(started.sessionId, owner);
       expect(completed.state).toBe('exited');
       expect(completed.chunks.map(({ text }) => text).join('')).toContain('hello');
       await expect(readFile(join(workspace, 'done.txt'), 'utf8')).resolves.toBe('hello\n');
@@ -44,9 +45,12 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         argv: ['-c', 'while :; do sleep 1; done'],
       });
       const sessions = new ManagedCommandSessions();
-      const first = await sessions.start(spec);
-      expect(sessions.terminate(first.sessionId)).toBe(true);
-      await expect(sessions.wait(first.sessionId)).resolves.toMatchObject({ state: 'canceled' });
+      const owner = { taskId: 'task-1', turnId: 'turn-1' };
+      const first = await sessions.start(spec, owner);
+      expect(sessions.terminate(first.sessionId, owner)).toBe(true);
+      await expect(sessions.wait(first.sessionId, owner)).resolves.toMatchObject({
+        state: 'canceled',
+      });
       await sessions.dispose();
     });
   },

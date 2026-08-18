@@ -5,6 +5,7 @@ import {
   type ToolCatalogSnapshot,
   type ToolExecutionContext,
   type ExecutionSpec,
+  type JsonValue,
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
 import { ToolBroker, type ToolAuthorizer } from './tool-broker';
@@ -17,6 +18,7 @@ import {
 import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
+import { ManagedCommandSessions } from './managed-command-sessions';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
@@ -79,7 +81,63 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
     version: '1',
   }),
   providerName: 'exec_command',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      executable: { type: 'string' },
+      argv: { type: 'array', items: { type: 'string' } },
+      rootId: { type: 'string' },
+      cwd: { type: 'string' },
+      purpose: { type: 'string' },
+      background: { type: 'boolean' },
+    },
+    required: ['executable', 'argv', 'purpose'],
+    additionalProperties: false,
+  },
 });
+
+function managedCommandControlTool(
+  name: string,
+  providerName: string,
+  properties: Record<string, JsonValue>,
+  required: string[],
+) {
+  return createToolDefinition({
+    toolId: createToolId({ provider: 'builtin', namespace: 'command', name, version: '1' }),
+    providerName,
+    kind: 'backgroundTask',
+    schemaVersion: 1,
+    inputSchema: { type: 'object', properties, required, additionalProperties: false },
+    outputSchema: { type: 'object' },
+    sideEffect: 'control',
+    risk: 'high',
+    requiredCapabilities: ['shell.execute'],
+    executionTarget: 'main',
+    implementationKind: 'built-in',
+    priority: 10,
+    workspaceBinding: { kind: 'any' },
+    providerCompatibility: ['*'],
+  });
+}
+
+export const POLL_COMMAND_TOOL = managedCommandControlTool(
+  'poll',
+  'poll_command',
+  { sessionId: { type: 'string' }, afterSeq: { type: 'integer', minimum: 0 } },
+  ['sessionId'],
+);
+export const WRITE_STDIN_TOOL = managedCommandControlTool(
+  'write-stdin',
+  'write_stdin',
+  { sessionId: { type: 'string' }, chars: { type: 'string' }, close: { type: 'boolean' } },
+  ['sessionId', 'chars'],
+);
+export const TERMINATE_COMMAND_TOOL = managedCommandControlTool(
+  'terminate',
+  'terminate_command',
+  { sessionId: { type: 'string' } },
+  ['sessionId'],
+);
 
 export type CommandToolBoundary = Readonly<{
   persistence: Pick<
@@ -93,6 +151,9 @@ export type CommandToolBoundary = Readonly<{
     | 'appendCommandOutputBatch'
     | 'completeCommand'
     | 'getCommand'
+    | 'createBackgroundActivity'
+    | 'transitionBackgroundActivity'
+    | 'completeBackgroundActivity'
   >;
   publish(event: TurnEvent): void;
 }>;
@@ -174,12 +235,16 @@ export function registerCommandRunnerTool(
   commandRunner: CommandRunner,
   command?: CommandToolBoundary,
   definition = COMMAND_RUNNER_TOOL,
+  sessions?: ManagedCommandSessions,
 ): void {
   const commandIds = new WeakMap<object, string>();
+  const backgroundSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
     implementationKind: 'command-runner',
-    dispose: () => commandRunner.dispose(),
+    dispose: async () => {
+      await Promise.all([commandRunner.dispose(), sessions?.dispose()]);
+    },
     prepare: async (input, context, control) => {
       if (command === undefined)
         throw new Error('CommandRunner execution boundary is not configured');
@@ -189,6 +254,7 @@ export function registerCommandRunnerTool(
         rootId?: string;
         cwd?: string;
         purpose: string;
+        background?: boolean;
       };
       const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
       if (workspace === null)
@@ -220,6 +286,7 @@ export function registerCommandRunnerTool(
         createdAt: new Date().toISOString(),
       });
       commandIds.set(spec, persisted.id);
+      if (request.background === true) backgroundSpecs.add(spec);
       return spec;
     },
     authorizationDenied: (input) => {
@@ -246,31 +313,92 @@ export function registerCommandRunnerTool(
       const commandId = commandIds.get(spec);
       if (commandId === undefined) throw new Error('Command ExecutionSpec has no durable identity');
       const toolOutput = { stdout: '', stderr: '', truncated: false };
-      try {
-        const result = await commandRunner.run(spec, {
-          ...(control.signal === undefined ? {} : { signal: control.signal }),
-          beforeSpawn: () => {
-            command.persistence.beginCommand(commandId);
-          },
-          onStarted: ({ pid, startedAt, processStartIdentity }) => {
-            const persisted = command.persistence.startCommand({
-              commandId,
-              pid,
-              processStartTime: processStartIdentity,
-              startedAt: new Date(startedAt).toISOString(),
-            });
-            command.publish(persisted.event);
-          },
-          onBatch: (chunks: readonly CommandOutputChunk[]) => {
-            for (const chunk of chunks) appendCommandToolOutput(toolOutput, chunk);
-            const events = command.persistence.appendCommandOutputBatch({
-              commandId,
-              chunks,
-              createdAt: new Date().toISOString(),
-            });
-            for (const event of events) command.publish(event);
-          },
+      const hooks = {
+        ...(control.signal === undefined ? {} : { signal: control.signal }),
+        beforeSpawn: () => {
+          command.persistence.beginCommand(commandId);
+        },
+        onStarted: ({
+          pid,
+          startedAt,
+          processStartIdentity,
+        }: {
+          pid: number;
+          startedAt: number;
+          processStartIdentity: string;
+        }) => {
+          const persisted = command.persistence.startCommand({
+            commandId,
+            pid,
+            processStartTime: processStartIdentity,
+            startedAt: new Date(startedAt).toISOString(),
+          });
+          command.publish(persisted.event);
+        },
+        onBatch: (chunks: readonly CommandOutputChunk[]) => {
+          for (const chunk of chunks) appendCommandToolOutput(toolOutput, chunk);
+          const events = command.persistence.appendCommandOutputBatch({
+            commandId,
+            chunks,
+            createdAt: new Date().toISOString(),
+          });
+          for (const event of events) command.publish(event);
+        },
+      };
+      if (backgroundSpecs.has(spec)) {
+        if (sessions === undefined) throw new Error('Managed command sessions are unavailable');
+        const owner = { taskId: _context.taskId, turnId: _context.turnId };
+        const activityId = randomUUID();
+        command.persistence.createBackgroundActivity({
+          id: activityId,
+          taskId: owner.taskId,
+          ownerThreadId: owner.turnId,
+          ownerTurnId: owner.turnId,
+          kind: 'command',
+          wakePolicy: 'nextSafePoint',
+          requiredCapabilities: ['shell.execute'],
+          volumeQuotaBytes: 1_048_576,
+          createdAt: new Date().toISOString(),
         });
+        const started = await sessions.start(spec, owner, hooks, activityId);
+        command.persistence.transitionBackgroundActivity(
+          activityId,
+          'running',
+          new Date().toISOString(),
+        );
+        void sessions.wait(started.sessionId, owner).then((snapshot) => {
+          const persisted =
+            snapshot.result === null
+              ? command.persistence.completeCommand({
+                  commandId,
+                  state: snapshot.state === 'canceled' ? 'canceled' : 'failed',
+                  exitCode: null,
+                  signal: null,
+                  outputBytes: command.persistence.getCommand(commandId).outputBytes,
+                  truncated: false,
+                  finishedAt: new Date().toISOString(),
+                })
+              : completePersistedCommand(command.persistence, commandId, snapshot.result);
+          command.publish(persisted.event);
+          if (snapshot.state !== 'canceled')
+            command.persistence.completeBackgroundActivity({
+              activityId,
+              completionId: randomUUID(),
+              outcome: snapshot.state === 'exited' ? 'completed' : 'failed',
+              payload: JSON.stringify({
+                sessionId: snapshot.sessionId,
+                state: snapshot.state,
+                result: snapshot.result,
+                error: snapshot.error,
+              }),
+              outputCursor: snapshot.nextCursor,
+              completedAt: new Date().toISOString(),
+            });
+        });
+        return started;
+      }
+      try {
+        const result = await commandRunner.run(spec, hooks);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
         return {
@@ -298,6 +426,51 @@ export function registerCommandRunnerTool(
         }
         throw error;
       }
+    },
+  });
+}
+
+export function registerManagedCommandControlTools(
+  broker: ToolBroker,
+  sessions: ManagedCommandSessions,
+  command?: CommandToolBoundary,
+): void {
+  broker.registerImplementation({
+    toolId: POLL_COMMAND_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) => {
+      const request = input as { sessionId: string; afterSeq?: number };
+      return sessions.poll(request.sessionId, context, request.afterSeq ?? 0);
+    },
+  });
+  broker.registerImplementation({
+    toolId: WRITE_STDIN_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) => {
+      const request = input as { sessionId: string; chars: string; close?: boolean };
+      return {
+        written: sessions.writeStdin(
+          request.sessionId,
+          context,
+          request.chars,
+          request.close === true,
+        ),
+      };
+    },
+  });
+  broker.registerImplementation({
+    toolId: TERMINATE_COMMAND_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) => {
+      const sessionId = (input as { sessionId: string }).sessionId;
+      const terminated = sessions.terminate(sessionId, context);
+      if (terminated)
+        command?.persistence.transitionBackgroundActivity(
+          sessionId,
+          'canceled',
+          new Date().toISOString(),
+        );
+      return { terminated };
     },
   });
 }

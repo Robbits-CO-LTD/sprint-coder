@@ -20,7 +20,11 @@ import { CommandRunner } from './command-runner';
 import {
   COMMAND_RUNNER_TOOL,
   MANAGED_EXEC_COMMAND_TOOL,
+  POLL_COMMAND_TOOL,
+  TERMINATE_COMMAND_TOOL,
+  WRITE_STDIN_TOOL,
   registerCommandRunnerTool,
+  registerManagedCommandControlTools,
   type CommandToolBoundary,
 } from './default-tools';
 import {
@@ -34,6 +38,7 @@ import {
   type WorkspacePatchDeps,
 } from './workspace-patch-tool';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
+import { ManagedCommandSessions } from './managed-command-sessions';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 1024 * 1024;
@@ -176,6 +181,18 @@ const descriptions = new Map([
     MANAGED_EXEC_COMMAND_TOOL.providerName,
     'Run one executable by absolute path inside the selected workspace. Shell syntax and command-name lookup are not accepted; execution requires approval.',
   ],
+  [
+    POLL_COMMAND_TOOL.providerName,
+    'Poll new output and terminal state for one owned background command session.',
+  ],
+  [
+    WRITE_STDIN_TOOL.providerName,
+    'Write bounded characters to one owned command session and optionally close stdin.',
+  ],
+  [
+    TERMINATE_COMMAND_TOOL.providerName,
+    'Terminate one owned command session and its complete process tree.',
+  ],
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -214,7 +231,14 @@ export class ManagedCodingHarness {
     registry.register(LIST_WORKSPACE_TOOL);
     registry.register(READ_FILE_TOOL);
     registry.register(SEARCH_WORKSPACE_TOOL);
-    if (deps.command !== undefined) registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    if (deps.command !== undefined)
+      for (const definition of [
+        MANAGED_EXEC_COMMAND_TOOL,
+        POLL_COMMAND_TOOL,
+        WRITE_STDIN_TOOL,
+        TERMINATE_COMMAND_TOOL,
+      ])
+        registry.register(definition);
     if (deps.workspaceEdit !== undefined) {
       registry.register(WORKSPACE_CREATE_FILE_TOOL);
       registry.register(WORKSPACE_PATCH_TOOL);
@@ -222,13 +246,17 @@ export class ManagedCodingHarness {
         registry.register(WORKSPACE_CREATE_DIRECTORY_TOOL);
     }
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
-    if (deps.command !== undefined)
+    if (deps.command !== undefined) {
+      const sessions = new ManagedCommandSessions();
       registerCommandRunnerTool(
         this.broker,
         new CommandRunner({ sandboxed: true }),
         deps.command,
         MANAGED_EXEC_COMMAND_TOOL,
+        sessions,
       );
+      registerManagedCommandControlTools(this.broker, sessions, deps.command);
+    }
     this.broker.registerImplementation({
       toolId: LIST_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
@@ -314,7 +342,12 @@ export class ManagedCodingHarness {
       READ_FILE_TOOL.toolId,
       SEARCH_WORKSPACE_TOOL.toolId,
       ...(this.commandSandboxAvailable && this.deps.command !== undefined
-        ? [MANAGED_EXEC_COMMAND_TOOL.toolId]
+        ? [
+            MANAGED_EXEC_COMMAND_TOOL.toolId,
+            POLL_COMMAND_TOOL.toolId,
+            WRITE_STDIN_TOOL.toolId,
+            TERMINATE_COMMAND_TOOL.toolId,
+          ]
         : []),
       ...(this.deps.workspaceEdit === undefined
         ? []

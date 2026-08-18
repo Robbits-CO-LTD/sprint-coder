@@ -265,7 +265,14 @@ export class ToolBroker {
       }
       if (!toolValueMatchesSchema(definition.outputSchema, output))
         throw new Error('Tool output does not match the pinned schema');
-      transition('succeeded');
+      if (
+        typeof output === 'object' &&
+        output !== null &&
+        (output as Record<string, unknown>)['state'] === 'running' &&
+        typeof (output as Record<string, unknown>)['sessionId'] === 'string'
+      )
+        transition('backgrounded');
+      else transition('succeeded');
       return output;
     } catch (error) {
       if (!terminal) transition(request.signal?.aborted ? 'canceled' : 'failed');
