@@ -654,6 +654,7 @@ export class CodexRuntimeAdapter {
           verified: true,
         });
         skillIsolationReady = true;
+        const dynamicTools = mergeCodexDynamicTools(managedDynamicTools, teamDynamicTools);
         const threadResult = asRecord(
           await send('thread/start', {
             cwd,
@@ -662,9 +663,7 @@ export class CodexRuntimeAdapter {
             sandbox: 'read-only',
             environments: [],
             ephemeral: true,
-            ...(teamDynamicTools.length + managedDynamicTools.length === 0
-              ? {}
-              : { dynamicTools: [...managedDynamicTools, ...teamDynamicTools] }),
+            ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
             ...(model === 'auto' ? {} : { model }),
           }),
         );
@@ -1023,6 +1022,14 @@ export type CodexDynamicToolSpec = Readonly<{
   inputSchema: unknown;
   deferLoading: false;
 }>;
+
+export function mergeCodexDynamicTools(
+  managed: readonly CodexDynamicToolSpec[],
+  mcp: readonly CodexDynamicToolSpec[],
+): CodexDynamicToolSpec[] {
+  const names = new Set(managed.map(({ name }) => name));
+  return [...managed, ...mcp.filter(({ name }) => !names.has(name))];
+}
 
 export function buildCodexManagedDynamicTools(
   snapshot: ToolCatalogSnapshot,

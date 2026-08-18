@@ -20,6 +20,7 @@ import {
   resolveCodexCommand,
   terminateCodexProcessTree,
   isUnsupportedMultiRootError,
+  mergeCodexDynamicTools,
   validateCodexTeamMcpInventory,
   codexDynamicToolResponseFromMcp,
   codexInitializeCapabilities,
@@ -1013,6 +1014,28 @@ describe('Codex runtime probe', () => {
         inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
         deferLoading: false,
       },
+    ]);
+  });
+
+  it('keeps the Managed Harness route when an MCP inventory repeats the same tool name', () => {
+    const managed = [
+      {
+        type: 'function' as const,
+        name: 'team_list_models',
+        description: 'managed',
+        inputSchema: { type: 'object' },
+        deferLoading: false as const,
+      },
+    ];
+    const mcp = [
+      { ...managed[0]!, description: 'mcp duplicate' },
+      { ...managed[0]!, name: 'team_wait_reports', description: 'mcp unique' },
+    ];
+    expect(
+      mergeCodexDynamicTools(managed, mcp).map(({ name, description }) => [name, description]),
+    ).toEqual([
+      ['team_list_models', 'managed'],
+      ['team_wait_reports', 'mcp unique'],
     ]);
   });
 
