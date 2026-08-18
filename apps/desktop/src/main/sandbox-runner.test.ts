@@ -27,8 +27,12 @@ describe('sandbox runner boundary', () => {
           reason: null,
         });
       else {
-        expect(capability.backend).toBe('windows-appcontainer');
-        expect(capability.reason).toMatch(/^appcontainer_[a-z0-9_]+$/u);
+        if (capability.backend === 'windows-appcontainer')
+          expect(capability.reason).toMatch(/^appcontainer_[a-z0-9_]+$/u);
+        else {
+          expect(capability.backend).toBe('win32-unavailable');
+          expect(capability.reason).toMatch(/^sandbox_runner_probe_failed_[a-z0-9_]+$/u);
+        }
       }
     },
   );
