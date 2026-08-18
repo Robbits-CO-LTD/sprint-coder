@@ -562,7 +562,7 @@ async function wireEditSagaRecovery(
       turnRootMutationBindingsFor: (turnId) => persistence.getTurnWorkspaceMutationBindings(turnId),
       revisions: new FileRevisionRegistry(),
       apply: (request) => executor.apply(request),
-      createDirectory: ({ taskId, turnId, rootId, path, guard }) =>
+      createDirectory: ({ taskId, turnId, rootId, path, guard, boundary }) =>
         executeWorkspaceCreateDirectory(
           { rootId, path },
           { taskId, turnId },
@@ -577,6 +577,7 @@ async function wireEditSagaRecovery(
               persistence.getPermissionPolicy(candidateTaskId).policyEpoch,
           },
           guard,
+          boundary,
         ),
       policyEpochFor: (taskId) => persistence.getPermissionPolicy(taskId).policyEpoch,
     };

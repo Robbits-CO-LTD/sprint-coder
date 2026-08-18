@@ -66,10 +66,10 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     kind: 'claude' | 'codex',
     taskId: string,
     runtimeTurnId: string,
-    workspacePath: string | null,
+    workspace: RuntimeWorkspaceSet,
     worker: AgentRecord,
     writeScope: RuntimeWriteScope,
-  ) => unknown;
+  ) => unknown | Promise<unknown>;
   /** Provider egress gate; returns false when policy denies the dispatch. */
   authorizeEgress: (
     kind: 'claude' | 'codex',
@@ -342,11 +342,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     writeScope: RuntimeWriteScope,
   ): Promise<string> {
     const turnId = randomUUID();
-    const toolCatalog = this.deps.catalogFor(
+    const normalizedWorkspace =
+      typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
+        ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
+        : runtimeWorkspace;
+    const toolCatalog = await this.deps.catalogFor(
       choice.kind,
       taskId,
       turnId,
-      workspacePath,
+      normalizedWorkspace,
       input.worker,
       writeScope,
     );
@@ -359,16 +363,13 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           entries: [],
           digest: 'unavailable',
         };
-    const normalizedWorkspace =
-      typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
-        ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
-        : runtimeWorkspace;
-    const teamMcp = this.deps.teamMcpFor?.(
-      input.worker,
-      turnId,
-      input.executionId,
-      promptToolCatalog,
-    );
+    let teamMcp: RuntimeTeamMcpOption | undefined;
+    try {
+      teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
+    } catch (error) {
+      this.deps.releaseManagedTurn?.(turnId);
+      throw error;
+    }
     if (input.worker.canDelegate === true && teamMcp === undefined) {
       this.deps.releaseManagedTurn?.(turnId);
       throw new Error('Manager Team MCP is unavailable');

@@ -213,8 +213,14 @@ const descriptions = new Map([
 ]);
 
 type WorkspaceToolDeps = Readonly<{
-  workspaceFor(taskId: string, turnId: string): EffectiveWorkspaceSet | null;
-  rootIdentityFor(turnId: string, rootId: string): string | undefined;
+  workspaceFor(taskId: string, turnId: string, callId?: string): EffectiveWorkspaceSet | null;
+  rootIdentityFor(turnId: string, rootId: string, callId?: string): string | undefined;
+  mutationBindingFor?(
+    turnId: string,
+    rootId: string,
+    callId?: string,
+  ): Readonly<{ workspaceKey: string; rootIdentityDigest: string }> | undefined;
+  providerFor?(turnId: string, callId: string): string | undefined;
   policyEpochFor(taskId: string): number;
   authorizer: ToolAuthorizer;
   lifecycle?: (event: ManagedToolLifecycleEvent) => void;
@@ -240,6 +246,8 @@ type PreparedWorkspaceInput = Readonly<{
   readGuard?: PathGuard;
   disclosure?: Omit<ProviderDisclosureAssessment, 'redactedContent'> & { providerId: string };
   raw?: unknown;
+  workspace: EffectiveWorkspaceSet;
+  mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
 }>;
 
 const issuedPreparedInputs = new WeakSet<object>();
@@ -296,39 +304,49 @@ export class ManagedCodingHarness {
     this.broker.registerImplementation({
       toolId: LIST_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
-      prepare: (input, context) => this.prepare('list', input, context),
+      prepare: (input, context, control) => this.prepare('list', input, context, control.callId),
       execute: async (input) => listWorkspace(input as PreparedWorkspaceInput),
     });
     registerManagedControlTools(this.broker, deps.recordPlan);
     this.broker.registerImplementation({
       toolId: READ_FILE_TOOL.toolId,
       implementationKind: 'built-in',
-      prepare: (input, context) => this.prepare('read', input, context),
+      prepare: (input, context, control) => this.prepare('read', input, context, control.callId),
       execute: async (input, context) => this.read(input as PreparedWorkspaceInput, context),
     });
     this.broker.registerImplementation({
       toolId: SEARCH_WORKSPACE_TOOL.toolId,
       implementationKind: 'built-in',
-      prepare: (input, context) => this.prepareSearch(input, context),
+      prepare: (input, context, control) => this.prepareSearch(input, context, control.callId),
       execute: async (input, context) => this.search(input as PreparedWorkspaceInput, context),
     });
     if (deps.workspaceEdit !== undefined) {
       this.broker.registerImplementation({
         toolId: WORKSPACE_CREATE_FILE_TOOL.toolId,
         implementationKind: 'built-in',
-        prepare: (input, context) => this.prepareMutation('create', input, context),
-        execute: (input, context) =>
-          executeWorkspaceCreateFile(
-            (input as PreparedWorkspaceInput).raw,
+        prepare: (input, context, control) =>
+          this.prepareMutation('create', input, context, control.callId),
+        execute: (input, context) => {
+          const prepared = input as PreparedWorkspaceInput;
+          return executeWorkspaceCreateFile(
+            prepared.raw,
             context,
             deps.workspaceEdit!,
-            (input as PreparedWorkspaceInput).guard,
-          ),
+            prepared.guard,
+            {
+              workspace: prepared.workspace,
+              ...(prepared.mutationBinding === undefined
+                ? {}
+                : { mutationBinding: prepared.mutationBinding }),
+            },
+          );
+        },
       });
       this.broker.registerImplementation({
         toolId: WORKSPACE_PATCH_TOOL.toolId,
         implementationKind: 'built-in',
-        prepare: (input, context) => this.prepareMutation('patch', input, context),
+        prepare: (input, context, control) =>
+          this.prepareMutation('patch', input, context, control.callId),
         execute: (input, context) => {
           const prepared = input as PreparedWorkspaceInput;
           if (
@@ -341,6 +359,12 @@ export class ManagedCodingHarness {
               context,
               deps.workspaceEdit!,
               prepared.guards ?? [prepared.guard],
+              {
+                workspace: prepared.workspace,
+                ...(prepared.mutationBinding === undefined
+                  ? {}
+                  : { mutationBinding: prepared.mutationBinding }),
+              },
             );
           if (prepared.readGuard === undefined)
             throw new Error('apply_patch requires an issued read guard');
@@ -350,6 +374,12 @@ export class ManagedCodingHarness {
             deps.workspaceEdit!,
             prepared.guard,
             prepared.readGuard,
+            {
+              workspace: prepared.workspace,
+              ...(prepared.mutationBinding === undefined
+                ? {}
+                : { mutationBinding: prepared.mutationBinding }),
+            },
           );
         },
       });
@@ -357,7 +387,8 @@ export class ManagedCodingHarness {
         this.broker.registerImplementation({
           toolId: WORKSPACE_CREATE_DIRECTORY_TOOL.toolId,
           implementationKind: 'built-in',
-          prepare: (input, context) => this.prepareMutation('create-directory', input, context),
+          prepare: (input, context, control) =>
+            this.prepareMutation('create-directory', input, context, control.callId),
           execute: async (input, context) => {
             const prepared = input as PreparedWorkspaceInput;
             assertPreparedWorkspaceInput(prepared, 'create-directory');
@@ -367,6 +398,12 @@ export class ManagedCodingHarness {
               rootId: prepared.rootId,
               path: prepared.relativePath,
               guard: prepared.guard,
+              boundary: {
+                workspace: prepared.workspace,
+                ...(prepared.mutationBinding === undefined
+                  ? {}
+                  : { mutationBinding: prepared.mutationBinding }),
+              },
             });
           },
         });
@@ -425,15 +462,17 @@ export class ManagedCodingHarness {
     kind: PreparedWorkspaceInput['kind'],
     input: unknown,
     context: ToolExecutionContext,
+    callId: string,
   ): Promise<PreparedWorkspaceInput> {
     const request = parseWorkspaceInput(input, kind === 'read');
-    const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
-    if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
+    if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspace = sealWorkspace(workspaceValue);
     const root = resolveWorkspaceToolRoot(workspace, request.rootId);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
-        ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+        ? this.deps.rootIdentityFor(context.turnId, root.rootId, callId)
         : undefined;
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
@@ -458,7 +497,9 @@ export class ManagedCodingHarness {
               ).content,
               request.path,
             ),
-            this.providersByTurn.get(JSON.stringify([context.taskId, context.turnId])) ?? '',
+            this.deps.providerFor?.(context.turnId, callId) ??
+              this.providersByTurn.get(JSON.stringify([context.taskId, context.turnId])) ??
+              '',
           )
         : undefined;
     const prepared = Object.freeze({
@@ -467,6 +508,7 @@ export class ManagedCodingHarness {
       rootLabel: root.label,
       relativePath: request.path,
       guard,
+      workspace,
       ...(disclosure === undefined ? {} : { disclosure }),
     });
     issuedPreparedInputs.add(prepared);
@@ -518,15 +560,17 @@ export class ManagedCodingHarness {
   private async prepareSearch(
     input: unknown,
     context: ToolExecutionContext,
+    callId: string,
   ): Promise<PreparedWorkspaceInput> {
     const request = parseSearchInput(input);
-    const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
-    if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
+    if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspace = sealWorkspace(workspaceValue);
     const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
-        ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+        ? this.deps.rootIdentityFor(context.turnId, root.rootId, callId)
         : undefined;
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
@@ -548,6 +592,7 @@ export class ManagedCodingHarness {
       rootLabel: root.label,
       relativePath: request.path,
       guard,
+      workspace,
       raw: Object.freeze(request),
     });
     issuedPreparedInputs.add(prepared);
@@ -581,14 +626,11 @@ export class ManagedCodingHarness {
       if (matches.length >= request.maxResults) break;
       let guard: PathGuard;
       try {
-        const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
-        if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+        const workspace = input.workspace;
         const root = resolveWorkspaceToolRoot(workspace, input.rootId);
         if (root === null) throw new Error('Workspace rootId is not present in this Turn');
         const expectedRootIdentityDigest =
-          workspace.source === 'project'
-            ? this.deps.rootIdentityFor(context.turnId, root.rootId)
-            : undefined;
+          workspace.source === 'project' ? input.mutationBinding?.rootIdentityDigest : undefined;
         guard = await createPathGuard({
           rootId: root.rootId,
           workspacePath: root.path,
@@ -639,22 +681,24 @@ export class ManagedCodingHarness {
     kind: 'create' | 'create-directory' | 'patch',
     input: unknown,
     context: ToolExecutionContext,
+    callId: string,
   ): Promise<PreparedWorkspaceInput> {
     if (typeof input !== 'object' || input === null || Array.isArray(input))
       throw new Error('Workspace mutation input must be an object');
     const record = input as Record<string, unknown>;
     if (kind === 'patch' && Array.isArray(record['operations']))
-      return this.prepareBatchMutation(record, context);
+      return this.prepareBatchMutation(record, context, callId);
     if (typeof record['path'] !== 'string' || record['path'].length === 0)
       throw new Error('Workspace mutation requires a path');
-    const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
-    if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
+    if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspace = sealWorkspace(workspaceValue);
     const requestedRootId = typeof record['rootId'] === 'string' ? record['rootId'] : null;
     const root = resolveWorkspaceToolRoot(workspace, requestedRootId);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
-        ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+        ? this.deps.rootIdentityFor(context.turnId, root.rootId, callId)
         : undefined;
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
@@ -675,12 +719,21 @@ export class ManagedCodingHarness {
             operation: 'read',
           })
         : undefined;
+    const mutationBindingValue = this.deps.mutationBindingFor?.(
+      context.turnId,
+      root.rootId,
+      callId,
+    );
+    const mutationBinding =
+      mutationBindingValue === undefined ? undefined : Object.freeze({ ...mutationBindingValue });
     const prepared = Object.freeze({
       kind,
       rootId: root.rootId,
       rootLabel: root.label,
       relativePath: record['path'],
       guard: writeGuard,
+      workspace,
+      ...(mutationBinding === undefined ? {} : { mutationBinding }),
       ...(readGuard === undefined ? {} : { readGuard }),
       raw: Object.freeze({ ...record, rootId: root.rootId }),
     });
@@ -691,15 +744,17 @@ export class ManagedCodingHarness {
   private async prepareBatchMutation(
     input: Record<string, unknown>,
     context: ToolExecutionContext,
+    callId: string,
   ): Promise<PreparedWorkspaceInput> {
     const request = parseBatchInput(input);
-    const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
-    if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
+    if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const workspace = sealWorkspace(workspaceValue);
     const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
-        ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+        ? this.deps.rootIdentityFor(context.turnId, root.rootId, callId)
         : undefined;
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
@@ -719,12 +774,21 @@ export class ManagedCodingHarness {
     );
     const first = guards[0];
     if (first === undefined) throw new Error('Workspace batch mutation has no target');
+    const mutationBindingValue = this.deps.mutationBindingFor?.(
+      context.turnId,
+      root.rootId,
+      callId,
+    );
+    const mutationBinding =
+      mutationBindingValue === undefined ? undefined : Object.freeze({ ...mutationBindingValue });
     const prepared = Object.freeze({
       kind: 'patch' as const,
       rootId: root.rootId,
       rootLabel: root.label,
       relativePath: request.operations[0]!.path,
       guard: first,
+      workspace,
+      ...(mutationBinding === undefined ? {} : { mutationBinding }),
       guards: Object.freeze(guards),
       raw: Object.freeze({ ...input, rootId: root.rootId }),
     });
@@ -745,6 +809,15 @@ export class WorkspaceToolRejection extends Error {
     super(message);
     this.name = 'WorkspaceToolRejection';
   }
+}
+
+function sealWorkspace(workspace: EffectiveWorkspaceSet): EffectiveWorkspaceSet {
+  const roots = workspace.roots.map((root) => Object.freeze({ ...root }));
+  Object.freeze(roots);
+  return Object.freeze({
+    ...workspace,
+    roots,
+  });
 }
 
 export function providerToolsFromSnapshot(snapshot: ToolCatalogSnapshot): readonly ProviderTool[] {

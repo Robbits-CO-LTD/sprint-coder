@@ -525,7 +525,27 @@ export class IpcRouter {
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   private readonly managedWorkerTurn = new Map<
     string,
-    Readonly<{ taskId: string; parentTurnId: string; snapshot: ToolCatalogSnapshot }>
+    Readonly<{
+      taskId: string;
+      parentTurnId: string;
+      snapshot: ToolCatalogSnapshot;
+      workspace: EffectiveWorkspaceSet;
+      mutationBindings: ReadonlyMap<
+        string,
+        Readonly<{ workspaceKey: string; rootIdentityDigest: string }>
+      >;
+    }>
+  >();
+  private readonly managedWorkerCall = new Map<
+    string,
+    Readonly<{
+      providerId: string;
+      workspace: EffectiveWorkspaceSet;
+      mutationBindings: ReadonlyMap<
+        string,
+        Readonly<{ workspaceKey: string; rootIdentityDigest: string }>
+      >;
+    }>
   >();
   private readonly turnLogCategoryByTurn = new Map<string, 'chat' | 'team'>();
   private readonly turnLogStartedAtByTurn = new Map<string, number>();
@@ -782,12 +802,12 @@ export class IpcRouter {
       },
       availability: this.teamRuntimeAvailability,
       workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
-      catalogFor: (kind, taskId, runtimeTurnId, workspacePath, worker, writeScope) =>
+      catalogFor: (kind, taskId, runtimeTurnId, workspace, worker, writeScope) =>
         this.prepareWorkerManagedCatalog(
           kind,
           taskId,
           runtimeTurnId,
-          workspacePath,
+          workspace,
           worker.canDelegate,
           writeScope,
         ),
@@ -1027,10 +1047,26 @@ export class IpcRouter {
       },
     });
     this.managedCodingHarness = new ManagedCodingHarness({
-      workspaceFor: (taskId, turnId) =>
+      workspaceFor: (taskId, turnId, callId) =>
+        (callId === undefined
+          ? undefined
+          : this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.workspace) ??
         this.persistence.readTurnWorkspaceSetForTask(taskId, turnId),
-      rootIdentityFor: (turnId, rootId) =>
+      rootIdentityFor: (turnId, rootId, callId) =>
+        (callId === undefined
+          ? undefined
+          : this.managedWorkerCall
+              .get(JSON.stringify([turnId, callId]))
+              ?.mutationBindings.get(rootId)?.rootIdentityDigest) ??
         this.persistence.getTurnWorkspaceRootIdentities(turnId).get(rootId),
+      mutationBindingFor: (turnId, rootId, callId) =>
+        callId === undefined
+          ? undefined
+          : this.managedWorkerCall
+              .get(JSON.stringify([turnId, callId]))
+              ?.mutationBindings.get(rootId),
+      providerFor: (turnId, callId) =>
+        this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.providerId,
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
@@ -3302,23 +3338,35 @@ export class IpcRouter {
             0,
             128,
           );
-    const result = await this.managedCodingHarness.broker.dispatch({
-      taskId,
-      turnId: ownerTurnId,
-      callId: brokerCallId,
-      providerName: request.toolName,
-      input: request.arguments,
-      signal,
-    });
+    const workerCallKey = JSON.stringify([ownerTurnId, brokerCallId]);
+    if (worker !== undefined)
+      this.managedWorkerCall.set(workerCallKey, {
+        providerId: worker.snapshot.providerId,
+        workspace: worker.workspace,
+        mutationBindings: worker.mutationBindings,
+      });
+    let result: unknown;
+    try {
+      result = await this.managedCodingHarness.broker.dispatch({
+        taskId,
+        turnId: ownerTurnId,
+        callId: brokerCallId,
+        providerName: request.toolName,
+        input: request.arguments,
+        signal,
+      });
+    } finally {
+      if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
+    }
     const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, ownerTurnId);
-    if (workspace !== null && isCommittedProviderWorkspaceChange(result)) {
+    if (worker === undefined && workspace !== null && isCommittedProviderWorkspaceChange(result)) {
       const root = workspace.roots.find(({ rootId }) => rootId === result.rootId);
       if (root !== undefined)
         this.recordFileChanges(taskId, ownerTurnId, [
           { path: resolvePath(root.path, result.path), kind: result.kind },
         ]);
     }
-    if (workspace !== null && isCommittedProviderWorkspaceBatch(result)) {
+    if (worker === undefined && workspace !== null && isCommittedProviderWorkspaceBatch(result)) {
       const root = workspace.roots.find(({ rootId }) => rootId === result.rootId);
       if (root !== undefined)
         this.recordFileChanges(
@@ -4224,44 +4272,73 @@ export class IpcRouter {
     }
   }
 
-  private prepareWorkerManagedCatalog(
+  private async prepareWorkerManagedCatalog(
     kind: 'claude' | 'codex',
     taskId: string,
     runtimeTurnId: string,
-    workspacePath: string | null,
+    runtimeWorkspace: RuntimeWorkspaceSet,
     canDelegate: boolean,
     writeScope: 'read-only' | 'workspace-write' | 'full',
-  ): ToolCatalogSnapshot {
+  ): Promise<ToolCatalogSnapshot> {
     const parentTurnId = this.persistence.getActiveTurnId(taskId);
     if (parentTurnId === null) throw new Error('Team Worker has no active parent Turn');
-    const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, parentTurnId);
+    const parentWorkspace = this.persistence.readTurnWorkspaceSetForTask(taskId, parentTurnId);
+    const boundRoots = await Promise.all(
+      runtimeWorkspace.roots.map(async (root) => ({
+        root,
+        binding: await workspaceMutationBinding(root.path),
+      })),
+    );
+    const workspace: EffectiveWorkspaceSet = {
+      source: boundRoots.length === 0 ? 'none' : 'task',
+      projectId: null,
+      primaryRootId: runtimeWorkspace.primaryRootId,
+      roots: boundRoots.map(({ root, binding }) => ({
+        rootId: root.rootId,
+        path: binding.canonicalPath,
+        label: root.label,
+        role: root.role,
+        status: 'available',
+      })),
+      digest: digestCanonical({
+        source: 'team-worker',
+        primaryRootId: runtimeWorkspace.primaryRootId,
+        roots: boundRoots.map(({ root, binding }) => [
+          root.rootId,
+          binding.canonicalPath,
+          binding.rootIdentityDigest,
+        ]),
+      }),
+    };
+    const mutationBindings = new Map(
+      boundRoots.map(({ root, binding }) => [
+        root.rootId,
+        {
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        },
+      ]),
+    );
     let parent = this.managedCodingHarness.broker.getTurnSnapshot(taskId, parentTurnId);
     if (parent === undefined)
       parent = this.managedCodingHarness.startTurn(
         {
           taskId,
           turnId: parentTurnId,
-          workspaceId: workspace?.digest ?? null,
+          workspaceId: parentWorkspace?.digest ?? null,
           policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
         },
         kind,
       );
     const teamNames = new Set(canDelegate ? TEAM_CORE_MCP_TOOL_NAMES : WORKER_TEAM_MCP_TOOL_NAMES);
-    const workspaceMatchesParent =
-      workspacePath === null ||
-      workspace?.roots.some(
-        ({ path }) => pathComparisonKey(path) === pathComparisonKey(workspacePath),
-      );
     const readable = new Set(['list_workspace', 'read_file', 'search_workspace']);
+    const writable = new Set(['create_file', 'create_directory', 'apply_patch']);
     const allowed = new Set([
       'update_plan',
       ...teamNames,
-      ...(workspaceMatchesParent ? readable : []),
+      ...(workspace.roots.length === 0 ? [] : readable),
+      ...(writeScope === 'read-only' ? [] : writable),
     ]);
-    // Mutating tools stay out of an isolated Worker catalog until their worktree identity can be
-    // represented as a durable child item. This is a capability ceiling, never an unsafe fallback
-    // to the parent Workspace. The write scope is retained in the decision for future child items.
-    void writeScope;
     const facts = {
       revision: parent.revision,
       providerId: kind,
@@ -4273,7 +4350,13 @@ export class IpcRouter {
       entries: Object.freeze([...facts.entries]),
       digest: digestToolCatalogValue(facts as never),
     });
-    this.managedWorkerTurn.set(runtimeTurnId, { taskId, parentTurnId, snapshot });
+    this.managedWorkerTurn.set(runtimeTurnId, {
+      taskId,
+      parentTurnId,
+      snapshot,
+      workspace,
+      mutationBindings,
+    });
     return snapshot;
   }
 

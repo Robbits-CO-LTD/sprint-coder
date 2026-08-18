@@ -174,6 +174,7 @@ export type WorkspacePatchDeps = Readonly<{
     rootId: string;
     path: string;
     guard: PathGuard;
+    boundary?: PreparedWorkspaceBoundary;
   }) => Promise<unknown>;
   policyEpochFor: (taskId: string) => number;
   newId?: () => string;
@@ -181,6 +182,10 @@ export type WorkspacePatchDeps = Readonly<{
 }>;
 
 export type WorkspacePatchContext = Readonly<{ taskId: string; turnId: string }>;
+export type PreparedWorkspaceBoundary = Readonly<{
+  workspace: EffectiveWorkspaceSet;
+  mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
+}>;
 
 /**
  * Raised for a failure the model can act on, carrying the text it should be shown.
@@ -202,6 +207,7 @@ export async function executeWorkspacePatch(
   deps: WorkspacePatchDeps,
   approvedGuard: PathGuard,
   approvedReadGuard: PathGuard,
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{
   rootId: string;
   path: string;
@@ -211,16 +217,17 @@ export async function executeWorkspacePatch(
   kind: 'update';
 }> {
   const request = parseInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null) throw new Error('apply_patch requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0) throw new Error('apply_patch requires a selected Workspace');
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('apply_patch Turn Workspace identity is incomplete');
   const expectedRootIdentityDigest = mutationBinding?.rootIdentityDigest;
@@ -299,6 +306,7 @@ export async function executeWorkspacePatchBatch(
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
   approvedGuards: readonly PathGuard[],
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{
   rootId: string;
   paths: readonly string[];
@@ -308,15 +316,16 @@ export async function executeWorkspacePatchBatch(
   changes: readonly { path: string; kind: 'add' | 'update' | 'delete' }[];
 }> {
   const request = parseBatchInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null) throw new Error('apply_patch requires a sealed Turn Workspace snapshot');
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('apply_patch requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('apply_patch Turn Workspace identity is incomplete');
   const plan = await prepareStructuredPatch({
@@ -399,18 +408,20 @@ export async function executeWorkspaceCreateFile(
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
   approvedGuard: PathGuard,
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{ rootId: string; path: string; sagaId: string; state: string; kind: 'add' }> {
   const request = parseCreateFileInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null) throw new Error('create_file requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0) throw new Error('create_file requires a selected Workspace');
   const requestedRootId = request.rootId ?? workspace.primaryRootId;
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('create_file requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('create_file Turn Workspace identity is incomplete');
   const plan = await prepareStructuredPatch({
@@ -457,9 +468,10 @@ export async function executeWorkspaceCreateDirectory(
   context: WorkspacePatchContext,
   deps: WorkspacePatchDeps,
   approvedGuard: PathGuard,
+  boundary?: PreparedWorkspaceBoundary,
 ): Promise<{ rootId: string; path: string; sagaId: string; state: string; kind: 'mkdir' }> {
   const request = parseCreateDirectoryInput(input);
-  const workspace = deps.turnWorkspaceSetFor(context.taskId, context.turnId);
+  const workspace = boundary?.workspace ?? deps.turnWorkspaceSetFor(context.taskId, context.turnId);
   if (workspace === null)
     throw new Error('create_directory requires a sealed Turn Workspace snapshot');
   if (workspace.roots.length === 0)
@@ -468,9 +480,10 @@ export async function executeWorkspaceCreateDirectory(
   const root = workspace.roots.find(({ rootId }) => rootId === requestedRootId);
   if (root === undefined) throw new Error('create_directory requires a valid Workspace rootId');
   const mutationBinding =
-    workspace.source === 'project'
+    boundary?.mutationBinding ??
+    (workspace.source === 'project'
       ? deps.turnRootMutationBindingsFor(context.turnId).get(root.rootId)
-      : undefined;
+      : undefined);
   if (workspace.source === 'project' && mutationBinding === undefined)
     throw new Error('create_directory Turn Workspace identity is incomplete');
   const plan = await prepareStructuredPatch({

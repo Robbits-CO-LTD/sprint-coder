@@ -14,6 +14,7 @@ import {
 import { FileRevisionRegistry } from './file-revision';
 import { commandToolTruncated } from './default-tools';
 import { approvalFactsForTool } from './approval-coordinator';
+import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 
@@ -135,7 +136,10 @@ describe('Provider workspace read tools', () => {
     };
     const created: string[] = [];
     const tools = new ProviderWorkspaceTools({
-      workspaceFor: () => workspace,
+      workspaceFor: (_taskId, _turnId, callId) => {
+        if (callId !== undefined) expect(callId).toBe('call-mkdir');
+        return workspace;
+      },
       rootIdentityFor: () => undefined,
       policyEpochFor: () => 2,
       authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
@@ -146,9 +150,10 @@ describe('Provider workspace read tools', () => {
         apply: async () => {
           throw new Error('not used');
         },
-        createDirectory: async ({ path, guard }) => {
+        createDirectory: async ({ path, guard, boundary }) => {
           expect(workspaceToolAuthorizationGuard({})).toBeUndefined();
           expect(guard.operation).toBe('write');
+          expect(boundary?.workspace).toEqual(workspace);
           created.push(path);
           return {
             rootId: 'root-a',
@@ -470,6 +475,58 @@ describe('Provider workspace read tools', () => {
       }),
     ).resolves.toMatchObject({ state: 'committed', kind: 'update' });
     expect(applied).toBe(true);
+  });
+
+  it('executes a Worker mutation against its call-bound isolated Workspace', async () => {
+    const parentRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-parent-'));
+    const workerRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-worker-'));
+    roots.push(parentRoot, workerRoot);
+    const makeWorkspace = (path: string, digest: string): EffectiveWorkspaceSet => ({
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [{ rootId: 'root-a', path, label: 'Workspace', role: 'primary', status: 'available' }],
+      digest,
+    });
+    const parent = makeWorkspace(parentRoot, '1'.repeat(64));
+    const worker = makeWorkspace(workerRoot, '2'.repeat(64));
+    const binding = await workspaceMutationBinding(workerRoot);
+    const applied: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: (_taskId, _turnId, callId) => (callId === 'worker-create' ? worker : parent),
+      rootIdentityFor: () => undefined,
+      mutationBindingFor: (_turnId, _rootId, callId) =>
+        callId === 'worker-create' ? binding : undefined,
+      policyEpochFor: () => 1,
+      authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => parent,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions: new FileRevisionRegistry(),
+        apply: async (request) => {
+          applied.push(request);
+          return { id: 'worker-saga', state: 'committed' } as never;
+        },
+        policyEpochFor: () => 1,
+      },
+    });
+    const context = {
+      taskId: 'task-worker',
+      turnId: 'turn-parent',
+      workspaceId: parent.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'worker-create',
+        providerName: 'create_file',
+        input: { path: 'worker-only.txt', content: 'isolated\n' },
+      }),
+    ).resolves.toMatchObject({ state: 'committed', kind: 'add' });
+    expect(JSON.stringify(applied)).toContain(workerRoot);
+    expect(JSON.stringify(applied)).not.toContain(parentRoot);
   });
 
   it('dispatches a revision-bound multi-file apply_patch batch through one Saga', async () => {
