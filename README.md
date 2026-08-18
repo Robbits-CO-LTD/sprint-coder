@@ -153,7 +153,7 @@ tasks/              実装計画と設計レビュー記録
 └── team/<teamId>.jsonl
 ```
 
-各streamは5MBで1世代ローテーションします。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
+各streamは5MBで1世代ローテーションします。prompt、response、Teamメッセージ本文、環境変数全体は診断ログへ保存しません。既知のcredential形式やsecret項目は保存前に秘匿化しますが、第三者へ共有する前には内容を確認してください。
 
 ## 開発
 
