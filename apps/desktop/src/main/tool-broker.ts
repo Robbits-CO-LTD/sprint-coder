@@ -70,6 +70,7 @@ type BoundTurn = {
   implementations: ReadonlyMap<ToolId, ToolImplementation>;
   claimedCallIds: Set<string>;
   gate: ToolResourceGate;
+  resultGate: OrderedToolResultGate;
   nextOrdinal: number;
 };
 
@@ -125,7 +126,8 @@ export class ToolBroker {
       snapshot,
       implementations,
       claimedCallIds: new Set(),
-      gate: new ToolResourceGate(),
+      gate: new ToolResourceGate(8),
+      resultGate: new OrderedToolResultGate(),
       nextOrdinal: 0,
     });
     return snapshot;
@@ -277,9 +279,11 @@ export class ToolBroker {
       )
         transition('backgrounded');
       else transition('succeeded');
+      await bound.resultGate.complete(ordinal);
       return output;
     } catch (error) {
       if (!terminal) transition(request.signal?.aborted ? 'canceled' : 'failed');
+      await bound.resultGate.complete(ordinal);
       throw error;
     }
   }
@@ -298,6 +302,11 @@ class ToolResourceGate {
   private readers = 0;
   private writer = false;
   private readonly queue: GateWaiter[] = [];
+
+  constructor(private readonly maxReaders: number) {
+    if (!Number.isInteger(maxReaders) || maxReaders < 1)
+      throw new Error('Tool resource gate requires a positive reader bound');
+  }
 
   acquire(mode: GateMode, signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted) return Promise.reject(abortError(signal));
@@ -332,7 +341,7 @@ class ToolResourceGate {
       waiter.resolve(this.releaseOnce('write'));
       return;
     }
-    while (!this.writer && this.queue[0]?.mode === 'read') {
+    while (!this.writer && this.readers < this.maxReaders && this.queue[0]?.mode === 'read') {
       const waiter = this.queue.shift()!;
       this.detach(waiter);
       this.readers += 1;
@@ -354,6 +363,37 @@ class ToolResourceGate {
   private detach(waiter: GateWaiter): void {
     if (waiter.signal !== undefined && waiter.abort !== undefined)
       waiter.signal.removeEventListener('abort', waiter.abort);
+  }
+}
+
+class OrderedToolResultGate {
+  private nextOrdinal = 1;
+  private readonly completed = new Map<number, () => void>();
+  private drainScheduled = false;
+
+  complete(ordinal: number): Promise<void> {
+    if (!Number.isInteger(ordinal) || ordinal < this.nextOrdinal)
+      return Promise.reject(new Error('Managed tool result ordinal is invalid'));
+    if (this.completed.has(ordinal))
+      return Promise.reject(new Error('Managed tool result ordinal completed twice'));
+    return new Promise((resolve) => {
+      this.completed.set(ordinal, resolve);
+      this.scheduleDrain();
+    });
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainScheduled || !this.completed.has(this.nextOrdinal)) return;
+    this.drainScheduled = true;
+    setImmediate(() => {
+      this.drainScheduled = false;
+      const resolve = this.completed.get(this.nextOrdinal);
+      if (resolve === undefined) return;
+      this.completed.delete(this.nextOrdinal);
+      this.nextOrdinal += 1;
+      resolve();
+      this.scheduleDrain();
+    });
   }
 }
 
