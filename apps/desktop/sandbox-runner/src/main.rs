@@ -106,7 +106,7 @@ fn execute_workspace_command(root: &Path, executable: &str, argv: &[String]) -> 
 
 #[cfg(target_os = "windows")]
 fn execute_workspace_command(_root: &Path, _executable: &str, _argv: &[String]) -> ExitCode {
-    ExitCode::from(69)
+    ExitCode::from(windows_backend::execute(_root, _executable, _argv))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -264,16 +264,12 @@ fn macos_probe_command(
 
 #[cfg(target_os = "windows")]
 fn probe() -> ProbeResult {
-    let token_available = windows_backend::restricted_token_probe();
+    let available = windows_backend::restricted_token_probe();
     ProbeResult {
         protocol_version: PROTOCOL_VERSION,
-        available: false,
-        backend: "windows-restricted-token",
-        reason: Some(if token_available {
-            "workspace_acl_and_network_probe_pending"
-        } else {
-            "restricted_token_probe_failed"
-        }),
+        available,
+        backend: "windows-appcontainer",
+        reason: (!available).then_some("appcontainer_probe_failed"),
     }
 }
 

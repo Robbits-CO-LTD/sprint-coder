@@ -218,6 +218,29 @@ describe('CommandRunner', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'enforces Windows AppContainer workspace-write through the packaged sandbox helper',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-command-'));
+      const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-outside-'));
+      roots.push(workspace, outside);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: process.execPath,
+        argv: [
+          '-e',
+          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
+        ],
+      });
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(7);
+      await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
+
   it('rejects a replacement inode at a persisted Project root path', async () => {
     const root = await workspace();
     const binding = await workspaceMutationBinding(root);

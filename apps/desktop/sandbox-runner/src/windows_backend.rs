@@ -1,48 +1,262 @@
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::Security::{
-    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, LUA_TOKEN, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
-    TOKEN_QUERY,
+use std::ffi::c_void;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use std::process::Command;
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
+use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows_sys::Win32::Security::Isolation::{
+    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_CAPABILITIES};
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+};
 
-struct OwnedHandle(HANDLE);
-
-impl Drop for OwnedHandle {
+struct OwnedSid(PSID);
+impl Drop for OwnedSid {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            unsafe { CloseHandle(self.0) };
+            unsafe { FreeSid(self.0) };
         }
     }
 }
 
 pub fn restricted_token_probe() -> bool {
-    unsafe {
-        let mut source: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
-            &mut source,
-        ) == 0
-        {
-            return false;
-        }
-        let source = OwnedHandle(source);
-        let mut restricted: HANDLE = std::ptr::null_mut();
-        if CreateRestrictedToken(
-            source.0,
-            DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
-            0,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            &mut restricted,
-        ) == 0
-        {
-            return false;
-        }
-        let _restricted = OwnedHandle(restricted);
-        true
+    let base = std::env::temp_dir().join(format!(
+        "sprint-coder-windows-sandbox-{}",
+        std::process::id()
+    ));
+    let inside = base.join("inside");
+    let outside = base.join("outside");
+    if std::fs::create_dir_all(&inside).is_err() || std::fs::create_dir_all(&outside).is_err() {
+        return false;
     }
+    let inside_marker = inside.join("allowed.txt");
+    let outside_marker = outside.join("denied.txt");
+    let script = format!(
+        "echo inside>\"{}\" & echo outside>\"{}\"",
+        inside_marker.display(),
+        outside_marker.display()
+    );
+    let _ = execute(
+        &inside,
+        r"C:\Windows\System32\cmd.exe",
+        &["/D".into(), "/S".into(), "/C".into(), script],
+    );
+    let result = inside_marker.is_file() && !outside_marker.exists();
+    let _ = std::fs::remove_dir_all(base);
+    result
+}
+
+pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return 66;
+    };
+    let mut hasher = DefaultHasher::new();
+    root.to_string_lossy().to_lowercase().hash(&mut hasher);
+    let profile = format!("SprintCoder.ManagedCommand.{:016x}", hasher.finish());
+    let Some(sid) = appcontainer_sid(&profile) else {
+        return 69;
+    };
+    let Some(sid_string) = sid_string(sid.0) else {
+        return 69;
+    };
+    if !set_acl(&root, &sid_string, true) || !set_acl(Path::new(executable), &sid_string, false) {
+        remove_acl(&root, &sid_string, true);
+        remove_acl(Path::new(executable), &sid_string, false);
+        return 69;
+    }
+    let result = unsafe { spawn_appcontainer(sid.0, &root, executable, argv) };
+    remove_acl(&root, &sid_string, true);
+    remove_acl(Path::new(executable), &sid_string, false);
+    result.unwrap_or(70)
+}
+
+fn appcontainer_sid(name: &str) -> Option<OwnedSid> {
+    let name_wide = wide(name);
+    unsafe {
+        let mut sid: PSID = std::ptr::null_mut();
+        if DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut sid) < 0 {
+            let display = wide("Sprint Coder Managed Command");
+            let description = wide("Per-workspace command sandbox");
+            if CreateAppContainerProfile(
+                name_wide.as_ptr(),
+                display.as_ptr(),
+                description.as_ptr(),
+                std::ptr::null(),
+                0,
+                &mut sid,
+            ) < 0
+            {
+                return None;
+            }
+        }
+        (!sid.is_null()).then_some(OwnedSid(sid))
+    }
+}
+
+fn sid_string(sid: PSID) -> Option<String> {
+    unsafe {
+        let mut value = std::ptr::null_mut();
+        if ConvertSidToStringSidW(sid, &mut value) == 0 {
+            return None;
+        }
+        let mut len = 0usize;
+        while *value.add(len) != 0 {
+            len += 1;
+        }
+        let result = String::from_utf16_lossy(std::slice::from_raw_parts(value, len));
+        LocalFree(value as *mut c_void);
+        Some(result)
+    }
+}
+
+fn set_acl(path: &Path, sid: &str, recursive: bool) -> bool {
+    let grant = if recursive {
+        format!("*{sid}:(OI)(CI)M")
+    } else {
+        format!("*{sid}:RX")
+    };
+    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    command.arg(path).args(["/grant", &grant, "/C", "/Q"]);
+    if recursive {
+        command.arg("/T");
+    }
+    command.status().is_ok_and(|status| status.success())
+}
+
+fn remove_acl(path: &Path, sid: &str, recursive: bool) {
+    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    command
+        .arg(path)
+        .args(["/remove", &format!("*{sid}"), "/C", "/Q"]);
+    if recursive {
+        command.arg("/T");
+    }
+    let _ = command.status();
+}
+
+unsafe fn spawn_appcontainer(
+    sid: PSID,
+    cwd: &Path,
+    executable: &str,
+    argv: &[String],
+) -> Result<u8, u32> {
+    let mut size = 0usize;
+    unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+    if size == 0 {
+        return Err(unsafe { GetLastError() });
+    }
+    let mut buffer = vec![0u8; size];
+    let list = buffer.as_mut_ptr().cast();
+    if unsafe { InitializeProcThreadAttributeList(list, 1, 0, &mut size) } == 0 {
+        return Err(unsafe { GetLastError() });
+    }
+    let mut capabilities = SECURITY_CAPABILITIES {
+        AppContainerSid: sid,
+        Capabilities: std::ptr::null_mut(),
+        CapabilityCount: 0,
+        Reserved: 0,
+    };
+    let updated = unsafe {
+        UpdateProcThreadAttribute(
+            list,
+            0,
+            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+            (&mut capabilities as *mut SECURITY_CAPABILITIES).cast(),
+            std::mem::size_of::<SECURITY_CAPABILITIES>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+    if updated == 0 {
+        unsafe { DeleteProcThreadAttributeList(list) };
+        return Err(unsafe { GetLastError() });
+    }
+    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    startup.StartupInfo.hStdOutput = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    startup.StartupInfo.hStdError = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+    startup.lpAttributeList = list;
+    let application = wide(executable);
+    let mut command_line = wide(windows_command_line(executable, argv));
+    let cwd = wide(cwd.as_os_str());
+    let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT,
+            std::ptr::null(),
+            cwd.as_ptr(),
+            &startup.StartupInfo,
+            &mut process,
+        )
+    };
+    unsafe { DeleteProcThreadAttributeList(list) };
+    if ok == 0 {
+        return Err(unsafe { GetLastError() });
+    }
+    unsafe { CloseHandle(process.hThread) };
+    unsafe { WaitForSingleObject(process.hProcess, INFINITE) };
+    let mut exit_code = 1u32;
+    let read = unsafe { GetExitCodeProcess(process.hProcess, &mut exit_code) };
+    unsafe { CloseHandle(process.hProcess) };
+    if read == 0 {
+        return Err(unsafe { GetLastError() });
+    }
+    Ok(exit_code.min(255) as u8)
+}
+
+fn windows_command_line(executable: &str, argv: &[String]) -> String {
+    std::iter::once(executable)
+        .chain(argv.iter().map(String::as_str))
+        .map(quote_arg)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_arg(value: &str) -> String {
+    if !value.is_empty() && !value.chars().any(|c| c == ' ' || c == '\t' || c == '"') {
+        return value.to_owned();
+    }
+    let mut result = String::from("\"");
+    let mut slashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            result.push_str(&"\\".repeat(slashes * 2 + 1));
+            result.push('"');
+        } else {
+            result.push_str(&"\\".repeat(slashes));
+            result.push(ch);
+        }
+        slashes = 0;
+    }
+    result.push_str(&"\\".repeat(slashes * 2));
+    result.push('"');
+    result
+}
+
+fn wide(value: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+    value
+        .as_ref()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }

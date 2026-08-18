@@ -329,9 +329,9 @@ export class CommandRunner {
       const startedAt = Date.now();
       options.beforeSpawn?.();
       let child: ChildProcess;
+      const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
       try {
         const windows = process.platform === 'win32';
-        const sandboxExecutable = windows || !this.sandboxed ? null : sandboxRunnerPath();
         if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
         child = spawn(
           windows ? windowsJobWrapperCommand() : posixSupervisorCommand(),
@@ -390,9 +390,20 @@ export class CommandRunner {
           const controlInput = child.stdio[3] as NodeJS.WritableStream | null | undefined;
           controlInput?.end(
             JSON.stringify({
-              executable: executionImage.launchPath,
+              executable: sandboxExecutable ?? executionImage.launchPath,
               nativeAddonPath: nativeSafeFsAddonPath(),
-              argv: [...executionImage.argvPrefix, ...spec.argv],
+              argv:
+                sandboxExecutable === null
+                  ? [...executionImage.argvPrefix, ...spec.argv]
+                  : [
+                      '--exec',
+                      'workspace-write',
+                      preparedIdentity.pathGuard.workspacePath,
+                      '--',
+                      executionImage.launchPath,
+                      ...executionImage.argvPrefix,
+                      ...spec.argv,
+                    ],
               cwd: spec.cwdIdentity.canonicalPath,
               env: buildEnvironment(spec.envDelta, executionImage.environment),
             }),

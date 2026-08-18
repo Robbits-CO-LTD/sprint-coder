@@ -16,6 +16,17 @@ describe('sandbox runner boundary', () => {
     });
   });
 
+  it.runIf(process.platform === 'win32')(
+    'passes the Windows AppContainer filesystem and network-default-deny probe',
+    async () => {
+      await expect(probeSandboxRunner()).resolves.toMatchObject({
+        available: true,
+        backend: 'windows-appcontainer',
+        reason: null,
+      });
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'rejects a helper whose bytes changed after sealing',
     () => {
