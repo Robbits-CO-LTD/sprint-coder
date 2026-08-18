@@ -14,6 +14,7 @@ import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from '.
 import {
   providerDisclosureAuthorizationFacts,
   workspaceToolAuthorizationGuard,
+  workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
 
 type ApprovalLike = {
@@ -393,10 +394,16 @@ export function approvalFactsForTool(
 } {
   const operation = operationFor(capability);
   const disclosure = providerDisclosureAuthorizationFacts(request.input);
-  const workspaceGuard = workspaceToolAuthorizationGuard(
+  const workspaceGuards = workspaceToolAuthorizationGuards(
     request.input,
     operation === 'read' || operation === 'write' ? operation : undefined,
   );
+  const workspaceGuard =
+    workspaceGuards[0] ??
+    workspaceToolAuthorizationGuard(
+      request.input,
+      operation === 'read' || operation === 'write' ? operation : undefined,
+    );
   const workspaceResource =
     workspaceGuard === undefined ? undefined : workspacePermissionResourceFromGuard(workspaceGuard);
   const commandSpec =
@@ -417,15 +424,17 @@ export function approvalFactsForTool(
           disclosedDigest: disclosure.disclosedDigest,
           classifierVersion: disclosure.classifierVersion,
         }
-      : workspaceResource !== undefined
-        ? {
-            kind: 'path-exact',
-            workspaceId: workspaceResource.workspaceId,
-            canonicalPath: workspaceResource.canonicalPath,
-          }
-        : commandResource === undefined
-          ? resourceFor(request)
-          : { kind: 'external-exact', target: commandResource.target };
+      : workspaceResource !== undefined && workspaceGuards.length > 1
+        ? { kind: 'workspace', workspaceId: workspaceResource.workspaceId }
+        : workspaceResource !== undefined
+          ? {
+              kind: 'path-exact',
+              workspaceId: workspaceResource.workspaceId,
+              canonicalPath: workspaceResource.canonicalPath,
+            }
+          : commandResource === undefined
+            ? resourceFor(request)
+            : { kind: 'external-exact', target: commandResource.target };
   const resource: PermissionResource =
     disclosure !== undefined
       ? {
@@ -454,11 +463,18 @@ export function approvalFactsForTool(
           ? digest({ toolId: request.entry.toolId, disclosure, operation })
           : workspaceGuard === undefined
             ? digest({ toolId: request.entry.toolId, input: request.input })
-            : digest({
-                toolId: request.entry.toolId,
-                pathGuardDigest: pathGuardIdentityDigest(workspaceGuard),
-                operation,
-              }),
+            : workspaceGuards.length > 1
+              ? digest({
+                  toolId: request.entry.toolId,
+                  input: request.input,
+                  pathGuardDigests: workspaceGuards.map(pathGuardIdentityDigest),
+                  operation,
+                })
+              : digest({
+                  toolId: request.entry.toolId,
+                  pathGuardDigest: pathGuardIdentityDigest(workspaceGuard),
+                  operation,
+                }),
     resourceSet,
     resource,
     operation,
@@ -503,6 +519,7 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
         : {};
     const content = typeof raw['content'] === 'string' ? raw['content'] : undefined;
     const edits = Array.isArray(raw['edits']) ? raw['edits'] : undefined;
+    const operations = Array.isArray(raw['operations']) ? raw['operations'] : undefined;
     return stableStringify({
       tool: request.entry.providerName,
       rootId: workspaceGuard.rootId,
@@ -511,6 +528,9 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
         ? {}
         : { contentBytes: Buffer.byteLength(content, 'utf8'), contentDigest: digest(content) }),
       ...(edits === undefined ? {} : { editCount: edits.length, editsDigest: digest(edits) }),
+      ...(operations === undefined
+        ? {}
+        : { operationCount: operations.length, operationsDigest: digest(operations) }),
     });
   }
   if (

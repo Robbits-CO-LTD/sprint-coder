@@ -21,6 +21,7 @@ import {
   type TeamMcpRole,
   type TeamMcpToolName,
 } from '../runtime-host/team-mcp-tool-contract';
+import type { RuntimeManagedToolDefinition } from '../runtime-host/protocol';
 import {
   isNativeProcessDescendant,
   queryNativeNamedPipePeerIdentity,
@@ -266,6 +267,8 @@ export type TeamMcpRegistration = Readonly<{
   allowTeamTools?: boolean;
   role?: TeamMcpRole;
   allowedTools?: readonly TeamMcpToolName[];
+  managedTools?: readonly RuntimeManagedToolDefinition[];
+  managedToolCatalogDigest?: string;
   contextOwner?: { type: 'turn' | 'team_execution'; id: string };
   initialWaitCursor?: number;
 }>;
@@ -360,6 +363,16 @@ export class TeamMcpBridge {
     private readonly readImportSkillSource?: (
       input: unknown,
       context: { taskId: string; turnId: string },
+    ) => Promise<unknown>,
+    private readonly executeManagedTool?: (
+      input: unknown,
+      context: {
+        taskId: string;
+        turnId: string;
+        callId: string;
+        toolName: string;
+        catalogDigest: string;
+      },
     ) => Promise<unknown>,
   ) {}
 
@@ -618,6 +631,21 @@ export class TeamMcpBridge {
     return true;
   }
 
+  attachManagedTools(
+    turnId: string,
+    managedTools: readonly RuntimeManagedToolDefinition[],
+    catalogDigest: string,
+  ): boolean {
+    const registration = this.registrations.get(turnId);
+    if (registration === undefined) return false;
+    this.registrations.set(turnId, {
+      ...registration,
+      managedTools: Object.freeze(managedTools.map((tool) => Object.freeze({ ...tool }))),
+      managedToolCatalogDigest: catalogDigest,
+    });
+    return true;
+  }
+
   unregister(turnId: string): void {
     this.registrations.delete(turnId);
   }
@@ -716,14 +744,17 @@ export class TeamMcpBridge {
             skillImports: registration.allowSkillImports === true,
             teamTools: registration.allowTeamTools !== false,
           },
+          managedTools: registration.managedTools ?? [],
+          toolCatalogDigest: registration.managedToolCatalogDigest ?? null,
         },
       });
       return;
     }
     const [turnId, registration] = found;
     try {
+      const managedTool = registration.managedTools?.find(({ name }) => name === request.tool);
       const allowedTools = new Set<string>(teamMcpToolNamesForCapabilities(registration));
-      if (!allowedTools.has(request.tool))
+      if (managedTool === undefined && !allowedTools.has(request.tool))
         throw new Error('Tool is not allowed for this Team MCP role');
       if (process.env['SPRINT_CODER_TEAM_MCP_TRACE'] === '1') {
         const teamId = this.coordinator.get(registration.taskId)?.team.id;
@@ -741,77 +772,90 @@ export class TeamMcpBridge {
         );
       }
       const result =
-        request.tool === 'project_memory_remember'
-          ? await this.executeProjectMemoryTool(turnId, registration, request.args)
-          : request.tool === 'skill_draft_create'
-            ? await this.executeSkillDraftTool(turnId, registration, request.args)
-            : request.tool === 'skill_import_read'
-              ? await this.executeSkillImportReadTool(turnId, registration, request.args)
-              : request.tool === 'skill_import_install'
-                ? await this.executeSkillImportTool(turnId, registration, request.args)
-                : registration.allowTeamTools === false
-                  ? (() => {
-                      throw new Error('Team tools are not available for this Turn');
-                    })()
-                  : await executeTeamTool(
-                      this.coordinator,
-                      registration.taskId,
-                      request.tool,
-                      request.args,
-                      {
-                        ...(registration.requesterAgentId === undefined
-                          ? {}
-                          : { requesterAgentId: registration.requesterAgentId }),
-                        ...(registration.accessCeiling === undefined
-                          ? {}
-                          : { accessCeiling: registration.accessCeiling }),
-                        ...(registration.contextOwner === undefined
-                          ? {}
-                          : { contextOwner: registration.contextOwner }),
-                        longPoll:
-                          request.tool === 'team_wait_reports' ||
-                          request.tool === 'team_wait_events',
-                        waitReportsCursor: {
-                          read: () => registration.waitCursor,
-                          advance: (seq) => {
-                            registration.waitCursor = seq;
+        managedTool !== undefined
+          ? this.executeManagedTool === undefined ||
+            registration.managedToolCatalogDigest === undefined
+            ? (() => {
+                throw new Error('Managed tool executor is unavailable');
+              })()
+            : await this.executeManagedTool(request.args, {
+                taskId: registration.taskId,
+                turnId,
+                callId: request.requestId,
+                toolName: managedTool.name,
+                catalogDigest: registration.managedToolCatalogDigest,
+              })
+          : request.tool === 'project_memory_remember'
+            ? await this.executeProjectMemoryTool(turnId, registration, request.args)
+            : request.tool === 'skill_draft_create'
+              ? await this.executeSkillDraftTool(turnId, registration, request.args)
+              : request.tool === 'skill_import_read'
+                ? await this.executeSkillImportReadTool(turnId, registration, request.args)
+                : request.tool === 'skill_import_install'
+                  ? await this.executeSkillImportTool(turnId, registration, request.args)
+                  : registration.allowTeamTools === false
+                    ? (() => {
+                        throw new Error('Team tools are not available for this Turn');
+                      })()
+                    : await executeTeamTool(
+                        this.coordinator,
+                        registration.taskId,
+                        request.tool,
+                        request.args,
+                        {
+                          ...(registration.requesterAgentId === undefined
+                            ? {}
+                            : { requesterAgentId: registration.requesterAgentId }),
+                          ...(registration.accessCeiling === undefined
+                            ? {}
+                            : { accessCeiling: registration.accessCeiling }),
+                          ...(registration.contextOwner === undefined
+                            ? {}
+                            : { contextOwner: registration.contextOwner }),
+                          longPoll:
+                            request.tool === 'team_wait_reports' ||
+                            request.tool === 'team_wait_events',
+                          waitReportsCursor: {
+                            read: () => registration.waitCursor,
+                            advance: (seq) => {
+                              registration.waitCursor = seq;
+                            },
                           },
-                        },
-                        ...(this.listModelCandidates === undefined
-                          ? {}
-                          : { listModelCandidates: this.listModelCandidates }),
-                        modelCatalogAudit: {
-                          wasQueried: () => registration.modelCatalogQueried,
-                          markQueried: () => {
-                            registration.modelCatalogQueried = true;
+                          ...(this.listModelCandidates === undefined
+                            ? {}
+                            : { listModelCandidates: this.listModelCandidates }),
+                          modelCatalogAudit: {
+                            wasQueried: () => registration.modelCatalogQueried,
+                            markQueried: () => {
+                              registration.modelCatalogQueried = true;
+                            },
                           },
-                        },
-                        ...(registration.requireModelResearch === true
-                          ? {
-                              modelResearchAudit: {
-                                required: true,
-                                record: (input: {
-                                  modelSelection: {
+                          ...(registration.requireModelResearch === true
+                            ? {
+                                modelResearchAudit: {
+                                  required: true,
+                                  record: (input: {
+                                    modelSelection: {
+                                      connectionId: string | null;
+                                      requestedProvider: string | null;
+                                      requestedModel: string | null;
+                                    };
+                                  }) => {
+                                    registration.researchedModels.add(
+                                      modelSelectionKey(input.modelSelection),
+                                    );
+                                  },
+                                  hasEvidence: (selection: {
                                     connectionId: string | null;
                                     requestedProvider: string | null;
                                     requestedModel: string | null;
-                                  };
-                                }) => {
-                                  registration.researchedModels.add(
-                                    modelSelectionKey(input.modelSelection),
-                                  );
+                                  }) =>
+                                    registration.researchedModels.has(modelSelectionKey(selection)),
                                 },
-                                hasEvidence: (selection: {
-                                  connectionId: string | null;
-                                  requestedProvider: string | null;
-                                  requestedModel: string | null;
-                                }) =>
-                                  registration.researchedModels.has(modelSelectionKey(selection)),
-                              },
-                            }
-                          : {}),
-                      },
-                    );
+                              }
+                            : {}),
+                        },
+                      );
       respond({ ok: true, result });
     } catch (error) {
       respond({ ok: false, error: error instanceof Error ? error.message : String(error) });

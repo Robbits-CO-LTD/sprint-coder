@@ -21,6 +21,7 @@ import {
   type RuntimeImageAttachmentManifestEntry,
   type RuntimePreparedImageAttachments,
   type RuntimeProcessIdentity,
+  type RuntimeToolRequest,
   type RuntimeProjectContextItem,
   type ResolvedCliCommand,
   type RuntimeSkillInput,
@@ -49,10 +50,12 @@ type ActiveTurn = {
   projectItemIds: string[];
   projectSnapshotDigest: string | null;
   payloadDigest: string;
+  toolCatalogDigest: string;
   startAcceptanceDeadline: RuntimeStartAcceptanceDeadline;
   startFailed: boolean;
   teamMcpEnabled: boolean;
   teamRuntimeProcessBound: boolean;
+  toolControllers: Set<AbortController>;
 };
 export type RuntimeStopReceipt = Readonly<{
   turnId: string;
@@ -104,6 +107,12 @@ type ContextAccepted = (
   projectSnapshotDigest: string | null,
   payloadDigest: string,
 ) => void;
+type ToolRequestHandler = (
+  taskId: string,
+  turnId: string,
+  request: RuntimeToolRequest,
+  signal: AbortSignal,
+) => Promise<unknown>;
 export type RuntimeCapabilityReport = {
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
@@ -162,6 +171,7 @@ export class RuntimeHostClient {
       turnId: string,
       identity: RuntimeProcessIdentity,
     ) => boolean,
+    private readonly onToolRequest?: ToolRequestHandler,
   ) {
     this.launch();
   }
@@ -298,10 +308,12 @@ export class RuntimeHostClient {
       projectItemIds: projectItems.map((item) => item.id),
       projectSnapshotDigest,
       payloadDigest: payload.digest,
+      toolCatalogDigest: toolCatalogSnapshot.digest,
       startAcceptanceDeadline,
       startFailed: false,
       teamMcpEnabled: teamMcp !== undefined,
       teamRuntimeProcessBound: false,
+      toolControllers: new Set(),
     });
     startAcceptanceDeadline.start();
     const startPayload = {
@@ -425,6 +437,7 @@ export class RuntimeHostClient {
         stoppedAt: new Date().toISOString(),
       });
     active.startAcceptanceDeadline.stop();
+    for (const controller of active.toolControllers) controller.abort();
     this.post({
       ...this.base(taskId, turnId, active.operationId, active.lastSeq + 1),
       type: 'cancel',
@@ -491,7 +504,10 @@ export class RuntimeHostClient {
     this.resolveProbe?.(unavailable);
     this.resolveProbe = null;
     this.expectedProbeOperationId = null;
-    for (const active of this.active.values()) active.startAcceptanceDeadline.stop();
+    for (const active of this.active.values()) {
+      active.startAcceptanceDeadline.stop();
+      for (const controller of active.toolControllers) controller.abort();
+    }
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -687,6 +703,47 @@ export class RuntimeHostClient {
           retryable: false,
         });
       } else active.teamRuntimeProcessBound = true;
+    } else if (raw.type === 'tool_request') {
+      if (
+        raw.request.catalogDigest !== active.toolCatalogDigest ||
+        this.onToolRequest === undefined
+      ) {
+        this.post({
+          ...this.base(raw.taskId, raw.turnId, raw.operationId, raw.seq + 1),
+          type: 'tool_result',
+          callId: raw.request.callId,
+          success: false,
+          output: { code: 'TOOL_PROTOCOL_ERROR', message: 'Tool request was not accepted.' },
+        });
+        return;
+      }
+      const controller = new AbortController();
+      active.toolControllers.add(controller);
+      void this.onToolRequest(raw.taskId, raw.turnId, raw.request, controller.signal)
+        .then((output) => {
+          if (this.active.get(raw.turnId) !== active) return;
+          this.post({
+            ...this.base(raw.taskId, raw.turnId, raw.operationId, raw.seq + 1),
+            type: 'tool_result',
+            callId: raw.request.callId,
+            success: true,
+            output,
+          });
+        })
+        .catch((error: unknown) => {
+          if (this.active.get(raw.turnId) !== active) return;
+          this.post({
+            ...this.base(raw.taskId, raw.turnId, raw.operationId, raw.seq + 1),
+            type: 'tool_result',
+            callId: raw.request.callId,
+            success: false,
+            output: {
+              code: 'TOOL_EXECUTION_FAILED',
+              message: error instanceof Error ? error.message.slice(0, 2_000) : 'Tool failed.',
+            },
+          });
+        })
+        .finally(() => active.toolControllers.delete(controller));
     } else if (raw.type === 'event') {
       this.onEvent(raw.taskId, raw.turnId, raw.event);
     } else if (raw.type === 'started') {
@@ -737,6 +794,7 @@ export class RuntimeHostClient {
       this.finishCancel(raw.turnId, raw.forced);
     } else if (raw.type === 'error') {
       active.startAcceptanceDeadline.stop();
+      for (const controller of active.toolControllers) controller.abort();
       this.active.delete(raw.turnId);
       if (!active.startFailed)
         this.onFailure(
@@ -798,7 +856,10 @@ export class RuntimeHostClient {
     this.rejectAllImagePrepareWaiters(new Error('Runtime Host exited during image prepare'));
     this.invalidateAllImagePreparationPhases();
     const failures = [...this.active.entries()];
-    for (const active of this.active.values()) active.startAcceptanceDeadline.stop();
+    for (const active of this.active.values()) {
+      active.startAcceptanceDeadline.stop();
+      for (const controller of active.toolControllers) controller.abort();
+    }
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);
@@ -890,7 +951,10 @@ export class RuntimeHostClient {
       this.expectedProbeOperationId = null;
     }
     const failures = [...this.active.entries()];
-    for (const active of this.active.values()) active.startAcceptanceDeadline.stop();
+    for (const active of this.active.values()) {
+      active.startAcceptanceDeadline.stop();
+      for (const controller of active.toolControllers) controller.abort();
+    }
     this.active.clear();
     for (const [turnId, waiter] of this.cancelWaiters) {
       clearTimeout(waiter.timer);

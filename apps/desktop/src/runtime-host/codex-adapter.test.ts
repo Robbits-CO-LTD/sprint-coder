@@ -3,11 +3,13 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
   CodexAgentMessageBoundary,
   CodexRuntimeAdapter,
   advanceCodexAppServerStage,
   buildCodexArgs,
+  buildCodexManagedDynamicTools,
   buildCodexPrompt,
   buildCodexTeamDynamicTools,
   buildCodexTurnInput,
@@ -325,6 +327,100 @@ describe('Codex runtime probe', () => {
 
     expect(failures).toEqual([]);
     expect(events.at(-1)).toMatchObject({ type: 'completed' });
+  });
+
+  it('routes a managed dynamic tool to the client and disables Codex native environments', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-codex-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'managed-codex.mjs');
+    await writeFile(
+      script,
+      [
+        "import { createInterface } from 'node:readline';",
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
+        "  if (message.method === 'thread/start') {",
+        "    if (message.params.sandbox !== 'read-only' || message.params.environments?.length !== 0) process.exit(21);",
+        "    if (message.params.dynamicTools?.[0]?.name !== 'read_file') process.exit(22);",
+        "    send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-managed' } } });",
+        '  }',
+        "  if (message.method === 'turn/start') {",
+        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    send({ jsonrpc: '2.0', id: 'managed-call', method: 'item/tool/call', params: { threadId: 'thread-managed', turnId: 'turn-1', callId: 'call-read', namespace: null, tool: 'read_file', arguments: { path: 'README.md' } } });",
+        '  }',
+        "  if (message.id === 'managed-call' && message.result?.success === true) {",
+        "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+        '  }',
+        '});',
+      ].join('\n'),
+    );
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'workspace',
+          name: 'read',
+          version: '1',
+        }),
+        providerName: 'read_file',
+        kind: 'fileRead',
+        schemaVersion: 1,
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+        outputSchema: { type: 'object' },
+        sideEffect: 'read',
+        risk: 'low',
+        requiredCapabilities: ['workspace.read'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['*'],
+      }),
+    );
+    const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
+    const calls: unknown[] = [];
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'managed-tool-turn',
+        'request',
+        [],
+        () => undefined,
+        root,
+        'auto',
+        () => undefined,
+        () => undefined,
+        () => resolve(),
+        undefined,
+        undefined,
+        'workspace-write',
+        [],
+        [],
+        undefined,
+        undefined,
+        { inheritUserConfig: false },
+        undefined,
+        snapshot,
+        async (call) => {
+          calls.push(call);
+          return { success: true, output: { content: 'managed' } };
+        },
+      );
+    });
+    expect(calls).toEqual([
+      {
+        callId: 'call-read',
+        toolName: 'read_file',
+        arguments: { path: 'README.md' },
+        catalogDigest: snapshot.digest,
+      },
+    ]);
   });
 
   it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
@@ -881,6 +977,46 @@ describe('Codex runtime probe', () => {
         name: 'team_list_models',
         description: 'models',
         inputSchema: { type: 'object' },
+        deferLoading: false,
+      },
+    ]);
+  });
+
+  it('publishes the sealed managed catalog as client-hosted dynamic tools', () => {
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'workspace',
+          name: 'read',
+          version: '1',
+        }),
+        providerName: 'read_file',
+        kind: 'fileRead',
+        schemaVersion: 1,
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+        outputSchema: { type: 'object' },
+        sideEffect: 'read',
+        risk: 'low',
+        requiredCapabilities: ['workspace.read'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['*'],
+      }),
+    );
+    expect(
+      buildCodexManagedDynamicTools(
+        registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' }),
+      ),
+    ).toEqual([
+      {
+        type: 'function',
+        name: 'read_file',
+        description: 'Sprint Coder managed fileRead tool: read_file',
+        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
         deferLoading: false,
       },
     ]);

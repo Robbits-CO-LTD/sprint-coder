@@ -163,6 +163,7 @@ import {
   type ExecutionInstruction,
   type WorkerState,
 } from '@sprint-coder/domain';
+import type { ManagedToolLifecycleEvent, ManagedToolCallState } from './tool-broker';
 import {
   ContextLedger,
   CONTEXT_HARD_CAP_TOKENS,
@@ -3279,6 +3280,39 @@ const migrations = [
         ON user_file_save_intents(state, created_at, operation_id);
     `,
   },
+  {
+    version: 71,
+    checksum: 'managed-coding-harness-v71-tool-lifecycle',
+    sql: `
+      CREATE TABLE managed_tool_calls (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+        provider_name TEXT NOT NULL,
+        catalog_digest TEXT NOT NULL CHECK (length(catalog_digest) = 64),
+        state TEXT NOT NULL CHECK (state IN (
+          'requested', 'prepared', 'awaiting_approval', 'queued', 'running',
+          'backgrounded', 'succeeded', 'failed', 'denied', 'canceled'
+        )),
+        requested_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        finished_at TEXT,
+        UNIQUE(turn_id, call_id),
+        UNIQUE(turn_id, ordinal)
+      );
+      CREATE INDEX managed_tool_calls_task_state_idx
+        ON managed_tool_calls(task_id, state, requested_at, id);
+      CREATE TABLE managed_tool_call_events (
+        tool_call_id TEXT NOT NULL REFERENCES managed_tool_calls(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL CHECK (seq > 0),
+        state TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        PRIMARY KEY(tool_call_id, seq)
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4389,6 +4423,7 @@ export interface PersistenceClient {
     policyEpoch: number,
     invalidatedAt: string,
   ): ApprovalPersistenceResult[];
+  recordManagedToolLifecycle(event: ManagedToolLifecycleEvent): void;
   prepareCommand(input: {
     id: string;
     taskId: string;
@@ -12022,6 +12057,86 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  recordManagedToolLifecycle(event: ManagedToolLifecycleEvent): void {
+    const occurredAt = new Date(event.occurredAt).toISOString();
+    this.db.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT id, ordinal, provider_name, catalog_digest, state
+           FROM managed_tool_calls WHERE turn_id = ? AND call_id = ?`,
+        )
+        .get(event.turnId, event.callId) as
+        | {
+            id: string;
+            ordinal: number;
+            provider_name: string;
+            catalog_digest: string;
+            state: ManagedToolCallState;
+          }
+        | undefined;
+      if (existing === undefined) {
+        if (event.state !== 'requested')
+          throw new Error('Managed tool lifecycle must start requested');
+        const id = randomUUID();
+        this.db
+          .prepare(
+            `INSERT INTO managed_tool_calls(
+              id, task_id, turn_id, call_id, ordinal, provider_name, catalog_digest,
+              state, requested_at, updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          )
+          .run(
+            id,
+            event.taskId,
+            event.turnId,
+            event.callId,
+            event.ordinal,
+            event.providerName,
+            event.catalogDigest,
+            event.state,
+            occurredAt,
+            occurredAt,
+          );
+        this.db
+          .prepare(
+            `INSERT INTO managed_tool_call_events(tool_call_id, seq, state, occurred_at)
+             VALUES (?, 1, ?, ?)`,
+          )
+          .run(id, event.state, occurredAt);
+        return;
+      }
+      if (
+        existing.ordinal !== event.ordinal ||
+        existing.provider_name !== event.providerName ||
+        existing.catalog_digest !== event.catalogDigest
+      )
+        throw new Error('Managed tool lifecycle identity mismatch');
+      assertManagedToolTransition(existing.state, event.state);
+      const terminal = isManagedToolTerminal(event.state);
+      this.db
+        .prepare(
+          `UPDATE managed_tool_calls
+           SET state = ?, updated_at = ?, finished_at = CASE WHEN ? THEN ? ELSE finished_at END
+           WHERE id = ?`,
+        )
+        .run(event.state, occurredAt, terminal ? 1 : 0, occurredAt, existing.id);
+      const nextSeq = (
+        this.db
+          .prepare(
+            `SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+             FROM managed_tool_call_events WHERE tool_call_id = ?`,
+          )
+          .get(existing.id) as { seq: number }
+      ).seq;
+      this.db
+        .prepare(
+          `INSERT INTO managed_tool_call_events(tool_call_id, seq, state, occurred_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(existing.id, nextSeq, event.state, occurredAt);
+    })();
+  }
+
   prepareCommand(input: {
     id: string;
     taskId: string;
@@ -18187,4 +18302,28 @@ function mutationTokenMatchesRow(token: MutationLeaseToken, row: WorkspaceMutati
 function validateMutationIdentifier(value: string, name: string): void {
   if (typeof value !== 'string' || value.length < 1 || value.length > 200)
     throw new Error(`Invalid ${name}`);
+}
+
+const managedToolTransitions: Readonly<
+  Record<ManagedToolCallState, readonly ManagedToolCallState[]>
+> = {
+  requested: ['prepared', 'failed', 'canceled'],
+  prepared: ['awaiting_approval', 'failed', 'canceled'],
+  awaiting_approval: ['queued', 'denied', 'failed', 'canceled'],
+  queued: ['running', 'failed', 'canceled'],
+  running: ['backgrounded', 'succeeded', 'failed', 'canceled'],
+  backgrounded: ['running', 'succeeded', 'failed', 'canceled'],
+  succeeded: [],
+  failed: [],
+  denied: [],
+  canceled: [],
+};
+
+function assertManagedToolTransition(from: ManagedToolCallState, to: ManagedToolCallState): void {
+  if (!managedToolTransitions[from].includes(to))
+    throw new Error(`Invalid managed tool lifecycle transition: ${from} -> ${to}`);
+}
+
+function isManagedToolTerminal(state: ManagedToolCallState): boolean {
+  return state === 'succeeded' || state === 'failed' || state === 'denied' || state === 'canceled';
 }

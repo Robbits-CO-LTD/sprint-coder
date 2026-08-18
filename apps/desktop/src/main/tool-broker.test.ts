@@ -550,4 +550,72 @@ describe('Main ToolBroker', () => {
       }),
     ).toThrow('reserved for Public Beta');
   });
+
+  it('serializes process and mutation claims within one Turn', async () => {
+    const { registry, command } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizeAll);
+    let active = 0;
+    let maximum = 0;
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      execute: async () => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return {};
+      },
+    });
+    broker.startTurn(context, 'mock');
+    await Promise.all([
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'command-one',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['one'] },
+      }),
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'command-two',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: ['two'] },
+      }),
+    ]);
+    expect(maximum).toBe(1);
+  });
+
+  it('emits one ordered terminal lifecycle for a successful managed call', async () => {
+    const { registry, echo } = createRegistry();
+    const states: string[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizePure,
+      (event) => states.push(event.state),
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: (input) => input,
+    });
+    broker.startTurn(context, 'mock');
+    await broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'lifecycle-one',
+      providerName: 'mock_echo',
+      input: { text: 'ok' },
+    });
+    expect(states).toEqual([
+      'requested',
+      'prepared',
+      'awaiting_approval',
+      'queued',
+      'running',
+      'succeeded',
+    ]);
+  });
 });

@@ -1,5 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
+import { join } from 'node:path';
 import type { EffectiveWorkspaceSet, ProviderTool } from '@sprint-coder/contracts';
 import {
   ToolRegistry,
@@ -14,7 +15,7 @@ import {
   assessProviderDisclosure,
   type ProviderDisclosureAssessment,
 } from './provider-disclosure-classifier';
-import { ToolBroker, type ToolAuthorizer } from './tool-broker';
+import { ToolBroker, type ManagedToolLifecycleEvent, type ToolAuthorizer } from './tool-broker';
 import { CommandRunner } from './command-runner';
 import {
   COMMAND_RUNNER_TOOL,
@@ -27,12 +28,17 @@ import {
   WORKSPACE_PATCH_TOOL,
   executeWorkspaceCreateFile,
   executeWorkspacePatch,
+  executeWorkspacePatchBatch,
+  parseBatchInput,
   type WorkspacePatchDeps,
 } from './workspace-patch-tool';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 1024 * 1024;
+const MAX_SEARCH_FILES = 2_000;
+const MAX_SEARCH_RESULTS = 200;
+const MAX_SEARCH_DEPTH = 32;
 
 export const PROVIDER_WORKSPACE_GUIDANCE = `You are operating as a coding agent through a Provider API.
 Use the provided workspace tools when the user asks you to inspect or change files. Never claim that
@@ -107,6 +113,39 @@ export const READ_FILE_TOOL = createToolDefinition({
   providerCompatibility: ['*'],
 });
 
+export const SEARCH_WORKSPACE_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'provider-workspace',
+    name: 'search',
+    version: '1',
+  }),
+  providerName: 'search_workspace',
+  kind: 'search',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      rootId: { type: 'string' },
+      path: { type: 'string' },
+      query: { type: 'string' },
+      glob: { type: 'string' },
+      maxResults: { type: 'integer', minimum: 1, maximum: MAX_SEARCH_RESULTS },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object' },
+  sideEffect: 'read',
+  risk: 'low',
+  requiredCapabilities: ['workspace.read'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'any' },
+  providerCompatibility: ['*'],
+});
+
 const descriptions = new Map([
   [
     LIST_WORKSPACE_TOOL.providerName,
@@ -115,6 +154,10 @@ const descriptions = new Map([
   [
     READ_FILE_TOOL.providerName,
     'Read one UTF-8 text file inside the selected workspace and return a revision token for later edits.',
+  ],
+  [
+    SEARCH_WORKSPACE_TOOL.providerName,
+    'Search UTF-8 text files inside the selected workspace without following symlinks. Results are bounded and sensitive matches are withheld.',
   ],
   [
     WORKSPACE_CREATE_FILE_TOOL.providerName,
@@ -126,7 +169,7 @@ const descriptions = new Map([
   ],
   [
     WORKSPACE_PATCH_TOOL.providerName,
-    'Safely update one existing text file using exact anchored replacements.',
+    'Apply one revision-bound batch of add, update, delete, rename, and mkdir operations through the recoverable Edit Saga.',
   ],
   [
     COMMAND_RUNNER_TOOL.providerName,
@@ -139,16 +182,18 @@ type WorkspaceToolDeps = Readonly<{
   rootIdentityFor(turnId: string, rootId: string): string | undefined;
   policyEpochFor(taskId: string): number;
   authorizer: ToolAuthorizer;
+  lifecycle?: (event: ManagedToolLifecycleEvent) => void;
   command?: CommandToolBoundary;
   workspaceEdit?: WorkspacePatchDeps;
 }>;
 
 type PreparedWorkspaceInput = Readonly<{
-  kind: 'list' | 'read' | 'create' | 'create-directory' | 'patch';
+  kind: 'list' | 'read' | 'search' | 'create' | 'create-directory' | 'patch';
   rootId: string;
   rootLabel: string;
   relativePath: string;
   guard: PathGuard;
+  guards?: readonly PathGuard[];
   readGuard?: PathGuard;
   disclosure?: Omit<ProviderDisclosureAssessment, 'redactedContent'> & { providerId: string };
   raw?: unknown;
@@ -156,7 +201,7 @@ type PreparedWorkspaceInput = Readonly<{
 
 const issuedPreparedInputs = new WeakSet<object>();
 
-export class ProviderWorkspaceTools {
+export class ManagedCodingHarness {
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
   private readonly providersByTurn = new Map<string, string>();
@@ -166,6 +211,7 @@ export class ProviderWorkspaceTools {
     const registry = new ToolRegistry();
     registry.register(LIST_WORKSPACE_TOOL);
     registry.register(READ_FILE_TOOL);
+    registry.register(SEARCH_WORKSPACE_TOOL);
     if (deps.command !== undefined) registry.register(COMMAND_RUNNER_TOOL);
     if (deps.workspaceEdit !== undefined) {
       registry.register(WORKSPACE_CREATE_FILE_TOOL);
@@ -173,7 +219,7 @@ export class ProviderWorkspaceTools {
       if (deps.workspaceEdit.createDirectory !== undefined)
         registry.register(WORKSPACE_CREATE_DIRECTORY_TOOL);
     }
-    this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer);
+    this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     if (deps.command !== undefined)
       registerCommandRunnerTool(this.broker, new CommandRunner(), deps.command);
     this.broker.registerImplementation({
@@ -187,6 +233,12 @@ export class ProviderWorkspaceTools {
       implementationKind: 'built-in',
       prepare: (input, context) => this.prepare('read', input, context),
       execute: async (input, context) => this.read(input as PreparedWorkspaceInput, context),
+    });
+    this.broker.registerImplementation({
+      toolId: SEARCH_WORKSPACE_TOOL.toolId,
+      implementationKind: 'built-in',
+      prepare: (input, context) => this.prepareSearch(input, context),
+      execute: async (input, context) => this.search(input as PreparedWorkspaceInput, context),
     });
     if (deps.workspaceEdit !== undefined) {
       this.broker.registerImplementation({
@@ -207,6 +259,17 @@ export class ProviderWorkspaceTools {
         prepare: (input, context) => this.prepareMutation('patch', input, context),
         execute: (input, context) => {
           const prepared = input as PreparedWorkspaceInput;
+          if (
+            typeof prepared.raw === 'object' &&
+            prepared.raw !== null &&
+            Array.isArray((prepared.raw as Record<string, unknown>)['operations'])
+          )
+            return executeWorkspacePatchBatch(
+              prepared.raw,
+              context,
+              deps.workspaceEdit!,
+              prepared.guards ?? [prepared.guard],
+            );
           if (prepared.readGuard === undefined)
             throw new Error('apply_patch requires an issued read guard');
           return executeWorkspacePatch(
@@ -239,7 +302,20 @@ export class ProviderWorkspaceTools {
   }
 
   startTurn(context: ToolExecutionContext, providerId: string): ToolCatalogSnapshot {
-    const snapshot = this.broker.startTurn(context, providerId);
+    const snapshot = this.broker.startTurn(context, providerId, [
+      LIST_WORKSPACE_TOOL.toolId,
+      READ_FILE_TOOL.toolId,
+      SEARCH_WORKSPACE_TOOL.toolId,
+      ...(this.deps.workspaceEdit === undefined
+        ? []
+        : [
+            WORKSPACE_CREATE_FILE_TOOL.toolId,
+            WORKSPACE_PATCH_TOOL.toolId,
+            ...(this.deps.workspaceEdit.createDirectory === undefined
+              ? []
+              : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),
+          ]),
+    ]);
     this.providersByTurn.set(JSON.stringify([context.taskId, context.turnId]), providerId);
     return snapshot;
   }
@@ -348,6 +424,126 @@ export class ProviderWorkspaceTools {
     };
   }
 
+  private async prepareSearch(
+    input: unknown,
+    context: ToolExecutionContext,
+  ): Promise<PreparedWorkspaceInput> {
+    const request = parseSearchInput(input);
+    const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
+    if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null);
+    if (root === null) throw new Error('Workspace rootId is not present in this Turn');
+    const expectedRootIdentityDigest =
+      workspace.source === 'project'
+        ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+        : undefined;
+    if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+      throw new Error('Workspace root identity is incomplete');
+    const guard = await createPathGuard({
+      rootId: root.rootId,
+      workspacePath: root.path,
+      ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+      targetPath: request.path,
+      operation: 'read',
+    });
+    if (guard.targetIdentity?.kind !== 'directory')
+      throw new WorkspaceToolRejection(
+        'NOT_A_DIRECTORY',
+        'search_workspace path is not a directory',
+      );
+    const prepared = Object.freeze({
+      kind: 'search' as const,
+      rootId: root.rootId,
+      rootLabel: root.label,
+      relativePath: request.path,
+      guard,
+      raw: Object.freeze(request),
+    });
+    issuedPreparedInputs.add(prepared);
+    return prepared;
+  }
+
+  private async search(
+    input: PreparedWorkspaceInput,
+    context: ToolExecutionContext,
+  ): Promise<{
+    rootId: string;
+    rootLabel: string;
+    path: string;
+    matches: readonly { path: string; line: number; text: string }[];
+    searchedFiles: number;
+    withheldFiles: number;
+    truncated: boolean;
+  }> {
+    assertPreparedWorkspaceInput(input, 'search');
+    const request = input.raw as ReturnType<typeof parseSearchInput>;
+    await revalidatePathGuard(input.guard);
+    const candidates = await collectSearchCandidates(
+      input.guard.resolvedPath,
+      input.relativePath,
+      request.glob,
+    );
+    const matches: { path: string; line: number; text: string }[] = [];
+    let searchedFiles = 0;
+    let withheldFiles = 0;
+    for (const relativePath of candidates.files) {
+      if (matches.length >= request.maxResults) break;
+      let guard: PathGuard;
+      try {
+        const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
+        if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+        const root = resolveWorkspaceToolRoot(workspace, input.rootId);
+        if (root === null) throw new Error('Workspace rootId is not present in this Turn');
+        const expectedRootIdentityDigest =
+          workspace.source === 'project'
+            ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+            : undefined;
+        guard = await createPathGuard({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+          targetPath: relativePath,
+          operation: 'read',
+        });
+        if (guard.targetIdentity?.kind !== 'file') continue;
+        const read = await this.revisions.readGuarded({
+          owner: { taskId: context.taskId, turnId: context.turnId },
+          guard,
+          policyEpoch: context.policyEpoch,
+          maxBytes: MAX_READ_BYTES,
+        });
+        searchedFiles += 1;
+        const disclosure = assessProviderDisclosure(read.content, relativePath);
+        if (disclosure.classification !== 'safe') {
+          withheldFiles += 1;
+          continue;
+        }
+        for (const [index, line] of disclosure.redactedContent.split(/\r?\n/u).entries()) {
+          if (!line.includes(request.query)) continue;
+          matches.push({ path: relativePath, line: index + 1, text: line.slice(0, 2_000) });
+          if (matches.length >= request.maxResults) break;
+        }
+      } catch (error) {
+        if (error instanceof WorkspaceToolRejection) throw error;
+        // A file that disappears or changes type during a bounded search is skipped. Every file
+        // that is returned still passed its own handle/identity guard.
+      }
+    }
+    await revalidatePathGuard(input.guard);
+    return {
+      rootId: input.rootId,
+      rootLabel: input.rootLabel,
+      path: input.relativePath,
+      matches,
+      searchedFiles,
+      withheldFiles,
+      truncated:
+        candidates.truncated ||
+        matches.length >= request.maxResults ||
+        candidates.files.length > searchedFiles,
+    };
+  }
+
   private async prepareMutation(
     kind: 'create' | 'create-directory' | 'patch',
     input: unknown,
@@ -356,6 +552,8 @@ export class ProviderWorkspaceTools {
     if (typeof input !== 'object' || input === null || Array.isArray(input))
       throw new Error('Workspace mutation input must be an object');
     const record = input as Record<string, unknown>;
+    if (kind === 'patch' && Array.isArray(record['operations']))
+      return this.prepareBatchMutation(record, context);
     if (typeof record['path'] !== 'string' || record['path'].length === 0)
       throw new Error('Workspace mutation requires a path');
     const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
@@ -398,7 +596,55 @@ export class ProviderWorkspaceTools {
     issuedPreparedInputs.add(prepared);
     return prepared;
   }
+
+  private async prepareBatchMutation(
+    input: Record<string, unknown>,
+    context: ToolExecutionContext,
+  ): Promise<PreparedWorkspaceInput> {
+    const request = parseBatchInput(input);
+    const workspace = this.deps.workspaceFor(context.taskId, context.turnId);
+    if (workspace === null) throw new Error('Workspace snapshot is unavailable for this Turn');
+    const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null);
+    if (root === null) throw new Error('Workspace rootId is not present in this Turn');
+    const expectedRootIdentityDigest =
+      workspace.source === 'project'
+        ? this.deps.rootIdentityFor(context.turnId, root.rootId)
+        : undefined;
+    if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+      throw new Error('Workspace root identity is incomplete');
+    const paths = request.operations.flatMap((operation) =>
+      operation.kind === 'rename' ? [operation.path, operation.destination] : [operation.path],
+    );
+    const guards = await Promise.all(
+      paths.map((targetPath) =>
+        createPathGuard({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
+          targetPath,
+          operation: 'write',
+        }),
+      ),
+    );
+    const first = guards[0];
+    if (first === undefined) throw new Error('Workspace batch mutation has no target');
+    const prepared = Object.freeze({
+      kind: 'patch' as const,
+      rootId: root.rootId,
+      rootLabel: root.label,
+      relativePath: request.operations[0]!.path,
+      guard: first,
+      guards: Object.freeze(guards),
+      raw: Object.freeze({ ...input, rootId: root.rootId }),
+    });
+    issuedPreparedInputs.add(prepared);
+    return prepared;
+  }
 }
+
+// Compatibility export while call sites migrate from the Provider-specific name. Both API and
+// CLI Runtime paths bind to the same implementation.
+export { ManagedCodingHarness as ProviderWorkspaceTools };
 
 export class WorkspaceToolRejection extends Error {
   constructor(
@@ -438,6 +684,19 @@ export function workspaceToolAuthorizationGuard(
   return prepared.guard.operation === operation || operation === undefined
     ? prepared.guard
     : undefined;
+}
+
+export function workspaceToolAuthorizationGuards(
+  input: unknown,
+  operation?: 'read' | 'write',
+): readonly PathGuard[] {
+  if (typeof input !== 'object' || input === null || !issuedPreparedInputs.has(input)) return [];
+  const prepared = input as PreparedWorkspaceInput;
+  const guards = [
+    ...(prepared.guards ?? [prepared.guard]),
+    ...(prepared.readGuard === undefined ? [] : [prepared.readGuard]),
+  ];
+  return guards.filter((guard) => operation === undefined || guard.operation === operation);
 }
 
 export function providerDisclosureAuthorizationFacts(input: unknown):
@@ -536,6 +795,103 @@ function parseWorkspaceInput(
     ...(typeof record['rootId'] === 'string' ? { rootId: record['rootId'] } : {}),
     path: typeof record['path'] === 'string' ? record['path'] : '.',
   };
+}
+
+function parseSearchInput(input: unknown): {
+  rootId?: string;
+  path: string;
+  query: string;
+  glob?: string;
+  maxResults: number;
+} {
+  if (typeof input !== 'object' || input === null || Array.isArray(input))
+    throw new Error('search_workspace requires an object');
+  const record = input as Record<string, unknown>;
+  if (
+    typeof record['query'] !== 'string' ||
+    record['query'].length === 0 ||
+    record['query'].length > 1_000
+  )
+    throw new Error('search_workspace query must be 1 to 1000 characters');
+  if (record['path'] !== undefined && typeof record['path'] !== 'string')
+    throw new Error('search_workspace path must be a string');
+  if (
+    record['glob'] !== undefined &&
+    (typeof record['glob'] !== 'string' || record['glob'].length > 256)
+  )
+    throw new Error('search_workspace glob must be a bounded string');
+  if (
+    record['rootId'] !== undefined &&
+    (typeof record['rootId'] !== 'string' || record['rootId'].length === 0)
+  )
+    throw new Error('search_workspace rootId must be a non-empty string');
+  const maxResults = record['maxResults'] ?? 100;
+  if (
+    !Number.isInteger(maxResults) ||
+    Number(maxResults) < 1 ||
+    Number(maxResults) > MAX_SEARCH_RESULTS
+  )
+    throw new Error(`search_workspace maxResults must be 1 to ${MAX_SEARCH_RESULTS}`);
+  return {
+    ...(typeof record['rootId'] === 'string' ? { rootId: record['rootId'] } : {}),
+    path: typeof record['path'] === 'string' ? record['path'] : '.',
+    query: record['query'],
+    ...(typeof record['glob'] === 'string' && record['glob'].length > 0
+      ? { glob: record['glob'] }
+      : {}),
+    maxResults: Number(maxResults),
+  };
+}
+
+async function collectSearchCandidates(
+  absoluteStart: string,
+  relativeStart: string,
+  glob?: string,
+): Promise<{ files: string[]; truncated: boolean }> {
+  const files: string[] = [];
+  const queue: { absolute: string; relative: string; depth: number }[] = [
+    { absolute: absoluteStart, relative: relativeStart === '.' ? '' : relativeStart, depth: 0 },
+  ];
+  let truncated = false;
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.depth > MAX_SEARCH_DEPTH) {
+      truncated = true;
+      continue;
+    }
+    const entries = await readdir(current.absolute, { withFileTypes: true });
+    entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const relative = current.relative === '' ? entry.name : `${current.relative}/${entry.name}`;
+      if (entry.isDirectory()) {
+        queue.push({
+          absolute: join(current.absolute, entry.name),
+          relative,
+          depth: current.depth + 1,
+        });
+        continue;
+      }
+      if (!entry.isFile() || !matchesSimpleGlob(relative, glob)) continue;
+      files.push(relative);
+      if (files.length >= MAX_SEARCH_FILES) {
+        truncated = true;
+        return { files, truncated };
+      }
+    }
+  }
+  return { files, truncated };
+}
+
+function matchesSimpleGlob(path: string, glob?: string): boolean {
+  if (glob === undefined) return true;
+  const doubleStarToken = '\u{e000}';
+  const escaped = glob
+    .replace(/[|\\{}()[\]^$+?.]/gu, '\\$&')
+    .replace(/\*\*/gu, doubleStarToken)
+    .replace(/\*/gu, '[^/]*')
+    .replaceAll(doubleStarToken, '.*');
+  return new RegExp(`^${escaped}$`, 'u').test(path);
 }
 
 function assertPreparedWorkspaceInput(

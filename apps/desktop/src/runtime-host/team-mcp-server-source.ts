@@ -485,7 +485,11 @@ function connectSocket() {
             return;
           }
           const capabilities = response.result && response.result.capabilities;
-          availableTools = TOOLS.filter((tool) =>
+          const managedTools =
+            response.result && Array.isArray(response.result.managedTools)
+              ? response.result.managedTools
+              : [];
+          availableTools = managedTools.concat(TOOLS.filter((tool) =>
             tool.name === 'project_memory_remember'
               ? capabilities && capabilities.projectMemory === true
               : tool.name === 'skill_draft_create'
@@ -493,7 +497,7 @@ function connectSocket() {
                 : tool.name === 'skill_import_read' || tool.name === 'skill_import_install'
                   ? capabilities && capabilities.skillImports === true
                 : capabilities && capabilities.teamTools === true,
-          );
+          ));
           resolve(s);
         },
         reject,

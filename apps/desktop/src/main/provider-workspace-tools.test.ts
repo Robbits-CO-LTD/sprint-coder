@@ -9,6 +9,7 @@ import {
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
+  workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
 import { commandToolTruncated } from './default-tools';
@@ -72,6 +73,7 @@ describe('Provider workspace read tools', () => {
     expect(providerToolsFromSnapshot(snapshot).map(({ name }) => name)).toEqual([
       'list_workspace',
       'read_file',
+      'search_workspace',
     ]);
     expect(Object.isFrozen(snapshot)).toBe(true);
     tools.finishTurn(context.taskId, context.turnId);
@@ -195,6 +197,31 @@ describe('Provider workspace read tools', () => {
       path: 'hello.txt',
       content: 'こんにちは\n',
       revision: { version: 1 },
+    });
+  });
+
+  it('searches bounded UTF-8 files without following symlinks or disclosing secrets', async () => {
+    const { root, tools, context } = await harness();
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'one.ts'), 'first\nneedle here\n');
+    await writeFile(join(root, 'src', 'two.txt'), 'needle ignored by glob\n');
+    await writeFile(
+      join(root, 'src', 'secret.ts'),
+      'API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456\nneedle\n',
+    );
+    if (process.platform !== 'win32') await symlink('/tmp', join(root, 'src', 'outside'));
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-search',
+        providerName: 'search_workspace',
+        input: { path: 'src', query: 'needle', glob: '**/*.ts', maxResults: 20 },
+      }),
+    ).resolves.toMatchObject({
+      path: 'src',
+      matches: [{ path: 'src/one.ts', line: 2, text: 'needle here' }],
+      withheldFiles: 1,
     });
   });
 
@@ -401,5 +428,74 @@ describe('Provider workspace read tools', () => {
       }),
     ).resolves.toMatchObject({ state: 'committed', kind: 'update' });
     expect(applied).toBe(true);
+  });
+
+  it('dispatches a revision-bound multi-file apply_patch batch through one Saga', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-batch-'));
+    roots.push(root);
+    await writeFile(join(root, 'one.txt'), 'before\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'f'.repeat(64),
+    };
+    const revisions = new FileRevisionRegistry();
+    const applied: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: ({ input }) => {
+        if (workspaceToolAuthorizationGuards(input, 'write').length > 0)
+          expect(workspaceToolAuthorizationGuards(input, 'write')).toHaveLength(2);
+        return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      },
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions,
+        apply: async (request) => {
+          applied.push(request);
+          return { id: 'batch-saga', state: 'committed' } as never;
+        },
+        policyEpochFor: () => 1,
+      },
+    });
+    const context = {
+      taskId: 'task-batch',
+      turnId: 'turn-batch',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'ollama');
+    const read = (await tools.broker.dispatch({
+      ...context,
+      callId: 'batch-read',
+      providerName: 'read_file',
+      input: { path: 'one.txt' },
+    })) as { revision: { version: 1; tokenId: string } };
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'batch-patch',
+        providerName: 'apply_patch',
+        input: {
+          operations: [
+            {
+              kind: 'update',
+              path: 'one.txt',
+              revision: read.revision,
+              edits: [{ oldText: 'before', newText: 'after' }],
+            },
+            { kind: 'add', path: 'two.txt', content: 'new\n' },
+          ],
+        },
+      }),
+    ).resolves.toMatchObject({ state: 'committed', operations: 2 });
+    expect(applied).toHaveLength(1);
   });
 });

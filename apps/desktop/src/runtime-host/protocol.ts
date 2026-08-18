@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 import { TEAM_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
 
-export const RUNTIME_PROTOCOL_VERSION = 10;
+export const RUNTIME_PROTOCOL_VERSION = 11;
 
 export type RuntimeImageAttachmentManifestEntry = Readonly<{
   id: string;
@@ -124,15 +124,30 @@ export type RuntimeTeamMcpOption = Readonly<{
   guidance: string;
   /** Exact, Main-authorized tools exposed by this Turn's bridge registration. */
   toolNames: readonly TeamMcpToolName[];
+  managedTools?: readonly RuntimeManagedToolDefinition[];
+  toolCatalogDigest?: string;
   /** Enables the Runtime's native live-Web search only for a Leader/Manager that must research
    * candidate models before hiring. Omitted/false preserves the existing no-Web Team profile. */
   enableWebSearch?: boolean;
+}>;
+
+export type RuntimeManagedToolDefinition = Readonly<{
+  name: string;
+  description: string;
+  inputSchema: unknown;
 }>;
 
 export type RuntimeProcessIdentity = Readonly<{
   pid: number;
   parentPid: number;
   startIdentity: string;
+}>;
+
+export type RuntimeToolRequest = Readonly<{
+  callId: string;
+  toolName: string;
+  arguments: unknown;
+  catalogDigest: string;
 }>;
 
 export type RuntimeFailureStage =
@@ -309,7 +324,13 @@ export type MainToRuntimeEnvelope =
         selectionIdentity: string;
         manifestDigest: string;
       })
-  | (EnvelopeBase & { type: 'cancel' });
+  | (EnvelopeBase & { type: 'cancel' })
+  | (EnvelopeBase & {
+      type: 'tool_result';
+      callId: string;
+      success: boolean;
+      output: unknown;
+    });
 
 export type RuntimeToMainEnvelope =
   | (EnvelopeBase & {
@@ -350,6 +371,7 @@ export type RuntimeToMainEnvelope =
     })
   | (EnvelopeBase & { type: 'stopped'; forced: boolean })
   | (EnvelopeBase & { type: 'event'; event: RuntimeCanonicalEvent })
+  | (EnvelopeBase & { type: 'tool_request'; request: RuntimeToolRequest })
   | (EnvelopeBase & { type: 'exit'; code: number; canceled: boolean })
   | (EnvelopeBase & {
       type: 'error';
@@ -428,6 +450,15 @@ function isWithinStartRejectionInspectionBudget(record: Record<string, unknown>)
 export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeEnvelope {
   if (!hasValidBase(value)) return false;
   if (value.type === 'hello' || value.type === 'cancel') return true;
+  if (value.type === 'tool_result')
+    return (
+      'callId' in value &&
+      isBoundedCallId(value.callId) &&
+      'success' in value &&
+      typeof value.success === 'boolean' &&
+      'output' in value &&
+      isBoundedJson(value.output, 1024 * 1024)
+    );
   if (value.type === 'prepare_images') return isRuntimeImagePreparation(value);
   return (
     (value.type === 'start' || value.type === 'commit_images') &&
@@ -623,13 +654,40 @@ function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
     typeof record['guidance'] === 'string' &&
     record['guidance'].length <= 20_000 &&
     Array.isArray(record['toolNames']) &&
-    record['toolNames'].length > 0 &&
+    (record['toolNames'].length > 0 ||
+      (Array.isArray(record['managedTools']) && record['managedTools'].length > 0)) &&
     record['toolNames'].length <= TEAM_MCP_TOOL_NAMES.length &&
     new Set(record['toolNames']).size === record['toolNames'].length &&
     record['toolNames'].every(
       (name) => typeof name === 'string' && TEAM_MCP_TOOL_NAMES.includes(name as TeamMcpToolName),
     ) &&
+    (record['managedTools'] === undefined ||
+      (Array.isArray(record['managedTools']) &&
+        record['managedTools'].length <= 32 &&
+        new Set(
+          record['managedTools'].map((tool) =>
+            typeof tool === 'object' && tool !== null
+              ? (tool as Record<string, unknown>)['name']
+              : null,
+          ),
+        ).size === record['managedTools'].length &&
+        record['managedTools'].every(isRuntimeManagedToolDefinition))) &&
+    (record['toolCatalogDigest'] === undefined || isSha256(record['toolCatalogDigest'])) &&
     (record['enableWebSearch'] === undefined || typeof record['enableWebSearch'] === 'boolean')
+  );
+}
+
+function isRuntimeManagedToolDefinition(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const tool = value as Record<string, unknown>;
+  return (
+    Object.keys(tool).every((key) => ['name', 'description', 'inputSchema'].includes(key)) &&
+    typeof tool['name'] === 'string' &&
+    /^[a-z][a-z0-9_]{0,63}$/u.test(tool['name']) &&
+    typeof tool['description'] === 'string' &&
+    tool['description'].length > 0 &&
+    tool['description'].length <= 2_000 &&
+    isBoundedJson(tool['inputSchema'], 64 * 1024)
   );
 }
 
@@ -727,11 +785,7 @@ function hasValidFragmentAuthority(fragment: Record<string, unknown>): boolean {
 
 function isVerifiedReadOnlyCatalog(value: unknown): value is ToolCatalogSnapshot {
   const parsed = toolCatalogSnapshotSchema.safeParse(value);
-  return (
-    parsed.success &&
-    parsed.data.entries.length === 0 &&
-    verifyToolCatalogSnapshot(parsed.data as unknown as ToolCatalogSnapshot)
-  );
+  return parsed.success && verifyToolCatalogSnapshot(parsed.data as unknown as ToolCatalogSnapshot);
 }
 
 export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainEnvelope {
@@ -812,6 +866,8 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       isSha256(value.acceptedPayloadDigest)
     );
   if (value.type === 'event') return 'event' in value && isRuntimeCanonicalEvent(value.event);
+  if (value.type === 'tool_request')
+    return 'request' in value && isRuntimeToolRequest(value.request);
   if (value.type === 'stopped') return 'forced' in value && typeof value.forced === 'boolean';
   if (value.type === 'exit')
     return (
@@ -832,6 +888,39 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       value.rejection === undefined ||
       isRuntimeStartRejection(value.rejection))
   );
+}
+
+function isRuntimeToolRequest(value: unknown): value is RuntimeToolRequest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const request = value as Record<string, unknown>;
+  return (
+    Object.keys(request).every((key) =>
+      ['callId', 'toolName', 'arguments', 'catalogDigest'].includes(key),
+    ) &&
+    isBoundedCallId(request['callId']) &&
+    typeof request['toolName'] === 'string' &&
+    /^[a-z][a-z0-9_]{0,63}$/u.test(request['toolName']) &&
+    isSha256(request['catalogDigest']) &&
+    isBoundedJson(request['arguments'], 512 * 1024)
+  );
+}
+
+function isBoundedCallId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 128 &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value)
+  );
+}
+
+function isBoundedJson(value: unknown, maxBytes: number): boolean {
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized !== undefined && Buffer.byteLength(serialized, 'utf8') <= maxBytes;
+  } catch {
+    return false;
+  }
 }
 
 function isResolvedCliCommand(value: unknown): value is ResolvedCliCommand {

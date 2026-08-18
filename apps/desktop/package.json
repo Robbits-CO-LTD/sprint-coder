@@ -9,7 +9,7 @@
   "main": ".vite/build/index.js",
   "scripts": {
     "start": "electron-forge start",
-    "prepare:desktop": "electron-rebuild -f -w better-sqlite3 && node ../../build-native-safe-fs.mjs",
+    "prepare:desktop": "electron-rebuild -f -w better-sqlite3 && node ../../build-native-safe-fs.mjs && node ../../build-sandbox-runner.mjs",
     "package": "npm run prepare:desktop && electron-forge package",
     "make": "npm run prepare:desktop && electron-forge make",
     "make:windows": "npm run prepare:desktop && electron-forge make --platform=win32 --arch=x64",

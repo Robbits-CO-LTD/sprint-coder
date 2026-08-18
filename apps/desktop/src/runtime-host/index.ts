@@ -5,6 +5,7 @@ import {
   correlatedRuntimeStartRejection,
   isMainToRuntimeEnvelope,
   type MainToRuntimeEnvelope,
+  type RuntimeToolRequest,
   type RuntimeToMainEnvelope,
 } from './protocol';
 import { requireParentPort } from './parent-port';
@@ -29,6 +30,15 @@ const adapter =
     : new CodexRuntimeAdapter(undefined, undefined, undefined, readCodexIsolationRoot());
 const sequences = new Map<string, number>();
 const activeTurns = new Map<string, { taskId: string; operationId: string }>();
+const pendingToolCalls = new Map<
+  string,
+  {
+    turnId: string;
+    resolve: (result: { success: boolean; output: unknown }) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }
+>();
 const preparedTurns = new Map<
   string,
   {
@@ -73,6 +83,13 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
   }
   if (data.type === 'hello') {
     void probeAndSendCapability(data.operationId);
+  } else if (data.type === 'tool_result') {
+    const key = toolCallKey(data.turnId, data.callId);
+    const pending = pendingToolCalls.get(key);
+    if (pending === undefined || pending.turnId !== data.turnId) return;
+    clearTimeout(pending.timer);
+    pendingToolCalls.delete(key);
+    pending.resolve({ success: data.success, output: data.output });
   } else if (data.type === 'prepare_images') {
     void prepareImages(data);
   } else if (data.type === 'commit_images') {
@@ -88,6 +105,7 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
     }
     startAdapter(data);
   } else if (data.type === 'cancel') {
+    rejectPendingToolCalls(data.turnId, new Error('Runtime turn was canceled'));
     const preparing = preparingOperations.get(data.operationId);
     if (preparing?.turnId === data.turnId) {
       preparing.controller.abort();
@@ -293,6 +311,7 @@ function startAdapter(
           ...(diagnostic === undefined ? {} : { diagnostic }),
         }),
       (code, canceled) => {
+        rejectPendingToolCalls(data.turnId, new Error('Runtime adapter exited'));
         send(data.taskId, data.turnId, data.operationId, { type: 'exit', code, canceled });
         activeTurns.delete(data.turnId);
       },
@@ -318,6 +337,8 @@ function startAdapter(
           processIdentity,
         });
       },
+      data.toolCatalogSnapshot,
+      (request) => invokeManagedTool(data, request),
     );
   } catch {
     activeTurns.delete(data.turnId);
@@ -420,7 +441,47 @@ process.once('exit', () => {
     void releasePreparedRuntimeImages(owned.prepared);
   }
   preparedTurns.clear();
+  for (const pending of pendingToolCalls.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error('Runtime Host exited'));
+  }
+  pendingToolCalls.clear();
 });
+
+function invokeManagedTool(
+  data: Pick<
+    Extract<MainToRuntimeEnvelope, { type: 'start' | 'commit_images' }>,
+    'taskId' | 'turnId' | 'operationId'
+  >,
+  request: RuntimeToolRequest,
+): Promise<{ success: boolean; output: unknown }> {
+  const key = toolCallKey(data.turnId, request.callId);
+  if (pendingToolCalls.has(key)) return Promise.reject(new Error('Duplicate managed tool call'));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const pending = pendingToolCalls.get(key);
+      if (pending === undefined) return;
+      pendingToolCalls.delete(key);
+      reject(new Error('Managed tool call timed out'));
+    }, 60 * 60_000);
+    timer.unref();
+    pendingToolCalls.set(key, { turnId: data.turnId, resolve, reject, timer });
+    send(data.taskId, data.turnId, data.operationId, { type: 'tool_request', request });
+  });
+}
+
+function rejectPendingToolCalls(turnId: string, error: Error): void {
+  for (const [key, pending] of pendingToolCalls) {
+    if (pending.turnId !== turnId) continue;
+    clearTimeout(pending.timer);
+    pendingToolCalls.delete(key);
+    pending.reject(error);
+  }
+}
+
+function toolCallKey(turnId: string, callId: string): string {
+  return JSON.stringify([turnId, callId]);
+}
 
 function send(
   taskId: string,
@@ -440,6 +501,7 @@ function send(
         | 'claudeModels'
       >
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
+    | Pick<Extract<RuntimeToMainEnvelope, { type: 'tool_request' }>, 'type' | 'request'>
     | Pick<
         Extract<RuntimeToMainEnvelope, { type: 'images_prepared' }>,
         'type' | 'selectionIdentity' | 'manifestDigest' | 'decodedByteLength'

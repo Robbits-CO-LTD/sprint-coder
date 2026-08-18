@@ -12,7 +12,7 @@
 
 | Repository | Commit | 取得方法 | License |
 |---|---|---|---|
-| `openai/codex` | `fd3c1dc13d0a0941af406e1bc1f697c9d14110ea` | partial clone、default branch | Apache-2.0 |
+| `openai/codex` | `95637f7056835fea66bdd0044414af480fc0fd74` | partial clone、default branch | Apache-2.0 |
 | `xai-org/grok-build` | `a881e6703f46b01d8c7d4a5437683546df30449d` | shallow clone、default branch | Apache-2.0 |
 
 ローカル調査用clone:

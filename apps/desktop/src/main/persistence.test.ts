@@ -6041,6 +6041,56 @@ if (runsWithElectronAbi)
       compromised.close();
     });
 
+    it('persists the canonical managed tool lifecycle and rejects invalid transitions', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const started = startExecutingTurn(persistence, task.id);
+      const base = {
+        taskId: task.id,
+        turnId: started.turnId,
+        callId: 'managed-call-1',
+        ordinal: 1,
+        providerName: 'read_file',
+        catalogDigest: 'd'.repeat(64),
+      } as const;
+      for (const [index, state] of [
+        'requested',
+        'prepared',
+        'awaiting_approval',
+        'queued',
+        'running',
+        'succeeded',
+      ].entries())
+        persistence.recordManagedToolLifecycle({
+          ...base,
+          state: state as never,
+          occurredAt: new Date(Date.UTC(2026, 7, 18, 0, 0, index)).toISOString(),
+        });
+      expect(() =>
+        persistence.recordManagedToolLifecycle({
+          ...base,
+          state: 'running',
+          occurredAt: '2026-08-18T00:01:00.000Z',
+        }),
+      ).toThrow('Invalid managed tool lifecycle transition');
+      persistence.close();
+
+      const db = new Database(path, { readonly: true });
+      expect(db.prepare('SELECT state, finished_at FROM managed_tool_calls').get()).toMatchObject({
+        state: 'succeeded',
+        finished_at: '2026-08-18T00:00:05.000Z',
+      });
+      expect(db.prepare('SELECT state FROM managed_tool_call_events ORDER BY seq').all()).toEqual([
+        { state: 'requested' },
+        { state: 'prepared' },
+        { state: 'awaiting_approval' },
+        { state: 'queued' },
+        { state: 'running' },
+        { state: 'succeeded' },
+      ]);
+      db.close();
+    });
+
     it('marks a running command interrupted on restart and never reconnects by PID', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -6658,6 +6708,7 @@ if (runsWithElectronAbi)
         { version: 68 },
         { version: 69 },
         { version: 70 },
+        { version: 71 },
       ]);
       for (const [table, columns] of [
         [

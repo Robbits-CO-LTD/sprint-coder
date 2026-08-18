@@ -23,6 +23,7 @@ import type {
   RuntimeWriteScope,
   TurnStage,
 } from '@sprint-coder/contracts';
+import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type {
   RuntimeCanonicalEvent,
   RuntimeCodexConfigPolicy,
@@ -72,6 +73,12 @@ type ActiveProcess = {
 };
 type EmitEvent = (event: RuntimeCanonicalEvent) => void;
 type EmitError = (error: PublicError, diagnostic?: RuntimeFailureDiagnostic) => void;
+type InvokeManagedTool = (input: {
+  callId: string;
+  toolName: string;
+  arguments: unknown;
+  catalogDigest: string;
+}) => Promise<{ success: boolean; output: unknown }>;
 export type CodexLocalImagePreparation = Readonly<{
   paths: readonly string[];
   beforeTurnStart: () => Promise<void>;
@@ -214,6 +221,8 @@ export class CodexRuntimeAdapter {
     localImages?: CodexLocalImagePreparation,
     codexConfigPolicy: RuntimeCodexConfigPolicy = { inheritUserConfig: false },
     runtimeProcessStarted?: (pid: number) => void,
+    toolCatalogSnapshot?: ToolCatalogSnapshot,
+    invokeManagedTool?: InvokeManagedTool,
   ): void {
     let localImageReleasePromise: Promise<void> | null = null;
     const releaseLocalImages = (): Promise<void> => {
@@ -425,6 +434,9 @@ export class CodexRuntimeAdapter {
     let skillIsolationReady = false;
     let skillIsolationVerificationPending = false;
     let teamDynamicTools: readonly CodexDynamicToolSpec[] = [];
+    const managedDynamicTools =
+      toolCatalogSnapshot === undefined ? [] : buildCodexManagedDynamicTools(toolCatalogSnapshot);
+    const managedMode = toolCatalogSnapshot !== undefined;
     let activeThreadId: string | null = null;
     const send = (method: string, params: unknown): Promise<unknown> =>
       new Promise((resolve, reject) => {
@@ -476,7 +488,10 @@ export class CodexRuntimeAdapter {
           (typeof message['id'] === 'number' || typeof message['id'] === 'string') &&
           typeof message['method'] === 'string'
         ) {
-          if (message['method'] === 'item/tool/call' && teamMcp !== undefined) {
+          if (
+            message['method'] === 'item/tool/call' &&
+            (teamMcp !== undefined || managedDynamicTools.length > 0)
+          ) {
             const responseId = message['id'];
             void (async () => {
               const canRespond = (): boolean =>
@@ -491,20 +506,41 @@ export class CodexRuntimeAdapter {
                 const threadId = requiredString(params['threadId'], 'dynamic tool thread id');
                 requiredString(params['turnId'], 'dynamic tool turn id');
                 requiredString(params['callId'], 'dynamic tool call id');
-                if (
-                  params['namespace'] !== null ||
-                  threadId !== activeThreadId ||
-                  !teamMcp.toolNames.includes(tool as TeamMcpToolName)
-                )
-                  throw new Error('Unexpected dynamic Team tool');
-                const result = await send('mcpServer/tool/call', {
-                  server: 'team',
-                  threadId,
-                  tool,
-                  arguments: params['arguments'],
-                });
+                if (params['namespace'] !== null || threadId !== activeThreadId)
+                  throw new Error('Unexpected dynamic tool identity');
+                const managed = managedDynamicTools.some(({ name }) => name === tool);
+                let response: ReturnType<typeof codexDynamicToolResponseFromMcp>;
+                if (managed) {
+                  if (invokeManagedTool === undefined || toolCatalogSnapshot === undefined)
+                    throw new Error('Managed tool bridge is unavailable');
+                  const result = await invokeManagedTool({
+                    callId: requiredString(params['callId'], 'dynamic tool call id'),
+                    toolName: tool,
+                    arguments: params['arguments'],
+                    catalogDigest: toolCatalogSnapshot.digest,
+                  });
+                  response = {
+                    success: result.success,
+                    contentItems: [
+                      {
+                        type: 'inputText',
+                        text: JSON.stringify(result.output ?? null).slice(0, 1024 * 1024),
+                      },
+                    ],
+                  };
+                } else {
+                  if (teamMcp === undefined || !teamMcp.toolNames.includes(tool as TeamMcpToolName))
+                    throw new Error('Unexpected dynamic Team tool');
+                  const result = await send('mcpServer/tool/call', {
+                    server: 'team',
+                    threadId,
+                    tool,
+                    arguments: params['arguments'],
+                  });
+                  response = codexDynamicToolResponseFromMcp(result);
+                }
                 if (!canRespond()) return;
-                sendResponse(responseId, codexDynamicToolResponseFromMcp(result));
+                sendResponse(responseId, response);
               } catch {
                 if (!canRespond()) return;
                 sendResponse(responseId, {
@@ -564,6 +600,7 @@ export class CodexRuntimeAdapter {
             sawCompletion = true;
             child.stdin.end();
           },
+          managedMode,
         );
       } catch {
         failed = true;
@@ -591,7 +628,10 @@ export class CodexRuntimeAdapter {
           // Multi-root and client-hosted dynamic Team tools are both gated by the app-server's
           // experimentalApi client capability. The latter is required even though dynamicTools is
           // present in the generated v2 schema.
-          capabilities: codexInitializeCapabilities(multiRoot, teamMcp !== undefined),
+          capabilities: codexInitializeCapabilities(
+            multiRoot,
+            teamMcp !== undefined || managedDynamicTools.length > 0,
+          ),
         });
         child.stdin.write(
           `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`,
@@ -626,9 +666,12 @@ export class CodexRuntimeAdapter {
             cwd,
             ...(multiRoot ? { runtimeWorkspaceRoots } : {}),
             approvalPolicy: 'never',
-            sandbox: CODEX_SANDBOX_BY_SCOPE[effectiveScope],
+            sandbox: managedMode ? 'read-only' : CODEX_SANDBOX_BY_SCOPE[effectiveScope],
+            ...(managedMode ? { environments: [] } : {}),
             ephemeral: true,
-            ...(teamMcp === undefined ? {} : { dynamicTools: teamDynamicTools }),
+            ...(teamDynamicTools.length + managedDynamicTools.length === 0
+              ? {}
+              : { dynamicTools: [...managedDynamicTools, ...teamDynamicTools] }),
             ...(model === 'auto' ? {} : { model }),
           }),
         );
@@ -772,6 +815,7 @@ function handleCodexNotification(
   agentMessageBoundary: CodexAgentMessageBoundary,
   advanceStage: (stage: TurnStage) => void,
   completed: () => void,
+  managedMode = false,
 ): void {
   const method = message['method'];
   if (typeof method !== 'string') return;
@@ -797,6 +841,8 @@ function handleCodexNotification(
   }
   if (method === 'item/started') {
     const item = asRecord(params['item']);
+    if (managedMode && (item['type'] === 'commandExecution' || item['type'] === 'fileChange'))
+      throw new Error('Codex attempted to bypass the Managed Coding Harness');
     const operation = codexOperationForItem(item, 'started');
     if (operation !== null) {
       advanceStage('executing');
@@ -806,6 +852,8 @@ function handleCodexNotification(
   }
   if (method === 'item/completed') {
     const item = asRecord(params['item']);
+    if (managedMode && (item['type'] === 'commandExecution' || item['type'] === 'fileChange'))
+      throw new Error('Codex attempted to bypass the Managed Coding Harness');
     const operation = codexOperationForItem(item, 'completed');
     if (operation !== null) {
       advanceStage('executing');
@@ -1001,6 +1049,23 @@ export type CodexDynamicToolSpec = Readonly<{
   inputSchema: unknown;
   deferLoading: false;
 }>;
+
+export function buildCodexManagedDynamicTools(
+  snapshot: ToolCatalogSnapshot,
+): CodexDynamicToolSpec[] {
+  const names = new Set<string>();
+  return snapshot.entries.map((entry) => {
+    if (names.has(entry.providerName)) throw new Error('Duplicate managed dynamic tool name');
+    names.add(entry.providerName);
+    return {
+      type: 'function',
+      name: entry.providerName,
+      description: `Sprint Coder managed ${entry.kind} tool: ${entry.providerName}`,
+      inputSchema: JSON.parse(JSON.stringify(entry.inputSchema)) as unknown,
+      deferLoading: false,
+    };
+  });
+}
 
 export function codexInitializeCapabilities(
   multiRoot: boolean,

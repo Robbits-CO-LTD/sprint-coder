@@ -2,7 +2,7 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { dirname, join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ToolRegistry } from '@sprint-coder/domain';
+import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
   RUNTIME_PROTOCOL_VERSION,
   correlatedRuntimeStartRejection,
@@ -176,7 +176,7 @@ describe('Runtime Host protocol', () => {
     ).toBe(true);
   });
 
-  it('requires a cryptographically valid explicit empty catalog for Codex read-only starts', () => {
+  it('requires a cryptographically valid explicit catalog for managed Runtime starts', () => {
     const valid = startEnvelope();
     expect(isMainToRuntimeEnvelope(valid)).toBe(true);
     expect(isMainToRuntimeEnvelope({ ...valid, toolCatalogSnapshot: undefined })).toBe(false);
@@ -210,30 +210,72 @@ describe('Runtime Host protocol', () => {
     ).toBe(false);
   });
 
-  it('rejects a valid non-empty catalog while the production Codex host is no-tools', () => {
+  it('accepts a valid non-empty managed catalog and rejects a modified digest', () => {
     const valid = startEnvelope();
-    const nonEmpty = {
-      ...valid.toolCatalogSnapshot,
-      entries: [
-        {
-          providerName: 'unsafe',
-          toolId: 'builtin:test:unsafe@1',
+    const registry = new ToolRegistry();
+    registry.register(
+      createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'workspace',
+          name: 'read',
           version: '1',
-          kind: 'shell',
-          schemaVersion: 1,
-          inputSchema: { type: 'object' },
-          inputSchemaDigest: '0'.repeat(64),
-          outputSchemaDigest: '0'.repeat(64),
-          schemaDigest: '0'.repeat(64),
-          sideEffect: 'process',
-          risk: 'high',
-          requiredCapabilities: ['shell.execute'],
-          executionTarget: 'command-runner',
-          implementationKind: 'command-runner',
+        }),
+        providerName: 'read_file',
+        kind: 'fileRead',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'object' },
+        sideEffect: 'read',
+        risk: 'low',
+        requiredCapabilities: ['workspace.read'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'any' },
+        providerCompatibility: ['*'],
+      }),
+    );
+    const nonEmpty = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
+    expect(isMainToRuntimeEnvelope({ ...valid, toolCatalogSnapshot: nonEmpty })).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        toolCatalogSnapshot: { ...nonEmpty, digest: '0'.repeat(64) },
+      }),
+    ).toBe(false);
+  });
+
+  it('validates bounded bidirectional managed tool envelopes', () => {
+    const base = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 2,
+      operationId: 'operation-1',
+    } as const;
+    expect(
+      isRuntimeToMainEnvelope({
+        ...base,
+        type: 'tool_request',
+        request: {
+          callId: 'call-1',
+          toolName: 'read_file',
+          arguments: { path: 'README.md' },
+          catalogDigest: 'a'.repeat(64),
         },
-      ],
-    };
-    expect(isMainToRuntimeEnvelope({ ...valid, toolCatalogSnapshot: nonEmpty })).toBe(false);
+      }),
+    ).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...base,
+        type: 'tool_result',
+        callId: 'call-1',
+        success: true,
+        output: { content: 'ok' },
+      }),
+    ).toBe(true);
   });
 
   it('rejects old protocol versions', () => {

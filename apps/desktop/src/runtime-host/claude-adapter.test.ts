@@ -190,6 +190,28 @@ describe('Claude runtime probe', () => {
     expect(args).toContain('/tmp/secondary');
   });
 
+  it('removes every native tool when the managed MCP harness is active', () => {
+    const args = buildClaudeArgs(
+      'auto',
+      {
+        configPath: '/tmp/managed.json',
+        guidance: 'managed',
+        toolNames: ['read_file', 'search_workspace'],
+        managedMode: true,
+      },
+      undefined,
+      'full',
+      ['/tmp/ws'],
+    );
+    expect(args[args.indexOf('--tools') + 1]).toBe('');
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('default');
+    expect(args[args.indexOf('--allowedTools') + 1]).toBe(
+      'mcp__team__read_file,mcp__team__search_workspace',
+    );
+    expect(args).toContain('--setting-sources');
+    expect(args).toContain('--disable-slash-commands');
+  });
+
   it('enables native WebSearch only for an explicitly research-enabled Team turn', () => {
     const withoutResearch = buildClaudeArgs(
       'auto',
