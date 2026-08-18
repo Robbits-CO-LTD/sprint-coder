@@ -3270,19 +3270,6 @@ export class IpcRouter {
           })),
         );
     }
-    const sagaId =
-      isCommittedProviderWorkspaceMutation(result) || isCommittedProviderWorkspaceBatch(result)
-        ? result.sagaId
-        : null;
-    if (sagaId !== null)
-      this.persistence.recordAssuranceVerification({
-        taskId,
-        turnId,
-        sagaId,
-        outcome: 'passed',
-        failureClass: null,
-        createdAt: new Date().toISOString(),
-      });
     return result;
   }
 

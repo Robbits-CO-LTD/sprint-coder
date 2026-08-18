@@ -90,6 +90,7 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
       cwd: { type: 'string' },
       purpose: { type: 'string' },
       background: { type: 'boolean' },
+      verification: { type: 'boolean' },
     },
     required: ['executable', 'argv', 'purpose'],
     additionalProperties: false,
@@ -156,6 +157,7 @@ export type CommandToolBoundary = Readonly<{
     | 'createBackgroundActivity'
     | 'transitionBackgroundActivity'
     | 'completeBackgroundActivity'
+    | 'recordCommandVerification'
   >;
   publish(event: TurnEvent): void;
 }>;
@@ -241,6 +243,7 @@ export function registerCommandRunnerTool(
 ): void {
   const commandIds = new WeakMap<object, string>();
   const backgroundSpecs = new WeakSet<object>();
+  const verificationSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
     implementationKind: 'command-runner',
@@ -257,6 +260,7 @@ export function registerCommandRunnerTool(
         cwd?: string;
         purpose: string;
         background?: boolean;
+        verification?: boolean;
       };
       const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
       if (workspace === null)
@@ -289,6 +293,7 @@ export function registerCommandRunnerTool(
       });
       commandIds.set(spec, persisted.id);
       if (request.background === true) backgroundSpecs.add(spec);
+      if (request.verification === true) verificationSpecs.add(spec);
       return spec;
     },
     authorizationDenied: (input) => {
@@ -382,6 +387,14 @@ export function registerCommandRunnerTool(
                 })
               : completePersistedCommand(command.persistence, commandId, snapshot.result);
           command.publish(persisted.event);
+          if (verificationSpecs.has(spec) && snapshot.result?.exitCode === 0)
+            command.persistence.recordCommandVerification({
+              taskId: owner.taskId,
+              turnId: owner.turnId,
+              commandId,
+              exitCode: 0,
+              createdAt: new Date().toISOString(),
+            });
           if (snapshot.state !== 'canceled')
             command.persistence.completeBackgroundActivity({
               activityId,
@@ -403,6 +416,14 @@ export function registerCommandRunnerTool(
         const result = await commandRunner.run(spec, hooks);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
+        if (verificationSpecs.has(spec) && result.exitCode === 0)
+          command.persistence.recordCommandVerification({
+            taskId: _context.taskId,
+            turnId: _context.turnId,
+            commandId,
+            exitCode: 0,
+            createdAt: new Date().toISOString(),
+          });
         return {
           ...result,
           ...toolOutput,

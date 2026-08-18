@@ -2642,14 +2642,48 @@ if (runsWithElectronAbi)
           createdAt: '2026-07-23T00:00:04.000Z',
         }),
       ).toMatchObject({ decision: 'repair', repairRoundsUsed: 1 });
+      const verificationSpec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'd'.repeat(64),
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'e'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      persistence.prepareCommand({
+        id: 'verification-command',
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'verification-call',
+        spec: verificationSpec,
+        purpose: 'targeted verification',
+        risk: 'high',
+        createdAt: '2026-07-23T00:00:05.000Z',
+      });
+      persistence.beginCommand('verification-command');
+      persistence.startCommand({
+        commandId: 'verification-command',
+        pid: 123,
+        processStartTime: 'verification-process',
+        startedAt: '2026-07-23T00:00:05.100Z',
+      });
+      persistence.completeCommand({
+        commandId: 'verification-command',
+        state: 'exited',
+        exitCode: 0,
+        signal: null,
+        outputBytes: 0,
+        truncated: false,
+        finishedAt: '2026-07-23T00:00:05.200Z',
+      });
       expect(
-        persistence.recordAssuranceVerification({
+        persistence.recordCommandVerification({
           taskId: task.id,
           turnId: turn.turnId,
-          sagaId: 'cleanup-saga',
-          outcome: 'passed',
-          failureClass: null,
-          createdAt: '2026-07-23T00:00:05.000Z',
+          commandId: 'verification-command',
+          exitCode: 0,
+          createdAt: '2026-07-23T00:00:05.300Z',
         }),
       ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });
       expect(persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga')).toHaveLength(3);

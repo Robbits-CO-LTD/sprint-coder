@@ -4538,6 +4538,13 @@ export interface PersistenceClient {
     failureClass: AssuranceFailureClass | null;
     createdAt: string;
   }): AssuranceRound;
+  recordCommandVerification(input: {
+    taskId: string;
+    turnId: string;
+    commandId: string;
+    exitCode: number;
+    createdAt: string;
+  }): AssuranceRound | null;
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -13288,6 +13295,39 @@ export class SqlitePersistenceClient implements PersistenceClient {
       }
       return round;
     })();
+  }
+
+  recordCommandVerification(input: {
+    taskId: string;
+    turnId: string;
+    commandId: string;
+    exitCode: number;
+    createdAt: string;
+  }): AssuranceRound | null {
+    if (input.exitCode !== 0) return null;
+    const command = this.getCommand(input.commandId);
+    if (
+      command.taskId !== input.taskId ||
+      command.turnId !== input.turnId ||
+      command.state !== 'exited'
+    )
+      throw new OperationConflictError('Verification command is not a successful Turn command');
+    const saga = this.db
+      .prepare(
+        `SELECT id FROM edit_sagas
+         WHERE task_id = ? AND turn_id = ? AND state = 'committed'
+         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      )
+      .get(input.taskId, input.turnId) as { id: string } | undefined;
+    if (saga === undefined) return null;
+    return this.recordAssuranceVerification({
+      taskId: input.taskId,
+      turnId: input.turnId,
+      sagaId: saga.id,
+      outcome: 'passed',
+      failureClass: null,
+      createdAt: input.createdAt,
+    });
   }
 
   private insertAcceptanceContract(contract: AcceptanceContract): void {

@@ -89,6 +89,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
           createBackgroundActivity: () => ({}) as never,
           transitionBackgroundActivity: () => ({}) as never,
           completeBackgroundActivity: () => ({}) as never,
+          recordCommandVerification: () => null,
         },
         publish: () => undefined,
       } as unknown as CommandToolBoundary;
