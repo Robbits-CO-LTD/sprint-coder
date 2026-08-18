@@ -2,7 +2,7 @@ use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
@@ -41,7 +41,7 @@ pub fn restricted_token_probe() -> bool {
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
     let script = format!(
-        "echo inside>\"{}\" & echo outside>\"{}\"",
+        "(echo inside>\"{}\" & echo outside>\"{}\") >NUL 2>NUL",
         inside_marker.display(),
         outside_marker.display()
     );
@@ -126,6 +126,7 @@ fn set_acl(path: &Path, sid: &str, recursive: bool) -> bool {
     };
     let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
     command.arg(path).args(["/grant", &grant, "/C", "/Q"]);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     if recursive {
         command.arg("/T");
     }
@@ -137,6 +138,7 @@ fn remove_acl(path: &Path, sid: &str, recursive: bool) {
     command
         .arg(path)
         .args(["/remove", &format!("*{sid}"), "/C", "/Q"]);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     if recursive {
         command.arg("/T");
     }
