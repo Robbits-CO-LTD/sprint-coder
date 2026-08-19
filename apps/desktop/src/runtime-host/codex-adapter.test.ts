@@ -25,6 +25,7 @@ import {
   codexDynamicToolResponseFromMcp,
   codexDynamicToolResponseFromManaged,
   codexInitializeCapabilities,
+  configuredCodexCommand,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 import type { RuntimeFailureDiagnostic } from './protocol';
@@ -38,6 +39,19 @@ afterEach(async () => {
 });
 
 describe('Codex runtime probe', () => {
+  it('uses an explicitly configured Codex executable path when provided', () => {
+    expect(
+      configuredCodexCommand(
+        { SPRINT_CODER_CODEX_PATH: '  C:\\Tools\\codex-0.144.4.exe  ' },
+        'win32',
+      ),
+    ).toBe('C:\\Tools\\codex-0.144.4.exe');
+    expect(configuredCodexCommand({ SPRINT_CODER_CODEX_PATH: '  ' }, 'win32')).toBe('codex');
+    expect(
+      configuredCodexCommand({ sprint_coder_codex_path: 'C:\\Tools\\codex.exe' }, 'win32'),
+    ).toBe('C:\\Tools\\codex.exe');
+  });
+
   it('captures a bounded diagnostic when a fake CLI emits an unsupported notification then stops', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-fake-codex-'));
     temporaryRoots.push(root);

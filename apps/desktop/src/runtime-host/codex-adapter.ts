@@ -136,8 +136,16 @@ const E2E_CODEX_MODELS: CodexModelOption[] = [
   },
 ];
 
+export function configuredCodexCommand(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const configured = environmentValue(environment, 'SPRINT_CODER_CODEX_PATH', platform)?.trim();
+  return configured === undefined || configured === '' ? 'codex' : configured;
+}
+
 export async function probeCodex(
-  command = 'codex',
+  command: string | undefined = undefined,
   environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): Promise<CodexProbe> {
   // Packaged E2E exercises model selection without executing the real CLI. CI runners deliberately
@@ -151,9 +159,10 @@ export async function probeCodex(
       models: E2E_CODEX_MODELS,
     };
   }
+  const selectedCommand = command ?? configuredCodexCommand(environment);
   const cli = await probeCliCommandCandidates({
     kind: 'codex',
-    candidates: resolveCodexCommandCandidates(command, environment),
+    candidates: resolveCodexCommandCandidates(selectedCommand, environment),
     environment: minimalEnvironment(environment),
     timeoutMs: RUNTIME_VERSION_PROBE_TIMEOUT_MS,
   });
@@ -186,7 +195,7 @@ export class CodexRuntimeAdapter {
 
   constructor(
     private readonly timeoutMs = 10 * 60_000,
-    private readonly command = 'codex',
+    private readonly command = configuredCodexCommand(),
     private readonly commandPrefixArgs: readonly string[] = [],
     private readonly isolationRoot = tmpdir(),
   ) {}
