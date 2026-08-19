@@ -14,7 +14,7 @@ Local-first desktop AI coding workspace for multi-agent software development.
 [![GitHub stars](https://img.shields.io/github/stars/Robbits-CO-LTD/sprint-coder?style=flat&logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 
-[ダウンロード](https://github.com/Robbits-CO-LTD/sprint-coder/releases) · [3分で起動](#3分で起動) · [セキュリティ](#local-firstとセキュリティ) · [FAQ](#よくある質問) · [設計資料](#設計資料)
+[公式サイト](https://sprintcoder.yuseilab.com/) · [ダウンロード](https://github.com/Robbits-CO-LTD/sprint-coder/releases) · [3分で起動](#3分で起動) · [セキュリティ](#local-firstとセキュリティ) · [FAQ](#よくある質問) · [設計資料](#設計資料)
 
 </div>
 
@@ -249,5 +249,5 @@ Issue、改善提案、Pull Requestを歓迎します。大きな変更は、先
 <div align="center">
   <strong>One Task. One Team. Ship with control.</strong><br />
   Sprint Coder — local-first multi-agent AI coding desktop app.<br />
-  Developed by <a href="https://robbits.co.jp/">Robbits Inc.</a>
+  Developed, owned and managed by <a href="https://robbits.co.jp/">Robbits Inc.</a>
 </div>
