@@ -14,13 +14,17 @@ Local-first desktop AI coding workspace for multi-agent software development.
 [![GitHub stars](https://img.shields.io/github/stars/Robbits-CO-LTD/sprint-coder?style=flat&logo=github)](https://github.com/Robbits-CO-LTD/sprint-coder/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 
-[ダウンロード](https://github.com/Robbits-CO-LTD/sprint-coder/releases) · [3分で起動](#3分で起動) · [セキュリティ](#local-firstとセキュリティ) · [設計資料](#設計資料)
+[ダウンロード](https://github.com/Robbits-CO-LTD/sprint-coder/releases) · [3分で起動](#3分で起動) · [セキュリティ](#local-firstとセキュリティ) · [FAQ](#よくある質問) · [設計資料](#設計資料)
 
 </div>
 
 ![Sprint CoderでAIチームに調査・実装・レビューを分担している画面](docs/assets/readme/sprint-coder-team.png)
 
-Sprint Coderは、**AIコーディングアシスタント、マルチエージェント実行、ローカルの開発環境**を一つにまとめるオープンソースのデスクトップアプリです。Codex CLI、Claude Code CLI、クラウドAPI、OllamaなどのローカルLLMをTaskごとに選び、必要になった瞬間だけ、同じ会話をLeaderと複数WorkerのTeamへ切り替えられます。
+## Sprint Coderとは
+
+Sprint Coder（スプリントコーダー）は、**AIコーディングアシスタント、マルチエージェント実行、ローカルの開発環境**を一つにまとめる、local-firstなオープンソースのデスクトップアプリです。Codex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OllamaなどからTaskごとにモデルを選び、必要になった瞬間だけ、同じ会話をLeaderと複数WorkerのAI Teamへ切り替えられます。
+
+Sprint Coder is an open-source, local-first desktop AI coding workspace that brings Codex CLI, Claude Code, Gemini, cloud APIs, local LLMs, and multi-agent software development into one Task.
 
 > [!WARNING]
 > 現在はearly betaです。機能、データ形式、配布方法は今後変更される可能性があります。重要なリポジトリでは、差分と承認内容を確認しながら利用してください。
@@ -206,6 +210,32 @@ npm run make:windows
 - [アクセシビリティ監査](docs/A11Y_AUDIT.md)
 - [実装計画](tasks/IMPLEMENTATION_PLAN.md)
 
+## よくある質問
+
+### Sprint Coderは何ができるアプリですか？
+
+AIとのChat、ローカルWorkspaceのファイル編集とコマンド実行、差分・承認履歴の確認、複数AI Workerへの調査・実装・レビューの分担を、一つのTaskで扱えるAIコーディングデスクトップです。
+
+### Codex CLIやClaude Codeとの違いは何ですか？
+
+Codex CLIやClaude Codeを置き換えるものではありません。既存のCLI認証を利用しながら、クラウドAPIやローカルLLMも同じ画面から選択し、共通のManaged Harness、Access設定、Task履歴、AI Teamへ接続します。
+
+### Google Geminiを使えますか？
+
+はい。Google Gemini公式APIをProviderとして登録できます。OpenAI、Anthropic、xAI、OpenRouter、OpenAI互換API、Ollamaなどにも対応しています。利用可能なmodelとtool capabilityは接続先によって異なります。
+
+### 無料で使えますか？
+
+Sprint CoderのソースコードはMIT Licenseで公開されています。接続するクラウドProviderやモデルによっては、別途API利用料金が発生します。
+
+### コードや会話はローカルに保存されますか？
+
+Task履歴、設定、実行状態は端末内に保存します。ただし、クラウドProviderを選んだTurnでは、生成に必要なpromptやcontextが選択先へ送信されます。完全にオフラインで使う場合はローカルLLMを選択してください。
+
+### どのOSで動作しますか？
+
+macOS、Windows、Linuxを対象にしています。ソースからの起動手順は[3分で起動](#3分で起動)、現在公開中のビルド済み配布物は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases)で確認できます。
+
 ## Contributing
 
 Issue、改善提案、Pull Requestを歓迎します。大きな変更は、先にIssueで目的と範囲を共有してください。
@@ -218,5 +248,6 @@ Issue、改善提案、Pull Requestを歓迎します。大きな変更は、先
 
 <div align="center">
   <strong>One Task. One Team. Ship with control.</strong><br />
-  Sprint Coder — local-first multi-agent AI coding desktop app.
+  Sprint Coder — local-first multi-agent AI coding desktop app.<br />
+  Developed by <a href="https://robbits.co.jp/">Robbits Inc.</a>
 </div>
