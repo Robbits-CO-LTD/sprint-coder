@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>対応AI・Provider | Codex・Claude Code・Gemini・ローカルLLM</title>
+    <meta
+      name="description"
+      content="Sprint Coderが対応するCodex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OpenAI互換API、Ollamaなどを整理し、Taskごとの選び方を説明します。"
+    />
+    <meta name="author" content="Robbits Inc." />
+    <meta
+      name="robots"
+      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
+    />
+    <meta name="theme-color" content="#060806" />
+    <link rel="canonical" href="https://sprintcoder.yuseilab.com/providers/" />
+    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:site_name" content="Sprint Coder" />
+    <meta
+      property="og:title"
+      content="対応AI・Provider | Codex・Claude Code・Gemini・ローカルLLM"
+    />
+    <meta
+      property="og:description"
+      content="Sprint Coderが対応するCodex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OpenAI互換API、Ollamaなどを整理し、Taskごとの選び方を説明します。"
+    />
+    <meta property="og:url" content="https://sprintcoder.yuseilab.com/providers/" />
+    <meta
+      property="og:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <meta property="og:image:width" content="1600" />
+    <meta property="og:image:height" content="1000" />
+    <meta property="og:image:alt" content="Sprint CoderのAI Team画面" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="対応AI・Provider | Codex・Claude Code・Gemini・ローカルLLM"
+    />
+    <meta
+      name="twitter:description"
+      content="Sprint Coderが対応するCodex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OpenAI互換API、Ollamaなどを整理し、Taskごとの選び方を説明します。"
+    />
+    <meta
+      name="twitter:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20260820-4" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://sprintcoder.yuseilab.com/#website",
+            "url": "https://sprintcoder.yuseilab.com/",
+            "name": "Sprint Coder",
+            "alternateName": "スプリントコーダー",
+            "inLanguage": "ja",
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://robbits.co.jp/#organization",
+            "name": "株式会社Robbits",
+            "alternateName": "Robbits Inc.",
+            "url": "https://robbits.co.jp/",
+            "sameAs": ["https://github.com/Robbits-CO-LTD"]
+          },
+          {
+            "@type": "WebPage",
+            "@id": "https://sprintcoder.yuseilab.com/providers/#page",
+            "url": "https://sprintcoder.yuseilab.com/providers/",
+            "name": "対応AI・Provider | Codex・Claude Code・Gemini・ローカルLLM",
+            "description": "Sprint Coderが対応するCodex CLI、Claude Code CLI、OpenAI、Anthropic、Google Gemini、xAI、OpenAI互換API、Ollamaなどを整理し、Taskごとの選び方を説明します。",
+            "inLanguage": "ja",
+            "dateModified": "2026-08-20",
+            "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
+            "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "BreadcrumbList",
+            "@id": "https://sprintcoder.yuseilab.com/providers/#breadcrumb",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Sprint Coder",
+                "item": "https://sprintcoder.yuseilab.com/"
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "name": "仕事に合わせて、AIを選ぶ",
+                "item": "https://sprintcoder.yuseilab.com/providers/"
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="content-page">
+    <a class="skip-link" href="#main">本文へ移動</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Sprint Coder トップ">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
+          <span class="brand-copy"
+            ><strong>Sprint Coder</strong><small>A product of Robbits</small></span
+          >
+        </a>
+        <nav aria-label="メインナビゲーション">
+          <a href="/about/">製品</a>
+          <a href="/ai-team/">AI Team</a>
+          <a href="/providers/" aria-current="page">Providers</a>
+          <a href="/local-first-security/">Security</a>
+          <a href="/getting-started/">はじめる</a>
+        </nav>
+        <a
+          class="button button-header"
+          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+          >ダウンロード<svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" /></svg
+        ></a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="content-hero">
+        <div class="shell">
+          <nav class="breadcrumb" aria-label="パンくず">
+            <ol>
+              <li><a href="/">Sprint Coder</a></li>
+              <li aria-current="page">仕事に合わせて、AIを選ぶ</li>
+            </ol>
+          </nav>
+          <div class="content-hero-layout">
+            <div class="content-hero-copy">
+              <p class="section-label">MODEL & PROVIDER</p>
+              <h1>仕事に合わせて、AIを選ぶ</h1>
+              <p class="content-hero-lead">
+                Sprint
+                Coderは特定のmodelやProviderへ固定しません。組み込みCLI、公式API、OpenAI互換API、ローカルLLMを一つのmodel
+                pickerから選び、Taskごとに使い分けます。
+              </p>
+              <div class="content-meta">
+                <span>更新 2026-08-20</span><span>公式情報</span><span>株式会社Robbits</span>
+              </div>
+            </div>
+            <dl class="topic-signal">
+              <div>
+                <dt>CLI</dt>
+                <dd>Codex / Claude</dd>
+              </div>
+              <div>
+                <dt>API</dt>
+                <dd>公式 / 互換</dd>
+              </div>
+              <div>
+                <dt>LOCAL</dt>
+                <dd>Ollamaほか</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="article-section">
+        <div class="shell article-layout">
+          <aside class="table-of-contents" aria-label="このページの目次">
+            <strong>ON THIS PAGE</strong>
+            <ol>
+              <li><a href="#categories">4つの接続方法</a></li>
+              <li><a href="#supported">主な対応先</a></li>
+              <li><a href="#choose">選び方</a></li>
+              <li><a href="#boundary">料金とデータ境界</a></li>
+            </ol>
+          </aside>
+          <article class="prose">
+            <p class="article-lead">
+              modelごとに別アプリを開くのではなく、同じTaskの中で「今回どの実行環境を使うか」を選ぶことがSprint
+              Coderの基本です。利用できるtool
+              capability、料金、データの送信先は接続方法によって異なります。
+            </p>
+
+            <h2 id="categories">4つの接続方法</h2>
+            <div class="fact-grid">
+              <div class="fact-card">
+                <small>BUILT-IN CLI</small>
+                <h3>Codex CLI / Claude Code CLI</h3>
+                <p>端末にインストール済みのCLIと既存認証を利用します。</p>
+              </div>
+              <div class="fact-card">
+                <small>OFFICIAL API</small>
+                <h3>各社の公式API</h3>
+                <p>OpenAI、Anthropic、Google Gemini、xAIなどへ直接接続します。</p>
+              </div>
+              <div class="fact-card">
+                <small>COMPATIBLE API</small>
+                <h3>OpenAI互換API</h3>
+                <p>互換endpointを持つ複数Providerを共通形式で登録します。</p>
+              </div>
+              <div class="fact-card">
+                <small>LOCAL LLM</small>
+                <h3>端末・LAN内のmodel</h3>
+                <p>Ollama、LM Studio、LocalAIを利用できます。</p>
+              </div>
+            </div>
+
+            <h2 id="supported">主な対応Runtime / Provider</h2>
+            <div class="table-region" role="region" aria-label="対応RuntimeとProvider" tabindex="0">
+              <table class="content-table">
+                <thead>
+                  <tr>
+                    <th>種別</th>
+                    <th>主な対応先</th>
+                    <th>認証・接続</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>組み込みCLI</td>
+                    <td>Codex CLI、Claude Code CLI</td>
+                    <td>端末のCLI認証</td>
+                  </tr>
+                  <tr>
+                    <td>公式API</td>
+                    <td>OpenAI、Anthropic、Google Gemini、xAI、OpenRouter</td>
+                    <td>Provider API key</td>
+                  </tr>
+                  <tr>
+                    <td>OpenAI互換API</td>
+                    <td>
+                      Mistral、DeepSeek、Groq、Moonshot AI、MiniMax、Zhipu AI、NVIDIA
+                      NIM、Cloudflare Workers AIなど
+                    </td>
+                    <td>Base URLとAPI key</td>
+                  </tr>
+                  <tr>
+                    <td>ローカルLLM</td>
+                    <td>Ollama、LM Studio、LocalAI</td>
+                    <td>ローカルendpoint</td>
+                  </tr>
+                  <tr>
+                    <td>開発・評価</td>
+                    <td>Mock Runtime</td>
+                    <td>Provider設定不要</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="callout">
+              <strong>すべてのmodelが同じ能力ではありません</strong>
+              <p>
+                利用可能なmodel、context、画像入力、tool
+                use、Team実行などのcapabilityは接続先によって異なります。接続検証とmodel
+                pickerの表示を確認してください。
+              </p>
+            </div>
+
+            <h2 id="choose">Taskごとの選び方</h2>
+            <ol class="steps-list">
+              <li>
+                <h3>既存契約やローカル環境を確認する</h3>
+                <p>
+                  すでにCodex CLIやClaude Code
+                  CLIを利用している場合は、組み込みCLIから始められます。
+                </p>
+              </li>
+              <li>
+                <h3>必要なcapabilityを確認する</h3>
+                <p>
+                  画像入力、tool use、長いcontext、特定modelなど、Taskに必要な能力を先に決めます。
+                </p>
+              </li>
+              <li>
+                <h3>データ境界と料金を選ぶ</h3>
+                <p>
+                  クラウドAPIへ送るのか、ローカルLLMで閉じるのか、速度や費用と合わせて判断します。
+                </p>
+              </li>
+              <li>
+                <h3>Taskへmodelを保存する</h3>
+                <p>選択はTaskの仕事単位と結び付き、次のTurnでも同じ前提で進められます。</p>
+              </li>
+            </ol>
+
+            <h2 id="boundary">料金とデータの送信先</h2>
+            <p>
+              Sprint Coder自体はMIT
+              Licenseで公開されていますが、クラウドProviderのAPIやmodelには各社の利用料金が発生する場合があります。料金、rate
+              limit、データ保持、学習利用の条件は接続先の最新規約を確認してください。
+            </p>
+            <p>
+              クラウドProviderを選んだTurnでは、生成に必要なpromptやcontextがそのProviderへ送信されます。完全にローカルで構成したい場合は、対応するローカルLLMを選択します。詳しくは<a
+                href="/local-first-security/"
+                >Local-firstと安全性</a
+              >を参照してください。
+            </p>
+
+            <section class="related-section" aria-labelledby="related-title">
+              <h2 id="related-title">関連ページ</h2>
+              <div class="related-grid">
+                <a class="related-card" href="/local-first-security/"
+                  ><small>SECURITY</small><strong>Local-firstと安全性</strong
+                  ><span>端末内に残る情報、外部へ送る情報、Access境界の説明。</span></a
+                ><a class="related-card" href="/getting-started/"
+                  ><small>GUIDE</small><strong>はじめ方</strong
+                  ><span>インストールから最初のTask、Provider接続、AI Teamまで。</span></a
+                ><a class="related-card" href="/about/"
+                  ><small>PRODUCT</small><strong>Sprint Coderとは</strong
+                  ><span>製品の目的、対象ユーザー、ChatからAI Teamへ拡張する考え方。</span></a
+                >
+              </div>
+            </section>
+            <section class="content-cta" aria-labelledby="cta-title">
+              <h2 id="cta-title">最初のTaskを始める</h2>
+              <p>Sprint CoderはMIT Licenseで公開されています。配布物またはソースから試せます。</p>
+              <div class="hero-actions">
+                <a
+                  class="button button-primary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+                  >最新版をダウンロード</a
+                >
+                <a
+                  class="button button-secondary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder"
+                  >GitHubで見る</a
+                >
+              </div>
+            </section>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-grid">
+        <div class="footer-brand">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
+          <div>
+            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
+          </div>
+        </div>
+        <div class="footer-owner">
+          <span>Developed, owned and managed by</span
+          ><a href="https://robbits.co.jp/">株式会社Robbits</a>
+        </div>
+        <nav class="footer-links" aria-label="フッターナビゲーション">
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a
+          ><a href="/releases/">Releases</a
+          ><a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE"
+            >MIT License</a
+          >
+        </nav>
+      </div>
+      <nav class="shell content-footer-links" aria-label="公式情報ページ">
+        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
+        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
+        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
+        ><a href="/releases/">Releases</a>
+      </nav>
+      <div class="shell copyright">
+        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
+      </div>
+    </footer>
+  </body>
+</html>

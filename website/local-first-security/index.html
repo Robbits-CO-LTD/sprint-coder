@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local-firstと安全性 | 保存場所・送信境界・Access設定</title>
+    <meta
+      name="description"
+      content="Sprint Coderのlocal-first設計を解説します。Task履歴や設定が端末内に保存される範囲、クラウドProviderへ送信される情報、API key、Access設定、Managed Harnessの境界を説明します。"
+    />
+    <meta name="author" content="Robbits Inc." />
+    <meta
+      name="robots"
+      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
+    />
+    <meta name="theme-color" content="#060806" />
+    <link rel="canonical" href="https://sprintcoder.yuseilab.com/local-first-security/" />
+    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:site_name" content="Sprint Coder" />
+    <meta property="og:title" content="Local-firstと安全性 | 保存場所・送信境界・Access設定" />
+    <meta
+      property="og:description"
+      content="Sprint Coderのlocal-first設計を解説します。Task履歴や設定が端末内に保存される範囲、クラウドProviderへ送信される情報、API key、Access設定、Managed Harnessの境界を説明します。"
+    />
+    <meta property="og:url" content="https://sprintcoder.yuseilab.com/local-first-security/" />
+    <meta
+      property="og:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <meta property="og:image:width" content="1600" />
+    <meta property="og:image:height" content="1000" />
+    <meta property="og:image:alt" content="Sprint CoderのAI Team画面" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Local-firstと安全性 | 保存場所・送信境界・Access設定" />
+    <meta
+      name="twitter:description"
+      content="Sprint Coderのlocal-first設計を解説します。Task履歴や設定が端末内に保存される範囲、クラウドProviderへ送信される情報、API key、Access設定、Managed Harnessの境界を説明します。"
+    />
+    <meta
+      name="twitter:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20260820-4" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://sprintcoder.yuseilab.com/#website",
+            "url": "https://sprintcoder.yuseilab.com/",
+            "name": "Sprint Coder",
+            "alternateName": "スプリントコーダー",
+            "inLanguage": "ja",
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://robbits.co.jp/#organization",
+            "name": "株式会社Robbits",
+            "alternateName": "Robbits Inc.",
+            "url": "https://robbits.co.jp/",
+            "sameAs": ["https://github.com/Robbits-CO-LTD"]
+          },
+          {
+            "@type": "TechArticle",
+            "@id": "https://sprintcoder.yuseilab.com/local-first-security/#page",
+            "url": "https://sprintcoder.yuseilab.com/local-first-security/",
+            "name": "Local-firstと安全性 | 保存場所・送信境界・Access設定",
+            "description": "Sprint Coderのlocal-first設計を解説します。Task履歴や設定が端末内に保存される範囲、クラウドProviderへ送信される情報、API key、Access設定、Managed Harnessの境界を説明します。",
+            "inLanguage": "ja",
+            "dateModified": "2026-08-20",
+            "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
+            "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
+            "publisher": { "@id": "https://robbits.co.jp/#organization" },
+            "headline": "Local-firstと安全性",
+            "datePublished": "2026-08-20",
+            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png",
+            "author": { "@id": "https://robbits.co.jp/#organization" },
+            "mainEntityOfPage": {
+              "@id": "https://sprintcoder.yuseilab.com/local-first-security/#page"
+            }
+          },
+          {
+            "@type": "BreadcrumbList",
+            "@id": "https://sprintcoder.yuseilab.com/local-first-security/#breadcrumb",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Sprint Coder",
+                "item": "https://sprintcoder.yuseilab.com/"
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "name": "Local-firstと安全性",
+                "item": "https://sprintcoder.yuseilab.com/local-first-security/"
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="content-page">
+    <a class="skip-link" href="#main">本文へ移動</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Sprint Coder トップ">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
+          <span class="brand-copy"
+            ><strong>Sprint Coder</strong><small>A product of Robbits</small></span
+          >
+        </a>
+        <nav aria-label="メインナビゲーション">
+          <a href="/about/">製品</a>
+          <a href="/ai-team/">AI Team</a>
+          <a href="/providers/">Providers</a>
+          <a href="/local-first-security/" aria-current="page">Security</a>
+          <a href="/getting-started/">はじめる</a>
+        </nav>
+        <a
+          class="button button-header"
+          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+          >ダウンロード<svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" /></svg
+        ></a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="content-hero">
+        <div class="shell">
+          <nav class="breadcrumb" aria-label="パンくず">
+            <ol>
+              <li><a href="/">Sprint Coder</a></li>
+              <li aria-current="page">Local-firstと安全性</li>
+            </ol>
+          </nav>
+          <div class="content-hero-layout">
+            <div class="content-hero-copy">
+              <p class="section-label">LOCAL-FIRST & SECURITY</p>
+              <h1>Local-firstと安全性</h1>
+              <p class="content-hero-lead">
+                Local-firstは『常にオフライン』という意味ではありません。Sprint
+                Coderは履歴と実行状態を端末内で管理し、ユーザーが選んだProviderとAccess設定に応じて外部送信とWorkspace操作の境界を変えます。
+              </p>
+              <div class="content-meta">
+                <span>更新 2026-08-20</span><span>公式情報</span><span>株式会社Robbits</span>
+              </div>
+            </div>
+            <dl class="topic-signal">
+              <div>
+                <dt>STATE</dt>
+                <dd>端末内</dd>
+              </div>
+              <div>
+                <dt>EGRESS</dt>
+                <dd>Provider選択</dd>
+              </div>
+              <div>
+                <dt>ACCESS</dt>
+                <dd>Task単位</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="article-section">
+        <div class="shell article-layout">
+          <aside class="table-of-contents" aria-label="このページの目次">
+            <strong>ON THIS PAGE</strong>
+            <ol>
+              <li><a href="#meaning">Local-firstの意味</a></li>
+              <li><a href="#data">データの保存と送信</a></li>
+              <li><a href="#secrets">API keyの扱い</a></li>
+              <li><a href="#access">WorkspaceのAccess</a></li>
+            </ol>
+          </aside>
+          <article class="prose">
+            <p class="article-lead">
+              安全性を考えるときは、「どこに保存されるか」「どこへ送られるか」「何を実行できるか」を分ける必要があります。Sprint
+              Coderはこの三つをTask、Provider、Accessの設定として明示します。
+            </p>
+
+            <h2 id="meaning">Local-firstが意味すること</h2>
+            <p>
+              Task、Message、Turn、Teamの状態やアプリ設定は、基本的にユーザーの端末内へ保存されます。UIを閉じたりアプリを再起動したりしても、同じTaskを続きから再開できるようにするためです。
+            </p>
+            <p>
+              一方で、クラウドProviderを使う場合、AI生成に必要なpromptやcontextは選択した接続先へ送信されます。local-firstはクラウド利用を隠す表現ではなく、保存の正本と送信先をユーザーが選べる設計です。
+            </p>
+
+            <h2 id="data">保存される情報と送信される情報</h2>
+            <div
+              class="table-region"
+              role="region"
+              aria-label="データ保存と送信の境界"
+              tabindex="0"
+            >
+              <table class="content-table">
+                <thead>
+                  <tr>
+                    <th>情報</th>
+                    <th>端末内</th>
+                    <th>外部送信</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Task履歴・実行状態</td>
+                    <td>ローカルへ保存</td>
+                    <td>同期サービスは標準前提ではない</td>
+                  </tr>
+                  <tr>
+                    <td>prompt・生成context</td>
+                    <td>Task履歴として保持</td>
+                    <td>クラウドProvider選択時に送信</td>
+                  </tr>
+                  <tr>
+                    <td>Workspaceファイル</td>
+                    <td>ユーザーのWorkspaceに存在</td>
+                    <td>modelへ必要なcontextとして渡る場合がある</td>
+                  </tr>
+                  <tr>
+                    <td>診断ログ</td>
+                    <td><code>~/.sprintcoder/logs/</code>等へ保存</td>
+                    <td>自動的な第三者共有を前提にしない</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="callout">
+              <strong>機密情報を含むTask</strong>
+              <p>
+                Providerのデータ利用条件と組織のポリシーを確認し、必要ならローカルLLMを選択してください。第三者へ診断ログを渡す前にも内容を確認してください。
+              </p>
+            </div>
+
+            <h2 id="secrets">API keyとRendererの境界</h2>
+            <p>
+              API keyはRendererへ長期間保持せず、Main
+              process側でElectronの<code>safeStorage</code>を使って端末内へ保存します。Rendererはsandboxとcontext
+              isolationを有効にし、Node.js APIを直接公開しません。
+            </p>
+            <p>
+              接続先のBase
+              URLも無制限ではありません。公式Providerや設定した互換endpointを使うときは、接続検証とegress
+              policyを通します。実装上の確認項目は<a
+                href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/docs/SECURITY_CHECKLIST.md"
+                >Security Checklist</a
+              >で公開しています。
+            </p>
+
+            <h2 id="access">Workspace操作をTask単位で制御する</h2>
+            <p>
+              Workspaceへ影響する操作は、TaskのAccess設定と<a href="/managed-harness/"
+                >Managed Harness</a
+              >を通じて扱います。入口となるAccessは、確認を挟む運用、自動実行を許す運用、より広いアクセスを与える運用を選べます。
+            </p>
+            <div class="fact-grid">
+              <div class="fact-card">
+                <small>確認する</small>
+                <h3>操作ごとに判断</h3>
+                <p>ファイル変更やCommandの前に内容を確認したいTask向けです。</p>
+              </div>
+              <div class="fact-card">
+                <small>自動</small>
+                <h3>許可範囲で進行</h3>
+                <p>定義された範囲内の操作を止めずに進めたいTask向けです。</p>
+              </div>
+              <div class="fact-card">
+                <small>フルアクセス</small>
+                <h3>広い権限を明示</h3>
+                <p>信頼できるWorkspaceで、必要性を理解して選ぶ設定です。</p>
+              </div>
+              <div class="fact-card">
+                <small>監査</small>
+                <h3>実行を画面へ残す</h3>
+                <p>差分、Command、承認履歴をTaskの仕事として確認します。</p>
+              </div>
+            </div>
+            <p>
+              どのAccess設定でも、OSや環境側のsandbox確認に失敗した場合は、危険なcommand
+              toolをそのまま公開しない設計です。early
+              betaであることも踏まえ、重要な操作では差分と実行内容を確認してください。
+            </p>
+
+            <section class="related-section" aria-labelledby="related-title">
+              <h2 id="related-title">関連ページ</h2>
+              <div class="related-grid">
+                <a class="related-card" href="/managed-harness/"
+                  ><small>HARNESS</small><strong>Managed Harness</strong
+                  ><span>ファイル、Command、承認、監査を共通経路で扱う設計。</span></a
+                ><a class="related-card" href="/providers/"
+                  ><small>PROVIDERS</small><strong>対応AI・モデル</strong
+                  ><span>Codex、Claude Code、Gemini、API、ローカルLLMの選び方。</span></a
+                ><a class="related-card" href="/getting-started/"
+                  ><small>GUIDE</small><strong>はじめ方</strong
+                  ><span>インストールから最初のTask、Provider接続、AI Teamまで。</span></a
+                >
+              </div>
+            </section>
+            <section class="content-cta" aria-labelledby="cta-title">
+              <h2 id="cta-title">最初のTaskを始める</h2>
+              <p>Sprint CoderはMIT Licenseで公開されています。配布物またはソースから試せます。</p>
+              <div class="hero-actions">
+                <a
+                  class="button button-primary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+                  >最新版をダウンロード</a
+                >
+                <a
+                  class="button button-secondary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder"
+                  >GitHubで見る</a
+                >
+              </div>
+            </section>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-grid">
+        <div class="footer-brand">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
+          <div>
+            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
+          </div>
+        </div>
+        <div class="footer-owner">
+          <span>Developed, owned and managed by</span
+          ><a href="https://robbits.co.jp/">株式会社Robbits</a>
+        </div>
+        <nav class="footer-links" aria-label="フッターナビゲーション">
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a
+          ><a href="/releases/">Releases</a
+          ><a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE"
+            >MIT License</a
+          >
+        </nav>
+      </div>
+      <nav class="shell content-footer-links" aria-label="公式情報ページ">
+        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
+        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
+        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
+        ><a href="/releases/">Releases</a>
+      </nav>
+      <div class="shell copyright">
+        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
+      </div>
+    </footer>
+  </body>
+</html>

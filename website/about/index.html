@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sprint Coderとは | AIチーム型コーディングデスクトップ</title>
+    <meta
+      name="description"
+      content="Sprint Coderとは何か、どんな開発課題を解決するのかを紹介します。一人のAIとのChatから、複数AIのTeamへ同じTaskを保ったまま展開できるlocal-firstなオープンソースデスクトップです。"
+    />
+    <meta name="author" content="Robbits Inc." />
+    <meta
+      name="robots"
+      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
+    />
+    <meta name="theme-color" content="#060806" />
+    <link rel="canonical" href="https://sprintcoder.yuseilab.com/about/" />
+    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:site_name" content="Sprint Coder" />
+    <meta property="og:title" content="Sprint Coderとは | AIチーム型コーディングデスクトップ" />
+    <meta
+      property="og:description"
+      content="Sprint Coderとは何か、どんな開発課題を解決するのかを紹介します。一人のAIとのChatから、複数AIのTeamへ同じTaskを保ったまま展開できるlocal-firstなオープンソースデスクトップです。"
+    />
+    <meta property="og:url" content="https://sprintcoder.yuseilab.com/about/" />
+    <meta
+      property="og:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <meta property="og:image:width" content="1600" />
+    <meta property="og:image:height" content="1000" />
+    <meta property="og:image:alt" content="Sprint CoderのAI Team画面" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Sprint Coderとは | AIチーム型コーディングデスクトップ" />
+    <meta
+      name="twitter:description"
+      content="Sprint Coderとは何か、どんな開発課題を解決するのかを紹介します。一人のAIとのChatから、複数AIのTeamへ同じTaskを保ったまま展開できるlocal-firstなオープンソースデスクトップです。"
+    />
+    <meta
+      name="twitter:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20260820-4" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://sprintcoder.yuseilab.com/#website",
+            "url": "https://sprintcoder.yuseilab.com/",
+            "name": "Sprint Coder",
+            "alternateName": "スプリントコーダー",
+            "inLanguage": "ja",
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://robbits.co.jp/#organization",
+            "name": "株式会社Robbits",
+            "alternateName": "Robbits Inc.",
+            "url": "https://robbits.co.jp/",
+            "sameAs": ["https://github.com/Robbits-CO-LTD"]
+          },
+          {
+            "@type": "AboutPage",
+            "@id": "https://sprintcoder.yuseilab.com/about/#page",
+            "url": "https://sprintcoder.yuseilab.com/about/",
+            "name": "Sprint Coderとは | AIチーム型コーディングデスクトップ",
+            "description": "Sprint Coderとは何か、どんな開発課題を解決するのかを紹介します。一人のAIとのChatから、複数AIのTeamへ同じTaskを保ったまま展開できるlocal-firstなオープンソースデスクトップです。",
+            "inLanguage": "ja",
+            "dateModified": "2026-08-20",
+            "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
+            "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "BreadcrumbList",
+            "@id": "https://sprintcoder.yuseilab.com/about/#breadcrumb",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Sprint Coder",
+                "item": "https://sprintcoder.yuseilab.com/"
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "name": "Sprint Coderとは",
+                "item": "https://sprintcoder.yuseilab.com/about/"
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="content-page">
+    <a class="skip-link" href="#main">本文へ移動</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Sprint Coder トップ">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
+          <span class="brand-copy"
+            ><strong>Sprint Coder</strong><small>A product of Robbits</small></span
+          >
+        </a>
+        <nav aria-label="メインナビゲーション">
+          <a href="/about/" aria-current="page">製品</a>
+          <a href="/ai-team/">AI Team</a>
+          <a href="/providers/">Providers</a>
+          <a href="/local-first-security/">Security</a>
+          <a href="/getting-started/">はじめる</a>
+        </nav>
+        <a
+          class="button button-header"
+          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+          >ダウンロード<svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" /></svg
+        ></a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="content-hero">
+        <div class="shell">
+          <nav class="breadcrumb" aria-label="パンくず">
+            <ol>
+              <li><a href="/">Sprint Coder</a></li>
+              <li aria-current="page">Sprint Coderとは</li>
+            </ol>
+          </nav>
+          <div class="content-hero-layout">
+            <div class="content-hero-copy">
+              <p class="section-label">PRODUCT OVERVIEW</p>
+              <h1>Sprint Coderとは</h1>
+              <p class="content-hero-lead">
+                Sprint Coderは、一人のAIとのChat、ローカルWorkspaceでのコーディング、複数AI
+                Workerへの役割分担を、ひとつのTaskで扱うオープンソースのデスクトップアプリです。
+              </p>
+              <div class="content-meta">
+                <span>更新 2026-08-20</span><span>公式情報</span><span>株式会社Robbits</span>
+              </div>
+            </div>
+            <dl class="topic-signal">
+              <div>
+                <dt>LICENSE</dt>
+                <dd>MIT</dd>
+              </div>
+              <div>
+                <dt>OWNER</dt>
+                <dd>Robbits</dd>
+              </div>
+              <div>
+                <dt>MODEL</dt>
+                <dd>選択可能</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="article-section">
+        <div class="shell article-layout">
+          <aside class="table-of-contents" aria-label="このページの目次">
+            <strong>ON THIS PAGE</strong>
+            <ol>
+              <li><a href="#why">なぜ作るのか</a></li>
+              <li><a href="#difference">何が違うのか</a></li>
+              <li><a href="#fit">どんな仕事に向くか</a></li>
+              <li><a href="#open">オープンソースと運営</a></li>
+            </ol>
+          </aside>
+          <article class="prose">
+            <p class="article-lead">
+              AIモデルが増えても、仕事の前提を複数のチャットへ説明し直し、結果を人が集めて整合性を確認している限り、開発のボトルネックは人のままです。Sprint
+              Coderは、会話・実行・役割分担を同じTaskへまとめることで、この断絶を小さくします。
+            </p>
+
+            <h2 id="why">なぜSprint Coderを作るのか</h2>
+            <p>
+              一般的なAI
+              Chatは、相談や小さな修正には便利です。しかし仕事が調査、実装、テスト、レビューへ広がると、複数セッションの状態管理や成果の統合が必要になります。Sprint
+              Coderは最初から大人数のTeamを強制せず、一人のAIで始め、必要な瞬間だけ同じ会話をAI
+              Teamへ拡張します。
+            </p>
+            <p>
+              Taskには会話だけでなく、選択したWorkspace、model、Effort、Access、実行履歴が結び付きます。ユーザーは「どのAIへ何を頼んだか」ではなく、「この仕事が今どこまで進んだか」を一つの画面で追えます。
+            </p>
+
+            <div class="fact-grid">
+              <div class="fact-card">
+                <small>CHAT</small>
+                <h3>一人で始める</h3>
+                <p>相談、設計、実装依頼を自然な会話から開始します。</p>
+              </div>
+              <div class="fact-card">
+                <small>WORKSPACE</small>
+                <h3>実際のコードで進める</h3>
+                <p>ファイル差分、Command、承認を同じTaskへ記録します。</p>
+              </div>
+              <div class="fact-card">
+                <small>TEAM</small>
+                <h3>必要な役割だけ増やす</h3>
+                <p>Leaderが調査、実装、レビューをWorkerへ分担します。</p>
+              </div>
+              <div class="fact-card">
+                <small>RESUME</small>
+                <h3>仕事を再開する</h3>
+                <p>TaskとTeamの状態を端末内へ保存し、続きから再開します。</p>
+              </div>
+            </div>
+
+            <h2 id="difference">単一ChatとAI Teamの違い</h2>
+            <div
+              class="table-region"
+              role="region"
+              aria-label="単一ChatとAI Teamの比較"
+              tabindex="0"
+            >
+              <table class="content-table">
+                <thead>
+                  <tr>
+                    <th>観点</th>
+                    <th>通常のChat</th>
+                    <th>Sprint CoderのAI Team</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>開始</td>
+                    <td>一人のAIへ依頼</td>
+                    <td>同じく一人のAIから開始</td>
+                  </tr>
+                  <tr>
+                    <td>拡張</td>
+                    <td>別Chatを人が追加</td>
+                    <td>同じTaskをLeaderとWorkerへ展開</td>
+                  </tr>
+                  <tr>
+                    <td>役割</td>
+                    <td>一つの会話で順番に処理</td>
+                    <td>調査・実装・レビューなどを明示的に分担</td>
+                  </tr>
+                  <tr>
+                    <td>確認</td>
+                    <td>各Chatの結果を個別に確認</td>
+                    <td>進行と成果を同じTaskへ戻して確認</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h2 id="fit">どんな仕事に向いているか</h2>
+            <p>
+              Sprint
+              Coderは、ファイルを一行直すだけの作業より、複数の観点を並行して扱う仕事で価値を発揮します。たとえば、既存コードの調査と実装修正を分けたい場合、実装と独立レビューを同時に進めたい場合、異なるProviderやmodelをTaskごとに使い分けたい場合です。
+            </p>
+            <ul>
+              <li>既存コードを調査してから安全に変更したい</li>
+              <li>実装、テスト、レビューを役割として分けたい</li>
+              <li>Codex、Claude Code、Gemini、ローカルLLMを使い分けたい</li>
+              <li>AIが実行したファイル変更やCommandを画面で追いたい</li>
+            </ul>
+            <div class="callout">
+              <strong>小さい仕事はChatのままでよい</strong>
+              <p>
+                Teamは常に使う機能ではありません。短い相談や明確な小修正は一人のAIで進め、分担の効果が上回るときだけTeamへ展開する設計です。
+              </p>
+            </div>
+
+            <h2 id="open">オープンソースと運営主体</h2>
+            <p>
+              Sprint CoderのソースコードはMIT Licenseで<a
+                href="https://github.com/Robbits-CO-LTD/sprint-coder"
+                >GitHub</a
+              >に公開されています。製品と公式サイトの開発・所有・運営主体は<a
+                href="https://robbits.co.jp/"
+                >株式会社Robbits</a
+              >です。<code>sprintcoder.yuseilab.com</code>はホスティング用ドメインとして利用しています。
+            </p>
+            <p>
+              現在はearly
+              betaです。重要なリポジトリで使用するときは、差分、承認内容、利用するProviderのデータ取扱いを確認してください。
+            </p>
+
+            <section class="related-section" aria-labelledby="related-title">
+              <h2 id="related-title">関連ページ</h2>
+              <div class="related-grid">
+                <a class="related-card" href="/ai-team/"
+                  ><small>AI TEAM</small><strong>AI Team Coding</strong
+                  ><span>LeaderとWorkerが同じTaskで役割分担し、成果を統合する仕組み。</span></a
+                ><a class="related-card" href="/providers/"
+                  ><small>PROVIDERS</small><strong>対応AI・モデル</strong
+                  ><span>Codex、Claude Code、Gemini、API、ローカルLLMの選び方。</span></a
+                ><a class="related-card" href="/getting-started/"
+                  ><small>GUIDE</small><strong>はじめ方</strong
+                  ><span>インストールから最初のTask、Provider接続、AI Teamまで。</span></a
+                >
+              </div>
+            </section>
+            <section class="content-cta" aria-labelledby="cta-title">
+              <h2 id="cta-title">最初のTaskを始める</h2>
+              <p>Sprint CoderはMIT Licenseで公開されています。配布物またはソースから試せます。</p>
+              <div class="hero-actions">
+                <a
+                  class="button button-primary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+                  >最新版をダウンロード</a
+                >
+                <a
+                  class="button button-secondary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder"
+                  >GitHubで見る</a
+                >
+              </div>
+            </section>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-grid">
+        <div class="footer-brand">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
+          <div>
+            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
+          </div>
+        </div>
+        <div class="footer-owner">
+          <span>Developed, owned and managed by</span
+          ><a href="https://robbits.co.jp/">株式会社Robbits</a>
+        </div>
+        <nav class="footer-links" aria-label="フッターナビゲーション">
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a
+          ><a href="/releases/">Releases</a
+          ><a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE"
+            >MIT License</a
+          >
+        </nav>
+      </div>
+      <nav class="shell content-footer-links" aria-label="公式情報ページ">
+        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
+        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
+        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
+        ><a href="/releases/">Releases</a>
+      </nav>
+      <div class="shell copyright">
+        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
+      </div>
+    </footer>
+  </body>
+</html>
