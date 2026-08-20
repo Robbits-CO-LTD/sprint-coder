@@ -42,7 +42,12 @@ import {
   startAutoUpdate,
   type AutoUpdateController,
 } from './auto-update';
-import { IPC_CHANNELS, updateHealthSchema, type UpdateHealth } from '@sprint-coder/contracts';
+import {
+  IPC_CHANNELS,
+  updateCheckResultSchema,
+  updateHealthSchema,
+  type UpdateHealth,
+} from '@sprint-coder/contracts';
 import {
   applyWindowControl,
   isWindowControlAction,
@@ -79,9 +84,10 @@ ipcMain.handle(WINDOW_CONTROL_CHANNELS.getMaximized, (event) => {
   const window = trustedWindowControlTarget(event);
   return window?.isMaximized() ?? false;
 });
-ipcMain.on(IPC_CHANNELS.updateRetry, (event) => {
-  if (trustedMainWindowTarget(event) === null) return;
-  void autoUpdateController?.checkNow();
+ipcMain.handle(IPC_CHANNELS.updateCheckNow, async (event) => {
+  if (trustedMainWindowTarget(event) === null || autoUpdateController === null)
+    return updateCheckResultSchema.parse({ status: 'unsupported' });
+  return updateCheckResultSchema.parse(await autoUpdateController.checkNow());
 });
 ipcMain.on(IPC_CHANNELS.updateOpenManual, (event) => {
   if (trustedMainWindowTarget(event) === null) return;

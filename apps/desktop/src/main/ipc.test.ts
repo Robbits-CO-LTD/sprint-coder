@@ -1316,7 +1316,9 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.turnsSnapshot]: taskIdPayloadSchema,
   [IPC_CHANNELS.turnsSubscribe]: turnSubscriptionInputSchema,
 };
-const PUSH_ONLY_CHANNELS = new Set<string>([
+// Channels owned directly by Main or sent from Main to Renderer do not pass through IpcRouter's
+// command-envelope parser, so they are intentionally outside the adversarial input-schema table.
+const NON_ROUTER_CHANNELS = new Set<string>([
   IPC_CHANNELS.tasksUpdated,
   IPC_CHANNELS.teamsEvent,
   IPC_CHANNELS.turnsPort,
@@ -1324,21 +1326,21 @@ const PUSH_ONLY_CHANNELS = new Set<string>([
   IPC_CHANNELS.fileEditEvent,
   IPC_CHANNELS.runtimeStatusEvent,
   IPC_CHANNELS.updateHealthEvent,
-  IPC_CHANNELS.updateRetry,
+  IPC_CHANNELS.updateCheckNow,
   IPC_CHANNELS.updateOpenManual,
   IPC_CHANNELS.updateOpenLog,
 ]);
 
 describe('IPC channel registry stays in sync with the adversarial fuzz table', () => {
-  it('covers every IPC_CHANNELS entry exactly once, split between handled and push-only', () => {
+  it('covers every IPC_CHANNELS entry exactly once, split between router and non-router channels', () => {
     const allChannels = new Set(Object.values(IPC_CHANNELS));
     const handled = new Set(Object.keys(CHANNEL_INPUT_SCHEMAS));
     for (const channel of allChannels) {
       const isHandled = handled.has(channel);
-      const isPushOnly = PUSH_ONLY_CHANNELS.has(channel);
-      expect(isHandled !== isPushOnly).toBe(true);
+      const isNonRouter = NON_ROUTER_CHANNELS.has(channel);
+      expect(isHandled !== isNonRouter).toBe(true);
     }
-    expect(handled.size + PUSH_ONLY_CHANNELS.size).toBe(allChannels.size);
+    expect(handled.size + NON_ROUTER_CHANNELS.size).toBe(allChannels.size);
   });
 });
 

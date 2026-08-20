@@ -86,6 +86,7 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  updateCheckResultSchema,
   updateHealthSchema,
   runtimeFailureDiagnosticQuerySchema,
   runtimeFailureDiagnosticExportSchema,
@@ -579,7 +580,8 @@ const api: SprintCoderApi = {
       ipcRenderer.on(IPC_CHANNELS.updateHealthEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.updateHealthEvent, handler);
     },
-    retry: () => ipcRenderer.send(IPC_CHANNELS.updateRetry),
+    checkNow: async () =>
+      updateCheckResultSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.updateCheckNow)),
     openManualUpdate: () => ipcRenderer.send(IPC_CHANNELS.updateOpenManual),
     openUpdateLog: () => ipcRenderer.send(IPC_CHANNELS.updateOpenLog),
   },

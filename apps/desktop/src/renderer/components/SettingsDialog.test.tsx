@@ -134,6 +134,14 @@ describe('which body the flag selects', () => {
     }
   });
 
+  it('offers a manual update check in both settings layouts', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-check-update"');
+      expect(html).toContain('アップデートを確認');
+    }
+  });
+
   it('does not add a second heading called Skills', () => {
     // The Skill section's own heading is contributed by SkillSettingsSection. A page heading by the
     // same name would give the sheet two, which is ambiguous to a rotor and to a by-name locator.

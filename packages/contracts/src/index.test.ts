@@ -26,6 +26,7 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   updateHealthSchema,
+  updateCheckResultSchema,
   codexUserConfigSettingsSchema,
   teamModelResearchSettingsSchema,
   teamModelRestrictionSchema,
@@ -1140,6 +1141,23 @@ describe('public contracts', () => {
         lastSuccessAt: null,
         lastFailureAt: 'C:\\Users\\alice\\Squirrel-Update.log',
         lastErrorCategory: 'CryptUnprotectData failed',
+      }),
+    ).toThrow();
+    expect(updateCheckResultSchema.parse({ status: 'up_to_date' })).toEqual({
+      status: 'up_to_date',
+    });
+    expect(updateCheckResultSchema.parse({ status: 'update_available', version: '0.4.1' })).toEqual(
+      { status: 'update_available', version: '0.4.1' },
+    );
+    expect(updateCheckResultSchema.parse({ status: 'failed', errorCategory: 'network' })).toEqual({
+      status: 'failed',
+      errorCategory: 'network',
+    });
+    expect(() =>
+      updateCheckResultSchema.parse({
+        status: 'failed',
+        errorCategory: 'network',
+        rawError: '/Users/alice/private/update.log',
       }),
     ).toThrow();
     for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED', 'RUNTIME_RATE_LIMIT'] as const)
