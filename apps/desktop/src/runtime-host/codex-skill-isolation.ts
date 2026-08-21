@@ -15,6 +15,7 @@ import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison'
 
 export type CodexSkillIsolation = Readonly<{
   codexHome: string;
+  sourceCodexHome: string;
   isolatedUserHome: string;
   shellUserHome: string;
   selectedSkillsRoot: string;
@@ -42,12 +43,15 @@ export function prepareCodexSkillIsolation(input: {
   const environment = input.environment ?? process.env;
   const isolatedUserHome = join(input.temporaryRoot, 'user-home');
   const codexHome = join(isolatedUserHome, '.codex');
+  const sourceCodexHome =
+    environment['CODEX_HOME'] ??
+    join(environment['HOME'] ?? environment['USERPROFILE'] ?? homedir(), '.codex');
   const selectedSkillsRoot = join(input.temporaryRoot, 'selected-skills');
   mkdirSync(codexHome, { recursive: true, mode: 0o700 });
   mkdirSync(selectedSkillsRoot, { recursive: true, mode: 0o700 });
   chmodSync(codexHome, 0o700);
   chmodSync(selectedSkillsRoot, 0o700);
-  copyAuthentication(environment, codexHome);
+  copyAuthentication(sourceCodexHome, codexHome);
   const userConfigSnapshot = snapshotUserConfig(
     environment,
     codexHome,
@@ -77,6 +81,7 @@ export function prepareCodexSkillIsolation(input: {
   ].sort();
   return {
     codexHome,
+    sourceCodexHome,
     isolatedUserHome,
     shellUserHome: environment['HOME'] ?? environment['USERPROFILE'] ?? homedir(),
     selectedSkillsRoot,
@@ -88,13 +93,14 @@ export function prepareCodexSkillIsolation(input: {
 }
 
 export function codexSkillIsolationArgs(isolation: CodexSkillIsolation): string[] {
+  const imageGenerationEnabled = isolation.stagedSkills.some(({ name }) => name === 'imagegen');
   const rules = isolation.disabledWorkspaceSkillPaths
     .map((path) => `{path=${JSON.stringify(path)},enabled=false}`)
     .join(',');
   return [
     '--strict-config',
     '-c',
-    'skills.bundled.enabled=false',
+    `skills.bundled.enabled=${imageGenerationEnabled ? 'true' : 'false'}`,
     '-c',
     'skills.include_instructions=false',
     '-c',
@@ -214,11 +220,8 @@ export function discoverWorkspaceSkillPathsForRoots(roots: readonly string[]): s
   return [...new Set(roots.flatMap((root) => discoverWorkspaceSkillPaths(root)))].sort();
 }
 
-function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome: string): void {
-  const sourceHome =
-    environment['CODEX_HOME'] ??
-    join(environment['HOME'] ?? environment['USERPROFILE'] ?? '', '.codex');
-  const source = join(sourceHome, 'auth.json');
+function copyAuthentication(sourceCodexHome: string, codexHome: string): void {
+  const source = join(sourceCodexHome, 'auth.json');
   try {
     if (!statSync(source).isFile()) return;
     const destination = join(codexHome, 'auth.json');

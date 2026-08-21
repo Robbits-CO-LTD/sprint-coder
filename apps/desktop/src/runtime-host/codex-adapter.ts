@@ -51,6 +51,7 @@ import {
   type RuntimeProgressTimeoutPhase,
 } from './runtime-progress-deadline';
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
+import { publishIsolatedThreadImages } from '../main/generated-image-collector';
 import {
   environmentValue,
   probeCliCommandCandidates,
@@ -577,6 +578,16 @@ export class CodexRuntimeAdapter {
               skillIsolationVerificationPending = false;
             });
         }
+        if (
+          message['method'] === 'turn/completed' &&
+          activeThreadId !== null &&
+          skillIsolation.stagedSkills.some(({ name }) => name === 'imagegen')
+        )
+          publishIsolatedThreadImages(
+            activeThreadId,
+            join(skillIsolation.codexHome, 'generated_images'),
+            join(skillIsolation.sourceCodexHome, 'generated_images'),
+          );
         handleCodexNotification(
           message,
           emitRuntime,

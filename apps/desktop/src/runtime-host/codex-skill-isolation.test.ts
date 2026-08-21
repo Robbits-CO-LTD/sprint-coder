@@ -33,15 +33,31 @@ describe('Codex Skill isolation', () => {
     });
 
     expect(isolation.stagedSkills).toHaveLength(1);
+    expect(isolation.sourceCodexHome).toBe(sourceHome);
     expect(isolation.stagedSkills[0]).toMatchObject({ name: 'reviewer' });
     expect(await readFile(isolation.stagedSkills[0]!.path, 'utf8')).toContain('name: reviewer');
     expect(await readFile(join(isolation.codexHome, 'auth.json'), 'utf8')).toBe(
       '{"token":"fixture"}',
     );
     expect(codexSkillIsolationArgs(isolation)).toContain('skills.include_instructions=false');
+    expect(codexSkillIsolationArgs(isolation)).toContain('skills.bundled.enabled=false');
     expect(codexSkillIsolationArgs(isolation).join(' ')).toContain(
       'shell_environment_policy.set={HOME=',
     );
+  });
+
+  it('enables bundled tool support only when the managed imagegen Skill is selected', async () => {
+    const root = await temporaryRoot();
+    const imagegen = join(root, 'managed', 'imagegen');
+    await mkdir(imagegen, { recursive: true });
+    await writeFile(join(imagegen, 'SKILL.md'), '---\nname: imagegen\ndescription: image\n---\n');
+    const isolation = prepareCodexSkillIsolation({
+      temporaryRoot: join(root, 'runtime'),
+      cwd: root,
+      skills: [{ name: 'imagegen', path: imagegen }],
+      environment: { CODEX_HOME: join(root, 'source-codex') },
+    });
+    expect(codexSkillIsolationArgs(isolation)).toContain('skills.bundled.enabled=true');
   });
 
   it('keeps user config disabled by default and snapshots it only for an opted-in Turn', async () => {
@@ -206,6 +222,7 @@ describe('Codex Skill isolation', () => {
       },
       {
         codexHome: join(root, 'home', '.codex'),
+        sourceCodexHome: join(root, 'source-codex'),
         isolatedUserHome: join(root, 'home'),
         shellUserHome: root,
         selectedSkillsRoot: join(root, 'selected-skills'),
