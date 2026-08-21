@@ -5,10 +5,20 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PublicError } from '@sprint-coder/contracts';
 import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
-import { collectThreadImages } from '../main/generated-image-collector';
+import {
+  codexGeneratedImagesRoot,
+  collectThreadImages,
+  resolveThreadImageDirectory,
+} from '../main/generated-image-collector';
 import type { RuntimeCanonicalEvent } from './protocol';
 import { ToolRegistry } from '@sprint-coder/domain';
 import { WORKSPACE_CREATE_FILE_TOOL } from '../main/workspace-patch-tool';
+import {
+  BUILTIN_IMAGEGEN_SKILL_DIGEST,
+  BUILTIN_IMAGEGEN_SKILL_ID,
+  installBuiltinImagegenSkill,
+} from '../main/imagegen-builtin';
+import { SkillStore } from '../main/skill-store';
 
 // Opt-in REAL smoke test (Phase 7 hardening, IMPLEMENTATION_PLAN §10.4 5a/5b): drives real turns
 // through the actual adapter code path against the locally installed `codex` CLI, following
@@ -217,6 +227,12 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
   // Deliberately does NOT parse any path out of the agent's message: doing so is the vulnerability
   // this design exists to avoid, so the test must not demonstrate it working either.
   it('generates an image and makes it findable from the thread id alone', async () => {
+    const skillHome = mkdtempSync(join(tmpdir(), 'sprint-coder-imagegen-smoke-'));
+    cleanupDirs.push(skillHome);
+    await installBuiltinImagegenSkill(skillHome);
+    const imagegen = await (
+      await SkillStore.open({ rootPath: join(skillHome, '.sprintcoder', 'skills') })
+    ).resolveSelectable('builtin', BUILTIN_IMAGEGEN_SKILL_ID, BUILTIN_IMAGEGEN_SKILL_DIGEST);
     const adapter = await createProbedCodexAdapter();
     const events: RuntimeCanonicalEvent[] = [];
     const failures: PublicError[] = [];
@@ -236,6 +252,10 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
           failures.push(error);
         },
         () => resolve(),
+        undefined,
+        undefined,
+        'read-only',
+        [{ name: BUILTIN_IMAGEGEN_SKILL_ID, path: imagegen.packagePath }],
       );
     });
 
@@ -243,6 +263,8 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     const threadEvent = events.find((event) => event.type === 'thread');
     expect(threadEvent, 'adapter surfaced a thread id').toBeDefined();
     const threadId = threadEvent?.type === 'thread' ? threadEvent.threadId : '';
+    const publishedDirectory = resolveThreadImageDirectory(threadId, codexGeneratedImagesRoot());
+    if (publishedDirectory !== null) cleanupDirs.push(publishedDirectory);
     console.log('[codex-smoke] imagegen thread:', threadId);
 
     const collected = collectThreadImages(threadId);

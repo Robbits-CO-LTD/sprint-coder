@@ -53,6 +53,7 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
       'sprint-coder-product',
       'skill-creator',
       'import-skill',
+      'imagegen',
     ]) {
       const content = `---\nname: ${skillId}\ndescription: Builtin ${skillId}\n---\nBody\n`;
       await store.installBuiltin(
@@ -65,11 +66,12 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     await writeFile(join(storeRoot, 'created', 'broken-skill', 'SKILL.md'), 'not frontmatter');
 
     const catalog = await store.listCatalogSnapshotEntries();
-    expect(catalog.slice(0, 4).map(({ skillId }) => skillId)).toEqual([
+    expect(catalog.slice(0, 5).map(({ skillId }) => skillId)).toEqual([
       'sprint-coder-team',
       'sprint-coder-product',
       'skill-creator',
       'import-skill',
+      'imagegen',
     ]);
     expect(catalog.find(({ skillId }) => skillId === 'broken-skill')).toMatchObject({
       enabled: false,

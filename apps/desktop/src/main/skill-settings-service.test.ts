@@ -35,8 +35,9 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
       count: number;
       items: Array<{ id: string; enabled: boolean; availability: string }>;
     };
-    expect(catalog.count).toBe(4);
+    expect(catalog.count).toBe(5);
     expect(catalog.items.map(({ id }) => id)).toEqual([
+      'imagegen',
       'import-skill',
       'skill-creator',
       'sprint-coder-product',

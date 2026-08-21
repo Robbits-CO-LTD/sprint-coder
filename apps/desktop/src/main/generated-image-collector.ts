@@ -1,7 +1,14 @@
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 // Takes custody of images Codex generated during a Turn (issue #11).
 //
@@ -97,4 +104,82 @@ export function collectThreadImages(
     }
   }
   return collected;
+}
+
+/**
+ * Publishes images from a per-Turn isolated CODEX_HOME into the caller's canonical Codex image
+ * root before the isolated home is destroyed. Both roots are fixed by Runtime setup; no path from
+ * model-authored output is accepted. Main still performs final custody and validation.
+ */
+export function publishIsolatedThreadImages(
+  threadId: string,
+  isolatedRoot: string,
+  destinationRoot: string,
+): string[] {
+  const images = collectThreadImages(threadId, isolatedRoot).filter(({ bytes }) => isPng(bytes));
+  if (images.length === 0) return [];
+  mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  assertSafePublicationRoot(destinationRoot);
+  const destinationDirectory = resolveThreadImageDirectory(threadId, destinationRoot);
+  if (destinationDirectory === null)
+    throw new Error('Generated image destination escaped its root');
+  try {
+    mkdirSync(destinationDirectory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+  }
+  assertSafeThreadDirectory(destinationRoot, destinationDirectory);
+  const created: string[] = [];
+  try {
+    for (const { fileName, bytes } of images) {
+      const destination = join(destinationDirectory, fileName);
+      writeFileSync(destination, bytes, { flag: 'wx', mode: 0o600 });
+      created.push(destination);
+    }
+    return created.map((path) => path.slice(destinationDirectory.length + 1));
+  } catch (error) {
+    for (const path of created) {
+      try {
+        unlinkSync(path);
+      } catch {
+        // Preserve the original publication failure.
+      }
+    }
+    throw error;
+  }
+}
+
+function assertSafePublicationRoot(root: string): void {
+  const metadata = lstatSync(root);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink())
+    throw new Error('Generated image publication root is not a plain directory');
+  const canonicalParent = realpathSync(dirname(root));
+  const canonicalRoot = realpathSync(root);
+  const expected = resolve(canonicalParent, basename(root));
+  const equal =
+    process.platform === 'win32'
+      ? canonicalRoot.toLocaleLowerCase('en-US') === expected.toLocaleLowerCase('en-US')
+      : canonicalRoot === expected;
+  if (!equal) throw new Error('Generated image publication root changed identity');
+}
+
+function assertSafeThreadDirectory(root: string, directory: string): void {
+  const metadata = lstatSync(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink())
+    throw new Error('Generated image destination is not a plain directory');
+  const canonicalRoot = realpathSync(root);
+  const canonicalDirectory = realpathSync(directory);
+  const expected = resolve(canonicalRoot, relative(resolve(root), directory));
+  const equal =
+    process.platform === 'win32'
+      ? canonicalDirectory.toLocaleLowerCase('en-US') === expected.toLocaleLowerCase('en-US')
+      : canonicalDirectory === expected;
+  if (!equal) throw new Error('Generated image destination changed identity');
+}
+
+function isPng(bytes: Buffer): boolean {
+  return (
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  );
 }
