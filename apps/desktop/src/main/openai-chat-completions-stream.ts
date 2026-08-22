@@ -31,11 +31,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
       if (typeof choice.finish_reason === 'string') stopReason = choice.finish_reason;
       const delta = asRecord(choice.delta);
       if (delta === null) continue;
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
-        budget.consumeOutput(delta.reasoning_content);
-        yield { type: 'reasoning_delta', text: delta.reasoning_content };
-      }
-      for (const reasoning of reasoningTexts(delta.reasoning_details)) {
+      for (const reasoning of reasoningTextsFromDelta(delta)) {
         budget.consumeOutput(reasoning);
         yield { type: 'reasoning_delta', text: reasoning };
       }
@@ -88,6 +84,17 @@ export async function* normalizeOpenAIChatCompletionsStream(
     },
   };
   yield { type: 'completed', stopReason };
+}
+
+function reasoningTextsFromDelta(delta: Record<string, unknown>): string[] {
+  const texts = [
+    ...(typeof delta.reasoning === 'string' && delta.reasoning.length > 0 ? [delta.reasoning] : []),
+    ...(typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0
+      ? [delta.reasoning_content]
+      : []),
+    ...reasoningTexts(delta.reasoning_details),
+  ];
+  return [...new Set(texts)];
 }
 
 function reasoningTexts(value: unknown): string[] {
