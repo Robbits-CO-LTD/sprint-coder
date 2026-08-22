@@ -1,4 +1,4 @@
 interface:
   display_name: "Sprint Coder Release"
-  short_description: "署名済み成果物を検証してDraft Releaseへ登録"
-  default_prompt: "Use $release to prepare and verify a Sprint Coder draft release."
+  short_description: "SemVer判定と署名済みDraft Releaseを安全に準備"
+  default_prompt: "Use $release to choose the version once from all changes since the previous release, then prepare and verify a signed Sprint Coder draft release."
