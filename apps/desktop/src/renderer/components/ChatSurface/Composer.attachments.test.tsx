@@ -4,7 +4,6 @@ import {
   AttachmentDraftList,
   attachmentDraftStatus,
   attachmentInteractionPolicy,
-  clipboardCarriesImage,
   directTurnAttachmentIds,
   focusAfterAttachmentRemoval,
 } from './Composer';
@@ -63,33 +62,6 @@ describe('Composer attachment drafts', () => {
     expect(html).toContain('aria-label="貼り付け画像-20260822-134210.pngを削除"');
     // Main answers the thumbnail request asynchronously, so the first paint is the placeholder.
     expect(html).toContain('composer-attachment-thumb placeholder');
-  });
-
-  it('treats a paste as an image only when no text was copied alongside it', () => {
-    const screenshot = {
-      types: ['Files'],
-      items: [{ kind: 'file', type: 'image/png' }],
-    };
-    expect(clipboardCarriesImage(screenshot)).toBe(true);
-
-    // Spreadsheet and slide editors put a picture of the selection on the clipboard next to the
-    // text. Attaching that picture instead of pasting the text would be wrong far more often.
-    expect(
-      clipboardCarriesImage({
-        types: ['text/plain', 'text/html', 'Files'],
-        items: [
-          { kind: 'string', type: 'text/plain' },
-          { kind: 'file', type: 'image/png' },
-        ],
-      }),
-    ).toBe(false);
-    expect(
-      clipboardCarriesImage({
-        types: ['Files'],
-        items: [{ kind: 'file', type: 'application/pdf' }],
-      }),
-    ).toBe(false);
-    expect(clipboardCarriesImage(null)).toBe(false);
   });
 
   it('allows supported idle direct send but blocks active-Turn attachment queueing', () => {

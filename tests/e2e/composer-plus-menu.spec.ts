@@ -226,25 +226,28 @@ test.describe('composer plus menu', () => {
         );
       });
 
-      // Only the *decision* travels from the Renderer: the paste event carries a file item, and
-      // Main reads the actual bytes off the clipboard itself.
-      await page.evaluate(() => {
-        const textarea = document.querySelector<HTMLTextAreaElement>(
-          '[data-testid="composer-textarea"]',
-        );
-        if (textarea === null) throw new Error('composer textarea missing');
-        const transfer = new DataTransfer();
-        transfer.items.add(
-          new File([new Uint8Array([1, 2, 3])], 'clip.png', { type: 'image/png' }),
-        );
-        textarea.focus();
-        textarea.dispatchEvent(
-          new ClipboardEvent('paste', {
-            clipboardData: transfer,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
+      // Reading the OS clipboard is a capability the page must not have on its own: without a
+      // trusted paste behind it, the bridge refuses before Main is ever asked.
+      const unsolicited = await page.evaluate(() =>
+        (
+          window as unknown as {
+            sprintCoder: { attachments: { paste: (taskId: string) => Promise<unknown> } };
+          }
+        ).sprintCoder.attachments
+          .paste('00000000-0000-4000-8000-000000000000')
+          .then(
+            () => 'resolved',
+            (error: Error) => `rejected: ${error.message}`,
+          ),
+      );
+      expect(unsolicited).toMatch(/^rejected: /);
+      await expect(page.getByTestId('composer-attachment')).toHaveCount(0);
+
+      // A real user-agent paste, not a synthetic event: the preload only arms Main's clipboard read
+      // for a paste the user agent marked `isTrusted`, which is exactly what a page cannot forge.
+      await page.getByTestId('composer-textarea').focus();
+      await app.evaluate(({ BrowserWindow }) => {
+        BrowserWindow.getAllWindows()[0]?.webContents.paste();
       });
 
       const tile = page.getByTestId('composer-attachment');

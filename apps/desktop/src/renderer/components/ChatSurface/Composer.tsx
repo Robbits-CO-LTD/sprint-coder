@@ -23,6 +23,9 @@ import {
 } from './slash-commands';
 import { buildSkillSearchIndex, filterSkillSearchIndex } from './skill-picker';
 import { useTaskBoundary } from '../TaskBoundary';
+// Shared with the preload bridge, which arms the clipboard read from the same predicate — the two
+// must agree on what an image paste is.
+import { clipboardCarriesImage } from '../../../clipboard-image-paste';
 // Shared with the settings dialog (issue #5) so the same option can never be named two ways.
 import {
   EFFORT_DESC,
@@ -1457,26 +1460,6 @@ function formatAttachmentBytes(byteLength: number): string {
   if (byteLength < 1024) return `${byteLength} B`;
   if (byteLength < 1024 * 1024) return `${Math.ceil(byteLength / 1024)} KB`;
   return `${(byteLength / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * Decides whether a paste should become an attachment instead of text.
- *
- * `text/plain` wins whenever it is present: several apps (spreadsheets and slide editors in
- * particular) put a picture of the selection on the clipboard alongside the text, and pasting that
- * picture instead of the text the user copied would be wrong far more often than it is right.
- */
-export function clipboardCarriesImage(
-  data: {
-    types?: readonly string[];
-    items?: ArrayLike<{ kind: string; type: string }>;
-  } | null,
-): boolean {
-  if (!data) return false;
-  if ((data.types ?? []).includes('text/plain')) return false;
-  return Array.from(data.items ?? []).some(
-    (item) => item.kind === 'file' && item.type.startsWith('image/'),
-  );
 }
 
 export function directTurnAttachmentIds(attachments: readonly ImageAttachmentMetadata[]): string[] {
