@@ -31,6 +31,12 @@ import {
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
 import mitLicenseText from '../../../../../LICENSE?raw';
+import {
+  readSoundEffectPreferences,
+  setSoundEffectsEnabled,
+  setSoundEffectsVolume,
+  unlockSoundEffects,
+} from '../lib/ui-sound';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -214,6 +220,7 @@ export function LegacyBody({
           />
         </>
       )}
+      <SoundEffectsGroup />
       <LicenseGroup />
     </div>
   );
@@ -319,6 +326,7 @@ export function WorkspaceBody({
               <CliDetectionGroup />
               <UpdateHealthGroup />
               <DiagnosticsGroup />
+              <SoundEffectsGroup />
               <LicenseGroup />
             </WorkspacePage>
           </div>
@@ -724,6 +732,56 @@ function LicenseGroup() {
         <summary>ライセンス全文を表示</summary>
         <pre data-testid="settings-license-text">{mitLicenseText.trim()}</pre>
       </details>
+    </div>
+  );
+}
+
+function SoundEffectsGroup() {
+  const [preferences, setPreferences] = useState(readSoundEffectPreferences);
+
+  function setEnabled(enabled: boolean): void {
+    setSoundEffectsEnabled(enabled);
+    setPreferences((current) => ({ ...current, enabled }));
+    if (enabled) void unlockSoundEffects();
+  }
+
+  function setVolume(volume: number): void {
+    setSoundEffectsVolume(volume);
+    setPreferences((current) => ({ ...current, volume }));
+  }
+
+  return (
+    <div className="settings-group" data-testid="settings-sound-effects">
+      <span className="settings-field-label">効果音</span>
+      <label className="settings-skill-row">
+        <input
+          type="checkbox"
+          data-testid="settings-sound-effects-enabled"
+          checked={preferences.enabled}
+          onChange={(event) => setEnabled(event.target.checked)}
+        />
+        <span>
+          <strong>Taskの重要な状態を音で知らせる</strong>
+          <small>完了、失敗、承認待ちだけをMinimalサウンドで知らせます。</small>
+        </span>
+      </label>
+      <label className="settings-field" htmlFor="settings-sound-effects-volume">
+        <span className="settings-field-label">音量</span>
+        <select
+          id="settings-sound-effects-volume"
+          data-testid="settings-sound-effects-volume"
+          value={preferences.volume}
+          disabled={!preferences.enabled}
+          onChange={(event) => setVolume(Number(event.target.value))}
+        >
+          {[0.1, 0.2, 0.3, 0.4, 0.5].map((volume) => (
+            <option key={volume} value={volume}>
+              {Math.round(volume * 100)}%
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="settings-hint">画面上の状態表示を補助する機能です。初期状態ではオフです。</p>
     </div>
   );
 }

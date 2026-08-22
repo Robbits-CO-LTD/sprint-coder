@@ -135,6 +135,16 @@ describe('which body the flag selects', () => {
     }
   });
 
+  it('offers muted-by-default Task sound effects in both settings layouts', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-sound-effects"');
+      expect(html).toContain('Taskの重要な状態を音で知らせる');
+      expect(html).toContain('data-testid="settings-sound-effects-enabled"');
+      expect(html).toContain('data-testid="settings-sound-effects-volume"');
+    }
+  });
+
   it('does not add a second heading called Skills', () => {
     // The Skill section's own heading is contributed by SkillSettingsSection. A page heading by the
     // same name would give the sheet two, which is ambiguous to a rotor and to a by-name locator.
