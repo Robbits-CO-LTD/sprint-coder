@@ -137,6 +137,14 @@ export type ImageAttachmentCapability = {
   selectionIdentity: string | null;
 };
 
+export type ImageAttachmentPreview = {
+  id: string;
+  mimeType: 'image/webp';
+  width: number;
+  height: number;
+  base64: string;
+};
+
 export type TurnStage =
   'understanding' | 'planning' | 'executing' | 'waiting_approval' | 'synthesizing';
 
@@ -883,7 +891,9 @@ export interface SprintCoderApi {
   attachments: {
     capability(taskId: string): Promise<ImageAttachmentCapability>;
     pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    paste(taskId: string): Promise<ImageAttachmentMetadata | null>;
     listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    preview(input: { taskId: string; attachmentId: string }): Promise<ImageAttachmentPreview>;
     remove(input: { taskId: string; attachmentId: string }): Promise<void>;
   };
   projects: {

@@ -1,5 +1,6 @@
 import {
   app,
+  clipboard,
   dialog,
   ipcMain,
   MessageChannelMain,
@@ -138,6 +139,8 @@ import {
   imageAttachmentCapabilitySchema,
   imageAttachmentMetadataListSchema,
   imageAttachmentMetadataSchema,
+  imageAttachmentPreviewInputSchema,
+  imageAttachmentPreviewSchema,
   imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -198,6 +201,7 @@ import {
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
 import {
+  clipboardAttachmentFileName,
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
 } from './image-attachment-store';
@@ -1284,10 +1288,33 @@ export class IpcRouter {
       },
     );
     this.handle(
+      IPC_CHANNELS.attachmentsPaste,
+      taskIdPayloadSchema,
+      imageAttachmentMetadataSchema.nullable(),
+      async (input) => {
+        this.persistence.listDraftImageAttachments(input.taskId);
+        // The Renderer reports only that its paste carried an image; the bytes are read here, so a
+        // compromised Renderer cannot inject arbitrary image content into a draft.
+        const image = clipboard.readImage();
+        if (image.isEmpty()) return null;
+        return this.attachmentDraftStore.addFromClipboard(
+          input.taskId,
+          image.toPNG(),
+          clipboardAttachmentFileName(new Date()),
+        );
+      },
+    );
+    this.handle(
       IPC_CHANNELS.attachmentsListDraft,
       taskIdPayloadSchema,
       imageAttachmentMetadataListSchema,
       (input) => this.attachmentDraftStore.list(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsPreview,
+      imageAttachmentPreviewInputSchema,
+      imageAttachmentPreviewSchema,
+      (input) => this.attachmentDraftStore.preview(input.taskId, input.attachmentId),
     );
     this.handleMutation(
       IPC_CHANNELS.attachmentsRemove,

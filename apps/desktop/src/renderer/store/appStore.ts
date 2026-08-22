@@ -323,6 +323,8 @@ type AppState = {
   setDraft(taskId: string, text: string): void;
   refreshDraftAttachments(taskId: string): Promise<void>;
   pickDraftAttachment(taskId: string): Promise<void>;
+  pasteDraftAttachment(taskId: string): Promise<void>;
+  setAttachmentError(taskId: string, message: string | undefined): void;
   removeDraftAttachment(taskId: string, attachmentId: string): Promise<boolean>;
   loadSkills(): Promise<void>;
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
@@ -2038,6 +2040,47 @@ export const useAppStore = create<AppState>((set, get) => {
               picked === null
                 ? '画像の選択をキャンセルしました'
                 : `${picked.fileName}を追加しました`,
+          },
+        }));
+      } catch (error) {
+        set((state) => ({
+          attachmentErrorByTask: {
+            ...state.attachmentErrorByTask,
+            [taskId]: describeError(error),
+          },
+        }));
+      } finally {
+        set((state) => ({
+          attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: false },
+        }));
+      }
+    },
+
+    setAttachmentError(taskId: string, message: string | undefined) {
+      set((state) => ({
+        attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: message },
+      }));
+    },
+
+    async pasteDraftAttachment(taskId: string) {
+      const api = window.sprintCoder?.attachments;
+      if (typeof api?.paste !== 'function' || get().attachmentBusyByTask[taskId]) return;
+      set((state) => ({
+        attachmentBusyByTask: { ...state.attachmentBusyByTask, [taskId]: true },
+        attachmentErrorByTask: { ...state.attachmentErrorByTask, [taskId]: undefined },
+      }));
+      try {
+        const pasted = await api.paste(taskId);
+        // A null result means the OS clipboard held no image by the time Main looked. Nothing was
+        // added and nothing failed, so the draft list is left exactly as it was.
+        if (pasted !== null) await get().refreshDraftAttachments(taskId);
+        set((state) => ({
+          attachmentAnnouncementByTask: {
+            ...state.attachmentAnnouncementByTask,
+            [taskId]:
+              pasted === null
+                ? 'クリップボードに画像がありません'
+                : `${pasted.fileName}を貼り付けました`,
           },
         }));
       } catch (error) {

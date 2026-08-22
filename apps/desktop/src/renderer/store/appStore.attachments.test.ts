@@ -155,6 +155,60 @@ describe('attachment draft store state', () => {
     expect(remove).toHaveBeenCalledWith({ taskId, attachmentId: first.id });
   });
 
+  it('adds a clipboard image and leaves the draft untouched when the clipboard held none', async () => {
+    const paste = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(null);
+    const listDraft = vi.fn().mockResolvedValue([first]);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        attachments: {
+          capability: vi.fn().mockResolvedValue({
+            status: 'supported',
+            reason: null,
+            selectionIdentity: 'selection-1',
+          }),
+          paste,
+          listDraft,
+          remove: vi.fn(),
+        },
+      },
+    });
+
+    await useAppStore.getState().pasteDraftAttachment(taskId);
+    expect(paste).toHaveBeenCalledWith(taskId);
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([first]);
+    expect(useAppStore.getState().attachmentAnnouncementByTask[taskId]).toBe(
+      'one.pngを貼り付けました',
+    );
+
+    await useAppStore.getState().pasteDraftAttachment(taskId);
+    expect(listDraft).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().draftAttachmentsByTask[taskId]).toEqual([first]);
+    expect(useAppStore.getState().attachmentAnnouncementByTask[taskId]).toBe(
+      'クリップボードに画像がありません',
+    );
+    expect(useAppStore.getState().attachmentErrorByTask[taskId]).toBeUndefined();
+  });
+
+  it('surfaces a rejected clipboard paste next to the attachment controls', async () => {
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        attachments: {
+          capability: vi.fn(),
+          paste: vi.fn().mockRejectedValue(new Error('コピーした画像が大きすぎます。')),
+          listDraft: vi.fn(),
+          remove: vi.fn(),
+        },
+      },
+    });
+
+    await useAppStore.getState().pasteDraftAttachment(taskId);
+
+    expect(useAppStore.getState().attachmentErrorByTask[taskId]).toContain(
+      'コピーした画像が大きすぎます。',
+    );
+    expect(useAppStore.getState().attachmentBusyByTask[taskId]).toBe(false);
+  });
+
   it('keeps Task drafts isolated and announces picker cancellation', async () => {
     const otherTaskId = 'task-other';
     vi.stubGlobal('window', {

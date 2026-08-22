@@ -3853,41 +3853,49 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer-attachment-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 10px;
   min-width: 0;
+  /* Room for the remove control, which sits on the tile's top-right corner. */
+  padding: 8px 8px 0 0;
 }
 .composer-attachment-chip {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 6px;
-  max-width: min(360px, 100%);
-  min-width: 0;
-  padding: 4px 4px 4px 8px;
+  position: relative;
+  width: 72px;
+  height: 72px;
   border: 1px solid var(--accent-line);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--accent-wash);
-  font-size: 11.5px;
 }
-.composer-attachment-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.composer-attachment-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 9px;
+  object-fit: cover;
 }
-.composer-attachment-meta {
+.composer-attachment-thumb.placeholder {
+  display: grid;
+  place-items: center;
   color: var(--text-secondary);
-  white-space: nowrap;
 }
 .composer-attachment-remove {
+  position: absolute;
+  top: -8px;
+  right: -8px;
   display: inline-grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  /* The tile underneath is arbitrary image content, so the control carries its own opaque ground
+     rather than relying on contrast with whatever was pasted. */
+  background: var(--bg-elevated);
   color: var(--text-secondary);
 }
 .composer-attachment-remove:hover,
 .composer-attachment-remove:focus-visible {
+  border-color: var(--accent);
   color: var(--text-primary);
   background: var(--bg-hover);
 }

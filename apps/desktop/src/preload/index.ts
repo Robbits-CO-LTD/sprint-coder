@@ -106,6 +106,8 @@ import {
   imageAttachmentCapabilitySchema,
   imageAttachmentMetadataListSchema,
   imageAttachmentMetadataSchema,
+  imageAttachmentPreviewInputSchema,
+  imageAttachmentPreviewSchema,
   imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -290,12 +292,26 @@ const api: SprintCoderApi = {
         imageAttachmentMetadataSchema.nullable(),
         { taskId },
       ),
+    paste: (taskId) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPaste,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataSchema.nullable(),
+        { taskId },
+      ),
     listDraft: (taskId) =>
       invoke(
         IPC_CHANNELS.attachmentsListDraft,
         taskIdPayloadSchema,
         imageAttachmentMetadataListSchema,
         { taskId },
+      ),
+    preview: (input) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPreview,
+        imageAttachmentPreviewInputSchema,
+        imageAttachmentPreviewSchema,
+        input,
       ),
     remove: (input) =>
       invoke(

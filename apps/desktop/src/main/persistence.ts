@@ -3362,6 +3362,11 @@ export type DraftImageAttachmentInput = Readonly<{
   createdAt?: string;
 }>;
 
+export type DraftImageAttachmentBytes = Readonly<{
+  metadata: ImageAttachmentMetadata;
+  bytes: Buffer;
+}>;
+
 type ImageAttachmentRow = Readonly<{
   id: string;
   task_id: string;
@@ -4304,6 +4309,7 @@ export interface PersistenceClient {
   setDraft(taskId: string, draft: string): void;
   createDraftImageAttachment(input: DraftImageAttachmentInput): ImageAttachmentMetadata;
   listDraftImageAttachments(taskId: string): ImageAttachmentMetadata[];
+  readDraftImageAttachment(taskId: string, attachmentId: string): DraftImageAttachmentBytes | null;
   getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[];
   removeDraftImageAttachment(taskId: string, attachmentId: string): void;
   getDraftSkillSelections(taskId: string): TurnSkillSelection[];
@@ -10206,6 +10212,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
       )
       .all(taskId) as ImageAttachmentRow[];
     return imageAttachmentMetadataListSchema.parse(rows.map(toImageAttachmentMetadata));
+  }
+
+  readDraftImageAttachment(taskId: string, attachmentId: string): DraftImageAttachmentBytes | null {
+    this.assertTask(taskId);
+    const row = this.db
+      .prepare(
+        `SELECT * FROM image_attachments
+         WHERE id = ? AND task_id = ? AND state = 'draft' AND message_id IS NULL`,
+      )
+      .get(attachmentId, taskId) as ImageAttachmentRow | undefined;
+    if (row === undefined) return null;
+    // Same integrity gate the accepted path uses: bytes that no longer match what was recorded are
+    // treated as absent rather than rendered.
+    if (
+      row.bytes.byteLength !== row.byte_length ||
+      createHash('sha256').update(row.bytes).digest('hex') !== row.sha256
+    )
+      return null;
+    return { metadata: toImageAttachmentMetadata(row), bytes: row.bytes };
   }
 
   getAcceptedImageAttachments(taskId: string, turnId: string): AcceptedImageAttachment[] {

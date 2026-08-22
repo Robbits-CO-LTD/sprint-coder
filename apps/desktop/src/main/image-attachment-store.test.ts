@@ -7,10 +7,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_ATTACHMENT_MAX_BYTES } from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import {
+  clipboardAttachmentFileName,
+  fitClipboardImage,
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
   normalizeAttachmentFileName,
   readSelectedRegularFile,
+  renderAttachmentPreview,
 } from './image-attachment-store';
 
 const cleanup: string[] = [];
@@ -163,6 +166,84 @@ describe.skipIf(process.platform === 'win32')('ImageAttachmentDraftStore POSIX r
     await expect(
       new ImageAttachmentDraftStore(persistenceMock()).addFromPath('task-1', tooWide),
     ).rejects.toMatchObject({ reason: 'invalid_image' });
+  });
+});
+
+describe('clipboard drafts', () => {
+  it('stores canonical bytes under a generated, displayable name', async () => {
+    const persistence = persistenceMock();
+    const pasted = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: { r: 10, g: 20, b: 30 } },
+    })
+      .png()
+      .toBuffer();
+
+    const result = await new ImageAttachmentDraftStore(persistence).addFromClipboard(
+      'task-1',
+      pasted,
+      clipboardAttachmentFileName(new Date('2026-08-22T13:42:10')),
+    );
+
+    expect(result).toMatchObject({
+      fileName: '貼り付け画像-20260822-134210.png',
+      mimeType: 'image/png',
+    });
+    expect(() => normalizeAttachmentFileName(result.fileName)).not.toThrow();
+  });
+
+  it('leaves an image that already fits untouched', async () => {
+    const bytes = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .png()
+      .toBuffer();
+    expect(await fitClipboardImage(bytes)).toBe(bytes);
+  });
+
+  it('steps a screenshot-sized paste down until it fits the per-image cap', async () => {
+    // Deterministic noise so PNG cannot compress it away — this is what pushes the encode past the
+    // cap the way a full-screen Retina grab does.
+    const width = 1800;
+    const height = 1200;
+    const noise = Buffer.alloc(width * height * 3);
+    let seed = 1;
+    for (let index = 0; index < noise.length; index += 1) {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      noise[index] = seed >>> 24;
+    }
+    const oversized = await sharp(noise, { raw: { width, height, channels: 3 } })
+      .png()
+      .toBuffer();
+    expect(oversized.byteLength).toBeGreaterThan(IMAGE_ATTACHMENT_MAX_BYTES);
+
+    const fitted = await fitClipboardImage(oversized);
+
+    expect(fitted.byteLength).toBeLessThanOrEqual(IMAGE_ATTACHMENT_MAX_BYTES);
+    const metadata = await sharp(fitted).metadata();
+    expect(Math.max(metadata.width ?? 0, metadata.height ?? 0)).toBeLessThanOrEqual(2048);
+  });
+});
+
+describe('draft thumbnails', () => {
+  it('downscales inside the preview bound and returns base64 WebP', async () => {
+    const bytes = await sharp({
+      create: { width: 1200, height: 600, channels: 3, background: { r: 90, g: 90, b: 90 } },
+    })
+      .png()
+      .toBuffer();
+
+    const preview = await renderAttachmentPreview('attachment-1', bytes);
+
+    expect(preview).toMatchObject({ id: 'attachment-1', mimeType: 'image/webp' });
+    expect(preview.width).toBe(320);
+    expect(preview.height).toBe(160);
+    expect((await sharp(Buffer.from(preview.base64, 'base64')).metadata()).format).toBe('webp');
+  });
+
+  it('reports unusable stored bytes as a validation error rather than a broken image', async () => {
+    await expect(
+      renderAttachmentPreview('attachment-1', Buffer.from('not an image')),
+    ).rejects.toThrow(ImageAttachmentValidationError);
   });
 });
 
