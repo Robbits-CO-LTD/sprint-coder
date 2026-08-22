@@ -41,6 +41,20 @@ drag/drop, paste, OCR, thumbnails, editing, and generated-image reuse. Issue #17
 design to Windows with a native no-reparse read primitive; it does not introduce a parallel
 attachment path or relax the file-identity checks.
 
+Clipboard paste and Composer thumbnails landed after C1a as an additive follow-up. Neither adds a
+second custody path: paste keeps the bytes in Main (`clipboard.readImage()`, never Renderer-supplied
+content) and reuses the same canonicalizing decoder, and thumbnails are downscaled copies delivered
+as base64 for a `data:` URL.
+
+Reading the OS clipboard is a capability the Renderer does not otherwise hold, so the paste channel
+is not a Renderer-callable primitive. The preload arms it from its isolated world only for a `paste`
+event the user agent marked `isTrusted` and that carries an image, and each arming authorizes one
+read within a short window (`src/clipboard-image-paste.ts`). A page that calls
+`attachments.paste()` on its own — the polling channel a compromised Renderer would want — is
+refused before Main is asked.
+
+Drag/drop, OCR, and editing remain non-goals.
+
 Cheapest coherent proof follows the checkpoints. Deterministic E2E patches Electron's native dialog
 and covers selection/removal/focus, Task isolation, and restart hydration only. Direct acceptance and
 dispatch use Main/Runtime integration tests with a fake Runtime boundary. The existing E2E CLI

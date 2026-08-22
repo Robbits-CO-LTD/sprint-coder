@@ -105,6 +105,8 @@ import {
   imageAttachmentCapabilitySchema,
   imageAttachmentMetadataListSchema,
   imageAttachmentMetadataSchema,
+  imageAttachmentPreviewInputSchema,
+  imageAttachmentPreviewSchema,
   imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -156,6 +158,7 @@ import {
 } from '@sprint-coder/contracts';
 import { createTeamSubscriptionBuffer } from './team-subscription-buffer';
 import { WINDOW_CONTROL_CHANNELS } from '../window-controls';
+import { clipboardCarriesImage, createTrustedImagePasteGate } from '../clipboard-image-paste';
 
 async function invoke<TInput, TOutput>(
   channel: string,
@@ -208,6 +211,17 @@ function getTaskId(value: unknown): string | undefined {
     ? value.taskId
     : undefined;
 }
+
+const trustedImagePaste = createTrustedImagePasteGate(() => Date.now());
+// Capture phase: this runs before any listener the page installed, and `isTrusted` is false for
+// every event the page can dispatch itself.
+window.addEventListener(
+  'paste',
+  (event) => {
+    if (event.isTrusted && clipboardCarriesImage(event.clipboardData)) trustedImagePaste.arm();
+  },
+  true,
+);
 
 const api: SprintCoderApi = {
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
@@ -289,12 +303,34 @@ const api: SprintCoderApi = {
         imageAttachmentMetadataSchema.nullable(),
         { taskId },
       ),
+    paste: (taskId) => {
+      // Main reads the OS clipboard for this call, so the page cannot be allowed to make it at
+      // will. Only a `paste` the user agent marked trusted arms the gate, and only in this isolated
+      // world — see createTrustedImagePasteGate.
+      if (!trustedImagePaste.consume())
+        return Promise.reject(
+          new Error('画像の貼り付けは、入力欄でのCtrl+V / Cmd+Vからのみ実行できます'),
+        );
+      return invoke(
+        IPC_CHANNELS.attachmentsPaste,
+        taskIdPayloadSchema,
+        imageAttachmentMetadataSchema.nullable(),
+        { taskId },
+      );
+    },
     listDraft: (taskId) =>
       invoke(
         IPC_CHANNELS.attachmentsListDraft,
         taskIdPayloadSchema,
         imageAttachmentMetadataListSchema,
         { taskId },
+      ),
+    preview: (input) =>
+      invoke(
+        IPC_CHANNELS.attachmentsPreview,
+        imageAttachmentPreviewInputSchema,
+        imageAttachmentPreviewSchema,
+        input,
       ),
     remove: (input) =>
       invoke(

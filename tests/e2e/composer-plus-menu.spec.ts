@@ -185,6 +185,110 @@ test.describe('composer plus menu', () => {
     }
   });
 
+  test('attaches the clipboard image on paste and shows it as a thumbnail', async () => {
+    const dir = createUserDataDir('composer-image-paste');
+    let app: ElectronApplication | null = null;
+    // The clipboard is system-wide, so whatever the developer running this suite had copied is put
+    // back before the test returns.
+    let restore: (() => Promise<void>) | null = null;
+    try {
+      app = await launchApp(dir, undefined, {
+        SPRINT_CODER_MULTI_PROVIDER_MODEL_PICKER_V2: '0',
+      });
+      const page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await page.getByTestId('runtime-selector').click();
+      await page.getByTestId('runtime-option-codex').click();
+      await expect(page.getByTestId('runtime-selector')).toHaveText('Codex');
+      await page.getByTestId('model-selector').click();
+      await page.getByTestId('model-option-gpt-5.6-terra').click();
+      await expect(page.getByTestId('model-selector')).toHaveText('GPT-5.6-Terra');
+
+      const previous = await app.evaluate(({ clipboard }) => {
+        const image = clipboard.readImage();
+        return { text: clipboard.readText(), image: image.isEmpty() ? null : image.toDataURL() };
+      });
+      const owner = app;
+      restore = async () => {
+        await owner.evaluate(({ clipboard, nativeImage }, saved) => {
+          if (saved.image !== null)
+            clipboard.writeImage(nativeImage.createFromDataURL(saved.image));
+          else if (saved.text !== '') clipboard.writeText(saved.text);
+          else clipboard.clear();
+        }, previous);
+      };
+      await app.evaluate(({ clipboard, nativeImage }) => {
+        // 8x8 opaque PNG — enough for the decoder, small enough to inline.
+        clipboard.writeImage(
+          nativeImage.createFromDataURL(
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWM4YSOCFTEMLQkAh11GAUtH1v4AAAAASUVORK5CYII=',
+          ),
+        );
+      });
+
+      // Reading the OS clipboard is a capability the page must not have on its own: without a
+      // trusted paste behind it, the bridge refuses before Main is ever asked.
+      const unsolicited = await page.evaluate(() =>
+        (
+          window as unknown as {
+            sprintCoder: { attachments: { paste: (taskId: string) => Promise<unknown> } };
+          }
+        ).sprintCoder.attachments
+          .paste('00000000-0000-4000-8000-000000000000')
+          .then(
+            () => 'resolved',
+            (error: Error) => `rejected: ${error.message}`,
+          ),
+      );
+      expect(unsolicited).toMatch(/^rejected: /);
+      await expect(page.getByTestId('composer-attachment')).toHaveCount(0);
+
+      // A real user-agent paste, not a synthetic event: the preload only arms Main's clipboard read
+      // for a paste the user agent marked `isTrusted`, which is exactly what a page cannot forge.
+      await page.getByTestId('composer-textarea').focus();
+      await app.evaluate(({ BrowserWindow }) => {
+        BrowserWindow.getAllWindows()[0]?.webContents.paste();
+      });
+
+      const tile = page.getByTestId('composer-attachment');
+      await expect(tile).toHaveCount(1);
+      await expect(tile).toHaveAttribute('title', /^貼り付け画像-\d{8}-\d{6}\.png · PNG · /);
+      // The thumbnail is a `data:` URL built from bytes Main downscaled — never a path or a URL.
+      await expect(page.getByTestId('composer-attachment-thumbnail')).toHaveAttribute(
+        'src',
+        /^data:image\/webp;base64,/,
+      );
+      // The pasted image did not also land in the text as characters.
+      await expect(page.getByTestId('composer-textarea')).toHaveValue('');
+
+      await page.getByRole('button', { name: /貼り付け画像-.*を削除/ }).click();
+      await expect(page.getByTestId('composer-attachment')).toHaveCount(0);
+
+      // A 6K full-screen capture is 20.4M pixels — past the decoder's pixel envelope, and small
+      // enough in bytes that no byte-driven step-down would ever look at it. Upscaling the fixture
+      // in Main is how the test gets one without moving 80MB of bitmap across the boundary.
+      await app.evaluate(({ clipboard, nativeImage }) => {
+        clipboard.writeImage(
+          nativeImage
+            .createFromDataURL(
+              'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWM4YSOCFTEMLQkAh11GAUtH1v4AAAAASUVORK5CYII=',
+            )
+            .resize({ width: 6016, height: 3384 }),
+        );
+      });
+      await page.getByTestId('composer-textarea').focus();
+      await app.evaluate(({ BrowserWindow }) => {
+        BrowserWindow.getAllWindows()[0]?.webContents.paste();
+      });
+      await expect(page.getByTestId('composer-attachment')).toHaveCount(1);
+      await expect(page.locator('.composer-attachment-error')).toHaveCount(0);
+    } finally {
+      if (restore !== null) await restore();
+      await closeApp(app);
+      removeUserDataDir(dir);
+    }
+  });
+
   test('the menu stays inside the Leader node on the Team Canvas', async () => {
     // `.team-canvas` is `overflow: clip` and the Leader node is a fixed 720x620, so a popover that
     // opens downward or overflows would be silently cut off there.

@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AttachmentDraftList,
+  attachmentDraftStatus,
   attachmentInteractionPolicy,
   directTurnAttachmentIds,
   focusAfterAttachmentRemoval,
@@ -12,6 +13,7 @@ describe('Composer attachment drafts', () => {
   it('shows metadata, current-Turn scope, and an accessible remove control', () => {
     const html = renderToStaticMarkup(
       <AttachmentDraftList
+        taskId="task-1"
         attachments={[
           {
             id: 'attachment-1',
@@ -24,17 +26,42 @@ describe('Composer attachment drafts', () => {
         busy={false}
         removeRefs={{ current: new Map<string, HTMLButtonElement>() }}
         onRemove={() => undefined}
-        status="画像添付の送信は準備中です。画像を削除すると通常のメッセージを送信できます。"
+        status="送信するとこの画像が参照されます"
         errorId="attachment-error"
       />,
     );
 
     expect(html).toContain('参照範囲: この送信のみ');
-    expect(html).toContain('設計図.png');
-    expect(html).toContain('PNG · 1.5 MB');
+    expect(html).toContain('設計図.png · PNG · 1.5 MB');
     expect(html).toContain('aria-label="設計図.pngを削除"');
     expect(html).toContain('aria-describedby="attachment-error"');
-    expect(html).toContain('画像添付の送信は準備中です');
+    expect(html).toContain('送信するとこの画像が参照されます');
+  });
+
+  it('renders a thumbnail tile whose name, media type, and size stay accessible', () => {
+    const html = renderToStaticMarkup(
+      <AttachmentDraftList
+        taskId="task-1"
+        attachments={[
+          {
+            id: 'attachment-1',
+            fileName: '貼り付け画像-20260822-134210.png',
+            mimeType: 'image/png',
+            byteLength: 204_800,
+            createdAt: '2026-08-22T13:42:10.000Z',
+          },
+        ]}
+        busy={false}
+        removeRefs={{ current: new Map<string, HTMLButtonElement>() }}
+        onRemove={() => undefined}
+        status="送信するとこの画像が参照されます"
+      />,
+    );
+
+    expect(html).toContain('title="貼り付け画像-20260822-134210.png · PNG · 200 KB"');
+    expect(html).toContain('aria-label="貼り付け画像-20260822-134210.pngを削除"');
+    // Main answers the thumbnail request asynchronously, so the first paint is the placeholder.
+    expect(html).toContain('composer-attachment-thumb placeholder');
   });
 
   it('allows supported idle direct send but blocks active-Turn attachment queueing', () => {
@@ -72,6 +99,43 @@ describe('Composer attachment drafts', () => {
     ).toBe('画像添付は送信機能の準備完了後に利用できます');
   });
 
+  it('never says attachments are unsendable while the policy allows sending them', () => {
+    expect(
+      attachmentDraftStatus({
+        turnActive: false,
+        goalRequested: false,
+        capabilityStatus: 'supported',
+        capabilityReason: '',
+      }),
+    ).toBe('送信するとこの画像が参照されます');
+    expect(
+      attachmentDraftStatus({
+        turnActive: true,
+        goalRequested: false,
+        capabilityStatus: 'supported',
+        capabilityReason: '',
+      }),
+    ).toContain('実行中のTurnにはキュー追加できません');
+    expect(
+      attachmentDraftStatus({
+        turnActive: false,
+        goalRequested: true,
+        capabilityStatus: 'supported',
+        capabilityReason: '',
+      }),
+    ).toContain('Goal入力中');
+    expect(
+      attachmentDraftStatus({
+        turnActive: false,
+        goalRequested: false,
+        capabilityStatus: 'unsupported',
+        capabilityReason: '画像添付はCodex CLI Runtimeで利用できます',
+      }),
+    ).toBe(
+      '画像添付はCodex CLI Runtimeで利用できます。画像を削除すると通常のメッセージを送信できます',
+    );
+  });
+
   it('passes every draft ID to direct start in visible order', () => {
     expect(
       directTurnAttachmentIds([
@@ -96,6 +160,7 @@ describe('Composer attachment drafts', () => {
   it('keeps a focused remove control focusable while its request is busy', () => {
     const html = renderToStaticMarkup(
       <AttachmentDraftList
+        taskId="task-1"
         attachments={[
           {
             id: 'attachment-1',

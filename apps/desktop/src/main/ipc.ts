@@ -1,5 +1,6 @@
 import {
   app,
+  clipboard,
   dialog,
   ipcMain,
   MessageChannelMain,
@@ -136,6 +137,8 @@ import {
   imageAttachmentCapabilitySchema,
   imageAttachmentMetadataListSchema,
   imageAttachmentMetadataSchema,
+  imageAttachmentPreviewInputSchema,
+  imageAttachmentPreviewSchema,
   imageAttachmentRemoveInputSchema,
   taskArchivedInputSchema,
   taskCreateInputSchema,
@@ -196,6 +199,8 @@ import {
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
 import {
+  boundClipboardImageSize,
+  clipboardAttachmentFileName,
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
 } from './image-attachment-store';
@@ -1279,10 +1284,39 @@ export class IpcRouter {
       },
     );
     this.handle(
+      IPC_CHANNELS.attachmentsPaste,
+      taskIdPayloadSchema,
+      imageAttachmentMetadataSchema.nullable(),
+      async (input) => {
+        this.persistence.listDraftImageAttachments(input.taskId);
+        // The Renderer reports only that its paste carried an image; the bytes are read here, so a
+        // compromised Renderer cannot inject arbitrary image content into a draft.
+        const image = clipboard.readImage();
+        if (image.isEmpty()) return null;
+        // Bound the bitmap before encoding: a 6K capture is past the decoder's pixel envelope, so
+        // handing its PNG straight to the draft store would fail as "not a still image".
+        const bounded = boundClipboardImageSize(image.getSize());
+        const png = (
+          bounded === null ? image : image.resize({ ...bounded, quality: 'better' })
+        ).toPNG();
+        return this.attachmentDraftStore.addFromClipboard(
+          input.taskId,
+          png,
+          clipboardAttachmentFileName(new Date()),
+        );
+      },
+    );
+    this.handle(
       IPC_CHANNELS.attachmentsListDraft,
       taskIdPayloadSchema,
       imageAttachmentMetadataListSchema,
       (input) => this.attachmentDraftStore.list(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.attachmentsPreview,
+      imageAttachmentPreviewInputSchema,
+      imageAttachmentPreviewSchema,
+      (input) => this.attachmentDraftStore.preview(input.taskId, input.attachmentId),
     );
     this.handleMutation(
       IPC_CHANNELS.attachmentsRemove,

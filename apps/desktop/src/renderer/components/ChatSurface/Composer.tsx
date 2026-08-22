@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent, RefObject } from 'react';
+import type { ClipboardEvent, KeyboardEvent, RefObject } from 'react';
 import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
 import { useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
@@ -23,6 +23,9 @@ import {
 } from './slash-commands';
 import { buildSkillSearchIndex, filterSkillSearchIndex } from './skill-picker';
 import { useTaskBoundary } from '../TaskBoundary';
+// Shared with the preload bridge, which arms the clipboard read from the same predicate — the two
+// must agree on what an image paste is.
+import { clipboardCarriesImage } from '../../../clipboard-image-paste';
 // Shared with the settings dialog (issue #5) so the same option can never be named two ways.
 import {
   EFFORT_DESC,
@@ -245,6 +248,8 @@ export function Composer({ taskId }: { taskId: string }) {
   const attachmentError = useAppStore((s) => s.attachmentErrorByTask[taskId]);
   const attachmentAnnouncement = useAppStore((s) => s.attachmentAnnouncementByTask[taskId]);
   const pickDraftAttachment = useAppStore((s) => s.pickDraftAttachment);
+  const pasteDraftAttachment = useAppStore((s) => s.pasteDraftAttachment);
+  const setAttachmentError = useAppStore((s) => s.setAttachmentError);
   const removeDraftAttachment = useAppStore((s) => s.removeDraftAttachment);
   const toast = useAppStore((s) => s.toast);
   const dismissToast = useAppStore((s) => s.dismissToast);
@@ -450,6 +455,22 @@ export function Composer({ taskId }: { taskId: string }) {
   function updateImageRequested(next: boolean): void {
     imageRequestRevisionRef.current += 1;
     setImageRequested(next);
+  }
+
+  // Ctrl+V / Cmd+V with an image on the clipboard attaches it instead of pasting nothing visible.
+  // Only the *decision* is made here — Main reads the clipboard bytes itself (see
+  // main/image-attachment-store.ts), so the Renderer never carries image content.
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    if (!clipboardCarriesImage(event.clipboardData)) return;
+    event.preventDefault();
+    if (!attachmentPolicy.attachSupported) {
+      setAttachmentError(
+        taskId,
+        attachmentPolicy.attachUnavailableReason ?? '画像を添付できません',
+      );
+      return;
+    }
+    void pasteDraftAttachment(taskId);
   }
 
   async function handleRemoveAttachment(attachmentId: string): Promise<void> {
@@ -756,16 +777,19 @@ export function Composer({ taskId }: { taskId: string }) {
             )}
             {draftAttachments.length > 0 && (
               <AttachmentDraftList
+                taskId={taskId}
                 attachments={draftAttachments}
                 busy={attachmentBusy}
                 removeRefs={attachmentRemoveRefs}
                 onRemove={(attachmentId) => void handleRemoveAttachment(attachmentId)}
                 errorId={attachmentErrorId}
-                status={
-                  turnActive
-                    ? '画像添付は実行中のTurnにはキュー追加できません。完了後に送信してください'
-                    : '画像添付の送信は準備中です。画像を削除すると通常のメッセージを送信できます。'
-                }
+                status={attachmentDraftStatus({
+                  turnActive,
+                  goalRequested,
+                  capabilityStatus: attachmentCapability?.status ?? 'pending',
+                  capabilityReason:
+                    attachmentCapability?.reason ?? '画像添付の準備状況を確認中です',
+                })}
               />
             )}
             <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -815,6 +839,7 @@ export function Composer({ taskId }: { taskId: string }) {
               onClick={(event) => setComposerCursor(event.currentTarget.selectionStart)}
               onKeyUp={(event) => setComposerCursor(event.currentTarget.selectionStart)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               aria-label="メッセージ入力"
               aria-describedby={attachmentErrorId}
               aria-autocomplete="list"
@@ -1441,6 +1466,27 @@ export function directTurnAttachmentIds(attachments: readonly ImageAttachmentMet
   return attachments.map(({ id }) => id);
 }
 
+/**
+ * The line under the draft tiles, which states what will happen to these images on the next send.
+ *
+ * It tracks the same conditions as `attachmentInteractionPolicy`: whenever `sendBlocked` is false
+ * the copy has to say the images will be sent, or a pasted image reads as one the app is going to
+ * ignore.
+ */
+export function attachmentDraftStatus(input: {
+  turnActive: boolean;
+  goalRequested: boolean;
+  capabilityStatus: 'pending' | 'supported' | 'unsupported';
+  capabilityReason: string;
+}): string {
+  if (input.turnActive)
+    return '画像添付は実行中のTurnにはキュー追加できません。完了後に送信してください';
+  if (input.goalRequested) return 'Goal入力中は画像を送信できません。Goalを取り消すと送信できます';
+  if (input.capabilityStatus !== 'supported')
+    return `${input.capabilityReason}。画像を削除すると通常のメッセージを送信できます`;
+  return '送信するとこの画像が参照されます';
+}
+
 export function attachmentInteractionPolicy(input: {
   draftCount: number;
   turnActive: boolean;
@@ -1487,7 +1533,58 @@ export function focusAfterAttachmentRemoval(input: {
   target?.focus({ preventScroll: true });
 }
 
+function attachmentDraftLabel(attachment: ImageAttachmentMetadata): string {
+  return `${attachment.fileName} · ${attachment.mimeType.replace('image/', '').toUpperCase()} · ${formatAttachmentBytes(attachment.byteLength)}`;
+}
+
+/**
+ * Bytes stay in Main; this asks it for a downscaled copy and builds a `data:` URL from the base64
+ * it returns — never a path or an http(s) URL, so showing a thumbnail can neither read the
+ * filesystem nor issue a request (the rule GeneratedImageCard follows for the same reason).
+ */
+function AttachmentThumbnail({
+  taskId,
+  attachment,
+}: {
+  taskId: string;
+  attachment: ImageAttachmentMetadata;
+}) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const preview = window.sprintCoder?.attachments?.preview;
+    if (typeof preview !== 'function') return;
+    let cancelled = false;
+    void preview({ taskId, attachmentId: attachment.id })
+      .then((image) => {
+        if (!cancelled) setDataUrl(`data:${image.mimeType};base64,${image.base64}`);
+      })
+      // A thumbnail that cannot be rendered falls back to the placeholder below. The attachment
+      // itself is unaffected, so this is not surfaced as an attachment error.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, attachment.id]);
+
+  if (dataUrl === null)
+    return (
+      <span className="composer-attachment-thumb placeholder" aria-hidden="true">
+        <Paperclip size={16} />
+      </span>
+    );
+  return (
+    <img
+      className="composer-attachment-thumb"
+      data-testid="composer-attachment-thumbnail"
+      src={dataUrl}
+      alt=""
+    />
+  );
+}
+
 export function AttachmentDraftList({
+  taskId,
   attachments,
   busy,
   removeRefs,
@@ -1495,6 +1592,7 @@ export function AttachmentDraftList({
   status,
   errorId,
 }: {
+  taskId: string;
   attachments: readonly ImageAttachmentMetadata[];
   busy: boolean;
   removeRefs: RefObject<Map<string, HTMLButtonElement>>;
@@ -1507,13 +1605,17 @@ export function AttachmentDraftList({
       <div className="composer-attachment-scope">参照範囲: この送信のみ</div>
       <div className="composer-attachment-list">
         {attachments.map((attachment) => (
-          <div className="composer-attachment-chip" key={attachment.id}>
-            <Paperclip size={14} />
-            <span className="composer-attachment-name">{attachment.fileName}</span>
-            <span className="composer-attachment-meta">
-              {attachment.mimeType.replace('image/', '').toUpperCase()} ·{' '}
-              {formatAttachmentBytes(attachment.byteLength)}
-            </span>
+          <div
+            className="composer-attachment-chip"
+            key={attachment.id}
+            data-testid="composer-attachment"
+            title={attachmentDraftLabel(attachment)}
+          >
+            <AttachmentThumbnail taskId={taskId} attachment={attachment} />
+            {/* The tile is the image itself, as in the picker preview. Name, media type, and size
+                stay in the accessible name and the tooltip so nothing is lost to sighted keyboard
+                or screen-reader users. */}
+            <span className="sr-only">{attachmentDraftLabel(attachment)}</span>
             <button
               ref={(node) => {
                 if (node) removeRefs.current.set(attachment.id, node);

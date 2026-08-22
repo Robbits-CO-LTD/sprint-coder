@@ -152,6 +152,14 @@ if (runsWithElectronAbi)
       expect(() => persistence.removeDraftImageAttachment(otherTask.id, created.id)).toThrow(
         NotFoundError,
       );
+      // Thumbnail reads are Task-owned like every other draft operation, and an unknown draft is
+      // absent rather than an error the Composer would have to special-case.
+      expect(persistence.readDraftImageAttachment(task.id, created.id)).toEqual({
+        metadata: created,
+        bytes,
+      });
+      expect(persistence.readDraftImageAttachment(otherTask.id, created.id)).toBeNull();
+      expect(persistence.readDraftImageAttachment(task.id, otherTask.id)).toBeNull();
 
       for (let index = 1; index < 4; index += 1)
         persistence.createDraftImageAttachment({

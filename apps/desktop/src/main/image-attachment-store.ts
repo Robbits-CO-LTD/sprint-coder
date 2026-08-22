@@ -5,8 +5,10 @@ import { basename } from 'node:path';
 import sharp, { type FormatEnum, type Metadata, type OutputInfo, type Sharp } from 'sharp';
 import {
   IMAGE_ATTACHMENT_MAX_BYTES,
+  IMAGE_ATTACHMENT_PREVIEW_MAX_EDGE,
   type ImageAttachmentMetadata,
   type ImageAttachmentMimeType,
+  type ImageAttachmentPreview,
 } from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import { readWindowsNoReparseImageFile } from './native-file-publication';
@@ -16,7 +18,12 @@ const IMAGE_ATTACHMENT_MAX_PIXELS = 16_777_216;
 const FORBIDDEN_FILE_NAME = /[/\\\u202a-\u202e\u2066-\u2069]/u;
 
 export type ImageAttachmentValidationReason =
-  'unsupported_platform' | 'unsafe_file' | 'file_too_large' | 'invalid_file_name' | 'invalid_image';
+  | 'unsupported_platform'
+  | 'unsafe_file'
+  | 'file_too_large'
+  | 'invalid_file_name'
+  | 'invalid_image'
+  | 'clipboard_image_too_large';
 
 export class ImageAttachmentValidationError extends Error {
   constructor(readonly reason: ImageAttachmentValidationReason) {
@@ -37,6 +44,8 @@ function imageAttachmentValidationMessage(reason: ImageAttachmentValidationReaso
       return 'PNG・JPEG・WebPの静止画像を選んでください。';
     case 'unsafe_file':
       return 'この画像は安全に読み込めません。通常のファイルを選び直してください。';
+    case 'clipboard_image_too_large':
+      return 'コピーした画像が大きすぎます。縮小してからコピーし直してください。';
   }
 }
 
@@ -58,12 +67,140 @@ export class ImageAttachmentDraftStore {
     });
   }
 
+  /**
+   * Adds bytes the OS clipboard handed to Main.
+   *
+   * The Renderer never supplies image bytes: it only reports that the paste it received carried an
+   * image, and Main reads the clipboard itself. So this path keeps the same custody rule as the
+   * picker — bytes enter through Main, are decoded and re-encoded by `canonicalizeImage`, and the
+   * Renderer only ever sees public metadata.
+   */
+  async addFromClipboard(
+    taskId: string,
+    bytes: Buffer,
+    fileName: string,
+  ): Promise<ImageAttachmentMetadata> {
+    const canonical = await canonicalizeImage(await fitClipboardImage(bytes));
+    return this.persistence.createDraftImageAttachment({
+      taskId,
+      fileName: normalizeAttachmentFileName(fileName),
+      mimeType: canonical.mimeType,
+      bytes: canonical.bytes,
+    });
+  }
+
   list(taskId: string): ImageAttachmentMetadata[] {
     return this.persistence.listDraftImageAttachments(taskId);
   }
 
+  async preview(taskId: string, attachmentId: string): Promise<ImageAttachmentPreview> {
+    const found = this.persistence.readDraftImageAttachment(taskId, attachmentId);
+    if (found === null) throw new ImageAttachmentValidationError('invalid_image');
+    return renderAttachmentPreview(found.metadata.id, found.bytes);
+  }
+
   remove(taskId: string, attachmentId: string): void {
     this.persistence.removeDraftImageAttachment(taskId, attachmentId);
+  }
+}
+
+/**
+ * The size a clipboard image has to be resized to before it can be decoded at all, or `null` when
+ * it already fits.
+ *
+ * A 6K capture is 20.4M pixels — past the decoder's pixel envelope, and small enough in bytes that
+ * the byte-driven step-down below would never look at it. Bounding happens at the `NativeImage` the
+ * clipboard handed over (Chromium has already decoded it, so no untrusted decode is involved) and
+ * before the PNG encode, which is what makes those captures pasteable instead of rejected as "not
+ * a still image".
+ */
+export function boundClipboardImageSize(size: {
+  width: number;
+  height: number;
+}): { width: number; height: number } | null {
+  const { width, height } = size;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return null;
+  const scale = Math.min(
+    1,
+    Math.sqrt(IMAGE_ATTACHMENT_MAX_PIXELS / (width * height)),
+    IMAGE_ATTACHMENT_MAX_DIMENSION / width,
+    IMAGE_ATTACHMENT_MAX_DIMENSION / height,
+  );
+  if (scale >= 1) return null;
+  let bounded = {
+    width: Math.max(1, Math.floor(width * scale)),
+    height: Math.max(1, Math.floor(height * scale)),
+  };
+  // Floating-point scale plus flooring lands inside the envelope in practice; this closes the edge
+  // rather than trusting that, and terminates because both edges shrink.
+  while (
+    bounded.width * bounded.height > IMAGE_ATTACHMENT_MAX_PIXELS &&
+    (bounded.width > 1 || bounded.height > 1)
+  )
+    bounded = {
+      width: Math.max(1, bounded.width - 1),
+      height: Math.max(1, bounded.height - 1),
+    };
+  return bounded;
+}
+
+/**
+ * A pasted screenshot is whatever size the display is, and a Retina full-screen grab routinely
+ * encodes past the 5 MiB per-image cap. Refusing it would make Ctrl+V unusable on exactly the
+ * screens people paste most, so the long edge is stepped down until the encode fits. Steps are
+ * fixed rather than computed so the same clipboard always yields the same attachment.
+ */
+export const CLIPBOARD_IMAGE_DOWNSCALE_EDGES = [2048, 1536, 1024] as const;
+
+export async function fitClipboardImage(bytes: Buffer): Promise<Buffer> {
+  if (bytes.byteLength <= IMAGE_ATTACHMENT_MAX_BYTES) return bytes;
+  for (const edge of CLIPBOARD_IMAGE_DOWNSCALE_EDGES) {
+    const resized = await sharp(bytes, {
+      animated: false,
+      failOn: 'warning',
+      limitInputPixels: IMAGE_ATTACHMENT_MAX_PIXELS,
+      unlimited: false,
+    })
+      .rotate()
+      .resize({ width: edge, height: edge, fit: 'inside', withoutEnlargement: true })
+      .png()
+      .toBuffer()
+      .catch(() => null);
+    if (resized !== null && resized.byteLength <= IMAGE_ATTACHMENT_MAX_BYTES) return resized;
+  }
+  throw new ImageAttachmentValidationError('clipboard_image_too_large');
+}
+
+export async function renderAttachmentPreview(
+  attachmentId: string,
+  bytes: Buffer,
+): Promise<ImageAttachmentPreview> {
+  try {
+    const output = await sharp(bytes, {
+      animated: false,
+      failOn: 'warning',
+      limitInputPixels: IMAGE_ATTACHMENT_MAX_PIXELS,
+      unlimited: false,
+    })
+      .rotate()
+      .resize({
+        width: IMAGE_ATTACHMENT_PREVIEW_MAX_EDGE,
+        height: IMAGE_ATTACHMENT_PREVIEW_MAX_EDGE,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({ quality: 72 })
+      .toBuffer({ resolveWithObject: true });
+    return {
+      id: attachmentId,
+      mimeType: 'image/webp',
+      width: output.info.width,
+      height: output.info.height,
+      base64: output.data.toString('base64'),
+    };
+  } catch (error) {
+    if (error instanceof ImageAttachmentValidationError) throw error;
+    throw new ImageAttachmentValidationError('invalid_image');
   }
 }
 
@@ -80,6 +217,23 @@ function readSelectedWindowsFile(selectedPath: string): Buffer {
       throw new ImageAttachmentValidationError('file_too_large');
     throw new ImageAttachmentValidationError('unsafe_file');
   }
+}
+
+/**
+ * A clipboard image has no name of its own, so one is minted here. The timestamp keeps repeated
+ * pastes distinguishable in the Composer chip list, which is the only place this string is shown.
+ */
+export function clipboardAttachmentFileName(now: Date): string {
+  const stamp = [
+    now.getFullYear(),
+    `${now.getMonth() + 1}`.padStart(2, '0'),
+    `${now.getDate()}`.padStart(2, '0'),
+    '-',
+    `${now.getHours()}`.padStart(2, '0'),
+    `${now.getMinutes()}`.padStart(2, '0'),
+    `${now.getSeconds()}`.padStart(2, '0'),
+  ].join('');
+  return `貼り付け画像-${stamp}.png`;
 }
 
 export function normalizeAttachmentFileName(selectedPath: string): string {

@@ -1076,6 +1076,24 @@ export type ImageAttachmentCapability = z.infer<typeof imageAttachmentCapability
 export const imageAttachmentRemoveInputSchema = z
   .object({ taskId: idSchema, attachmentId: idSchema })
   .strict();
+export const imageAttachmentPreviewInputSchema = z
+  .object({ taskId: idSchema, attachmentId: idSchema })
+  .strict();
+/** Longest edge of the Composer thumbnail Main renders for a draft image. */
+export const IMAGE_ATTACHMENT_PREVIEW_MAX_EDGE = 320;
+export const imageAttachmentPreviewSchema = z
+  .object({
+    id: idSchema,
+    mimeType: z.literal('image/webp'),
+    width: z.number().int().min(1).max(IMAGE_ATTACHMENT_PREVIEW_MAX_EDGE),
+    height: z.number().int().min(1).max(IMAGE_ATTACHMENT_PREVIEW_MAX_EDGE),
+    /** base64 of a downscaled copy. The renderer turns this into a `data:` URL, so showing a
+     * thumbnail can neither read the filesystem nor issue a request (same rule as generated
+     * images). Full-size bytes never leave Main. */
+    base64: z.string().min(1).max(2_000_000),
+  })
+  .strict();
+export type ImageAttachmentPreview = z.infer<typeof imageAttachmentPreviewSchema>;
 export const imageAttachmentIdsSchema = z
   .array(idSchema)
   .max(IMAGE_ATTACHMENT_MAX_COUNT)
@@ -3200,7 +3218,11 @@ export interface SprintCoderApi {
   attachments: {
     capability(taskId: string): Promise<ImageAttachmentCapability>;
     pick(taskId: string): Promise<ImageAttachmentMetadata | null>;
+    /** Adds the image currently on the OS clipboard. Resolves `null` when it holds none. */
+    paste(taskId: string): Promise<ImageAttachmentMetadata | null>;
     listDraft(taskId: string): Promise<ImageAttachmentMetadata[]>;
+    /** Downscaled bytes as base64, for a `data:` URL thumbnail. Rejects an unknown draft. */
+    preview(input: { taskId: string; attachmentId: string }): Promise<ImageAttachmentPreview>;
     remove(input: { taskId: string; attachmentId: string }): Promise<void>;
   };
   projects: {
@@ -3463,7 +3485,9 @@ export const IPC_CHANNELS = {
   tasksSetDraft: 'sprint-coder:tasks:set-draft',
   attachmentsCapability: 'sprint-coder:attachments:capability',
   attachmentsPick: 'sprint-coder:attachments:pick',
+  attachmentsPaste: 'sprint-coder:attachments:paste',
   attachmentsListDraft: 'sprint-coder:attachments:list-draft',
+  attachmentsPreview: 'sprint-coder:attachments:preview',
   attachmentsRemove: 'sprint-coder:attachments:remove',
   projectsList: 'sprint-coder:projects:list',
   projectsPickFolders: 'sprint-coder:projects:pick-folders',
