@@ -39,13 +39,21 @@ describe('evaluateNativeMutationPlatformGate', () => {
     });
   });
 
-  it('denies when the platform is not darwin', () => {
+  it('allows Windows when the packaged native mutation boundary is proven', () => {
     const result = evaluateNativeMutationPlatformGate({
       ...validInput(),
       platform: 'win32',
     });
+    expect(result).toEqual({ allowed: true, reasons: [] });
+  });
+
+  it('denies unsupported platforms', () => {
+    const result = evaluateNativeMutationPlatformGate({
+      ...validInput(),
+      platform: 'linux',
+    });
     expect(result.allowed).toBe(false);
-    expect(result.reasons).toContain('PLATFORM_NOT_DARWIN');
+    expect(result.reasons).toContain('PLATFORM_UNSUPPORTED');
   });
 
   it('denies when packaged load evidence is null', () => {
@@ -156,7 +164,7 @@ describe('evaluateNativeMutationPlatformGate', () => {
     });
     expect(result.allowed).toBe(false);
     expect(result.reasons).toEqual([
-      'PLATFORM_NOT_DARWIN',
+      'PLATFORM_UNSUPPORTED',
       'TRUSTED_LOAD_EVIDENCE_MISSING',
       'PROBE_UNAVAILABLE',
       'PROBE_MUTATION_NOT_TRUE',

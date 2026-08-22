@@ -50,7 +50,8 @@ export function evaluateNativeMutationPlatformGate(
 
   const reasons: string[] = [];
 
-  if (input['platform'] !== 'darwin') reasons.push('PLATFORM_NOT_DARWIN');
+  if (input['platform'] !== 'darwin' && input['platform'] !== 'win32')
+    reasons.push('PLATFORM_UNSUPPORTED');
 
   if (
     !isValidPackagedLoadEvidence(input['packagedLoadEvidence']) &&
