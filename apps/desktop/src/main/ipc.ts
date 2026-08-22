@@ -287,6 +287,13 @@ class ProviderImageAttachmentError extends Error {
   }
 }
 
+class ProviderTurnFailureError extends Error {
+  constructor(readonly cause: ProviderSafeFailureCause) {
+    super(`Provider Turn failed at ${cause.failureStage}`);
+    this.name = 'ProviderTurnFailureError';
+  }
+}
+
 export function contextFragmentsForRuntime(
   kind: 'codex' | 'claude' | 'provider',
   fragments: readonly RuntimeContextFragment[],
@@ -338,6 +345,23 @@ export function providerMessagesFromContext(
   if (inlineImages !== undefined && imageMessageMatches !== 1)
     throw new ProviderImageAttachmentError();
   return messages;
+}
+
+export async function* providerEventsWithSafeFailure<T>(
+  source: AsyncIterable<T>,
+  modelPreparation: 'not_required' | 'completed',
+): AsyncIterable<T> {
+  try {
+    yield* source;
+  } catch (error) {
+    if (
+      error instanceof ProviderStreamTimeoutError ||
+      error instanceof ProviderQuotaExceededError ||
+      error instanceof ProviderTurnFailureError
+    )
+      throw error;
+    throw new ProviderTurnFailureError(providerStreamFailureCause(modelPreparation, false));
+  }
 }
 
 /**
@@ -515,6 +539,14 @@ import {
   providerEventsWithDeadline,
 } from './provider-stream-deadline';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
+import {
+  buildProviderFailureDiagnostic,
+  providerCauseFromDeadline,
+  providerCauseFromNormalizedError,
+  providerCauseFromPreparation,
+  providerStreamFailureCause,
+  type ProviderSafeFailureCause,
+} from './provider-failure-diagnostic';
 import { UpdateInstallMutationGate } from './update-install-mutation-gate';
 import { ProviderVerificationService } from './provider-verification';
 import { OpenAIProviderClient, parseOpenAICredential } from './openai-provider-client';
@@ -5538,11 +5570,13 @@ export class IpcRouter {
         selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
     );
     const controller = new AbortController();
+    const providerStartedAtMs = Date.now();
     this.providerAbortByTurn.set(started.turnId, controller);
     let synthesizing = false;
     const messageId = randomUUID();
     let runtime: ProviderRuntime | undefined;
     let modelLease: ProviderModelLease | undefined;
+    let diagnosticProvider: Readonly<{ providerId: string; profileId: string }> | undefined;
     let workspaceToolSnapshot: ToolCatalogSnapshot | undefined;
     const streamBudget = new ProviderStreamBudget();
     try {
@@ -5553,6 +5587,10 @@ export class IpcRouter {
         connectionId,
         controller.signal,
       );
+      diagnosticProvider = Object.freeze({
+        providerId: connection.providerId,
+        profileId: connection.providerId,
+      });
       const modelId = started.modelSelection.requestedModel;
       if (modelId === null || connection.providerId !== started.modelSelection.requestedProvider)
         throw new Error('Provider Turn model selection is invalid');
@@ -5695,26 +5733,29 @@ export class IpcRouter {
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
-        for await (const providerEvent of providerEventsWithDeadline(
-          runtime.execute(
-            connection,
+        for await (const providerEvent of providerEventsWithSafeFailure(
+          providerEventsWithDeadline(
+            runtime.execute(
+              connection,
+              {
+                executionId,
+                connectionId,
+                modelId,
+                messages: dispatchRound.messages,
+                ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
+                  ? {}
+                  : { tools: dispatchRound.tools }),
+              },
+              controller.signal,
+              streamBudget,
+            ),
             {
               executionId,
-              connectionId,
-              modelId,
-              messages: dispatchRound.messages,
-              ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
-                ? {}
-                : { tools: dispatchRound.tools }),
+              firstEventTimeoutMs: PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+              idleTimeoutMs: PROVIDER_IDLE_TIMEOUT_MS,
             },
-            controller.signal,
-            streamBudget,
           ),
-          {
-            executionId,
-            firstEventTimeoutMs: PROVIDER_FIRST_EVENT_TIMEOUT_MS,
-            idleTimeoutMs: PROVIDER_IDLE_TIMEOUT_MS,
-          },
+          connection.providerId === 'ollama' ? 'completed' : 'not_required',
         )) {
           if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
           if (providerEvent.type === 'tool_call') {
@@ -5783,9 +5824,20 @@ export class IpcRouter {
                 messages.splice(index, 1);
             continue;
           }
-          throw new Error('Provider execution failed');
+          const cause = providerCauseFromNormalizedError(
+            roundError,
+            connection.providerId === 'ollama' ? 'completed' : 'not_required',
+          );
+          if (cause === null) throw new Error('Provider execution was canceled');
+          throw new ProviderTurnFailureError(cause);
         }
-        if (!roundCompleted) throw new Error('Provider stream ended without a completion event');
+        if (!roundCompleted)
+          throw new ProviderTurnFailureError(
+            providerStreamFailureCause(
+              connection.providerId === 'ollama' ? 'completed' : 'not_required',
+              false,
+            ),
+          );
         if (
           roundToolCalls.length === 0 &&
           shouldBlockProviderLeaderCompletion(
@@ -5892,17 +5944,34 @@ export class IpcRouter {
       if (error instanceof OllamaModelPreparationError) {
         controller.abort();
         if (error.category === 'canceled') return;
-        await this.mailbox.run(taskId, () => {
-          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-          this.publish(
-            this.persistence.appendDelta(
-              taskId,
-              started.turnId,
-              messageId,
-              `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
-            ),
-          );
-          this.finishAndAdvance(taskId, started.turnId, 'failed');
+        await this.finishProviderFailureWithDiagnostic({
+          taskId,
+          turnId: started.turnId,
+          messageId,
+          synthesizing,
+          startedAtMs: providerStartedAtMs,
+          provider: diagnosticProvider,
+          cause: providerCauseFromPreparation(error.category),
+          userMessage: error.userMessage,
+        });
+        return;
+      }
+      if (error instanceof ProviderTurnFailureError) {
+        if (runtime !== undefined)
+          void this.cancelProviderExecution(
+            runtime,
+            controller,
+            this.providerExecutionIdByTurn.get(started.turnId) ?? started.turnId,
+          ).catch(() => undefined);
+        else controller.abort();
+        await this.finishProviderFailureWithDiagnostic({
+          taskId,
+          turnId: started.turnId,
+          messageId,
+          synthesizing,
+          startedAtMs: providerStartedAtMs,
+          provider: diagnosticProvider,
+          cause: error.cause,
         });
         return;
       }
@@ -5919,18 +5988,26 @@ export class IpcRouter {
               : (this.providerExecutionIdByTurn.get(started.turnId) ?? started.turnId),
           ).catch(() => undefined);
         else controller.abort();
-        await this.mailbox.run(taskId, () => {
-          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
-          if (error instanceof ProviderStreamTimeoutError)
-            this.publish(
-              this.persistence.appendDelta(
-                taskId,
-                started.turnId,
-                messageId,
-                `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
-              ),
-            );
-          this.finishAndAdvance(taskId, started.turnId, 'failed');
+        await this.finishProviderFailureWithDiagnostic({
+          taskId,
+          turnId: started.turnId,
+          messageId,
+          synthesizing,
+          startedAtMs: providerStartedAtMs,
+          provider: diagnosticProvider,
+          cause:
+            error instanceof ProviderStreamTimeoutError
+              ? providerCauseFromDeadline(
+                  error.phase,
+                  diagnosticProvider?.providerId === 'ollama' ? 'completed' : 'not_required',
+                )
+              : providerStreamFailureCause(
+                  diagnosticProvider?.providerId === 'ollama' ? 'completed' : 'not_required',
+                  false,
+                ),
+          ...(error instanceof ProviderStreamTimeoutError
+            ? { userMessage: error.userMessage }
+            : {}),
         });
         return;
       }
@@ -5947,6 +6024,89 @@ export class IpcRouter {
         this.providerAbortByTurn.delete(started.turnId);
       this.providerExecutionIdByTurn.delete(started.turnId);
     }
+  }
+
+  private async finishProviderFailureWithDiagnostic(input: {
+    taskId: string;
+    turnId: string;
+    messageId: string;
+    synthesizing: boolean;
+    startedAtMs: number;
+    provider: Readonly<{ providerId: string; profileId: string }> | undefined;
+    cause: ProviderSafeFailureCause;
+    userMessage?: string | undefined;
+  }): Promise<void> {
+    await this.mailbox.run(input.taskId, () => {
+      if (
+        this.canceledRuntimeTurns.has(input.turnId) ||
+        this.turnRuntimes.get(input.turnId) !== 'provider' ||
+        this.persistence.getActiveTurnId(input.taskId) !== input.turnId
+      )
+        return;
+      if (input.userMessage !== undefined)
+        try {
+          this.publish(
+            this.persistence.appendDelta(
+              input.taskId,
+              input.turnId,
+              input.messageId,
+              `${input.synthesizing ? '\n\n' : ''}${input.userMessage}`,
+            ),
+          );
+        } catch {
+          // Failure text is helpful but secondary; diagnostic storage and durable terminalization
+          // must still run when a late message append loses its ownership race.
+        }
+      let diagnosticId: string | null = null;
+      if (input.provider !== undefined)
+        try {
+          const diagnostic = buildProviderFailureDiagnostic({
+            cause: input.cause,
+            providerId: input.provider.providerId,
+            profileId: input.provider.profileId,
+            elapsedMs: Date.now() - input.startedAtMs,
+            appVersion: typeof app?.getVersion === 'function' ? app.getVersion() : 'unknown',
+          });
+          if (
+            this.canceledRuntimeTurns.has(input.turnId) ||
+            this.turnRuntimes.get(input.turnId) !== 'provider' ||
+            this.persistence.getActiveTurnId(input.taskId) !== input.turnId
+          )
+            return;
+          diagnosticId = this.persistence.recordRuntimeFailureDiagnostic(
+            input.taskId,
+            input.turnId,
+            diagnostic,
+          ).diagnosticId;
+        } catch {
+          try {
+            secureLogger.error('Provider failure diagnostic could not be persisted', {
+              process: 'main',
+              runtimeKind: 'provider',
+              taskId: input.taskId,
+              turnId: input.turnId,
+              failureStage: input.cause.failureStage,
+              category: input.cause.category,
+            });
+          } catch {
+            // Logging is also best-effort and cannot replace durable Turn terminalization.
+          }
+        }
+      try {
+        secureLogger.error('Provider Turn failed', {
+          process: 'main',
+          runtimeKind: 'provider',
+          taskId: input.taskId,
+          turnId: input.turnId,
+          failureStage: input.cause.failureStage,
+          category: input.cause.category,
+          diagnosticId,
+        });
+      } catch {
+        // Preserve terminalization even if the logging sink itself fails.
+      }
+      this.finishAndAdvance(input.taskId, input.turnId, 'failed');
+    });
   }
 
   private async beginProviderSynthesis(taskId: string, turnId: string): Promise<void> {

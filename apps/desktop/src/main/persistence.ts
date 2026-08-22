@@ -201,11 +201,11 @@ import {
   modelSelectionForRuntime,
 } from './connection-identity';
 import { sanitizeTerminalOutput } from './ansi-sanitizer';
-import {
-  isRuntimeFailureDiagnostic,
-  type RuntimeFailureDiagnostic,
-} from '../runtime-host/protocol';
 import { RUNTIME_DIAGNOSTIC_MAX_BYTES } from '../runtime-host/runtime-failure-diagnostics';
+import {
+  isPersistedFailureDiagnostic,
+  type PersistedFailureDiagnostic,
+} from './provider-failure-diagnostic';
 import { pathComparisonKey, pathsEquivalent } from '../path-comparison';
 import {
   legacyMutationWorkspaceKey,
@@ -3367,6 +3367,57 @@ const migrations = [
         ON turn_skill_candidates(turn_id, state, ordinal);
     `,
   },
+  {
+    version: 74,
+    checksum: 'provider-failure-diagnostics-v74',
+    sql: `
+      ALTER TABLE runtime_failure_diagnostics RENAME TO runtime_failure_diagnostics_v69;
+      DROP INDEX runtime_failure_diagnostics_task_created_idx;
+      CREATE TABLE runtime_failure_diagnostics (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude', 'provider')),
+        failure_stage TEXT NOT NULL CHECK (
+          (runtime_kind IN ('codex', 'claude') AND failure_stage IN (
+            'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+            'startup_error', 'spawn_error', 'abnormal_exit'
+          )) OR
+          (runtime_kind = 'provider' AND failure_stage IN (
+            'model_preparation', 'first_event_timeout', 'idle_timeout', 'provider_error',
+            'network', 'stream_error'
+          ))
+        ),
+        diagnostic_json TEXT NOT NULL
+          CHECK (length(CAST(diagnostic_json AS BLOB)) <= 16384),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO runtime_failure_diagnostics(
+        id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+      )
+      SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+      FROM runtime_failure_diagnostics_v69;
+      CREATE TEMP TABLE runtime_failure_diagnostics_v74_guard(
+        valid INTEGER NOT NULL CHECK (valid = 1)
+      );
+      INSERT INTO runtime_failure_diagnostics_v74_guard(valid)
+      SELECT CASE WHEN
+        (SELECT COUNT(*) FROM runtime_failure_diagnostics) =
+          (SELECT COUNT(*) FROM runtime_failure_diagnostics_v69)
+        AND NOT EXISTS (
+          SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+          FROM runtime_failure_diagnostics_v69
+          EXCEPT
+          SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+          FROM runtime_failure_diagnostics
+        )
+      THEN 1 ELSE 0 END;
+      DROP TABLE runtime_failure_diagnostics_v74_guard;
+      DROP TABLE runtime_failure_diagnostics_v69;
+      CREATE INDEX runtime_failure_diagnostics_task_created_idx
+        ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3641,7 +3692,7 @@ export type BackgroundCompletionRecord = Readonly<{
   attachedAt: string | null;
   runtimeAckedAt: string | null;
 }>;
-export type PersistedRuntimeFailureDiagnostic = RuntimeFailureDiagnostic &
+export type PersistedRuntimeFailureDiagnostic = PersistedFailureDiagnostic &
   Readonly<{ taskId: string; turnId: string }>;
 type PersistedJsonValue =
   | string
@@ -4341,7 +4392,7 @@ export interface PersistenceClient {
   recordRuntimeFailureDiagnostic(
     taskId: string,
     turnId: string,
-    diagnostic: RuntimeFailureDiagnostic,
+    diagnostic: PersistedFailureDiagnostic,
   ): PersistedRuntimeFailureDiagnostic;
   getRuntimeFailureDiagnostic(input: {
     taskId?: string | undefined;
@@ -10729,36 +10780,54 @@ export class SqlitePersistenceClient implements PersistenceClient {
   recordRuntimeFailureDiagnostic(
     taskId: string,
     turnId: string,
-    diagnostic: RuntimeFailureDiagnostic,
+    diagnostic: PersistedFailureDiagnostic,
   ): PersistedRuntimeFailureDiagnostic {
     this.getTurn(taskId, turnId);
-    if (!isRuntimeFailureDiagnostic(diagnostic)) throw new Error('Invalid Runtime diagnostic');
-    const safeDiagnostic: RuntimeFailureDiagnostic = {
-      version: 1,
-      diagnosticId: diagnostic.diagnosticId,
-      runtimeKind: diagnostic.runtimeKind,
-      failureStage: diagnostic.failureStage,
-      elapsedMs: diagnostic.elapsedMs,
-      appVersion: diagnostic.appVersion,
-      cliVersion: diagnostic.cliVersion,
-      ...(diagnostic.capabilityMismatch === undefined
-        ? {}
-        : { capabilityMismatch: diagnostic.capabilityMismatch }),
-      ...(diagnostic.cliResolution === undefined
-        ? {}
-        : { cliResolution: diagnostic.cliResolution }),
-      teamMcp: diagnostic.teamMcp,
-      lastRecognizedNotification: diagnostic.lastRecognizedNotification,
-      lastReceivedNotification: diagnostic.lastReceivedNotification,
-      unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
-      stderrObserved: diagnostic.stderrObserved,
-      stderrTruncated: diagnostic.stderrTruncated,
-      ...(diagnostic.codexIsolation === undefined
-        ? {}
-        : { codexIsolation: diagnostic.codexIsolation }),
-      recordedAt: new Date().toISOString(),
-      ...(diagnostic.reasonCode === undefined ? {} : { reasonCode: diagnostic.reasonCode }),
-    };
+    if (!isPersistedFailureDiagnostic(diagnostic)) throw new Error('Invalid Runtime diagnostic');
+    const recordedAt = new Date().toISOString();
+    const safeDiagnostic: PersistedFailureDiagnostic =
+      diagnostic.runtimeKind === 'provider'
+        ? {
+            version: 1,
+            diagnosticId: diagnostic.diagnosticId,
+            runtimeKind: 'provider',
+            failureStage: diagnostic.failureStage,
+            category: diagnostic.category,
+            retryable: diagnostic.retryable,
+            providerId: diagnostic.providerId,
+            profileId: diagnostic.profileId,
+            providerCode: diagnostic.providerCode,
+            modelPreparation: diagnostic.modelPreparation,
+            elapsedMs: diagnostic.elapsedMs,
+            appVersion: diagnostic.appVersion,
+            recordedAt,
+          }
+        : {
+            version: 1,
+            diagnosticId: diagnostic.diagnosticId,
+            runtimeKind: diagnostic.runtimeKind,
+            failureStage: diagnostic.failureStage,
+            elapsedMs: diagnostic.elapsedMs,
+            appVersion: diagnostic.appVersion,
+            cliVersion: diagnostic.cliVersion,
+            ...(diagnostic.capabilityMismatch === undefined
+              ? {}
+              : { capabilityMismatch: diagnostic.capabilityMismatch }),
+            ...(diagnostic.cliResolution === undefined
+              ? {}
+              : { cliResolution: diagnostic.cliResolution }),
+            teamMcp: diagnostic.teamMcp,
+            lastRecognizedNotification: diagnostic.lastRecognizedNotification,
+            lastReceivedNotification: diagnostic.lastReceivedNotification,
+            unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
+            stderrObserved: diagnostic.stderrObserved,
+            stderrTruncated: diagnostic.stderrTruncated,
+            ...(diagnostic.codexIsolation === undefined
+              ? {}
+              : { codexIsolation: diagnostic.codexIsolation }),
+            recordedAt,
+            ...(diagnostic.reasonCode === undefined ? {} : { reasonCode: diagnostic.reasonCode }),
+          };
     const serialized = JSON.stringify(safeDiagnostic);
     if (Buffer.byteLength(serialized, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES)
       throw new Error('Runtime diagnostic exceeds byte limit');
@@ -10790,7 +10859,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .get(turnId) as { task_id: string; turn_id: string; diagnostic_json: string } | undefined;
     if (existing === undefined) throw new Error('Runtime diagnostic was not persisted');
     const existingDiagnostic = JSON.parse(existing.diagnostic_json) as unknown;
-    if (!isRuntimeFailureDiagnostic(existingDiagnostic))
+    if (!isPersistedFailureDiagnostic(existingDiagnostic))
       throw new Error('Persisted Runtime diagnostic is invalid');
     return Object.freeze({
       ...existingDiagnostic,
@@ -10828,7 +10897,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     } catch {
       return null;
     }
-    if (!isRuntimeFailureDiagnostic(diagnostic)) return null;
+    if (!isPersistedFailureDiagnostic(diagnostic)) return null;
     return Object.freeze({ ...diagnostic, taskId: row.task_id, turnId: row.turn_id });
   }
 
