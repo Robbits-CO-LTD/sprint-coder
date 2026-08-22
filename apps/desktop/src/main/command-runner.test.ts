@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { renameSync, writeFileSync } from 'node:fs';
 import {
   access,
@@ -285,23 +286,41 @@ describe('CommandRunner', () => {
       roots.push(workspace, outside);
       const nested = join(workspace, 'existing', 'nested');
       const existing = join(nested, 'before.txt');
+      const protectedDirectory = join(workspace, 'protected');
+      const protectedFile = join(protectedDirectory, 'must-stay.txt');
       await mkdir(nested, { recursive: true });
+      await mkdir(protectedDirectory);
       await writeFile(existing, 'before');
+      await writeFile(protectedFile, 'protected');
+      execFileSync('C:\\Windows\\System32\\icacls.exe', [
+        protectedDirectory,
+        '/inheritance:d',
+        '/Q',
+      ]);
+      const aclBefore = [workspace, protectedDirectory].map((path) =>
+        execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+      );
       const spec = await prepareExecutionSpec({
         workspacePath: workspace,
         executable: process.execPath,
         argv: [
           '-e',
-          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); fs.writeFileSync(${JSON.stringify(existing)},fs.readFileSync(${JSON.stringify(existing)},'utf8')+'-after'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
+          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); fs.writeFileSync(${JSON.stringify(existing)},fs.readFileSync(${JSON.stringify(existing)},'utf8')+'-after'); let protectedDenied=false; let outsideDenied=false; try { fs.writeFileSync(${JSON.stringify(protectedFile)},'changed'); } catch { protectedDenied=true; } try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { outsideDenied=true; } process.exitCode=protectedDenied&&outsideDenied?23:24;`,
         ],
       });
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
-      expect(result.exitCode).toBe(7);
+      expect(result.exitCode).toBe(23);
       await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
       await expect(readFile(existing, 'utf8')).resolves.toBe('before-after');
+      await expect(readFile(protectedFile, 'utf8')).resolves.toBe('protected');
       await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       });
+      expect(
+        [workspace, protectedDirectory].map((path) =>
+          execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+        ),
+      ).toEqual(aclBefore);
     },
   );
 

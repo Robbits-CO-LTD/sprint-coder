@@ -338,6 +338,9 @@ fn sid_string(sid: PSID) -> Option<String> {
 }
 
 fn set_workspace_acl(path: &Path, sid: &str) -> bool {
+    // workspace-write is still bounded by the user's existing OS ACLs. Grant at the root so
+    // ordinary descendants inherit access, but deliberately do not traverse and rewrite entries
+    // whose inheritance was disabled; doing so is O(files) and stalls commands in large repos.
     let grant = format!("*{sid}:(OI)(CI)M");
     let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
     command.arg(path).args(["/grant", &grant, "/C", "/Q"]);

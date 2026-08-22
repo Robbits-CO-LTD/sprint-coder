@@ -88,20 +88,38 @@ describe('hasUnsafeWindowsDllImport', () => {
   });
 
   const windowsIt = process.platform === 'win32' ? it : it.skip;
-  windowsIt('does not recurse into an allowlisted system DLL beside the executable', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-system-dll-'));
-    try {
-      const executable = join(directory, 'command.exe');
-      await writeFile(executable, peWithImport('KERNEL32.dll'));
-      await writeFile(join(directory, 'kernel32.dll'), Buffer.from('not a PE'));
+  windowsIt('does not recurse through allowlisted imports of a System32 executable', async () => {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    expect(systemRoot).toBeDefined();
 
-      const sealed = await sealExecutablePath(executable);
+    const sealed = await sealExecutablePath(join(systemRoot!, 'System32', 'where.exe'), true);
 
-      expect(sealed.dependencies).toEqual([]);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    expect(sealed.dependencies).toEqual([]);
   });
+
+  windowsIt(
+    'still seals an allowlisted DLL deployed beside an application executable',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-system-dll-'));
+      try {
+        const executable = join(directory, 'command.exe');
+        const dependency = join(directory, 'vcruntime140.dll');
+        await writeFile(executable, peWithImport('VCRUNTIME140.dll'));
+        await writeFile(dependency, peWithImport('KERNEL32.dll'));
+
+        const sealed = await sealExecutablePath(executable);
+
+        expect(sealed.dependencies).toEqual([
+          expect.objectContaining({
+            canonicalPath: dependency,
+            importName: 'vcruntime140.dll',
+          }),
+        ]);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 function peWithImport(name: string, delay = false): Buffer {

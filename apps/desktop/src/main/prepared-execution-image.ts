@@ -627,11 +627,12 @@ async function sealExecutablePathInternal(
       throw new Error('Executable changed while sealing approval');
     const imports = parsePeImports(bytes);
     if (imports === null) throw new Error('Windows execution image has an invalid PE import table');
+    const imageIsInSystem32 = await isWindowsSystem32Image(canonicalPath);
     const dependencies: SealedExecutableIdentity[] = [];
     for (const name of imports) {
       if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error(`Windows execution image has an unsafe DLL import name: ${name}`);
-      if (WINDOWS_SYSTEM_DLL.test(name)) continue;
+      if (imageIsInSystem32 && WINDOWS_SYSTEM_DLL.test(name)) continue;
       const dependencyPath = join(dirname(canonicalPath), name);
       let localDependency = true;
       try {
@@ -681,15 +682,31 @@ async function sealExecutablePathInternal(
 }
 
 async function isWindowsSystem32Dependency(name: string): Promise<boolean> {
-  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-  if (systemRoot === undefined) return false;
+  const systemDirectory = await windowsSystem32Directory();
+  if (systemDirectory === undefined) return false;
   try {
-    const systemDirectory = await realpath(join(systemRoot, 'System32'));
     const dependency = await realpath(join(systemDirectory, name));
     if (dirname(dependency).toLowerCase() !== systemDirectory.toLowerCase()) return false;
     return (await stat(dependency, { bigint: true })).isFile();
   } catch {
     return false;
+  }
+}
+
+async function isWindowsSystem32Image(path: string): Promise<boolean> {
+  const systemDirectory = await windowsSystem32Directory();
+  return (
+    systemDirectory !== undefined && dirname(path).toLowerCase() === systemDirectory.toLowerCase()
+  );
+}
+
+async function windowsSystem32Directory(): Promise<string | undefined> {
+  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+  if (systemRoot === undefined) return undefined;
+  try {
+    return await realpath(join(systemRoot, 'System32'));
+  } catch {
+    return undefined;
   }
 }
 
