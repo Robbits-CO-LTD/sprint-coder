@@ -509,16 +509,22 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
 }
 
 napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
-    napi_throw_type_error(env, nullptr, "holdPreparedExecutionImage requires one absolute path");
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 || argc > 2) {
+    napi_throw_type_error(env, nullptr,
+                          "holdPreparedExecutionImage requires a path and optional policy");
     return nullptr;
   }
   std::string path_utf8;
   std::wstring path;
   if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path))
     return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  bool allow_hardlinks = false;
+  if (argc == 2 && napi_get_value_bool(env, argv[1], &allow_hardlinks) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared image hardlink policy");
+    return nullptr;
+  }
   const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
   if (full_length == 0) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
   std::vector<wchar_t> full_buffer(full_length, L'\0');
@@ -553,7 +559,8 @@ napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
   FILE_BASIC_INFO before_basic{};
   FILE_STANDARD_INFO before_standard{};
   constexpr LONGLONG kMaximumExecutionImageBytes = 512LL * 1024LL * 1024LL;
-  if (!QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard) ||
+  if (!QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard,
+                                !allow_hardlinks) ||
       before_standard.EndOfFile.QuadPart < 1 ||
       before_standard.EndOfFile.QuadPart > kMaximumExecutionImageBytes) {
     CloseHandle(file);
@@ -577,7 +584,8 @@ napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
   FILE_ID_INFO after_id{};
   FILE_BASIC_INFO after_basic{};
   FILE_STANDARD_INFO after_standard{};
-  if (!QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) ||
+  if (!QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard,
+                                !allow_hardlinks) ||
       !SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
                          after_standard)) {
     CloseHandle(file);

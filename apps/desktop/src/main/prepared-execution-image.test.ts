@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
+  prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
 } from './prepared-execution-image';
@@ -95,6 +96,21 @@ describe('hasUnsafeWindowsDllImport', () => {
     const sealed = await sealExecutablePath(join(systemRoot!, 'System32', 'where.exe'), true);
 
     expect(sealed.dependencies).toEqual([]);
+  });
+
+  windowsIt('launches a System32 image from its protected original directory', async () => {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    expect(systemRoot).toBeDefined();
+    const sealed = await sealExecutablePath(join(systemRoot!, 'System32', 'where.exe'), true);
+    const prepared = await prepareExecutionImage(sealed);
+    try {
+      expect(prepared.launchPath).toBe(await realpath(join(systemRoot!, 'System32', 'where.exe')));
+      expect(dirname(prepared.launchPath).toLocaleLowerCase()).toBe(
+        (await realpath(join(systemRoot!, 'System32'))).toLocaleLowerCase(),
+      );
+    } finally {
+      await prepared.close();
+    }
   });
 
   windowsIt(

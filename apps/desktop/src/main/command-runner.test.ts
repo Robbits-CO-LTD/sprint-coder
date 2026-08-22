@@ -354,6 +354,24 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'runs a held System32 command directly from its protected directory',
+    async () => {
+      if (!(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+      expect(systemRoot).toBeDefined();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: join(systemRoot!, 'System32', 'cmd.exe'),
+        argv: ['/d', '/s', '/c', 'echo command ok'],
+      });
+
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(0);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
     'holds the per-workspace AppContainer ACL lease until concurrent helpers finish',
     async () => {
       if (!(await probeSandboxRunner()).available) return;

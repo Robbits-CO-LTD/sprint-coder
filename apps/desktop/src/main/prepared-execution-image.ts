@@ -69,7 +69,10 @@ export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentit
 
 type WindowsExecutionAddon = Readonly<{
   readNoReparseImageFile(path: string, allowHardlinks?: boolean): Buffer;
-  holdPreparedExecutionImage(path: string): Readonly<{ id: string; bytes: Buffer }>;
+  holdPreparedExecutionImage(
+    path: string,
+    allowHardlinks?: boolean,
+  ): Readonly<{ id: string; bytes: Buffer }>;
   closePreparedExecutionImage(id: string): void;
 }>;
 type PosixExecutionAddon = Readonly<{
@@ -83,6 +86,8 @@ export async function prepareExecutionImage(
   expected: SealedExecutableIdentity,
   allowScript = true,
 ): Promise<PreparedExecutionImage> {
+  const trustedWindowsPath =
+    process.platform === 'win32' && (await isWindowsSystem32Image(expected.canonicalPath));
   const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-execution-'));
   await chmod(directory, 0o700);
   const imageDirectory = join(directory, 'bin');
@@ -103,11 +108,16 @@ export async function prepareExecutionImage(
         ? await readExpectedWindowsImage(expected, 'approved executable')
         : await readStablePosixImage(expected);
     assertDigestAndSize(sourceBytes, expected);
-    await writeFile(destination, sourceBytes, { flag: 'wx', mode: expected.mode & 0o777 });
-    await chmod(destination, expected.mode & 0o777);
+    if (!trustedWindowsPath) {
+      await writeFile(destination, sourceBytes, { flag: 'wx', mode: expected.mode & 0o777 });
+      await chmod(destination, expected.mode & 0o777);
+    }
     let heldBytes: Buffer;
     if (process.platform === 'win32') {
-      const prepared = windowsAddon().holdPreparedExecutionImage(destination);
+      const prepared = windowsAddon().holdPreparedExecutionImage(
+        trustedWindowsPath ? expected.canonicalPath : destination,
+        trustedWindowsPath && expected.allowSourceHardlinks === true,
+      );
       windowsId = prepared.id;
       heldBytes = prepared.bytes;
     } else if (process.platform === 'linux') {
@@ -141,7 +151,7 @@ export async function prepareExecutionImage(
       }
     }
     assertDigestAndSize(heldBytes, expected);
-    if (process.platform === 'win32')
+    if (process.platform === 'win32' && !trustedWindowsPath)
       windowsDependencyIds.push(
         ...(await prepareWindowsSideBySideImages(imageDirectory, expected.dependencies ?? [])),
       );
@@ -158,8 +168,9 @@ export async function prepareExecutionImage(
     // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
     // root-owned, non-writable system images (or descriptor-fed scripts) below.
     const descriptor = process.platform === 'linux' ? undefined : held?.fd;
-    const baseLaunchPath =
-      process.platform === 'linux'
+    const baseLaunchPath = trustedWindowsPath
+      ? expected.canonicalPath
+      : process.platform === 'linux'
         ? trustedLinuxPath
           ? expected.canonicalPath
           : `/proc/${process.pid}/fd/${sealedDescriptor}`
