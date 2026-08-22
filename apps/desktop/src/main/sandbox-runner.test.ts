@@ -17,24 +17,16 @@ describe('sandbox runner boundary', () => {
   });
 
   it.runIf(process.platform === 'win32')(
-    'passes the Windows AppContainer probe or reports a typed fail-closed reason',
+    'finishes the Windows AppContainer probe without the outer timeout fallback',
     async () => {
       const capability = await probeSandboxRunner();
-      if (capability.available)
-        expect(capability).toEqual({
-          available: true,
-          backend: 'windows-appcontainer',
-          reason: null,
-        });
-      else {
-        if (capability.backend === 'windows-appcontainer')
-          expect(capability.reason).toMatch(/^appcontainer_[a-z0-9_]+$/u);
-        else {
-          expect(capability.backend).toBe('win32-unavailable');
-          expect(capability.reason).toMatch(/^sandbox_runner_probe_failed_[a-z0-9_]+$/u);
-        }
-      }
+      expect(capability).toEqual({
+        available: true,
+        backend: 'windows-appcontainer',
+        reason: null,
+      });
     },
+    15_000,
   );
 
   it.skipIf(process.platform === 'win32')(

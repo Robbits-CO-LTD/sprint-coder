@@ -448,7 +448,7 @@ async function wireEditSagaRecovery(
   // its restart recovery. The workspace mutation path stays fail-closed — no write
   // ToolDefinition is published and the session resolver refuses to open a native
   // mutation session — until the platform gate (native-mutation-platform-gate.ts)
-  // allows it, which requires darwin, a proven packaged+unpacked addon load, a true
+  // allows it, which requires a supported native boundary, a proven packaged+unpacked addon load, a true
   // mutation probe capability, and persistence mutation authority all at once. This
   // dormant wiring must never break startup.
   try {

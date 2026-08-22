@@ -30,6 +30,17 @@ struct ProbeResult {
 
 fn main() -> ExitCode {
     let args = std::env::args().collect::<Vec<_>>();
+    #[cfg(target_os = "windows")]
+    if args.len() == 5 && args[1] == "--windows-probe-child" {
+        let Ok(port) = args[4].parse::<u16>() else {
+            return ExitCode::from(64);
+        };
+        return ExitCode::from(windows_backend::run_probe_child(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            port,
+        ));
+    }
     if args.len() == 2 && args[1] == "--probe-json" {
         let result = probe();
         return match serde_json::to_string(&result) {

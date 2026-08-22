@@ -1,16 +1,18 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE,
     INVALID_HANDLE_VALUE, LocalFree, WAIT_ABANDONED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_CAPABILITIES};
 use windows_sys::Win32::System::Console::{
@@ -23,6 +25,8 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
+
+static PROFILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 struct OwnedSid(PSID);
 impl Drop for OwnedSid {
@@ -111,17 +115,16 @@ pub fn restricted_token_probe() -> Result<(), String> {
     ));
     let inside = base.join("inside");
     let outside = base.join("outside");
+    let _ = std::fs::remove_dir_all(&base);
     if std::fs::create_dir_all(&inside).is_err() || std::fs::create_dir_all(&outside).is_err() {
         return Err("appcontainer_probe_setup_failed".to_owned());
     }
     let inside_marker = inside.join("allowed.txt");
     let outside_marker = outside.join("denied.txt");
-    let system_root = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| "appcontainer_probe_system_root_failed".to_owned())?;
-    let command_source = system_root.join("System32").join("cmd.exe");
-    let command_executable = inside.join("probe-cmd.exe");
-    if std::fs::copy(command_source, &command_executable).is_err() {
+    let probe_executable = inside.join("probe-runner.exe");
+    let current_executable =
+        std::env::current_exe().map_err(|_| "appcontainer_probe_executable_failed".to_owned())?;
+    if std::fs::copy(current_executable, &probe_executable).is_err() {
         return Err("appcontainer_probe_executable_failed".to_owned());
     }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -133,22 +136,15 @@ pub fn restricted_token_probe() -> Result<(), String> {
         .local_addr()
         .map_err(|_| "appcontainer_probe_listener_failed".to_owned())?
         .port();
-    let curl_source = system_root.join("System32").join("curl.exe");
-    let curl_executable = inside.join("probe-curl.exe");
-    if std::fs::copy(curl_source, &curl_executable).is_err() {
-        let _ = std::fs::remove_dir_all(base);
-        return Err("appcontainer_probe_network_executable_failed".to_owned());
-    }
-    let script = format!(
-        "(echo inside>\"{}\" & echo outside>\"{}\") >NUL 2>NUL & \"{}\" --silent --output NUL --max-time 1 http://127.0.0.1:{port}/ >NUL 2>NUL",
-        inside_marker.display(),
-        outside_marker.display(),
-        curl_executable.display(),
-    );
     let execution = execute_impl(
         &inside,
-        &command_executable.to_string_lossy(),
-        &["/D".into(), "/S".into(), "/C".into(), script],
+        &probe_executable.to_string_lossy(),
+        &[
+            "--windows-probe-child".into(),
+            inside_marker.to_string_lossy().into_owned(),
+            outside_marker.to_string_lossy().into_owned(),
+            port.to_string(),
+        ],
     );
     let result = match execution {
         Ok(_) if !inside_marker.is_file() => {
@@ -167,6 +163,14 @@ pub fn restricted_token_probe() -> Result<(), String> {
     result
 }
 
+pub fn run_probe_child(inside_marker: &Path, outside_marker: &Path, port: u16) -> u8 {
+    let _ = std::fs::write(inside_marker, b"inside");
+    let _ = std::fs::write(outside_marker, b"outside");
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let _ = TcpStream::connect_timeout(&address, Duration::from_secs(1));
+    0
+}
+
 pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {
     execute_impl(root, executable, argv).unwrap_or(70)
 }
@@ -175,54 +179,72 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
     let Ok(root) = std::fs::canonicalize(root) else {
         return Err("appcontainer_workspace_resolution_failed".to_owned());
     };
-    let mut hasher = DefaultHasher::new();
-    root.to_string_lossy().to_lowercase().hash(&mut hasher);
-    let profile = format!("SprintCoder.ManagedCommand.{:016x}", hasher.finish());
-    let _workspace_mutex = acquire_workspace_mutex(&profile)?;
+    let workspace_profile = appcontainer_workspace_profile(&root);
+    let _workspace_mutex = acquire_workspace_mutex(&workspace_profile)?;
+    let profile = appcontainer_profile_name(&workspace_profile);
     let Some(sid) = appcontainer_sid(&profile) else {
         return Err("appcontainer_profile_failed".to_owned());
     };
-    let Some(sid_string) = sid_string(sid.0) else {
-        return Err("appcontainer_sid_string_failed".to_owned());
+    let sid_string = match sid_string(sid.0) {
+        Some(value) => value,
+        None => {
+            drop(sid);
+            let _ = delete_appcontainer_profile(&profile);
+            return Err("appcontainer_sid_string_failed".to_owned());
+        }
     };
     let executable_path = Path::new(executable);
     let executable_acl_required =
         !is_windows_system_path(executable_path) && !is_path_inside(&root, executable_path);
-    let executable_ancestors = if executable_acl_required {
-        executable_path
-            .parent()
-            .into_iter()
-            .flat_map(Path::ancestors)
-            .filter(|path| path.parent().is_some())
-            .map(Path::to_path_buf)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let executable_directory = executable_acl_required
+        .then(|| executable_path.parent())
+        .flatten();
     if !set_acl(&root, &sid_string, true)
-        || (executable_acl_required && !set_acl(executable_path, &sid_string, false))
-        || executable_ancestors
-            .iter()
-            .any(|path| !set_acl(path, &sid_string, false))
+        || executable_directory.is_some_and(|path| !set_read_tree_acl(path, &sid_string))
     {
-        remove_acl(&root, &sid_string, true);
-        if executable_acl_required {
-            remove_acl(executable_path, &sid_string, false);
+        let _ = remove_acl(&root, &sid_string, true);
+        if let Some(path) = executable_directory {
+            let _ = remove_acl(path, &sid_string, true);
         }
-        for path in executable_ancestors.iter().rev() {
-            remove_acl(path, &sid_string, false);
-        }
+        drop(sid);
+        let _ = delete_appcontainer_profile(&profile);
         return Err("appcontainer_acl_failed".to_owned());
     }
     let result = spawn_appcontainer(sid.0, &root, executable, argv);
-    remove_acl(&root, &sid_string, true);
-    if executable_acl_required {
-        remove_acl(executable_path, &sid_string, false);
-    }
-    for path in executable_ancestors.iter().rev() {
-        remove_acl(path, &sid_string, false);
+    let workspace_acl_removed = remove_acl(&root, &sid_string, true);
+    let executable_acl_removed =
+        executable_directory.is_none_or(|path| remove_acl(path, &sid_string, true));
+    drop(sid);
+    let profile_deleted = delete_appcontainer_profile(&profile);
+    if !workspace_acl_removed || !executable_acl_removed || !profile_deleted {
+        return Err("appcontainer_cleanup_failed".to_owned());
     }
     result.map_err(|code| format!("appcontainer_process_failed_{code}"))
+}
+
+fn appcontainer_workspace_profile(root: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    root.to_string_lossy().to_lowercase().hash(&mut hasher);
+    format!("SprintCoder.ManagedCommand.{:016x}", hasher.finish())
+}
+
+fn appcontainer_profile_name(workspace_profile: &str) -> String {
+    let counter = PROFILE_NONCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = DefaultHasher::new();
+    std::process::id().hash(&mut hasher);
+    counter.hash(&mut hasher);
+    timestamp.hash(&mut hasher);
+    format!("{workspace_profile}.{:016x}", hasher.finish())
+}
+
+fn delete_appcontainer_profile(profile: &str) -> bool {
+    let name = wide(profile);
+    // SAFETY: name is a live, NUL-terminated UTF-16 profile name created by this runner.
+    unsafe { DeleteAppContainerProfile(name.as_ptr()) >= 0 }
 }
 
 fn acquire_workspace_mutex(profile: &str) -> Result<WorkspaceMutex, String> {
@@ -248,26 +270,22 @@ fn is_windows_system_path(path: &Path) -> bool {
     let Some(windows_root) = std::env::var_os("SystemRoot").map(std::path::PathBuf::from) else {
         return false;
     };
-    let candidate = path.to_string_lossy().replace('/', "\\").to_lowercase();
-    let root = windows_root
-        .to_string_lossy()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_lowercase();
+    let candidate = normalized_windows_path(path);
+    let root = normalized_windows_path(&windows_root);
     candidate == root || candidate.starts_with(&format!("{root}\\"))
 }
 
 fn is_path_inside(root: &Path, candidate: &Path) -> bool {
-    let root = root
-        .to_string_lossy()
+    let root = normalized_windows_path(root);
+    let candidate = normalized_windows_path(candidate);
+    candidate == root || candidate.starts_with(&format!("{root}\\"))
+}
+
+fn normalized_windows_path(path: &Path) -> String {
+    win32_process_path(&path.to_string_lossy())
         .replace('/', "\\")
         .trim_end_matches('\\')
-        .to_lowercase();
-    let candidate = candidate
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_lowercase();
-    candidate == root || candidate.starts_with(&format!("{root}\\"))
+        .to_lowercase()
 }
 
 fn appcontainer_sid(name: &str) -> Option<OwnedSid> {
@@ -276,20 +294,22 @@ fn appcontainer_sid(name: &str) -> Option<OwnedSid> {
     // a SID allocation with ownership transferred to the caller for release via FreeSid.
     unsafe {
         let mut sid: PSID = std::ptr::null_mut();
-        if DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut sid) < 0 {
-            let display = wide("Sprint Coder Managed Command");
-            let description = wide("Per-workspace command sandbox");
-            if CreateAppContainerProfile(
-                name_wide.as_ptr(),
-                display.as_ptr(),
-                description.as_ptr(),
-                std::ptr::null(),
-                0,
-                &mut sid,
-            ) < 0
-            {
-                return None;
-            }
+        let display = wide("Sprint Coder Managed Command");
+        let description = wide("Per-workspace command sandbox");
+        let created = CreateAppContainerProfile(
+            name_wide.as_ptr(),
+            display.as_ptr(),
+            description.as_ptr(),
+            std::ptr::null(),
+            0,
+            &mut sid,
+        );
+        const HRESULT_ALREADY_EXISTS: i32 = 0x8007_00b7_u32 as i32;
+        if created < 0
+            && (created != HRESULT_ALREADY_EXISTS
+                || DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut sid) < 0)
+        {
+            return None;
         }
         (!sid.is_null()).then_some(OwnedSid(sid))
     }
@@ -332,7 +352,18 @@ fn set_acl(path: &Path, sid: &str, recursive: bool) -> bool {
     command.status().is_ok_and(|status| status.success())
 }
 
-fn remove_acl(path: &Path, sid: &str, recursive: bool) {
+fn set_read_tree_acl(path: &Path, sid: &str) -> bool {
+    let grant = format!("*{sid}:(OI)(CI)RX");
+    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    command
+        .arg(path)
+        .args(["/grant", &grant, "/C", "/Q", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().is_ok_and(|status| status.success())
+}
+
+fn remove_acl(path: &Path, sid: &str, recursive: bool) -> bool {
     let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
     command
         .arg(path)
@@ -341,7 +372,7 @@ fn remove_acl(path: &Path, sid: &str, recursive: bool) {
     if recursive {
         command.arg("/T");
     }
-    let _ = command.status();
+    command.status().is_ok_and(|status| status.success())
 }
 
 fn spawn_appcontainer(sid: PSID, cwd: &Path, executable: &str, argv: &[String]) -> Result<u8, u32> {
@@ -419,7 +450,6 @@ fn spawn_appcontainer(sid: PSID, cwd: &Path, executable: &str, argv: &[String]) 
     startup.lpAttributeList = list;
     let executable = win32_process_path(executable);
     let cwd = win32_process_path(&cwd.to_string_lossy());
-    let application = wide(&executable);
     let mut command_line = wide(windows_command_line(&executable, argv));
     let cwd = wide(&cwd);
     // SAFETY: PROCESS_INFORMATION's all-zero state is the documented output initialization.
@@ -428,7 +458,7 @@ fn spawn_appcontainer(sid: PSID, cwd: &Path, executable: &str, argv: &[String]) 
     // initialized two-attribute list; only the three HANDLE_LIST entries may be inherited.
     let ok = unsafe {
         CreateProcessW(
-            application.as_ptr(),
+            std::ptr::null(),
             command_line.as_mut_ptr(),
             std::ptr::null(),
             std::ptr::null(),
