@@ -210,7 +210,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     let modelLease: ProviderModelLease | undefined;
     try {
       const runtime = this.deps.registry.resolve(connection);
-      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId, controller.signal);
       const streamBudget = new ProviderStreamBudget();
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         providerCallCount += 1;

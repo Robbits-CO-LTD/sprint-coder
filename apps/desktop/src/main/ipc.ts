@@ -466,7 +466,10 @@ import {
   type OpenAICompatibleCredential,
 } from './provider-profile';
 import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
-import { OpenAICompatibleProviderClient } from './openai-compatible-provider-client';
+import {
+  OllamaModelPreparationError,
+  OpenAICompatibleProviderClient,
+} from './openai-compatible-provider-client';
 import {
   ProviderEndpointConsentChallenges,
   ProviderEndpointPolicy,
@@ -5112,7 +5115,7 @@ export class IpcRouter {
       if (!egress.allowed) return null;
 
       const runtime = this.providerRegistry.resolve(connection);
-      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId, controller.signal);
       let output = '';
       for await (const event of runtime.execute(
         connection,
@@ -5346,7 +5349,7 @@ export class IpcRouter {
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
       runtime = this.providerRegistry.resolve(connection);
-      modelLease = await acquireProviderModelLease(runtime, connection, modelId);
+      modelLease = await acquireProviderModelLease(runtime, connection, modelId, controller.signal);
       const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) =>
         fragment.source === 'background'
           ? {
@@ -5622,6 +5625,23 @@ export class IpcRouter {
         aggregateUsage,
       );
     } catch (error) {
+      if (error instanceof OllamaModelPreparationError) {
+        controller.abort();
+        if (error.category === 'canceled') return;
+        await this.mailbox.run(taskId, () => {
+          if (this.turnRuntimes.get(started.turnId) !== 'provider') return;
+          this.publish(
+            this.persistence.appendDelta(
+              taskId,
+              started.turnId,
+              messageId,
+              `${synthesizing ? '\n\n' : ''}${error.userMessage}`,
+            ),
+          );
+          this.finishAndAdvance(taskId, started.turnId, 'failed');
+        });
+        return;
+      }
       if (
         error instanceof ProviderStreamTimeoutError ||
         error instanceof ProviderQuotaExceededError

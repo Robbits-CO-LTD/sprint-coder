@@ -11,6 +11,10 @@ type Entry = {
   readonly key: string;
   readonly target: OllamaModelTarget;
   readonly leases: Map<symbol, boolean>;
+  readonly prepareWaiters: Set<symbol>;
+  prepared: boolean;
+  prepareController: AbortController | null;
+  preparePromise: Promise<void> | null;
   pendingUnload: boolean;
   unloadPromise: Promise<void> | null;
 };
@@ -24,18 +28,31 @@ export class OllamaModelLeaseCoordinator {
     private readonly unload: (target: OllamaModelTarget) => Promise<void>,
     private readonly onUnloadError: (target: OllamaModelTarget, error: unknown) => void,
     private readonly drainTimeoutMs = 2_000,
+    private readonly prepare: (
+      target: OllamaModelTarget,
+      signal: AbortSignal,
+    ) => Promise<void> = async () => undefined,
   ) {}
 
-  async acquire(target: OllamaModelTarget, automaticRelease: boolean): Promise<ProviderModelLease> {
+  async acquire(
+    target: OllamaModelTarget,
+    automaticRelease: boolean,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<ProviderModelLease> {
     const key = `${target.endpoint}\u0000${target.modelId}`;
     for (;;) {
       if (this.phase !== 'open') throw new Error('Provider model lifecycle is shutting down');
+      if (signal.aborted) throw preparationCanceled();
       let entry = this.entries.get(key);
       if (entry === undefined) {
         entry = {
           key,
           target,
           leases: new Map(),
+          prepareWaiters: new Set(),
+          prepared: false,
+          prepareController: null,
+          preparePromise: null,
           pendingUnload: false,
           unloadPromise: null,
         };
@@ -45,6 +62,19 @@ export class OllamaModelLeaseCoordinator {
       if (unloading !== null) {
         await unloading;
         continue;
+      }
+      try {
+        await this.ensurePrepared(entry, signal);
+        if (signal.aborted) throw preparationCanceled();
+      } catch (error) {
+        entry.pendingUnload ||= automaticRelease;
+        if (entry.leases.size === 0 && entry.prepareWaiters.size === 0) {
+          if (entry.preparePromise === null) {
+            if (entry.pendingUnload) void this.ensureUnload(entry);
+            else if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+          } else entry.prepareController?.abort();
+        }
+        throw error;
       }
       if (this.phase !== 'open' || this.entries.get(key) !== entry) continue;
       const leaseId = Symbol(key);
@@ -67,6 +97,7 @@ export class OllamaModelLeaseCoordinator {
       return;
     }
     this.phase = 'closing';
+    for (const entry of this.entries.values()) entry.prepareController?.abort();
     this.notifyChanged();
     const deadline = Date.now() + this.drainTimeoutMs;
     while (this.activeLeaseCount() > 0 && Date.now() < deadline)
@@ -99,6 +130,7 @@ export class OllamaModelLeaseCoordinator {
 
   private ensureUnload(entry: Entry): Promise<void> {
     if (entry.unloadPromise !== null) return entry.unloadPromise;
+    entry.prepared = false;
     let failed = false;
     const unloading = this.unload(entry.target)
       .catch((error: unknown) => {
@@ -117,6 +149,59 @@ export class OllamaModelLeaseCoordinator {
       });
     entry.unloadPromise = unloading;
     return unloading;
+  }
+
+  private async ensurePrepared(entry: Entry, signal: AbortSignal): Promise<void> {
+    if (entry.prepared) return;
+    if (signal.aborted) throw preparationCanceled();
+    if (entry.preparePromise === null) {
+      const controller = new AbortController();
+      entry.prepareController = controller;
+      const preparing = this.prepare(entry.target, controller.signal)
+        .then(() => {
+          if (controller.signal.aborted || this.phase !== 'open') throw preparationCanceled();
+          entry.prepared = true;
+        })
+        .finally(() => {
+          if (entry.preparePromise === preparing) {
+            entry.preparePromise = null;
+            entry.prepareController = null;
+          }
+          if (
+            !entry.prepared &&
+            entry.leases.size === 0 &&
+            entry.prepareWaiters.size === 0 &&
+            this.entries.get(entry.key) === entry
+          )
+            if (entry.pendingUnload) void this.ensureUnload(entry);
+            else this.entries.delete(entry.key);
+          this.notifyChanged();
+        });
+      entry.preparePromise = preparing;
+    }
+    const preparing = entry.preparePromise;
+    const waiterId = Symbol(entry.key);
+    entry.prepareWaiters.add(waiterId);
+    let rejectCanceled: ((error: Error) => void) | undefined;
+    const canceled = new Promise<never>((_resolve, reject) => {
+      rejectCanceled = reject;
+    });
+    const abort = (): void => rejectCanceled?.(preparationCanceled());
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      await Promise.race([preparing, canceled]);
+    } finally {
+      signal.removeEventListener('abort', abort);
+      entry.prepareWaiters.delete(waiterId);
+      if (
+        !entry.prepared &&
+        entry.leases.size === 0 &&
+        entry.prepareWaiters.size === 0 &&
+        entry.preparePromise !== null
+      )
+        entry.prepareController?.abort();
+      this.notifyChanged();
+    }
   }
 
   private activeLeaseCount(): number {
@@ -147,4 +232,10 @@ export class OllamaModelLeaseCoordinator {
   private notifyChanged(): void {
     for (const notify of [...this.changed]) notify();
   }
+}
+
+function preparationCanceled(): Error {
+  const error = new Error('Provider model preparation was canceled');
+  error.name = 'AbortError';
+  return error;
 }

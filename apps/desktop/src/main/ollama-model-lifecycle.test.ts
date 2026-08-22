@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OllamaModelLeaseCoordinator } from './ollama-model-lifecycle';
+import { OllamaModelLeaseCoordinator, type OllamaModelTarget } from './ollama-model-lifecycle';
 
 const target = {
   endpoint: 'http://127.0.0.1:11434/api/generate',
@@ -123,5 +123,84 @@ describe('OllamaModelLeaseCoordinator', () => {
 
     expect(unload).toHaveBeenCalledTimes(1);
     await expect(subject.acquire(target, true)).rejects.toThrow('shutting down');
+  });
+
+  it('shares one preload across concurrent leases without serializing their use', async () => {
+    const gate = deferred();
+    const prepare = vi.fn(() => gate.promise);
+    const unload = vi.fn(async () => undefined);
+    const subject = new OllamaModelLeaseCoordinator(unload, vi.fn(), 2_000, prepare);
+
+    const firstLease = subject.acquire(target, true);
+    const secondLease = subject.acquire(target, true);
+    await Promise.resolve();
+    expect(prepare).toHaveBeenCalledTimes(1);
+    gate.resolve();
+    const [first, second] = await Promise.all([firstLease, secondLease]);
+
+    await Promise.all([first.release(), second.release()]);
+    expect(unload).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a shared preload alive when only one waiter cancels', async () => {
+    const gate = deferred();
+    const prepare = vi.fn(() => gate.promise);
+    const subject = new OllamaModelLeaseCoordinator(async () => undefined, vi.fn(), 2_000, prepare);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const firstLease = subject.acquire(target, true, firstController.signal);
+    const firstResult = firstLease.catch((error: unknown) => error);
+    const secondLease = subject.acquire(target, true, secondController.signal);
+
+    firstController.abort();
+    expect(await firstResult).toMatchObject({ name: 'AbortError' });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    gate.resolve();
+    await (await secondLease).release();
+  });
+
+  it('aborts a shared preload after its last waiter cancels', async () => {
+    let preloadAborted = false;
+    const prepare = vi.fn(
+      (_target: OllamaModelTarget, signal: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => {
+              preloadAborted = true;
+              reject(new Error('preload aborted'));
+            },
+            { once: true },
+          );
+        }),
+    );
+    const subject = new OllamaModelLeaseCoordinator(async () => undefined, vi.fn(), 2_000, prepare);
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const firstResult = subject
+      .acquire(target, true, firstController.signal)
+      .catch((error: unknown) => error);
+    const secondResult = subject
+      .acquire(target, true, secondController.signal)
+      .catch((error: unknown) => error);
+
+    firstController.abort();
+    expect(await firstResult).toMatchObject({ name: 'AbortError' });
+    expect(preloadAborted).toBe(false);
+    secondController.abort();
+    expect(await secondResult).toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(preloadAborted).toBe(true));
+  });
+
+  it('drops a failed preload so the next acquisition can retry', async () => {
+    const prepare = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(undefined);
+    const subject = new OllamaModelLeaseCoordinator(async () => undefined, vi.fn(), 2_000, prepare);
+
+    await expect(subject.acquire(target, true)).rejects.toThrow('offline');
+    await (await subject.acquire(target, true)).release();
+    expect(prepare).toHaveBeenCalledTimes(2);
   });
 });
