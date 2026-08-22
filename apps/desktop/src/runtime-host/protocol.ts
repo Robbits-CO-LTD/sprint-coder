@@ -581,7 +581,7 @@ function isRuntimeWorkspaceSet(value: unknown): value is RuntimeWorkspaceSet {
 function isRuntimeSkillInputs(value: unknown): value is RuntimeSkillInput[] {
   return (
     Array.isArray(value) &&
-    value.length <= 6 &&
+    value.length <= 38 &&
     value.every(
       (item) =>
         typeof item === 'object' &&
