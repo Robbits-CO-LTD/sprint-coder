@@ -5349,7 +5349,6 @@ export class IpcRouter {
         this.publish(this.persistence.changeStage(taskId, started.turnId, 'executing'));
       });
       runtime = this.providerRegistry.resolve(connection);
-      modelLease = await acquireProviderModelLease(runtime, connection, modelId, controller.signal);
       const messages: ProviderExecutionRequest['messages'] = context.fragments.map((fragment) =>
         fragment.source === 'background'
           ? {
@@ -5443,6 +5442,14 @@ export class IpcRouter {
           this.providerEgressTrustForConnection(connection),
         );
         if (!egress.allowed) throw new Error('Provider egress was denied by policy');
+        if (modelLease === undefined)
+          modelLease = await acquireProviderModelLease(
+            runtime,
+            connection,
+            modelId,
+            controller.signal,
+          );
+        else await modelLease.prepare(controller.signal);
         const roundToolCalls: ProviderMessageToolCall[] = [];
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { OllamaModelLeaseCoordinator, type OllamaModelTarget } from './ollama-model-lifecycle';
+import {
+  OLLAMA_MODEL_PREPARED_REUSE_MS,
+  OllamaModelLeaseCoordinator,
+  type OllamaModelTarget,
+} from './ollama-model-lifecycle';
 
 const target = {
   endpoint: 'http://127.0.0.1:11434/api/generate',
@@ -140,6 +144,31 @@ describe('OllamaModelLeaseCoordinator', () => {
 
     await Promise.all([first.release(), second.release()]);
     expect(unload).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes preparation before a later provider call when the safety window expires', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const prepare = vi.fn(async () => undefined);
+      const subject = new OllamaModelLeaseCoordinator(
+        async () => undefined,
+        vi.fn(),
+        2_000,
+        prepare,
+      );
+      const lease = await subject.acquire(target, true);
+
+      await lease.prepare(new AbortController().signal);
+      expect(prepare).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(OLLAMA_MODEL_PREPARED_REUSE_MS + 1);
+      await lease.prepare(new AbortController().signal);
+
+      expect(prepare).toHaveBeenCalledTimes(2);
+      await lease.release();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps a shared preload alive when only one waiter cancels', async () => {

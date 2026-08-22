@@ -311,7 +311,8 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
   it('lets an external API Manager execute coordinator-bound Team tools and continue', async () => {
     const requests: unknown[] = [];
     const release = vi.fn(async () => undefined);
-    const acquireModelLease = vi.fn(async () => ({ release }));
+    const prepare = vi.fn(async () => undefined);
+    const acquireModelLease = vi.fn(async () => ({ prepare, release }));
     let call = 0;
     const runtime: ProviderRuntime = {
       verify: vi.fn(),
@@ -402,6 +403,10 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     );
     expect(authorizeEgress).toHaveBeenCalledTimes(2);
     expect(acquireModelLease).toHaveBeenCalledTimes(1);
+    expect(authorizeEgress.mock.invocationCallOrder[0]!).toBeLessThan(
+      acquireModelLease.mock.invocationCallOrder[0]!,
+    );
+    expect(prepare).toHaveBeenCalledTimes(1);
     expect(release).toHaveBeenCalledTimes(1);
     expect(requests).toHaveLength(2);
     expect(requests[1]).toMatchObject({

@@ -90,7 +90,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     signal: AbortSignal = new AbortController().signal,
   ): Promise<ProviderModelLease> {
     const target = await this.ollamaModelTarget(connection, modelId);
-    if (target === null) return { release: async () => undefined };
+    if (target === null) return { prepare: async () => undefined, release: async () => undefined };
     return this.modelLifecycle.acquire(target, connection.automaticModelRelease !== false, signal);
   }
 

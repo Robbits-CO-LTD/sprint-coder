@@ -4,15 +4,18 @@ export type OllamaModelTarget = Readonly<{
 }>;
 
 export type ProviderModelLease = Readonly<{
+  prepare(signal: AbortSignal): Promise<void>;
   release(): Promise<void>;
 }>;
+
+export const OLLAMA_MODEL_PREPARED_REUSE_MS = 4 * 60 * 1_000;
 
 type Entry = {
   readonly key: string;
   readonly target: OllamaModelTarget;
   readonly leases: Map<symbol, boolean>;
   readonly prepareWaiters: Set<symbol>;
-  prepared: boolean;
+  preparedUntilMs: number;
   prepareController: AbortController | null;
   preparePromise: Promise<void> | null;
   pendingUnload: boolean;
@@ -50,7 +53,7 @@ export class OllamaModelLeaseCoordinator {
           target,
           leases: new Map(),
           prepareWaiters: new Set(),
-          prepared: false,
+          preparedUntilMs: 0,
           prepareController: null,
           preparePromise: null,
           pendingUnload: false,
@@ -63,24 +66,17 @@ export class OllamaModelLeaseCoordinator {
         await unloading;
         continue;
       }
-      try {
-        await this.ensurePrepared(entry, signal);
-        if (signal.aborted) throw preparationCanceled();
-      } catch (error) {
-        entry.pendingUnload ||= automaticRelease;
-        if (entry.leases.size === 0 && entry.prepareWaiters.size === 0) {
-          if (entry.preparePromise === null) {
-            if (entry.pendingUnload) void this.ensureUnload(entry);
-            else if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
-          } else entry.prepareController?.abort();
-        }
-        throw error;
-      }
+      await this.prepareForUse(entry, automaticRelease, signal);
       if (this.phase !== 'open' || this.entries.get(key) !== entry) continue;
       const leaseId = Symbol(key);
       entry.leases.set(leaseId, automaticRelease);
       let released = false;
       return {
+        prepare: async (nextSignal) => {
+          if (released) throw new Error('Provider model lease is already released');
+          if (this.phase !== 'open') throw new Error('Provider model lifecycle is shutting down');
+          await this.prepareForUse(entry, automaticRelease, nextSignal);
+        },
         release: async () => {
           if (released) return;
           released = true;
@@ -130,7 +126,7 @@ export class OllamaModelLeaseCoordinator {
 
   private ensureUnload(entry: Entry): Promise<void> {
     if (entry.unloadPromise !== null) return entry.unloadPromise;
-    entry.prepared = false;
+    entry.preparedUntilMs = 0;
     let failed = false;
     const unloading = this.unload(entry.target)
       .catch((error: unknown) => {
@@ -152,7 +148,7 @@ export class OllamaModelLeaseCoordinator {
   }
 
   private async ensurePrepared(entry: Entry, signal: AbortSignal): Promise<void> {
-    if (entry.prepared) return;
+    if (this.prepared(entry)) return;
     if (signal.aborted) throw preparationCanceled();
     if (entry.preparePromise === null) {
       const controller = new AbortController();
@@ -160,7 +156,7 @@ export class OllamaModelLeaseCoordinator {
       const preparing = this.prepare(entry.target, controller.signal)
         .then(() => {
           if (controller.signal.aborted || this.phase !== 'open') throw preparationCanceled();
-          entry.prepared = true;
+          entry.preparedUntilMs = Date.now() + OLLAMA_MODEL_PREPARED_REUSE_MS;
         })
         .finally(() => {
           if (entry.preparePromise === preparing) {
@@ -168,7 +164,7 @@ export class OllamaModelLeaseCoordinator {
             entry.prepareController = null;
           }
           if (
-            !entry.prepared &&
+            !this.prepared(entry) &&
             entry.leases.size === 0 &&
             entry.prepareWaiters.size === 0 &&
             this.entries.get(entry.key) === entry
@@ -194,7 +190,7 @@ export class OllamaModelLeaseCoordinator {
       signal.removeEventListener('abort', abort);
       entry.prepareWaiters.delete(waiterId);
       if (
-        !entry.prepared &&
+        !this.prepared(entry) &&
         entry.leases.size === 0 &&
         entry.prepareWaiters.size === 0 &&
         entry.preparePromise !== null
@@ -202,6 +198,30 @@ export class OllamaModelLeaseCoordinator {
         entry.prepareController?.abort();
       this.notifyChanged();
     }
+  }
+
+  private async prepareForUse(
+    entry: Entry,
+    automaticRelease: boolean,
+    signal: AbortSignal,
+  ): Promise<void> {
+    try {
+      await this.ensurePrepared(entry, signal);
+      if (signal.aborted) throw preparationCanceled();
+    } catch (error) {
+      entry.pendingUnload ||= automaticRelease;
+      if (entry.leases.size === 0 && entry.prepareWaiters.size === 0) {
+        if (entry.preparePromise === null) {
+          if (entry.pendingUnload) void this.ensureUnload(entry);
+          else if (this.entries.get(entry.key) === entry) this.entries.delete(entry.key);
+        } else entry.prepareController?.abort();
+      }
+      throw error;
+    }
+  }
+
+  private prepared(entry: Entry): boolean {
+    return entry.preparedUntilMs > Date.now();
   }
 
   private activeLeaseCount(): number {

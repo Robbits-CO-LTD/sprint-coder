@@ -210,7 +210,6 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     let modelLease: ProviderModelLease | undefined;
     try {
       const runtime = this.deps.registry.resolve(connection);
-      modelLease = await acquireProviderModelLease(runtime, connection, modelId, controller.signal);
       const streamBudget = new ProviderStreamBudget();
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         providerCallCount += 1;
@@ -224,6 +223,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           })
         )
           throw new Error('Provider Worker egress was denied');
+        if (modelLease === undefined)
+          modelLease = await acquireProviderModelLease(
+            runtime,
+            connection,
+            modelId,
+            controller.signal,
+          );
+        else await modelLease.prepare(controller.signal);
         const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
         this.active.set(input.worker.id, {
           executionId: providerExecutionId,

@@ -38,6 +38,7 @@ export interface ProviderRuntime {
 }
 
 const NOOP_MODEL_LEASE: ProviderModelLease = Object.freeze({
+  prepare: async () => undefined,
   release: async () => undefined,
 });
 
