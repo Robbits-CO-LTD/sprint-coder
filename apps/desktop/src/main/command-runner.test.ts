@@ -45,6 +45,16 @@ import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 
+const normalizeIcaclsAcl = (value: string): string[] =>
+  [
+    ...new Set(
+      value
+        .split(/\r?\n/u)
+        .map((line) => line.trim().replace(/:\(I\)\(/u, ':('))
+        .filter((line) => line.length > 0),
+    ),
+  ].sort();
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) =>
@@ -316,11 +326,13 @@ describe('CommandRunner', () => {
       await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       });
-      expect(
-        [workspace, protectedDirectory].map((path) =>
-          execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
-        ),
-      ).toEqual(aclBefore);
+      const aclAfter = [workspace, protectedDirectory].map((path) =>
+        execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+      );
+      // Editing a parent DACL can make Windows enumerate an inherited ACE alongside an identical
+      // explicit ACE. Compare that root ACL semantically while keeping the protected child exact.
+      expect(normalizeIcaclsAcl(aclAfter[0]!)).toEqual(normalizeIcaclsAcl(aclBefore[0]!));
+      expect(aclAfter[1]).toBe(aclBefore[1]);
     },
   );
 
