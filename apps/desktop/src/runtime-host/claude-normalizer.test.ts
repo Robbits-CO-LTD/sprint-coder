@@ -176,7 +176,6 @@ describe('ClaudeJsonlNormalizer', () => {
   it.each([
     ['memory', ['mcp__team__project_memory_remember']],
     ['skill creator', ['mcp__team__skill_draft_create']],
-    ['skill import', ['mcp__team__skill_import_read', 'mcp__team__skill_import_install']],
   ])('accepts the exact %s MCP subset', (_kind, toolNames) => {
     const normalizer = new ClaudeJsonlNormalizer({
       builtInTools: [],

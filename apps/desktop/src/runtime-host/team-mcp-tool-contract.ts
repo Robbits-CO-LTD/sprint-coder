@@ -1,6 +1,5 @@
 export const PROJECT_MEMORY_MCP_TOOL_NAMES = ['project_memory_remember'] as const;
 export const SKILL_DRAFT_MCP_TOOL_NAMES = ['skill_draft_create'] as const;
-export const SKILL_IMPORT_MCP_TOOL_NAMES = ['skill_import_read', 'skill_import_install'] as const;
 export const TEAM_CORE_MCP_TOOL_NAMES = [
   'team_list_models',
   'team_record_model_research',
@@ -22,7 +21,6 @@ export const TEAM_CORE_MCP_TOOL_NAMES = [
 export const TEAM_MCP_TOOL_NAMES = [
   ...PROJECT_MEMORY_MCP_TOOL_NAMES,
   ...SKILL_DRAFT_MCP_TOOL_NAMES,
-  ...SKILL_IMPORT_MCP_TOOL_NAMES,
   ...TEAM_CORE_MCP_TOOL_NAMES,
 ] as const;
 
@@ -36,7 +34,6 @@ export const WORKER_TEAM_MCP_TOOL_NAMES = TEAM_CORE_MCP_TOOL_NAMES.filter(
 export type TeamMcpToolCapabilities = Readonly<{
   allowProjectMemory?: boolean;
   allowSkillDrafts?: boolean;
-  allowSkillImports?: boolean;
   allowTeamTools?: boolean;
   role?: TeamMcpRole;
   allowedTools?: readonly TeamMcpToolName[];
@@ -53,7 +50,6 @@ export function teamMcpToolNamesForCapabilities(
   const candidates: readonly TeamMcpToolName[] = [
     ...(capabilities.allowProjectMemory === true ? PROJECT_MEMORY_MCP_TOOL_NAMES : []),
     ...(capabilities.allowSkillDrafts === true ? SKILL_DRAFT_MCP_TOOL_NAMES : []),
-    ...(capabilities.allowSkillImports === true ? SKILL_IMPORT_MCP_TOOL_NAMES : []),
     ...(capabilities.allowTeamTools === false ? [] : roleTools),
   ];
   if (capabilities.allowedTools === undefined) return candidates;

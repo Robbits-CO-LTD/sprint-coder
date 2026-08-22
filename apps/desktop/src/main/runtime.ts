@@ -259,18 +259,12 @@ export class MockRuntimeAdapter {
         ({ selection }) =>
           selection.ref.source === 'builtin' && selection.ref.skillId === 'skill-creator',
       );
-      const importSkillTurn = turnSkills.some(
-        ({ selection }) =>
-          selection.ref.source === 'builtin' && selection.ref.skillId === 'import-skill',
-      );
       const teamFixtureActive =
         this.teamCoordinator !== undefined && isTeamScenarioFixtureInput(input);
       const toolCatalogSnapshot =
         this.managedHarness?.startTurn(toolContext, 'mock', {
           projectMemory: (this.persistence.getTask?.(taskId)?.projectId ?? null) !== null,
           skillDrafts: skillCreatorTurn,
-          skillImports: importSkillTurn,
-          ...(importSkillTurn ? { skillImportUserText: input } : {}),
           ...(input.includes('承認テスト')
             ? { mockFixture: 'approval' as const }
             : input.includes('コマンドテスト')

@@ -15,7 +15,6 @@ import { createInterface } from 'node:readline';
 import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
-import { parseSkillImportConfirmation } from './import-skill-builtin';
 import {
   teamMcpToolNamesForCapabilities,
   type TeamMcpRole,
@@ -261,8 +260,6 @@ export type TeamMcpRegistration = Readonly<{
   accessCeiling?: 'read-only' | 'workspace-write';
   requireModelResearch?: boolean;
   allowSkillDrafts?: boolean;
-  allowSkillImports?: boolean;
-  skillImportUserText?: string;
   allowProjectMemory?: boolean;
   allowTeamTools?: boolean;
   role?: TeamMcpRole;
@@ -277,8 +274,6 @@ type Registered = TeamMcpRegistration & {
   waitCursor: number;
   modelCatalogQueried: boolean;
   researchedModels: Set<string>;
-  authorizedSkillImport?: { cli: 'claude' | 'codex'; skillId: string; digest: string };
-  skillImportReadStarted: boolean;
   runtimeProcessIdentity: NativeProcessIdentity | null;
 };
 
@@ -288,51 +283,6 @@ function modelSelectionKey(selection: {
   requestedModel: string | null;
 }): string {
   return `${selection.connectionId ?? ''}\0${selection.requestedProvider ?? ''}\0${selection.requestedModel ?? ''}`;
-}
-
-export type SkillImportSource = { cli: 'claude' | 'codex'; skillId: string };
-
-export function parseSkillImportReadInput(input: unknown): SkillImportSource {
-  if (typeof input !== 'object' || input === null) throw new Error('invalid skill import source');
-  const value = input as { cli?: unknown; skillId?: unknown };
-  if (
-    (value.cli !== 'claude' && value.cli !== 'codex') ||
-    typeof value.skillId !== 'string' ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.skillId)
-  )
-    throw new Error('invalid skill import source');
-  return { cli: value.cli, skillId: value.skillId };
-}
-
-export function parseSkillImportSource(input: unknown): SkillImportSource & { digest: string } {
-  if (typeof input !== 'object' || input === null) throw new Error('invalid skill import source');
-  const source = (input as { source?: unknown }).source;
-  const parsed = parseSkillImportReadInput(source);
-  const digest = (source as { digest?: unknown }).digest;
-  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest))
-    throw new Error('invalid skill import source digest');
-  return { ...parsed, digest };
-}
-
-export function userConfirmedSkillImport(
-  text: string | undefined,
-  source: SkillImportSource,
-): boolean {
-  if (text === undefined) return false;
-  const confirmation = parseSkillImportConfirmation(text);
-  return (
-    confirmation !== null &&
-    confirmation.cli === source.cli &&
-    confirmation.skillId === source.skillId
-  );
-}
-
-export function readDigest(result: unknown): string {
-  if (typeof result !== 'object' || result === null) throw new Error('invalid skill import result');
-  const digest = (result as { digest?: unknown }).digest;
-  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest))
-    throw new Error('invalid skill import result digest');
-  return digest;
 }
 
 export class TeamMcpBridge {
@@ -359,11 +309,11 @@ export class TeamMcpBridge {
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
-    private readonly installPreparedSkill?: (
+    private readonly _legacyInstallPreparedSkill?: (
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
-    private readonly readImportSkillSource?: (
+    private readonly _legacyReadImportSkillSource?: (
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
@@ -620,7 +570,6 @@ export class TeamMcpBridge {
       waitCursor: registration.initialWaitCursor ?? 0,
       modelCatalogQueried: false,
       researchedModels: new Set(),
-      skillImportReadStarted: false,
       runtimeProcessIdentity: null,
     });
   }
@@ -744,7 +693,6 @@ export class TeamMcpBridge {
           capabilities: {
             projectMemory: registration.allowProjectMemory === true,
             skillDrafts: registration.allowSkillDrafts === true,
-            skillImports: registration.allowSkillImports === true,
             teamTools: registration.allowTeamTools !== false,
           },
           allowedTools: teamMcpToolNamesForCapabilities(registration),
@@ -793,73 +741,67 @@ export class TeamMcpBridge {
             ? await this.executeProjectMemoryTool(turnId, registration, request.args)
             : request.tool === 'skill_draft_create'
               ? await this.executeSkillDraftTool(turnId, registration, request.args)
-              : request.tool === 'skill_import_read'
-                ? await this.executeSkillImportReadTool(turnId, registration, request.args)
-                : request.tool === 'skill_import_install'
-                  ? await this.executeSkillImportTool(turnId, registration, request.args)
-                  : registration.allowTeamTools === false
-                    ? (() => {
-                        throw new Error('Team tools are not available for this Turn');
-                      })()
-                    : await executeTeamTool(
-                        this.coordinator,
-                        registration.taskId,
-                        request.tool,
-                        request.args,
-                        {
-                          ...(registration.requesterAgentId === undefined
-                            ? {}
-                            : { requesterAgentId: registration.requesterAgentId }),
-                          ...(registration.accessCeiling === undefined
-                            ? {}
-                            : { accessCeiling: registration.accessCeiling }),
-                          ...(registration.contextOwner === undefined
-                            ? {}
-                            : { contextOwner: registration.contextOwner }),
-                          longPoll:
-                            request.tool === 'team_wait_reports' ||
-                            request.tool === 'team_wait_events',
-                          waitReportsCursor: {
-                            read: () => registration.waitCursor,
-                            advance: (seq) => {
-                              registration.waitCursor = seq;
-                            },
-                          },
-                          ...(this.listModelCandidates === undefined
-                            ? {}
-                            : { listModelCandidates: this.listModelCandidates }),
-                          modelCatalogAudit: {
-                            wasQueried: () => registration.modelCatalogQueried,
-                            markQueried: () => {
-                              registration.modelCatalogQueried = true;
-                            },
-                          },
-                          ...(registration.requireModelResearch === true
-                            ? {
-                                modelResearchAudit: {
-                                  required: true,
-                                  record: (input: {
-                                    modelSelection: {
-                                      connectionId: string | null;
-                                      requestedProvider: string | null;
-                                      requestedModel: string | null;
-                                    };
-                                  }) => {
-                                    registration.researchedModels.add(
-                                      modelSelectionKey(input.modelSelection),
-                                    );
-                                  },
-                                  hasEvidence: (selection: {
-                                    connectionId: string | null;
-                                    requestedProvider: string | null;
-                                    requestedModel: string | null;
-                                  }) =>
-                                    registration.researchedModels.has(modelSelectionKey(selection)),
-                                },
-                              }
-                            : {}),
+              : registration.allowTeamTools === false
+                ? (() => {
+                    throw new Error('Team tools are not available for this Turn');
+                  })()
+                : await executeTeamTool(
+                    this.coordinator,
+                    registration.taskId,
+                    request.tool,
+                    request.args,
+                    {
+                      ...(registration.requesterAgentId === undefined
+                        ? {}
+                        : { requesterAgentId: registration.requesterAgentId }),
+                      ...(registration.accessCeiling === undefined
+                        ? {}
+                        : { accessCeiling: registration.accessCeiling }),
+                      ...(registration.contextOwner === undefined
+                        ? {}
+                        : { contextOwner: registration.contextOwner }),
+                      longPoll:
+                        request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
+                      waitReportsCursor: {
+                        read: () => registration.waitCursor,
+                        advance: (seq) => {
+                          registration.waitCursor = seq;
                         },
-                      );
+                      },
+                      ...(this.listModelCandidates === undefined
+                        ? {}
+                        : { listModelCandidates: this.listModelCandidates }),
+                      modelCatalogAudit: {
+                        wasQueried: () => registration.modelCatalogQueried,
+                        markQueried: () => {
+                          registration.modelCatalogQueried = true;
+                        },
+                      },
+                      ...(registration.requireModelResearch === true
+                        ? {
+                            modelResearchAudit: {
+                              required: true,
+                              record: (input: {
+                                modelSelection: {
+                                  connectionId: string | null;
+                                  requestedProvider: string | null;
+                                  requestedModel: string | null;
+                                };
+                              }) => {
+                                registration.researchedModels.add(
+                                  modelSelectionKey(input.modelSelection),
+                                );
+                              },
+                              hasEvidence: (selection: {
+                                connectionId: string | null;
+                                requestedProvider: string | null;
+                                requestedModel: string | null;
+                              }) => registration.researchedModels.has(modelSelectionKey(selection)),
+                            },
+                          }
+                        : {}),
+                    },
+                  );
       respond({ ok: true, result });
     } catch (error) {
       respond({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -879,55 +821,6 @@ export class TeamMcpBridge {
     )
       throw new Error('skill_draft_create is not available for this Turn');
     return this.createSkillDraft(input, { taskId: registration.taskId, turnId });
-  }
-
-  private async executeSkillImportTool(
-    turnId: string,
-    registration: Registered,
-    input: unknown,
-  ): Promise<unknown> {
-    if (
-      registration.allowSkillImports !== true ||
-      registration.requesterAgentId !== undefined ||
-      this.installPreparedSkill === undefined
-    )
-      throw new Error('skill_import_install is not available for this Turn');
-    const source = parseSkillImportSource(input);
-    if (
-      registration.authorizedSkillImport === undefined ||
-      source.cli !== registration.authorizedSkillImport.cli ||
-      source.skillId !== registration.authorizedSkillImport.skillId ||
-      source.digest !== registration.authorizedSkillImport.digest
-    )
-      throw new Error('skill_import_install source was not authorized by skill_import_read');
-    delete registration.authorizedSkillImport;
-    return this.installPreparedSkill(input, { taskId: registration.taskId, turnId });
-  }
-
-  private async executeSkillImportReadTool(
-    turnId: string,
-    registration: Registered,
-    input: unknown,
-  ): Promise<unknown> {
-    if (
-      registration.allowSkillImports !== true ||
-      registration.requesterAgentId !== undefined ||
-      this.readImportSkillSource === undefined
-    )
-      throw new Error('skill_import_read is not available for this Turn');
-    const source = parseSkillImportReadInput(input);
-    if (!userConfirmedSkillImport(registration.skillImportUserText, source))
-      throw new Error('skill_import_read requires the user to name the CLI and Skill together');
-    if (registration.skillImportReadStarted)
-      throw new Error('skill_import_read authorization was already consumed for this Turn');
-    registration.skillImportReadStarted = true;
-    const result = await this.readImportSkillSource(input, {
-      taskId: registration.taskId,
-      turnId,
-    });
-    const digest = readDigest(result);
-    registration.authorizedSkillImport = { ...source, digest };
-    return result;
   }
 
   private async executeProjectMemoryTool(

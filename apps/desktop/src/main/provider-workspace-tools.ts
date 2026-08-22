@@ -57,12 +57,6 @@ import {
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
-import {
-  parseSkillImportReadInput,
-  parseSkillImportSource,
-  readDigest,
-  userConfirmedSkillImport,
-} from './team-mcp-bridge';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
@@ -255,23 +249,6 @@ export const SKILL_DRAFT_TOOL = auxiliaryTool(
   'Create one validated Skill Draft for user review without installing it.',
   { type: 'object' },
 );
-export const SKILL_IMPORT_READ_TOOL = auxiliaryTool(
-  'skill-import-read',
-  'skill_import_read',
-  'Read one user-confirmed Claude or Codex Skill through the managed import boundary.',
-  {
-    type: 'object',
-    properties: { cli: { type: 'string', enum: ['claude', 'codex'] }, skillId: { type: 'string' } },
-    required: ['cli', 'skillId'],
-    additionalProperties: false,
-  },
-);
-export const SKILL_IMPORT_INSTALL_TOOL = auxiliaryTool(
-  'skill-import-install',
-  'skill_import_install',
-  'Install a prepared Skill only when it matches the preceding managed import read.',
-  { type: 'object' },
-);
 export const SKILL_ACTIVATE_TOOL = createToolDefinition({
   toolId: createToolId({
     provider: 'builtin',
@@ -356,8 +333,6 @@ const descriptions = new Map([
   ],
   [PROJECT_MEMORY_TOOL.providerName, PROJECT_MEMORY_TOOL.description],
   [SKILL_DRAFT_TOOL.providerName, SKILL_DRAFT_TOOL.description],
-  [SKILL_IMPORT_READ_TOOL.providerName, SKILL_IMPORT_READ_TOOL.description],
-  [SKILL_IMPORT_INSTALL_TOOL.providerName, SKILL_IMPORT_INSTALL_TOOL.description],
   [SKILL_ACTIVATE_TOOL.providerName, SKILL_ACTIVATE_TOOL.description],
 ]);
 
@@ -382,8 +357,6 @@ type WorkspaceToolDeps = Readonly<{
   auxiliary?: Readonly<{
     queueProjectMemory(input: unknown, context: ToolExecutionContext): Promise<unknown>;
     createSkillDraft(input: unknown, context: ToolExecutionContext): Promise<unknown>;
-    readSkillImport(input: unknown, context: ToolExecutionContext): Promise<unknown>;
-    installSkillImport(input: unknown, context: ToolExecutionContext): Promise<unknown>;
     activateSkill(input: unknown, context: ToolExecutionContext): Promise<unknown>;
   }>;
   recordPlan?: (
@@ -395,8 +368,6 @@ type WorkspaceToolDeps = Readonly<{
 export type ManagedHarnessTurnOptions = Readonly<{
   projectMemory?: boolean;
   skillDrafts?: boolean;
-  skillImports?: boolean;
-  skillImportUserText?: string;
   skillActivation?: boolean;
   mockFixture?: 'approval' | 'command';
   mockTeamFixture?: boolean;
@@ -404,8 +375,6 @@ export type ManagedHarnessTurnOptions = Readonly<{
 
 type AuxiliaryTurnState = {
   options: ManagedHarnessTurnOptions;
-  skillImportReadStarted: boolean;
-  authorizedSkillImport?: { cli: 'claude' | 'codex'; skillId: string; digest: string };
 };
 
 type PreparedWorkspaceInput = Readonly<{
@@ -460,13 +429,7 @@ export class ManagedCodingHarness {
     }
     if (deps.team !== undefined) for (const definition of TEAM_TOOLS) registry.register(definition);
     if (deps.auxiliary !== undefined)
-      for (const definition of [
-        PROJECT_MEMORY_TOOL,
-        SKILL_DRAFT_TOOL,
-        SKILL_IMPORT_READ_TOOL,
-        SKILL_IMPORT_INSTALL_TOOL,
-        SKILL_ACTIVATE_TOOL,
-      ])
+      for (const definition of [PROJECT_MEMORY_TOOL, SKILL_DRAFT_TOOL, SKILL_ACTIVATE_TOOL])
         registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     registerApprovalProbeTool(this.broker);
@@ -668,9 +631,6 @@ export class ManagedCodingHarness {
       ...(this.deps.auxiliary === undefined || options.skillDrafts !== true
         ? []
         : [SKILL_DRAFT_TOOL.toolId]),
-      ...(this.deps.auxiliary === undefined || options.skillImports !== true
-        ? []
-        : [SKILL_IMPORT_READ_TOOL.toolId, SKILL_IMPORT_INSTALL_TOOL.toolId]),
       ...(this.deps.auxiliary === undefined || options.skillActivation !== true
         ? []
         : [SKILL_ACTIVATE_TOOL.toolId]),
@@ -679,7 +639,6 @@ export class ManagedCodingHarness {
     this.providersByTurn.set(key, providerId);
     this.auxiliaryByTurn.set(key, {
       options: Object.freeze({ ...options }),
-      skillImportReadStarted: false,
     });
     return snapshot;
   }
@@ -726,43 +685,6 @@ export class ManagedCodingHarness {
         if (stateFor(context).options.skillDrafts !== true)
           throw new Error('skill_draft_create is not available for this Turn');
         return auxiliary.createSkillDraft(input, context);
-      },
-    });
-    this.broker.registerImplementation({
-      toolId: SKILL_IMPORT_READ_TOOL.toolId,
-      implementationKind: 'built-in',
-      execute: async (input, context) => {
-        const state = stateFor(context);
-        const source = parseSkillImportReadInput(input);
-        if (
-          state.options.skillImports !== true ||
-          !userConfirmedSkillImport(state.options.skillImportUserText, source)
-        )
-          throw new Error('skill_import_read requires the user to name the CLI and Skill together');
-        if (state.skillImportReadStarted)
-          throw new Error('skill_import_read authorization was already consumed for this Turn');
-        state.skillImportReadStarted = true;
-        const result = await auxiliary.readSkillImport(input, context);
-        state.authorizedSkillImport = { ...source, digest: readDigest(result) };
-        return result;
-      },
-    });
-    this.broker.registerImplementation({
-      toolId: SKILL_IMPORT_INSTALL_TOOL.toolId,
-      implementationKind: 'built-in',
-      execute: (input, context) => {
-        const state = stateFor(context);
-        const source = parseSkillImportSource(input);
-        if (
-          state.options.skillImports !== true ||
-          state.authorizedSkillImport === undefined ||
-          source.cli !== state.authorizedSkillImport.cli ||
-          source.skillId !== state.authorizedSkillImport.skillId ||
-          source.digest !== state.authorizedSkillImport.digest
-        )
-          throw new Error('skill_import_install source was not authorized by skill_import_read');
-        delete state.authorizedSkillImport;
-        return auxiliary.installSkillImport(input, context);
       },
     });
     this.broker.registerImplementation({

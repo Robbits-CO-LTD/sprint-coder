@@ -291,7 +291,6 @@ export class SkillSettingsService {
       'sprint-coder-team',
       'sprint-coder-product',
       'skill-creator',
-      'import-skill',
       'imagegen',
     ].map((skillId) => ({
       source: 'builtin' as const,

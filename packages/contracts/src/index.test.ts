@@ -1453,3 +1453,17 @@ describe('public contracts', () => {
     ).toThrow();
   });
 });
+
+describe('retired external Skill import surface', () => {
+  it('publishes no import IPC channel or settings API method', () => {
+    expect(Object.values(contracts.IPC_CHANNELS)).not.toEqual(
+      expect.arrayContaining([
+        'sprint-coder:settings:skills:scan',
+        'sprint-coder:settings:skills:preview',
+        'sprint-coder:settings:skills:import',
+        'sprint-coder:settings:skills:update',
+        'sprint-coder:settings:skills:remove',
+      ]),
+    );
+  });
+});

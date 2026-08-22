@@ -130,7 +130,7 @@ test.describe('settings dialog', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('previews and imports a detected Skill using the typed settings bridge', async () => {
+  test.skip('previews and imports a detected Skill using the typed settings bridge', async () => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();
     await page.getByTestId('settings-nav-skills').click();
@@ -154,7 +154,7 @@ test.describe('settings dialog', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('routes a blocked Skill preview into the managed Portable conversion workflow', async () => {
+  test.skip('routes a blocked Skill preview into the managed Portable conversion workflow', async () => {
     const blocked = join(userDataDir, '.claude', 'skills', 'e2e-blocked');
     mkdirSync(blocked, { recursive: true });
     writeFileSync(
@@ -177,6 +177,19 @@ test.describe('settings dialog', () => {
     await expect(page.getByTestId('composer-textarea')).toHaveValue(
       /ClaudeのSkill e2e-blocked をPortable版へ変換してください/u,
     );
+  });
+
+  test('shows only Sprint Coder Skills and no external import controls', async () => {
+    const page: Page = await firstWindow(app!);
+    await page.getByTestId('sidebar-settings-button').click();
+    await page.getByTestId('settings-nav-skills').click();
+    await expect(
+      page.getByText('Sprint Coder内蔵Skillと、Skill Creatorで作成したSkillを管理します。'),
+    ).toBeVisible();
+    await expect(page.getByText('e2e-writer', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '候補を選択' })).toHaveCount(0);
+    await expect(page.getByText('import-skill', { exact: true })).toHaveCount(0);
+    await page.keyboard.press('Escape');
   });
 
   test('progressively reveals the add form, keeps optional fields folded, and clears the draft on cancel', async ({}, testInfo) => {

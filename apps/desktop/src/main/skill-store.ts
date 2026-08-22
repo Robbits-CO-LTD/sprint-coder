@@ -42,7 +42,6 @@ const BUILTIN_SKILL_IDS = new Set([
   'sprint-coder-team',
   'sprint-coder-product',
   'skill-creator',
-  'import-skill',
   'imagegen',
 ]);
 const RESERVED_NAMES = new Set([
@@ -195,9 +194,6 @@ export class SkillStore {
       join(rootPath, 'builtin'),
       join(rootPath, 'created'),
       join(rootPath, 'drafts'),
-      join(rootPath, 'imported'),
-      join(rootPath, 'imported', 'claude'),
-      join(rootPath, 'imported', 'agents'),
       join(rootPath, 'revisions'),
     ]);
     await removeOwnedStagingDirectories(rootPath);
@@ -784,14 +780,9 @@ export class SkillStore {
 
   async listSelectable(): Promise<SelectableSkill[]> {
     const items: SelectableSkill[] = [];
-    for (const skillId of ['sprint-coder-product', 'skill-creator', 'import-skill'] as const) {
+    for (const skillId of ['sprint-coder-product', 'skill-creator'] as const) {
       const builtin = await this.readSelectableAt('builtin', skillId, true);
       if (builtin !== null) items.push(builtin);
-    }
-    for (const imported of await this.listImported()) {
-      const source = imported.provider;
-      const item = await this.readSelectableAt(source, imported.skillId, imported.manifest.enabled);
-      if (item !== null) items.push(item);
     }
     const createdRoot = join(this.rootPath, 'created');
     for (const skillId of (await readdir(createdRoot)).sort()) {
@@ -852,18 +843,9 @@ export class SkillStore {
       'sprint-coder-team',
       'sprint-coder-product',
       'skill-creator',
-      'import-skill',
       'imagegen',
     ] as const)
       await capture('builtin', skillId, true);
-    for (const provider of ['claude', 'agents'] as const) {
-      const root = join(this.rootPath, 'imported', provider);
-      for (const skillId of (await readdir(root)).sort()) {
-        if (!SKILL_ID.test(skillId) || skillId.startsWith('.')) continue;
-        const manifest = await readExistingManifest(join(root, skillId)).catch(() => null);
-        await capture(provider, skillId, manifest?.enabled ?? false);
-      }
-    }
     const createdRoot = join(this.rootPath, 'created');
     for (const skillId of (await readdir(createdRoot)).sort()) {
       if (!SKILL_ID.test(skillId) || skillId.startsWith('.')) continue;
@@ -880,6 +862,10 @@ export class SkillStore {
     skillId: string,
     digest: string,
   ): Promise<ResolvedSkillPackage> {
+    if (source !== 'builtin' && source !== 'created')
+      throw new SkillStoreError('INVALID_SKILL', '外部由来Skillは利用できません');
+    if (skillId === 'import-skill')
+      throw new SkillStoreError('INVALID_SKILL', '廃止済みの予約Skill IDです');
     assertSkillIdForSource(source, skillId);
     if (!/^[a-f0-9]{64}$/.test(digest))
       throw new SkillStoreError('INVALID_SKILL', 'Skill digest is invalid');
@@ -1272,16 +1258,6 @@ async function removeOwnedStagingDirectories(rootPath: string): Promise<void> {
     const item = await lstat(target);
     if (item.isDirectory() && !item.isSymbolicLink())
       await rm(target, { recursive: true, force: true });
-  }
-  for (const provider of ['claude', 'agents'] as const) {
-    const providerRoot = join(rootPath, 'imported', provider);
-    for (const name of await readdir(providerRoot)) {
-      if (!/^\.staging-[0-9a-f-]{36}$/.test(name)) continue;
-      const target = join(providerRoot, name);
-      const item = await lstat(target);
-      if (item.isDirectory() && !item.isSymbolicLink())
-        await rm(target, { recursive: true, force: true });
-    }
   }
   const revisionsRoot = join(rootPath, 'revisions');
   for (const source of await readdir(revisionsRoot)) {
