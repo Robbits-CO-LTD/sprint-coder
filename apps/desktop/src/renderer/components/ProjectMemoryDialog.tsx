@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { X } from './icons';
 
 export type ProjectMemoryDialogSource = {
   projectId: string;
@@ -69,10 +70,16 @@ export function ProjectMemoryDialog({
           void save();
         }}
       >
-        <header className="team-policy-header">
+        <header className="team-policy-header project-memory-header">
           <h2 id="project-memory-dialog-title">Projectメモとして保存</h2>
-          <button type="button" className="settings-close" onClick={onClose} disabled={saving}>
-            閉じる
+          <button
+            type="button"
+            className="project-memory-close"
+            aria-label="閉じる"
+            onClick={onClose}
+            disabled={saving}
+          >
+            <X size={16} aria-hidden="true" />
           </button>
         </header>
         <p className="settings-note">
@@ -87,6 +94,7 @@ export function ProjectMemoryDialog({
         <label>
           Memory（1〜4000文字）
           <textarea
+            className="project-memory-input"
             autoFocus
             value={content}
             maxLength={4000}
