@@ -66,7 +66,8 @@ absolute paths.
 1. Use a discriminated internal capability binding for `codex_cli` and `provider_inline`; keep the
    public capability response unchanged.
 2. Ollama capability comes only from a bounded loopback native `/api/show` response whose
-   `capabilities` contains `vision`. Model-name heuristics are forbidden.
+   `capabilities` contains `vision`. Model-name heuristics and coarse generic `multimodalInput`
+   flags are forbidden; a Runtime without an image-specific snapshot stays unknown.
 3. Bind Provider acceptance to task, connection, provider, model, endpoint/connection revision,
    capability digest, and capture age. Revalidate in the acceptance transaction and before every
    Provider round.

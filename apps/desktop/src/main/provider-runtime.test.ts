@@ -82,4 +82,32 @@ describe('Provider Runtime Registry', () => {
     expect(second).toMatchObject({ value: null, capturedAtMs: 20 });
     expect(second.revision).toBe(first.revision);
   });
+
+  it('does not treat a coarse multimodal catalog flag as explicit image support', async () => {
+    const runtime = new DeterministicMockProviderRuntime();
+    runtime.listModels = async () => [
+      {
+        ...(
+          await new DeterministicMockProviderRuntime().listModels(
+            connection,
+            new AbortController().signal,
+          )
+        )[0]!,
+        multimodalInput: {
+          value: true,
+          source: 'provider_api' as const,
+          observedAt: '2026-08-22T00:00:00.000Z',
+        },
+      },
+    ];
+
+    await expect(
+      captureProviderImageInputCapability(
+        runtime,
+        connection,
+        'audio-only-model',
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ value: null });
+  });
 });

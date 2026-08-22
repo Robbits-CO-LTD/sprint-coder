@@ -72,20 +72,14 @@ export async function captureProviderImageInputCapability(
 ): Promise<ProviderImageInputCapabilitySnapshot> {
   const captured = await runtime.captureImageInputCapability?.(connection, modelId, signal);
   if (captured !== undefined && captured !== null) return captured;
-  const model = (await runtime.listModels(connection, signal)).find(
-    (candidate) => candidate.connectionId === connection.id && candidate.modelId === modelId,
-  );
-  const value = model?.multimodalInput.value ?? null;
-  const source = model?.multimodalInput.source ?? 'unknown';
   return Object.freeze({
-    value,
+    value: null,
     revision: digestCanonical({
       connectionId: connection.id,
       providerId: connection.providerId,
       modelId,
       connectionUpdatedAt: connection.updatedAt,
-      value,
-      source,
+      imageCapabilitySource: 'runtime_specific_snapshot_unavailable',
     }),
     capturedAtMs: now(),
   });
