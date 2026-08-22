@@ -66,7 +66,7 @@ import {
 type SettingsSection = 'models' | 'team' | 'skills' | 'advanced';
 type SkillCreationRequest = {
   prompt: string;
-  builtinSkillId: 'skill-creator' | 'import-skill';
+  builtinSkillId: 'skill-creator';
 };
 type SkillCreationHandler = (request?: SkillCreationRequest) => void;
 

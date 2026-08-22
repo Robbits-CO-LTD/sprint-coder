@@ -3426,12 +3426,6 @@ export interface SprintCoderApi {
     setTeamModelRestriction(input: TeamModelRestriction): Promise<void>;
     getDefaultTeamPolicy(): Promise<TeamPolicy>;
     setDefaultTeamPolicy(policy: TeamPolicy): Promise<void>;
-    scanSkills(): Promise<SkillScanResult>;
-    previewSkill(provider: SkillProvider, skillId: string): Promise<SkillPreviewResult>;
-    importSkill(previewId: string, nativeModeConfirmed?: boolean): Promise<SkillImportResult>;
-    updateSkill(previewId: string, nativeModeConfirmed?: boolean): Promise<SkillImportResult>;
-    setSkillEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void>;
-    removeSkill(provider: SkillProvider, skillId: string): Promise<void>;
   };
   skills: {
     list(): Promise<SkillCatalog>;
@@ -3588,12 +3582,6 @@ export const IPC_CHANNELS = {
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
   settingsSetEffort: 'sprint-coder:settings:set-effort',
-  settingsSkillsScan: 'sprint-coder:settings:skills:scan',
-  settingsSkillsPreview: 'sprint-coder:settings:skills:preview',
-  settingsSkillsImport: 'sprint-coder:settings:skills:import',
-  settingsSkillsUpdate: 'sprint-coder:settings:skills:update',
-  settingsSkillsSetEnabled: 'sprint-coder:settings:skills:set-enabled',
-  settingsSkillsRemove: 'sprint-coder:settings:skills:remove',
   skillsList: 'sprint-coder:skills:list',
   skillsGetDraftSelection: 'sprint-coder:skills:get-draft-selection',
   skillsSetDraftSelection: 'sprint-coder:skills:set-draft-selection',

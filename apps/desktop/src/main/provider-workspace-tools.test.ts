@@ -97,7 +97,7 @@ describe('Provider workspace read tools', () => {
     await tools.dispose();
   });
 
-  it('exposes Project Memory, Skill import, and Skill activation only through the selected managed catalog', async () => {
+  it('exposes Project Memory and Skill activation but rejects removed import tools', async () => {
     const calls: string[] = [];
     const tools = new ProviderWorkspaceTools({
       workspaceFor: () => null,
@@ -110,14 +110,6 @@ describe('Provider workspace read tools', () => {
           return { queued: true };
         },
         createSkillDraft: async () => ({ draft: true }),
-        readSkillImport: async () => {
-          calls.push('read');
-          return { digest: 'a'.repeat(64), files: [] };
-        },
-        installSkillImport: async () => {
-          calls.push('install');
-          return { installed: true };
-        },
         activateSkill: async () => {
           calls.push('activate');
           return { instructions: 'Follow the pinned Skill.' };
@@ -132,17 +124,10 @@ describe('Provider workspace read tools', () => {
     } as const;
     const snapshot = tools.startTurn(context, 'codex', {
       projectMemory: true,
-      skillImports: true,
       skillActivation: true,
-      skillImportUserText: 'IMPORT_SKILL claude writer',
     });
     expect(snapshot.entries.map(({ providerName }) => providerName)).toEqual(
-      expect.arrayContaining([
-        'project_memory_remember',
-        'skill_import_read',
-        'skill_import_install',
-        'skill_activate',
-      ]),
+      expect.arrayContaining(['project_memory_remember', 'skill_activate']),
     );
     expect(snapshot.entries.map(({ providerName }) => providerName)).not.toContain(
       'skill_draft_create',
@@ -153,25 +138,21 @@ describe('Provider workspace read tools', () => {
       providerName: 'project_memory_remember',
       input: { content: 'durable fact' },
     });
-    await tools.broker.dispatch({
-      ...context,
-      callId: 'import-read',
-      providerName: 'skill_import_read',
-      input: { cli: 'claude', skillId: 'writer' },
-    });
-    await tools.broker.dispatch({
-      ...context,
-      callId: 'import-install',
-      providerName: 'skill_import_install',
-      input: { source: { cli: 'claude', skillId: 'writer', digest: 'a'.repeat(64) }, files: [] },
-    });
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'import-read',
+        providerName: 'skill_import_read',
+        input: { cli: 'claude', skillId: 'writer' },
+      }),
+    ).rejects.toThrow();
     await tools.broker.dispatch({
       ...context,
       callId: 'activate',
       providerName: 'skill_activate',
       input: { skillId: 'writer', digest: 'a'.repeat(64) },
     });
-    expect(calls).toEqual(['memory', 'read', 'install', 'activate']);
+    expect(calls).toEqual(['memory', 'activate']);
     await tools.dispose();
   });
 

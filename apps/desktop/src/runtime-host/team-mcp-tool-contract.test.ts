@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import {
   PROJECT_MEMORY_MCP_TOOL_NAMES,
   SKILL_DRAFT_MCP_TOOL_NAMES,
-  SKILL_IMPORT_MCP_TOOL_NAMES,
   TEAM_CORE_MCP_TOOL_NAMES,
   WORKER_TEAM_MCP_TOOL_NAMES,
   teamMcpToolNamesForCapabilities,
@@ -16,11 +15,6 @@ describe('Team MCP tool contract', () => {
       'skill creator',
       { allowTeamTools: false, allowSkillDrafts: true },
       SKILL_DRAFT_MCP_TOOL_NAMES,
-    ],
-    [
-      'skill import',
-      { allowTeamTools: false, allowSkillImports: true },
-      SKILL_IMPORT_MCP_TOOL_NAMES,
     ],
   ])('derives the exact %s Turn subset', (_kind, capabilities, expected) => {
     expect(teamMcpToolNamesForCapabilities(capabilities)).toEqual(expected);

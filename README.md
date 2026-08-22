@@ -61,7 +61,7 @@ Sprint Coderは、一人のAIとの対話を入口に、仕事が大きくなっ
 - **Local-firstな履歴** — Task、Message、Turn、Teamの状態を端末内へ保存します。
 - **Managed workspace tools** — ファイル変更、差分、コマンド、承認履歴を画面で追跡します。
 - **Access control** — `確認する` / `自動` / `フルアクセス`を入口に、実行範囲をTask単位で制御します。
-- **Skill対応** — ローカルSkillをChatやTeamへ追加できます。Portable／Codex Native／Claude Nativeの互換性を事前表示し、未対応機能は黙って無視せず変換または停止します。Codex実行では選択した管理コピーだけを隔離rootから渡し、隔離を確認できないCLIではTurnを開始しません。詳しくは[Skillガイド](docs/skills.md)を参照してください。
+- **Skill対応** — Sprint Coder内蔵SkillとSkill Creatorで作成したSkillをChatやTeamへ追加できます。Portable／Codex Native／Claude Nativeの互換性を確認し、未対応機能は黙って無視せず停止します。Codex実行では選択した管理コピーだけを隔離rootから渡し、隔離を確認できないCLIではTurnを開始しません。詳しくは[Skillガイド](docs/skills.md)を参照してください。
 
 ## 対応Runtime / Provider
 

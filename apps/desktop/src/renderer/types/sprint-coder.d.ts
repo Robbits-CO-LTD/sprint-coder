@@ -1124,28 +1124,6 @@ export interface SprintCoderApi {
     ): Promise<void>;
     getDefaultTeamPolicy(): Promise<import('@sprint-coder/contracts').TeamPolicy>;
     setDefaultTeamPolicy(policy: import('@sprint-coder/contracts').TeamPolicy): Promise<void>;
-    scanSkills(): Promise<import('@sprint-coder/contracts').SkillScanResult>;
-    previewSkill(
-      provider: import('@sprint-coder/contracts').SkillProvider,
-      skillId: string,
-    ): Promise<import('@sprint-coder/contracts').SkillPreviewResult>;
-    importSkill(
-      previewId: string,
-      nativeModeConfirmed?: boolean,
-    ): Promise<import('@sprint-coder/contracts').SkillImportResult>;
-    updateSkill(
-      previewId: string,
-      nativeModeConfirmed?: boolean,
-    ): Promise<import('@sprint-coder/contracts').SkillImportResult>;
-    setSkillEnabled(
-      provider: import('@sprint-coder/contracts').SkillProvider,
-      skillId: string,
-      enabled: boolean,
-    ): Promise<void>;
-    removeSkill(
-      provider: import('@sprint-coder/contracts').SkillProvider,
-      skillId: string,
-    ): Promise<void>;
   };
   skills: {
     list(): Promise<import('@sprint-coder/contracts').SkillCatalog>;

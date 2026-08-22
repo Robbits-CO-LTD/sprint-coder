@@ -69,7 +69,6 @@ import {
   runtimeSettingsSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
-  skillCandidateInputSchema,
   skillActivationPolicyInputSchema,
   skillCatalogSchema,
   skillCatalogItemSchema,
@@ -77,13 +76,7 @@ import {
   skillDraftCreateInputSchema,
   skillDraftInstallInputSchema,
   skillDraftIdInputSchema,
-  skillEnabledInputSchema,
   skillExportInputSchema,
-  skillImportInputSchema,
-  skillImportResultSchema,
-  skillInstalledInputSchema,
-  skillPreviewResultSchema,
-  skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
   updateCheckResultSchema,
@@ -763,36 +756,6 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsGetDefaultTeamPolicy, emptyPayloadSchema, teamPolicySchema, {}),
     setDefaultTeamPolicy: (policy) =>
       invoke(IPC_CHANNELS.settingsSetDefaultTeamPolicy, teamPolicySchema, z.undefined(), policy),
-    scanSkills: () =>
-      invoke(IPC_CHANNELS.settingsSkillsScan, emptyPayloadSchema, skillScanResultSchema, {}),
-    previewSkill: (provider, skillId) =>
-      invoke(
-        IPC_CHANNELS.settingsSkillsPreview,
-        skillCandidateInputSchema,
-        skillPreviewResultSchema,
-        { provider, skillId },
-      ),
-    importSkill: (previewId, nativeModeConfirmed = false) =>
-      invoke(IPC_CHANNELS.settingsSkillsImport, skillImportInputSchema, skillImportResultSchema, {
-        previewId,
-        nativeModeConfirmed,
-      }),
-    updateSkill: (previewId, nativeModeConfirmed = false) =>
-      invoke(IPC_CHANNELS.settingsSkillsUpdate, skillImportInputSchema, skillImportResultSchema, {
-        previewId,
-        nativeModeConfirmed,
-      }),
-    setSkillEnabled: (provider, skillId, enabled) =>
-      invoke(IPC_CHANNELS.settingsSkillsSetEnabled, skillEnabledInputSchema, z.undefined(), {
-        provider,
-        skillId,
-        enabled,
-      }),
-    removeSkill: (provider, skillId) =>
-      invoke(IPC_CHANNELS.settingsSkillsRemove, skillInstalledInputSchema, z.undefined(), {
-        provider,
-        skillId,
-      }),
   },
   skills: {
     list: () => invoke(IPC_CHANNELS.skillsList, emptyPayloadSchema, skillCatalogSchema, {}),
