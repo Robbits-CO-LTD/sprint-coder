@@ -13,7 +13,12 @@ import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/spri
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
-import type { ProviderModel, TeamModelRestriction, TeamPolicy } from '@sprint-coder/contracts';
+import type {
+  ProviderModel,
+  TeamModelRestriction,
+  TeamPolicy,
+  UpdateCheckResult,
+} from '@sprint-coder/contracts';
 import {
   filterTeamModelGroups,
   getTeamConnectionSelection,
@@ -548,54 +553,122 @@ const UPDATE_ERROR_LABEL = {
   unknown: '不明',
 } as const;
 
-function UpdateHealthGroup() {
+type UpdateCheckUiResult = UpdateCheckResult | { status: 'bridge_failed' };
+
+export function updateCheckResultText(result: UpdateCheckUiResult): string {
+  switch (result.status) {
+    case 'up_to_date':
+      return '最新版を使用しています。';
+    case 'update_available':
+      return `v${result.version.replace(/^v/, '')} が見つかりました。バックグラウンドでダウンロードしています。`;
+    case 'already_checking':
+      return 'アップデートを確認中です。少し待ってからもう一度お試しください。';
+    case 'unsupported':
+      return 'アップデートの確認は対応するインストール版で利用できます。';
+    case 'failed':
+      return `アップデートを確認できませんでした（${UPDATE_ERROR_LABEL[result.errorCategory]}）。`;
+    case 'bridge_failed':
+      return 'アップデートを確認できませんでした。時間をおいてもう一度お試しください。';
+  }
+}
+
+export function UpdateHealthGroup() {
   const health = useAppStore((s) => s.updateHealth);
-  if (health === null) return null;
-  const failing = health.consecutiveFailures > 0;
-  const attention = health.consecutiveFailures >= 3;
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<UpdateCheckUiResult | null>(null);
+  const requestGeneration = useRef(0);
+  const checkNow =
+    typeof window === 'undefined' ? undefined : window.sprintCoder?.updates?.checkNow;
+  const canCheck = typeof checkNow === 'function';
+  const failing = (health?.consecutiveFailures ?? 0) > 0;
+  const attention = (health?.consecutiveFailures ?? 0) >= 3;
+
+  useEffect(
+    () => () => {
+      requestGeneration.current += 1;
+    },
+    [],
+  );
+
+  async function checkForUpdate(): Promise<void> {
+    if (checkNow === undefined || checking) return;
+    const generation = ++requestGeneration.current;
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const result = await checkNow();
+      if (generation === requestGeneration.current) setCheckResult(result);
+    } catch {
+      if (generation === requestGeneration.current) setCheckResult({ status: 'bridge_failed' });
+    } finally {
+      if (generation === requestGeneration.current) setChecking(false);
+    }
+  }
+
   return (
     <div
       className={`settings-group settings-update-health${attention ? ' attention' : ''}`}
       data-testid="settings-update-health"
-      role="status"
     >
-      <span className="settings-field-label">自動更新</span>
+      <span className="settings-field-label">アップデート</span>
       <p className={failing ? 'settings-update-warning' : 'settings-hint'}>
         {failing
-          ? `自動更新が連続 ${health.consecutiveFailures} 回失敗しています（${
-              health.lastErrorCategory === null
+          ? `自動更新が連続 ${health!.consecutiveFailures} 回失敗しています（${
+              health!.lastErrorCategory === null
                 ? '不明'
-                : UPDATE_ERROR_LABEL[health.lastErrorCategory]
+                : UPDATE_ERROR_LABEL[health!.lastErrorCategory]
             }）。`
-          : '自動更新は正常です。'}
+          : health === null
+            ? '更新状態を読み込んでいます。'
+            : '自動更新は正常です。'}
       </p>
-      <p className="settings-hint">
-        成功 {health.successfulChecks}回 / 失敗 {health.failedChecks}回
-      </p>
-      {failing && (
-        <div className="settings-update-actions">
-          <button
-            type="button"
-            className={attention ? 'settings-primary-button' : 'settings-secondary-button'}
-            onClick={() => window.sprintCoder?.updates?.retry()}
-          >
-            今すぐ再試行
-          </button>
-          <button
-            type="button"
-            className="settings-secondary-button"
-            onClick={() => window.sprintCoder?.updates?.openManualUpdate()}
-          >
-            手動更新を開く
-          </button>
-          <button
-            type="button"
-            className="settings-secondary-button"
-            onClick={() => window.sprintCoder?.updates?.openUpdateLog()}
-          >
-            更新ログを確認
-          </button>
-        </div>
+      {health !== null && (
+        <p className="settings-hint">
+          成功 {health.successfulChecks}回 / 失敗 {health.failedChecks}回
+        </p>
+      )}
+      <div className="settings-update-actions">
+        <button
+          type="button"
+          className={attention ? 'settings-primary-button' : 'settings-secondary-button'}
+          data-testid="settings-check-update"
+          disabled={!canCheck || checking}
+          onClick={() => void checkForUpdate()}
+        >
+          {checking ? '確認中…' : 'アップデートを確認'}
+        </button>
+        {failing && (
+          <>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              onClick={() => window.sprintCoder?.updates?.openManualUpdate()}
+            >
+              手動更新を開く
+            </button>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              onClick={() => window.sprintCoder?.updates?.openUpdateLog()}
+            >
+              更新ログを確認
+            </button>
+          </>
+        )}
+      </div>
+      {checkResult !== null && (
+        <p
+          className={
+            checkResult.status === 'failed' || checkResult.status === 'bridge_failed'
+              ? 'settings-update-warning'
+              : 'settings-hint'
+          }
+          data-testid="settings-update-result"
+          role="status"
+          aria-live="polite"
+        >
+          {updateCheckResultText(checkResult)}
+        </p>
       )}
     </div>
   );

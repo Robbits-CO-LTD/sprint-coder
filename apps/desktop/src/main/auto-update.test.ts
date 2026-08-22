@@ -204,6 +204,10 @@ describe('startAutoUpdate', () => {
     expect(setFeedURL).toHaveBeenCalledWith({
       url: 'https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.0.1-beta.5',
     });
+    await expect(controller.checkNow()).resolves.toEqual({
+      status: 'update_available',
+      version: '0.0.1-beta.5',
+    });
 
     events.emit('update-downloaded');
     await vi.waitFor(() => expect(restartToInstall).toHaveBeenCalledOnce());
@@ -564,8 +568,77 @@ describe('startAutoUpdate', () => {
       macAutoUpdateEligible: false,
     });
 
-    await controller.checkNow();
+    await expect(controller.checkNow()).resolves.toEqual({ status: 'unsupported' });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('reports when a manual check confirms the current version is latest', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const recordSuccess = vi.fn();
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => [],
+    }));
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox: vi.fn() } as unknown as AutoUpdateOptions['dialog'],
+      fetch,
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall: vi.fn(),
+      currentVersion: '0.4.0',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath: 'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.4.0\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+      recordSuccess,
+    });
+
+    await vi.waitFor(() => expect(recordSuccess).toHaveBeenCalledOnce());
+    await expect(controller.checkNow()).resolves.toEqual({ status: 'up_to_date' });
+    controller.stop();
+  });
+
+  it('returns only the classified failure when a manual check fails', async () => {
+    vi.useFakeTimers();
+    const events = new EventEmitter();
+    const recordFailure = vi.fn();
+    const fetch = vi.fn(async () => {
+      throw new Error('fetch failed for /Users/alice/private/update.log');
+    });
+    const controller = startAutoUpdate({
+      updater: {
+        setFeedURL: vi.fn(),
+        checkForUpdates: vi.fn(),
+        on: events.on.bind(events),
+        removeListener: events.removeListener.bind(events),
+      } as unknown as AutoUpdateOptions['updater'],
+      dialog: { showMessageBox: vi.fn() } as unknown as AutoUpdateOptions['dialog'],
+      fetch,
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      restartToInstall: vi.fn(),
+      currentVersion: '0.4.0',
+      isPackaged: true,
+      platform: 'win32',
+      architecture: 'x64',
+      executablePath: 'C:\\Users\\me\\AppData\\Local\\SprintCoder\\app-0.4.0\\Sprint Coder.exe',
+      macAutoUpdateEligible: false,
+      recordFailure,
+    });
+
+    await vi.waitFor(() => expect(recordFailure).toHaveBeenCalledOnce());
+    await expect(controller.checkNow()).resolves.toEqual({
+      status: 'failed',
+      errorCategory: 'network',
+    });
+    controller.stop();
   });
 
   it('does not enter Electron autoUpdater after stop wins a release-discovery race', async () => {
@@ -606,6 +679,7 @@ describe('startAutoUpdate', () => {
     });
 
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    await expect(controller.checkNow()).resolves.toEqual({ status: 'already_checking' });
     controller.stop();
     resolveFetch({ ok: true, status: 200, json: responseJson });
     await vi.waitFor(() => expect(responseJson).toHaveBeenCalledOnce());

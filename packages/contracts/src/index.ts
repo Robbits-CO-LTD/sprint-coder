@@ -2422,6 +2422,24 @@ export const updateHealthSchema = z
   })
   .strict();
 export type UpdateHealth = z.infer<typeof updateHealthSchema>;
+export const updateCheckResultSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('up_to_date') }).strict(),
+  z
+    .object({
+      status: z.literal('update_available'),
+      version: z.string().min(1).max(64),
+    })
+    .strict(),
+  z.object({ status: z.literal('already_checking') }).strict(),
+  z.object({ status: z.literal('unsupported') }).strict(),
+  z
+    .object({
+      status: z.literal('failed'),
+      errorCategory: updateErrorCategorySchema,
+    })
+    .strict(),
+]);
+export type UpdateCheckResult = z.infer<typeof updateCheckResultSchema>;
 export const resolvedCliCommandSchema = z
   .object({
     source: z.enum([
@@ -3287,7 +3305,7 @@ export interface SprintCoderApi {
   };
   updates: {
     subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
-    retry(): void;
+    checkNow(): Promise<UpdateCheckResult>;
     openManualUpdate(): void;
     openUpdateLog(): void;
   };
@@ -3510,7 +3528,7 @@ export const IPC_CHANNELS = {
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   /** Push-only update health contains classifications, never raw updater errors or paths. */
   updateHealthEvent: 'sprint-coder:update:health',
-  updateRetry: 'sprint-coder:update:retry',
+  updateCheckNow: 'sprint-coder:update:check-now',
   updateOpenManual: 'sprint-coder:update:open-manual',
   updateOpenLog: 'sprint-coder:update:open-log',
   runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',

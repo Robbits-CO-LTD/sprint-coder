@@ -531,6 +531,15 @@ export type UpdateHealth = {
   lastErrorCategory:
     'network' | 'release_feed' | 'decryption' | 'filesystem' | 'updater' | 'unknown' | null;
 };
+export type UpdateCheckResult =
+  | { status: 'up_to_date' }
+  | { status: 'update_available'; version: string }
+  | { status: 'already_checking' }
+  | { status: 'unsupported' }
+  | {
+      status: 'failed';
+      errorCategory: Exclude<UpdateHealth['lastErrorCategory'], null>;
+    };
 export type EffortOption = { id: string; description: string };
 export type CodexModelOption = {
   id: string;
@@ -847,7 +856,7 @@ export interface SprintCoderApi {
   };
   updates: {
     subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
-    retry(): void;
+    checkNow(): Promise<UpdateCheckResult>;
     openManualUpdate(): void;
     openUpdateLog(): void;
   };

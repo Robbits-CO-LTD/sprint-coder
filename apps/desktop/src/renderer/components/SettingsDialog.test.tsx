@@ -135,6 +135,14 @@ describe('which body the flag selects', () => {
     }
   });
 
+  it('offers a manual update check in both settings layouts', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-check-update"');
+      expect(html).toContain('アップデートを確認');
+    }
+  });
+
   it('offers muted-by-default Task sound effects in both settings layouts', () => {
     stubBridge();
     for (const html of [workspace(), legacy()]) {
