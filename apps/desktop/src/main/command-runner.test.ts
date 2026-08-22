@@ -45,12 +45,19 @@ import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 
-const normalizeIcaclsAcl = (value: string): string[] =>
+const normalizeIcaclsAcl = (value: string, path: string): string[] =>
   [
     ...new Set(
       value
         .split(/\r?\n/u)
-        .map((line) => line.trim().replace(/:\(I\)\(/u, ':('))
+        .map((line, index) => {
+          const trimmed = line.trim();
+          const withoutPath =
+            index === 0 && trimmed.toLocaleLowerCase().startsWith(path.toLocaleLowerCase())
+              ? trimmed.slice(path.length).trim()
+              : trimmed;
+          return withoutPath.replace(/:\(I\)\(/u, ':(');
+        })
         .filter((line) => line.length > 0),
     ),
   ].sort();
@@ -78,6 +85,14 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
+  it('normalizes equivalent explicit and inherited icacls entries', () => {
+    const path = 'C:\\Temp\\workspace';
+    const before = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+    const after = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\n  NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+
+    expect(normalizeIcaclsAcl(after, path)).toEqual(normalizeIcaclsAcl(before, path));
+  });
+
   it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
@@ -331,7 +346,9 @@ describe('CommandRunner', () => {
       );
       // Editing a parent DACL can make Windows enumerate an inherited ACE alongside an identical
       // explicit ACE. Compare that root ACL semantically while keeping the protected child exact.
-      expect(normalizeIcaclsAcl(aclAfter[0]!)).toEqual(normalizeIcaclsAcl(aclBefore[0]!));
+      expect(normalizeIcaclsAcl(aclAfter[0]!, workspace)).toEqual(
+        normalizeIcaclsAcl(aclBefore[0]!, workspace),
+      );
       expect(aclAfter[1]).toBe(aclBefore[1]);
     },
   );
