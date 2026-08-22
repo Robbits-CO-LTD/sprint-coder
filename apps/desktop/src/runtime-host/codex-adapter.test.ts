@@ -406,7 +406,6 @@ describe('Codex runtime probe', () => {
         [],
         undefined,
         undefined,
-        { inheritUserConfig: false },
         undefined,
         snapshot,
         async (call) => {

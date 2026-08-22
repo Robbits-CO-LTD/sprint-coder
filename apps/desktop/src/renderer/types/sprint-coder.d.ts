@@ -1074,8 +1074,6 @@ export interface SprintCoderApi {
     setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     setCodexEffort(effort: string): Promise<void>;
-    getCodexUserConfig(): Promise<{ enabled: boolean }>;
-    setCodexUserConfig(input: { enabled: boolean }): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
     getTeamModelSelectionGuidance(): Promise<

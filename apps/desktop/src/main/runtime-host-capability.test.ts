@@ -458,7 +458,6 @@ describe('RuntimeHostClient Team process binding', () => {
       undefined,
       'codex',
       undefined,
-      undefined,
       (taskId, turnId, identity) => {
         bindings.push({ taskId, turnId, identity });
         return true;
@@ -510,7 +509,6 @@ describe('RuntimeHostClient Team process binding', () => {
       undefined,
       undefined,
       'codex',
-      undefined,
       undefined,
       () => true,
     );

@@ -219,7 +219,6 @@ describe.skipIf(!enabled)('Claude runtime adapter (REAL CLI smoke)', () => {
           [],
           undefined,
           undefined,
-          undefined,
           (pid) => {
             const identity = queryNativeProcessIdentity(pid);
             processBound = identity !== null && bridge.bindRuntimeProcess(turnId, identity);

@@ -183,7 +183,6 @@ class DirectCodexTeamRuntime implements TeamWorkerRuntime {
           [],
           undefined,
           undefined,
-          { inheritUserConfig: false },
           undefined,
           snapshot,
           async ({ callId, toolName, arguments: toolInput }) => {

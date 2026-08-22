@@ -2084,19 +2084,6 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    it('defaults Codex user config inheritance off and persists explicit opt-in', () => {
-      const { persistence, path } = createPersistence();
-      expect(persistence.getCodexUserConfigEnabled()).toBe(false);
-      persistence.setCodexUserConfigEnabled(true);
-      persistence.close();
-
-      const reopened = new SqlitePersistenceClient(path);
-      expect(reopened.getCodexUserConfigEnabled()).toBe(true);
-      reopened.setCodexUserConfigEnabled(false);
-      expect(reopened.getCodexUserConfigEnabled()).toBe(false);
-      reopened.close();
-    });
-
     it('persists trimmed Team model-selection guidance across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getTeamModelSelectionGuidance()).toBe('');

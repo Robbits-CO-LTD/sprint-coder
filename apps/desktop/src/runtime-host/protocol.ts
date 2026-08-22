@@ -110,10 +110,6 @@ export type RuntimeSkillInput = Readonly<{
   path: string;
 }>;
 
-export type RuntimeCodexConfigPolicy = Readonly<{
-  inheritUserConfig: boolean;
-}>;
-
 /** Additive, optional per-turn addendum: when present, the Codex/Claude adapter wires the real Leader
  * up to team-mcp-bridge.ts (via an ephemeral MCP stdio server) instead of running the plain
  * no-tools profile. `socketPath`/`token` name the bridge connection; `guidance` is appended to the
@@ -289,7 +285,6 @@ type RuntimeStartRequest = {
   payload: string;
   payloadDigest: string;
   skills?: RuntimeSkillInput[];
-  codexConfigPolicy?: RuntimeCodexConfigPolicy;
   toolCatalogSnapshot: ToolCatalogSnapshot;
   teamMcp?: RuntimeTeamMcpOption;
 };
@@ -484,22 +479,10 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     createHash('sha256').update(Buffer.from(value.payload, 'utf8')).digest('hex') ===
       value.payloadDigest &&
     (!('skills' in value) || value.skills === undefined || isRuntimeSkillInputs(value.skills)) &&
-    (!('codexConfigPolicy' in value) ||
-      value.codexConfigPolicy === undefined ||
-      isRuntimeCodexConfigPolicy(value.codexConfigPolicy)) &&
+    !('codexConfigPolicy' in value) &&
     'toolCatalogSnapshot' in value &&
     isVerifiedReadOnlyCatalog(value.toolCatalogSnapshot) &&
     (!('teamMcp' in value) || value.teamMcp === undefined || isRuntimeTeamMcpOption(value.teamMcp))
-  );
-}
-
-function isRuntimeCodexConfigPolicy(value: unknown): value is RuntimeCodexConfigPolicy {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.keys(value).length === 1 &&
-    typeof (value as Record<string, unknown>)['inheritUserConfig'] === 'boolean'
   );
 }
 

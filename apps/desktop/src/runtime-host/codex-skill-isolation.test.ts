@@ -1,4 +1,4 @@
-import { mkdir, realpath, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -60,7 +60,7 @@ describe('Codex Skill isolation', () => {
     expect(codexSkillIsolationArgs(isolation)).toContain('skills.bundled.enabled=true');
   });
 
-  it('keeps user config disabled by default and snapshots it only for an opted-in Turn', async () => {
+  it('never copies ambient user config into an isolated Turn', async () => {
     const root = await temporaryRoot();
     const sourceHome = join(root, 'source-home');
     await mkdir(sourceHome, { recursive: true });
@@ -69,45 +69,14 @@ describe('Codex Skill isolation', () => {
       '[mcp_servers.example]\ncommand = "example"\n',
     );
 
-    const disabled = prepareCodexSkillIsolation({
-      temporaryRoot: join(root, 'disabled'),
+    const isolation = prepareCodexSkillIsolation({
+      temporaryRoot: join(root, 'runtime'),
       cwd: root,
       skills: [],
       environment: { CODEX_HOME: sourceHome },
     });
-    expect(disabled.userConfigSnapshot).toBe('disabled');
-    await expect(readFile(join(disabled.codexHome, 'config.toml'), 'utf8')).rejects.toThrow();
-
-    const enabled = prepareCodexSkillIsolation({
-      temporaryRoot: join(root, 'enabled'),
-      cwd: root,
-      skills: [],
-      configPolicy: { inheritUserConfig: true },
-      environment: { CODEX_HOME: sourceHome },
-    });
-    expect(enabled.userConfigSnapshot).toBe('copied');
-    expect(await readFile(join(enabled.codexHome, 'config.toml'), 'utf8')).toContain(
-      '[mcp_servers.example]',
-    );
-  });
-
-  it('rejects an opted-in config symlink instead of silently following it', async () => {
-    const root = await temporaryRoot();
-    const sourceHome = join(root, 'source-home');
-    const target = join(root, 'config-target.toml');
-    await mkdir(sourceHome, { recursive: true });
-    await writeFile(target, 'model = "test"\n');
-    await symlink(target, join(sourceHome, 'config.toml'));
-
-    expect(() =>
-      prepareCodexSkillIsolation({
-        temporaryRoot: join(root, 'runtime'),
-        cwd: root,
-        skills: [],
-        configPolicy: { inheritUserConfig: true },
-        environment: { CODEX_HOME: sourceHome },
-      }),
-    ).toThrow('Codex user config snapshot failed');
+    expect(isolation.userConfigSnapshot).toBe('disabled');
+    await expect(readFile(join(isolation.codexHome, 'config.toml'), 'utf8')).rejects.toThrow();
   });
 
   it('finds repository Skills to disable and stops at the git boundary', async () => {
