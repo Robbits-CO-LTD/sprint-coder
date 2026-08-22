@@ -44,6 +44,7 @@ import { structuredPatchDigest, type PreparedStructuredPatch } from './structure
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { modelSelectionForRuntime } from './connection-identity';
 import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
+import { buildProviderFailureDiagnostic } from './provider-failure-diagnostic';
 import {
   EditSagaCrashError,
   EditSagaExecutor,
@@ -1939,7 +1940,9 @@ if (runsWithElectronAbi)
           verified: true,
         },
       });
-      expect(persisted?.stderrObserved).toBe(true);
+      expect(persisted?.runtimeKind).toBe('codex');
+      if (persisted?.runtimeKind !== 'codex') throw new Error('Expected a Codex diagnostic');
+      expect(persisted.stderrObserved).toBe(true);
       expect(JSON.stringify(persisted)).not.toContain('abcdefghijkl');
       expect(JSON.stringify(persisted)).not.toContain('/Users/example');
       reopened.close();
@@ -1982,6 +1985,190 @@ if (runsWithElectronAbi)
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.getRuntimeFailureDiagnostic({ taskId: task.id })).toBeNull();
       reopened.close();
+    });
+
+    it('persists one safe Provider diagnostic per Turn and reads the same row by Task or id', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('provider diagnostic');
+      const turn = persistence.startTurn(task.id, 'private prompt canary');
+      const diagnostic = buildProviderFailureDiagnostic({
+        cause: {
+          failureStage: 'provider_error',
+          category: 'provider_unavailable',
+          retryable: true,
+          providerCode: 'http_503',
+          modelPreparation: 'completed',
+        },
+        providerId: 'ollama',
+        profileId: 'ollama',
+        elapsedMs: 45_072,
+        appVersion: '0.4.0',
+      });
+      const persisted = persistence.recordRuntimeFailureDiagnostic(
+        task.id,
+        turn.turnId,
+        diagnostic,
+      );
+      const duplicate = persistence.recordRuntimeFailureDiagnostic(
+        task.id,
+        turn.turnId,
+        buildProviderFailureDiagnostic({
+          cause: {
+            failureStage: 'network',
+            category: 'network',
+            retryable: true,
+            providerCode: null,
+            modelPreparation: 'completed',
+          },
+          providerId: 'ollama',
+          profileId: 'ollama',
+          elapsedMs: 50_000,
+          appVersion: '0.4.0',
+        }),
+      );
+
+      expect(duplicate.diagnosticId).toBe(persisted.diagnosticId);
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      const byTask = reopened.getRuntimeFailureDiagnostic({ taskId: task.id });
+      const byId = reopened.getRuntimeFailureDiagnostic({ diagnosticId: persisted.diagnosticId });
+      expect(byTask).toEqual(byId);
+      expect(byTask).toMatchObject({
+        runtimeKind: 'provider',
+        failureStage: 'provider_error',
+        category: 'provider_unavailable',
+        providerCode: 'http_503',
+        taskId: task.id,
+        turnId: turn.turnId,
+      });
+      expect(JSON.stringify(byTask)).not.toContain('private prompt canary');
+      reopened.close();
+    });
+
+    it('migrates the v69 CLI diagnostic table to v74 without changing existing JSON', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('diagnostic migration');
+      const turn = persistence.startTurn(task.id, 'fail');
+      const diagnosticId = randomUUID();
+      persistence.recordRuntimeFailureDiagnostic(task.id, turn.turnId, {
+        version: 1,
+        diagnosticId,
+        runtimeKind: 'codex',
+        failureStage: 'protocol_error',
+        elapsedMs: 12,
+        appVersion: '0.4.0',
+        cliVersion: 'codex 1.2.3',
+        teamMcp: { enabled: false, status: 'not_configured' },
+        lastRecognizedNotification: null,
+        lastReceivedNotification: null,
+        unsupportedNotificationCount: 0,
+        stderrObserved: false,
+        stderrTruncated: false,
+        recordedAt: '2026-08-22T00:00:00.000Z',
+      });
+      persistence.close();
+
+      const legacy = new Database(path);
+      const before = legacy
+        .prepare('SELECT diagnostic_json FROM runtime_failure_diagnostics WHERE id = ?')
+        .get(diagnosticId) as { diagnostic_json: string };
+      legacy.exec(`
+        ALTER TABLE runtime_failure_diagnostics
+          RENAME TO runtime_failure_diagnostics_v74_current;
+        DROP INDEX runtime_failure_diagnostics_task_created_idx;
+        CREATE TABLE runtime_failure_diagnostics (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+          runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude')),
+          failure_stage TEXT NOT NULL CHECK (failure_stage IN (
+            'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+            'startup_error', 'spawn_error', 'abnormal_exit'
+          )),
+          diagnostic_json TEXT NOT NULL CHECK (length(CAST(diagnostic_json AS BLOB)) <= 16384),
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO runtime_failure_diagnostics
+          SELECT * FROM runtime_failure_diagnostics_v74_current;
+        DROP TABLE runtime_failure_diagnostics_v74_current;
+        CREATE INDEX runtime_failure_diagnostics_task_created_idx
+          ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+        DELETE FROM schema_migrations WHERE version = 74;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getRuntimeFailureDiagnostic({ diagnosticId })).toMatchObject({
+        runtimeKind: 'codex',
+        diagnosticId,
+        taskId: task.id,
+        turnId: turn.turnId,
+      });
+      migrated.close();
+      const verified = new Database(path, { readonly: true });
+      expect(
+        (
+          verified
+            .prepare('SELECT diagnostic_json FROM runtime_failure_diagnostics WHERE id = ?')
+            .get(diagnosticId) as { diagnostic_json: string }
+        ).diagnostic_json,
+      ).toBe(before.diagnostic_json);
+      expect(
+        verified.prepare('SELECT checksum FROM schema_migrations WHERE version = 74').get(),
+      ).toEqual({ checksum: 'provider-failure-diagnostics-v74' });
+      verified.close();
+    });
+
+    it('rolls the v74 diagnostic rebuild back when a legacy row violates the new contract', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('diagnostic rollback');
+      const turn = persistence.startTurn(task.id, 'fail');
+      persistence.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`
+        ALTER TABLE runtime_failure_diagnostics
+          RENAME TO runtime_failure_diagnostics_v74_current;
+        DROP INDEX runtime_failure_diagnostics_task_created_idx;
+        CREATE TABLE runtime_failure_diagnostics (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+          runtime_kind TEXT NOT NULL,
+          failure_stage TEXT NOT NULL,
+          diagnostic_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        DROP TABLE runtime_failure_diagnostics_v74_current;
+        CREATE INDEX runtime_failure_diagnostics_task_created_idx
+          ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+        DELETE FROM schema_migrations WHERE version = 74;
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO runtime_failure_diagnostics(
+             id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+           ) VALUES (?, ?, ?, 'provider', 'invalid_stage', '{}', ?)`,
+        )
+        .run(randomUUID(), task.id, turn.turnId, new Date().toISOString());
+      legacy.close();
+
+      expect(() => new SqlitePersistenceClient(path)).toThrow();
+      const rolledBack = new Database(path, { readonly: true });
+      expect(
+        rolledBack
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get('runtime_failure_diagnostics'),
+      ).toEqual({ name: 'runtime_failure_diagnostics' });
+      expect(
+        rolledBack
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get('runtime_failure_diagnostics_v69'),
+      ).toBeUndefined();
+      expect(
+        rolledBack.prepare('SELECT version FROM schema_migrations WHERE version = 74').get(),
+      ).toBeUndefined();
+      rolledBack.close();
     });
 
     it('tells "never chose" apart from "chose mock", so a real CLI can be adopted once', () => {
@@ -6855,6 +7042,7 @@ if (runsWithElectronAbi)
         { version: 71 },
         { version: 72 },
         { version: 73 },
+        { version: 74 },
       ]);
       for (const [table, columns] of [
         [

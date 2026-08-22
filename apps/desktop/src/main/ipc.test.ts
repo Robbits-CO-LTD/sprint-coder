@@ -112,6 +112,7 @@ import {
   providerModelsForBuiltin,
   providerMessagesFromContext,
   providerMessagesForEgressPolicy,
+  providerEventsWithSafeFailure,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
@@ -995,6 +996,104 @@ describe('root-aware file selection', () => {
 });
 
 describe('Provider Team completion and model errors', () => {
+  it('replaces an unknown Provider stream throw with a fixed safe cause', async () => {
+    async function* unsafeStream(seed: readonly never[] = []): AsyncIterable<never> {
+      yield* seed;
+      throw new Error('raw token /Users/private endpoint=https://secret.example');
+    }
+    let captured: unknown;
+    try {
+      for await (const _event of providerEventsWithSafeFailure(unsafeStream(), 'not_required')) {
+        // The source never yields.
+      }
+    } catch (error) {
+      captured = error;
+    }
+    expect(captured).toMatchObject({
+      name: 'ProviderTurnFailureError',
+      cause: {
+        failureStage: 'stream_error',
+        category: 'internal',
+        retryable: false,
+      },
+    });
+    expect(JSON.stringify(captured)).not.toContain('/Users/private');
+    expect(JSON.stringify(captured)).not.toContain('secret.example');
+  });
+
+  it('persists an owned Provider failure best-effort and excludes canceled Turns', async () => {
+    const recordRuntimeFailureDiagnostic = vi.fn(
+      (_taskId: string, _turnId: string, diagnostic: { diagnosticId: string }) => ({
+        ...diagnostic,
+        taskId: 'task-provider-failure',
+        turnId: 'turn-provider-failure',
+      }),
+    );
+    const finishAndAdvance = vi.fn();
+    const fakeRouter = {
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([['turn-provider-failure', 'provider']]),
+      persistence: {
+        getActiveTurnId: () => 'turn-provider-failure',
+        recordRuntimeFailureDiagnostic,
+        appendDelta: vi.fn(),
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      publish: vi.fn(),
+      finishAndAdvance,
+    };
+    const finishProviderFailureWithDiagnostic = Reflect.get(
+      IpcRouter.prototype,
+      'finishProviderFailureWithDiagnostic',
+    ) as (this: typeof fakeRouter, input: Record<string, unknown>) => Promise<void>;
+    const input = {
+      taskId: 'task-provider-failure',
+      turnId: 'turn-provider-failure',
+      messageId: 'message-provider-failure',
+      synthesizing: false,
+      startedAtMs: Date.now() - 10,
+      provider: { providerId: 'ollama', profileId: 'ollama' },
+      cause: {
+        failureStage: 'network',
+        category: 'network',
+        retryable: true,
+        providerCode: null,
+        modelPreparation: 'completed',
+      },
+    };
+
+    await finishProviderFailureWithDiagnostic.call(fakeRouter, input);
+    expect(recordRuntimeFailureDiagnostic).toHaveBeenCalledTimes(1);
+    expect(recordRuntimeFailureDiagnostic.mock.calls[0]?.[2]).toMatchObject({
+      runtimeKind: 'provider',
+      failureStage: 'network',
+      providerId: 'ollama',
+    });
+    expect(finishAndAdvance).toHaveBeenCalledWith(
+      'task-provider-failure',
+      'turn-provider-failure',
+      'failed',
+    );
+
+    recordRuntimeFailureDiagnostic.mockClear();
+    finishAndAdvance.mockClear();
+    fakeRouter.canceledRuntimeTurns.add('turn-provider-failure');
+    await finishProviderFailureWithDiagnostic.call(fakeRouter, input);
+    expect(recordRuntimeFailureDiagnostic).not.toHaveBeenCalled();
+    expect(finishAndAdvance).not.toHaveBeenCalled();
+
+    fakeRouter.canceledRuntimeTurns.clear();
+    recordRuntimeFailureDiagnostic.mockImplementationOnce(() => {
+      throw new Error('sqlite unavailable');
+    });
+    await finishProviderFailureWithDiagnostic.call(fakeRouter, input);
+    expect(finishAndAdvance).toHaveBeenCalledWith(
+      'task-provider-failure',
+      'turn-provider-failure',
+      'failed',
+    );
+  });
+
   it('derives Leader MCP Team capability only from the sealed Team Turn contract', () => {
     expect(leaderMcpCapabilities(true)).toEqual({ role: 'leader', allowTeamTools: true });
     expect(leaderMcpCapabilities(false)).toEqual({ role: 'leader', allowTeamTools: false });
