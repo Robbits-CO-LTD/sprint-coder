@@ -70,6 +70,7 @@ import {
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
   skillCandidateInputSchema,
+  skillActivationPolicyInputSchema,
   skillCatalogSchema,
   skillCatalogItemSchema,
   skillDraftSchema,
@@ -77,6 +78,7 @@ import {
   skillDraftInstallInputSchema,
   skillDraftIdInputSchema,
   skillEnabledInputSchema,
+  skillExportInputSchema,
   skillImportInputSchema,
   skillImportResultSchema,
   skillInstalledInputSchema,
@@ -770,13 +772,15 @@ const api: SprintCoderApi = {
         skillPreviewResultSchema,
         { provider, skillId },
       ),
-    importSkill: (previewId) =>
+    importSkill: (previewId, nativeModeConfirmed = false) =>
       invoke(IPC_CHANNELS.settingsSkillsImport, skillImportInputSchema, skillImportResultSchema, {
         previewId,
+        nativeModeConfirmed,
       }),
-    updateSkill: (previewId) =>
+    updateSkill: (previewId, nativeModeConfirmed = false) =>
       invoke(IPC_CHANNELS.settingsSkillsUpdate, skillImportInputSchema, skillImportResultSchema, {
         previewId,
+        nativeModeConfirmed,
       }),
     setSkillEnabled: (provider, skillId, enabled) =>
       invoke(IPC_CHANNELS.settingsSkillsSetEnabled, skillEnabledInputSchema, z.undefined(), {
@@ -825,13 +829,19 @@ const api: SprintCoderApi = {
         digest,
         enabled,
       }),
-    exportCreated: (skillId, digest) =>
+    setActivationPolicy: (ref, policy) =>
       invoke(
-        IPC_CHANNELS.skillsExportCreated,
-        createdSkillMutationInputSchema,
-        z.string().nullable(),
-        { skillId, digest },
+        IPC_CHANNELS.skillsSetActivationPolicy,
+        skillActivationPolicyInputSchema,
+        z.undefined(),
+        { ref, policy },
       ),
+    exportCreated: (skillId, digest, format = 'original') =>
+      invoke(IPC_CHANNELS.skillsExportCreated, skillExportInputSchema, z.string().nullable(), {
+        skillId,
+        digest,
+        format,
+      }),
   },
   models: {
     query: (input) =>

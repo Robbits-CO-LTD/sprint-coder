@@ -33,6 +33,7 @@ import {
   teamExecutionIsolationSchema,
   turnSkillSelectionsSchema,
   turnSkillSelectionSchema,
+  skillCompatibilityReportSchema,
   turnEventSchema,
   turnSnapshotSchema,
   workerReportSchema,
@@ -65,6 +66,8 @@ import {
   type QueuedInput,
   type RuntimeKind,
   type SkillDraft,
+  type SkillActivationPolicy,
+  type SkillCompatibilityReport,
   type DatabaseRecovery,
   type FileChange,
   type FileChangeRecord,
@@ -163,6 +166,8 @@ import {
   type ExecutionInstruction,
   type WorkerState,
 } from '@sprint-coder/domain';
+import { portableSkillCompatibility } from './skill-compatibility';
+import { expandSkillArguments } from '../runtime-host/skill-arguments';
 import type { ManagedToolLifecycleEvent, ManagedToolCallState } from './tool-broker';
 import {
   ContextLedger,
@@ -886,6 +891,9 @@ type TurnSkillBindingRow = SkillBindingIdentityRow & {
   description: string;
   content: string;
   package_path: string;
+  activation_policy: SkillActivationPolicy | null;
+  compatibility_json: string | null;
+  arguments_text: string | null;
 };
 type OperationRow = { request_hash: string; state: string; result_json: string | null };
 type IntelligenceStepRow = {
@@ -3327,6 +3335,38 @@ const migrations = [
       CREATE INDEX managed_turn_plans_task_idx ON managed_turn_plans(task_id, updated_at);
     `,
   },
+  {
+    version: 73,
+    checksum: 'skills-v3-v73-compatibility-and-auto-candidates',
+    sql: `
+      ALTER TABLE turn_skill_bindings ADD COLUMN activation_policy TEXT
+        CHECK (activation_policy IN ('manual', 'auto-allowed'));
+      ALTER TABLE turn_skill_bindings ADD COLUMN compatibility_json TEXT;
+      ALTER TABLE turn_skill_bindings ADD COLUMN arguments_text TEXT;
+      ALTER TABLE turns ADD COLUMN auto_skill_candidates_pinned INTEGER NOT NULL DEFAULT 0
+        CHECK (auto_skill_candidates_pinned IN (0, 1));
+      CREATE TABLE turn_skill_candidates (
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 1 AND ordinal <= 32),
+        source TEXT NOT NULL CHECK (source IN ('builtin', 'created', 'agents', 'claude')),
+        skill_id TEXT NOT NULL,
+        digest TEXT NOT NULL CHECK (length(digest) = 64),
+        kind TEXT NOT NULL CHECK (kind IN ('chat', 'team')),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        content TEXT NOT NULL,
+        package_path TEXT NOT NULL,
+        compatibility_json TEXT NOT NULL CHECK (json_valid(compatibility_json)),
+        arguments_text TEXT,
+        state TEXT NOT NULL CHECK (state IN ('available', 'activated')) DEFAULT 'available',
+        activated_at TEXT,
+        PRIMARY KEY(turn_id, ordinal),
+        UNIQUE(turn_id, source, skill_id, digest)
+      );
+      CREATE INDEX turn_skill_candidates_turn_idx
+        ON turn_skill_candidates(turn_id, state, ordinal);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -3505,6 +3545,7 @@ export type StartedTurn = {
   model: string;
   modelSelection: ModelSelection;
   skills: PersistedTurnSkill[];
+  autoSkills: PersistedTurnSkill[];
   /** Computed once with context sealing and reused by dispatch so Team routing cannot diverge. */
   teamTurn: boolean;
   event: TurnEvent;
@@ -3559,6 +3600,8 @@ export type PersistedTurnSkill = Readonly<{
   description: string;
   content: string;
   packagePath: string;
+  activationPolicy?: SkillActivationPolicy;
+  compatibility?: SkillCompatibilityReport;
 }>;
 export type BackgroundActivityRecord = Readonly<{
   id: string;
@@ -3860,6 +3903,9 @@ export interface PersistenceClient {
       selections: readonly TurnSkillSelection[],
       includeBuiltinTeamSkill: boolean,
     ) => string,
+  ): void;
+  setAutoSkillProvider?(
+    provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
@@ -4622,6 +4668,17 @@ export interface PersistenceClient {
     includeBuiltinTeamSkill?: boolean,
   ): StopAndSendTransition;
   getTurnSkills(taskId: string, turnId: string): PersistedTurnSkill[];
+  pinTurnAutoSkills(taskId: string, turnId: string, skills: readonly PersistedTurnSkill[]): void;
+  hasTurnAutoSkillSet(taskId: string, turnId: string): boolean;
+  getTurnAutoSkills(taskId: string, turnId: string): PersistedTurnSkill[];
+  activateTurnAutoSkill(
+    taskId: string,
+    turnId: string,
+    input: Readonly<{ skillId: string; digest: string }>,
+  ): Readonly<{
+    skill: { skillId: string; digest: string; name: string; instructions: string };
+    event: TurnEvent;
+  }>;
   recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent;
   getTurnModelIdentity(taskId: string, turnId: string): TurnModelIdentity;
   recordTurnResolution(
@@ -5279,6 +5336,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private skillCatalogContextProvider:
     | ((selections: readonly TurnSkillSelection[], includeBuiltinTeamSkill: boolean) => string)
     | null = null;
+  private autoSkillProvider:
+    ((runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[]) | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;
 
@@ -5331,6 +5390,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     ) => string,
   ): void {
     this.skillCatalogContextProvider = provider;
+  }
+
+  setAutoSkillProvider(
+    provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
+  ): void {
+    this.autoSkillProvider = provider;
   }
 
   /**
@@ -14008,19 +14073,155 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.getTurn(taskId, turnId);
     const rows = this.db
       .prepare(
-        `SELECT source, skill_id, digest, kind, name, description, content, package_path
+        `SELECT source, skill_id, digest, kind, name, description, content, package_path,
+                activation_policy, compatibility_json, arguments_text
          FROM turn_skill_bindings
          WHERE turn_id = ?
          ORDER BY ordinal`,
       )
       .all(turnId) as TurnSkillBindingRow[];
     return rows.map((row) => ({
-      selection: toTurnSkillSelection(row),
+      selection: {
+        ...toTurnSkillSelection(row),
+        ...(row.arguments_text === null ? {} : { arguments: row.arguments_text }),
+      },
       name: row.name,
       description: row.description,
       content: row.content,
       packagePath: row.package_path,
+      activationPolicy: row.activation_policy ?? 'manual',
+      compatibility:
+        row.compatibility_json === null
+          ? portableSkillCompatibility()
+          : skillCompatibilityReportSchema.parse(JSON.parse(row.compatibility_json)),
     }));
+  }
+
+  pinTurnAutoSkills(taskId: string, turnId: string, skills: readonly PersistedTurnSkill[]): void {
+    this.getTurn(taskId, turnId);
+    if (skills.length > 32) throw new Error('Turn auto Skill candidate limit exceeded');
+    const parsed = skills.map((skill) => validatePersistedAutoSkill(skill));
+    this.db.transaction(() => {
+      const turn = this.db
+        .prepare(
+          'SELECT auto_skill_candidates_pinned AS pinned FROM turns WHERE id = ? AND task_id = ?',
+        )
+        .get(turnId, taskId) as { pinned: number } | undefined;
+      if (turn?.pinned === 1) throw new Error('Turn auto Skill candidates are already pinned');
+      const existing = this.db
+        .prepare('SELECT COUNT(*) AS count FROM turn_skill_candidates WHERE turn_id = ?')
+        .get(turnId) as { count: number };
+      if (existing.count > 0) throw new Error('Turn auto Skill candidates are already pinned');
+      const insert = this.db.prepare(
+        `INSERT INTO turn_skill_candidates(
+           turn_id, ordinal, source, skill_id, digest, kind, name, description, content,
+           package_path, compatibility_json, arguments_text, state
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available')`,
+      );
+      parsed.forEach((skill, index) =>
+        insert.run(
+          turnId,
+          index + 1,
+          skill.selection.ref.source,
+          skill.selection.ref.skillId,
+          skill.selection.ref.digest,
+          skill.selection.kind,
+          skill.name,
+          skill.description,
+          skill.content,
+          skill.packagePath,
+          JSON.stringify(skill.compatibility),
+          skill.selection.arguments ?? null,
+        ),
+      );
+      this.db
+        .prepare('UPDATE turns SET auto_skill_candidates_pinned = 1 WHERE id = ? AND task_id = ?')
+        .run(turnId, taskId);
+    })();
+  }
+
+  hasTurnAutoSkillSet(taskId: string, turnId: string): boolean {
+    const row = this.db
+      .prepare(
+        'SELECT auto_skill_candidates_pinned AS pinned FROM turns WHERE id = ? AND task_id = ?',
+      )
+      .get(turnId, taskId) as { pinned: number } | undefined;
+    if (row === undefined) throw new Error('Turn not found');
+    return row.pinned === 1;
+  }
+
+  getTurnAutoSkills(taskId: string, turnId: string): PersistedTurnSkill[] {
+    this.getTurn(taskId, turnId);
+    const rows = this.db
+      .prepare(
+        `SELECT source, skill_id, digest, kind, name, description, content, package_path,
+                'auto-allowed' AS activation_policy, compatibility_json, arguments_text
+         FROM turn_skill_candidates WHERE turn_id = ? ORDER BY ordinal`,
+      )
+      .all(turnId) as TurnSkillBindingRow[];
+    return rows.map((row) => ({
+      selection: {
+        ...toTurnSkillSelection(row),
+        ...(row.arguments_text === null ? {} : { arguments: row.arguments_text }),
+      },
+      name: row.name,
+      description: row.description,
+      content: row.content,
+      packagePath: row.package_path,
+      activationPolicy: 'auto-allowed',
+      compatibility: skillCompatibilityReportSchema.parse(JSON.parse(row.compatibility_json!)),
+    }));
+  }
+
+  activateTurnAutoSkill(
+    taskId: string,
+    turnId: string,
+    input: Readonly<{ skillId: string; digest: string }>,
+  ): Readonly<{
+    skill: { skillId: string; digest: string; name: string; instructions: string };
+    event: TurnEvent;
+  }> {
+    if (this.getActiveTurnId(taskId) !== turnId)
+      throw new Error('Skill activation requires the active Turn');
+    const rows = this.db
+      .prepare(
+        `SELECT source, name, content, state FROM turn_skill_candidates
+         WHERE turn_id = ? AND skill_id = ? AND digest = ?`,
+      )
+      .all(turnId, input.skillId, input.digest) as Array<{
+      source: TurnSkillSelection['ref']['source'];
+      name: string;
+      content: string;
+      state: 'available' | 'activated';
+    }>;
+    if (rows.length === 0) throw new Error('Skill is not a pinned auto candidate for this Turn');
+    if (rows.length !== 1) throw new Error('Skill activation identity is ambiguous');
+    const row = rows[0]!;
+    if (row.state !== 'available') throw new Error('Skill activation was already consumed');
+    return this.db.transaction(() => {
+      const result = this.db
+        .prepare(
+          `UPDATE turn_skill_candidates SET state = 'activated', activated_at = ?
+           WHERE turn_id = ? AND skill_id = ? AND digest = ? AND state = 'available'`,
+        )
+        .run(new Date().toISOString(), turnId, input.skillId, input.digest);
+      if (result.changes !== 1) throw new Error('Skill activation raced with another call');
+      return {
+        skill: {
+          skillId: input.skillId,
+          digest: input.digest,
+          name: row.name,
+          instructions: row.content,
+        },
+        event: this.appendEvent({
+          type: 'skill.activated',
+          taskId,
+          turnId,
+          ref: { source: row.source, skillId: input.skillId, digest: input.digest },
+          name: row.name,
+        }),
+      };
+    })();
   }
 
   recordSkillDraft(taskId: string, turnId: string, draft: SkillDraft): TurnEvent {
@@ -14292,12 +14493,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY created_at DESC, id DESC LIMIT 1`,
       )
       .get(taskId) as { id: string } | undefined;
+    const activatedSkills = this.db
+      .prepare(
+        `SELECT c.turn_id, c.source, c.skill_id, c.digest, c.name
+         FROM turn_skill_candidates c
+         JOIN turns t ON t.id = c.turn_id
+         WHERE t.task_id = ? AND c.state = 'activated'
+         ORDER BY t.created_at, c.ordinal
+         LIMIT 4096`,
+      )
+      .all(taskId) as Array<{
+      turn_id: string;
+      source: TurnSkillSelection['ref']['source'];
+      skill_id: string;
+      digest: string;
+      name: string;
+    }>;
     return turnSnapshotSchema.parse({
       lastSeq,
       activeTurn,
       queued: this.listQueued(taskId),
       contextUsage,
       pendingApprovals: this.listPendingApprovals(taskId).map(toApprovalSummary),
+      activatedSkills: activatedSkills.map((skill) => ({
+        turnId: skill.turn_id,
+        ref: { source: skill.source, skillId: skill.skill_id, digest: skill.digest },
+        name: skill.name,
+      })),
       latestTurnDiff:
         latestCompletedTurn === undefined
           ? null
@@ -15464,6 +15686,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const parsedSkills = validatePersistedTurnSkills(skills);
     const selection = this.getImageAttachmentAcceptanceSelection(taskId);
     const { runtimeKind, model, modelSelection } = selection;
+    const autoRuntime =
+      modelSelection.connectionId !== null && modelSelection.requestedProvider !== null
+        ? 'provider'
+        : runtimeKind === 'mock'
+          ? 'provider'
+          : runtimeKind;
+    const selectedSkillKeys = new Set(
+      parsedSkills.map(
+        ({ selection: selected }) =>
+          `${selected.ref.source}:${selected.ref.skillId}:${selected.ref.digest}`,
+      ),
+    );
+    const autoSkills = (this.autoSkillProvider?.(autoRuntime) ?? [])
+      .filter(
+        ({ selection: candidate }) =>
+          !selectedSkillKeys.has(
+            `${candidate.ref.source}:${candidate.ref.skillId}:${candidate.ref.digest}`,
+          ),
+      )
+      .map((skill) =>
+        validatePersistedAutoSkill({
+          ...skill,
+          selection: { ...skill.selection, arguments: text.slice(0, 8_000) },
+          content: expandSkillArguments(skill.content, text),
+        }),
+      );
+    if (autoSkills.length > 32) throw new Error('Turn auto Skill candidate limit exceeded');
     const acceptedAttachments = this.prepareAcceptedImageAttachments(
       taskId,
       attachmentIds,
@@ -15528,8 +15777,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const insertSkill = this.db.prepare(
       `INSERT INTO turn_skill_bindings(
          turn_id, ordinal, source, skill_id, digest, kind,
-         name, description, content, package_path
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         name, description, content, package_path, activation_policy, compatibility_json,
+         arguments_text
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     parsedSkills.forEach((skill, index) =>
       insertSkill.run(
@@ -15543,8 +15793,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
         skill.description,
         skill.content,
         skill.packagePath,
+        skill.activationPolicy,
+        JSON.stringify(skill.compatibility),
+        skill.selection.arguments ?? null,
       ),
     );
+    this.pinTurnAutoSkills(taskId, turnId, autoSkills);
     this.insertAcceptanceContract(
       createInitialAcceptanceContract({
         taskId,
@@ -15592,6 +15846,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       model,
       modelSelection,
       skills: parsedSkills,
+      autoSkills,
       teamTurn: shouldSealBuiltinTeamSkill,
       event,
       sealId: seal.sealId,
@@ -16672,7 +16927,9 @@ function validatePersistedTurnSkills(skills: readonly PersistedTurnSkill[]): Per
       skill.content.length > 40_000 ||
       typeof skill.packagePath !== 'string' ||
       !isAbsolute(skill.packagePath) ||
-      skill.packagePath.length > 4_096
+      skill.packagePath.length > 4_096 ||
+      (skill.activationPolicy !== undefined &&
+        !['manual', 'auto-allowed'].includes(skill.activationPolicy))
     )
       throw new Error('Resolved Skill payload is invalid');
     return {
@@ -16681,8 +16938,20 @@ function validatePersistedTurnSkills(skills: readonly PersistedTurnSkill[]): Per
       description: skill.description,
       content: skill.content,
       packagePath: skill.packagePath,
+      activationPolicy: skill.activationPolicy ?? 'manual',
+      compatibility:
+        skill.compatibility === undefined
+          ? portableSkillCompatibility()
+          : skillCompatibilityReportSchema.parse(skill.compatibility),
     };
   });
+}
+
+function validatePersistedAutoSkill(skill: PersistedTurnSkill): PersistedTurnSkill {
+  const [validated] = validatePersistedTurnSkills([skill]);
+  if (validated === undefined || validated.activationPolicy !== 'auto-allowed')
+    throw new Error('Auto Skill candidate must be explicitly allowed');
+  return validated;
 }
 
 function parseQueuedPayload(payloadJson: string): {

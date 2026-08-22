@@ -305,7 +305,7 @@ export class CodexRuntimeAdapter {
       };
       diagnostics.recordCodexIsolation({
         userConfigSnapshot: skillIsolation.userConfigSnapshot,
-        selectedSkillCount: skillIsolation.stagedSkills.length,
+        selectedSkillCount: selectedRuntimeSkillCount(skillIsolation.stagedSkills),
         disabledUnexpectedSkillCount: 0,
         verified: false,
       });
@@ -546,7 +546,7 @@ export class CodexRuntimeAdapter {
             .then((disabledUnexpectedSkills) => {
               diagnostics.recordCodexIsolation({
                 userConfigSnapshot: skillIsolation.userConfigSnapshot,
-                selectedSkillCount: skillIsolation.stagedSkills.length,
+                selectedSkillCount: selectedRuntimeSkillCount(skillIsolation.stagedSkills),
                 disabledUnexpectedSkillCount: disabledUnexpectedSkills.length,
                 verified: true,
               });
@@ -642,7 +642,7 @@ export class CodexRuntimeAdapter {
         const disabledUnexpectedSkills = await enforceCodexSkillIsolation(send, skillIsolation);
         diagnostics.recordCodexIsolation({
           userConfigSnapshot: skillIsolation.userConfigSnapshot,
-          selectedSkillCount: skillIsolation.stagedSkills.length,
+          selectedSkillCount: selectedRuntimeSkillCount(skillIsolation.stagedSkills),
           disabledUnexpectedSkillCount: disabledUnexpectedSkills.length,
           verified: true,
         });
@@ -780,8 +780,14 @@ export function buildCodexTurnInput(
   return [
     { type: 'text', text },
     ...localImagePaths.map((path) => ({ type: 'localImage' as const, path })),
-    ...skills.map((skill) => ({ type: 'skill' as const, name: skill.name, path: skill.path })),
+    ...skills
+      .filter(({ selected }) => selected !== false)
+      .map((skill) => ({ type: 'skill' as const, name: skill.name, path: skill.path })),
   ];
+}
+
+function selectedRuntimeSkillCount(skills: readonly RuntimeSkillInput[]): number {
+  return skills.filter(({ selected }) => selected !== false).length;
 }
 
 export function isUnsupportedMultiRootError(error: unknown): boolean {

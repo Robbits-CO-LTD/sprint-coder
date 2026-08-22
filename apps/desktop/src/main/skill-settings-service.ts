@@ -9,6 +9,8 @@ import type {
   SkillImportResult,
   SkillPreviewResult,
   SkillProvider,
+  SkillActivationPolicy,
+  SkillRef,
   SkillScanResult,
   TurnSkillSelection,
 } from '@sprint-coder/contracts';
@@ -21,6 +23,8 @@ import {
   type SkillCatalogSnapshotEntry,
 } from './skill-store';
 import { buildSkillCatalogContext, SkillCatalogContextError } from './skill-catalog-context';
+import { createPortableSkillFile } from './skill-compatibility';
+import { expandSkillArguments } from '../runtime-host/skill-arguments';
 
 const PREVIEW_TTL_MS = 5 * 60 * 1_000;
 const MAX_PREVIEWS = 64;
@@ -40,6 +44,8 @@ export type ResolvedTurnSkill = Readonly<{
   description: string;
   content: string;
   packagePath: string;
+  activationPolicy: SkillActivationPolicy;
+  compatibility: SkillCatalogItem['compatibility'];
 }>;
 
 export class SkillSettingsService {
@@ -47,6 +53,10 @@ export class SkillSettingsService {
   private readonly drafts = new Map<string, SkillDraft>();
   private store: Promise<SkillStore> | null = null;
   private contextCatalogEntries: readonly SkillCatalogSnapshotEntry[] = [];
+  private autoCandidatesByRuntime: Readonly<
+    Record<'codex' | 'claude' | 'provider', readonly ResolvedTurnSkill[]>
+  > = { codex: [], claude: [], provider: [] };
+  private activationPolicyMutation: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly input: {
@@ -141,11 +151,17 @@ export class SkillSettingsService {
       description: preview.description,
       files: [...preview.files],
       warnings: [...preview.warnings],
+      compatibility: preview.compatibility,
     };
   }
 
-  async import(senderId: number, previewId: string): Promise<SkillImportResult> {
+  async import(
+    senderId: number,
+    previewId: string,
+    nativeModeConfirmed = false,
+  ): Promise<SkillImportResult> {
     const record = this.consumePreview(senderId, previewId);
+    assertCompatibilityApproved(record.preview.compatibility, nativeModeConfirmed);
     const candidate = await this.findCandidate(record.provider, record.skillId);
     const currentPreview = await (await this.getStore()).previewImport(candidate);
     if (currentPreview.digest !== record.digest)
@@ -160,8 +176,13 @@ export class SkillSettingsService {
     };
   }
 
-  async update(senderId: number, previewId: string): Promise<SkillImportResult> {
+  async update(
+    senderId: number,
+    previewId: string,
+    nativeModeConfirmed = false,
+  ): Promise<SkillImportResult> {
     const record = this.consumePreview(senderId, previewId);
+    assertCompatibilityApproved(record.preview.compatibility, nativeModeConfirmed);
     const candidate = await this.findCandidate(record.provider, record.skillId);
     const currentPreview = await (await this.getStore()).previewImport(candidate);
     if (currentPreview.digest !== record.digest)
@@ -196,8 +217,13 @@ export class SkillSettingsService {
     await this.refreshContextCatalog();
   }
 
-  async exportCreated(skillId: string, digest: string, destinationParent: string): Promise<string> {
-    return (await this.getStore()).exportCreated(skillId, digest, destinationParent);
+  async exportCreated(
+    skillId: string,
+    digest: string,
+    destinationParent: string,
+    format: 'original' | 'portable' = 'original',
+  ): Promise<string> {
+    return (await this.getStore()).exportCreated(skillId, digest, destinationParent, format);
   }
 
   async listCatalog(): Promise<SkillCatalog> {
@@ -211,6 +237,8 @@ export class SkillSettingsService {
       name: item.name,
       description: item.description,
       enabled: item.enabled,
+      activationPolicy: item.activationPolicy,
+      compatibility: item.compatibility,
       removable: item.removable,
       exportable: item.exportable,
     }));
@@ -220,10 +248,45 @@ export class SkillSettingsService {
   }
 
   async refreshContextCatalog(): Promise<void> {
-    this.contextCatalogEntries = await (await this.getStore()).listCatalogSnapshotEntries();
+    const store = await this.getStore();
+    const selectable = await store.listSelectable();
+    const entries = await store.listCatalogSnapshotEntries();
+    const approved = selectable.filter(
+      (item) => item.enabled && item.activationPolicy === 'auto-allowed',
+    );
+    if (approved.length > 32)
+      throw new SkillSettingsError('INVALID_SKILL', '自動選択候補は最大32件です');
+    const resolved = await Promise.all(
+      approved.map((item) =>
+        store.resolveSelectable(item.source, item.skillId, item.digest).then((skill) => ({
+          selection: {
+            kind: skill.kind,
+            ref: { source: skill.source, skillId: skill.skillId, digest: skill.digest },
+          },
+          name: skill.name,
+          description: skill.description,
+          content: skill.content,
+          packagePath: skill.packagePath,
+          activationPolicy: skill.activationPolicy,
+          compatibility: skill.compatibility,
+        })),
+      ),
+    );
+    const forRuntime = (runtime: 'codex' | 'claude' | 'provider') =>
+      resolved
+        .filter(({ compatibility }) => compatibility.runtimeSupport[runtime] !== 'blocked')
+        .map((skill) => projectResolvedSkillForRuntime(skill, runtime));
+    const byRuntime = {
+      codex: forRuntime('codex'),
+      claude: forRuntime('claude'),
+      provider: forRuntime('provider'),
+    };
+    this.contextCatalogEntries = entries;
+    this.autoCandidatesByRuntime = byRuntime;
   }
 
   markContextCatalogUnavailable(): void {
+    this.autoCandidatesByRuntime = { codex: [], claude: [], provider: [] };
     this.contextCatalogEntries = [
       'sprint-coder-team',
       'sprint-coder-product',
@@ -238,6 +301,21 @@ export class SkillSettingsService {
       name: skillId,
       description: '',
       enabled: false,
+      activationPolicy: 'manual' as const,
+      compatibility: {
+        profile: 'portable' as const,
+        runtimeSupport: {
+          codex: 'full' as const,
+          claude: 'full' as const,
+          provider: 'full' as const,
+        },
+        features: [],
+        requestedTools: [],
+        warnings: [],
+        blockers: [],
+        requiresConversion: false,
+        nativeModeConsentRequired: false,
+      },
       availability: 'invalid' as const,
     }));
   }
@@ -314,6 +392,9 @@ export class SkillSettingsService {
       throw new SkillSettingsError('NOT_FOUND', 'Skill Draftが見つかりません');
     if (draft.digest !== expectedDigest)
       throw new SkillSettingsError('SOURCE_CHANGED', 'Skill Draftが確認後に変更されました');
+    const validation = (await this.getStore()).validateCreatedSkill(draft.skillId, draft.files);
+    if (validation.compatibility.requiresConversion)
+      throw new SkillSettingsError('INVALID_SKILL', 'Skill DraftはPortable版への変換が必要です');
     const installed = await (await this.getStore()).installCreatedSkill(draft.skillId, draft.files);
     await (await this.getStore()).removeCreatedDraft(draftId);
     this.drafts.delete(draftId);
@@ -328,6 +409,8 @@ export class SkillSettingsService {
       name: installed.name,
       description: installed.description,
       enabled: installed.enabled,
+      activationPolicy: installed.activationPolicy,
+      compatibility: installed.compatibility,
       removable: installed.removable,
       exportable: installed.exportable,
     };
@@ -335,6 +418,8 @@ export class SkillSettingsService {
 
   async installPrepared(input: SkillDraftCreateInput): Promise<SkillCatalogItem> {
     const validation = (await this.getStore()).validateCreatedSkill(input.skillId, input.files);
+    if (validation.compatibility.requiresConversion)
+      throw new SkillSettingsError('INVALID_SKILL', 'Prepared Skill is not Portable-compatible');
     if (validation.kind !== input.kind)
       throw new SkillSettingsError(
         'INVALID_SKILL',
@@ -354,6 +439,8 @@ export class SkillSettingsService {
       name: installed.name,
       description: installed.description,
       enabled: installed.enabled,
+      activationPolicy: installed.activationPolicy,
+      compatibility: installed.compatibility,
       removable: installed.removable,
       exportable: installed.exportable,
     };
@@ -397,7 +484,11 @@ export class SkillSettingsService {
     this.drafts.delete(draftId);
   }
 
-  async resolveSelections(selections: readonly TurnSkillSelection[]): Promise<ResolvedTurnSkill[]> {
+  async resolveSelections(
+    selections: readonly TurnSkillSelection[],
+    defaultArguments?: string,
+    runtime: 'codex' | 'claude' | 'provider' = 'provider',
+  ): Promise<ResolvedTurnSkill[]> {
     const resolved = await Promise.all(
       selections.map(async (selection) => {
         const item: ResolvedSkillPackage = await (
@@ -405,16 +496,50 @@ export class SkillSettingsService {
         ).resolveSelectable(selection.ref.source, selection.ref.skillId, selection.ref.digest);
         if (item.kind !== selection.kind)
           throw new SkillSettingsError('SOURCE_CHANGED', 'Skillの種類が変更されました');
+        const selectionWithArguments = {
+          ...selection,
+          ...((selection.arguments ?? defaultArguments) === undefined
+            ? {}
+            : { arguments: (selection.arguments ?? defaultArguments)!.slice(0, 8_000) }),
+        };
+        const portableContent =
+          item.compatibility.runtimeSupport[runtime] === 'portable'
+            ? createPortableSkillFile(Buffer.from(item.content, 'utf8')).toString('utf8')
+            : item.content;
         return {
-          selection,
+          selection: selectionWithArguments,
           name: item.name,
           description: item.description,
-          content: item.content,
+          content: expandSkillArguments(portableContent, selectionWithArguments.arguments),
           packagePath: item.packagePath,
+          activationPolicy: item.activationPolicy,
+          compatibility: item.compatibility,
         };
       }),
     );
     return resolved;
+  }
+
+  async resolveAutoCandidates(
+    runtime: 'codex' | 'claude' | 'provider',
+  ): Promise<ResolvedTurnSkill[]> {
+    await this.refreshContextCatalog();
+    return [...this.autoCandidatesByRuntime[runtime]];
+  }
+
+  pinnedAutoCandidates(runtime: 'codex' | 'claude' | 'provider'): ResolvedTurnSkill[] {
+    return [...this.autoCandidatesByRuntime[runtime]];
+  }
+
+  async setActivationPolicy(ref: SkillRef, policy: SkillActivationPolicy): Promise<void> {
+    const operation = this.activationPolicyMutation.then(async () => {
+      await (
+        await this.getStore()
+      ).setActivationPolicy(ref.source, ref.skillId, ref.digest, policy);
+      await this.refreshContextCatalog();
+    });
+    this.activationPolicyMutation = operation.catch(() => undefined);
+    await operation;
   }
 
   private async getStore(): Promise<SkillStore> {
@@ -488,4 +613,28 @@ export function skillSettingsPublicError(error: unknown): SkillSettingsError {
 
 function key(provider: SkillProvider, skillId: string): string {
   return `${provider}:${skillId}`;
+}
+
+function assertCompatibilityApproved(
+  compatibility: SkillCatalogItem['compatibility'],
+  nativeModeConfirmed: boolean,
+): void {
+  if (compatibility.requiresConversion)
+    throw new SkillSettingsError('INVALID_SKILL', 'SkillはPortable版への変換が必要です');
+  if (compatibility.nativeModeConsentRequired && !nativeModeConfirmed)
+    throw new SkillSettingsError(
+      'INVALID_SKILL',
+      'Claude native modeのambient Skill警告を確認してください',
+    );
+}
+
+function projectResolvedSkillForRuntime(
+  skill: ResolvedTurnSkill,
+  runtime: 'codex' | 'claude' | 'provider',
+): ResolvedTurnSkill {
+  if (skill.compatibility.runtimeSupport[runtime] !== 'portable') return skill;
+  return {
+    ...skill,
+    content: createPortableSkillFile(Buffer.from(skill.content, 'utf8')).toString('utf8'),
+  };
 }

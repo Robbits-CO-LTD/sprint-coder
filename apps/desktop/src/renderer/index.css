@@ -3827,6 +3827,14 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer-skill-chip:hover {
   border-color: var(--accent);
 }
+
+.composer-auto-skill-status {
+  align-self: center;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+}
 .composer-attachments {
   display: grid;
   gap: 6px;
@@ -7244,8 +7252,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 5px;
 }
 .settings-installed-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   font-size: 12px;
@@ -7253,6 +7261,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-installed-row > span {
   display: flex;
   flex-direction: column;
+  flex: 1 1 240px;
   min-width: 0;
 }
 .settings-installed-row small {

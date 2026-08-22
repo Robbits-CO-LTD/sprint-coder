@@ -428,7 +428,15 @@ describe('Codex runtime probe', () => {
     expect(
       buildCodexTurnInput(
         'inspect these images',
-        [{ name: 'reviewer', path: '/skills/reviewer' }],
+        [
+          { name: 'reviewer', path: '/skills/reviewer', selected: true },
+          {
+            name: 'auto-reviewer',
+            path: '/skills/auto-reviewer',
+            activationPolicy: 'auto-allowed',
+            selected: false,
+          },
+        ],
         ['/custody/001.png', '/custody/002.webp'],
       ),
     ).toEqual([

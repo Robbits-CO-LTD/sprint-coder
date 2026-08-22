@@ -143,10 +143,40 @@ test.describe('settings dialog', () => {
     await candidate.locator('xpath=ancestor::label').locator('input').check();
     await page.getByRole('button', { name: '内容を確認' }).click();
     await expect(page.getByText(/含まれるファイル 1件/)).toBeVisible();
+    await expect(page.getByText(/Portable · 含まれるファイル 1件/)).toBeVisible();
     await page.getByRole('button', { name: '1件を読み込む' }).click();
     await expect(page.getByText('読み込み済み', { exact: true })).toBeVisible();
+    const autoSelection = page.getByRole('button', { name: '自動選択 OFF' });
+    await expect(autoSelection).toBeVisible();
+    await autoSelection.click();
+    await expect(page.getByRole('button', { name: '自動選択 ON' })).toBeVisible();
 
     await page.keyboard.press('Escape');
+  });
+
+  test('routes a blocked Skill preview into the managed Portable conversion workflow', async () => {
+    const blocked = join(userDataDir, '.claude', 'skills', 'e2e-blocked');
+    mkdirSync(blocked, { recursive: true });
+    writeFileSync(
+      join(blocked, 'SKILL.md'),
+      '---\nname: e2e-blocked\ndescription: Blocked fixture\nunknown-policy: true\n---\n',
+    );
+    const page: Page = await firstWindow(app!);
+    await page.getByTestId('sidebar-settings-button').click();
+    await page.getByTestId('settings-nav-skills').click();
+    await page.getByRole('button', { name: '再読み込み' }).click();
+    await page.getByRole('button', { name: '候補を選択' }).click();
+    const candidate = page.getByText('e2e-blocked', { exact: true });
+    await candidate.locator('xpath=ancestor::label').locator('input').check();
+    await page.getByRole('button', { name: '内容を確認' }).click();
+    await expect(page.getByText(/未対応のfrontmatter field: unknown-policy/)).toBeVisible();
+    await page.getByRole('button', { name: 'AIでPortable版へ変換' }).click();
+
+    await expect(page.getByTestId('settings-dialog')).not.toBeVisible();
+    await expect(page.getByLabel('この送信で使用するSkill')).toContainText('import-skill');
+    await expect(page.getByTestId('composer-textarea')).toHaveValue(
+      /ClaudeのSkill e2e-blocked をPortable版へ変換してください/u,
+    );
   });
 
   test('progressively reveals the add form, keeps optional fields folded, and clears the draft on cancel', async ({}, testInfo) => {

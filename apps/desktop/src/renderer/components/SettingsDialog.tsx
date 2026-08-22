@@ -64,6 +64,11 @@ import {
 // not a one-way migration.
 
 type SettingsSection = 'models' | 'team' | 'skills' | 'advanced';
+type SkillCreationRequest = {
+  prompt: string;
+  builtinSkillId: 'skill-creator' | 'import-skill';
+};
+type SkillCreationHandler = (request?: SkillCreationRequest) => void;
 
 /** The left-hand list, in order. It is the nav and the page switcher's source of truth, so a section
  * can never exist in one and not the other. `label` is both the nav row and the section's heading;
@@ -122,21 +127,26 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
   const supported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.getRuntime === 'function';
 
-  async function beginSkillCreation(): Promise<void> {
-    const created = await createTask();
-    if (created === null) return;
-    const state = useAppStore.getState();
+  async function beginSkillCreation(request?: SkillCreationRequest): Promise<void> {
+    let state = useAppStore.getState();
+    if (request === undefined || state.selectedTaskId === null) {
+      const created = await createTask();
+      if (created === null) return;
+      state = useAppStore.getState();
+    }
     const taskId = state.selectedTaskId;
     if (taskId === null || typeof window.sprintCoder?.skills?.list !== 'function') return;
     const catalog = await window.sprintCoder.skills.list();
+    const builtinSkillId = request?.builtinSkillId ?? 'skill-creator';
     const creator = catalog.items.find(
-      ({ ref, enabled }) => ref.source === 'builtin' && ref.skillId === 'skill-creator' && enabled,
+      ({ ref, enabled }) => ref.source === 'builtin' && ref.skillId === builtinSkillId && enabled,
     );
     if (creator === undefined) return;
     await state.setSkillSelection(taskId, [{ kind: creator.kind, ref: creator.ref }]);
     state.setDraft(
       taskId,
-      '作りたいSkillを説明してください。Chat SkillかTeam Skillかも指定できます。',
+      request?.prompt ??
+        '作りたいSkillを説明してください。Chat SkillかTeam Skillかも指定できます。',
     );
     onClose();
   }
@@ -165,14 +175,14 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
           open={open}
           supported={supported}
           onClose={onClose}
-          onCreateSkill={() => void beginSkillCreation()}
+          onCreateSkill={(request) => void beginSkillCreation(request)}
         />
       ) : (
         <LegacyBody
           open={open}
           supported={supported}
           onClose={onClose}
-          onCreateSkill={() => void beginSkillCreation()}
+          onCreateSkill={(request) => void beginSkillCreation(request)}
         />
       )}
     </dialog>
@@ -191,7 +201,7 @@ export function LegacyBody({
   open: boolean;
   supported: boolean;
   onClose: () => void;
-  onCreateSkill?: () => void;
+  onCreateSkill?: SkillCreationHandler;
 }) {
   return (
     <div className="settings-body">
@@ -243,7 +253,7 @@ export function WorkspaceBody({
   open: boolean;
   supported: boolean;
   onClose: () => void;
-  onCreateSkill?: () => void;
+  onCreateSkill?: SkillCreationHandler;
 }) {
   const uid = useId();
   const [current, setCurrent] = useState<SettingsSection>('models');

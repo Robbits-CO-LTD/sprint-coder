@@ -5,6 +5,7 @@ import type {
   SkillDraft,
   SkillPreviewResult,
   SkillScanResult,
+  SkillCompatibilityReport,
 } from '@sprint-coder/contracts';
 
 type CandidateState = 'idle' | 'previewing' | 'ready' | 'importing' | 'imported' | 'failed';
@@ -14,7 +15,10 @@ export function SkillSettingsSection({
   onCreateWithAi,
 }: {
   active: boolean;
-  onCreateWithAi?: () => void;
+  onCreateWithAi?: (request?: {
+    prompt: string;
+    builtinSkillId: 'skill-creator' | 'import-skill';
+  }) => void;
 }) {
   const [scan, setScan] = useState<SkillScanResult | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -27,6 +31,7 @@ export function SkillSettingsSection({
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<SkillDraft[]>([]);
   const [reviewedDrafts, setReviewedDrafts] = useState<Set<string>>(new Set());
+  const [nativeConsents, setNativeConsents] = useState<Set<string>>(new Set());
   const [catalog, setCatalog] = useState<SkillCatalogItem[]>([]);
   const generation = useRef(0);
 
@@ -54,6 +59,7 @@ export function SkillSettingsSection({
       setStatus(`${result.claudeDetected + result.agentsDetected}件のSkillを検出しました。`);
       setDrafts(managedDrafts);
       setReviewedDrafts(new Set());
+      setNativeConsents(new Set());
       setCatalog(selectable?.items ?? []);
     } catch {
       if (request === generation.current)
@@ -83,11 +89,15 @@ export function SkillSettingsSection({
     }
   }
 
-  async function exportCreated(item: SkillCatalogItem): Promise<void> {
+  async function exportCreated(
+    item: SkillCatalogItem,
+    format: 'original' | 'portable',
+  ): Promise<void> {
     try {
       const path = await window.sprintCoder?.skills?.exportCreated(
         item.ref.skillId,
         item.ref.digest,
+        format,
       );
       if (path) setStatus(`${item.name}を${path}へExportしました。`);
     } catch {
@@ -112,6 +122,25 @@ export function SkillSettingsSection({
       setStatus(`${item.name}を${item.enabled ? '無効' : '有効'}にしました。`);
     } catch {
       setError(`${item.name}の状態を変更できませんでした。`);
+    }
+  }
+
+  async function toggleActivation(item: SkillCatalogItem): Promise<void> {
+    try {
+      const next = item.activationPolicy === 'manual' ? 'auto-allowed' : 'manual';
+      await window.sprintCoder?.skills?.setActivationPolicy(item.ref, next);
+      setCatalog((current) =>
+        current.map((candidate) =>
+          candidate.ref.source === item.ref.source &&
+          candidate.ref.skillId === item.ref.skillId &&
+          candidate.ref.digest === item.ref.digest
+            ? { ...candidate, activationPolicy: next }
+            : candidate,
+        ),
+      );
+      setStatus(`${item.name}の自動選択を${next === 'auto-allowed' ? '許可' : '解除'}しました。`);
+    } catch {
+      setError(`${item.name}の自動選択設定を変更できませんでした。`);
     }
   }
 
@@ -213,9 +242,19 @@ export function SkillSettingsSection({
       nextStates.set(candidateKey, 'importing');
       setStates(new Map(nextStates));
       try {
+        if (preview.compatibility.requiresConversion) {
+          setError(`${preview.name}はPortable版への変換が必要です。`);
+          throw new Error('portable conversion required');
+        }
+        if (preview.compatibility.nativeModeConsentRequired && !nativeConsents.has(candidateKey)) {
+          setError(`${preview.name}のClaude native modeを確認してください。`);
+          throw new Error('native consent required');
+        }
         const candidate = scan?.candidates.find((item) => key(item) === candidateKey);
-        if (candidate?.updateAvailable) await skillApi().updateSkill(preview.previewId);
-        else await skillApi().importSkill(preview.previewId);
+        const nativeConfirmed = nativeConsents.has(candidateKey);
+        if (candidate?.updateAvailable)
+          await skillApi().updateSkill(preview.previewId, nativeConfirmed);
+        else await skillApi().importSkill(preview.previewId, nativeConfirmed);
         nextStates.set(candidateKey, 'imported');
         imported += 1;
       } catch {
@@ -228,6 +267,8 @@ export function SkillSettingsSection({
       .scanSkills()
       .catch(() => null);
     if (result !== null) setScan(result);
+    const nextCatalog = await window.sprintCoder?.skills?.list().catch(() => null);
+    if (nextCatalog !== null && nextCatalog !== undefined) setCatalog(nextCatalog.items);
   }
 
   async function setInstalledEnabled(
@@ -266,7 +307,12 @@ export function SkillSettingsSection({
   }
 
   const busy = [...states.values()].some(isBusy);
-  const readyCount = [...states.values()].filter((state) => state === 'ready').length;
+  const readyCount = [...previews.entries()].filter(
+    ([candidateKey, preview]) =>
+      states.get(candidateKey) === 'ready' &&
+      !preview.compatibility.requiresConversion &&
+      (!preview.compatibility.nativeModeConsentRequired || nativeConsents.has(candidateKey)),
+  ).length;
   const candidates = scan?.candidates ?? [];
 
   return (
@@ -282,7 +328,11 @@ export function SkillSettingsSection({
         </div>
         <div className="settings-skill-heading-actions">
           {onCreateWithAi !== undefined && (
-            <button type="button" className="settings-primary-button" onClick={onCreateWithAi}>
+            <button
+              type="button"
+              className="settings-primary-button"
+              onClick={() => onCreateWithAi()}
+            >
               AIでSkillを作成
             </button>
           )}
@@ -332,9 +382,18 @@ export function SkillSettingsSection({
                     <strong>{item.name}</strong>
                     <small>
                       作成済み · {item.kind === 'team' ? 'Team Skill' : 'Chat Skill'} ·{' '}
-                      {item.enabled ? '有効' : '無効'}
+                      {item.enabled ? '有効' : '無効'} · {profileLabel(item)}
                     </small>
+                    <small>{runtimeSupportLabel(item)}</small>
                   </span>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => void toggleActivation(item)}
+                    disabled={!item.enabled}
+                  >
+                    自動選択 {item.activationPolicy === 'auto-allowed' ? 'ON' : 'OFF'}
+                  </button>
                   <button
                     type="button"
                     className="settings-secondary-button"
@@ -345,9 +404,16 @@ export function SkillSettingsSection({
                   <button
                     type="button"
                     className="settings-secondary-button"
-                    onClick={() => void exportCreated(item)}
+                    onClick={() => void exportCreated(item, 'original')}
                   >
                     Export
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => void exportCreated(item, 'portable')}
+                  >
+                    Portable Export
                   </button>
                   <button
                     type="button"
@@ -437,6 +503,9 @@ export function SkillSettingsSection({
         <div className="settings-installed-skills" aria-label="読み込み済みSkill">
           {scan!.installed.map((installed) => {
             const installedKey = `${installed.provider}:${installed.skillId}`;
+            const item = catalog.find(
+              ({ ref }) => ref.source === installed.provider && ref.skillId === installed.skillId,
+            );
             return (
               <div key={installedKey} className="settings-installed-row">
                 <span>
@@ -445,8 +514,20 @@ export function SkillSettingsSection({
                     {providerLabel(installed.provider)}
                     {installed.updateAvailable ? ' · 更新あり' : ''}
                     {!installed.sourceAvailable ? ' · 読込元なし' : ''}
+                    {item === undefined ? '' : ` · ${profileLabel(item)}`}
                   </small>
+                  {item !== undefined && <small>{runtimeSupportLabel(item)}</small>}
                 </span>
+                {item !== undefined && (
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => void toggleActivation(item)}
+                    disabled={!item.enabled}
+                  >
+                    自動選択 {item.activationPolicy === 'auto-allowed' ? 'ON' : 'OFF'}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="settings-secondary-button"
@@ -530,10 +611,54 @@ export function SkillSettingsSection({
                           : stateLabel(state)}
                     </small>
                     {preview !== undefined && (
-                      <small>
-                        含まれるファイル {preview.files.length}件
-                        {preview.warnings.length > 0 ? ` · 警告 ${preview.warnings.length}件` : ''}
-                      </small>
+                      <>
+                        <small>
+                          {profileLabel(preview.compatibility)} · 含まれるファイル{' '}
+                          {preview.files.length}件
+                          {preview.warnings.length > 0
+                            ? ` · 警告 ${preview.warnings.length}件`
+                            : ''}
+                        </small>
+                        <small>{runtimeSupportLabel(preview.compatibility)}</small>
+                        {preview.compatibility.blockers.map((blocker) => (
+                          <small key={blocker} className="settings-skill-error">
+                            {blocker}
+                          </small>
+                        ))}
+                        {preview.compatibility.nativeModeConsentRequired && (
+                          <span>
+                            <input
+                              type="checkbox"
+                              aria-label={`${preview.name}のClaude native modeを許可`}
+                              checked={nativeConsents.has(candidateKey)}
+                              onChange={(event) =>
+                                setNativeConsents((current) => {
+                                  const next = new Set(current);
+                                  if (event.currentTarget.checked) next.add(candidateKey);
+                                  else next.delete(candidateKey);
+                                  return next;
+                                })
+                              }
+                            />
+                            Claude native modeではambient Skillを発見し得ることを確認しました
+                          </span>
+                        )}
+                        {preview.compatibility.requiresConversion &&
+                          onCreateWithAi !== undefined && (
+                            <button
+                              type="button"
+                              className="settings-secondary-button"
+                              onClick={() =>
+                                onCreateWithAi({
+                                  builtinSkillId: 'import-skill',
+                                  prompt: `${preview.provider === 'claude' ? 'Claude' : 'Codex'}のSkill ${preview.skillId} をPortable版へ変換してください。previewで検出されたblockerを解消し、Managed Harnessの権限上限を維持してください。`,
+                                })
+                              }
+                            >
+                              AIでPortable版へ変換
+                            </button>
+                          )}
+                      </>
                     )}
                   </span>
                 </label>
@@ -580,6 +705,34 @@ function isBusy(state: CandidateState | undefined): boolean {
 
 function providerLabel(provider: SkillCandidateSummary['provider']): string {
   return provider === 'claude' ? 'Claude' : 'Agents';
+}
+
+function compatibilityOf(
+  value: SkillCompatibilityReport | Pick<SkillCatalogItem, 'compatibility'>,
+): SkillCompatibilityReport {
+  return 'compatibility' in value ? value.compatibility : value;
+}
+
+function profileLabel(
+  value: SkillCompatibilityReport | Pick<SkillCatalogItem, 'compatibility'>,
+): string {
+  const profile = compatibilityOf(value).profile;
+  if (profile === 'codex-native') return 'Codex Native';
+  if (profile === 'claude-native') return 'Claude Native';
+  return 'Portable';
+}
+
+function runtimeSupportLabel(
+  value: SkillCompatibilityReport | Pick<SkillCatalogItem, 'compatibility'>,
+): string {
+  const support = compatibilityOf(value).runtimeSupport;
+  const label = (runtime: keyof typeof support) =>
+    support[runtime] === 'full'
+      ? '完全対応'
+      : support[runtime] === 'portable'
+        ? 'Portable実行'
+        : '変換が必要';
+  return `Codex ${label('codex')} · Claude ${label('claude')} · API ${label('provider')}`;
 }
 
 function stateLabel(state: CandidateState): string {

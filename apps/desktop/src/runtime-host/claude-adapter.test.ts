@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,8 @@ import {
   buildClaudePrompt,
   buildClaudeTeamMcpConfig,
   claudeOutputErrorToPublicError,
+  discoverAmbientClaudeSkillNames,
+  materializeClaudeSkillPlugin,
   probeClaude,
   resolveClaudeCommand,
 } from './claude-adapter';
@@ -22,6 +24,77 @@ afterEach(async () => {
 });
 
 describe('Claude runtime probe', () => {
+  it('materializes only selected managed revisions as explicit namespaced invocations', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'claude-skill-plugin-'));
+    temporaryRoots.push(root);
+    const source = join(root, 'source');
+    const plugin = join(root, 'plugin');
+    await mkdir(source);
+    await mkdir(plugin);
+    await writeFile(
+      join(source, 'SKILL.md'),
+      '---\nname: reviewer\ndescription: Review\n---\nReview $0 and $ARGUMENTS.',
+    );
+    const autoSource = join(root, 'auto-source');
+    await mkdir(autoSource);
+    await writeFile(
+      join(autoSource, 'SKILL.md'),
+      '---\nname: auto-reviewer\ndescription: Auto review\n---\nNever load directly.',
+    );
+    const invocation = materializeClaudeSkillPlugin(plugin, [
+      {
+        name: 'reviewer',
+        path: source,
+        profile: 'claude-native',
+        runtimeSupport: 'full',
+        activationPolicy: 'manual',
+        selected: true,
+        arguments: 'src/app.ts carefully',
+      },
+      {
+        name: 'auto-reviewer',
+        path: autoSource,
+        profile: 'claude-native',
+        runtimeSupport: 'full',
+        activationPolicy: 'auto-allowed',
+        selected: false,
+      },
+    ]);
+    expect(invocation).toBe('/sprint-coder-selected:selected-1-reviewer');
+    expect(
+      await readFile(join(plugin, 'skills', 'selected-1-reviewer', 'SKILL.md'), 'utf8'),
+    ).toContain('Review src/app.ts and src/app.ts carefully.');
+    await expect(
+      readFile(join(plugin, 'skills', 'selected-2-auto-reviewer', 'SKILL.md'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    const ambient = join(root, '.claude', 'skills', 'ambient-reviewer');
+    await mkdir(ambient, { recursive: true });
+    await writeFile(join(ambient, 'SKILL.md'), '---\nname: ambient\ndescription: Ambient\n---\n');
+    const workspaceSkill = join(root, 'workspace', '.claude', 'skills', 'workspace-reviewer');
+    await mkdir(workspaceSkill, { recursive: true });
+    await writeFile(
+      join(workspaceSkill, 'SKILL.md'),
+      '---\nname: workspace\ndescription: Workspace\n---\n',
+    );
+    const nested = join(root, 'workspace', 'packages', 'web', '.claude', 'skills', 'web-reviewer');
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, 'SKILL.md'), '---\nname: web\ndescription: Web\n---\n');
+    expect(discoverAmbientClaudeSkillNames([join(root, 'workspace')], { HOME: root })).toEqual([
+      'ambient-reviewer',
+      'workspace-reviewer',
+    ]);
+    expect(
+      discoverAmbientClaudeSkillNames([join(root, 'workspace')], { HOME: root }),
+    ).not.toContain('web-reviewer');
+    const args = buildClaudeArgs('auto', undefined, undefined, [], plugin, ['ambient-reviewer']);
+    expect(args).toEqual(expect.arrayContaining(['--plugin-dir', plugin, '--settings']));
+    expect(args).not.toContain('--safe-mode');
+    expect(args).not.toContain('--disable-slash-commands');
+    expect(args[args.indexOf('--settings') + 1]).toContain(
+      '"skillOverrides":{"ambient-reviewer":"off"}',
+    );
+  });
+
   it('keeps the Team bearer token out of the temporary MCP settings JSON', () => {
     const config = buildClaudeTeamMcpConfig(
       '/app/node',

@@ -4,14 +4,19 @@ import {
   cpSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { RuntimeSkillInput } from './protocol';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
+import { createPortableSkillFile } from '../main/skill-compatibility';
+import { expandSkillArguments } from './skill-arguments';
 
 export type CodexSkillIsolation = Readonly<{
   codexHome: string;
@@ -55,7 +60,21 @@ export function prepareCodexSkillIsolation(input: {
       errorOnExist: true,
       force: false,
     });
-    return { name: skill.name, path: realpathSync.native(join(destination, 'SKILL.md')) };
+    const destinationSkill = join(destination, 'SKILL.md');
+    if (skill.runtimeSupport === 'portable') {
+      writeFileSync(destinationSkill, createPortableSkillFile(readFileSync(destinationSkill)), {
+        mode: 0o600,
+      });
+      rmSync(join(destination, 'agents', 'openai.yaml'), { force: true });
+    }
+    if (skill.arguments !== undefined) {
+      writeFileSync(
+        destinationSkill,
+        expandSkillArguments(readFileSync(destinationSkill, 'utf8'), skill.arguments),
+        { mode: 0o600 },
+      );
+    }
+    return { ...skill, path: realpathSync.native(join(destination, 'SKILL.md')) };
   });
 
   const validationCwds = [

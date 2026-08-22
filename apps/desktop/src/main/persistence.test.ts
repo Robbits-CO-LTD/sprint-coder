@@ -1142,6 +1142,21 @@ if (runsWithElectronAbi)
         description: 'Review code',
         content: '---\nname: reviewer\ndescription: Review code\n---\n\nReview carefully.',
         packagePath: '/tmp/sprint-coder-skill-revisions/agents/reviewer/a',
+        activationPolicy: 'manual' as const,
+        compatibility: {
+          profile: 'portable' as const,
+          runtimeSupport: {
+            codex: 'full' as const,
+            claude: 'full' as const,
+            provider: 'full' as const,
+          },
+          features: ['standard:description', 'standard:name'],
+          requestedTools: [],
+          warnings: [],
+          blockers: [],
+          requiresConversion: false,
+          nativeModeConsentRequired: false,
+        },
       };
       persistence.setDraftSkillSelections(task.id, [selection]);
       expect(persistence.getDraftSkillSelections(task.id)).toEqual([selection]);
@@ -1166,6 +1181,81 @@ if (runsWithElectronAbi)
       expect(queued?.skills).toEqual([resolved]);
       expect(reopened.getTurnSkills(task.id, queued!.turnId)).toEqual([resolved]);
       reopened.close();
+    });
+
+    it('pins auto Skill candidates once and records activation without allowing replay', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('auto-skills');
+      const candidate = {
+        selection: {
+          kind: 'chat' as const,
+          ref: { source: 'created' as const, skillId: 'reviewer', digest: 'b'.repeat(64) },
+          arguments: 'review this',
+        },
+        name: 'Reviewer',
+        description: 'Review safely',
+        content: 'Review $ARGUMENTS carefully.',
+        packagePath: '/tmp/sprint-coder-skill-revisions/created/reviewer/b',
+        activationPolicy: 'auto-allowed' as const,
+        compatibility: {
+          profile: 'portable' as const,
+          runtimeSupport: {
+            codex: 'full' as const,
+            claude: 'full' as const,
+            provider: 'full' as const,
+          },
+          features: ['standard:description', 'standard:name'],
+          requestedTools: [],
+          warnings: [],
+          blockers: [],
+          requiresConversion: false,
+          nativeModeConsentRequired: false,
+        },
+      };
+      persistence.setAutoSkillProvider?.(() => [candidate]);
+      const started = persistence.startTurn(task.id, 'review this');
+      const boundCandidate = { ...candidate, content: 'Review review this carefully.' };
+      expect(started.autoSkills).toEqual([boundCandidate]);
+      expect(persistence.hasTurnAutoSkillSet(task.id, started.turnId)).toBe(true);
+      expect(persistence.getTurnAutoSkills(task.id, started.turnId)).toEqual([boundCandidate]);
+      expect(
+        persistence.activateTurnAutoSkill(task.id, started.turnId, {
+          skillId: 'reviewer',
+          digest: 'b'.repeat(64),
+        }),
+      ).toMatchObject({
+        skill: { instructions: boundCandidate.content },
+        event: { type: 'skill.activated', name: 'Reviewer' },
+      });
+      expect(() =>
+        persistence.activateTurnAutoSkill(task.id, started.turnId, {
+          skillId: 'reviewer',
+          digest: 'b'.repeat(64),
+        }),
+      ).toThrow(/already consumed/u);
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTurnAutoSkills(task.id, started.turnId)).toEqual([boundCandidate]);
+      expect(reopened.snapshot(task.id).activatedSkills).toEqual([
+        {
+          turnId: started.turnId,
+          ref: candidate.selection.ref,
+          name: 'Reviewer',
+        },
+      ]);
+      reopened.close();
+    });
+
+    it('seals an empty auto Skill set so it cannot be replaced after Turn acceptance', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('empty-auto-skills');
+      const started = persistence.startTurn(task.id, 'plain request');
+      expect(started.autoSkills).toEqual([]);
+      expect(persistence.hasTurnAutoSkillSet(task.id, started.turnId)).toBe(true);
+      expect(() => persistence.pinTurnAutoSkills(task.id, started.turnId, [])).toThrow(
+        /already pinned/u,
+      );
+      persistence.close();
     });
 
     it('creates one immutable context seal at the actual Turn boundary', () => {
@@ -6764,6 +6854,7 @@ if (runsWithElectronAbi)
         { version: 70 },
         { version: 71 },
         { version: 72 },
+        { version: 73 },
       ]);
       for (const [table, columns] of [
         [

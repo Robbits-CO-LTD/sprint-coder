@@ -13,7 +13,19 @@ import {
 } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
-import { skillDraftSchema, teamBlueprintSchema, type SkillDraft } from '@sprint-coder/contracts';
+import {
+  skillCompatibilityReportSchema,
+  skillDraftSchema,
+  teamBlueprintSchema,
+  type SkillActivationPolicy,
+  type SkillCompatibilityReport,
+  type SkillDraft,
+} from '@sprint-coder/contracts';
+import {
+  analyzeSkillPackage,
+  createPortableSkillFile,
+  portableSkillCompatibility,
+} from './skill-compatibility';
 import { secureWindowsPath, secureWindowsPaths } from './windows-acl';
 import {
   assertStableDirectoryIdentity,
@@ -71,6 +83,7 @@ export type SkillImportPreview = Readonly<{
   digest: string;
   files: readonly string[];
   warnings: readonly string[];
+  compatibility: SkillCompatibilityReport;
 }>;
 export type ImportedSkill = Readonly<{
   status: 'imported' | 'already-imported';
@@ -83,13 +96,14 @@ export type ImportedSkillSummary = Readonly<{
   manifest: SkillManifest;
 }>;
 export type SkillManifest = Readonly<{
-  version: 1;
+  version: 2;
   source: SkillProvider;
   importedAt: string;
   digest: string;
   name: string;
   description: string;
-  activationMode: 'manual';
+  activationPolicy: SkillActivationPolicy;
+  compatibility: SkillCompatibilityReport;
   enabled: boolean;
 }>;
 export type SelectableSkill = Readonly<{
@@ -100,6 +114,8 @@ export type SelectableSkill = Readonly<{
   name: string;
   description: string;
   enabled: boolean;
+  activationPolicy: SkillActivationPolicy;
+  compatibility: SkillCompatibilityReport;
   removable: boolean;
   exportable: boolean;
 }>;
@@ -111,6 +127,8 @@ export type SkillCatalogSnapshotEntry = Readonly<{
   name: string;
   description: string;
   enabled: boolean;
+  activationPolicy: SkillActivationPolicy;
+  compatibility: SkillCompatibilityReport;
   availability: 'available' | 'disabled' | 'invalid';
 }>;
 export type ResolvedSkillPackage = SelectableSkill &
@@ -126,6 +144,7 @@ export type CreatedSkillValidation = Readonly<{
   kind: SkillKind;
   digest: string;
   files: readonly string[];
+  compatibility: SkillCompatibilityReport;
 }>;
 export type SkillRepairSource = Readonly<{
   skillId: string;
@@ -140,6 +159,7 @@ type Snapshot = {
   digest: string;
   files: { path: string; bytes: Buffer }[];
   warnings: string[];
+  compatibility: SkillCompatibilityReport;
 };
 
 export class SkillStoreError extends Error {
@@ -407,7 +427,7 @@ export class SkillStore {
     }
     const skillFile = canonical.find(({ path }) => path === 'SKILL.md');
     if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
-    const { name, description } = parseFrontmatter(skillFile.bytes);
+    const { name, description, compatibility } = analyzeSkill(skillFile.bytes, canonical);
     const blueprint = canonical.find(({ path }) => path === 'team/blueprint.json');
     if (blueprint !== undefined) teamBlueprintSchema.parse(JSON.parse(blueprint.content));
     canonical.sort((left, right) => left.path.localeCompare(right.path));
@@ -421,6 +441,7 @@ export class SkillStore {
       kind: blueprint === undefined ? 'chat' : 'team',
       digest: digest.digest('hex'),
       files: canonical.map(({ path }) => path),
+      compatibility,
     };
   }
 
@@ -493,6 +514,7 @@ export class SkillStore {
       digest: snapshot.digest,
       files: Object.freeze(snapshot.files.map((file) => file.path)),
       warnings: Object.freeze(snapshot.warnings),
+      compatibility: snapshot.compatibility,
     });
     issuedPreviews.add(preview);
     return preview;
@@ -520,13 +542,14 @@ export class SkillStore {
 
     const staging = join(providerRoot, `.staging-${randomUUID()}`);
     const manifest: SkillManifest = {
-      version: 1,
+      version: 2,
       source: preview.candidate.provider,
       importedAt: new Date().toISOString(),
       digest: snapshot.digest,
       name: snapshot.name,
       description: snapshot.description,
-      activationMode: 'manual',
+      activationPolicy: 'manual',
+      compatibility: snapshot.compatibility,
       enabled: true,
     };
     try {
@@ -581,13 +604,14 @@ export class SkillStore {
     const staging = join(providerRoot, `.staging-${randomUUID()}`);
     const backup = join(providerRoot, `.backup-${randomUUID()}`);
     const manifest: SkillManifest = {
-      version: 1,
+      version: 2,
       source: preview.candidate.provider,
       importedAt: new Date().toISOString(),
       digest: snapshot.digest,
       name: snapshot.name,
       description: snapshot.description,
-      activationMode: 'manual',
+      activationPolicy: 'manual',
+      compatibility: snapshot.compatibility,
       enabled: existing.enabled,
     };
     try {
@@ -677,10 +701,53 @@ export class SkillStore {
     await syncDirectory(this.currentPath('created', skillId));
   }
 
+  async setActivationPolicy(
+    source: SkillSource,
+    skillId: string,
+    expectedDigest: string,
+    activationPolicy: SkillActivationPolicy,
+  ): Promise<void> {
+    if (source === 'builtin')
+      throw new SkillStoreError('INVALID_SKILL', 'Builtin Skill activation policy is fixed');
+    assertSkillId(skillId);
+    const current = await this.readSelectableAt(source, skillId, true);
+    if (current === null) throw new SkillStoreError('CONFLICT', 'Skill does not exist');
+    if (current.digest !== expectedDigest)
+      throw new SkillStoreError('SOURCE_CHANGED', 'Skill changed before activation update');
+    if (activationPolicy === 'auto-allowed') {
+      const autoCount = (await this.listSelectable()).filter(
+        (item) =>
+          item.activationPolicy === 'auto-allowed' &&
+          !(item.source === source && item.skillId === skillId && item.digest === expectedDigest),
+      ).length;
+      if (autoCount >= 32)
+        throw new SkillStoreError('CONFLICT', '自動選択を許可できるSkillは最大32件です');
+    }
+    const destination = this.currentPath(source, skillId);
+    if (source === 'created') {
+      const marker = join(destination, '.auto-allowed');
+      if (activationPolicy === 'manual') await rm(marker, { force: true });
+      else if (!(await pathExists(marker)))
+        await writeExclusive(marker, Buffer.from('auto-allowed\n', 'utf8'));
+      await syncDirectory(destination);
+      return;
+    }
+    const manifest = await readExistingManifest(destination);
+    if (manifest === null) throw new SkillStoreError('CONFLICT', 'Imported Skill is unavailable');
+    const temporary = join(destination, `.manifest-${randomUUID()}.tmp`);
+    await writeExclusive(
+      temporary,
+      Buffer.from(`${JSON.stringify({ ...manifest, activationPolicy }, null, 2)}\n`, 'utf8'),
+    );
+    await rename(temporary, join(destination, 'manifest.json'));
+    await syncDirectory(destination);
+  }
+
   async exportCreated(
     skillId: string,
     expectedDigest: string,
     destinationParent: string,
+    format: 'original' | 'portable' = 'original',
   ): Promise<string> {
     assertSkillId(skillId);
     const current = await this.readSelectableAt('created', skillId, true);
@@ -691,13 +758,25 @@ export class SkillStore {
     const parentItem = await lstat(parent);
     if (!parentItem.isDirectory() || parentItem.isSymbolicLink())
       throw new SkillStoreError('UNSAFE_SOURCE', 'Export destination is unsafe');
-    const destination = join(parent, skillId);
+    const destination = join(parent, format === 'portable' ? `${skillId}-portable` : skillId);
     if (await pathExists(destination))
       throw new SkillStoreError('CONFLICT', 'Export destination already exists');
     await copySafeDirectory(this.currentPath('created', skillId), destination, {
-      omit: new Set(['manifest.json', 'revision.json', '.disabled']),
+      omit: new Set([
+        'manifest.json',
+        'revision.json',
+        '.disabled',
+        '.auto-allowed',
+        ...(format === 'portable' ? ['openai.yaml'] : []),
+      ]),
       secureDestination: false,
     });
+    if (format === 'portable') {
+      const skillPath = join(destination, 'SKILL.md');
+      const portable = createPortableSkillFile(await readFile(skillPath));
+      await rm(skillPath);
+      await writeExclusive(skillPath, portable, false);
+    }
     await syncDirectoryTree(destination);
     await syncDirectory(parent);
     return destination;
@@ -750,6 +829,8 @@ export class SkillStore {
           name: item.name,
           description: item.description,
           enabled: item.enabled,
+          activationPolicy: item.activationPolicy,
+          compatibility: item.compatibility,
           availability: item.enabled ? 'available' : 'disabled',
         });
       } catch {
@@ -761,6 +842,8 @@ export class SkillStore {
           name: skillId,
           description: '',
           enabled: false,
+          activationPolicy: 'manual',
+          compatibility: portableSkillCompatibility(),
           availability: 'invalid',
         });
       }
@@ -846,13 +929,23 @@ export class SkillStore {
       if (!item.isDirectory() || item.isSymbolicLink())
         throw new SkillStoreError('CONFLICT', 'Skill destination is unsafe');
       const skillBytes = await readFile(join(path, 'SKILL.md'));
-      const { name, description } = parseFrontmatter(skillBytes);
+      const packageFiles = await readCompatibilityFiles(path);
+      const { name, description, compatibility } = analyzeSkill(skillBytes, packageFiles);
+      const manifest =
+        source === 'claude' || source === 'agents' ? await readExistingManifest(path) : null;
+      if (
+        manifest !== null &&
+        (manifest.name !== name ||
+          manifest.description !== description ||
+          JSON.stringify(manifest.compatibility) !== JSON.stringify(compatibility))
+      )
+        throw new SkillStoreError('SOURCE_CHANGED', 'Managed Skill metadata changed identity');
       const digest =
         source === 'builtin'
           ? (await readBuiltinManifest(path))?.digest
           : source === 'created'
             ? await digestDirectory(path)
-            : (await readExistingManifest(path))?.digest;
+            : manifest?.digest;
       if (digest === null || digest === undefined) return null;
       const kind = (await pathExists(join(path, 'team', 'blueprint.json'))) ? 'team' : 'chat';
       await this.ensureRevisionFromDirectory(source, skillId, digest, path);
@@ -864,6 +957,15 @@ export class SkillStore {
         name,
         description,
         enabled,
+        activationPolicy:
+          source === 'builtin'
+            ? 'manual'
+            : source === 'created'
+              ? (await pathExists(join(path, '.auto-allowed')))
+                ? 'auto-allowed'
+                : 'manual'
+              : (manifest?.activationPolicy ?? 'manual'),
+        compatibility,
         removable: source !== 'builtin',
         exportable: source === 'created',
       };
@@ -896,7 +998,7 @@ export class SkillStore {
     let preserveContestedPath = false;
     try {
       await copySafeDirectory(sourcePath, staging, {
-        omit: new Set(['manifest.json', '.disabled']),
+        omit: new Set(['manifest.json', '.disabled', '.auto-allowed']),
       });
       await writeExclusive(
         join(staging, 'revision.json'),
@@ -952,15 +1054,15 @@ async function readSnapshot(candidate: SkillCandidate): Promise<Snapshot> {
   const snapshot = await readRawSnapshot(candidate);
   const skillFile = snapshot.files.find((file) => file.path === 'SKILL.md');
   if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
-  const { name, description } = parseFrontmatter(skillFile.bytes);
+  const { name, description, compatibility } = analyzeSkill(skillFile.bytes, snapshot.files);
   if (RESERVED_NAMES.has(candidate.skillId.toLowerCase()) || RESERVED_NAMES.has(name.toLowerCase()))
     throw new SkillStoreError('INVALID_SKILL', 'Skill name conflicts with a reserved capability');
-  return { ...snapshot, name, description };
+  return { ...snapshot, name, description, compatibility };
 }
 
 async function readRawSnapshot(
   candidate: SkillCandidate,
-): Promise<Omit<Snapshot, 'name' | 'description'>> {
+): Promise<Omit<Snapshot, 'name' | 'description' | 'compatibility'>> {
   const canonicalRoot = await realpath(candidate.sourceRoot).catch(() => '');
   const canonicalSource = await realpath(candidate.sourcePath).catch(() => '');
   if (
@@ -992,7 +1094,7 @@ async function readRawSnapshot(
     if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink())
       throw new SkillStoreError('UNSAFE_SOURCE', 'Skill directory changed identity');
     for (const name of (await readdir(directory)).sort()) {
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      const relativePath = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
       if (name.startsWith('.') || SECRET_FILE_NAMES.has(name.toLowerCase())) {
         warnings.push(`Excluded ${relativePath}`);
         continue;
@@ -1047,49 +1149,49 @@ async function readRawSnapshot(
   }
 }
 
-function parseFrontmatter(bytes: Buffer): { name: string; description: string } {
-  const text = bytes.toString('utf8');
-  if (!Buffer.from(text, 'utf8').equals(bytes))
-    throw new SkillStoreError('INVALID_SKILL', 'SKILL.md must be valid UTF-8');
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
-  if (match === null)
-    throw new SkillStoreError('INVALID_SKILL', 'SKILL.md frontmatter is required');
-  const values = new Map<string, string>();
-  for (const rawLine of match[1]!.split(/\r?\n/)) {
-    if (rawLine.trim() === '') continue;
-    const line = /^([a-zA-Z][a-zA-Z0-9_-]*):\s*(.*)$/.exec(rawLine);
-    if (line === null || (line[1] !== 'name' && line[1] !== 'description'))
-      throw new SkillStoreError(
-        'INVALID_SKILL',
-        'Only name and description are allowed in frontmatter',
-      );
-    if (values.has(line[1]))
-      throw new SkillStoreError('INVALID_SKILL', `Duplicate frontmatter key: ${line[1]}`);
-    values.set(line[1], parseScalar(line[2]!));
+function analyzeSkill(
+  bytes: Buffer,
+  files: readonly { path: string; bytes?: Buffer; content?: string }[] = [],
+) {
+  try {
+    return analyzeSkillPackage(bytes, files);
+  } catch (error) {
+    throw new SkillStoreError(
+      'INVALID_SKILL',
+      error instanceof Error ? error.message : 'Skill compatibility analysis failed',
+    );
   }
-  const name = values.get('name')?.trim();
-  const description = values.get('description')?.trim();
-  if (!name || !description)
-    throw new SkillStoreError('INVALID_SKILL', 'Skill name and description are required');
-  return { name, description };
 }
 
-function parseScalar(value: string): string {
-  if (value.startsWith('"')) {
-    try {
-      const parsed: unknown = JSON.parse(value);
-      if (typeof parsed === 'string') return parsed;
-    } catch {
-      // Report a uniform invalid-frontmatter error below.
+async function readCompatibilityFiles(
+  packagePath: string,
+): Promise<readonly { path: string; bytes?: Buffer }[]> {
+  const files: { path: string; bytes?: Buffer }[] = [];
+  await walk(packagePath, '', 0);
+  return files;
+
+  async function walk(directory: string, relativeDirectory: string, depth: number): Promise<void> {
+    if (depth > MAX_DEPTH)
+      throw new SkillStoreError('INVALID_SKILL', 'Skill compatibility scan is too deep');
+    for (const name of (await readdir(directory)).sort()) {
+      if (name.startsWith('.') || name === 'manifest.json' || name === 'revision.json') continue;
+      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      const absolutePath = safeChild(packagePath, relativePath);
+      const item = await lstat(absolutePath);
+      if (item.isSymbolicLink() || (!item.isDirectory() && !item.isFile()))
+        throw new SkillStoreError('UNSAFE_SOURCE', `Unsafe managed Skill file: ${relativePath}`);
+      if (item.isDirectory()) {
+        await walk(absolutePath, relativePath, depth + 1);
+        continue;
+      }
+      if (files.length >= MAX_FILES)
+        throw new SkillStoreError('INVALID_SKILL', 'Skill compatibility scan has too many files');
+      files.push({
+        path: relativePath,
+        ...(relativePath === 'agents/openai.yaml' ? { bytes: await readFile(absolutePath) } : {}),
+      });
     }
-    throw new SkillStoreError('INVALID_SKILL', 'Invalid quoted frontmatter value');
   }
-  if (value.startsWith("'")) {
-    if (!value.endsWith("'"))
-      throw new SkillStoreError('INVALID_SKILL', 'Invalid quoted frontmatter value');
-    return value.slice(1, -1).replaceAll("''", "'");
-  }
-  return value;
 }
 
 function normalizeDraftFilePath(path: string): string {
@@ -1262,9 +1364,10 @@ async function readExistingManifest(path: string): Promise<SkillManifest | null>
     if (!item.isDirectory() || item.isSymbolicLink())
       throw new SkillStoreError('CONFLICT', 'Import destination is not a safe directory');
     const parsed: unknown = JSON.parse(await readFile(join(path, 'manifest.json'), 'utf8'));
-    if (!isManifest(parsed))
+    const normalized = await normalizeManifest(path, parsed);
+    if (normalized === null)
       throw new SkillStoreError('CONFLICT', 'Existing skill manifest is invalid');
-    return parsed;
+    return normalized;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
@@ -1301,21 +1404,61 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-function isManifest(value: unknown): value is SkillManifest {
-  if (typeof value !== 'object' || value === null) return false;
-  const item = value as Partial<SkillManifest>;
-  const valid =
-    item.version === 1 &&
+async function normalizeManifest(path: string, value: unknown): Promise<SkillManifest | null> {
+  if (typeof value !== 'object' || value === null) return null;
+  const item = value as Record<string, unknown>;
+  const commonValid =
     (item.source === 'claude' || item.source === 'agents') &&
     typeof item.importedAt === 'string' &&
     typeof item.digest === 'string' &&
     /^[a-f0-9]{64}$/.test(item.digest) &&
     typeof item.name === 'string' &&
     typeof item.description === 'string' &&
-    item.activationMode === 'manual' &&
     (item.enabled === undefined || typeof item.enabled === 'boolean');
-  if (valid && item.enabled === undefined) (value as { enabled: boolean }).enabled = true;
-  return valid;
+  if (!commonValid) return null;
+  const source = item.source as SkillProvider;
+  const importedAt = item.importedAt as string;
+  const digest = item.digest as string;
+  const name = item.name as string;
+  const description = item.description as string;
+  const enabled = (item.enabled ?? true) as boolean;
+  if (
+    item.version === 2 &&
+    (item.activationPolicy === 'manual' || item.activationPolicy === 'auto-allowed')
+  ) {
+    const compatibility = skillCompatibilityReportSchema.safeParse(item.compatibility);
+    if (!compatibility.success) return null;
+    return {
+      version: 2,
+      source,
+      importedAt,
+      digest,
+      name,
+      description,
+      activationPolicy: item.activationPolicy,
+      compatibility: compatibility.data,
+      enabled,
+    };
+  }
+  if (item.version !== 1 || item.activationMode !== 'manual') return null;
+  const skillBytes = await readFile(join(path, 'SKILL.md'));
+  const compatibility = analyzeSkill(skillBytes, await readCompatibilityFiles(path)).compatibility;
+  const migrated: SkillManifest = {
+    version: 2,
+    source,
+    importedAt,
+    digest,
+    name,
+    description,
+    activationPolicy: 'manual',
+    compatibility,
+    enabled,
+  };
+  const temporary = join(path, `.manifest-migration-${randomUUID()}.tmp`);
+  await writeExclusive(temporary, Buffer.from(`${JSON.stringify(migrated, null, 2)}\n`, 'utf8'));
+  await rename(temporary, join(path, 'manifest.json'));
+  await syncDirectory(path);
+  return migrated;
 }
 
 function assertSkillId(skillId: string): void {

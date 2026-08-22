@@ -363,6 +363,28 @@ describe('Runtime Host protocol', () => {
         skills: [{ name: 'reviewer', path: managedPath }],
       }),
     ).toBe(true);
+    const boundedCandidates = Array.from({ length: 38 }, (_, index) => {
+      const name = `candidate-${index}`;
+      return {
+        name,
+        path: join(tmpdir(), 'skills', 'revisions', 'created', name, digest),
+        activationPolicy: 'auto-allowed' as const,
+        selected: false,
+      };
+    });
+    expect(isMainToRuntimeEnvelope({ ...valid, skills: boundedCandidates })).toBe(true);
+    expect(
+      isMainToRuntimeEnvelope({
+        ...valid,
+        skills: [
+          ...boundedCandidates,
+          {
+            name: 'candidate-overflow',
+            path: join(tmpdir(), 'skills', 'revisions', 'created', 'candidate-overflow', digest),
+          },
+        ],
+      }),
+    ).toBe(false);
     for (const path of [
       '../../secrets',
       `${dirname(managedPath)}${sep}..${sep}${digest}`,
