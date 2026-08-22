@@ -47,7 +47,7 @@ Conventional Commitsの既定分類は次とする。
 
 例: `0.4.2` 以降に2件のfix、Gemini Provider追加、Provider共通化があれば、最大はMINORなので `0.5.0` へ一度だけ上げる。
 
-betaでは先に上記でstableの目標base versionを決め、そのbaseにbeta suffixを付ける。beta番号の進行を、同じ変更範囲に対する新たなSemVer bumpとして扱わない。
+betaでは先に上記でstableの目標base versionを決め、そのbaseにbeta suffixを付ける。`gh release list` とremote tagを列挙し、対象baseの `v<base>-beta.N` にある最大Nの次を選ぶ。既存tagや既存releaseの番号を再利用しない。beta番号の進行を、同じ変更範囲に対する新たなSemVer bumpとして扱わない。
 
 ## 2. Platformと署名方針を確定する
 
@@ -77,10 +77,11 @@ macOS releaseはnotarizationを必須とし、未実施・失敗・タイムア�
 2. `notarytool submit --wait` の結果が `Accepted` であることを機械的に確認する。
 3. `.app` へticketをstapleし、`stapler validate`、`codesign --verify --deep --strict`、`spctl --assess --type execute`を通す。
 4. notarize・staple済み `.app` からDMGとSquirrel.Mac更新ZIPを作る。ZIPを指す `RELEASES.json` を生成する。
-5. DMGも `spctl --assess --type open --context context:primary-signature` と `stapler validate` で確認する。
-6. cleanupを `always()` で実行し、一時keychain、P12、API key、notarization archive/resultをartifactやcacheへ残さない。
+5. 生成したDMGを別途 `notarytool submit --wait` し、`Accepted` を確認してからDMGへticketをstapleする。`stapler validate` と `spctl --assess --type open --context context:primary-signature` を通す。
+6. cleanupを `always()` で実行し、一時keychain、P12、API key、app/DMGのnotarization archive/resultをartifactやcacheへ残さない。
 
 必要secret、正式署名ID、Accepted、staple、Gatekeeper評価のいずれかを確認できなければDraft assetを完成扱いせず停止する。
+現行workflowがDMGを生成後にnotarize・stapleしない構成なら、そのままrelease tagをpushせず、上記順序をfail-closedで実装するrelease/build PRを先に完了する。
 
 ## 5. signed Windows成果物を作成する
 
