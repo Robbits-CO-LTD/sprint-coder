@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   codexGeneratedImagesRoot,
   collectThreadImages,
+  publishIsolatedThreadImages,
   resolveThreadImageDirectory,
 } from './generated-image-collector';
 
@@ -165,5 +166,53 @@ describe('collectThreadImages', () => {
     for (let i = 0; i < 20; i += 1)
       writeFileSync(join(root, thread, `call_${String(i).padStart(2, '0')}.png`), PNG);
     expect(collectThreadImages(thread, root).length).toBeLessThanOrEqual(8);
+  });
+});
+
+describe('publishIsolatedThreadImages', () => {
+  it('copies only bounded PNGs into the matching canonical thread directory', () => {
+    const isolated = tempRoot();
+    const destination = tempRoot();
+    const thread = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    mkdirSync(join(isolated, thread));
+    writeFileSync(join(isolated, thread, 'call.png'), PNG);
+    writeFileSync(join(isolated, thread, 'note.txt'), 'not an image');
+    expect(publishIsolatedThreadImages(thread, isolated, destination)).toEqual(['call.png']);
+    expect(collectThreadImages(thread, destination).map(({ fileName }) => fileName)).toEqual([
+      'call.png',
+    ]);
+  });
+
+  it('refuses a pre-existing destination thread symlink', () => {
+    const isolated = tempRoot();
+    const destination = tempRoot();
+    const outside = tempRoot();
+    const thread = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    mkdirSync(join(isolated, thread));
+    writeFileSync(join(isolated, thread, 'call.png'), PNG);
+    symlinkSync(
+      outside,
+      join(destination, thread),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    expect(() => publishIsolatedThreadImages(thread, isolated, destination)).toThrow(
+      'plain directory',
+    );
+    expect(collectThreadImages(thread, outside)).toEqual([]);
+  });
+
+  it('refuses a publication-root symlink even when the target is a directory', () => {
+    const isolated = tempRoot();
+    const destinationParent = tempRoot();
+    const outside = tempRoot();
+    const destination = join(destinationParent, 'generated_images');
+    const thread = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    mkdirSync(join(isolated, thread));
+    writeFileSync(join(isolated, thread, 'call.png'), PNG);
+    symlinkSync(outside, destination, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(() => publishIsolatedThreadImages(thread, isolated, destination)).toThrow(
+      'publication root',
+    );
+    expect(collectThreadImages(thread, outside)).toEqual([]);
   });
 });

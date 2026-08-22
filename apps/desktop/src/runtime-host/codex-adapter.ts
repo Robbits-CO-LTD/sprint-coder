@@ -26,7 +26,6 @@ import type {
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type {
   RuntimeCanonicalEvent,
-  RuntimeCodexConfigPolicy,
   RuntimeContextFragment,
   RuntimeFailureDiagnostic,
   RuntimeFailureStage,
@@ -51,13 +50,13 @@ import {
   type RuntimeProgressTimeoutPhase,
 } from './runtime-progress-deadline';
 import { RuntimeFailureDiagnosticCollector } from './runtime-failure-diagnostics';
+import { publishIsolatedThreadImages } from '../main/generated-image-collector';
 import {
   environmentValue,
   probeCliCommandCandidates,
   type CliCommandCandidate,
 } from './cli-command-resolution';
 import {
-  CodexUserConfigSnapshotError,
   codexSkillIsolationArgs,
   enforceCodexSkillIsolation,
   prepareCodexSkillIsolation,
@@ -219,7 +218,6 @@ export class CodexRuntimeAdapter {
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     localImages?: CodexLocalImagePreparation,
-    codexConfigPolicy: RuntimeCodexConfigPolicy = { inheritUserConfig: false },
     runtimeProcessStarted?: (pid: number) => void,
     toolCatalogSnapshot?: ToolCatalogSnapshot,
     invokeManagedTool?: InvokeManagedTool,
@@ -284,7 +282,6 @@ export class CodexRuntimeAdapter {
         cwd,
         runtimeWorkspaceRoots,
         skills,
-        configPolicy: codexConfigPolicy,
       });
       let teamMcpProfile: CodexTeamMcpProfile | undefined;
       if (teamMcp !== undefined) {
@@ -312,17 +309,11 @@ export class CodexRuntimeAdapter {
         disabledUnexpectedSkillCount: 0,
         verified: false,
       });
-    } catch (error) {
+    } catch {
       void releaseLocalImages();
       cleanupPaths();
       failWithDiagnostic(
-        publicError(
-          'RUNTIME_FAILED',
-          error instanceof CodexUserConfigSnapshotError
-            ? 'Codexユーザーconfig.tomlを隔離環境へ読み込めませんでした。設定を確認してください。'
-            : 'Codex app-serverを準備できませんでした。',
-          false,
-        ),
+        publicError('RUNTIME_FAILED', 'Codex app-serverを準備できませんでした。', false),
         'startup_error',
       );
       return;
@@ -577,6 +568,16 @@ export class CodexRuntimeAdapter {
               skillIsolationVerificationPending = false;
             });
         }
+        if (
+          message['method'] === 'turn/completed' &&
+          activeThreadId !== null &&
+          skillIsolation.stagedSkills.some(({ name }) => name === 'imagegen')
+        )
+          publishIsolatedThreadImages(
+            activeThreadId,
+            join(skillIsolation.codexHome, 'generated_images'),
+            join(skillIsolation.sourceCodexHome, 'generated_images'),
+          );
         handleCodexNotification(
           message,
           emitRuntime,
@@ -696,9 +697,7 @@ export class CodexRuntimeAdapter {
                 'RUNTIME_FAILED',
                 error instanceof CodexTeamMcpUnavailableError
                   ? 'CodexがSprint Coder Team MCPの必須ツールを確認できないため、Turn開始前に停止しました。'
-                  : codexConfigPolicy.inheritUserConfig
-                    ? 'Codexユーザーconfig.tomlを含む隔離環境を開始できませんでした。configを確認してください。'
-                    : 'Codex app-serverを開始できませんでした。',
+                  : 'Codex app-serverを開始できませんでした。',
                 !(error instanceof CodexTeamMcpUnavailableError),
               ),
           'startup_error',

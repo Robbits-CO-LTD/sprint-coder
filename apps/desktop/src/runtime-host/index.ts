@@ -325,7 +325,6 @@ function startAdapter(
       data.projectItems,
       data.payload,
       localImages,
-      data.codexConfigPolicy,
       (pid) => {
         const processIdentity = queryNativeProcessIdentity(pid);
         if (processIdentity === null) {

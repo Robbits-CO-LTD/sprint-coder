@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sprint Coderの始め方 | インストールから最初のAI Teamまで</title>
+    <meta
+      name="description"
+      content="Sprint Coderを始める手順です。必要環境、GitHub Releasesまたはソースからの起動、最初のTask、Codex・Claude Code・API Providerの接続、AI Teamへの展開を説明します。"
+    />
+    <meta name="author" content="Robbits Inc." />
+    <meta
+      name="robots"
+      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
+    />
+    <meta name="theme-color" content="#060806" />
+    <link rel="canonical" href="https://sprintcoder.yuseilab.com/getting-started/" />
+    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:site_name" content="Sprint Coder" />
+    <meta property="og:title" content="Sprint Coderの始め方 | インストールから最初のAI Teamまで" />
+    <meta
+      property="og:description"
+      content="Sprint Coderを始める手順です。必要環境、GitHub Releasesまたはソースからの起動、最初のTask、Codex・Claude Code・API Providerの接続、AI Teamへの展開を説明します。"
+    />
+    <meta property="og:url" content="https://sprintcoder.yuseilab.com/getting-started/" />
+    <meta
+      property="og:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <meta property="og:image:width" content="1600" />
+    <meta property="og:image:height" content="1000" />
+    <meta property="og:image:alt" content="Sprint CoderのAI Team画面" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Sprint Coderの始め方 | インストールから最初のAI Teamまで" />
+    <meta
+      name="twitter:description"
+      content="Sprint Coderを始める手順です。必要環境、GitHub Releasesまたはソースからの起動、最初のTask、Codex・Claude Code・API Providerの接続、AI Teamへの展開を説明します。"
+    />
+    <meta
+      name="twitter:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20260820-4" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://sprintcoder.yuseilab.com/#website",
+            "url": "https://sprintcoder.yuseilab.com/",
+            "name": "Sprint Coder",
+            "alternateName": "スプリントコーダー",
+            "inLanguage": "ja",
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://robbits.co.jp/#organization",
+            "name": "株式会社Robbits",
+            "alternateName": "Robbits Inc.",
+            "url": "https://robbits.co.jp/",
+            "sameAs": ["https://github.com/Robbits-CO-LTD"]
+          },
+          {
+            "@type": "TechArticle",
+            "@id": "https://sprintcoder.yuseilab.com/getting-started/#page",
+            "url": "https://sprintcoder.yuseilab.com/getting-started/",
+            "name": "Sprint Coderの始め方 | インストールから最初のAI Teamまで",
+            "description": "Sprint Coderを始める手順です。必要環境、GitHub Releasesまたはソースからの起動、最初のTask、Codex・Claude Code・API Providerの接続、AI Teamへの展開を説明します。",
+            "inLanguage": "ja",
+            "dateModified": "2026-08-20",
+            "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
+            "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
+            "publisher": { "@id": "https://robbits.co.jp/#organization" },
+            "headline": "Sprint Coderを始める",
+            "datePublished": "2026-08-20",
+            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png",
+            "author": { "@id": "https://robbits.co.jp/#organization" },
+            "mainEntityOfPage": { "@id": "https://sprintcoder.yuseilab.com/getting-started/#page" }
+          },
+          {
+            "@type": "BreadcrumbList",
+            "@id": "https://sprintcoder.yuseilab.com/getting-started/#breadcrumb",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Sprint Coder",
+                "item": "https://sprintcoder.yuseilab.com/"
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "name": "Sprint Coderを始める",
+                "item": "https://sprintcoder.yuseilab.com/getting-started/"
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="content-page">
+    <a class="skip-link" href="#main">本文へ移動</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Sprint Coder トップ">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
+          <span class="brand-copy"
+            ><strong>Sprint Coder</strong><small>A product of Robbits</small></span
+          >
+        </a>
+        <nav aria-label="メインナビゲーション">
+          <a href="/about/">製品</a>
+          <a href="/ai-team/">AI Team</a>
+          <a href="/providers/">Providers</a>
+          <a href="/local-first-security/">Security</a>
+          <a href="/getting-started/" aria-current="page">はじめる</a>
+        </nav>
+        <a
+          class="button button-header"
+          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+          >ダウンロード<svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" /></svg
+        ></a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="content-hero">
+        <div class="shell">
+          <nav class="breadcrumb" aria-label="パンくず">
+            <ol>
+              <li><a href="/">Sprint Coder</a></li>
+              <li aria-current="page">Sprint Coderを始める</li>
+            </ol>
+          </nav>
+          <div class="content-hero-layout">
+            <div class="content-hero-copy">
+              <p class="section-label">GETTING STARTED</p>
+              <h1>Sprint Coderを始める</h1>
+              <p class="content-hero-lead">
+                配布物をダウンロードするか、Node.js
+                22でソースから起動できます。Providerをまだ設定していなくても、Mock
+                RuntimeでTask、Workspace、基本操作を確認できます。
+              </p>
+              <div class="content-meta">
+                <span>更新 2026-08-20</span><span>公式情報</span><span>株式会社Robbits</span>
+              </div>
+            </div>
+            <dl class="topic-signal">
+              <div>
+                <dt>NODE</dt>
+                <dd>22.x</dd>
+              </div>
+              <div>
+                <dt>LICENSE</dt>
+                <dd>MIT</dd>
+              </div>
+              <div>
+                <dt>FIRST RUN</dt>
+                <dd>Mock対応</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="article-section">
+        <div class="shell article-layout">
+          <aside class="table-of-contents" aria-label="このページの目次">
+            <strong>ON THIS PAGE</strong>
+            <ol>
+              <li><a href="#requirements">必要なもの</a></li>
+              <li><a href="#install">インストール</a></li>
+              <li><a href="#first-task">最初のTask</a></li>
+              <li><a href="#connect">実AIを接続</a></li>
+              <li><a href="#team">AI Teamへ展開</a></li>
+            </ol>
+          </aside>
+          <article class="prose">
+            <p class="article-lead">
+              最初は小さな検証用Projectを選び、Accessを「確認する」にして操作の流れを把握するのがおすすめです。early
+              betaのため、重要なWorkspaceでは差分と承認内容を確認してください。
+            </p>
+
+            <h2 id="requirements">必要なもの</h2>
+            <ul>
+              <li>macOS、Windows、またはLinux</li>
+              <li>ソースから起動する場合はNode.js 22とnpm</li>
+              <li>Git repositoryを扱う場合はGit</li>
+              <li>実AIを使う場合は認証済みCodex CLI / Claude Code CLI、またはProvider API key</li>
+            </ul>
+            <div class="callout">
+              <strong>まずMock Runtimeで試せます</strong>
+              <p>
+                Provider認証がなくてもUIと基本的なTask操作を確認できます。課金を伴うAPIを接続する前の導入確認に利用してください。
+              </p>
+            </div>
+
+            <h2 id="install">インストールする</h2>
+            <h3>GitHub Releasesから取得</h3>
+            <p>
+              公開済みのbuildがある場合は、<a href="/releases/">リリース・ダウンロード</a
+              >からOSに合うartifactを選びます。early
+              betaではOSの保護機能が警告を表示する場合があるため、release
+              notesと配布状態を確認してください。
+            </p>
+
+            <h3>ソースから起動</h3>
+            <div class="code-block">
+              <div class="code-block-header"><span>Terminal</span><span>Node.js 22</span></div>
+              <pre><code><span class="prompt">$</span> git clone https://github.com/Robbits-CO-LTD/sprint-coder.git
+<span class="prompt">$</span> cd sprint-coder
+<span class="prompt">$</span> nvm use
+<span class="prompt">$</span> npm ci
+<span class="prompt">$</span> npm start</code></pre>
+            </div>
+            <p>
+              <code>nvm</code>を使わない場合は、<code>node --version</code
+              >が<code>v22.x</code>であることを確認してください。
+            </p>
+
+            <h2 id="first-task">最初のTaskを作る</h2>
+            <ol class="steps-list">
+              <li>
+                <h3>新規Taskを作成する</h3>
+                <p>サイドバーから新しいTaskを作り、今回の仕事を独立した単位にします。</p>
+              </li>
+              <li>
+                <h3>Project / Workspaceを選択する</h3>
+                <p>最初は検証用repositoryや小さなsample Projectを選びます。</p>
+              </li>
+              <li>
+                <h3>Model、Effort、Accessを確認する</h3>
+                <p>
+                  Provider未設定ならMock
+                  Runtime、実AIを使うなら接続済みmodelを選びます。Accessは「確認する」から始めると操作境界を理解しやすくなります。
+                </p>
+              </li>
+              <li>
+                <h3>小さな依頼を送る</h3>
+                <p>
+                  READMEの説明、簡単なコード調査、テスト実行など、結果を確認しやすい依頼から始めます。
+                </p>
+              </li>
+            </ol>
+
+            <h2 id="connect">Codex、Claude Code、API Providerを接続する</h2>
+            <p>
+              組み込みCLIは端末にあるCLIと認証を利用します。公式APIや互換APIは「設定 →
+              モデルと接続」から追加し、接続検証後にmodel pickerで選択します。
+            </p>
+            <p>
+              API keyを登録する前に、接続先の料金、データ保持、rate
+              limitを確認してください。対応先の全体像は<a href="/providers/">対応AI・Provider</a
+              >にまとめています。
+            </p>
+
+            <h2 id="team">ChatをAI Teamへ展開する</h2>
+            <p>
+              一人のAIとの会話で目的が明確になり、調査・実装・レビューを分ける価値が出たらTeamへ展開します。Leaderへ最終目的と、分担してほしい観点を伝えてください。
+            </p>
+            <p>
+              Worker数を増やすこと自体を目的にせず、ファイル担当、調査対象、review観点など境界を明確にすると成果を統合しやすくなります。詳しい流れは<a
+                href="/ai-team/"
+                >AI Team Coding</a
+              >を参照してください。
+            </p>
+
+            <section class="related-section" aria-labelledby="related-title">
+              <h2 id="related-title">関連ページ</h2>
+              <div class="related-grid">
+                <a class="related-card" href="/releases/"
+                  ><small>RELEASES</small><strong>リリース・ダウンロード</strong
+                  ><span>現在公開中の正式版、対応OS、検証方法。</span></a
+                ><a class="related-card" href="/providers/"
+                  ><small>PROVIDERS</small><strong>対応AI・モデル</strong
+                  ><span>Codex、Claude Code、Gemini、API、ローカルLLMの選び方。</span></a
+                ><a class="related-card" href="/ai-team/"
+                  ><small>AI TEAM</small><strong>AI Team Coding</strong
+                  ><span>LeaderとWorkerが同じTaskで役割分担し、成果を統合する仕組み。</span></a
+                >
+              </div>
+            </section>
+            <section class="content-cta" aria-labelledby="cta-title">
+              <h2 id="cta-title">最初のTaskを始める</h2>
+              <p>Sprint CoderはMIT Licenseで公開されています。配布物またはソースから試せます。</p>
+              <div class="hero-actions">
+                <a
+                  class="button button-primary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+                  >最新版をダウンロード</a
+                >
+                <a
+                  class="button button-secondary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder"
+                  >GitHubで見る</a
+                >
+              </div>
+            </section>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-grid">
+        <div class="footer-brand">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
+          <div>
+            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
+          </div>
+        </div>
+        <div class="footer-owner">
+          <span>Developed, owned and managed by</span
+          ><a href="https://robbits.co.jp/">株式会社Robbits</a>
+        </div>
+        <nav class="footer-links" aria-label="フッターナビゲーション">
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a
+          ><a href="/releases/">Releases</a
+          ><a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE"
+            >MIT License</a
+          >
+        </nav>
+      </div>
+      <nav class="shell content-footer-links" aria-label="公式情報ページ">
+        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
+        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
+        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
+        ><a href="/releases/">Releases</a>
+      </nav>
+      <div class="shell copyright">
+        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
+      </div>
+    </footer>
+  </body>
+</html>

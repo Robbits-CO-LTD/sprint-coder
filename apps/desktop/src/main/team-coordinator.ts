@@ -2383,6 +2383,10 @@ export class TeamCoordinator {
           this.emit(task.id, team.id);
           continue;
         }
+        // A Mission hard-timeout is a deliberate human/manual-resume boundary. Re-queuing it on
+        // startup bypasses that gate and can fail/cancel the remaining steps before the UI can
+        // present the resume decision. Integration-specific waiting states are handled below.
+        if (queued.state === 'waiting_resume') continue;
         const execution =
           queued.state === 'queued'
             ? queued

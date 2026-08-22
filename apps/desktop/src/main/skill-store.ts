@@ -31,12 +31,14 @@ const BUILTIN_SKILL_IDS = new Set([
   'sprint-coder-product',
   'skill-creator',
   'import-skill',
+  'imagegen',
 ]);
 const RESERVED_NAMES = new Set([
   'sprint-coder-team',
   'sprint-coder-product',
   'skill-creator',
   'import-skill',
+  'imagegen',
   'team',
   'team-hub',
 ]);
@@ -768,6 +770,7 @@ export class SkillStore {
       'sprint-coder-product',
       'skill-creator',
       'import-skill',
+      'imagegen',
     ] as const)
       await capture('builtin', skillId, true);
     for (const provider of ['claude', 'agents'] as const) {

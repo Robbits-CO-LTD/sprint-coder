@@ -27,7 +27,6 @@ import {
   runtimeSettingsSchema,
   updateHealthSchema,
   updateCheckResultSchema,
-  codexUserConfigSettingsSchema,
   teamModelResearchSettingsSchema,
   teamModelRestrictionSchema,
   taskRenameInputSchema,
@@ -398,12 +397,6 @@ describe('public contracts', () => {
       researchBeforeHiring: true,
     });
     expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
-  });
-
-  it('requires an explicit boolean for Codex user-config opt-in', () => {
-    expect(codexUserConfigSettingsSchema.parse({ enabled: false })).toEqual({ enabled: false });
-    expect(() => codexUserConfigSettingsSchema.parse({})).toThrow();
-    expect(() => codexUserConfigSettingsSchema.parse({ enabled: 'false' })).toThrow();
   });
 
   it('requires at least one unique model when Team models are restricted', () => {

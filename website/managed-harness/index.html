@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Managed Harness | AIのファイル変更・Command・承認を制御する</title>
+    <meta
+      name="description"
+      content="Sprint CoderのManaged Harnessを解説します。Providerごとのtool useを共通のファイル操作、Command sandbox、承認、監査へ接続し、AIの実行を見える形で扱う設計です。"
+    />
+    <meta name="author" content="Robbits Inc." />
+    <meta
+      name="robots"
+      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
+    />
+    <meta name="theme-color" content="#060806" />
+    <link rel="canonical" href="https://sprintcoder.yuseilab.com/managed-harness/" />
+    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:site_name" content="Sprint Coder" />
+    <meta
+      property="og:title"
+      content="Managed Harness | AIのファイル変更・Command・承認を制御する"
+    />
+    <meta
+      property="og:description"
+      content="Sprint CoderのManaged Harnessを解説します。Providerごとのtool useを共通のファイル操作、Command sandbox、承認、監査へ接続し、AIの実行を見える形で扱う設計です。"
+    />
+    <meta property="og:url" content="https://sprintcoder.yuseilab.com/managed-harness/" />
+    <meta
+      property="og:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <meta property="og:image:width" content="1600" />
+    <meta property="og:image:height" content="1000" />
+    <meta property="og:image:alt" content="Sprint CoderのAI Team画面" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Managed Harness | AIのファイル変更・Command・承認を制御する"
+    />
+    <meta
+      name="twitter:description"
+      content="Sprint CoderのManaged Harnessを解説します。Providerごとのtool useを共通のファイル操作、Command sandbox、承認、監査へ接続し、AIの実行を見える形で扱う設計です。"
+    />
+    <meta
+      name="twitter:image"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+    />
+    <link rel="stylesheet" href="/styles.css?v=20260820-4" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://sprintcoder.yuseilab.com/#website",
+            "url": "https://sprintcoder.yuseilab.com/",
+            "name": "Sprint Coder",
+            "alternateName": "スプリントコーダー",
+            "inLanguage": "ja",
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
+          },
+          {
+            "@type": "Organization",
+            "@id": "https://robbits.co.jp/#organization",
+            "name": "株式会社Robbits",
+            "alternateName": "Robbits Inc.",
+            "url": "https://robbits.co.jp/",
+            "sameAs": ["https://github.com/Robbits-CO-LTD"]
+          },
+          {
+            "@type": "TechArticle",
+            "@id": "https://sprintcoder.yuseilab.com/managed-harness/#page",
+            "url": "https://sprintcoder.yuseilab.com/managed-harness/",
+            "name": "Managed Harness | AIのファイル変更・Command・承認を制御する",
+            "description": "Sprint CoderのManaged Harnessを解説します。Providerごとのtool useを共通のファイル操作、Command sandbox、承認、監査へ接続し、AIの実行を見える形で扱う設計です。",
+            "inLanguage": "ja",
+            "dateModified": "2026-08-20",
+            "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
+            "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
+            "publisher": { "@id": "https://robbits.co.jp/#organization" },
+            "headline": "AIの実行を、共通の制御下へ",
+            "datePublished": "2026-08-20",
+            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png",
+            "author": { "@id": "https://robbits.co.jp/#organization" },
+            "mainEntityOfPage": { "@id": "https://sprintcoder.yuseilab.com/managed-harness/#page" }
+          },
+          {
+            "@type": "BreadcrumbList",
+            "@id": "https://sprintcoder.yuseilab.com/managed-harness/#breadcrumb",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Sprint Coder",
+                "item": "https://sprintcoder.yuseilab.com/"
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "name": "AIの実行を、共通の制御下へ",
+                "item": "https://sprintcoder.yuseilab.com/managed-harness/"
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="content-page">
+    <a class="skip-link" href="#main">本文へ移動</a>
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="/" aria-label="Sprint Coder トップ">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
+          <span class="brand-copy"
+            ><strong>Sprint Coder</strong><small>A product of Robbits</small></span
+          >
+        </a>
+        <nav aria-label="メインナビゲーション">
+          <a href="/about/">製品</a>
+          <a href="/ai-team/">AI Team</a>
+          <a href="/providers/">Providers</a>
+          <a href="/local-first-security/">Security</a>
+          <a href="/getting-started/">はじめる</a>
+        </nav>
+        <a
+          class="button button-header"
+          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+          >ダウンロード<svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" /></svg
+        ></a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="content-hero">
+        <div class="shell">
+          <nav class="breadcrumb" aria-label="パンくず">
+            <ol>
+              <li><a href="/">Sprint Coder</a></li>
+              <li aria-current="page">AIの実行を、共通の制御下へ</li>
+            </ol>
+          </nav>
+          <div class="content-hero-layout">
+            <div class="content-hero-copy">
+              <p class="section-label">EXECUTION CONTROL</p>
+              <h1>AIの実行を、共通の制御下へ</h1>
+              <p class="content-hero-lead">
+                Managed
+                Harnessは、AIが何を答えたかではなく、Workspaceへ何を実行したかを管理するための境界です。Providerが変わっても、ファイル操作、Command、承認、監査を共通の契約で扱います。
+              </p>
+              <div class="content-meta">
+                <span>更新 2026-08-20</span><span>公式情報</span><span>株式会社Robbits</span>
+              </div>
+            </div>
+            <dl class="topic-signal">
+              <div>
+                <dt>FILES</dt>
+                <dd>差分を確認</dd>
+              </div>
+              <div>
+                <dt>COMMAND</dt>
+                <dd>sandbox</dd>
+              </div>
+              <div>
+                <dt>APPROVAL</dt>
+                <dd>Taskへ記録</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+
+      <section class="article-section">
+        <div class="shell article-layout">
+          <aside class="table-of-contents" aria-label="このページの目次">
+            <strong>ON THIS PAGE</strong>
+            <ol>
+              <li><a href="#reason">なぜ共通Harnessが必要か</a></li>
+              <li><a href="#flow">実行経路</a></li>
+              <li><a href="#files">ファイル操作</a></li>
+              <li><a href="#commands">Commandと承認</a></li>
+            </ol>
+          </aside>
+          <article class="prose">
+            <p class="article-lead">
+              Providerごとに独自のfile toolやshell
+              toolを直接実行すると、Access設定、監査、失敗時の扱いがばらばらになります。Sprint
+              Coderは副作用をMain側の共通経路へ集約し、UIから同じ考え方で確認できるようにします。
+            </p>
+
+            <h2 id="reason">なぜProvider共通のHarnessが必要か</h2>
+            <p>
+              Codex CLI、Claude Code、公式API、互換APIでは、tool callの形式やstream
+              eventが異なります。しかしユーザーにとって重要なのは、どのProviderを使ったかより、どのファイルを読み、何を変更し、どのCommandを実行したかです。
+            </p>
+            <p>
+              Managed HarnessはProvider固有eventを正規化した後、Workspace toolとCommand
+              runnerへ接続します。これにより、modelを変えてもTaskのAccess方針と監査の見方を変えずに済みます。
+            </p>
+
+            <h2 id="flow">生成から実行までの経路</h2>
+            <ol class="steps-list">
+              <li>
+                <h3>Providerがtool callを生成する</h3>
+                <p>選択されたmodelが、必要なファイル操作やCommandを要求します。</p>
+              </li>
+              <li>
+                <h3>Runtimeが共通eventへ正規化する</h3>
+                <p>Provider固有の形式を、Sprint Coderが扱うcanonical eventへ変換します。</p>
+              </li>
+              <li>
+                <h3>Tool Brokerがpolicyを評価する</h3>
+                <p>TaskのAccess、Workspace範囲、tool capability、承認条件を確認します。</p>
+              </li>
+              <li>
+                <h3>管理された実行器が操作する</h3>
+                <p>ファイルtoolまたはCommand sandboxが、許可された範囲で副作用を実行します。</p>
+              </li>
+              <li>
+                <h3>結果と証拠をTaskへ返す</h3>
+                <p>成功・失敗、差分、出力、承認履歴をUIから確認できる形へ戻します。</p>
+              </li>
+            </ol>
+
+            <figure class="article-image">
+              <img
+                src="/assets/sprint-coder-workspace.png"
+                alt="Sprint CoderのWorkspace画面でAIの実行と差分を確認する様子"
+                width="1600"
+                height="1000"
+              />
+              <figcaption>
+                Workspaceの操作とTaskの会話を分離せず、同じ仕事の証拠として確認します。
+              </figcaption>
+            </figure>
+
+            <h2 id="files">ファイル操作の境界</h2>
+            <p>
+              ファイルtoolは選択したWorkspaceを基準に扱います。読み取り、作成、更新はpath
+              guardとscopeを通し、差分として確認できる状態へつなげます。単純な文字列prefixだけで安全性を判断せず、正規化されたpathとWorkspace境界を使います。
+            </p>
+            <ul>
+              <li>Workspace外への意図しないpath逸脱を防ぐ</li>
+              <li>変更内容をTaskの差分として確認する</li>
+              <li>承認要求を対象ファイルと操作へ結び付ける</li>
+              <li>途中失敗時も結果を曖昧な「完了」にしない</li>
+            </ul>
+
+            <h2 id="commands">Command sandboxと承認</h2>
+            <p>
+              CommandはOS環境のsandbox
+              probeとTaskのAccessを確認してから公開します。sandboxを確認できない環境では、危険なcommand
+              toolを利用可能にしたまま進めません。
+            </p>
+            <p>
+              承認が必要な操作では、理由、対象、実行内容をUIへ表示し、ユーザーの判断を待ちます。承認後の実行結果も同じTurnへ戻し、「許可した内容」と「実際に起きたこと」を追えるようにします。
+            </p>
+            <div class="callout">
+              <strong>HarnessはAIの正しさを保証するものではない</strong>
+              <p>
+                実行境界と証拠を揃える仕組みです。生成された変更の設計品質や要件適合性は、テスト、差分review、必要に応じた独立reviewで確認してください。
+              </p>
+            </div>
+
+            <section class="related-section" aria-labelledby="related-title">
+              <h2 id="related-title">関連ページ</h2>
+              <div class="related-grid">
+                <a class="related-card" href="/local-first-security/"
+                  ><small>SECURITY</small><strong>Local-firstと安全性</strong
+                  ><span>端末内に残る情報、外部へ送る情報、Access境界の説明。</span></a
+                ><a class="related-card" href="/ai-team/"
+                  ><small>AI TEAM</small><strong>AI Team Coding</strong
+                  ><span>LeaderとWorkerが同じTaskで役割分担し、成果を統合する仕組み。</span></a
+                ><a class="related-card" href="/getting-started/"
+                  ><small>GUIDE</small><strong>はじめ方</strong
+                  ><span>インストールから最初のTask、Provider接続、AI Teamまで。</span></a
+                >
+              </div>
+            </section>
+            <section class="content-cta" aria-labelledby="cta-title">
+              <h2 id="cta-title">最初のTaskを始める</h2>
+              <p>Sprint CoderはMIT Licenseで公開されています。配布物またはソースから試せます。</p>
+              <div class="hero-actions">
+                <a
+                  class="button button-primary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
+                  >最新版をダウンロード</a
+                >
+                <a
+                  class="button button-secondary"
+                  href="https://github.com/Robbits-CO-LTD/sprint-coder"
+                  >GitHubで見る</a
+                >
+              </div>
+            </section>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-grid">
+        <div class="footer-brand">
+          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
+          <div>
+            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
+          </div>
+        </div>
+        <div class="footer-owner">
+          <span>Developed, owned and managed by</span
+          ><a href="https://robbits.co.jp/">株式会社Robbits</a>
+        </div>
+        <nav class="footer-links" aria-label="フッターナビゲーション">
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a
+          ><a href="/releases/">Releases</a
+          ><a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE"
+            >MIT License</a
+          >
+        </nav>
+      </div>
+      <nav class="shell content-footer-links" aria-label="公式情報ページ">
+        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
+        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
+        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
+        ><a href="/releases/">Releases</a>
+      </nav>
+      <div class="shell copyright">
+        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
+      </div>
+    </footer>
+  </body>
+</html>

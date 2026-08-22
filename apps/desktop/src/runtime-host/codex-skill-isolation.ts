@@ -10,50 +10,40 @@ import {
 } from 'node:fs';
 import { dirname, join, parse, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import type { RuntimeCodexConfigPolicy, RuntimeSkillInput } from './protocol';
+import type { RuntimeSkillInput } from './protocol';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 
 export type CodexSkillIsolation = Readonly<{
   codexHome: string;
+  sourceCodexHome: string;
   isolatedUserHome: string;
   shellUserHome: string;
   selectedSkillsRoot: string;
   stagedSkills: readonly RuntimeSkillInput[];
   disabledWorkspaceSkillPaths: readonly string[];
   validationCwds: readonly string[];
-  userConfigSnapshot: 'disabled' | 'missing' | 'copied';
+  userConfigSnapshot: 'disabled';
 }>;
-
-export class CodexUserConfigSnapshotError extends Error {
-  constructor() {
-    super('Codex user config snapshot failed');
-    this.name = 'CodexUserConfigSnapshotError';
-  }
-}
 
 export function prepareCodexSkillIsolation(input: {
   temporaryRoot: string;
   cwd: string;
   runtimeWorkspaceRoots?: readonly string[];
   skills: readonly RuntimeSkillInput[];
-  configPolicy?: RuntimeCodexConfigPolicy;
   environment?: Readonly<NodeJS.ProcessEnv>;
 }): CodexSkillIsolation {
   const environment = input.environment ?? process.env;
   const isolatedUserHome = join(input.temporaryRoot, 'user-home');
   const codexHome = join(isolatedUserHome, '.codex');
+  const sourceCodexHome =
+    environment['CODEX_HOME'] ??
+    join(environment['HOME'] ?? environment['USERPROFILE'] ?? homedir(), '.codex');
   const selectedSkillsRoot = join(input.temporaryRoot, 'selected-skills');
   mkdirSync(codexHome, { recursive: true, mode: 0o700 });
   mkdirSync(selectedSkillsRoot, { recursive: true, mode: 0o700 });
   chmodSync(codexHome, 0o700);
   chmodSync(selectedSkillsRoot, 0o700);
-  copyAuthentication(environment, codexHome);
-  const userConfigSnapshot = snapshotUserConfig(
-    environment,
-    codexHome,
-    input.configPolicy?.inheritUserConfig === true,
-  );
-
+  copyAuthentication(sourceCodexHome, codexHome);
   const stagedSkills = input.skills.map((skill, index) => {
     const sourceSkillFile = join(skill.path, 'SKILL.md');
     if (!lstatSync(skill.path).isDirectory() || !lstatSync(sourceSkillFile).isFile())
@@ -77,24 +67,26 @@ export function prepareCodexSkillIsolation(input: {
   ].sort();
   return {
     codexHome,
+    sourceCodexHome,
     isolatedUserHome,
     shellUserHome: environment['HOME'] ?? environment['USERPROFILE'] ?? homedir(),
     selectedSkillsRoot,
     stagedSkills,
     disabledWorkspaceSkillPaths: discoverWorkspaceSkillPathsForRoots(validationCwds),
     validationCwds,
-    userConfigSnapshot,
+    userConfigSnapshot: 'disabled',
   };
 }
 
 export function codexSkillIsolationArgs(isolation: CodexSkillIsolation): string[] {
+  const imageGenerationEnabled = isolation.stagedSkills.some(({ name }) => name === 'imagegen');
   const rules = isolation.disabledWorkspaceSkillPaths
     .map((path) => `{path=${JSON.stringify(path)},enabled=false}`)
     .join(',');
   return [
     '--strict-config',
     '-c',
-    'skills.bundled.enabled=false',
+    `skills.bundled.enabled=${imageGenerationEnabled ? 'true' : 'false'}`,
     '-c',
     'skills.include_instructions=false',
     '-c',
@@ -214,11 +206,8 @@ export function discoverWorkspaceSkillPathsForRoots(roots: readonly string[]): s
   return [...new Set(roots.flatMap((root) => discoverWorkspaceSkillPaths(root)))].sort();
 }
 
-function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome: string): void {
-  const sourceHome =
-    environment['CODEX_HOME'] ??
-    join(environment['HOME'] ?? environment['USERPROFILE'] ?? '', '.codex');
-  const source = join(sourceHome, 'auth.json');
+function copyAuthentication(sourceCodexHome: string, codexHome: string): void {
+  const source = join(sourceCodexHome, 'auth.json');
   try {
     if (!statSync(source).isFile()) return;
     const destination = join(codexHome, 'auth.json');
@@ -226,31 +215,6 @@ function copyAuthentication(environment: Readonly<NodeJS.ProcessEnv>, codexHome:
     chmodSync(destination, 0o600);
   } catch {
     // Authentication failure is reported by app-server without exposing the source path.
-  }
-}
-
-function snapshotUserConfig(
-  environment: Readonly<NodeJS.ProcessEnv>,
-  codexHome: string,
-  enabled: boolean,
-): CodexSkillIsolation['userConfigSnapshot'] {
-  if (!enabled) return 'disabled';
-  const sourceHome =
-    environment['CODEX_HOME'] ??
-    join(environment['HOME'] ?? environment['USERPROFILE'] ?? '', '.codex');
-  const source = join(sourceHome, 'config.toml');
-  try {
-    const metadata = lstatSync(source);
-    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1024 * 1024)
-      throw new CodexUserConfigSnapshotError();
-    const destination = join(codexHome, 'config.toml');
-    copyFileSync(source, destination);
-    chmodSync(destination, 0o600);
-    return 'copied';
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
-    if (error instanceof CodexUserConfigSnapshotError) throw error;
-    throw new CodexUserConfigSnapshotError();
   }
 }
 

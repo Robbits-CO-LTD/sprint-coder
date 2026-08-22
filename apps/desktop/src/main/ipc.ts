@@ -100,8 +100,6 @@ import {
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
-  codexUserConfigSettingsSchema,
-  codexUserConfigSettingsSetInputSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
   teamModelResearchSettingsSchema,
@@ -372,6 +370,12 @@ import {
   BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
   BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
 } from './sprint-coder-product-skill';
+import {
+  BUILTIN_IMAGEGEN_SKILL_CONTENT,
+  BUILTIN_IMAGEGEN_SKILL_DIGEST,
+  BUILTIN_IMAGEGEN_SKILL_ID,
+  bindBuiltinImagegenSkillForTurn,
+} from './imagegen-builtin';
 import { SkillStore } from './skill-store';
 import {
   TeamMcpBridge,
@@ -855,7 +859,6 @@ export class IpcRouter {
       bindTeamMcpProcess: (turnId, identity) =>
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
-      codexUserConfigEnabled: () => this.persistence.getCodexUserConfigEnabled(),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
@@ -1181,7 +1184,6 @@ export class IpcRouter {
       },
       'codex',
       join(app.getPath('userData'), 'codex-isolated'),
-      () => ({ inheritUserConfig: this.persistence.getCodexUserConfigEnabled() }),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       (taskId, turnId, request, signal) =>
         this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
@@ -1196,7 +1198,6 @@ export class IpcRouter {
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
       join(app.getPath('userData'), 'codex-isolated'),
-      undefined,
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       (taskId, turnId, request, signal) =>
         this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
@@ -1333,21 +1334,6 @@ export class IpcRouter {
           modelFallbackNotice: this.persistence.takeModelFallbackNotice(),
         };
       },
-    );
-    this.handle(
-      IPC_CHANNELS.settingsGetCodexUserConfig,
-      emptyPayloadSchema,
-      codexUserConfigSettingsSchema,
-      () => ({ enabled: this.persistence.getCodexUserConfigEnabled() }),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.settingsSetCodexUserConfig,
-      codexUserConfigSettingsSetInputSchema,
-      z.undefined(),
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetCodexUserConfig, () =>
-          this.persistence.setCodexUserConfigEnabled(input.enabled),
-        ).value,
     );
     this.handle(
       IPC_CHANNELS.settingsGetTeamModelResearch,
@@ -2251,9 +2237,11 @@ export class IpcRouter {
       goalStartInputSchema,
       goalRunResultSchema,
       async (input, event, envelope) => {
-        const skills = await this.resolveTurnSkills(input.objective, input.skills).catch((error) =>
-          Promise.reject(skillSettingsPublicError(error)),
-        );
+        const skills = await this.resolveTurnSkills(
+          input.taskId,
+          input.objective,
+          input.skills,
+        ).catch((error) => Promise.reject(skillSettingsPublicError(error)));
         let started: StartedTurn | undefined;
         const result = this.runMutation(
           event,
@@ -2834,8 +2822,8 @@ export class IpcRouter {
       turnStartResultSchema,
       async (input, event, envelope) => {
         await this.reconcileTaskBuiltinModel(input.taskId);
-        const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
-          Promise.reject(skillSettingsPublicError(error)),
+        const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
+          (error) => Promise.reject(skillSettingsPublicError(error)),
         );
         let attachmentCapability:
           | Readonly<{
@@ -2905,8 +2893,8 @@ export class IpcRouter {
       turnQueueInputSchema,
       turnQueueResultSchema,
       async (input, event, envelope) => {
-        const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
-          Promise.reject(skillSettingsPublicError(error)),
+        const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
+          (error) => Promise.reject(skillSettingsPublicError(error)),
         );
         let queueEvent: TurnEvent | undefined;
         const result = this.runMutation(
@@ -2958,8 +2946,8 @@ export class IpcRouter {
       turnStopAndSendInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        const skills = await this.resolveTurnSkills(input.text, input.skills).catch((error) =>
-          Promise.reject(skillSettingsPublicError(error)),
+        const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
+          (error) => Promise.reject(skillSettingsPublicError(error)),
         );
         const principal = principalFor(event);
         const hash = requestHash(envelope.payload);
@@ -3163,6 +3151,11 @@ export class IpcRouter {
           BUILTIN_SPRINT_CODER_PRODUCT_SKILL_ID,
           BUILTIN_SPRINT_CODER_PRODUCT_SKILL_CONTENT,
           BUILTIN_SPRINT_CODER_PRODUCT_SKILL_DIGEST,
+        ),
+        store.installBuiltin(
+          BUILTIN_IMAGEGEN_SKILL_ID,
+          BUILTIN_IMAGEGEN_SKILL_CONTENT,
+          BUILTIN_IMAGEGEN_SKILL_DIGEST,
         ),
       ]);
       await this.skillSettings.refreshContextCatalog();
@@ -4112,10 +4105,17 @@ export class IpcRouter {
   }
 
   private resolveTurnSkills(
+    taskId: string,
     text: string,
     selections: readonly TurnSkillSelection[],
   ): Promise<PersistedTurnSkill[]> {
-    return this.skillSettings.resolveSelections(bindBuiltinImportSkillForTurn(text, selections));
+    const taskSelection = this.persistence.getTaskModelSelection(taskId);
+    const builtin = taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
+    const runtimeKind = builtin?.runtimeKind ?? this.persistence.getRuntime();
+    const importBound = bindBuiltinImportSkillForTurn(text, selections);
+    return this.skillSettings.resolveSelections(
+      bindBuiltinImagegenSkillForTurn(text, runtimeKind, importBound),
+    );
   }
 
   private async prepareTurnImageAttachments(
@@ -4246,7 +4246,9 @@ export class IpcRouter {
       ...(options.importSkillTurn ? { allowSkillImports: true } : {}),
       ...(options.importSkillTurn ? { skillImportUserText: options.skillImportUserText } : {}),
       ...(options.memoryTurn ? { allowProjectMemory: true } : {}),
-      ...leaderMcpCapabilities(false),
+      // The sealed Team intent is the authority for Leader tools. Passing false here produced an
+      // empty MCP option that Runtime Host correctly rejected before Codex could start.
+      ...leaderMcpCapabilities(options.teamTurn),
     };
     const registration: TeamMcpRegistration = {
       ...baseRegistration,
