@@ -51,6 +51,8 @@ import {
 import {
   applyWindowControl,
   isWindowControlAction,
+  presentWindow,
+  restoreWindow,
   WINDOW_CONTROL_CHANNELS,
   windowChromeOptions,
 } from '../window-controls';
@@ -385,7 +387,7 @@ function createWindow(): BrowserWindow {
   window.once('closed', () => {
     if (mainWindow === window) mainWindow = null;
   });
-  window.once('ready-to-show', () => window.show());
+  window.once('ready-to-show', () => presentWindow(window));
   return window;
 }
 
@@ -426,9 +428,7 @@ function publishUpdateHealth(health: UpdateHealth): void {
 function showMainWindow(): void {
   const window = mainWindow;
   if (window === null || window.isDestroyed()) return;
-  if (window.isMinimized()) window.restore();
-  if (!window.isVisible()) window.show();
-  window.focus();
+  restoreWindow(window);
 }
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {

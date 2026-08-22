@@ -425,6 +425,9 @@ export async function launchApp(
     // developer machine or credential-free CI runner. This only affects availability probes;
     // mock remains the adopted execution runtime and no fixture can execute a turn.
     SPRINT_CODER_E2E_CLI_FIXTURES: '1',
+    // Keep the real app window rendered and interactive without taking over the developer's
+    // active desktop whenever an E2E process starts.
+    SPRINT_CODER_E2E_BACKGROUND: '1',
     ...environmentOverrides,
   };
 

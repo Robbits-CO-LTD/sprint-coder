@@ -17,6 +17,43 @@ export type WindowControlTarget = {
   close(): void;
 };
 
+export type WindowPresentationTarget = {
+  show(): void;
+  showInactive(): void;
+};
+
+export type WindowRestoreTarget = WindowPresentationTarget & {
+  focus(): void;
+  isMinimized(): boolean;
+  isVisible(): boolean;
+  restore(): void;
+};
+
+export function usesInactiveWindowPresentation(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  return environment['SPRINT_CODER_E2E_BACKGROUND'] === '1';
+}
+
+/** Keeps automated app windows visible for rendering without stealing OS focus. */
+export function presentWindow(
+  target: WindowPresentationTarget,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): void {
+  if (usesInactiveWindowPresentation(environment)) target.showInactive();
+  else target.show();
+}
+
+/** Restores an existing window while preserving the developer's active app during E2E. */
+export function restoreWindow(
+  target: WindowRestoreTarget,
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): void {
+  if (target.isMinimized()) target.restore();
+  if (!target.isVisible()) presentWindow(target, environment);
+  if (!usesInactiveWindowPresentation(environment)) target.focus();
+}
+
 /** Keeps Linux on its existing native frame while macOS and Windows use product-owned chrome. */
 export function windowChromeOptions(
   platform: NodeJS.Platform,
