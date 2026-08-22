@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { renameSync, writeFileSync } from 'node:fs';
 import {
   access,
@@ -44,6 +45,23 @@ import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 
+const normalizeIcaclsAcl = (value: string, path: string): string[] =>
+  [
+    ...new Set(
+      value
+        .split(/\r?\n/u)
+        .map((line, index) => {
+          const trimmed = line.trim();
+          const withoutPath =
+            index === 0 && trimmed.toLocaleLowerCase().startsWith(path.toLocaleLowerCase())
+              ? trimmed.slice(path.length).trim()
+              : trimmed;
+          return withoutPath.replace(/:\(I\)\(/u, ':(');
+        })
+        .filter((line) => line.length > 0),
+    ),
+  ].sort();
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) =>
@@ -67,6 +85,14 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
+  it('normalizes equivalent explicit and inherited icacls entries', () => {
+    const path = 'C:\\Temp\\workspace';
+    const before = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+    const after = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\n  NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+
+    expect(normalizeIcaclsAcl(after, path)).toEqual(normalizeIcaclsAcl(before, path));
+  });
+
   it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
@@ -283,20 +309,65 @@ describe('CommandRunner', () => {
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-command-'));
       const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-outside-'));
       roots.push(workspace, outside);
+      const nested = join(workspace, 'existing', 'nested');
+      const existing = join(nested, 'before.txt');
+      const protectedDirectory = join(workspace, 'protected');
+      const protectedFile = join(protectedDirectory, 'must-stay.txt');
+      await mkdir(nested, { recursive: true });
+      await mkdir(protectedDirectory);
+      await writeFile(existing, 'before');
+      await writeFile(protectedFile, 'protected');
+      execFileSync('C:\\Windows\\System32\\icacls.exe', [
+        protectedDirectory,
+        '/inheritance:d',
+        '/Q',
+      ]);
+      const aclBefore = [workspace, protectedDirectory].map((path) =>
+        execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+      );
       const spec = await prepareExecutionSpec({
         workspacePath: workspace,
         executable: process.execPath,
         argv: [
           '-e',
-          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
+          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); fs.writeFileSync(${JSON.stringify(existing)},fs.readFileSync(${JSON.stringify(existing)},'utf8')+'-after'); let protectedDenied=false; let outsideDenied=false; try { fs.writeFileSync(${JSON.stringify(protectedFile)},'changed'); } catch { protectedDenied=true; } try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { outsideDenied=true; } process.exitCode=protectedDenied&&outsideDenied?23:24;`,
         ],
       });
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
-      expect(result.exitCode).toBe(7);
+      expect(result.exitCode).toBe(23);
       await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(existing, 'utf8')).resolves.toBe('before-after');
+      await expect(readFile(protectedFile, 'utf8')).resolves.toBe('protected');
       await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       });
+      const aclAfter = [workspace, protectedDirectory].map((path) =>
+        execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+      );
+      // Editing a parent DACL can make Windows enumerate an inherited ACE alongside an identical
+      // explicit ACE. Compare that root ACL semantically while keeping the protected child exact.
+      expect(normalizeIcaclsAcl(aclAfter[0]!, workspace)).toEqual(
+        normalizeIcaclsAcl(aclBefore[0]!, workspace),
+      );
+      expect(aclAfter[1]).toBe(aclBefore[1]);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'runs a held System32 command directly from its protected directory',
+    async () => {
+      if (!(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+      expect(systemRoot).toBeDefined();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: join(systemRoot!, 'System32', 'cmd.exe'),
+        argv: ['/d', '/s', '/c', 'echo command ok'],
+      });
+
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(0);
     },
   );
 
@@ -328,6 +399,7 @@ describe('CommandRunner', () => {
         await Promise.all([first.dispose(), second.dispose()]);
       }
     },
+    10_000,
   );
 
   it('rejects a replacement inode at a persisted Project root path', async () => {

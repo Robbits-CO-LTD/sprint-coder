@@ -68,8 +68,12 @@ export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentit
 }
 
 type WindowsExecutionAddon = Readonly<{
+  getTrustedSystemDirectory(): string;
   readNoReparseImageFile(path: string, allowHardlinks?: boolean): Buffer;
-  holdPreparedExecutionImage(path: string): Readonly<{ id: string; bytes: Buffer }>;
+  holdPreparedExecutionImage(
+    path: string,
+    allowHardlinks?: boolean,
+  ): Readonly<{ id: string; bytes: Buffer }>;
   closePreparedExecutionImage(id: string): void;
 }>;
 type PosixExecutionAddon = Readonly<{
@@ -83,6 +87,8 @@ export async function prepareExecutionImage(
   expected: SealedExecutableIdentity,
   allowScript = true,
 ): Promise<PreparedExecutionImage> {
+  const trustedWindowsPath =
+    process.platform === 'win32' && (await isWindowsSystem32Image(expected.canonicalPath));
   const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-execution-'));
   await chmod(directory, 0o700);
   const imageDirectory = join(directory, 'bin');
@@ -103,11 +109,16 @@ export async function prepareExecutionImage(
         ? await readExpectedWindowsImage(expected, 'approved executable')
         : await readStablePosixImage(expected);
     assertDigestAndSize(sourceBytes, expected);
-    await writeFile(destination, sourceBytes, { flag: 'wx', mode: expected.mode & 0o777 });
-    await chmod(destination, expected.mode & 0o777);
+    if (!trustedWindowsPath) {
+      await writeFile(destination, sourceBytes, { flag: 'wx', mode: expected.mode & 0o777 });
+      await chmod(destination, expected.mode & 0o777);
+    }
     let heldBytes: Buffer;
     if (process.platform === 'win32') {
-      const prepared = windowsAddon().holdPreparedExecutionImage(destination);
+      const prepared = windowsAddon().holdPreparedExecutionImage(
+        trustedWindowsPath ? expected.canonicalPath : destination,
+        trustedWindowsPath && expected.allowSourceHardlinks === true,
+      );
       windowsId = prepared.id;
       heldBytes = prepared.bytes;
     } else if (process.platform === 'linux') {
@@ -141,7 +152,7 @@ export async function prepareExecutionImage(
       }
     }
     assertDigestAndSize(heldBytes, expected);
-    if (process.platform === 'win32')
+    if (process.platform === 'win32' && !trustedWindowsPath)
       windowsDependencyIds.push(
         ...(await prepareWindowsSideBySideImages(imageDirectory, expected.dependencies ?? [])),
       );
@@ -158,8 +169,9 @@ export async function prepareExecutionImage(
     // process.execPath still resolve an immutable image. macOS has no equivalent and only permits
     // root-owned, non-writable system images (or descriptor-fed scripts) below.
     const descriptor = process.platform === 'linux' ? undefined : held?.fd;
-    const baseLaunchPath =
-      process.platform === 'linux'
+    const baseLaunchPath = trustedWindowsPath
+      ? expected.canonicalPath
+      : process.platform === 'linux'
         ? trustedLinuxPath
           ? expected.canonicalPath
           : `/proc/${process.pid}/fd/${sealedDescriptor}`
@@ -627,10 +639,12 @@ async function sealExecutablePathInternal(
       throw new Error('Executable changed while sealing approval');
     const imports = parsePeImports(bytes);
     if (imports === null) throw new Error('Windows execution image has an invalid PE import table');
+    const imageIsInSystem32 = await isWindowsSystem32Image(canonicalPath);
     const dependencies: SealedExecutableIdentity[] = [];
     for (const name of imports) {
       if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error(`Windows execution image has an unsafe DLL import name: ${name}`);
+      if (imageIsInSystem32 && WINDOWS_SYSTEM_DLL.test(name)) continue;
       const dependencyPath = join(dirname(canonicalPath), name);
       let localDependency = true;
       try {
@@ -639,7 +653,7 @@ async function sealExecutablePathInternal(
         localDependency = false;
       }
       if (!localDependency) {
-        if (!WINDOWS_SYSTEM_DLL.test(name) && !(await isWindowsSystem32Dependency(name)))
+        if (!(await isWindowsSystem32Dependency(name)))
           throw new Error(`Windows execution image dependency is unavailable: ${name}`);
         continue;
       }
@@ -680,15 +694,29 @@ async function sealExecutablePathInternal(
 }
 
 async function isWindowsSystem32Dependency(name: string): Promise<boolean> {
-  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-  if (systemRoot === undefined) return false;
+  const systemDirectory = await windowsSystem32Directory();
+  if (systemDirectory === undefined) return false;
   try {
-    const systemDirectory = await realpath(join(systemRoot, 'System32'));
     const dependency = await realpath(join(systemDirectory, name));
     if (dirname(dependency).toLowerCase() !== systemDirectory.toLowerCase()) return false;
     return (await stat(dependency, { bigint: true })).isFile();
   } catch {
     return false;
+  }
+}
+
+async function isWindowsSystem32Image(path: string): Promise<boolean> {
+  const systemDirectory = await windowsSystem32Directory();
+  return (
+    systemDirectory !== undefined && dirname(path).toLowerCase() === systemDirectory.toLowerCase()
+  );
+}
+
+async function windowsSystem32Directory(): Promise<string | undefined> {
+  try {
+    return await realpath(windowsAddon().getTrustedSystemDirectory());
+  } catch {
+    return undefined;
   }
 }
 
@@ -877,6 +905,7 @@ function windowsAddon(): WindowsExecutionAddon {
   const require = createRequire(join(__dirname, 'prepared-execution-image-loader.cjs'));
   const candidate = require(nativeSafeFsAddonPath()) as Partial<WindowsExecutionAddon>;
   if (
+    typeof candidate.getTrustedSystemDirectory !== 'function' ||
     typeof candidate.readNoReparseImageFile !== 'function' ||
     typeof candidate.holdPreparedExecutionImage !== 'function' ||
     typeof candidate.closePreparedExecutionImage !== 'function'
