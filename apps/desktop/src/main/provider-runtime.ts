@@ -29,11 +29,16 @@ export interface ProviderRuntime {
     budget?: ProviderStreamBudget,
   ): AsyncIterable<CanonicalProviderEvent>;
   cancel(executionId: string): Promise<void>;
-  acquireModelLease?(connection: ProviderConnection, modelId: string): Promise<ProviderModelLease>;
+  acquireModelLease?(
+    connection: ProviderConnection,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderModelLease>;
   dispose?(): Promise<void>;
 }
 
 const NOOP_MODEL_LEASE: ProviderModelLease = Object.freeze({
+  prepare: async () => undefined,
   release: async () => undefined,
 });
 
@@ -41,8 +46,9 @@ export async function acquireProviderModelLease(
   runtime: ProviderRuntime,
   connection: ProviderConnection,
   modelId: string,
+  signal: AbortSignal,
 ): Promise<ProviderModelLease> {
-  return runtime.acquireModelLease?.(connection, modelId) ?? NOOP_MODEL_LEASE;
+  return runtime.acquireModelLease?.(connection, modelId, signal) ?? NOOP_MODEL_LEASE;
 }
 
 export type ProviderRuntimeRegistration = Readonly<{

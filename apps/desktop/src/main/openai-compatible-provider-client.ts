@@ -28,7 +28,31 @@ import { ProviderEndpointPolicy, secureProviderFetch } from './provider-endpoint
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
+export const OLLAMA_MODEL_PRELOAD_TIMEOUT_MS = 180_000;
+const OLLAMA_MODEL_PRELOAD_RESPONSE_BYTES = 64 * 1_024;
 const endpointPolicy = new ProviderEndpointPolicy();
+
+export type OllamaModelPreparationFailure =
+  'preload_timeout' | 'not_found' | 'provider_unavailable' | 'network' | 'canceled';
+
+export class OllamaModelPreparationError extends Error {
+  readonly userMessage: string;
+
+  constructor(readonly category: OllamaModelPreparationFailure) {
+    super(`Ollama model preparation failed: ${category}`);
+    this.name = 'OllamaModelPreparationError';
+    this.userMessage =
+      category === 'preload_timeout'
+        ? 'Ollamaモデルの準備が180秒以内に完了しませんでした。モデルを確認して、もう一度お試しください。'
+        : category === 'not_found'
+          ? '選択したOllamaモデルが見つかりません。モデル一覧を更新して、もう一度選択してください。'
+          : category === 'provider_unavailable'
+            ? 'Ollamaがモデルの準備を完了できませんでした。Ollamaの状態を確認して、もう一度お試しください。'
+            : category === 'network'
+              ? 'Ollamaへ接続できず、モデルを準備できませんでした。Ollamaが起動していることを確認してください。'
+              : 'Ollamaモデルの準備をキャンセルしました。';
+  }
+}
 
 export type OpenAICompatibleCredentialResolver = (
   connection: ProviderConnection,
@@ -46,9 +70,8 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
   ) {
     this.modelLifecycle = new OllamaModelLeaseCoordinator(
       (target) => this.unloadOllamaModel(target),
-      (target, error) => {
+      (_target, error) => {
         secureLogger.warn('Ollama model release failed', {
-          modelId: target.modelId,
           category: 'provider_model_release',
           failure:
             error instanceof CompatibleHttpError
@@ -56,16 +79,19 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
               : { kind: 'transport', name: error instanceof Error ? error.name : 'unknown' },
         });
       },
+      2_000,
+      (target, signal) => this.preloadOllamaModel(target, signal),
     );
   }
 
   async acquireModelLease(
     connection: ProviderConnection,
     modelId: string,
+    signal: AbortSignal = new AbortController().signal,
   ): Promise<ProviderModelLease> {
     const target = await this.ollamaModelTarget(connection, modelId);
-    if (target === null) return { release: async () => undefined };
-    return this.modelLifecycle.acquire(target, connection.automaticModelRelease !== false);
+    if (target === null) return { prepare: async () => undefined, release: async () => undefined };
+    return this.modelLifecycle.acquire(target, connection.automaticModelRelease !== false, signal);
   }
 
   async dispose(): Promise<void> {
@@ -289,6 +315,45 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     }
   }
 
+  private async preloadOllamaModel(
+    target: OllamaModelTarget,
+    lifecycleSignal: AbortSignal,
+  ): Promise<void> {
+    if (lifecycleSignal.aborted) throw new OllamaModelPreparationError('canceled');
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = (): void => controller.abort();
+    lifecycleSignal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, OLLAMA_MODEL_PRELOAD_TIMEOUT_MS);
+    try {
+      const response = await this.providerFetch(target.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: target.modelId, keep_alive: '5m', stream: false }),
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      if (!response.ok)
+        throw new OllamaModelPreparationError(
+          response.status === 404 ? 'not_found' : 'provider_unavailable',
+        );
+      const payload = await readBoundedOllamaPreloadResponse(response, controller.signal);
+      if (payload.model !== target.modelId)
+        throw new OllamaModelPreparationError('provider_unavailable');
+    } catch (error) {
+      if (error instanceof OllamaModelPreparationError) throw error;
+      if (timedOut) throw new OllamaModelPreparationError('preload_timeout');
+      if (lifecycleSignal.aborted) throw new OllamaModelPreparationError('canceled');
+      throw new OllamaModelPreparationError('network');
+    } finally {
+      clearTimeout(timer);
+      lifecycleSignal.removeEventListener('abort', abort);
+    }
+  }
+
   private async fetchModels(
     connection: ProviderConnection,
     signal: AbortSignal,
@@ -410,6 +475,70 @@ function isLoopbackIpLiteral(hostname: string): boolean {
     octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255) &&
     octets[0] === '127'
   );
+}
+
+async function readBoundedOllamaPreloadResponse(
+  response: Response,
+  signal: AbortSignal,
+): Promise<{ model: string }> {
+  if (response.body === null) throw new OllamaModelPreparationError('provider_unavailable');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await readOllamaPreloadChunk(reader, signal);
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > OLLAMA_MODEL_PRELOAD_RESPONSE_BYTES)
+        throw new OllamaModelPreparationError('provider_unavailable');
+      chunks.push(next.value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A non-conforming mocked stream may keep a read pending after cancellation. The bounded
+      // preload has already failed, so lock cleanup must not replace the safe failure category.
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new OllamaModelPreparationError('provider_unavailable');
+  }
+  if (parsed === null || typeof parsed !== 'object')
+    throw new OllamaModelPreparationError('provider_unavailable');
+  const model = (parsed as Record<string, unknown>).model;
+  if (typeof model !== 'string' || model.length === 0 || model.length > 256)
+    throw new OllamaModelPreparationError('provider_unavailable');
+  return { model };
+}
+
+function readOllamaPreloadChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal.aborted) return Promise.reject(new Error('aborted'));
+  let rejectAborted: ((error: Error) => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAborted = reject;
+  });
+  const abort = (): void => rejectAborted?.(new Error('aborted'));
+  signal.addEventListener('abort', abort, { once: true });
+  return Promise.race([reader.read(), aborted]).finally(() => {
+    signal.removeEventListener('abort', abort);
+  });
 }
 
 type CompatibleModelList = Readonly<{

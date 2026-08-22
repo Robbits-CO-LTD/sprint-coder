@@ -6,6 +6,7 @@ import type {
 } from '@sprint-coder/contracts';
 import { MainProviderProfileRegistry, resolvedProfileEndpointTrust } from './provider-profile';
 import {
+  OLLAMA_MODEL_PRELOAD_TIMEOUT_MS,
   OpenAICompatibleProviderClient,
   openAICompatibleChatCompletionRequest,
   resolveOllamaNativeGenerateEndpoint,
@@ -117,11 +118,15 @@ describe('OpenAICompatibleProviderClient', () => {
       profiles,
       () => ({}),
       async (input, init) => {
+        const body = init?.body === undefined ? null : JSON.parse(String(init.body));
         requests.push({
           url: String(input),
-          body: init?.body === undefined ? null : JSON.parse(String(init.body)),
+          body,
         });
-        return new Response('{}', { status: 200 });
+        return new Response(
+          body?.keep_alive === 0 ? '{}' : JSON.stringify({ model: body?.model }),
+          { status: 200 },
+        );
       },
     );
     const ollamaConnection = {
@@ -137,9 +142,79 @@ describe('OpenAICompatibleProviderClient', () => {
     expect(requests).toEqual([
       {
         url: 'http://127.0.0.1:11434/api/generate',
+        body: { model: 'gemma3:1b', keep_alive: '5m', stream: false },
+      },
+      {
+        url: 'http://127.0.0.1:11434/api/generate',
         body: { model: 'gemma3:1b', keep_alive: 0 },
       },
     ]);
+  });
+
+  it('classifies a missing Ollama model before opening the answer stream', async () => {
+    const ollamaProfile: ProviderProfile = {
+      ...profile,
+      id: 'ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      nativeModelLifecycle: 'ollama',
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(ollamaProfile);
+    const client = new OpenAICompatibleProviderClient(
+      profiles,
+      () => ({}),
+      async () => new Response('{}', { status: 404 }),
+    );
+
+    await expect(
+      client.acquireModelLease(
+        { ...connection, id: 'ollama:missing', providerId: 'ollama' },
+        'missing:model',
+      ),
+    ).rejects.toMatchObject({
+      name: 'OllamaModelPreparationError',
+      category: 'not_found',
+    });
+  });
+
+  it('bounds Ollama preload separately from the provider first-event timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const ollamaProfile: ProviderProfile = {
+        ...profile,
+        id: 'ollama',
+        baseUrl: 'http://localhost:11434/v1',
+        baseUrlConfigurable: true,
+        nativeModelLifecycle: 'ollama',
+        requiredCredentialFields: [],
+      };
+      const profiles = new MainProviderProfileRegistry();
+      profiles.register(ollamaProfile);
+      const client = new OpenAICompatibleProviderClient(
+        profiles,
+        () => ({}),
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+              once: true,
+            });
+          }),
+      );
+      const lease = client.acquireModelLease(
+        { ...connection, id: 'ollama:slow', providerId: 'ollama' },
+        'slow:model',
+      );
+      const timedOut = expect(lease).rejects.toMatchObject({
+        category: 'preload_timeout',
+      });
+
+      await vi.advanceTimersByTimeAsync(OLLAMA_MODEL_PRELOAD_TIMEOUT_MS);
+      await timedOut;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.runIf(process.env['SPRINT_CODER_OLLAMA_TEST'] === '1')(
