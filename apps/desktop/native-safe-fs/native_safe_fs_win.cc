@@ -182,6 +182,26 @@ bool Utf8ToWide(const std::string& input, std::wstring* output) {
                              static_cast<int>(input.size()), output->data(), length) == length;
 }
 
+napi_value GetTrustedSystemDirectory(napi_env env, napi_callback_info info) {
+  (void)info;
+  std::vector<wchar_t> buffer(MAX_PATH + 1, L'\0');
+  UINT length = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+  if (length == 0) return ThrowWindowsError(env, "GetSystemDirectoryW");
+  if (length >= buffer.size()) {
+    buffer.resize(static_cast<size_t>(length) + 1, L'\0');
+    length = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+    if (length == 0 || length >= buffer.size())
+      return ThrowWindowsError(env, "GetSystemDirectoryW");
+  }
+  napi_value result;
+  if (napi_create_string_utf16(env, reinterpret_cast<const char16_t*>(buffer.data()), length,
+                               &result) != napi_ok) {
+    napi_throw_error(env, "WINDOWS_NATIVE_FAILURE", "Could not encode the system directory");
+    return nullptr;
+  }
+  return result;
+}
+
 napi_value ThrowUnsafeImageFile(napi_env env, const char* code) {
   napi_value error;
   napi_create_error(env, nullptr, MakeString(env, "The selected image file is unsafe"), &error);
@@ -1034,6 +1054,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"applyWindowsAcl", nullptr, ApplyWindowsAcl, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"readNoReparseImageFile", nullptr, ReadNoReparseImageFile, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"getTrustedSystemDirectory", nullptr, GetTrustedSystemDirectory, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"holdPreparedExecutionImage", nullptr, HoldPreparedExecutionImage, nullptr, nullptr, nullptr,
        napi_default, nullptr},

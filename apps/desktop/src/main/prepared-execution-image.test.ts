@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -136,6 +136,37 @@ describe('hasUnsafeWindowsDllImport', () => {
       }
     },
   );
+
+  windowsIt('does not trust a System32 directory supplied through the environment', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-fake-system-root-'));
+    const originalSystemRoot = process.env.SystemRoot;
+    const originalWindir = process.env.WINDIR;
+    try {
+      const fakeSystem32 = join(directory, 'System32');
+      await mkdir(fakeSystem32);
+      const executable = join(fakeSystem32, 'command.exe');
+      const dependency = join(fakeSystem32, 'vcruntime140.dll');
+      await writeFile(executable, peWithImport('VCRUNTIME140.dll'));
+      await writeFile(dependency, peWithImport('KERNEL32.dll'));
+      process.env.SystemRoot = directory;
+      process.env.WINDIR = directory;
+
+      const sealed = await sealExecutablePath(executable);
+
+      expect(sealed.dependencies).toEqual([
+        expect.objectContaining({
+          canonicalPath: await realpath(dependency),
+          importName: 'vcruntime140.dll',
+        }),
+      ]);
+    } finally {
+      if (originalSystemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = originalSystemRoot;
+      if (originalWindir === undefined) delete process.env.WINDIR;
+      else process.env.WINDIR = originalWindir;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 function peWithImport(name: string, delay = false): Buffer {

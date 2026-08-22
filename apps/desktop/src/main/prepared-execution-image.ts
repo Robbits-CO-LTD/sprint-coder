@@ -68,6 +68,7 @@ export function sealedExecutableIdentityDigest(identity: SealedExecutableIdentit
 }
 
 type WindowsExecutionAddon = Readonly<{
+  getTrustedSystemDirectory(): string;
   readNoReparseImageFile(path: string, allowHardlinks?: boolean): Buffer;
   holdPreparedExecutionImage(
     path: string,
@@ -712,10 +713,8 @@ async function isWindowsSystem32Image(path: string): Promise<boolean> {
 }
 
 async function windowsSystem32Directory(): Promise<string | undefined> {
-  const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-  if (systemRoot === undefined) return undefined;
   try {
-    return await realpath(join(systemRoot, 'System32'));
+    return await realpath(windowsAddon().getTrustedSystemDirectory());
   } catch {
     return undefined;
   }
@@ -906,6 +905,7 @@ function windowsAddon(): WindowsExecutionAddon {
   const require = createRequire(join(__dirname, 'prepared-execution-image-loader.cjs'));
   const candidate = require(nativeSafeFsAddonPath()) as Partial<WindowsExecutionAddon>;
   if (
+    typeof candidate.getTrustedSystemDirectory !== 'function' ||
     typeof candidate.readNoReparseImageFile !== 'function' ||
     typeof candidate.holdPreparedExecutionImage !== 'function' ||
     typeof candidate.closePreparedExecutionImage !== 'function'
