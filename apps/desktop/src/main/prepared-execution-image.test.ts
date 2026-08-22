@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
+  sealExecutablePath,
   sealedExecutableIdentityDigest,
 } from './prepared-execution-image';
 
@@ -81,6 +85,22 @@ describe('hasUnsafeWindowsDllImport', () => {
 
   it('fails closed for malformed images', () => {
     expect(hasUnsafeWindowsDllImport(Buffer.from('not a PE'))).toBe(true);
+  });
+
+  const windowsIt = process.platform === 'win32' ? it : it.skip;
+  windowsIt('does not recurse into an allowlisted system DLL beside the executable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-system-dll-'));
+    try {
+      const executable = join(directory, 'command.exe');
+      await writeFile(executable, peWithImport('KERNEL32.dll'));
+      await writeFile(join(directory, 'kernel32.dll'), Buffer.from('not a PE'));
+
+      const sealed = await sealExecutablePath(executable);
+
+      expect(sealed.dependencies).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 

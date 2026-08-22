@@ -631,6 +631,7 @@ async function sealExecutablePathInternal(
     for (const name of imports) {
       if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error(`Windows execution image has an unsafe DLL import name: ${name}`);
+      if (WINDOWS_SYSTEM_DLL.test(name)) continue;
       const dependencyPath = join(dirname(canonicalPath), name);
       let localDependency = true;
       try {
@@ -639,7 +640,7 @@ async function sealExecutablePathInternal(
         localDependency = false;
       }
       if (!localDependency) {
-        if (!WINDOWS_SYSTEM_DLL.test(name) && !(await isWindowsSystem32Dependency(name)))
+        if (!(await isWindowsSystem32Dependency(name)))
           throw new Error(`Windows execution image dependency is unavailable: ${name}`);
         continue;
       }
