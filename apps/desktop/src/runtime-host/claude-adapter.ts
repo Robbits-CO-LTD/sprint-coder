@@ -253,7 +253,8 @@ export class ClaudeRuntimeAdapter {
     let skillPluginDirectory: string | null = null;
     let nativeSkillInvocation = '';
     const nativeSkills = skills.filter(
-      ({ profile, runtimeSupport }) => profile === 'claude-native' && runtimeSupport === 'full',
+      ({ profile, runtimeSupport, selected }) =>
+        selected !== false && profile === 'claude-native' && runtimeSupport === 'full',
     );
     if (nativeSkills.length > 0) {
       skillPluginDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-skills-'));
@@ -599,25 +600,27 @@ export function materializeClaudeSkillPlugin(
     `${JSON.stringify({ name: 'sprint-coder-selected', version: '1.0.0' }, null, 2)}\n`,
     { mode: 0o600 },
   );
-  const commands = skills.flatMap((skill, index) => {
-    const commandName = `selected-${index + 1}-${skill.name}`;
-    const destination = join(skillsDirectory, commandName);
-    cpSync(skill.path, destination, {
-      recursive: true,
-      dereference: false,
-      errorOnExist: true,
-      force: false,
+  const commands = skills
+    .filter(({ selected }) => selected !== false)
+    .map((skill, index) => {
+      const commandName = `selected-${index + 1}-${skill.name}`;
+      const destination = join(skillsDirectory, commandName);
+      cpSync(skill.path, destination, {
+        recursive: true,
+        dereference: false,
+        errorOnExist: true,
+        force: false,
+      });
+      if (skill.arguments !== undefined) {
+        const skillPath = join(destination, 'SKILL.md');
+        writeFileSync(
+          skillPath,
+          expandSkillArguments(readFileSync(skillPath, 'utf8'), skill.arguments),
+          { mode: 0o600 },
+        );
+      }
+      return `/sprint-coder-selected:${commandName}`;
     });
-    if (skill.arguments !== undefined) {
-      const skillPath = join(destination, 'SKILL.md');
-      writeFileSync(
-        skillPath,
-        expandSkillArguments(readFileSync(skillPath, 'utf8'), skill.arguments),
-        { mode: 0o600 },
-      );
-    }
-    return skill.selected === false ? [] : [`/sprint-coder-selected:${commandName}`];
-  });
   return commands.join(' ');
 }
 

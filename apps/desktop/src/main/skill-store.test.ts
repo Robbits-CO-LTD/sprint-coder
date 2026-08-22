@@ -465,6 +465,7 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
         content: 'interface:\n  display_name: Created Reviewer\n',
       },
     ]);
+    expect(installed.compatibility.profile).toBe('codex-native');
     const exportRoot = join(root, 'export');
     await mkdir(exportRoot);
     const exported = await store.exportCreated(installed.skillId, installed.digest, exportRoot);

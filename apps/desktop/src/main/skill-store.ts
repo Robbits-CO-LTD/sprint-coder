@@ -1094,7 +1094,7 @@ async function readRawSnapshot(
     if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink())
       throw new SkillStoreError('UNSAFE_SOURCE', 'Skill directory changed identity');
     for (const name of (await readdir(directory)).sort()) {
-      const relativePath = relativeDirectory === '' ? name : join(relativeDirectory, name);
+      const relativePath = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
       if (name.startsWith('.') || SECRET_FILE_NAMES.has(name.toLowerCase())) {
         warnings.push(`Excluded ${relativePath}`);
         continue;

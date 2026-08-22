@@ -35,6 +35,12 @@ describe('Claude runtime probe', () => {
       join(source, 'SKILL.md'),
       '---\nname: reviewer\ndescription: Review\n---\nReview $0 and $ARGUMENTS.',
     );
+    const autoSource = join(root, 'auto-source');
+    await mkdir(autoSource);
+    await writeFile(
+      join(autoSource, 'SKILL.md'),
+      '---\nname: auto-reviewer\ndescription: Auto review\n---\nNever load directly.',
+    );
     const invocation = materializeClaudeSkillPlugin(plugin, [
       {
         name: 'reviewer',
@@ -45,11 +51,22 @@ describe('Claude runtime probe', () => {
         selected: true,
         arguments: 'src/app.ts carefully',
       },
+      {
+        name: 'auto-reviewer',
+        path: autoSource,
+        profile: 'claude-native',
+        runtimeSupport: 'full',
+        activationPolicy: 'auto-allowed',
+        selected: false,
+      },
     ]);
     expect(invocation).toBe('/sprint-coder-selected:selected-1-reviewer');
     expect(
       await readFile(join(plugin, 'skills', 'selected-1-reviewer', 'SKILL.md'), 'utf8'),
     ).toContain('Review src/app.ts and src/app.ts carefully.');
+    await expect(
+      readFile(join(plugin, 'skills', 'selected-2-auto-reviewer', 'SKILL.md'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
     const ambient = join(root, '.claude', 'skills', 'ambient-reviewer');
     await mkdir(ambient, { recursive: true });
     await writeFile(join(ambient, 'SKILL.md'), '---\nname: ambient\ndescription: Ambient\n---\n');
