@@ -201,6 +201,7 @@ import {
 } from '@sprint-coder/contracts';
 import type { PreparedContext } from './context-ledger';
 import {
+  boundClipboardImageSize,
   clipboardAttachmentFileName,
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
@@ -1297,9 +1298,15 @@ export class IpcRouter {
         // compromised Renderer cannot inject arbitrary image content into a draft.
         const image = clipboard.readImage();
         if (image.isEmpty()) return null;
+        // Bound the bitmap before encoding: a 6K capture is past the decoder's pixel envelope, so
+        // handing its PNG straight to the draft store would fail as "not a still image".
+        const bounded = boundClipboardImageSize(image.getSize());
+        const png = (
+          bounded === null ? image : image.resize({ ...bounded, quality: 'better' })
+        ).toPNG();
         return this.attachmentDraftStore.addFromClipboard(
           input.taskId,
-          image.toPNG(),
+          png,
           clipboardAttachmentFileName(new Date()),
         );
       },
