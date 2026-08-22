@@ -148,7 +148,6 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
         [],
         undefined,
         undefined,
-        { inheritUserConfig: false },
         undefined,
         snapshot,
         async ({ toolName, arguments: input }) => {
@@ -204,7 +203,6 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
         [],
         undefined,
         undefined,
-        { inheritUserConfig: false },
         undefined,
         snapshot,
         async ({ toolName, arguments: input }) => {

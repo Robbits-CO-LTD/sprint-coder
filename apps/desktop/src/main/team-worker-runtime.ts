@@ -96,7 +96,6 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   ) => Promise<unknown>;
   bindTeamMcpProcess?: (turnId: string, identity: RuntimeProcessIdentity) => boolean;
   codexIsolationRoot?: string;
-  codexUserConfigEnabled?: () => boolean;
   /** Explicit development/test opt-in. Production callers leave this false. */
   allowSimulation?: boolean;
 }>;
@@ -198,7 +197,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       undefined,
       kind,
       this.deps.codexIsolationRoot,
-      () => ({ inheritUserConfig: this.deps.codexUserConfigEnabled?.() === true }),
       (_taskId, turnId, identity) => this.deps.bindTeamMcpProcess?.(turnId, identity) === true,
       (taskId, turnId, request, signal) => {
         if (this.deps.invokeManagedTool === undefined)

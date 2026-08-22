@@ -188,24 +188,12 @@ describe('Runtime Host protocol', () => {
     ).toBe(false);
   });
 
-  it('accepts only a boolean Codex config policy snapshot', () => {
+  it('rejects the removed Codex user-config policy field', () => {
     const valid = startEnvelope();
     expect(
       isMainToRuntimeEnvelope({
         ...valid,
         codexConfigPolicy: { inheritUserConfig: true },
-      }),
-    ).toBe(true);
-    expect(
-      isMainToRuntimeEnvelope({
-        ...valid,
-        codexConfigPolicy: { inheritUserConfig: 'true' },
-      }),
-    ).toBe(false);
-    expect(
-      isMainToRuntimeEnvelope({
-        ...valid,
-        codexConfigPolicy: { inheritUserConfig: false, unexpected: true },
       }),
     ).toBe(false);
   });
