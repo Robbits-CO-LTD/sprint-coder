@@ -26,10 +26,14 @@ import {
 import { secureLogger } from './secure-logger';
 import { ProviderEndpointPolicy, secureProviderFetch } from './provider-endpoint-policy';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
+import { digestCanonical } from './context-compiler';
+import type { ProviderImageInputCapabilitySnapshot } from './provider-runtime';
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1_000;
 export const OLLAMA_MODEL_PRELOAD_TIMEOUT_MS = 180_000;
 const OLLAMA_MODEL_PRELOAD_RESPONSE_BYTES = 64 * 1_024;
+const OLLAMA_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
+const OLLAMA_IMAGE_CAPABILITY_RESPONSE_BYTES = 256 * 1_024;
 const endpointPolicy = new ProviderEndpointPolicy();
 
 export type OllamaModelPreparationFailure =
@@ -146,6 +150,64 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     if (profile.modelsPath === null) return this.catalogModels(connection, profile.curatedModels);
     const response = await this.fetchModels(connection, signal);
     return this.catalogModels(connection, response.data);
+  }
+
+  async captureImageInputCapability(
+    connection: ProviderConnection,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderImageInputCapabilitySnapshot | null> {
+    const target = await this.ollamaModelTarget(connection, modelId);
+    if (target === null) return null;
+    const endpoint = new URL(target.endpoint);
+    endpoint.pathname = '/api/show';
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = (): void => controller.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, OLLAMA_IMAGE_CAPABILITY_TIMEOUT_MS);
+    try {
+      const response = await this.providerFetch(endpoint.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelId, verbose: false }),
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      if (!response.ok) return this.unknownImageInputCapability(connection, modelId, 'http');
+      const payload = await readBoundedOllamaJsonResponse(
+        response,
+        controller.signal,
+        OLLAMA_IMAGE_CAPABILITY_RESPONSE_BYTES,
+      );
+      const capabilities = ollamaCapabilities(payload);
+      if (capabilities === null)
+        return this.unknownImageInputCapability(connection, modelId, 'malformed');
+      return Object.freeze({
+        value: capabilities.includes('vision'),
+        revision: digestCanonical({
+          connectionId: connection.id,
+          providerId: connection.providerId,
+          modelId,
+          endpointDigest: digestCanonical(target.endpoint),
+          capabilities,
+        }),
+        capturedAtMs: this.now().getTime(),
+      });
+    } catch {
+      if (signal.aborted) throw new OllamaModelPreparationError('canceled');
+      return this.unknownImageInputCapability(
+        connection,
+        modelId,
+        timedOut ? 'timeout' : 'network',
+      );
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+    }
   }
 
   private catalogModels(
@@ -354,6 +416,24 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     }
   }
 
+  private unknownImageInputCapability(
+    connection: ProviderConnection,
+    modelId: string,
+    reason: 'http' | 'malformed' | 'timeout' | 'network',
+  ): ProviderImageInputCapabilitySnapshot {
+    return Object.freeze({
+      value: null,
+      revision: digestCanonical({
+        connectionId: connection.id,
+        providerId: connection.providerId,
+        modelId,
+        connectionUpdatedAt: connection.updatedAt,
+        status: reason,
+      }),
+      capturedAtMs: this.now().getTime(),
+    });
+  }
+
   private async fetchModels(
     connection: ProviderConnection,
     signal: AbortSignal,
@@ -450,6 +530,14 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
 }
 
 export function resolveOllamaNativeGenerateEndpoint(baseUrl: string): string | null {
+  return resolveOllamaNativeEndpoint(baseUrl, '/api/generate');
+}
+
+export function resolveOllamaNativeShowEndpoint(baseUrl: string): string | null {
+  return resolveOllamaNativeEndpoint(baseUrl, '/api/show');
+}
+
+function resolveOllamaNativeEndpoint(baseUrl: string, pathname: '/api/generate' | '/api/show') {
   const parsed = new URL(baseUrl);
   if (
     parsed.protocol !== 'http:' ||
@@ -463,7 +551,7 @@ export function resolveOllamaNativeGenerateEndpoint(baseUrl: string): string | n
   const hostname = parsed.hostname.toLowerCase();
   if (hostname === 'localhost') parsed.hostname = '127.0.0.1';
   else if (!isLoopbackIpLiteral(hostname)) return null;
-  parsed.pathname = '/api/generate';
+  parsed.pathname = pathname;
   return parsed.toString();
 }
 
@@ -481,6 +569,24 @@ async function readBoundedOllamaPreloadResponse(
   response: Response,
   signal: AbortSignal,
 ): Promise<{ model: string }> {
+  const parsed = await readBoundedOllamaJsonResponse(
+    response,
+    signal,
+    OLLAMA_MODEL_PRELOAD_RESPONSE_BYTES,
+  );
+  if (parsed === null || typeof parsed !== 'object')
+    throw new OllamaModelPreparationError('provider_unavailable');
+  const model = (parsed as Record<string, unknown>).model;
+  if (typeof model !== 'string' || model.length === 0 || model.length > 256)
+    throw new OllamaModelPreparationError('provider_unavailable');
+  return { model };
+}
+
+async function readBoundedOllamaJsonResponse(
+  response: Response,
+  signal: AbortSignal,
+  maxBytes: number,
+): Promise<unknown> {
   if (response.body === null) throw new OllamaModelPreparationError('provider_unavailable');
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -490,8 +596,7 @@ async function readBoundedOllamaPreloadResponse(
       const next = await readOllamaPreloadChunk(reader, signal);
       if (next.done) break;
       total += next.value.byteLength;
-      if (total > OLLAMA_MODEL_PRELOAD_RESPONSE_BYTES)
-        throw new OllamaModelPreparationError('provider_unavailable');
+      if (total > maxBytes) throw new OllamaModelPreparationError('provider_unavailable');
       chunks.push(next.value);
     }
   } catch (error) {
@@ -511,18 +616,23 @@ async function readBoundedOllamaPreloadResponse(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
     throw new OllamaModelPreparationError('provider_unavailable');
   }
-  if (parsed === null || typeof parsed !== 'object')
-    throw new OllamaModelPreparationError('provider_unavailable');
-  const model = (parsed as Record<string, unknown>).model;
-  if (typeof model !== 'string' || model.length === 0 || model.length > 256)
-    throw new OllamaModelPreparationError('provider_unavailable');
-  return { model };
+}
+
+function ollamaCapabilities(value: unknown): readonly string[] | null {
+  if (value === null || typeof value !== 'object') return null;
+  const capabilities = (value as Record<string, unknown>).capabilities;
+  if (
+    !Array.isArray(capabilities) ||
+    capabilities.length > 64 ||
+    !capabilities.every((item) => typeof item === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(item))
+  )
+    return null;
+  return [...new Set(capabilities)].sort();
 }
 
 function readOllamaPreloadChunk(

@@ -110,6 +110,8 @@ import {
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
   providerModelsForBuiltin,
+  providerMessagesFromContext,
+  providerMessagesForEgressPolicy,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
@@ -127,6 +129,7 @@ import { ImageAttachmentValidationError } from './image-attachment-store';
 import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
 import {
   buildImageAttachmentSelectionIdentity,
+  buildProviderImageAttachmentSelectionIdentity,
   imageAttachmentSelectionIdentityDigest,
   type ImageAttachmentRuntimeSnapshot,
 } from './image-attachment-capability';
@@ -553,7 +556,7 @@ describe('image attachment public errors', () => {
   it('maps acceptance races and unsupported runtimes without leaking custody details', () => {
     expect(toPublicError(new ImageAttachmentAcceptanceError('unsupported'))).toEqual({
       code: 'INVALID_REQUEST',
-      userMessage: '選択中のRuntimeでは画像添付を送信できません。',
+      userMessage: '選択中の接続またはモデルでは画像添付を送信できません。',
       retryable: false,
     });
     expect(toPublicError(new ImageAttachmentAcceptanceError('stale'))).toEqual({
@@ -646,7 +649,7 @@ describe('Main image attachment dispatch boundary', () => {
       },
       attachmentCustodyStore: { prepare: prepareCustody, release: releaseCustody },
       attachmentCapabilityByTurn: new Map([
-        [turnId, Object.freeze({ snapshot, selectionIdentity })],
+        [turnId, Object.freeze({ kind: 'codex_cli', snapshot, selectionIdentity })],
       ]),
       attachmentCustodyByTurn: new Map(),
       turnRuntimes: new Map([[turnId, 'codex']]),
@@ -711,6 +714,187 @@ describe('Main image attachment dispatch boundary', () => {
     );
     expect(calls).toEqual(['cancel', 'release']);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('projects accepted Provider images once in DB order without exposing bytes to policy scan', async () => {
+    const taskId = 'task-provider-image';
+    const turnId = 'turn-provider-image';
+    const selection = {
+      taskId,
+      runtimeKind: 'codex' as const,
+      model: 'gpt-5',
+      modelSelection: {
+        connectionId: 'ollama:local',
+        requestedProvider: 'ollama',
+        requestedModel: 'gemma4:12b',
+      },
+    };
+    const snapshot = {
+      runtimeKind: 'provider' as const,
+      connectionId: 'ollama:local',
+      providerId: 'ollama',
+      modelId: 'gemma4:12b',
+      value: true,
+      revision: 'vision-revision-1',
+      capturedAtMs: Date.now(),
+    };
+    const selectionIdentity = imageAttachmentSelectionIdentityDigest(
+      buildProviderImageAttachmentSelectionIdentity(selection, snapshot)!,
+    );
+    const attachments = [
+      {
+        id: 'image-a',
+        fileName: 'a.png',
+        mimeType: 'image/png' as const,
+        byteLength: 3,
+        sha256: 'a'.repeat(64),
+        bytes: Buffer.from('one'),
+        createdAt: '2026-08-22T00:00:00.000Z',
+      },
+      {
+        id: 'image-b',
+        fileName: 'b.webp',
+        mimeType: 'image/webp' as const,
+        byteLength: 3,
+        sha256: 'b'.repeat(64),
+        bytes: Buffer.from('two'),
+        createdAt: '2026-08-22T00:00:01.000Z',
+      },
+    ];
+    const current = { ...snapshot, capturedAtMs: Date.now() };
+    const captureProviderImageAttachmentCapability = vi.fn().mockResolvedValue(current);
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      persistence: {
+        getAcceptedImageAttachments: vi.fn().mockReturnValue(attachments),
+        getImageAttachmentAcceptanceSelection: vi.fn().mockReturnValue(selection),
+      },
+      attachmentCapabilityByTurn: new Map([
+        [
+          turnId,
+          Object.freeze({
+            kind: 'provider_inline',
+            snapshot,
+            selectionIdentity,
+          }),
+        ],
+      ]),
+      captureProviderImageAttachmentCapability,
+    });
+    const probe = router as unknown as {
+      prepareProviderTurnImageAttachments(
+        started: unknown,
+        connection: unknown,
+      ): {
+        binding: unknown;
+        inlineImages: Array<{
+          mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+          base64: string;
+        }>;
+        manifestDigest: string;
+        byteCount: number;
+      };
+      providerImageAttachmentStillValid(
+        started: unknown,
+        connection: unknown,
+        binding: unknown,
+        signal: AbortSignal,
+      ): Promise<boolean>;
+    };
+    const started = {
+      turnId,
+      event: { taskId },
+      modelSelection: selection.modelSelection,
+    };
+    const connection = { id: 'ollama:local', providerId: 'ollama' };
+
+    const prepared = probe.prepareProviderTurnImageAttachments(started, connection);
+
+    expect(prepared.inlineImages).toEqual([
+      { mimeType: 'image/png', base64: Buffer.from('one').toString('base64') },
+      { mimeType: 'image/webp', base64: Buffer.from('two').toString('base64') },
+    ]);
+    expect(prepared.manifestDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(prepared.byteCount).toBe(6);
+    await expect(
+      probe.providerImageAttachmentStillValid(
+        started,
+        connection,
+        prepared.binding,
+        new AbortController().signal,
+      ),
+    ).resolves.toBe(true);
+    captureProviderImageAttachmentCapability.mockResolvedValueOnce({
+      ...current,
+      revision: 'vision-revision-2',
+    });
+    await expect(
+      probe.providerImageAttachmentStillValid(
+        started,
+        connection,
+        prepared.binding,
+        new AbortController().signal,
+      ),
+    ).resolves.toBe(false);
+
+    const messages = [
+      {
+        role: 'user' as const,
+        content: 'describe these images',
+        inlineImages: prepared.inlineImages,
+      },
+    ];
+    const policyProjection = JSON.stringify(providerMessagesForEgressPolicy(messages));
+    expect(policyProjection).toContain('describe these images');
+    expect(policyProjection).toContain('redacted-image-bytes');
+    for (const image of prepared.inlineImages) expect(policyProjection).not.toContain(image.base64);
+    expect(messages[0]?.inlineImages).toEqual(prepared.inlineImages);
+
+    const contextMessages = providerMessagesFromContext(
+      [
+        {
+          id: 'past',
+          taskId,
+          source: 'history',
+          trust: 'user',
+          tokenEstimate: 1,
+          content: 'past user message',
+          createdAt: '2026-08-22T00:00:00.000Z',
+          messageId: 'message-past',
+        },
+        {
+          id: 'current',
+          taskId,
+          source: 'history',
+          trust: 'user',
+          tokenEstimate: 1,
+          content: 'current user message',
+          createdAt: '2026-08-22T00:00:01.000Z',
+          messageId: 'message-current',
+        },
+        {
+          id: 'background',
+          taskId,
+          source: 'background',
+          trust: 'assistant',
+          tokenEstimate: 1,
+          content: 'untrusted background',
+          createdAt: '2026-08-22T00:00:02.000Z',
+          messageId: null,
+        },
+      ],
+      'message-current',
+      prepared.inlineImages,
+    );
+    expect(contextMessages.filter((message) => message.inlineImages !== undefined)).toEqual([
+      expect.objectContaining({
+        content: 'current user message',
+        inlineImages: prepared.inlineImages,
+      }),
+    ]);
+    expect(() => providerMessagesFromContext([], 'message-current', prepared.inlineImages)).toThrow(
+      'Provider image attachment binding is stale',
+    );
   });
 });
 

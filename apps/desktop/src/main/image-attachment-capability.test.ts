@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { ImageAttachmentAcceptanceSelection } from './persistence';
 import {
   buildImageAttachmentSelectionIdentity,
+  buildProviderImageAttachmentSelectionIdentity,
   imageAttachmentSelectionIdentityDigest,
+  toPublicProviderImageAttachmentCapability,
   toPublicImageAttachmentCapability,
+  validateProviderImageAttachmentCapabilitySnapshot,
+  validateProviderImageAttachmentCurrent,
   validateImageAttachmentCapabilitySnapshot,
   type ImageAttachmentRuntimeCurrent,
   type ImageAttachmentRuntimeSnapshot,
@@ -138,5 +142,131 @@ describe('image attachment capability identity', () => {
       reason: 'Codex CLIが見つかりません',
       selectionIdentity: null,
     });
+  });
+});
+
+describe('provider image attachment capability identity', () => {
+  const providerSelection: ImageAttachmentAcceptanceSelection = {
+    taskId: 'task-provider',
+    modelSelection: {
+      connectionId: 'ollama:local',
+      requestedProvider: 'ollama',
+      requestedModel: 'gemma4:12b',
+    },
+    runtimeKind: 'codex',
+    model: 'gpt-5.6-sol',
+  };
+  const providerSnapshot = {
+    runtimeKind: 'provider' as const,
+    connectionId: 'ollama:local',
+    providerId: 'ollama',
+    modelId: 'gemma4:12b',
+    value: true,
+    revision: 'capability-revision-1',
+    capturedAtMs: 10_000,
+  };
+
+  it('binds task, connection, provider, model, and capability revision', () => {
+    const identity = buildProviderImageAttachmentSelectionIdentity(
+      providerSelection,
+      providerSnapshot,
+    );
+    const selectionIdentity = imageAttachmentSelectionIdentityDigest(identity!);
+
+    expect(identity).toEqual({
+      taskId: 'task-provider',
+      connectionId: 'ollama:local',
+      providerId: 'ollama',
+      modelId: 'gemma4:12b',
+      runtimeKind: 'provider_inline',
+      capabilityRevision: 'capability-revision-1',
+    });
+    expect(
+      validateProviderImageAttachmentCapabilitySnapshot({
+        selection: providerSelection,
+        snapshot: providerSnapshot,
+        expectedSelectionIdentity: selectionIdentity,
+        nowMs: 14_999,
+      }),
+    ).toBe(true);
+    expect(
+      toPublicProviderImageAttachmentCapability(providerSelection, providerSnapshot, 14_999),
+    ).toEqual({ status: 'supported', reason: null, selectionIdentity });
+  });
+
+  it('fails closed for non-vision, unknown, stale, and changed provider identities', () => {
+    expect(
+      toPublicProviderImageAttachmentCapability(
+        providerSelection,
+        { ...providerSnapshot, value: false },
+        10_000,
+      ),
+    ).toMatchObject({
+      status: 'unsupported',
+      reason: '選択中のモデルは画像入力に対応していません',
+    });
+    expect(
+      toPublicProviderImageAttachmentCapability(
+        providerSelection,
+        { ...providerSnapshot, value: null },
+        10_000,
+      ),
+    ).toMatchObject({
+      status: 'unsupported',
+      reason: '選択中のモデルは画像入力対応を確認できません',
+    });
+    const selectionIdentity = imageAttachmentSelectionIdentityDigest(
+      buildProviderImageAttachmentSelectionIdentity(providerSelection, providerSnapshot)!,
+    );
+    for (const changes of [
+      { nowMs: 15_001 },
+      { snapshot: { ...providerSnapshot, revision: 'capability-revision-2' } },
+      {
+        selection: {
+          ...providerSelection,
+          modelSelection: { ...providerSelection.modelSelection, requestedModel: 'other:model' },
+        },
+      },
+    ])
+      expect(
+        validateProviderImageAttachmentCapabilitySnapshot({
+          selection: providerSelection,
+          snapshot: providerSnapshot,
+          expectedSelectionIdentity: selectionIdentity,
+          nowMs: 10_000,
+          ...changes,
+        }),
+      ).toBe(false);
+  });
+
+  it('revalidates a fresh matching capability before provider send', () => {
+    const selectionIdentity = imageAttachmentSelectionIdentityDigest(
+      buildProviderImageAttachmentSelectionIdentity(providerSelection, providerSnapshot)!,
+    );
+    const binding = {
+      kind: 'provider_inline' as const,
+      snapshot: providerSnapshot,
+      selectionIdentity,
+    };
+    expect(
+      validateProviderImageAttachmentCurrent({
+        selection: providerSelection,
+        binding,
+        current: { ...providerSnapshot, capturedAtMs: 20_000 },
+        nowMs: 20_000,
+      }),
+    ).toBe(true);
+    expect(
+      validateProviderImageAttachmentCurrent({
+        selection: providerSelection,
+        binding,
+        current: {
+          ...providerSnapshot,
+          revision: 'capability-revision-2',
+          capturedAtMs: 20_000,
+        },
+        nowMs: 20_000,
+      }),
+    ).toBe(false);
   });
 });

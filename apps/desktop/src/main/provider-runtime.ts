@@ -8,12 +8,19 @@ import {
 } from '@sprint-coder/contracts';
 import type { ProviderModelLease } from './ollama-model-lifecycle';
 import type { ProviderStreamBudget } from './provider-stream-budget';
+import { digestCanonical } from './context-compiler';
 
 export type ProviderVerificationResult = Readonly<{
   status: 'verified' | 'invalid_credentials' | 'unavailable';
   verifiedAt: string;
   expiresAt: string;
   message: string | null;
+}>;
+
+export type ProviderImageInputCapabilitySnapshot = Readonly<{
+  value: boolean | null;
+  revision: string;
+  capturedAtMs: number;
 }>;
 
 export interface ProviderRuntime {
@@ -34,6 +41,11 @@ export interface ProviderRuntime {
     modelId: string,
     signal: AbortSignal,
   ): Promise<ProviderModelLease>;
+  captureImageInputCapability?(
+    connection: ProviderConnection,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderImageInputCapabilitySnapshot | null>;
   dispose?(): Promise<void>;
 }
 
@@ -49,6 +61,28 @@ export async function acquireProviderModelLease(
   signal: AbortSignal,
 ): Promise<ProviderModelLease> {
   return runtime.acquireModelLease?.(connection, modelId, signal) ?? NOOP_MODEL_LEASE;
+}
+
+export async function captureProviderImageInputCapability(
+  runtime: ProviderRuntime,
+  connection: ProviderConnection,
+  modelId: string,
+  signal: AbortSignal,
+  now: () => number = Date.now,
+): Promise<ProviderImageInputCapabilitySnapshot> {
+  const captured = await runtime.captureImageInputCapability?.(connection, modelId, signal);
+  if (captured !== undefined && captured !== null) return captured;
+  return Object.freeze({
+    value: null,
+    revision: digestCanonical({
+      connectionId: connection.id,
+      providerId: connection.providerId,
+      modelId,
+      connectionUpdatedAt: connection.updatedAt,
+      imageCapabilitySource: 'runtime_specific_snapshot_unavailable',
+    }),
+    capturedAtMs: now(),
+  });
 }
 
 export type ProviderRuntimeRegistration = Readonly<{
