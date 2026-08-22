@@ -105,6 +105,46 @@ export class ImageAttachmentDraftStore {
 }
 
 /**
+ * The size a clipboard image has to be resized to before it can be decoded at all, or `null` when
+ * it already fits.
+ *
+ * A 6K capture is 20.4M pixels — past the decoder's pixel envelope, and small enough in bytes that
+ * the byte-driven step-down below would never look at it. Bounding happens at the `NativeImage` the
+ * clipboard handed over (Chromium has already decoded it, so no untrusted decode is involved) and
+ * before the PNG encode, which is what makes those captures pasteable instead of rejected as "not
+ * a still image".
+ */
+export function boundClipboardImageSize(size: {
+  width: number;
+  height: number;
+}): { width: number; height: number } | null {
+  const { width, height } = size;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return null;
+  const scale = Math.min(
+    1,
+    Math.sqrt(IMAGE_ATTACHMENT_MAX_PIXELS / (width * height)),
+    IMAGE_ATTACHMENT_MAX_DIMENSION / width,
+    IMAGE_ATTACHMENT_MAX_DIMENSION / height,
+  );
+  if (scale >= 1) return null;
+  let bounded = {
+    width: Math.max(1, Math.floor(width * scale)),
+    height: Math.max(1, Math.floor(height * scale)),
+  };
+  // Floating-point scale plus flooring lands inside the envelope in practice; this closes the edge
+  // rather than trusting that, and terminates because both edges shrink.
+  while (
+    bounded.width * bounded.height > IMAGE_ATTACHMENT_MAX_PIXELS &&
+    (bounded.width > 1 || bounded.height > 1)
+  )
+    bounded = {
+      width: Math.max(1, bounded.width - 1),
+      height: Math.max(1, bounded.height - 1),
+    };
+  return bounded;
+}
+
+/**
  * A pasted screenshot is whatever size the display is, and a Retina full-screen grab routinely
  * encodes past the 5 MiB per-image cap. Refusing it would make Ctrl+V unusable on exactly the
  * screens people paste most, so the long edge is stepped down until the encode fits. Steps are

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_ATTACHMENT_MAX_BYTES } from '@sprint-coder/contracts';
 import type { PersistenceClient } from './persistence';
 import {
+  boundClipboardImageSize,
   clipboardAttachmentFileName,
   fitClipboardImage,
   ImageAttachmentDraftStore,
@@ -189,6 +190,48 @@ describe('clipboard drafts', () => {
       mimeType: 'image/png',
     });
     expect(() => normalizeAttachmentFileName(result.fileName)).not.toThrow();
+  });
+
+  it('bounds a capture past the decoder pixel envelope instead of refusing it', () => {
+    // 6K full-screen capture: 20.4M pixels. It encodes to well under the byte cap, so nothing else
+    // in this path would look at it — it just failed to decode.
+    const bounded = boundClipboardImageSize({ width: 6016, height: 3384 });
+    expect(bounded).not.toBeNull();
+    expect(bounded!.width * bounded!.height).toBeLessThanOrEqual(16_777_216);
+    // Aspect ratio survives (within a pixel of rounding).
+    expect(bounded!.width / bounded!.height).toBeCloseTo(6016 / 3384, 2);
+
+    // A panorama grab is bounded by the per-edge limit rather than by pixel count.
+    const wide = boundClipboardImageSize({ width: 20_000, height: 400 });
+    expect(wide).toEqual({ width: 8192, height: 163 });
+
+    // Anything already inside the envelope is left alone, so a normal paste is not resampled.
+    expect(boundClipboardImageSize({ width: 3456, height: 2234 })).toBeNull();
+    expect(boundClipboardImageSize({ width: 8, height: 8 })).toBeNull();
+    expect(boundClipboardImageSize({ width: 0, height: 0 })).toBeNull();
+  });
+
+  it('accepts a 6K capture end to end once it has been bounded', async () => {
+    const bounded = boundClipboardImageSize({ width: 6016, height: 3384 })!;
+    // Stands in for the NativeImage resize Main performs before the PNG encode.
+    const pasted = await sharp({
+      create: {
+        width: bounded.width,
+        height: bounded.height,
+        channels: 3,
+        background: { r: 30, g: 30, b: 34 },
+      },
+    })
+      .png()
+      .toBuffer();
+
+    const result = await new ImageAttachmentDraftStore(persistenceMock()).addFromClipboard(
+      'task-1',
+      pasted,
+      clipboardAttachmentFileName(new Date('2026-08-22T13:42:10')),
+    );
+
+    expect(result).toMatchObject({ mimeType: 'image/png' });
   });
 
   it('leaves an image that already fits untouched', async () => {

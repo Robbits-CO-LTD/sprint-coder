@@ -263,6 +263,25 @@ test.describe('composer plus menu', () => {
 
       await page.getByRole('button', { name: /貼り付け画像-.*を削除/ }).click();
       await expect(page.getByTestId('composer-attachment')).toHaveCount(0);
+
+      // A 6K full-screen capture is 20.4M pixels — past the decoder's pixel envelope, and small
+      // enough in bytes that no byte-driven step-down would ever look at it. Upscaling the fixture
+      // in Main is how the test gets one without moving 80MB of bitmap across the boundary.
+      await app.evaluate(({ clipboard, nativeImage }) => {
+        clipboard.writeImage(
+          nativeImage
+            .createFromDataURL(
+              'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAEUlEQVQImWM4YSOCFTEMLQkAh11GAUtH1v4AAAAASUVORK5CYII=',
+            )
+            .resize({ width: 6016, height: 3384 }),
+        );
+      });
+      await page.getByTestId('composer-textarea').focus();
+      await app.evaluate(({ BrowserWindow }) => {
+        BrowserWindow.getAllWindows()[0]?.webContents.paste();
+      });
+      await expect(page.getByTestId('composer-attachment')).toHaveCount(1);
+      await expect(page.locator('.composer-attachment-error')).toHaveCount(0);
     } finally {
       if (restore !== null) await restore();
       await closeApp(app);
