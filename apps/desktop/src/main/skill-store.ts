@@ -610,7 +610,7 @@ export class SkillStore {
       digest: snapshot.digest,
       name: snapshot.name,
       description: snapshot.description,
-      activationPolicy: existing.activationPolicy,
+      activationPolicy: 'manual',
       compatibility: snapshot.compatibility,
       enabled: existing.enabled,
     };

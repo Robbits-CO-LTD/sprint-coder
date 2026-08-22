@@ -699,39 +699,10 @@ export function discoverAmbientClaudeSkillNames(
       if (current === filesystemRoot || hasGitBoundary(current)) break;
       current = dirname(current);
     }
-    collectNestedClaudeSkillRoots(resolve(workspaceRoot), roots, 0, { visited: 0 });
   }
   const names = new Set<string>();
   for (const root of roots) collectSkillNames(root, names, 0);
   return [...names].sort();
-}
-
-function collectNestedClaudeSkillRoots(
-  directory: string,
-  roots: Set<string>,
-  depth: number,
-  budget: { visited: number },
-): void {
-  if (depth > 20) return;
-  budget.visited += 1;
-  if (budget.visited > 10_000)
-    throw new Error('Claude ambient Skill discovery exceeded its directory limit');
-  let entries: Dirent[];
-  try {
-    entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    if (entry.name === '.claude') {
-      roots.add(join(directory, entry.name, 'skills'));
-      continue;
-    }
-    if (entry.name === '.git' || entry.name === 'node_modules' || entry.name.startsWith('.'))
-      continue;
-    collectNestedClaudeSkillRoots(join(directory, entry.name), roots, depth + 1, budget);
-  }
 }
 
 function collectSkillNames(root: string, names: Set<string>, depth: number): void {

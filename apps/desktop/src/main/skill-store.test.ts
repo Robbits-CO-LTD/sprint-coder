@@ -373,13 +373,17 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     const store = await SkillStore.open({ rootPath: join(root, 'store') });
     let [candidate] = await store.scanSources({ claudePath: source });
     let preview = await store.previewImport(candidate!);
-    await store.importSkill(preview);
+    const imported = await store.importSkill(preview);
+    await store.setActivationPolicy('claude', 'managed', imported.manifest.digest, 'auto-allowed');
     await store.setEnabled('claude', 'managed', false);
     await writeFile(join(path, 'SKILL.md'), '---\nname: managed\ndescription: Updated\n---\n');
     [candidate] = await store.scanSources({ claudePath: source });
     preview = await store.previewImport(candidate!);
     await store.updateSkill(preview);
-    expect((await store.listImported())[0]?.manifest.enabled).toBe(false);
+    expect((await store.listImported())[0]?.manifest).toMatchObject({
+      enabled: false,
+      activationPolicy: 'manual',
+    });
     await store.removeImported('claude', 'managed');
     expect(await store.listImported()).toEqual([]);
     expect(await readFile(join(path, 'SKILL.md'), 'utf8')).toContain('Updated');

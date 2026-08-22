@@ -53,13 +53,22 @@ describe('Claude runtime probe', () => {
     const ambient = join(root, '.claude', 'skills', 'ambient-reviewer');
     await mkdir(ambient, { recursive: true });
     await writeFile(join(ambient, 'SKILL.md'), '---\nname: ambient\ndescription: Ambient\n---\n');
+    const workspaceSkill = join(root, 'workspace', '.claude', 'skills', 'workspace-reviewer');
+    await mkdir(workspaceSkill, { recursive: true });
+    await writeFile(
+      join(workspaceSkill, 'SKILL.md'),
+      '---\nname: workspace\ndescription: Workspace\n---\n',
+    );
     const nested = join(root, 'workspace', 'packages', 'web', '.claude', 'skills', 'web-reviewer');
     await mkdir(nested, { recursive: true });
     await writeFile(join(nested, 'SKILL.md'), '---\nname: web\ndescription: Web\n---\n');
     expect(discoverAmbientClaudeSkillNames([join(root, 'workspace')], { HOME: root })).toEqual([
       'ambient-reviewer',
-      'web-reviewer',
+      'workspace-reviewer',
     ]);
+    expect(
+      discoverAmbientClaudeSkillNames([join(root, 'workspace')], { HOME: root }),
+    ).not.toContain('web-reviewer');
     const args = buildClaudeArgs('auto', undefined, undefined, [], plugin, ['ambient-reviewer']);
     expect(args).toEqual(expect.arrayContaining(['--plugin-dir', plugin, '--settings']));
     expect(args).not.toContain('--safe-mode');
