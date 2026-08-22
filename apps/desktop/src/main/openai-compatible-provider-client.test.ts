@@ -13,6 +13,7 @@ import {
   resolveOllamaNativeShowEndpoint,
 } from './openai-compatible-provider-client';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
+import { providerEventsWithDeadline } from './provider-stream-deadline';
 
 const profile: ProviderProfile = {
   id: 'example',
@@ -680,6 +681,76 @@ describe('OpenAICompatibleProviderClient', () => {
         },
       },
       { type: 'completed', stopReason: 'tool_calls' },
+    ]);
+  });
+
+  it('treats Ollama delta.reasoning as the first provider event without double counting aliases', async () => {
+    const client = new OpenAICompatibleProviderClient(
+      registry(),
+      () => approvedCredential(profile, 'test-key'),
+      async () =>
+        new Response(
+          sse([
+            {
+              model: 'model-a',
+              choices: [
+                {
+                  delta: {
+                    reasoning: 'ollama-think',
+                    reasoning_content: 'ollama-think',
+                    reasoning_details: [{ text: 'ollama-think' }, { text: 'distinct-detail' }],
+                    content: '',
+                  },
+                },
+              ],
+            },
+            {
+              choices: [{ finish_reason: 'stop', delta: { content: 'done' } }],
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+    );
+
+    const events = providerEventsWithDeadline(
+      client.execute(
+        connection,
+        {
+          executionId: 'execution-ollama-reasoning',
+          connectionId: connection.id,
+          modelId: 'model-a',
+          messages: [{ role: 'user', content: 'hello' }],
+        },
+        new AbortController().signal,
+      ),
+      {
+        executionId: 'execution-ollama-reasoning',
+        firstEventTimeoutMs: 1_000,
+        idleTimeoutMs: 1_000,
+      },
+    );
+
+    await expect(collect(events)).resolves.toEqual([
+      { type: 'reasoning_delta', text: 'ollama-think' },
+      { type: 'reasoning_delta', text: 'distinct-detail' },
+      { type: 'output_delta', text: 'done' },
+      {
+        type: 'resolution',
+        resolution: { resolvedProvider: 'example', resolvedModel: 'model-a' },
+      },
+      {
+        type: 'usage',
+        usage: {
+          inputTokens: null,
+          outputTokens: null,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          providerCost: null,
+          source: 'unknown',
+        },
+      },
+      { type: 'completed', stopReason: 'stop' },
     ]);
   });
 

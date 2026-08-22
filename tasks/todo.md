@@ -1,5 +1,34 @@
 # Round 2: Chat Alphaゲート正式通過(2026-07-22開始)
 
+## Issue #307 再発修正（2026-08-22）
+
+### 計画
+
+- [x] 実Ollama 0.32.15と対象Gemma 4モデルで、preload・通常応答・tool call・stream payloadを測定する
+- [x] `delta.reasoning` が正規化されず45秒の最初の応答監視に届かない根本原因を確定する
+- [x] OpenAI互換stream normalizerへ後方互換のreasoning正規化を追加する
+- [x] focused test、desktop typecheck、実Ollama構造確認を実行する
+- [x] 固定 `x-ai/grok-4.6` で候補commitをレビューし、検証済み指摘を反映する
+- [ ] PR、必須チェック、ReviewBOT、Issue closeoutを処理する
+
+### Next Steps
+
+1. PRと外部レビューを処理する。
+2. 必須チェックを最新commitへ固定する。
+3. マージ承認が必要な地点で停止する。
+
+### 進捗
+
+- 実装: `delta.reasoning` を既存の `reasoning_delta` へ正規化し、互換別名の二重計上を防止。
+- focused test: 30 PASS / 3 opt-in skip。
+- desktop typecheck、対象lint、対象format: PASS。
+- 実Ollama: 27 PASS / 2条件外skip。対象Gemma 4でpreload→応答→完了→解放、終了時loaded 0を確認。
+- ReviewBOT指摘を反映: 同一文字列の互換別名だけを重複排除し、異なる`reasoning_details`は保持。
+
+### Next Tasks
+
+- PR作成後に必須CIとReviewBOTを確認する。
+
 Wave 1(並列):
 - [ ] A(Codex): operations ledger / MessagePort+snapshot+afterSeq / input queue(Queue/Steer/Stop&Send) / goal・pin・archive・draft・workspace永続化 / contracts v2
 - [ ] B(Sonnet): Markdown+sanitizer描画 / pin・archive・goal・workspace UI / draft永続化接続 / queue・steer UI / snapshot復元
