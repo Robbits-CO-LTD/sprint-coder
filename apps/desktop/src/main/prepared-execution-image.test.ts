@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -111,7 +111,7 @@ describe('hasUnsafeWindowsDllImport', () => {
 
         expect(sealed.dependencies).toEqual([
           expect.objectContaining({
-            canonicalPath: dependency,
+            canonicalPath: await realpath(dependency),
             importName: 'vcruntime140.dll',
           }),
         ]);
