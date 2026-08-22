@@ -2440,6 +2440,24 @@ export const updateHealthSchema = z
   })
   .strict();
 export type UpdateHealth = z.infer<typeof updateHealthSchema>;
+export const updateCheckResultSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('up_to_date') }).strict(),
+  z
+    .object({
+      status: z.literal('update_available'),
+      version: z.string().min(1).max(64),
+    })
+    .strict(),
+  z.object({ status: z.literal('already_checking') }).strict(),
+  z.object({ status: z.literal('unsupported') }).strict(),
+  z
+    .object({
+      status: z.literal('failed'),
+      errorCategory: updateErrorCategorySchema,
+    })
+    .strict(),
+]);
+export type UpdateCheckResult = z.infer<typeof updateCheckResultSchema>;
 export const resolvedCliCommandSchema = z
   .object({
     source: z.enum([
@@ -2505,13 +2523,6 @@ export const teamModelResearchSettingsSchema = z
   .strict();
 export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
 export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
-export const codexUserConfigSettingsSchema = z
-  .object({
-    enabled: z.boolean(),
-  })
-  .strict();
-export type CodexUserConfigSettings = z.infer<typeof codexUserConfigSettingsSchema>;
-export const codexUserConfigSettingsSetInputSchema = codexUserConfigSettingsSchema;
 export const teamModelSelectionGuidanceSchema = z
   .object({
     guidance: z.string().max(4000),
@@ -3316,7 +3327,7 @@ export interface SprintCoderApi {
   };
   updates: {
     subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
-    retry(): void;
+    checkNow(): Promise<UpdateCheckResult>;
     openManualUpdate(): void;
     openUpdateLog(): void;
   };
@@ -3352,8 +3363,6 @@ export interface SprintCoderApi {
     /** Codex reasoning level. Rejects a level the selected model does not advertise (see
      * `effortOptionSchema`) — Codex fails the whole turn on an unsupported one. */
     setCodexEffort(effort: string): Promise<void>;
-    getCodexUserConfig(): Promise<CodexUserConfigSettings>;
-    setCodexUserConfig(input: CodexUserConfigSettings): Promise<void>;
     getTeamModelResearch(): Promise<TeamModelResearchSettings>;
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
     getTeamModelSelectionGuidance(): Promise<TeamModelSelectionGuidance>;
@@ -3543,7 +3552,7 @@ export const IPC_CHANNELS = {
   runtimeStatusEvent: 'sprint-coder:runtime:status',
   /** Push-only update health contains classifications, never raw updater errors or paths. */
   updateHealthEvent: 'sprint-coder:update:health',
-  updateRetry: 'sprint-coder:update:retry',
+  updateCheckNow: 'sprint-coder:update:check-now',
   updateOpenManual: 'sprint-coder:update:open-manual',
   updateOpenLog: 'sprint-coder:update:open-log',
   runtimeFailureDiagnosticGet: 'sprint-coder:runtime:failure-diagnostic:get',
@@ -3555,8 +3564,6 @@ export const IPC_CHANNELS = {
   filesSave: 'sprint-coder:files:save',
   imagesRead: 'sprint-coder:images:read',
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
-  settingsGetCodexUserConfig: 'sprint-coder:settings:get-codex-user-config',
-  settingsSetCodexUserConfig: 'sprint-coder:settings:set-codex-user-config',
   settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
   settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',

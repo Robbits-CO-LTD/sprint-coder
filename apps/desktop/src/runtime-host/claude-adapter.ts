@@ -24,7 +24,6 @@ import {
 } from './claude-normalizer';
 import type {
   RuntimeCanonicalEvent,
-  RuntimeCodexConfigPolicy,
   RuntimeContextFragment,
   RuntimeFailureDiagnostic,
   RuntimeFailureStage,
@@ -212,7 +211,6 @@ export class ClaudeRuntimeAdapter {
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     _localImages?: unknown,
-    _codexConfigPolicy?: RuntimeCodexConfigPolicy,
     runtimeProcessStarted?: (pid: number) => void,
     _toolCatalogSnapshot?: ToolCatalogSnapshot,
     _invokeManagedTool?: (input: {

@@ -539,6 +539,15 @@ export type UpdateHealth = {
   lastErrorCategory:
     'network' | 'release_feed' | 'decryption' | 'filesystem' | 'updater' | 'unknown' | null;
 };
+export type UpdateCheckResult =
+  | { status: 'up_to_date' }
+  | { status: 'update_available'; version: string }
+  | { status: 'already_checking' }
+  | { status: 'unsupported' }
+  | {
+      status: 'failed';
+      errorCategory: Exclude<UpdateHealth['lastErrorCategory'], null>;
+    };
 export type EffortOption = { id: string; description: string };
 export type CodexModelOption = {
   id: string;
@@ -855,7 +864,7 @@ export interface SprintCoderApi {
   };
   updates: {
     subscribeHealth(listener: (health: UpdateHealth) => void): () => void;
-    retry(): void;
+    checkNow(): Promise<UpdateCheckResult>;
     openManualUpdate(): void;
     openUpdateLog(): void;
   };
@@ -1084,8 +1093,6 @@ export interface SprintCoderApi {
     setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
     setCodexEffort(effort: string): Promise<void>;
-    getCodexUserConfig(): Promise<{ enabled: boolean }>;
-    setCodexUserConfig(input: { enabled: boolean }): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
     getTeamModelSelectionGuidance(): Promise<

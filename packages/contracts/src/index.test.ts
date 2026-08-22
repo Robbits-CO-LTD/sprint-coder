@@ -26,7 +26,7 @@ import {
   publicErrorSchema,
   runtimeSettingsSchema,
   updateHealthSchema,
-  codexUserConfigSettingsSchema,
+  updateCheckResultSchema,
   teamModelResearchSettingsSchema,
   teamModelRestrictionSchema,
   taskRenameInputSchema,
@@ -397,12 +397,6 @@ describe('public contracts', () => {
       researchBeforeHiring: true,
     });
     expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
-  });
-
-  it('requires an explicit boolean for Codex user-config opt-in', () => {
-    expect(codexUserConfigSettingsSchema.parse({ enabled: false })).toEqual({ enabled: false });
-    expect(() => codexUserConfigSettingsSchema.parse({})).toThrow();
-    expect(() => codexUserConfigSettingsSchema.parse({ enabled: 'false' })).toThrow();
   });
 
   it('requires at least one unique model when Team models are restricted', () => {
@@ -1140,6 +1134,23 @@ describe('public contracts', () => {
         lastSuccessAt: null,
         lastFailureAt: 'C:\\Users\\alice\\Squirrel-Update.log',
         lastErrorCategory: 'CryptUnprotectData failed',
+      }),
+    ).toThrow();
+    expect(updateCheckResultSchema.parse({ status: 'up_to_date' })).toEqual({
+      status: 'up_to_date',
+    });
+    expect(updateCheckResultSchema.parse({ status: 'update_available', version: '0.4.1' })).toEqual(
+      { status: 'update_available', version: '0.4.1' },
+    );
+    expect(updateCheckResultSchema.parse({ status: 'failed', errorCategory: 'network' })).toEqual({
+      status: 'failed',
+      errorCategory: 'network',
+    });
+    expect(() =>
+      updateCheckResultSchema.parse({
+        status: 'failed',
+        errorCategory: 'network',
+        rawError: '/Users/alice/private/update.log',
       }),
     ).toThrow();
     for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED', 'RUNTIME_RATE_LIMIT'] as const)

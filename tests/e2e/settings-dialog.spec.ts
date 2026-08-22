@@ -96,6 +96,10 @@ test.describe('settings dialog', () => {
     await page.getByTestId('sidebar-settings-button').click();
     await expect(page.getByTestId('settings-dialog')).toBeVisible();
     await page.getByTestId('settings-nav-advanced').click();
+    await expect(page.getByText('Codexユーザー設定', { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByText('ユーザーconfig・MCPをTurnへ引き継ぐ', { exact: true }),
+    ).toHaveCount(0);
 
     for (const kind of ['codex', 'claude']) {
       const row = page.getByTestId(`settings-cli-${kind}`);

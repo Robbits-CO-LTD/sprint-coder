@@ -13,7 +13,12 @@ import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/spri
 import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
-import type { ProviderModel, TeamModelRestriction, TeamPolicy } from '@sprint-coder/contracts';
+import type {
+  ProviderModel,
+  TeamModelRestriction,
+  TeamPolicy,
+  UpdateCheckResult,
+} from '@sprint-coder/contracts';
 import {
   filterTeamModelGroups,
   getTeamConnectionSelection,
@@ -31,6 +36,12 @@ import {
   type AccessPresetDefault,
 } from '../lib/access-preset-preference';
 import mitLicenseText from '../../../../../LICENSE?raw';
+import {
+  readSoundEffectPreferences,
+  setSoundEffectsEnabled,
+  setSoundEffectsVolume,
+  unlockSoundEffects,
+} from '../lib/ui-sound';
 
 // Settings dialog (issue #5). The sidebar's "設定" button had no onClick and was not disabled
 // either, so it looked pressable and did nothing — and no settings screen existed anywhere in the
@@ -202,7 +213,6 @@ export function LegacyBody({
               is exactly where a user who cannot select a Runtime will not look. */}
           <CliDetectionGroup />
           <UpdateHealthGroup />
-          <CodexUserConfigSetting active={open} />
           <SprintCoderPrePromptSetting active={open} />
           <TeamModelRestrictionSetting active={open} />
           <TeamModelSelectionGuidanceSetting active={open} />
@@ -215,6 +225,7 @@ export function LegacyBody({
           />
         </>
       )}
+      <SoundEffectsGroup />
       <LicenseGroup />
     </div>
   );
@@ -314,13 +325,13 @@ export function WorkspaceBody({
             </WorkspacePage>
 
             <WorkspacePage {...page('advanced')} active={current === 'advanced'}>
-              <CodexUserConfigSetting active={open} />
               <SprintCoderPrePromptSetting active={open} />
               {/* CLI detection. Previously only reachable as a tooltip on a disabled menu item,
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
               <UpdateHealthGroup />
               <DiagnosticsGroup />
+              <SoundEffectsGroup />
               <LicenseGroup />
             </WorkspacePage>
           </div>
@@ -542,54 +553,122 @@ const UPDATE_ERROR_LABEL = {
   unknown: '不明',
 } as const;
 
-function UpdateHealthGroup() {
+type UpdateCheckUiResult = UpdateCheckResult | { status: 'bridge_failed' };
+
+export function updateCheckResultText(result: UpdateCheckUiResult): string {
+  switch (result.status) {
+    case 'up_to_date':
+      return '最新版を使用しています。';
+    case 'update_available':
+      return `v${result.version.replace(/^v/, '')} が見つかりました。バックグラウンドでダウンロードしています。`;
+    case 'already_checking':
+      return 'アップデートを確認中です。少し待ってからもう一度お試しください。';
+    case 'unsupported':
+      return 'アップデートの確認は対応するインストール版で利用できます。';
+    case 'failed':
+      return `アップデートを確認できませんでした（${UPDATE_ERROR_LABEL[result.errorCategory]}）。`;
+    case 'bridge_failed':
+      return 'アップデートを確認できませんでした。時間をおいてもう一度お試しください。';
+  }
+}
+
+export function UpdateHealthGroup() {
   const health = useAppStore((s) => s.updateHealth);
-  if (health === null) return null;
-  const failing = health.consecutiveFailures > 0;
-  const attention = health.consecutiveFailures >= 3;
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<UpdateCheckUiResult | null>(null);
+  const requestGeneration = useRef(0);
+  const checkNow =
+    typeof window === 'undefined' ? undefined : window.sprintCoder?.updates?.checkNow;
+  const canCheck = typeof checkNow === 'function';
+  const failing = (health?.consecutiveFailures ?? 0) > 0;
+  const attention = (health?.consecutiveFailures ?? 0) >= 3;
+
+  useEffect(
+    () => () => {
+      requestGeneration.current += 1;
+    },
+    [],
+  );
+
+  async function checkForUpdate(): Promise<void> {
+    if (checkNow === undefined || checking) return;
+    const generation = ++requestGeneration.current;
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const result = await checkNow();
+      if (generation === requestGeneration.current) setCheckResult(result);
+    } catch {
+      if (generation === requestGeneration.current) setCheckResult({ status: 'bridge_failed' });
+    } finally {
+      if (generation === requestGeneration.current) setChecking(false);
+    }
+  }
+
   return (
     <div
       className={`settings-group settings-update-health${attention ? ' attention' : ''}`}
       data-testid="settings-update-health"
-      role="status"
     >
-      <span className="settings-field-label">自動更新</span>
+      <span className="settings-field-label">アップデート</span>
       <p className={failing ? 'settings-update-warning' : 'settings-hint'}>
         {failing
-          ? `自動更新が連続 ${health.consecutiveFailures} 回失敗しています（${
-              health.lastErrorCategory === null
+          ? `自動更新が連続 ${health!.consecutiveFailures} 回失敗しています（${
+              health!.lastErrorCategory === null
                 ? '不明'
-                : UPDATE_ERROR_LABEL[health.lastErrorCategory]
+                : UPDATE_ERROR_LABEL[health!.lastErrorCategory]
             }）。`
-          : '自動更新は正常です。'}
+          : health === null
+            ? '更新状態を読み込んでいます。'
+            : '自動更新は正常です。'}
       </p>
-      <p className="settings-hint">
-        成功 {health.successfulChecks}回 / 失敗 {health.failedChecks}回
-      </p>
-      {failing && (
-        <div className="settings-update-actions">
-          <button
-            type="button"
-            className={attention ? 'settings-primary-button' : 'settings-secondary-button'}
-            onClick={() => window.sprintCoder?.updates?.retry()}
-          >
-            今すぐ再試行
-          </button>
-          <button
-            type="button"
-            className="settings-secondary-button"
-            onClick={() => window.sprintCoder?.updates?.openManualUpdate()}
-          >
-            手動更新を開く
-          </button>
-          <button
-            type="button"
-            className="settings-secondary-button"
-            onClick={() => window.sprintCoder?.updates?.openUpdateLog()}
-          >
-            更新ログを確認
-          </button>
-        </div>
+      {health !== null && (
+        <p className="settings-hint">
+          成功 {health.successfulChecks}回 / 失敗 {health.failedChecks}回
+        </p>
+      )}
+      <div className="settings-update-actions">
+        <button
+          type="button"
+          className={attention ? 'settings-primary-button' : 'settings-secondary-button'}
+          data-testid="settings-check-update"
+          disabled={!canCheck || checking}
+          onClick={() => void checkForUpdate()}
+        >
+          {checking ? '確認中…' : 'アップデートを確認'}
+        </button>
+        {failing && (
+          <>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              onClick={() => window.sprintCoder?.updates?.openManualUpdate()}
+            >
+              手動更新を開く
+            </button>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              onClick={() => window.sprintCoder?.updates?.openUpdateLog()}
+            >
+              更新ログを確認
+            </button>
+          </>
+        )}
+      </div>
+      {checkResult !== null && (
+        <p
+          className={
+            checkResult.status === 'failed' || checkResult.status === 'bridge_failed'
+              ? 'settings-update-warning'
+              : 'settings-hint'
+          }
+          data-testid="settings-update-result"
+          role="status"
+          aria-live="polite"
+        >
+          {updateCheckResultText(checkResult)}
+        </p>
       )}
     </div>
   );
@@ -726,6 +805,56 @@ function LicenseGroup() {
         <summary>ライセンス全文を表示</summary>
         <pre data-testid="settings-license-text">{mitLicenseText.trim()}</pre>
       </details>
+    </div>
+  );
+}
+
+function SoundEffectsGroup() {
+  const [preferences, setPreferences] = useState(readSoundEffectPreferences);
+
+  function setEnabled(enabled: boolean): void {
+    setSoundEffectsEnabled(enabled);
+    setPreferences((current) => ({ ...current, enabled }));
+    if (enabled) void unlockSoundEffects();
+  }
+
+  function setVolume(volume: number): void {
+    setSoundEffectsVolume(volume);
+    setPreferences((current) => ({ ...current, volume }));
+  }
+
+  return (
+    <div className="settings-group" data-testid="settings-sound-effects">
+      <span className="settings-field-label">効果音</span>
+      <label className="settings-skill-row">
+        <input
+          type="checkbox"
+          data-testid="settings-sound-effects-enabled"
+          checked={preferences.enabled}
+          onChange={(event) => setEnabled(event.target.checked)}
+        />
+        <span>
+          <strong>Taskの重要な状態を音で知らせる</strong>
+          <small>完了、失敗、承認待ちだけをMinimalサウンドで知らせます。</small>
+        </span>
+      </label>
+      <label className="settings-field" htmlFor="settings-sound-effects-volume">
+        <span className="settings-field-label">音量</span>
+        <select
+          id="settings-sound-effects-volume"
+          data-testid="settings-sound-effects-volume"
+          value={preferences.volume}
+          disabled={!preferences.enabled}
+          onChange={(event) => setVolume(Number(event.target.value))}
+        >
+          {[0.1, 0.2, 0.3, 0.4, 0.5].map((volume) => (
+            <option key={volume} value={volume}>
+              {Math.round(volume * 100)}%
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="settings-hint">画面上の状態表示を補助する機能です。初期状態ではオフです。</p>
     </div>
   );
 }
@@ -1562,101 +1691,6 @@ function SprintCoderPrePromptSetting({ active }: { active: boolean }) {
       </p>
     </form>
   );
-}
-
-// Global Team setting: whether a Leader/Manager researches the Web before hiring Workers. Kept in
-// Persisted backend-only controls live here rather than in the app store. Main remains canonical,
-// so each dialog open reads a fresh value and response generations prevent a slow read from
-// overwriting a later save.
-function CodexUserConfigSetting({ active }: { active: boolean }) {
-  const [enabled, setEnabled] = useState<boolean | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const generation = useRef(0);
-  const inFlight = useRef(false);
-
-  useEffect(() => {
-    if (!active) return;
-    const api = codexUserConfigApi();
-    if (api === null) return;
-    const request = ++generation.current;
-    void api
-      .getCodexUserConfig()
-      .then((value) => {
-        if (request === generation.current) {
-          setError(null);
-          setEnabled(value.enabled);
-        }
-      })
-      .catch(() => {
-        if (request === generation.current)
-          setError('Codexユーザーconfig設定を読み込めませんでした。');
-      });
-    return () => {
-      if (request === generation.current) generation.current += 1;
-      inFlight.current = false;
-    };
-  }, [active]);
-
-  async function save(next: boolean): Promise<void> {
-    const api = codexUserConfigApi();
-    if (api === null || inFlight.current) return;
-    const request = ++generation.current;
-    inFlight.current = true;
-    const previous = enabled;
-    setEnabled(next);
-    setSaving(true);
-    setError(null);
-    try {
-      await api.setCodexUserConfig({ enabled: next });
-      if (request !== generation.current) return;
-    } catch {
-      if (request !== generation.current) return;
-      setEnabled(previous);
-      setError('設定を保存できませんでした。直前の値に戻しました。');
-    } finally {
-      if (request === generation.current) {
-        inFlight.current = false;
-        setSaving(false);
-      }
-    }
-  }
-
-  const unavailable = codexUserConfigApi() === null;
-  return (
-    <fieldset className="settings-group" aria-busy={enabled === null && !unavailable}>
-      <legend>Codexユーザー設定</legend>
-      <label className={`settings-skill-row${unavailable ? ' disabled' : ''}`}>
-        <input
-          type="checkbox"
-          checked={enabled ?? false}
-          disabled={unavailable || enabled === null || saving}
-          aria-describedby="settings-codex-user-config-hint"
-          onChange={(event) => void save(event.target.checked)}
-        />
-        <span>
-          <strong>ユーザーconfig・MCPをTurnへ引き継ぐ</strong>
-          <small>{enabled === true ? 'ON · Turn開始時に隔離コピー' : 'OFF · 既定の隔離実行'}</small>
-        </span>
-      </label>
-      <p className="settings-hint" id="settings-codex-user-config-hint">
-        既定はOFFです。ONではTurn開始時のconfig.tomlを専用homeへコピーします。元の設定やSkillは変更しません。
-        ユーザーMCPはSprint CoderのTool Broker管理外であり、権限・監査ポリシーは適用されません。
-      </p>
-      {error !== null && <p role="alert">{error}</p>}
-    </fieldset>
-  );
-}
-
-function codexUserConfigApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
-  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
-  if (
-    settings === undefined ||
-    typeof settings.getCodexUserConfig !== 'function' ||
-    typeof settings.setCodexUserConfig !== 'function'
-  )
-    return null;
-  return settings;
 }
 
 function TeamResearchSetting({ active }: { active: boolean }) {

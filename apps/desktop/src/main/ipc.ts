@@ -101,8 +101,6 @@ import {
   runtimeEffortSetInputSchema,
   runtimeCodexEffortSetInputSchema,
   runtimeSettingsSchema,
-  codexUserConfigSettingsSchema,
-  codexUserConfigSettingsSetInputSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
   teamModelResearchSettingsSchema,
@@ -865,7 +863,6 @@ export class IpcRouter {
       bindTeamMcpProcess: (turnId, identity) =>
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
-      codexUserConfigEnabled: () => this.persistence.getCodexUserConfigEnabled(),
       allowSimulation: process.env['SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS'] === '1',
     });
     this.teamWorkerRuntime = new ProviderAwareTeamWorkerRuntime({
@@ -1191,7 +1188,6 @@ export class IpcRouter {
       },
       'codex',
       join(app.getPath('userData'), 'codex-isolated'),
-      () => ({ inheritUserConfig: this.persistence.getCodexUserConfigEnabled() }),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       (taskId, turnId, request, signal) =>
         this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
@@ -1206,7 +1202,6 @@ export class IpcRouter {
         this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
       'claude',
       join(app.getPath('userData'), 'codex-isolated'),
-      undefined,
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       (taskId, turnId, request, signal) =>
         this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
@@ -1366,21 +1361,6 @@ export class IpcRouter {
           modelFallbackNotice: this.persistence.takeModelFallbackNotice(),
         };
       },
-    );
-    this.handle(
-      IPC_CHANNELS.settingsGetCodexUserConfig,
-      emptyPayloadSchema,
-      codexUserConfigSettingsSchema,
-      () => ({ enabled: this.persistence.getCodexUserConfigEnabled() }),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.settingsSetCodexUserConfig,
-      codexUserConfigSettingsSetInputSchema,
-      z.undefined(),
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetCodexUserConfig, () =>
-          this.persistence.setCodexUserConfigEnabled(input.enabled),
-        ).value,
     );
     this.handle(
       IPC_CHANNELS.settingsGetTeamModelResearch,

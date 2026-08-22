@@ -33,8 +33,6 @@ function stubBridge(): void {
     sprintCoder: {
       settings: {
         getRuntime: () => Promise.resolve(),
-        getCodexUserConfig: () => Promise.resolve({ enabled: false }),
-        setCodexUserConfig: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
         getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
@@ -82,7 +80,8 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-model"');
     expect(html).toContain('data-testid="settings-effort"');
     expect(html).toContain('data-testid="settings-cli-codex"');
-    expect(html).toContain('ユーザーMCPはSprint CoderのTool Broker管理外');
+    expect(html).not.toContain('Codexユーザー設定');
+    expect(html).not.toContain('ユーザーconfig・MCPをTurnへ引き継ぐ');
     expect(html).toContain('data-testid="settings-team-research"');
     expect(html).toContain('data-testid="settings-team-defaults"');
     expect(html).toContain('data-testid="settings-team-models"');
@@ -105,6 +104,8 @@ describe('which body the flag selects', () => {
     expect(html).toContain('data-testid="settings-model"');
     expect(html).toContain('data-testid="settings-cli-claude"');
     expect(html).not.toContain('settings-runtime-');
+    expect(html).not.toContain('Codexユーザー設定');
+    expect(html).not.toContain('ユーザーconfig・MCPをTurnへ引き継ぐ');
   });
 
   it('closes and labels the same way in both bodies, and says so when the bridge is missing', () => {
@@ -131,6 +132,24 @@ describe('which body the flag selects', () => {
       expect(html).toContain('data-testid="settings-license-details"');
       expect(html).toContain('Permission is hereby granted, free of charge');
       expect(html).toContain('THE SOFTWARE IS PROVIDED');
+    }
+  });
+
+  it('offers a manual update check in both settings layouts', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-check-update"');
+      expect(html).toContain('アップデートを確認');
+    }
+  });
+
+  it('offers muted-by-default Task sound effects in both settings layouts', () => {
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('data-testid="settings-sound-effects"');
+      expect(html).toContain('Taskの重要な状態を音で知らせる');
+      expect(html).toContain('data-testid="settings-sound-effects-enabled"');
+      expect(html).toContain('data-testid="settings-sound-effects-volume"');
     }
   });
 

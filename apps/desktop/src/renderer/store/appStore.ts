@@ -53,6 +53,7 @@ import {
   type CommandTailProjection,
 } from './command-projection';
 import { accessPresetForNewTask, rememberAccessPreset } from '../lib/access-preset-preference';
+import { playSoundForEvent } from '../lib/ui-sound';
 
 export type TurnStatus =
   'running' | 'canceling' | 'completed' | 'canceled' | 'failed' | 'interrupted';
@@ -512,6 +513,7 @@ function subscribeToTask(
       return;
     }
     handleTurnEvent(taskId, ev, apply);
+    if ('turnId' in ev && get().turnByTask[taskId]?.turnId === ev.turnId) playSoundForEvent(ev);
     if (ev.type === 'turn.completed') void get().loadSkills();
   };
   currentUnsubscribe =

@@ -67,8 +67,6 @@ import {
   runtimeSetInputSchema,
   runtimeSettingsGetInputSchema,
   runtimeSettingsSchema,
-  codexUserConfigSettingsSchema,
-  codexUserConfigSettingsSetInputSchema,
   sprintCoderPrePromptSchema,
   sprintCoderPrePromptSetInputSchema,
   skillCandidateInputSchema,
@@ -86,6 +84,7 @@ import {
   skillScanResultSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
+  updateCheckResultSchema,
   updateHealthSchema,
   runtimeFailureDiagnosticQuerySchema,
   runtimeFailureDiagnosticExportSchema,
@@ -615,7 +614,8 @@ const api: SprintCoderApi = {
       ipcRenderer.on(IPC_CHANNELS.updateHealthEvent, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.updateHealthEvent, handler);
     },
-    retry: () => ipcRenderer.send(IPC_CHANNELS.updateRetry),
+    checkNow: async () =>
+      updateCheckResultSchema.parse(await ipcRenderer.invoke(IPC_CHANNELS.updateCheckNow)),
     openManualUpdate: () => ipcRenderer.send(IPC_CHANNELS.updateOpenManual),
     openUpdateLog: () => ipcRenderer.send(IPC_CHANNELS.updateOpenLog),
   },
@@ -701,20 +701,6 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.settingsSetCodexEffort, runtimeCodexEffortSetInputSchema, z.undefined(), {
         effort,
       }),
-    getCodexUserConfig: () =>
-      invoke(
-        IPC_CHANNELS.settingsGetCodexUserConfig,
-        emptyPayloadSchema,
-        codexUserConfigSettingsSchema,
-        {},
-      ),
-    setCodexUserConfig: (input) =>
-      invoke(
-        IPC_CHANNELS.settingsSetCodexUserConfig,
-        codexUserConfigSettingsSetInputSchema,
-        z.undefined(),
-        input,
-      ),
     getTeamModelResearch: () =>
       invoke(
         IPC_CHANNELS.settingsGetTeamModelResearch,

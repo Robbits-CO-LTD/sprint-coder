@@ -26,6 +26,7 @@ import {
 import type { TeamViewPreference } from './lib/team-view-preference';
 import { readSetupComplete, shouldShowSetupWizard } from './lib/setup-preference';
 import { SetupWizard } from './components/SetupWizard';
+import { unlockSoundEffects } from './lib/ui-sound';
 
 export default function App() {
   const sprintCoderAvailable = useAppStore((s) => s.sprintCoderAvailable);
@@ -42,6 +43,22 @@ export default function App() {
   useEffect(() => {
     void init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const unlock = () => {
+      void unlockSoundEffects().then((unlocked) => {
+        if (!unlocked) return;
+        document.removeEventListener('pointerdown', unlock, { capture: true });
+        document.removeEventListener('keydown', unlock, { capture: true });
+      });
+    };
+    document.addEventListener('pointerdown', unlock, { capture: true });
+    document.addEventListener('keydown', unlock, { capture: true });
+    return () => {
+      document.removeEventListener('pointerdown', unlock, { capture: true });
+      document.removeEventListener('keydown', unlock, { capture: true });
+    };
   }, []);
 
   // --- Chat <-> Leader morph orchestration (Phase 6 Slice 6.2, docs §4.6 / ADR-002) ---

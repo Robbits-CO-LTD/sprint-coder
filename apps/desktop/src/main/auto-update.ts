@@ -1,5 +1,5 @@
 import type { AutoUpdater, Dialog } from 'electron';
-import type { UpdateErrorCategory } from '@sprint-coder/contracts';
+import type { UpdateCheckResult, UpdateErrorCategory } from '@sprint-coder/contracts';
 
 const GITHUB_REPOSITORY = 'Robbits-CO-LTD/sprint-coder';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=20`;
@@ -72,7 +72,7 @@ export type AutoUpdateOptions = Readonly<{
 }>;
 
 export type AutoUpdateController = Readonly<{
-  checkNow(): Promise<void>;
+  checkNow(): Promise<UpdateCheckResult>;
   stop(): void;
 }>;
 
@@ -104,7 +104,7 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
       platform: options.platform,
       architecture: options.architecture,
     });
-    return { checkNow: async () => undefined, stop: () => undefined };
+    return { checkNow: async () => ({ status: 'unsupported' }), stop: () => undefined };
   }
 
   let stopped = false;
@@ -169,19 +169,20 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
     }
   };
 
-  const checkNow = async (): Promise<void> => {
-    if (stopped || checking) return;
+  const checkNow = async (): Promise<UpdateCheckResult> => {
+    if (stopped) return { status: 'unsupported' };
+    if (checking) return { status: 'already_checking' };
     checking = true;
     failureRecordedForAttempt = false;
     try {
       const release = await discoverUpdate(options);
-      if (stopped) return;
+      if (stopped) return { status: 'unsupported' };
       if (release === null) {
         recordSuccess();
         options.logger.debug('No automatic update is available', {
           currentVersion: options.currentVersion,
         });
-        return;
+        return { status: 'up_to_date' };
       }
       targetVersion = release.version;
       options.updater.setFeedURL(
@@ -190,11 +191,13 @@ export function startAutoUpdate(options: AutoUpdateOptions): AutoUpdateControlle
           : { url: release.feedUrl },
       );
       await options.updater.checkForUpdates();
-      if (stopped) return;
+      if (stopped) return { status: 'unsupported' };
       options.logger.info('Automatic update download started', { version: release.version });
+      return { status: 'update_available', version: release.version };
     } catch (error) {
       recordFailure(error);
       options.logger.warn('Automatic update check failed', error);
+      return { status: 'failed', errorCategory: classifyUpdateError(error) };
     } finally {
       checking = false;
     }
