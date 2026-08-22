@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderConnection } from '@sprint-coder/contracts';
-import { DeterministicMockProviderRuntime, MainProviderRegistry } from './provider-runtime';
+import {
+  captureProviderImageInputCapability,
+  DeterministicMockProviderRuntime,
+  MainProviderRegistry,
+} from './provider-runtime';
 
 const connection: ProviderConnection = {
   id: 'mock:local',
@@ -55,5 +59,27 @@ describe('Provider Runtime Registry', () => {
       type: 'resolution',
       resolution: { resolvedProvider: 'mock', resolvedModel: 'mock-model' },
     });
+  });
+
+  it('fails closed with a stable revision when a Provider catalog has unknown image capability', async () => {
+    const runtime = new DeterministicMockProviderRuntime();
+    const first = await captureProviderImageInputCapability(
+      runtime,
+      connection,
+      'mock-model',
+      new AbortController().signal,
+      () => 10,
+    );
+    const second = await captureProviderImageInputCapability(
+      runtime,
+      connection,
+      'mock-model',
+      new AbortController().signal,
+      () => 20,
+    );
+
+    expect(first).toMatchObject({ value: null, capturedAtMs: 10 });
+    expect(second).toMatchObject({ value: null, capturedAtMs: 20 });
+    expect(second.revision).toBe(first.revision);
   });
 });

@@ -10,6 +10,7 @@ import {
   OpenAICompatibleProviderClient,
   openAICompatibleChatCompletionRequest,
   resolveOllamaNativeGenerateEndpoint,
+  resolveOllamaNativeShowEndpoint,
 } from './openai-compatible-provider-client';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 
@@ -100,6 +101,161 @@ describe('OpenAICompatibleProviderClient', () => {
     ['http://localhost:11434/custom', null],
   ])('resolves only a pinned loopback Ollama native endpoint from %s', (baseUrl, expected) => {
     expect(resolveOllamaNativeGenerateEndpoint(baseUrl)).toBe(expected);
+  });
+
+  it('resolves the native Ollama show endpoint under the same loopback policy', () => {
+    expect(resolveOllamaNativeShowEndpoint('http://localhost:11434/v1')).toBe(
+      'http://127.0.0.1:11434/api/show',
+    );
+    expect(resolveOllamaNativeShowEndpoint('https://localhost:11434/v1')).toBeNull();
+    expect(resolveOllamaNativeShowEndpoint('http://192.168.1.20:11434/v1')).toBeNull();
+  });
+
+  it.each([
+    [['completion', 'vision'], true],
+    [['completion', 'tools'], false],
+  ] as const)(
+    'derives Ollama image input only from bounded /api/show capabilities %j',
+    async (capabilities, expected) => {
+      const ollamaProfile: ProviderProfile = {
+        ...profile,
+        id: 'ollama',
+        baseUrl: 'http://localhost:11434/v1',
+        baseUrlConfigurable: true,
+        nativeModelLifecycle: 'ollama',
+        requiredCredentialFields: [],
+      };
+      const profiles = new MainProviderProfileRegistry();
+      profiles.register(ollamaProfile);
+      const requests: Array<{ url: string; body: unknown }> = [];
+      const client = new OpenAICompatibleProviderClient(
+        profiles,
+        () => ({}),
+        async (input, init) => {
+          requests.push({
+            url: String(input),
+            body: init?.body === undefined ? null : JSON.parse(String(init.body)),
+          });
+          return new Response(JSON.stringify({ capabilities }), { status: 200 });
+        },
+        () => new Date('2026-08-22T00:00:00.000Z'),
+      );
+      const ollamaConnection = {
+        ...connection,
+        id: 'ollama:capability',
+        providerId: 'ollama',
+      };
+
+      const captured = await client.captureImageInputCapability(
+        ollamaConnection,
+        'gemma4:12b',
+        new AbortController().signal,
+      );
+
+      expect(captured).toMatchObject({
+        value: expected,
+        capturedAtMs: Date.parse('2026-08-22T00:00:00.000Z'),
+      });
+      expect(captured?.revision).toMatch(/^[a-f0-9]{64}$/);
+      expect(requests).toEqual([
+        {
+          url: 'http://127.0.0.1:11434/api/show',
+          body: { model: 'gemma4:12b', verbose: false },
+        },
+      ]);
+    },
+  );
+
+  it('fails closed on a malformed Ollama capability response', async () => {
+    const ollamaProfile: ProviderProfile = {
+      ...profile,
+      id: 'ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      nativeModelLifecycle: 'ollama',
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(ollamaProfile);
+    const client = new OpenAICompatibleProviderClient(
+      profiles,
+      () => ({}),
+      async () => new Response(JSON.stringify({ capabilities: ['vision', { raw: 'secret' }] })),
+    );
+
+    await expect(
+      client.captureImageInputCapability(
+        { ...connection, id: 'ollama:malformed', providerId: 'ollama' },
+        'gemma4:12b',
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ value: null });
+  });
+
+  it('accepts bounded Ollama show metadata larger than 64 KiB', async () => {
+    const ollamaProfile: ProviderProfile = {
+      ...profile,
+      id: 'ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      nativeModelLifecycle: 'ollama',
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(ollamaProfile);
+    const client = new OpenAICompatibleProviderClient(
+      profiles,
+      () => ({}),
+      async () =>
+        new Response(
+          JSON.stringify({ capabilities: ['completion', 'vision'], license: 'x'.repeat(70_000) }),
+        ),
+    );
+
+    await expect(
+      client.captureImageInputCapability(
+        { ...connection, id: 'ollama:large-show', providerId: 'ollama' },
+        'gemma4:12b',
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ value: true });
+  });
+
+  it('bounds an unresponsive Ollama image capability probe', async () => {
+    vi.useFakeTimers();
+    try {
+      const ollamaProfile: ProviderProfile = {
+        ...profile,
+        id: 'ollama',
+        baseUrl: 'http://localhost:11434/v1',
+        baseUrlConfigurable: true,
+        nativeModelLifecycle: 'ollama',
+        requiredCredentialFields: [],
+      };
+      const profiles = new MainProviderProfileRegistry();
+      profiles.register(ollamaProfile);
+      const client = new OpenAICompatibleProviderClient(
+        profiles,
+        () => ({}),
+        (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+              once: true,
+            });
+          }),
+      );
+      const capability = client.captureImageInputCapability(
+        { ...connection, id: 'ollama:capability-timeout', providerId: 'ollama' },
+        'gemma4:12b',
+        new AbortController().signal,
+      );
+      const expected = expect(capability).resolves.toMatchObject({ value: null });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expected;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('releases a bundled loopback Ollama model after its logical lease', async () => {
@@ -265,6 +421,63 @@ describe('OpenAICompatibleProviderClient', () => {
     },
     120_000,
   );
+  it.runIf(
+    process.env['SPRINT_CODER_OLLAMA_TEST'] === '1' &&
+      process.env['SPRINT_CODER_OLLAMA_VISION_MODEL'] !== undefined,
+  )('reads real local Ollama vision capability without loading the model', async () => {
+    const ollamaProfile: ProviderProfile = {
+      ...profile,
+      id: 'ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      nativeModelLifecycle: 'ollama',
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(ollamaProfile);
+    const client = new OpenAICompatibleProviderClient(profiles, () =>
+      approvedCredential(ollamaProfile),
+    );
+    const ollamaConnection = {
+      ...connection,
+      id: 'ollama:real-vision',
+      providerId: 'ollama',
+    };
+
+    await expect(
+      client.captureImageInputCapability(
+        ollamaConnection,
+        process.env['SPRINT_CODER_OLLAMA_VISION_MODEL']!,
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ value: true });
+  });
+  it.runIf(
+    process.env['SPRINT_CODER_OLLAMA_TEST'] === '1' &&
+      process.env['SPRINT_CODER_OLLAMA_NONVISION_MODEL'] !== undefined,
+  )('rejects a real local Ollama model without vision capability', async () => {
+    const ollamaProfile: ProviderProfile = {
+      ...profile,
+      id: 'ollama',
+      baseUrl: 'http://localhost:11434/v1',
+      baseUrlConfigurable: true,
+      nativeModelLifecycle: 'ollama',
+      requiredCredentialFields: [],
+    };
+    const profiles = new MainProviderProfileRegistry();
+    profiles.register(ollamaProfile);
+    const client = new OpenAICompatibleProviderClient(profiles, () =>
+      approvedCredential(ollamaProfile),
+    );
+
+    await expect(
+      client.captureImageInputCapability(
+        { ...connection, id: 'ollama:real-nonvision', providerId: 'ollama' },
+        process.env['SPRINT_CODER_OLLAMA_NONVISION_MODEL']!,
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ value: false });
+  });
   it('classifies only resolved loopback endpoints as trusted local', () => {
     const configurable = { ...profile, baseUrlConfigurable: true };
     expect(
@@ -557,6 +770,37 @@ describe('OpenAICompatibleProviderClient', () => {
 });
 
 describe('openAICompatibleChatCompletionRequest', () => {
+  it('serializes accepted inline images as ordered data URLs on the same user message', () => {
+    expect(
+      openAICompatibleChatCompletionRequest({
+        executionId: 'execution-images',
+        connectionId: connection.id,
+        modelId: 'vision-model',
+        messages: [
+          {
+            role: 'user',
+            content: 'describe both',
+            inlineImages: [
+              { mimeType: 'image/png', base64: 'b25l' },
+              { mimeType: 'image/webp', base64: 'dHdv' },
+            ],
+          },
+        ],
+      }),
+    ).toMatchObject({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'describe both' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,b25l' } },
+            { type: 'image_url', image_url: { url: 'data:image/webp;base64,dHdv' } },
+          ],
+        },
+      ],
+    });
+  });
+
   it('maps tools and structured output without Provider-specific branches', () => {
     expect(
       openAICompatibleChatCompletionRequest({
