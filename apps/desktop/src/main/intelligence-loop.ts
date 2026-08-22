@@ -214,7 +214,10 @@ export function createDeterministicMockSampler(
 
 function commandFixture(): { executable: string; argv: string[] } {
   return process.platform === 'win32'
-    ? { executable: 'C:\\Windows\\System32\\where.exe', argv: ['where'] }
+    ? {
+        executable: 'C:\\Windows\\System32\\cmd.exe',
+        argv: ['/d', '/s', '/c', 'echo command ok'],
+      }
     : { executable: '/usr/bin/printf', argv: ['command ok\\n'] };
 }
 

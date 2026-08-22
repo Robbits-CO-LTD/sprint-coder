@@ -199,21 +199,21 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
     let executable_directory = executable_acl_required
         .then(|| executable_path.parent())
         .flatten();
-    if !set_acl(&root, &sid_string, true)
+    if !set_workspace_acl(&root, &sid_string)
         || executable_directory.is_some_and(|path| !set_read_tree_acl(path, &sid_string))
     {
-        let _ = remove_acl(&root, &sid_string, true);
+        let _ = remove_inherited_acl(&root, &sid_string);
         if let Some(path) = executable_directory {
-            let _ = remove_acl(path, &sid_string, true);
+            let _ = remove_tree_acl(path, &sid_string);
         }
         drop(sid);
         let _ = delete_appcontainer_profile(&profile);
         return Err("appcontainer_acl_failed".to_owned());
     }
     let result = spawn_appcontainer(sid.0, &root, executable, argv);
-    let workspace_acl_removed = remove_acl(&root, &sid_string, true);
+    let workspace_acl_removed = remove_inherited_acl(&root, &sid_string);
     let executable_acl_removed =
-        executable_directory.is_none_or(|path| remove_acl(path, &sid_string, true));
+        executable_directory.is_none_or(|path| remove_tree_acl(path, &sid_string));
     drop(sid);
     let profile_deleted = delete_appcontainer_profile(&profile);
     if !workspace_acl_removed || !executable_acl_removed || !profile_deleted {
@@ -337,18 +337,11 @@ fn sid_string(sid: PSID) -> Option<String> {
     }
 }
 
-fn set_acl(path: &Path, sid: &str, recursive: bool) -> bool {
-    let grant = if recursive {
-        format!("*{sid}:(OI)(CI)M")
-    } else {
-        format!("*{sid}:RX")
-    };
+fn set_workspace_acl(path: &Path, sid: &str) -> bool {
+    let grant = format!("*{sid}:(OI)(CI)M");
     let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
     command.arg(path).args(["/grant", &grant, "/C", "/Q"]);
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    if recursive {
-        command.arg("/T");
-    }
     command.status().is_ok_and(|status| status.success())
 }
 
@@ -363,15 +356,22 @@ fn set_read_tree_acl(path: &Path, sid: &str) -> bool {
     command.status().is_ok_and(|status| status.success())
 }
 
-fn remove_acl(path: &Path, sid: &str, recursive: bool) -> bool {
+fn remove_inherited_acl(path: &Path, sid: &str) -> bool {
     let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
     command
         .arg(path)
         .args(["/remove", &format!("*{sid}"), "/C", "/Q"]);
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    if recursive {
-        command.arg("/T");
-    }
+    command.status().is_ok_and(|status| status.success())
+}
+
+fn remove_tree_acl(path: &Path, sid: &str) -> bool {
+    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    command
+        .arg(path)
+        .args(["/remove", &format!("*{sid}"), "/C", "/Q", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command.status().is_ok_and(|status| status.success())
 }
 

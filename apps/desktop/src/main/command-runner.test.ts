@@ -283,17 +283,22 @@ describe('CommandRunner', () => {
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-command-'));
       const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-outside-'));
       roots.push(workspace, outside);
+      const nested = join(workspace, 'existing', 'nested');
+      const existing = join(nested, 'before.txt');
+      await mkdir(nested, { recursive: true });
+      await writeFile(existing, 'before');
       const spec = await prepareExecutionSpec({
         workspacePath: workspace,
         executable: process.execPath,
         argv: [
           '-e',
-          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
+          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); fs.writeFileSync(${JSON.stringify(existing)},fs.readFileSync(${JSON.stringify(existing)},'utf8')+'-after'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
         ],
       });
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
       expect(result.exitCode).toBe(7);
       await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(existing, 'utf8')).resolves.toBe('before-after');
       await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       });
@@ -328,6 +333,7 @@ describe('CommandRunner', () => {
         await Promise.all([first.dispose(), second.dispose()]);
       }
     },
+    10_000,
   );
 
   it('rejects a replacement inode at a persisted Project root path', async () => {
