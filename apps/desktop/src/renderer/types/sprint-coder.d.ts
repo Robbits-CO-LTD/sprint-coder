@@ -448,6 +448,14 @@ export type TurnEvent =
       seq: number;
       draft: import('@sprint-coder/contracts').SkillDraft;
     }
+  | {
+      type: 'skill.activated';
+      taskId: string;
+      turnId: string;
+      seq: number;
+      ref: import('@sprint-coder/contracts').SkillRef;
+      name: string;
+    }
   | { type: 'queue.changed'; taskId: string; seq: number; queued: QueuedInput[] }
   | { type: 'context.usage'; taskId: string; seq: number; usage: ContextUsage }
   | {
@@ -487,6 +495,11 @@ export type TurnSnapshot = {
   /** Absent until the backend implements context-usage tracking (graceful degrade). */
   contextUsage?: ContextUsage;
   pendingApprovals: ApprovalSummary[];
+  activatedSkills: {
+    turnId: string;
+    ref: import('@sprint-coder/contracts').SkillRef;
+    name: string;
+  }[];
   latestTurnDiff: TurnDiff | null;
 };
 
@@ -1116,8 +1129,14 @@ export interface SprintCoderApi {
       provider: import('@sprint-coder/contracts').SkillProvider,
       skillId: string,
     ): Promise<import('@sprint-coder/contracts').SkillPreviewResult>;
-    importSkill(previewId: string): Promise<import('@sprint-coder/contracts').SkillImportResult>;
-    updateSkill(previewId: string): Promise<import('@sprint-coder/contracts').SkillImportResult>;
+    importSkill(
+      previewId: string,
+      nativeModeConfirmed?: boolean,
+    ): Promise<import('@sprint-coder/contracts').SkillImportResult>;
+    updateSkill(
+      previewId: string,
+      nativeModeConfirmed?: boolean,
+    ): Promise<import('@sprint-coder/contracts').SkillImportResult>;
     setSkillEnabled(
       provider: import('@sprint-coder/contracts').SkillProvider,
       skillId: string,
@@ -1149,7 +1168,15 @@ export interface SprintCoderApi {
     discardDraft(draftId: string): Promise<void>;
     removeCreated(skillId: string, digest: string): Promise<void>;
     setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void>;
-    exportCreated(skillId: string, digest: string): Promise<string | null>;
+    setActivationPolicy(
+      ref: import('@sprint-coder/contracts').SkillRef,
+      policy: import('@sprint-coder/contracts').SkillActivationPolicy,
+    ): Promise<void>;
+    exportCreated(
+      skillId: string,
+      digest: string,
+      format?: 'original' | 'portable',
+    ): Promise<string | null>;
   };
   models: {
     query(

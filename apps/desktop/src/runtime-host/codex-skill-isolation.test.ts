@@ -1,5 +1,5 @@
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,12 +23,28 @@ describe('Codex Skill isolation', () => {
     await mkdir(sourceHome, { recursive: true });
     await mkdir(managed, { recursive: true });
     await writeFile(join(sourceHome, 'auth.json'), '{"token":"fixture"}');
-    await writeFile(join(managed, 'SKILL.md'), '---\nname: reviewer\ndescription: review\n---\n');
+    await mkdir(join(managed, 'agents'));
+    await writeFile(
+      join(managed, 'agents', 'openai.yaml'),
+      'interface:\n  display_name: Reviewer\n',
+    );
+    await writeFile(
+      join(managed, 'SKILL.md'),
+      '---\nname: reviewer\ndescription: review\ndisable-model-invocation: true\n---\nReview $0 with $ARGUMENTS.',
+    );
 
     const isolation = prepareCodexSkillIsolation({
       temporaryRoot: join(root, 'runtime'),
       cwd: root,
-      skills: [{ name: 'reviewer', path: managed }],
+      skills: [
+        {
+          name: 'reviewer',
+          path: managed,
+          arguments: 'src/app.ts carefully',
+          profile: 'claude-native',
+          runtimeSupport: 'portable',
+        },
+      ],
       environment: { CODEX_HOME: sourceHome },
     });
 
@@ -36,6 +52,15 @@ describe('Codex Skill isolation', () => {
     expect(isolation.sourceCodexHome).toBe(sourceHome);
     expect(isolation.stagedSkills[0]).toMatchObject({ name: 'reviewer' });
     expect(await readFile(isolation.stagedSkills[0]!.path, 'utf8')).toContain('name: reviewer');
+    expect(await readFile(isolation.stagedSkills[0]!.path, 'utf8')).toContain(
+      'Review src/app.ts with src/app.ts carefully.',
+    );
+    expect(await readFile(isolation.stagedSkills[0]!.path, 'utf8')).not.toContain(
+      'disable-model-invocation',
+    );
+    await expect(
+      readFile(join(dirname(isolation.stagedSkills[0]!.path), 'agents', 'openai.yaml'), 'utf8'),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await readFile(join(isolation.codexHome, 'auth.json'), 'utf8')).toBe(
       '{"token":"fixture"}',
     );

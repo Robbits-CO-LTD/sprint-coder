@@ -108,6 +108,11 @@ export type RuntimeProjectContextItem = Readonly<{
 export type RuntimeSkillInput = Readonly<{
   name: string;
   path: string;
+  activationPolicy?: 'manual' | 'auto-allowed';
+  profile?: 'portable' | 'codex-native' | 'claude-native';
+  runtimeSupport?: 'full' | 'portable' | 'blocked';
+  selected?: boolean;
+  arguments?: string;
 }>;
 
 /** Additive, optional per-turn addendum: when present, the Codex/Claude adapter wires the real Leader
@@ -581,12 +586,39 @@ function isRuntimeSkillInputs(value: unknown): value is RuntimeSkillInput[] {
       (item) =>
         typeof item === 'object' &&
         item !== null &&
-        Object.keys(item).every((key) => key === 'name' || key === 'path') &&
+        Object.keys(item).every((key) =>
+          [
+            'name',
+            'path',
+            'activationPolicy',
+            'profile',
+            'runtimeSupport',
+            'selected',
+            'arguments',
+          ].includes(key),
+        ) &&
         typeof (item as Record<string, unknown>)['name'] === 'string' &&
         /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(
           (item as Record<string, unknown>)['name'] as string,
         ) &&
         typeof (item as Record<string, unknown>)['path'] === 'string' &&
+        ((item as Record<string, unknown>)['activationPolicy'] === undefined ||
+          ['manual', 'auto-allowed'].includes(
+            String((item as Record<string, unknown>)['activationPolicy']),
+          )) &&
+        ((item as Record<string, unknown>)['profile'] === undefined ||
+          ['portable', 'codex-native', 'claude-native'].includes(
+            String((item as Record<string, unknown>)['profile']),
+          )) &&
+        ((item as Record<string, unknown>)['runtimeSupport'] === undefined ||
+          ['full', 'portable', 'blocked'].includes(
+            String((item as Record<string, unknown>)['runtimeSupport']),
+          )) &&
+        ((item as Record<string, unknown>)['selected'] === undefined ||
+          typeof (item as Record<string, unknown>)['selected'] === 'boolean') &&
+        ((item as Record<string, unknown>)['arguments'] === undefined ||
+          (typeof (item as Record<string, unknown>)['arguments'] === 'string' &&
+            String((item as Record<string, unknown>)['arguments']).length <= 8_000)) &&
         isManagedRuntimeSkillPath(
           (item as Record<string, unknown>)['name'] as string,
           (item as Record<string, unknown>)['path'] as string,

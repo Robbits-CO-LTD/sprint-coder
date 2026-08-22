@@ -17,7 +17,7 @@ description: Claude CLIまたはCodex CLIにある既存Skillを、AIがSprint C
 2. 確認形式のCLIとSkillを復唱し、その組み合わせ以外を対象にしない。否定、追加指示、ClaudeとCodexの併記を確認として扱わない。
 3. ユーザー回答からSkill IDを確定し、skill_import_readを一度呼ぶ。Claudeは ~/.claude/skills、Codexは ~/.codex/skills と ~/.agents/skills の順でMain側が安全に探索する。絶対パスが指定された場合もbasenameをSkill IDとして渡し、選択されたCLIのskills配下以外を直接読み取らない。
 4. skill_import_readが返した全ファイルと警告を確認する。シンボリックリンク、秘密情報、256ファイル超、UTF-8テキスト合計700 KiB超はツールが拒否するため、回避せず理由を報告する。
-5. 元の意図と手順を維持しつつSprint Coder互換へ仕上げる。必ずSKILL.mdを含め、frontmatterはnameとdescriptionだけにする。Skill IDは英数字で始まる英数字・ピリオド・アンダースコア・ハイフンだけにする。Claude/Codex固有の存在しないツール名やパスは、Sprint Coderで実行可能な手順へ置き換える。不要なメタデータやキャッシュは除外する。
+5. 元の意図と手順を維持しつつPortableなSprint Coder互換へ仕上げる。必ずSKILL.mdを含め、frontmatterはnameとdescriptionを基本に、必要なOpen Agent Skills標準fieldだけを残す。Skill IDは英数字で始まる英数字・ピリオド・アンダースコア・ハイフンだけにする。Claude/Codex固有の存在しないツール名、!command、権限昇格、ローカル固定パスは、Managed Harnessで実行可能な手順へ置き換える。不要なメタデータやキャッシュは除外する。
 6. 全ファイルをUTF-8テキストとして揃え、skill_import_readが返したcli、skillId、digestをsourceへそのまま指定してskill_import_installを一度呼ぶ。このツールの成功は、ユーザー回答と読み取った元Skillへ結び付いた検証済みSkillがSprint Coderへインストールされ、有効になったことを意味する。
 7. 検証エラー時だけ修正して再実行する。元Skillの削除・変更、Provider設定、Access preset、DB、他のSkillは変更しない。
 8. 最終報告に、import元CLI、元Skill、作成されたSkill名、互換化した点、有効化済みであることを含める。

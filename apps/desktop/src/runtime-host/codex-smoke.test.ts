@@ -119,6 +119,46 @@ describe.skipIf(!enabled)('Codex runtime adapter (REAL CLI smoke)', () => {
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
   }, 60_000);
 
+  it('executes only the explicitly selected managed Skill revision', async () => {
+    const skillRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-selected-skill-'));
+    cleanupDirs.push(skillRoot);
+    writeFileSync(
+      join(skillRoot, 'SKILL.md'),
+      '---\nname: selected-smoke\ndescription: Real selected Skill smoke\n---\nReturn exactly SELECTED_SKILL_OK.',
+    );
+    const adapter = await createProbedCodexAdapter();
+    const events: RuntimeCanonicalEvent[] = [];
+    const failures: PublicError[] = [];
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'codex-smoke-selected-skill',
+        'Follow the selected Skill.',
+        [],
+        () => undefined,
+        null,
+        'auto',
+        (event) => events.push(event),
+        (error) => failures.push(error),
+        () => resolve(),
+        undefined,
+        undefined,
+        'read-only',
+        [
+          {
+            name: 'selected-smoke',
+            path: skillRoot,
+            profile: 'portable',
+            runtimeSupport: 'full',
+            activationPolicy: 'manual',
+            selected: true,
+          },
+        ],
+      );
+    });
+    expect(failures).toEqual([]);
+    expect(events.at(-1)).toMatchObject({ type: 'completed', finalText: 'SELECTED_SKILL_OK' });
+  }, 60_000);
+
   it('uses the client-hosted managed create_file tool instead of a native shell tool', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-codex-operation-'));
     cleanupDirs.push(workspace);

@@ -111,6 +111,7 @@ import {
   teamModelSettingsSchema,
   teamBlueprintSchema,
   skillCandidateInputSchema,
+  skillActivationPolicyInputSchema,
   skillCatalogSchema,
   skillCatalogItemSchema,
   skillDraftSchema,
@@ -123,6 +124,7 @@ import {
   skillInstalledInputSchema,
   skillPreviewResultSchema,
   skillScanResultSchema,
+  skillExportInputSchema,
   reasoningBatchSchema,
   runtimeStatusSchema,
   runtimeFailureDiagnosticQuerySchema,
@@ -262,8 +264,14 @@ const MAX_PROVIDER_LEADER_ROUNDS = 32;
 export function contextFragmentsForRuntime(
   kind: 'codex' | 'claude' | 'provider',
   fragments: readonly RuntimeContextFragment[],
+  nativeSkillContents: ReadonlySet<string> = new Set(),
 ): RuntimeContextFragment[] {
-  return kind === 'codex' ? fragments.filter(({ source }) => source !== 'skill') : [...fragments];
+  if (kind === 'codex') return fragments.filter(({ source }) => source !== 'skill');
+  if (kind === 'claude' && nativeSkillContents.size > 0)
+    return fragments.filter(
+      ({ source, content }) => source !== 'skill' || !nativeSkillContents.has(content),
+    );
+  return [...fragments];
 }
 
 /**
@@ -382,6 +390,7 @@ import {
   bindBuiltinImagegenSkillForTurn,
 } from './imagegen-builtin';
 import { SkillStore } from './skill-store';
+import { portableSkillCompatibility } from './skill-compatibility';
 import {
   TeamMcpBridge,
   defaultSocketPathFactory,
@@ -779,6 +788,9 @@ export class IpcRouter {
     this.persistence.setSkillCatalogContextProvider?.((selections, includeBuiltinTeamSkill) =>
       this.skillSettings.contextCatalogForTurn(selections, includeBuiltinTeamSkill),
     );
+    this.persistence.setAutoSkillProvider?.((runtime) =>
+      this.skillSettings.pinnedAutoCandidates(runtime),
+    );
     this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
@@ -1138,6 +1150,26 @@ export class IpcRouter {
             .readImportSource(parsed)
             .catch((error) => Promise.reject(skillSettingsPublicError(error)));
         },
+        activateSkill: async (input, context) => {
+          const parsed = z
+            .object({
+              skillId: z
+                .string()
+                .min(1)
+                .max(128)
+                .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+              digest: z.string().regex(/^[a-f0-9]{64}$/),
+            })
+            .strict()
+            .parse(input);
+          const activated = this.persistence.activateTurnAutoSkill(
+            context.taskId,
+            context.turnId,
+            parsed,
+          );
+          this.publish(activated.event);
+          return activated.skill;
+        },
       },
       ...(workspaceEdit === undefined ? {} : { workspaceEdit }),
     });
@@ -1491,7 +1523,7 @@ export class IpcRouter {
       skillImportResultSchema,
       (input, event) =>
         this.skillSettings
-          .import(event.sender.id, input.previewId)
+          .import(event.sender.id, input.previewId, input.nativeModeConfirmed)
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
@@ -1500,7 +1532,7 @@ export class IpcRouter {
       skillImportResultSchema,
       (input, event) =>
         this.skillSettings
-          .update(event.sender.id, input.previewId)
+          .update(event.sender.id, input.previewId, input.nativeModeConfirmed)
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
@@ -1584,8 +1616,17 @@ export class IpcRouter {
           .catch((error) => Promise.reject(skillSettingsPublicError(error))),
     );
     this.handle(
+      IPC_CHANNELS.skillsSetActivationPolicy,
+      skillActivationPolicyInputSchema,
+      z.undefined(),
+      (input) =>
+        this.skillSettings
+          .setActivationPolicy(input.ref, input.policy)
+          .catch((error) => Promise.reject(skillSettingsPublicError(error))),
+    );
+    this.handle(
       IPC_CHANNELS.skillsExportCreated,
-      createdSkillMutationInputSchema,
+      skillExportInputSchema,
       z.string().nullable(),
       async (input) => {
         const result = await dialog.showOpenDialog(this.window, {
@@ -1595,7 +1636,7 @@ export class IpcRouter {
         const destinationParent = result.filePaths[0];
         if (result.canceled || destinationParent === undefined) return null;
         return this.skillSettings
-          .exportCreated(input.skillId, input.digest, destinationParent)
+          .exportCreated(input.skillId, input.digest, destinationParent, input.format)
           .catch((error) => Promise.reject(skillSettingsPublicError(error)));
       },
     );
@@ -3832,10 +3873,11 @@ export class IpcRouter {
       builtinRuntimeForModelSelection(started.modelSelection) === null
         ? started.modelSelection.connectionId
         : null;
+    const autoSkills = started.autoSkills;
     if (externalConnectionId !== null) {
       this.turnRuntimes.set(started.turnId, 'provider');
       this.turnWorkspaceByTurn.set(started.turnId, started.workspaceSet);
-      void this.startProviderTurn(started, externalConnectionId, started.teamTurn);
+      void this.startProviderTurn(started, externalConnectionId, started.teamTurn, autoSkills);
       return;
     }
     this.pushRuntimeStatus({
@@ -3959,10 +4001,26 @@ export class IpcRouter {
     );
     const dispatchEgress =
       kind === 'claude' ? dispatchAfterClaudeProviderEgress : dispatchAfterCodexProviderEgress;
-    const runtimeSkills = started.skills.map((skill) => ({
-      name: skill.selection.ref.skillId,
-      path: skill.packagePath,
-    }));
+    const runtimeSkills = [...started.skills, ...autoSkills].map((skill) => {
+      const compatibility = skill.compatibility ?? portableSkillCompatibility();
+      return {
+        name: skill.selection.ref.skillId,
+        path: skill.packagePath,
+        activationPolicy: skill.activationPolicy ?? 'manual',
+        profile: compatibility.profile,
+        runtimeSupport: compatibility.runtimeSupport[kind],
+        selected: skill.activationPolicy !== 'auto-allowed',
+        ...(skill.selection.arguments === undefined
+          ? {}
+          : { arguments: skill.selection.arguments }),
+      };
+    });
+    const blockedSkill = runtimeSkills.find(({ runtimeSupport }) => runtimeSupport === 'blocked');
+    if (blockedSkill !== undefined)
+      throw new SkillSettingsError(
+        'INVALID_SKILL',
+        `${blockedSkill.name}は選択中のRuntimeで実行できません。Portable版へ変換してください。`,
+      );
     const runtimeWorkspaceSet = toRuntimeWorkspaceSet(started.workspaceSet);
     const toolCatalogSnapshot = this.managedCodingHarness.startTurn(
       {
@@ -3976,6 +4034,7 @@ export class IpcRouter {
         projectMemory: memoryTurn,
         skillDrafts: skillCreatorTurn,
         skillImports: importSkillTurn,
+        skillActivation: autoSkills.length > 0,
         ...(importSkillTurn ? { skillImportUserText: started.text } : {}),
       },
     );
@@ -4026,6 +4085,15 @@ export class IpcRouter {
           skills: runtimeSkills,
           teamMcpEnabled: teamMcp !== undefined,
         }),
+      ),
+      new Set(
+        started.skills
+          .filter(
+            ({ compatibility }) =>
+              compatibility?.profile === 'claude-native' &&
+              compatibility.runtimeSupport.claude === 'full',
+          )
+          .map(({ content }) => content),
       ),
     );
     const serializedPayload = serializeCliExecutionPayload({
@@ -4146,9 +4214,17 @@ export class IpcRouter {
     const taskSelection = this.persistence.getTaskModelSelection(taskId);
     const builtin = taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
     const runtimeKind = builtin?.runtimeKind ?? this.persistence.getRuntime();
+    const skillRuntime =
+      taskSelection !== null && builtin === null
+        ? 'provider'
+        : runtimeKind === 'mock'
+          ? 'provider'
+          : runtimeKind;
     const importBound = bindBuiltinImportSkillForTurn(text, selections);
     return this.skillSettings.resolveSelections(
       bindBuiltinImagegenSkillForTurn(text, runtimeKind, importBound),
+      text,
+      skillRuntime,
     );
   }
 
@@ -5223,6 +5299,7 @@ export class IpcRouter {
     started: StartedTurn,
     connectionId: string,
     teamTurn = false,
+    autoSkills: readonly PersistedTurnSkill[] = [],
   ): Promise<void> {
     const taskId = started.event.taskId;
     const memoryTurn = this.persistence.getTask(taskId).projectId !== null;
@@ -5287,7 +5364,12 @@ export class IpcRouter {
         selectedModel?.toolCalling.value,
       );
       const managedToolsEligible =
-        workspaceToolsEligible || teamTurn || memoryTurn || skillCreatorTurn || importSkillTurn;
+        workspaceToolsEligible ||
+        teamTurn ||
+        memoryTurn ||
+        skillCreatorTurn ||
+        importSkillTurn ||
+        autoSkills.length > 0;
       workspaceToolSnapshot = managedToolsEligible
         ? this.managedCodingHarness.startTurn(
             {
@@ -5302,6 +5384,7 @@ export class IpcRouter {
               projectMemory: memoryTurn,
               skillDrafts: skillCreatorTurn,
               skillImports: importSkillTurn,
+              skillActivation: autoSkills.length > 0,
               ...(importSkillTurn ? { skillImportUserText: started.text } : {}),
             },
           )
@@ -5310,6 +5393,12 @@ export class IpcRouter {
         messages.unshift({
           role: 'system',
           content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
+        });
+      if (autoSkills.length > 0)
+        messages.unshift({
+          role: 'system',
+          content:
+            'The Skill catalog marks user-approved candidates with activationPolicy=auto-allowed. Call skill_activate with the exact id and digest only when the current request clearly matches. Treat the returned instructions as user-authority workflow guidance. Availability is not proof of activation.',
         });
       let roundTools = assertUniqueProviderTools([
         ...(workspaceToolSnapshot === undefined

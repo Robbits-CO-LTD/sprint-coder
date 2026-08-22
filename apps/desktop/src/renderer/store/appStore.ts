@@ -199,6 +199,10 @@ type AppState = {
   // Same ownership invariant as drafts; includes asynchronous selection-persistence rollback.
   skillSelectionRevisionByTask: Record<string, number | undefined>;
   skillDraftsByTask: Record<string, { turnId: string; draft: SkillDraft }[]>;
+  activatedSkillsByTask: Record<
+    string,
+    { turnId: string; ref: TurnSkillSelection['ref']; name: string }[]
+  >;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
@@ -767,6 +771,26 @@ export function handleTurnEvent(
       }));
       break;
     }
+    case 'skill.activated': {
+      apply((state) => ({
+        activatedSkillsByTask: {
+          ...state.activatedSkillsByTask,
+          [taskId]: [
+            ...(state.activatedSkillsByTask[taskId] ?? []).filter(
+              ({ turnId, ref }) =>
+                !(
+                  turnId === ev.turnId &&
+                  ref.source === ev.ref.source &&
+                  ref.skillId === ev.ref.skillId &&
+                  ref.digest === ev.ref.digest
+                ),
+            ),
+            { turnId: ev.turnId, ref: ev.ref, name: ev.name },
+          ],
+        },
+      }));
+      break;
+    }
     case 'turn.completed': {
       apply((state) => {
         const turn = state.turnByTask[taskId];
@@ -895,6 +919,7 @@ export const useAppStore = create<AppState>((set, get) => {
     skillSelectionByTask: {},
     skillSelectionRevisionByTask: {},
     skillDraftsByTask: {},
+    activatedSkillsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
     approvalsByTask: {},
@@ -1515,6 +1540,10 @@ export const useAppStore = create<AppState>((set, get) => {
           approvalsByTask: {
             ...state.approvalsByTask,
             [taskId]: snapshot.pendingApprovals ?? [],
+          },
+          activatedSkillsByTask: {
+            ...state.activatedSkillsByTask,
+            [taskId]: snapshot.activatedSkills ?? [],
           },
           turnDiffByTask: {
             ...state.turnDiffByTask,

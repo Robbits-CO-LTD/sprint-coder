@@ -134,6 +134,56 @@ describe.skipIf(!enabled)('Claude runtime adapter (REAL CLI smoke)', () => {
     expect(exitInfo).toMatchObject({ code: 0, canceled: false });
   }, 60_000);
 
+  it('runs a selected Claude-native Skill from the Turn-only plugin', async () => {
+    const skillRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-selected-skill-'));
+    try {
+      writeFileSync(
+        join(skillRoot, 'SKILL.md'),
+        '---\nname: native-smoke\ndescription: Real Claude native Skill smoke\ndisable-model-invocation: true\n---\nReturn exactly CLAUDE_NATIVE_SKILL_OK.',
+      );
+      const adapter = new ClaudeRuntimeAdapter();
+      const events: RuntimeCanonicalEvent[] = [];
+      const failures: PublicError[] = [];
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          'claude-smoke-selected-skill',
+          'Follow the selected Skill.',
+          [],
+          () => undefined,
+          null,
+          'auto',
+          (event) => events.push(event),
+          (error) => failures.push(error),
+          () => resolve(),
+          undefined,
+          undefined,
+          'read-only',
+          [
+            {
+              name: 'native-smoke',
+              path: skillRoot,
+              profile: 'claude-native',
+              runtimeSupport: 'full',
+              activationPolicy: 'manual',
+              selected: true,
+            },
+          ],
+        );
+      });
+      expect(failures).toEqual([]);
+      expect(events.at(-1)).toMatchObject({ type: 'completed' });
+      expect(
+        events
+          .filter((event) => event.type === 'delta')
+          .map((event) => event.delta)
+          .join('')
+          .trim(),
+      ).toBe('CLAUDE_NATIVE_SKILL_OK');
+    } finally {
+      rmSync(skillRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it('edits, verifies, and reads back through managed MCP tools with no native Claude tool', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-managed-'));
     const registry = new ToolRegistry();

@@ -81,6 +81,48 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
     });
   });
 
+  it('requires explicit Claude native consent and refuses blocked compatibility', async () => {
+    const root = await home();
+    const nativePath = await skill(root, 'claude', 'native-writer');
+    await writeFile(
+      join(nativePath, 'SKILL.md'),
+      '---\nname: native-writer\ndescription: Native writer\ndisable-model-invocation: true\n---\n',
+    );
+    const blockedPath = await skill(root, 'claude', 'blocked-writer');
+    await writeFile(
+      join(blockedPath, 'SKILL.md'),
+      '---\nname: blocked-writer\ndescription: Blocked writer\nunknown-policy: true\n---\n',
+    );
+    const service = new SkillSettingsService({ homePath: root });
+
+    let preview = await service.preview(7, 'claude', 'native-writer');
+    expect(preview.compatibility).toMatchObject({
+      profile: 'claude-native',
+      nativeModeConsentRequired: true,
+      requiresConversion: false,
+    });
+    await expect(service.import(7, preview.previewId)).rejects.toMatchObject({
+      code: 'INVALID_SKILL',
+    });
+    preview = await service.preview(7, 'claude', 'native-writer');
+    await expect(service.import(7, preview.previewId, true)).resolves.toMatchObject({
+      status: 'imported',
+    });
+    const [nativeItem] = (await service.listCatalog()).items;
+    const [portableProjection] = await service.resolveSelections(
+      [{ kind: nativeItem!.kind, ref: nativeItem!.ref }],
+      'write release notes',
+      'provider',
+    );
+    expect(portableProjection?.content).not.toContain('disable-model-invocation');
+
+    const blocked = await service.preview(7, 'claude', 'blocked-writer');
+    expect(blocked.compatibility.requiresConversion).toBe(true);
+    await expect(service.import(7, blocked.previewId, true)).rejects.toMatchObject({
+      code: 'INVALID_SKILL',
+    });
+  });
+
   it('expires previews deterministically at the TTL boundary', async () => {
     const root = await home();
     await skill(root, 'claude', 'writer');
@@ -168,6 +210,24 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
     await expect(
       service.resolveSelections([{ kind: item.kind, ref: item.ref }]),
     ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+  });
+
+  it('enables auto selection by exact digest and resolves only approved candidates', async () => {
+    const root = await home();
+    await skill(root, 'agents', 'reviewer');
+    const service = new SkillSettingsService({ homePath: root });
+    const preview = await service.preview(7, 'agents', 'reviewer');
+    await service.import(7, preview.previewId);
+    const [item] = (await service.listCatalog()).items;
+    expect(item).toBeDefined();
+    await service.setActivationPolicy(item!.ref, 'auto-allowed');
+    expect((await service.listCatalog()).items[0]?.activationPolicy).toBe('auto-allowed');
+    const candidates = await service.resolveAutoCandidates('provider');
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ activationPolicy: 'auto-allowed' });
+    await expect(
+      service.setActivationPolicy({ ...item!.ref, digest: '0'.repeat(64) }, 'manual'),
+    ).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
   });
 
   it('keeps an AI-produced Skill as a Draft until an exact digest is confirmed for install', async () => {

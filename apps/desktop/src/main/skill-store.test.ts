@@ -121,10 +121,10 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     expect((await lstat(join(imported.path, 'SKILL.md'))).mode & 0o777).toBe(0o600);
     expect((await lstat(join(imported.path, 'scripts', 'run.sh'))).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(join(imported.path, 'manifest.json'), 'utf8'))).toMatchObject({
-      version: 1,
+      version: 2,
       source: 'claude',
       name: 'writer',
-      activationMode: 'manual',
+      activationPolicy: 'manual',
       digest: preview.digest,
     });
     expect(
@@ -179,7 +179,7 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
       });
   });
 
-  it('rejects symlinks, missing SKILL.md, invalid frontmatter, and reserved names', async () => {
+  it('rejects symlinks, missing SKILL.md, and reserved names while blocking unknown metadata', async () => {
     const root = await tempRoot();
     const source = join(root, 'skills');
     await mkdir(source, { recursive: true });
@@ -197,10 +197,14 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
 
     expect(candidates.find((item) => item.skillId === 'linked')?.valid).toBe(false);
     expect(candidates.find((item) => item.skillId === 'team')?.valid).toBe(false);
-    for (const id of ['missing', 'bad-frontmatter']) {
-      const candidate = candidates.find((item) => item.skillId === id)!;
-      await expect(store.previewImport(candidate)).rejects.toBeInstanceOf(SkillStoreError);
-    }
+    await expect(
+      store.previewImport(candidates.find((item) => item.skillId === 'missing')!),
+    ).rejects.toBeInstanceOf(SkillStoreError);
+    const blocked = await store.previewImport(
+      candidates.find((item) => item.skillId === 'bad-frontmatter')!,
+    );
+    expect(blocked.compatibility).toMatchObject({ requiresConversion: true });
+    expect(blocked.compatibility.blockers[0]).toContain('extra');
   });
 
   it('rejects unsafe file types and bounded-resource violations', async () => {
@@ -252,6 +256,58 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     [candidate] = await store.scanSources({ claudePath: source });
     const changed = await store.previewImport(candidate!);
     await expect(store.importSkill(changed)).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('atomically migrates a managed v1 manifest without changing Skill source files', async () => {
+    const root = await tempRoot();
+    const storeRoot = join(root, 'store');
+    const store = await SkillStore.open({ rootPath: storeRoot });
+    const destination = join(storeRoot, 'imported', 'claude', 'legacy');
+    await mkdir(destination, { recursive: true });
+    const content = '---\nname: legacy\ndescription: Legacy Skill\n---\nKeep this body.';
+    await writeFile(join(destination, 'SKILL.md'), content);
+    await writeFile(
+      join(destination, 'manifest.json'),
+      JSON.stringify({
+        version: 1,
+        source: 'claude',
+        importedAt: new Date(0).toISOString(),
+        digest: 'c'.repeat(64),
+        name: 'legacy',
+        description: 'Legacy Skill',
+        activationMode: 'manual',
+        enabled: true,
+      }),
+    );
+
+    const [legacy] = await store.listImported();
+    expect(legacy?.manifest).toMatchObject({
+      version: 2,
+      activationPolicy: 'manual',
+      compatibility: { profile: 'portable' },
+    });
+    expect(await readFile(join(destination, 'SKILL.md'), 'utf8')).toBe(content);
+    expect(JSON.parse(await readFile(join(destination, 'manifest.json'), 'utf8'))).toMatchObject({
+      version: 2,
+      activationPolicy: 'manual',
+    });
+  });
+
+  it('rejects a managed manifest whose compatibility report was changed without a new digest', async () => {
+    const root = await tempRoot();
+    const source = join(root, 'skills');
+    await fixture(source, 'tampered-report');
+    const store = await SkillStore.open({ rootPath: join(root, 'store') });
+    const [candidate] = await store.scanSources({ claudePath: source });
+    const preview = await store.previewImport(candidate!);
+    const imported = await store.importSkill(preview);
+    const manifestPath = join(imported.path, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+    const compatibility = manifest['compatibility'] as Record<string, unknown>;
+    compatibility['profile'] = 'codex-native';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(store.listSelectable()).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
   });
 
   it('detects source changes after preview and leaves no partial import', async () => {
@@ -400,11 +456,25 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
         content:
           '---\nname: Created Reviewer\ndescription: Review created code\n---\n\nReview files.',
       },
+      {
+        path: 'agents/openai.yaml',
+        content: 'interface:\n  display_name: Created Reviewer\n',
+      },
     ]);
     const exportRoot = join(root, 'export');
     await mkdir(exportRoot);
     const exported = await store.exportCreated(installed.skillId, installed.digest, exportRoot);
     expect(await readFile(join(exported, 'SKILL.md'), 'utf8')).toContain('Review files');
+    const portable = await store.exportCreated(
+      installed.skillId,
+      installed.digest,
+      exportRoot,
+      'portable',
+    );
+    expect(await readFile(join(portable, 'SKILL.md'), 'utf8')).toContain('Review files');
+    await expect(readFile(join(portable, 'agents', 'openai.yaml'), 'utf8')).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
 
     const pinned = (await store.resolveSelectable('created', installed.skillId, installed.digest))
       .packagePath;
@@ -417,6 +487,34 @@ describe.skipIf(process.platform === 'win32')('SkillStore', () => {
     await store.removeCreated(installed.skillId, installed.digest);
     expect(await store.listSelectable()).toEqual([]);
     expect(await readFile(join(pinned, 'SKILL.md'), 'utf8')).toContain('Review files');
+  });
+
+  it('enforces the 32 auto-allowed Skill ceiling before changing the 33rd policy', async () => {
+    const root = await tempRoot();
+    const store = await SkillStore.open({ rootPath: join(root, 'store') });
+    const installed = [];
+    for (let index = 0; index < 33; index += 1) {
+      const id = `auto-${String(index).padStart(2, '0')}`;
+      installed.push(
+        await store.installCreatedSkill(id, [
+          {
+            path: 'SKILL.md',
+            content: `---\nname: ${id}\ndescription: Auto candidate ${index}\n---\n`,
+          },
+        ]),
+      );
+    }
+    for (const skill of installed.slice(0, 32))
+      await store.setActivationPolicy('created', skill.skillId, skill.digest, 'auto-allowed');
+    const last = installed[32]!;
+    await expect(
+      store.setActivationPolicy('created', last.skillId, last.digest, 'auto-allowed'),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(
+      (await store.listSelectable()).filter(
+        ({ activationPolicy }) => activationPolicy === 'auto-allowed',
+      ),
+    ).toHaveLength(32);
   });
 });
 

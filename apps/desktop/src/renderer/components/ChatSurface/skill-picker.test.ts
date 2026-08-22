@@ -13,6 +13,17 @@ function fixture(index: number): SkillCatalogItem {
     name: `Skill ${index}`,
     description: index === 999 ? '日本語アクセシビリティ監査' : `Fixture ${index}`,
     enabled: true,
+    activationPolicy: 'manual',
+    compatibility: {
+      profile: 'portable',
+      runtimeSupport: { codex: 'full', claude: 'full', provider: 'full' },
+      features: [],
+      requestedTools: [],
+      warnings: [],
+      blockers: [],
+      requiresConversion: false,
+      nativeModeConsentRequired: false,
+    },
     removable: true,
     exportable: true,
   };

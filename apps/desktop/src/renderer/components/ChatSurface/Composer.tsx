@@ -44,6 +44,11 @@ import type {
 } from '../../types/sprint-coder';
 
 const EMPTY_SKILL_SELECTION: readonly TurnSkillSelection[] = [];
+const EMPTY_ACTIVATED_SKILLS: readonly {
+  turnId: string;
+  ref: TurnSkillSelection['ref'];
+  name: string;
+}[] = [];
 
 export type ComposerActionKind = 'send' | 'queue' | 'cancel';
 
@@ -259,6 +264,8 @@ export function Composer({ taskId }: { taskId: string }) {
   const skillCatalogRevision = useAppStore((s) => s.skillCatalogRevision);
   const selectedSkills =
     useAppStore((s) => s.skillSelectionByTask[taskId]) ?? EMPTY_SKILL_SELECTION;
+  const activatedSkills =
+    useAppStore((s) => s.activatedSkillsByTask[taskId]) ?? EMPTY_ACTIVATED_SKILLS;
   const loadSkills = useAppStore((s) => s.loadSkills);
   const setSkillSelection = useAppStore((s) => s.setSkillSelection);
   // The V2 Model Picker replaces the legacy chip only once Main has answered `true` for *this*
@@ -328,6 +335,14 @@ export function Composer({ taskId }: { taskId: string }) {
     }),
     [selectedSkills],
   );
+  const skillRuntime =
+    runtime.kind === 'codex' ? 'codex' : runtime.kind === 'claude' ? 'claude' : 'provider';
+  const autoSkillCount = skillCatalog.filter(
+    (item) =>
+      item.enabled &&
+      item.activationPolicy === 'auto-allowed' &&
+      item.compatibility.runtimeSupport[skillRuntime] !== 'blocked',
+  ).length;
   const goalSupported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.goals?.start === 'function';
   const teamSupported = typeof window !== 'undefined' && window.sprintCoder?.teams !== undefined;
@@ -372,18 +387,20 @@ export function Composer({ taskId }: { taskId: string }) {
         const skillKey = `${skill.ref.source}:${skill.ref.skillId}:${skill.ref.digest}`;
         const unavailable = !skill.enabled
           ? 'このSkillは無効です'
-          : selectedSkillKeys.has(skillKey)
-            ? 'すでに選択されています'
-            : skill.kind === 'chat' && chatSkillCount >= 5
-              ? 'Chat Skillは最大5件です'
-              : skill.kind === 'team' && teamSkillCount >= 1
-                ? 'Team Skillは最大1件です'
-                : skill.kind === 'team' &&
-                    currentTeam !== null &&
-                    currentTeam !== undefined &&
-                    currentTeam.workers.some(({ kind }) => kind === 'worker')
-                  ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
-                  : undefined;
+          : skill.compatibility.runtimeSupport[skillRuntime] === 'blocked'
+            ? 'このRuntimeではPortable版への変換が必要です'
+            : selectedSkillKeys.has(skillKey)
+              ? 'すでに選択されています'
+              : skill.kind === 'chat' && chatSkillCount >= 5
+                ? 'Chat Skillは最大5件です'
+                : skill.kind === 'team' && teamSkillCount >= 1
+                  ? 'Team Skillは最大1件です'
+                  : skill.kind === 'team' &&
+                      currentTeam !== null &&
+                      currentTeam !== undefined &&
+                      currentTeam.workers.some(({ kind }) => kind === 'worker')
+                    ? 'このTaskではTeamが開始済みです。別のTeam Skillは新規Taskで使用してください'
+                    : undefined;
         return {
           key: `skill:${skillKey}`,
           group:
@@ -403,6 +420,7 @@ export function Composer({ taskId }: { taskId: string }) {
       chatSkillCount,
       currentTeam,
       selectedSkillKeys,
+      skillRuntime,
       slashCommands,
       slashSkills,
       slashUnavailable,
@@ -773,6 +791,16 @@ export function Composer({ taskId }: { taskId: string }) {
                     </button>
                   );
                 })}
+              </div>
+            )}
+            {autoSkillCount > 0 && (
+              <div className="composer-auto-skill-status" aria-label="AI自動選択候補">
+                Auto Skills {autoSkillCount}
+              </div>
+            )}
+            {activatedSkills.length > 0 && (
+              <div className="composer-auto-skill-status" aria-label="このTaskで発火したSkill">
+                Activated {activatedSkills.map(({ name }) => name).join(', ')}
               </div>
             )}
             {draftAttachments.length > 0 && (

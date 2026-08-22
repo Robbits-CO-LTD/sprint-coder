@@ -2,14 +2,19 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   accessSync,
   constants,
+  cpSync,
   lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
   mkdtempSync,
   rmSync,
   statSync,
   writeFileSync,
+  type Dirent,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join, parse, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
@@ -33,6 +38,7 @@ import type {
   RuntimeTeamMcpOption,
   RuntimeWorkspaceSet,
 } from './protocol';
+import { expandSkillArguments } from './skill-arguments';
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
@@ -207,7 +213,7 @@ export class ClaudeRuntimeAdapter {
     teamMcp?: RuntimeTeamMcpOption,
     effort?: string,
     writeScope: RuntimeWriteScope = 'read-only',
-    _skills: readonly RuntimeSkillInput[] = [],
+    skills: readonly RuntimeSkillInput[] = [],
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     _localImages?: unknown,
@@ -244,6 +250,19 @@ export class ClaudeRuntimeAdapter {
       (temporaryDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-')));
     const runtimeWorkspaceRoots = workspace.roots.map(({ path }) => path);
     let teamMcpDirectory: string | null = null;
+    let skillPluginDirectory: string | null = null;
+    let nativeSkillInvocation = '';
+    const nativeSkills = skills.filter(
+      ({ profile, runtimeSupport }) => profile === 'claude-native' && runtimeSupport === 'full',
+    );
+    if (nativeSkills.length > 0) {
+      skillPluginDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-claude-skills-'));
+      nativeSkillInvocation = materializeClaudeSkillPlugin(skillPluginDirectory, nativeSkills);
+    }
+    const ambientSkillNames =
+      nativeSkills.length === 0
+        ? []
+        : discoverAmbientClaudeSkillNames(runtimeWorkspaceRoots, process.env);
     let teamMcpArgs:
       | {
           configPath: string;
@@ -296,7 +315,14 @@ export class ClaudeRuntimeAdapter {
     );
     const child = spawn(
       this.cli?.executable ?? resolveClaudeCommand('claude'),
-      buildClaudeArgs(model, teamMcpArgs, effort, runtimeWorkspaceRoots),
+      buildClaudeArgs(
+        model,
+        teamMcpArgs,
+        effort,
+        runtimeWorkspaceRoots,
+        skillPluginDirectory,
+        ambientSkillNames,
+      ),
       {
         cwd,
         env: {
@@ -322,11 +348,16 @@ export class ClaudeRuntimeAdapter {
     const cleanup = (): void => {
       if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
       if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
+      if (skillPluginDirectory !== null)
+        rmSync(skillPluginDirectory, { recursive: true, force: true });
     };
     const control: ActiveProcess = { child, canceled: false, cleanup };
     this.active.set(turnId, control);
     if (teamMcp === undefined) accepted();
-    child.stdin.end(serializedPayload ?? buildClaudePrompt(input, contextFragments, projectItems));
+    const prompt = serializedPayload ?? buildClaudePrompt(input, contextFragments, projectItems);
+    child.stdin.end(
+      nativeSkillInvocation === '' ? prompt : `${nativeSkillInvocation}\n\n${prompt}`,
+    );
 
     let failed = false;
     let sawCompletion = false;
@@ -555,6 +586,41 @@ export function buildClaudeTeamMcpConfig(
   });
 }
 
+export function materializeClaudeSkillPlugin(
+  pluginRoot: string,
+  skills: readonly RuntimeSkillInput[],
+): string {
+  const manifestDirectory = join(pluginRoot, '.claude-plugin');
+  const skillsDirectory = join(pluginRoot, 'skills');
+  mkdirSync(manifestDirectory, { recursive: true, mode: 0o700 });
+  mkdirSync(skillsDirectory, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(manifestDirectory, 'plugin.json'),
+    `${JSON.stringify({ name: 'sprint-coder-selected', version: '1.0.0' }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  const commands = skills.flatMap((skill, index) => {
+    const commandName = `selected-${index + 1}-${skill.name}`;
+    const destination = join(skillsDirectory, commandName);
+    cpSync(skill.path, destination, {
+      recursive: true,
+      dereference: false,
+      errorOnExist: true,
+      force: false,
+    });
+    if (skill.arguments !== undefined) {
+      const skillPath = join(destination, 'SKILL.md');
+      writeFileSync(
+        skillPath,
+        expandSkillArguments(readFileSync(skillPath, 'utf8'), skill.arguments),
+        { mode: 0o600 },
+      );
+    }
+    return skill.selected === false ? [] : [`/sprint-coder-selected:${commandName}`];
+  });
+  return commands.join(' ');
+}
+
 export function buildClaudeArgs(
   model: string,
   teamMcp?: {
@@ -564,6 +630,8 @@ export function buildClaudeArgs(
   },
   effort?: string,
   workspaceRoots: readonly string[] = [],
+  skillPluginDirectory: string | null = null,
+  ambientSkillNames: readonly string[] = [],
 ): string[] {
   return [
     '-p',
@@ -580,9 +648,26 @@ export function buildClaudeArgs(
     // and survives a future change to how cwd is chosen.
     ...workspaceRoots.flatMap((path) => ['--add-dir', path]),
     '--strict-mcp-config',
-    ...(teamMcp === undefined
+    ...(teamMcp === undefined && skillPluginDirectory === null
       ? ['--safe-mode']
-      : ['--setting-sources', '', '--disable-slash-commands']),
+      : [
+          '--setting-sources',
+          '',
+          ...(skillPluginDirectory === null ? ['--disable-slash-commands'] : []),
+        ]),
+    ...(skillPluginDirectory === null
+      ? []
+      : [
+          '--plugin-dir',
+          skillPluginDirectory,
+          '--settings',
+          JSON.stringify({
+            disableSkillShellExecution: true,
+            skillOverrides: Object.fromEntries(
+              ambientSkillNames.map((name) => [name, 'off'] as const),
+            ),
+          }),
+        ]),
     '--no-session-persistence',
     ...(teamMcp === undefined
       ? []
@@ -597,6 +682,85 @@ export function buildClaudeArgs(
     ...(model === 'auto' ? [] : ['--model', model]),
     ...(effort === undefined ? [] : ['--effort', effort]),
   ];
+}
+
+export function discoverAmbientClaudeSkillNames(
+  workspaceRoots: readonly string[],
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): string[] {
+  const roots = new Set<string>();
+  const userHome = environment['HOME'] ?? environment['USERPROFILE'] ?? homedir();
+  roots.add(join(environment['CLAUDE_CONFIG_DIR'] ?? join(userHome, '.claude'), 'skills'));
+  for (const workspaceRoot of workspaceRoots) {
+    let current = resolve(workspaceRoot);
+    const filesystemRoot = parse(current).root;
+    while (true) {
+      roots.add(join(current, '.claude', 'skills'));
+      if (current === filesystemRoot || hasGitBoundary(current)) break;
+      current = dirname(current);
+    }
+    collectNestedClaudeSkillRoots(resolve(workspaceRoot), roots, 0, { visited: 0 });
+  }
+  const names = new Set<string>();
+  for (const root of roots) collectSkillNames(root, names, 0);
+  return [...names].sort();
+}
+
+function collectNestedClaudeSkillRoots(
+  directory: string,
+  roots: Set<string>,
+  depth: number,
+  budget: { visited: number },
+): void {
+  if (depth > 20) return;
+  budget.visited += 1;
+  if (budget.visited > 10_000)
+    throw new Error('Claude ambient Skill discovery exceeded its directory limit');
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === '.claude') {
+      roots.add(join(directory, entry.name, 'skills'));
+      continue;
+    }
+    if (entry.name === '.git' || entry.name === 'node_modules' || entry.name.startsWith('.'))
+      continue;
+    collectNestedClaudeSkillRoots(join(directory, entry.name), roots, depth + 1, budget);
+  }
+}
+
+function collectSkillNames(root: string, names: Set<string>, depth: number): void {
+  if (depth > 2 || names.size >= 4_096) return;
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    const directory = join(root, entry.name);
+    try {
+      if (!statSync(directory).isDirectory()) continue;
+      if (statSync(join(directory, 'SKILL.md')).isFile()) names.add(entry.name);
+    } catch {
+      collectSkillNames(directory, names, depth + 1);
+    }
+  }
+}
+
+function hasGitBoundary(path: string): boolean {
+  try {
+    const item = statSync(join(path, '.git'));
+    return item.isDirectory() || item.isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function resolveClaudeCommand(

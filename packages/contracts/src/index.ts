@@ -1121,6 +1121,27 @@ export type TurnStage = z.infer<typeof turnStageSchema>;
 
 export const skillSourceSchema = z.enum(['builtin', 'created', 'agents', 'claude']);
 export const skillKindSchema = z.enum(['chat', 'team']);
+export const skillProfileSchema = z.enum(['portable', 'codex-native', 'claude-native']);
+export const skillRuntimeSupportSchema = z.enum(['full', 'portable', 'blocked']);
+export const skillActivationPolicySchema = z.enum(['manual', 'auto-allowed']);
+export const skillCompatibilityReportSchema = z
+  .object({
+    profile: skillProfileSchema,
+    runtimeSupport: z
+      .object({
+        codex: skillRuntimeSupportSchema,
+        claude: skillRuntimeSupportSchema,
+        provider: skillRuntimeSupportSchema,
+      })
+      .strict(),
+    features: z.array(z.string().min(1).max(100)).max(64),
+    requestedTools: z.array(z.string().min(1).max(256)).max(64),
+    warnings: z.array(z.string().min(1).max(1_024)).max(256),
+    blockers: z.array(z.string().min(1).max(1_024)).max(256),
+    requiresConversion: z.boolean(),
+    nativeModeConsentRequired: z.boolean(),
+  })
+  .strict();
 export const skillIdSchema = z
   .string()
   .min(1)
@@ -1138,6 +1159,7 @@ export const turnSkillSelectionSchema = z
   .object({
     kind: skillKindSchema,
     ref: skillRefSchema,
+    arguments: z.string().max(8_000).optional(),
   })
   .strict();
 export const turnSkillSelectionsSchema = z
@@ -1205,9 +1227,19 @@ export const createdSkillMutationInputSchema = z
 export const createdSkillEnabledInputSchema = createdSkillMutationInputSchema
   .extend({ enabled: z.boolean() })
   .strict();
+export const skillExportInputSchema = createdSkillMutationInputSchema
+  .extend({ format: z.enum(['original', 'portable']).default('original') })
+  .strict();
+export const skillActivationPolicyInputSchema = z
+  .object({ ref: skillRefSchema, policy: skillActivationPolicySchema })
+  .strict();
 export type SkillDraftFile = z.infer<typeof skillDraftFileSchema>;
 export type SkillDraft = z.infer<typeof skillDraftSchema>;
 export type SkillDraftCreateInput = z.infer<typeof skillDraftCreateInputSchema>;
+export type SkillProfile = z.infer<typeof skillProfileSchema>;
+export type SkillRuntimeSupport = z.infer<typeof skillRuntimeSupportSchema>;
+export type SkillActivationPolicy = z.infer<typeof skillActivationPolicySchema>;
+export type SkillCompatibilityReport = z.infer<typeof skillCompatibilityReportSchema>;
 
 export const queuedInputSchema = z
   .object({
@@ -1704,6 +1736,14 @@ export const turnEventSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
+      type: z.literal('skill.activated'),
+      ...turnEventBase,
+      ref: skillRefSchema,
+      name: z.string().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal('delivery.acknowledged'),
       ...turnEventBase,
       deliveryId: digestSchema,
@@ -1802,6 +1842,14 @@ export const turnSnapshotSchema = z
     queued: z.array(queuedInputSchema),
     contextUsage: contextUsageSchema,
     pendingApprovals: z.array(approvalSummarySchema).default([]),
+    activatedSkills: z
+      .array(
+        z
+          .object({ turnId: idSchema, ref: skillRefSchema, name: z.string().min(1).max(200) })
+          .strict(),
+      )
+      .max(4_096)
+      .default([]),
     latestTurnDiff: turnDiffSchema.nullable().default(null),
   })
   .strict();
@@ -2687,6 +2735,8 @@ export const skillCatalogItemSchema = z
     name: z.string().min(1).max(200),
     description: z.string().min(1).max(2_000),
     enabled: z.boolean(),
+    activationPolicy: skillActivationPolicySchema,
+    compatibility: skillCompatibilityReportSchema,
     removable: z.boolean(),
     exportable: z.boolean(),
   })
@@ -2750,9 +2800,12 @@ export const skillPreviewResultSchema = z
     description: z.string().min(1).max(2_000),
     files: z.array(z.string().min(1).max(1_024)).max(256),
     warnings: z.array(z.string().min(1).max(1_024)).max(256),
+    compatibility: skillCompatibilityReportSchema,
   })
   .strict();
-export const skillImportInputSchema = z.object({ previewId: z.string().uuid() }).strict();
+export const skillImportInputSchema = z
+  .object({ previewId: z.string().uuid(), nativeModeConfirmed: z.boolean().default(false) })
+  .strict();
 export const skillInstalledInputSchema = z
   .object({ provider: skillProviderSchema, skillId: skillIdSchema })
   .strict();
@@ -3375,8 +3428,8 @@ export interface SprintCoderApi {
     setDefaultTeamPolicy(policy: TeamPolicy): Promise<void>;
     scanSkills(): Promise<SkillScanResult>;
     previewSkill(provider: SkillProvider, skillId: string): Promise<SkillPreviewResult>;
-    importSkill(previewId: string): Promise<SkillImportResult>;
-    updateSkill(previewId: string): Promise<SkillImportResult>;
+    importSkill(previewId: string, nativeModeConfirmed?: boolean): Promise<SkillImportResult>;
+    updateSkill(previewId: string, nativeModeConfirmed?: boolean): Promise<SkillImportResult>;
     setSkillEnabled(provider: SkillProvider, skillId: string, enabled: boolean): Promise<void>;
     removeSkill(provider: SkillProvider, skillId: string): Promise<void>;
   };
@@ -3394,7 +3447,12 @@ export interface SprintCoderApi {
     discardDraft(draftId: string): Promise<void>;
     removeCreated(skillId: string, digest: string): Promise<void>;
     setCreatedEnabled(skillId: string, digest: string, enabled: boolean): Promise<void>;
-    exportCreated(skillId: string, digest: string): Promise<string | null>;
+    setActivationPolicy(ref: SkillRef, policy: SkillActivationPolicy): Promise<void>;
+    exportCreated(
+      skillId: string,
+      digest: string,
+      format?: 'original' | 'portable',
+    ): Promise<string | null>;
   };
   models: {
     query(input: ModelCatalogQueryInput): Promise<ModelCatalogQueryResult>;
@@ -3545,6 +3603,7 @@ export const IPC_CHANNELS = {
   skillsDiscardDraft: 'sprint-coder:skills:discard-draft',
   skillsRemoveCreated: 'sprint-coder:skills:remove-created',
   skillsSetCreatedEnabled: 'sprint-coder:skills:set-created-enabled',
+  skillsSetActivationPolicy: 'sprint-coder:skills:set-activation-policy',
   skillsExportCreated: 'sprint-coder:skills:export-created',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */
   reasoningEvent: 'sprint-coder:turns:reasoning',

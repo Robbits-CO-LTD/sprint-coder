@@ -97,7 +97,7 @@ describe('Provider workspace read tools', () => {
     await tools.dispose();
   });
 
-  it('exposes Project Memory and Skill import only through the selected managed catalog', async () => {
+  it('exposes Project Memory, Skill import, and Skill activation only through the selected managed catalog', async () => {
     const calls: string[] = [];
     const tools = new ProviderWorkspaceTools({
       workspaceFor: () => null,
@@ -118,6 +118,10 @@ describe('Provider workspace read tools', () => {
           calls.push('install');
           return { installed: true };
         },
+        activateSkill: async () => {
+          calls.push('activate');
+          return { instructions: 'Follow the pinned Skill.' };
+        },
       },
     });
     const context = {
@@ -129,6 +133,7 @@ describe('Provider workspace read tools', () => {
     const snapshot = tools.startTurn(context, 'codex', {
       projectMemory: true,
       skillImports: true,
+      skillActivation: true,
       skillImportUserText: 'IMPORT_SKILL claude writer',
     });
     expect(snapshot.entries.map(({ providerName }) => providerName)).toEqual(
@@ -136,6 +141,7 @@ describe('Provider workspace read tools', () => {
         'project_memory_remember',
         'skill_import_read',
         'skill_import_install',
+        'skill_activate',
       ]),
     );
     expect(snapshot.entries.map(({ providerName }) => providerName)).not.toContain(
@@ -159,7 +165,13 @@ describe('Provider workspace read tools', () => {
       providerName: 'skill_import_install',
       input: { source: { cli: 'claude', skillId: 'writer', digest: 'a'.repeat(64) }, files: [] },
     });
-    expect(calls).toEqual(['memory', 'read', 'install']);
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'activate',
+      providerName: 'skill_activate',
+      input: { skillId: 'writer', digest: 'a'.repeat(64) },
+    });
+    expect(calls).toEqual(['memory', 'read', 'install', 'activate']);
     await tools.dispose();
   });
 

@@ -10,6 +10,17 @@ const entry = (
   name: input.skillId,
   description: 'description',
   enabled: true,
+  activationPolicy: 'manual',
+  compatibility: {
+    profile: 'portable',
+    runtimeSupport: { codex: 'full', claude: 'full', provider: 'full' },
+    features: [],
+    requestedTools: [],
+    warnings: [],
+    blockers: [],
+    requiresConversion: false,
+    nativeModeConsentRequired: false,
+  },
   availability: 'available',
   ...input,
 });

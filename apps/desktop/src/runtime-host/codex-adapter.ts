@@ -780,7 +780,9 @@ export function buildCodexTurnInput(
   return [
     { type: 'text', text },
     ...localImagePaths.map((path) => ({ type: 'localImage' as const, path })),
-    ...skills.map((skill) => ({ type: 'skill' as const, name: skill.name, path: skill.path })),
+    ...skills
+      .filter(({ selected }) => selected !== false)
+      .map((skill) => ({ type: 'skill' as const, name: skill.name, path: skill.path })),
   ];
 }
 

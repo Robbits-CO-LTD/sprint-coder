@@ -272,6 +272,34 @@ export const SKILL_IMPORT_INSTALL_TOOL = auxiliaryTool(
   'Install a prepared Skill only when it matches the preceding managed import read.',
   { type: 'object' },
 );
+export const SKILL_ACTIVATE_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'auxiliary',
+    name: 'skill-activate',
+    version: '1',
+  }),
+  providerName: 'skill_activate',
+  kind: 'search',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: { skillId: { type: 'string' }, digest: { type: 'string' } },
+    required: ['skillId', 'digest'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object' },
+  sideEffect: 'none',
+  risk: 'low',
+  requiredCapabilities: [],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'none' },
+  providerCompatibility: ['*'],
+  description: 'Load one user-approved Skill candidate pinned to this Turn.',
+  parallelism: 'serial',
+});
 
 const descriptions = new Map([
   [
@@ -330,6 +358,7 @@ const descriptions = new Map([
   [SKILL_DRAFT_TOOL.providerName, SKILL_DRAFT_TOOL.description],
   [SKILL_IMPORT_READ_TOOL.providerName, SKILL_IMPORT_READ_TOOL.description],
   [SKILL_IMPORT_INSTALL_TOOL.providerName, SKILL_IMPORT_INSTALL_TOOL.description],
+  [SKILL_ACTIVATE_TOOL.providerName, SKILL_ACTIVATE_TOOL.description],
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -355,6 +384,7 @@ type WorkspaceToolDeps = Readonly<{
     createSkillDraft(input: unknown, context: ToolExecutionContext): Promise<unknown>;
     readSkillImport(input: unknown, context: ToolExecutionContext): Promise<unknown>;
     installSkillImport(input: unknown, context: ToolExecutionContext): Promise<unknown>;
+    activateSkill(input: unknown, context: ToolExecutionContext): Promise<unknown>;
   }>;
   recordPlan?: (
     context: ToolExecutionContext,
@@ -367,6 +397,7 @@ export type ManagedHarnessTurnOptions = Readonly<{
   skillDrafts?: boolean;
   skillImports?: boolean;
   skillImportUserText?: string;
+  skillActivation?: boolean;
   mockFixture?: 'approval' | 'command';
   mockTeamFixture?: boolean;
 }>;
@@ -434,6 +465,7 @@ export class ManagedCodingHarness {
         SKILL_DRAFT_TOOL,
         SKILL_IMPORT_READ_TOOL,
         SKILL_IMPORT_INSTALL_TOOL,
+        SKILL_ACTIVATE_TOOL,
       ])
         registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
@@ -639,6 +671,9 @@ export class ManagedCodingHarness {
       ...(this.deps.auxiliary === undefined || options.skillImports !== true
         ? []
         : [SKILL_IMPORT_READ_TOOL.toolId, SKILL_IMPORT_INSTALL_TOOL.toolId]),
+      ...(this.deps.auxiliary === undefined || options.skillActivation !== true
+        ? []
+        : [SKILL_ACTIVATE_TOOL.toolId]),
     ]);
     const key = JSON.stringify([context.taskId, context.turnId]);
     this.providersByTurn.set(key, providerId);
@@ -728,6 +763,15 @@ export class ManagedCodingHarness {
           throw new Error('skill_import_install source was not authorized by skill_import_read');
         delete state.authorizedSkillImport;
         return auxiliary.installSkillImport(input, context);
+      },
+    });
+    this.broker.registerImplementation({
+      toolId: SKILL_ACTIVATE_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: (input, context) => {
+        if (stateFor(context).options.skillActivation !== true)
+          throw new Error('skill_activate is not available for this Turn');
+        return auxiliary.activateSkill(input, context);
       },
     });
   }
