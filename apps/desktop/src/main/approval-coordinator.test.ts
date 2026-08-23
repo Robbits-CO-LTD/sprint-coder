@@ -180,6 +180,10 @@ function createHarness(input?: {
     capability: Capability;
     request: ToolAuthorizationRequest;
   }) => ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required';
+  revalidateTaskGrant?: (input: {
+    capability: Capability;
+    request: ToolAuthorizationRequest;
+  }) => boolean;
 }) {
   const persistence = new InMemoryApprovalPersistence();
   const published: StoredApproval[] = [];
@@ -192,6 +196,9 @@ function createHarness(input?: {
     getCurrentPolicyEpoch: () => policyEpoch,
     isTurnActive: (taskId: string, turnId: string) => activeTurns.has(`${taskId}\0${turnId}`),
     evaluatePermission: input?.evaluatePermission ?? (() => 'approval_required' as const),
+    ...(input?.revalidateTaskGrant === undefined
+      ? {}
+      : { revalidateTaskGrant: input.revalidateTaskGrant }),
     publish: (approval: StoredApproval) => {
       persistence.timeline.push(`published:${approval.id}`);
       published.push(approval);
@@ -689,6 +696,36 @@ describe('ApprovalCoordinator', () => {
     harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
     await changed.catch(() => undefined);
     expect(executions()).toBe(2);
+  });
+
+  it('revalidates a production Task grant before the first approved execution', async () => {
+    let revalidationCalls = 0;
+    const harness = createHarness({
+      revalidateTaskGrant: () => {
+        revalidationCalls += 1;
+        return true;
+      },
+    });
+    harness.persistence.saveTaskGrant = () => undefined;
+    harness.persistence.hasTaskGrant = () => false;
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const dispatch = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-production-task-grant',
+      providerName: 'approval_fetch',
+      input: { origin: 'https://example.test' },
+    });
+    const approval = await waitForPublished(harness);
+
+    harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
+
+    await expect(dispatch).resolves.toEqual({ ok: true });
+    expect(revalidationCalls).toBe(1);
+    expect(executions()).toBe(1);
   });
 
   it('requires every capability to allow and never executes after one capability denies', async () => {
