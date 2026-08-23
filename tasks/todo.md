@@ -522,10 +522,10 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - [x] 公開v0.5.1インストール版で設定・モデル選択を再現する
 - [x] Mainのlocal catalogとRendererの選択肢を照合し、原因を確定する
 - [x] `ModelPickerV2`へ契約済みの「ローカル」利用形態を追加する
-- [ ] 局所テスト・型チェック・Grok 4.6レビューを完了する（局所テスト29件・型・lint・formatはPASS、Grok待ち）
+- [x] 局所テスト・型チェック・Grok 4.6レビューを完了する（29件PASS、型・lint・format PASS、Grok GO）
 - [ ] PR・CI・マージ後、v0.5.1プレリリースを再構築する
 - [ ] 公開インストーラーでOllama実応答と自動解放を確認する
 
 ### Next Steps
 
-候補差分をGrok 4.6でレビューし、PR・CI・v0.5.1再構築へ進む。
+PR・CI・マージ後、v0.5.1プレリリースを再構築してインストール版E2Eを再実行する。
