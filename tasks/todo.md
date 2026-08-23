@@ -514,3 +514,18 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - 信頼済み`cmd.exe`のUnix形式スイッチは`/d /s /c`へ正規化し、承認外のCommand Processor AutoRunを無効化する。
 - 非System32実行ファイルの仮想`api-ms-*` / `ext-ms-*` importは物理DLLを要求せず、その他の非ローカルDLLは引き続き実在するSystem32ファイルだけを許可する。
 - Grok 4.6の再レビューを反映し、信頼済み`cmd.exe`の全形式へ`/d`を強制する。API-setは信頼済みOS schemaに実在する契約だけを許可し、Workspace内の同名DLLによる偽装を拒否する。
+
+## Issue #307 v0.5.1 installed Ollama regression (2026-08-23)
+
+### 計画
+
+- [x] 公開v0.5.1インストール版で設定・モデル選択を再現する
+- [x] Mainのlocal catalogとRendererの選択肢を照合し、原因を確定する
+- [x] `ModelPickerV2`へ契約済みの「ローカル」利用形態を追加する
+- [ ] 局所テスト・型チェック・Grok 4.6レビューを完了する（局所テスト29件・型・lint・formatはPASS、Grok待ち）
+- [ ] PR・CI・マージ後、v0.5.1プレリリースを再構築する
+- [ ] 公開インストーラーでOllama実応答と自動解放を確認する
+
+### Next Steps
+
+候補差分をGrok 4.6でレビューし、PR・CI・v0.5.1再構築へ進む。

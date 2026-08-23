@@ -16,7 +16,7 @@ import {
 import { ModelAuthorIcon, modelAuthorBrand, modelAuthorDisplayName } from './ModelAuthorIcon';
 
 // The unified AI picker (UI slice U1b follow-up): one control for connection *and* model, with the
-// API / サブスク toggle deciding which half of the catalog is on screen. What is covered here is
+// API / サブスク / ローカル toggle deciding which catalog slice is on screen. What is covered here is
 // everything the picker decides on its own — the query it sends, and how a row names its connection.
 // Both are pure, and both are places where a shortcut ("assume subscription", "special-case the
 // built-in ids") would reintroduce exactly the Runtime coupling this slice removes.
@@ -43,12 +43,13 @@ function model(overrides: Partial<ProviderModel> = {}): ProviderModel {
 }
 
 describe('MODEL_ACCESS_OPTIONS', () => {
-  it('offers exactly the two access types the catalog contract defines', () => {
+  it('offers every access type the catalog contract defines', () => {
     // The labels are the user's words; the ids are the contract's. Mapping one to the other here is
     // the only place the two vocabularies meet.
     expect(MODEL_ACCESS_OPTIONS.map(({ id, label }) => [label, id])).toEqual([
       ['API', 'api'],
       ['サブスク', 'subscription'],
+      ['ローカル', 'local'],
     ]);
   });
 
@@ -67,6 +68,9 @@ describe('catalogQuery', () => {
     expect(
       catalogQuery({ taskId: 'task-a', text: '', accessType: 'api', cursor: null }).accessTypes,
     ).toEqual(['api']);
+    expect(
+      catalogQuery({ taskId: 'task-a', text: '', accessType: 'local', cursor: null }).accessTypes,
+    ).toEqual(['local']);
   });
 
   it('carries the search and the cursor unchanged, and narrows nothing else', () => {
@@ -374,17 +378,27 @@ describe('AccessTypeToggle', () => {
     );
     expect(segment(markup, 'API')).toContain('aria-pressed="true"');
     expect(segment(markup, 'サブスク')).toContain('aria-pressed="false"');
+    expect(segment(markup, 'ローカル')).toContain('aria-pressed="false"');
     expect(markup.split('aria-pressed="true"')).toHaveLength(2);
+  });
+
+  it('can select the local catalog without classifying it as API', () => {
+    const markup = renderToStaticMarkup(
+      <AccessTypeToggle value="local" onChange={() => {}} onDismiss={() => {}} />,
+    );
+    expect(segment(markup, 'ローカル')).toContain('aria-pressed="true"');
+    expect(segment(markup, 'API')).toContain('aria-pressed="false"');
+    expect(segment(markup, 'サブスク')).toContain('aria-pressed="false"');
   });
 
   it('is a labelled group of keyboard-native buttons', () => {
     // Real buttons: Tab reaches them and Space/Enter activate them without this component
-    // reimplementing either. The group label is what a screen reader announces around the pair.
+    // reimplementing either. The group label is what a screen reader announces around the set.
     const markup = renderToStaticMarkup(
       <AccessTypeToggle value="subscription" onChange={() => {}} onDismiss={() => {}} />,
     );
     expect(markup).toContain('role="group"');
     expect(markup).toContain('aria-label="モデルの利用形態"');
-    expect(markup.split('type="button"')).toHaveLength(3);
+    expect(markup.split('type="button"')).toHaveLength(4);
   });
 });
