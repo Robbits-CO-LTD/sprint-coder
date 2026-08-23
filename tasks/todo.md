@@ -1,3 +1,40 @@
+# Issue #122 Slice C — 公開catalog adapter（2026-08-23）
+
+### 計画
+
+- [x] Hugging Face / LocalAI Galleryの現行公式API、pagination、rate-limit、ETag、detail項目を確認する
+- [x] query/filter/sort/opaque cursorとbounded result/detail/error契約を追加する
+- [x] Mainにsource別adapterを実装し、公開結果の閲覧可否とGGUF artifactのinstall可否を分離する
+- [x] Link cursor、重複除外、429/offline/5xx、ETag cache、invalid metadataをfixtureで固定する
+- [x] 1,000件相当をpage単位で最後まで辿り、各応答が1page上限を超えないことを確認する
+- [ ] 対象型検査・テスト・lint・format、固定Grok 4.6レビュー、PR、全CI、マージを完了する
+
+### 実装境界
+
+- Mainが固定した公式origin/pathだけへ接続し、RendererからURL、header、token、任意cursor URLを受け取らない。
+- cursorはsource adapterが署名・検証するopaque値とし、offsetへ変換せず、別query/sourceへの使い回しを拒否する。
+- listは50件以下、detail/model cardは必要なbounded項目だけへ正規化し、README全文・HTML・外部指示文を返さない。
+- 公開結果に存在すること、GGUFであること、強いhashとimmutable revisionを解決できることを別状態として表す。
+- private/gated token、license同意代行、download/store、Renderer UIはSlice Cに含めない。
+
+### Next Steps
+
+1. 公式仕様と現行network境界を照合して契約を固定する。
+2. contracts、source adapter、service、fixture testを実装する。
+3. 対象検証と固定Grok 4.6レビュー後にPRを作成する。
+
+### 進捗
+
+- Hugging Faceの実APIで`Link: rel=next`、ETag、rate-limit header、immutable revision、LFS SHA-256/size、GGUF metadataを確認した。
+- LocalAI公式gallery indexでETag、variant、backend、GGUF file、SHA-256を確認し、Main内cacheから50件以下ずつ返すようにした。
+- remote URLをRendererへcursorとして渡さず、queryへ束縛した署名付きopaque tokenだけを返す。別queryへの再利用と公式origin/path外のLinkを拒否する。
+- 1,000件fixtureを20pageで走査し、1,000件到達、重複0、欠落0、各page 50件以下を確認した。
+- Hugging FaceとLocalAI Galleryの少数fixture IDを使ったlive contract smokeは成功した。
+- contracts/desktop型検査、対象eslint、Prettier、11件のadapter testはPASS。
+- 固定Grok 4.6は、immutable revision不明のHF artifactと非llama backendのgallery artifactがinstall可能になる2件をHIGHとして検出した。artifact層もfail-closedへ修正し、11件のtestと収束レビューGOで確認した。
+
+---
+
 # Issue #122 Slice B — Hardware inventory・fit推定（2026-08-23）
 
 ### 計画

@@ -2201,6 +2201,122 @@ export const localFitAssessmentSchema = z
       });
   });
 export type LocalFitAssessment = z.infer<typeof localFitAssessmentSchema>;
+
+export const publicModelCatalogSourceSchema = z.enum(['hugging_face', 'localai_gallery', 'all']);
+export type PublicModelCatalogSource = z.infer<typeof publicModelCatalogSourceSchema>;
+export const publicModelCatalogPurposeSchema = z.enum([
+  'all',
+  'code',
+  'text_generation',
+  'conversational',
+]);
+export const publicModelCatalogQuerySchema = z
+  .object({
+    text: z.string().trim().max(200).default(''),
+    source: publicModelCatalogSourceSchema.default('all'),
+    purpose: publicModelCatalogPurposeSchema.default('code'),
+    compatibility: z.enum(['compatible', 'all']).default('compatible'),
+    sort: z.enum(['downloads', 'updated', 'name']).default('downloads'),
+    direction: z.enum(['ascending', 'descending']).default('descending'),
+    cursor: z.string().min(1).max(128).nullable().default(null),
+    limit: z.number().int().min(1).max(50).default(50),
+  })
+  .strict();
+export type PublicModelCatalogQuery = z.infer<typeof publicModelCatalogQuerySchema>;
+export const publicModelInstallabilitySchema = z
+  .object({
+    state: z.enum([
+      'installable',
+      'browse_only',
+      'unsupported',
+      'metadata_required',
+      'access_restricted',
+    ]),
+    reason: z.string().min(1).max(500),
+  })
+  .strict();
+export type PublicModelInstallability = z.infer<typeof publicModelInstallabilitySchema>;
+export const publicModelCatalogItemSchema = z
+  .object({
+    id: z.string().min(1).max(320),
+    source: z.enum(['hugging_face', 'localai_gallery']),
+    sourceId: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    author: z.string().min(1).max(128).nullable(),
+    sourceUrl: z.string().url().max(1_024),
+    immutableRevision: z
+      .string()
+      .regex(/^[a-f0-9]{40,64}$/)
+      .nullable(),
+    gated: z.boolean(),
+    private: z.boolean(),
+    viewable: z.boolean(),
+    installability: publicModelInstallabilitySchema,
+    license: z.string().min(1).max(128).nullable(),
+    purpose: z.string().min(1).max(64).nullable(),
+    tags: z.array(z.string().min(1).max(128)).max(32),
+    downloads: z.number().int().nonnegative().nullable(),
+    updatedAt: timestampSchema.nullable(),
+  })
+  .strict();
+export type PublicModelCatalogItem = z.infer<typeof publicModelCatalogItemSchema>;
+export const publicModelCatalogErrorSchema = z
+  .object({
+    source: z.enum(['hugging_face', 'localai_gallery']),
+    code: z.enum([
+      'offline',
+      'rate_limited',
+      'source_unavailable',
+      'invalid_response',
+      'invalid_cursor',
+    ]),
+    message: z.string().min(1).max(500),
+    retryable: z.boolean(),
+    retryAt: timestampSchema.nullable(),
+  })
+  .strict();
+export const publicModelCatalogPageSchema = z
+  .object({
+    items: z.array(publicModelCatalogItemSchema).max(50),
+    nextCursor: z.string().min(1).max(128).nullable(),
+    errors: z.array(publicModelCatalogErrorSchema).max(2),
+  })
+  .strict();
+export type PublicModelCatalogPage = z.infer<typeof publicModelCatalogPageSchema>;
+export const publicModelCatalogDetailInputSchema = z
+  .object({
+    source: z.enum(['hugging_face', 'localai_gallery']),
+    sourceId: z.string().min(1).max(256),
+  })
+  .strict();
+export type PublicModelCatalogDetailInput = z.infer<typeof publicModelCatalogDetailInputSchema>;
+export const publicModelArtifactSchema = z
+  .object({
+    id: z.string().min(1).max(320),
+    filename: z.string().min(1).max(512),
+    format: z.enum(['gguf', 'other']),
+    quantization: z.string().min(1).max(64).nullable(),
+    sizeBytes: localHardwareByteCountSchema.nullable(),
+    sha256: digestSchema.nullable(),
+    sourceUrl: z.string().url().max(2_048).nullable(),
+    installability: publicModelInstallabilitySchema,
+  })
+  .strict();
+export const publicModelCatalogDetailSchema = z
+  .object({
+    item: publicModelCatalogItemSchema,
+    description: z.string().max(4_000),
+    architecture: z.string().min(1).max(128).nullable(),
+    parameterCount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+    contextTokens: z.number().int().positive().max(1_048_576).nullable(),
+    toolTemplate: z.enum(['available', 'unavailable', 'unknown']),
+    backend: z.string().min(1).max(128).nullable(),
+    variants: z.array(z.string().min(1).max(256)).max(64),
+    referenceUrls: z.array(z.string().url().max(2_048)).max(16),
+    artifacts: z.array(publicModelArtifactSchema).max(256),
+  })
+  .strict();
+export type PublicModelCatalogDetail = z.infer<typeof publicModelCatalogDetailSchema>;
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',
