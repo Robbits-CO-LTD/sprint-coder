@@ -7,6 +7,9 @@ import {
   executionResolutionSchema,
   modelCatalogQueryInputSchema,
   modelSelectionSchema,
+  localFitAssessmentSchema,
+  localHardwareSnapshotSchema,
+  localVerificationRecordSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   permissionSettingsSchema,
@@ -92,6 +95,163 @@ describe('public contracts', () => {
     allowWorkerDirectMessages: true,
     budgetMode: 'bounded',
   } as const;
+
+  it('bounds Local AI hardware, fit, and exact verification contracts', () => {
+    expect(
+      localHardwareSnapshotSchema.parse({
+        version: 1,
+        status: 'partial',
+        observedAt: '2026-08-23T00:00:00.000Z',
+        platform: 'win32',
+        architecture: 'x64',
+        memory: { totalBytes: 32 * 2 ** 30, availableBytes: 20 * 2 ** 30, topology: 'discrete' },
+        cpu: { model: 'Fixture CPU', logicalCores: 16, features: [], featuresStatus: 'unknown' },
+        gpuDevicesStatus: 'known',
+        gpus: [
+          {
+            id: 'gpu-0-4318-1234',
+            active: true,
+            vendorId: 0x10de,
+            deviceId: 1234,
+            vendorName: null,
+            deviceName: null,
+            memory: {
+              dedicatedTotalBytes: 12 * 2 ** 30,
+              dedicatedAvailableBytes: 10 * 2 ** 30,
+              sharedTotalBytes: 16 * 2 ** 30,
+              unifiedTotalBytes: null,
+            },
+          },
+        ],
+        backends: [{ kind: 'cuda', status: 'available' }],
+        unknownComponents: ['cpu_features'],
+      }),
+    ).toMatchObject({ status: 'partial', gpus: [{ vendorId: 0x10de }] });
+    expect(
+      localFitAssessmentSchema.parse({
+        state: 'unknown',
+        label: '未判定',
+        detail: '必要な情報が不足しています。',
+        breakdown: null,
+        verification: null,
+      }),
+    ).toMatchObject({ state: 'unknown' });
+    expect(
+      localVerificationRecordSchema.parse({
+        level: 'tools',
+        verifiedAt: '2026-08-23T00:00:00.000Z',
+        binding: {
+          hostCapabilityFingerprint: 'a'.repeat(64),
+          modelRepo: 'owner/model',
+          immutableRevision: 'b'.repeat(40),
+          artifactHashes: ['c'.repeat(64)],
+          quantization: 'Q4_K_M',
+          contextTokens: 8192,
+          kvCacheType: 'f16',
+          batchSize: 512,
+          gpuOffloadRatio: 1,
+          sidecarVersion: '1.0.0',
+          backend: 'cuda',
+        },
+      }),
+    ).toMatchObject({ level: 'tools' });
+    expect(() =>
+      localHardwareSnapshotSchema.parse({
+        version: 1,
+        status: 'partial',
+        observedAt: '2026-08-23T00:00:00.000Z',
+        platform: 'linux',
+        architecture: 'x64',
+        memory: { totalBytes: 8, availableBytes: 9, topology: 'unknown' },
+        cpu: { model: null, logicalCores: null, features: [], featuresStatus: 'unknown' },
+        gpuDevicesStatus: 'unknown',
+        gpus: [],
+        backends: [],
+        unknownComponents: ['system_memory', 'system_memory'],
+      }),
+    ).toThrow();
+    expect(() =>
+      localFitAssessmentSchema.parse({
+        state: 'estimated_cpu',
+        label: '動作可能',
+        detail: 'CPUで動作します。',
+        breakdown: null,
+        verification: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      localFitAssessmentSchema.parse({
+        state: 'estimated_cpu',
+        label: '推定: CPUで動く見込み',
+        detail: '推定結果です。',
+        breakdown: {
+          weightsBytes: 1,
+          kvCacheBytes: 1,
+          scratchBytes: 1,
+          runtimeReserveBytes: 1,
+          safetyMarginBytes: 1,
+          requiredHostBytes: 5,
+          requiredAcceleratorBytes: 0,
+        },
+        verification: {
+          level: 'loaded',
+          verifiedAt: '2026-08-23T00:00:00.000Z',
+          binding: {
+            hostCapabilityFingerprint: 'a'.repeat(64),
+            modelRepo: 'owner/model',
+            immutableRevision: 'b'.repeat(40),
+            artifactHashes: ['c'.repeat(64)],
+            quantization: 'Q4_K_M',
+            contextTokens: 8192,
+            kvCacheType: 'f16',
+            batchSize: 512,
+            gpuOffloadRatio: 0,
+            sidecarVersion: '1.0.0',
+            backend: 'cpu',
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      localFitAssessmentSchema.parse({
+        state: 'verified_tools',
+        label: 'コーディングツール確認済み',
+        detail: '確認しました。',
+        breakdown: null,
+        verification: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      localHardwareSnapshotSchema.parse({
+        version: 1,
+        status: 'complete',
+        observedAt: '2026-08-23T00:00:00.000Z',
+        platform: 'win32',
+        architecture: 'x64',
+        memory: { totalBytes: 32 * 2 ** 30, availableBytes: 20 * 2 ** 30, topology: 'discrete' },
+        cpu: { model: 'Fixture CPU', logicalCores: 16, features: [], featuresStatus: 'unknown' },
+        gpuDevicesStatus: 'known',
+        gpus: [
+          {
+            id: 'gpu-invalid-memory',
+            active: true,
+            vendorId: 0x10de,
+            deviceId: 1234,
+            vendorName: null,
+            deviceName: null,
+            memory: {
+              dedicatedTotalBytes: 8 * 2 ** 30,
+              dedicatedAvailableBytes: 9 * 2 ** 30,
+              sharedTotalBytes: 16 * 2 ** 30,
+              unifiedTotalBytes: null,
+            },
+          },
+        ],
+        backends: [{ kind: 'cuda', status: 'available' }],
+        unknownComponents: [],
+      }),
+    ).toThrow();
+  });
 
   it('carries corrupt SQLite bundle diagnostics in startup recovery', () => {
     expect(
