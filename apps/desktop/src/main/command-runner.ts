@@ -1567,6 +1567,10 @@ export function buildControlledEnvironment(
     environment['WINDIR'] = windowsRoot;
     environment['COMSPEC'] = windowsPath.join(systemDirectory, 'cmd.exe');
     environment['PATH'] = sanitizedWindowsPath(environment['PATH'], windowsRoot);
+    // AppContainer cannot inspect drive-root ancestors while Node resolves a relative entrypoint.
+    // Preserve only the main path so workspace scripts and npm can start without granting the
+    // sandbox read access to C:\ or the user's profile hierarchy. Never inherit user NODE_OPTIONS.
+    environment['NODE_OPTIONS'] = '--preserve-symlinks-main';
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;

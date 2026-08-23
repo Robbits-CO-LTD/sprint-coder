@@ -297,3 +297,13 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
 - [ ] PR #323をマージし、Issue #321をliveでCLOSEDまで確認する
 
 Next Steps: 変更をコミット・pushし、Grok 4.6レビューとCI後に生成アプリの承認表示で再確認する。
+
+### 実機RCA追記
+
+- RCA Mode: Root Cause Confirmed（A/B/C/D = YES）
+- 症状: AppContainer内の`node verify.mjs`が`EPERM: lstat 'C:\\'`で失敗する。
+- 原因箇所: `apps/desktop/src/main/command-runner.ts`のWindows制御環境が、Nodeのmain realpath処理に必要な固定オプションを設定していない。
+- 独立証拠: 同じsandbox helper・Workspace・Nodeで通常実行はEPERM、`NODE_OPTIONS=--preserve-symlinks-main`固定時はmainを起動してverifier本体まで到達した。
+- 除外: Workspace ACL不足ではない。`cmd.exe /c`による同じWorkspaceへの書込みはexit 0で成功した。
+- 修正: ユーザー由来`NODE_OPTIONS`を継承せず固定値を設定し、drive rootへACLを広げずNode/npmの相対entrypointを起動可能にする。
+- Symptom Gone: 同じ相対Node entrypointをAppContainerで実行するWindows回帰テストとpackaged Ollama E2Eで確認する。

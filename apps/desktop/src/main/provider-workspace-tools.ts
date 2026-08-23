@@ -85,7 +85,8 @@ export function providerWorkspaceGuidance(platform: NodeJS.Platform = process.pl
   return `${PROVIDER_WORKSPACE_GUIDANCE}\nThe host OS is Windows. For exec_command, use an absolute Windows executable and direct argv. Never
 guess /bin/bash or another Unix-only path. If cmd.exe is explicitly needed, use Windows switches
 such as /d, /s, and /c; never pass Unix flags such as -e. Prefer structured workspace file tools
-when they are available.`;
+when they are available. cmd.exe echo writes CRLF, so when exact UTF-8 LF bytes are required, use an
+absolute node.exe with -e and node:fs instead. Verify every requested change with the provided test.`;
 }
 
 export const LIST_WORKSPACE_TOOL = createToolDefinition({

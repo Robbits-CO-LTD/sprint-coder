@@ -335,6 +335,8 @@ describe('Provider workspace read tools', () => {
     expect(guidance).toContain('The host OS is Windows');
     expect(guidance).toContain('Never\nguess /bin/bash');
     expect(guidance).toContain('never pass Unix flags such as -e');
+    expect(guidance).toContain('cmd.exe echo writes CRLF');
+    expect(guidance).toContain('absolute node.exe with -e and node:fs');
     expect(providerWorkspaceGuidance('linux')).toBe(PROVIDER_WORKSPACE_GUIDANCE);
   });
 

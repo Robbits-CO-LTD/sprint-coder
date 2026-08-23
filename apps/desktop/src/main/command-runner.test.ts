@@ -109,6 +109,7 @@ describe('CommandRunner', () => {
       LD_PRELOAD: '/workspace/attacker.so',
       LD_LIBRARY_PATH: '/workspace/lib',
       AWS_SECRET_ACCESS_KEY: 'must-not-cross',
+      NODE_OPTIONS: '--require C:\\workspace\\attacker.cjs',
     });
 
     expect(environment).toMatchObject({
@@ -126,6 +127,7 @@ describe('CommandRunner', () => {
       SYSTEMROOT: windowsRoot,
       WINDIR: windowsRoot,
       COMSPEC: windowsPath.join(systemDirectory, 'cmd.exe'),
+      NODE_OPTIONS: '--preserve-symlinks-main',
     });
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
@@ -269,6 +271,31 @@ describe('CommandRunner', () => {
       });
       expect(spec.argv).toEqual(['/c', 'echo ollama-ok']);
     },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'runs a relative Node entrypoint without granting AppContainer access to drive ancestors',
+    async () => {
+      const root = await workspace();
+      await writeFile(
+        join(root, 'verify-node-main.mjs'),
+        "process.stdout.write('node-main-ok\\n');\n",
+      );
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['verify-node-main.mjs'],
+      });
+      const chunks: CommandOutputChunk[] = [];
+      const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(chunks.map(({ text }) => text).join('')).toContain('node-main-ok');
+    },
+    15_000,
   );
 
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
