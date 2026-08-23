@@ -6,6 +6,7 @@ import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
+  isWindowsApiSetContract,
   prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
@@ -166,6 +167,17 @@ describe('hasUnsafeWindowsDllImport', () => {
       else process.env.WINDIR = originalWindir;
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('isWindowsApiSetContract', () => {
+  it('accepts virtual API-set contracts without treating ordinary DLL names as virtual', () => {
+    expect(isWindowsApiSetContract('api-ms-win-core-file-l1-1-0.dll')).toBe(true);
+    expect(
+      isWindowsApiSetContract('ext-ms-onecore-appmodel-staterepository-cache-l1-1-0.dll'),
+    ).toBe(true);
+    expect(isWindowsApiSetContract('kernel32.dll')).toBe(false);
+    expect(isWindowsApiSetContract('payload.dll')).toBe(false);
   });
 });
 

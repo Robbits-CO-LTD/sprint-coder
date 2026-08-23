@@ -244,7 +244,9 @@ export function normalizeTrustedWindowsCmdArgv(
     (argv[0] !== '-c' && argv[0] !== '-e')
   )
     return argv;
-  return ['/c', ...argv.slice(1)];
+  // `/d` disables Command Processor AutoRun hooks so the approved argv is the only command that
+  // runs. `/s` gives the single command string the quoting semantics documented for `/c`.
+  return ['/d', '/s', '/c', ...argv.slice(1)];
 }
 
 export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {

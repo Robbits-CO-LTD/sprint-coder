@@ -269,7 +269,7 @@ describe('CommandRunner', () => {
         executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
         argv: ['-c', 'echo ollama-ok'],
       });
-      expect(spec.argv).toEqual(['/c', 'echo ollama-ok']);
+      expect(spec.argv).toEqual(['/d', '/s', '/c', 'echo ollama-ok']);
     },
   );
 

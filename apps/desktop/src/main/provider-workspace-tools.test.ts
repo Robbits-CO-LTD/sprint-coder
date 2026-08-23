@@ -354,7 +354,7 @@ describe('Provider workspace read tools', () => {
         request.argv,
         'win32',
       ),
-    ).toEqual(['/c', 'echo ollama-ok > ollama.txt']);
+    ).toEqual(['/d', '/s', '/c', 'echo ollama-ok > ollama.txt']);
     expect(
       normalizeTrustedWindowsCmdArgv(
         request.executable,
@@ -362,7 +362,7 @@ describe('Provider workspace read tools', () => {
         ['-e', 'echo ok'],
         'win32',
       ),
-    ).toEqual(['/c', 'echo ok']);
+    ).toEqual(['/d', '/s', '/c', 'echo ok']);
     expect(
       normalizeTrustedWindowsCmdArgv(
         request.executable,

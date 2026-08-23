@@ -314,3 +314,8 @@ Next Steps: 変更をコミット・pushし、Grok 4.6レビューとCI後に生
 - 原因箇所: `codex-adapter.ts`がツール呼び出し前のAssistantプリアンブルでTurnを`synthesizing`へ進め、後続の承認要求が永続層の許可状態から外れる。
 - 修正: Assistant deltaでは`executing`を維持し、`turn/completed`でのみ`synthesizing`へ進む。
 - 回帰防止: プリアンブルの後にmanaged toolを呼ぶ偽Codex app-serverで、呼び出し時点の最終stageが`executing`で`synthesizing`を含まないことを検証する。
+
+### 最終レビュー修正
+
+- 信頼済み`cmd.exe`のUnix形式スイッチは`/d /s /c`へ正規化し、承認外のCommand Processor AutoRunを無効化する。
+- 非System32実行ファイルの仮想`api-ms-*` / `ext-ms-*` importは物理DLLを要求せず、その他の非ローカルDLLは引き続き実在するSystem32ファイルだけを許可する。

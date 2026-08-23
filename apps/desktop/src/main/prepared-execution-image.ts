@@ -477,6 +477,12 @@ async function hasTrustedSystemElfRuntime(bytes: Buffer): Promise<boolean> {
 const WINDOWS_SYSTEM_DLL =
   /^(?:(?:(?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-\d+|(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|hvsifiletrust|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|wpaxholder|ws2_32|wtsapi32))\.dll|winspool\.drv)$/iu;
 
+const WINDOWS_API_SET_CONTRACT = /^(?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-\d+\.dll$/iu;
+
+export function isWindowsApiSetContract(name: string): boolean {
+  return WINDOWS_API_SET_CONTRACT.test(name);
+}
+
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
   const imports = parsePeImports(bytes);
   return imports === null || imports.some((name) => !WINDOWS_SYSTEM_DLL.test(name));
@@ -653,6 +659,9 @@ async function sealExecutablePathInternal(
         localDependency = false;
       }
       if (!localDependency) {
+        // API-set contracts are virtual loader names backed by the OS API-set schema and often do
+        // not exist as files in System32. They cannot be copied side-by-side from the Workspace.
+        if (isWindowsApiSetContract(name)) continue;
         if (!(await isWindowsSystem32Dependency(name)))
           throw new Error(`Windows execution image dependency is unavailable: ${name}`);
         continue;
