@@ -1654,3 +1654,43 @@ describe('retired external Skill import surface', () => {
     );
   });
 });
+
+describe('Managed Local download contracts', () => {
+  it('accepts bounded public progress and rejects impossible completion counts', () => {
+    const job = {
+      id: '11111111-1111-4111-8111-111111111111',
+      modelId: 'a'.repeat(64),
+      state: 'downloading',
+      artifactCount: 2,
+      completedArtifacts: 1,
+      downloadedBytes: 10,
+      totalBytes: 20,
+      failureCode: null,
+      createdAt: '2026-08-23T00:00:00.000Z',
+      updatedAt: '2026-08-23T00:00:01.000Z',
+    };
+    expect(contracts.localDownloadJobSchema.parse(job)).toEqual(job);
+    expect(() =>
+      contracts.localDownloadJobSchema.parse({ ...job, completedArtifacts: 257 }),
+    ).toThrow();
+    expect(() => contracts.localDownloadJobSchema.parse({ ...job, state: 'installed' })).toThrow();
+    expect(() => contracts.localDownloadJobSchema.parse({ ...job, state: 'failed' })).toThrow();
+  });
+
+  it('does not expose a URL or local path in an installed-model record', () => {
+    const model = contracts.installedLocalModelSchema.parse({
+      id: 'b'.repeat(64),
+      source: 'hugging_face',
+      sourceId: 'owner/model',
+      immutableRevision: 'c'.repeat(40),
+      quantization: 'Q4_K_M',
+      artifactCount: 1,
+      totalBytes: 1024,
+      state: 'installed',
+      createdAt: '2026-08-23T00:00:00.000Z',
+      updatedAt: '2026-08-23T00:00:01.000Z',
+    });
+    expect(model).not.toHaveProperty('sourceUrl');
+    expect(model).not.toHaveProperty('path');
+  });
+});

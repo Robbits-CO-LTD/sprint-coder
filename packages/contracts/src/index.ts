@@ -2317,6 +2317,88 @@ export const publicModelCatalogDetailSchema = z
   })
   .strict();
 export type PublicModelCatalogDetail = z.infer<typeof publicModelCatalogDetailSchema>;
+export const localDownloadJobStateSchema = z.enum([
+  'queued',
+  'downloading',
+  'paused',
+  'interrupted',
+  'verifying',
+  'installed',
+  'failed',
+  'canceled',
+]);
+export type LocalDownloadJobState = z.infer<typeof localDownloadJobStateSchema>;
+export const localDownloadFailureCodeSchema = z.enum([
+  'network',
+  'size_unknown',
+  'size_changed',
+  'disk_full',
+  'source_changed',
+  'hash_mismatch',
+  'missing_shard',
+  'unsafe_store',
+  'delete_failed',
+]);
+export type LocalDownloadFailureCode = z.infer<typeof localDownloadFailureCodeSchema>;
+export const localDownloadJobSchema = z
+  .object({
+    id: z.string().uuid(),
+    modelId: z.string().regex(/^[a-f0-9]{64}$/u),
+    state: localDownloadJobStateSchema,
+    artifactCount: z.number().int().min(1).max(256),
+    completedArtifacts: z.number().int().min(0).max(256),
+    downloadedBytes: localHardwareByteCountSchema,
+    totalBytes: localHardwareByteCountSchema,
+    failureCode: localDownloadFailureCodeSchema.nullable(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict()
+  .superRefine((job, context) => {
+    if (job.completedArtifacts > job.artifactCount)
+      context.addIssue({
+        code: 'custom',
+        path: ['completedArtifacts'],
+        message: 'Completed artifact count exceeds the job artifact count',
+      });
+    if (job.downloadedBytes > job.totalBytes)
+      context.addIssue({
+        code: 'custom',
+        path: ['downloadedBytes'],
+        message: 'Downloaded bytes exceed the job total',
+      });
+    if (
+      (job.state === 'verifying' || job.state === 'installed') &&
+      (job.completedArtifacts !== job.artifactCount || job.downloadedBytes !== job.totalBytes)
+    )
+      context.addIssue({
+        code: 'custom',
+        path: ['state'],
+        message: 'Verified and installed jobs must contain every declared artifact byte',
+      });
+    if (job.state === 'failed' && job.failureCode === null)
+      context.addIssue({
+        code: 'custom',
+        path: ['failureCode'],
+        message: 'Failed jobs require a bounded failure code',
+      });
+  });
+export type LocalDownloadJob = z.infer<typeof localDownloadJobSchema>;
+export const installedLocalModelSchema = z
+  .object({
+    id: z.string().regex(/^[a-f0-9]{64}$/u),
+    source: z.enum(['hugging_face', 'localai_gallery']),
+    sourceId: z.string().min(1).max(256),
+    immutableRevision: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u),
+    quantization: z.string().min(1).max(64),
+    artifactCount: z.number().int().min(1).max(256),
+    totalBytes: localHardwareByteCountSchema,
+    state: z.enum(['installing', 'installed', 'deleting', 'delete_failed']),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict();
+export type InstalledLocalModel = z.infer<typeof installedLocalModelSchema>;
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',
