@@ -20,6 +20,7 @@ import {
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 import {
+  getTrustedWindowsSystemDirectory,
   prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
@@ -209,9 +210,7 @@ async function resolveBareExecutable(
 async function isTrustedWindowsMultiLinkExecutable(canonicalPath: string): Promise<boolean> {
   if (process.platform !== 'win32') return false;
   if (canonicalPath.toLowerCase() === (await realpath(process.execPath)).toLowerCase()) return true;
-  const systemRoot = process.env['SystemRoot'];
-  if (systemRoot === undefined || !isAbsolute(systemRoot)) return false;
-  const systemDirectory = await realpath(join(systemRoot, 'System32'));
+  const systemDirectory = await realpath(getTrustedWindowsSystemDirectory());
   const childPath = relative(systemDirectory, canonicalPath);
   return childPath !== '' && !childPath.startsWith('..') && !isAbsolute(childPath);
 }

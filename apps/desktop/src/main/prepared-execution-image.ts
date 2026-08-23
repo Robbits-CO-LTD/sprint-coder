@@ -714,10 +714,16 @@ async function isWindowsSystem32Image(path: string): Promise<boolean> {
 
 async function windowsSystem32Directory(): Promise<string | undefined> {
   try {
-    return await realpath(windowsAddon().getTrustedSystemDirectory());
+    return await realpath(getTrustedWindowsSystemDirectory());
   } catch {
     return undefined;
   }
+}
+
+export function getTrustedWindowsSystemDirectory(): string {
+  if (process.platform !== 'win32')
+    throw new Error('Trusted System32 is only available on Windows');
+  return windowsAddon().getTrustedSystemDirectory();
 }
 
 function readWindowsImage(path: string, allowHardlinks: boolean, label: string): Buffer {

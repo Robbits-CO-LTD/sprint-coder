@@ -31,6 +31,7 @@ import {
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
+import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -354,21 +355,34 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'runs a held System32 command directly from its protected directory',
+    'runs a held command from the trusted System32 even when the environment is spoofed',
     async () => {
       if (!(await probeSandboxRunner()).available) return;
       const root = await workspace();
-      const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-      expect(systemRoot).toBeDefined();
-      const spec = await prepareExecutionSpec({
-        workspacePath: root,
-        executable: join(systemRoot!, 'System32', 'cmd.exe'),
-        argv: ['/d', '/s', '/c', 'echo command ok'],
-      });
+      const systemDirectory = getTrustedWindowsSystemDirectory();
+      const originalSystemRoot = process.env.SystemRoot;
+      const originalWindir = process.env.WINDIR;
+      const spec = await (async () => {
+        process.env.SystemRoot = root;
+        process.env.WINDIR = root;
+        try {
+          return await prepareExecutionSpec({
+            workspacePath: root,
+            executable: join(systemDirectory, 'cmd.exe'),
+            argv: ['/d', '/s', '/c', 'echo command ok'],
+          });
+        } finally {
+          if (originalSystemRoot === undefined) delete process.env.SystemRoot;
+          else process.env.SystemRoot = originalSystemRoot;
+          if (originalWindir === undefined) delete process.env.WINDIR;
+          else process.env.WINDIR = originalWindir;
+        }
+      })();
 
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
       expect(result.exitCode).toBe(0);
     },
+    10_000,
   );
 
   it.runIf(process.platform === 'win32')(

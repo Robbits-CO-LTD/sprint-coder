@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +18,7 @@ use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_CAPABILITIES};
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
@@ -342,7 +343,10 @@ fn set_workspace_acl(path: &Path, sid: &str) -> bool {
     // ordinary descendants inherit access, but deliberately do not traverse and rewrite entries
     // whose inheritance was disabled; doing so is O(files) and stalls commands in large repos.
     let grant = format!("*{sid}:(OI)(CI)M");
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
     command.arg(path).args(["/grant", &grant, "/C", "/Q"]);
     command.stdout(Stdio::null()).stderr(Stdio::null());
     command.status().is_ok_and(|status| status.success())
@@ -350,7 +354,10 @@ fn set_workspace_acl(path: &Path, sid: &str) -> bool {
 
 fn set_read_tree_acl(path: &Path, sid: &str) -> bool {
     let grant = format!("*{sid}:(OI)(CI)RX");
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
     command
         .arg(path)
         .args(["/grant", &grant, "/C", "/Q", "/T"])
@@ -360,7 +367,10 @@ fn set_read_tree_acl(path: &Path, sid: &str) -> bool {
 }
 
 fn remove_inherited_acl(path: &Path, sid: &str) -> bool {
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
     command
         .arg(path)
         .args(["/remove", &format!("*{sid}"), "/C", "/Q"]);
@@ -369,13 +379,36 @@ fn remove_inherited_acl(path: &Path, sid: &str) -> bool {
 }
 
 fn remove_tree_acl(path: &Path, sid: &str) -> bool {
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
     command
         .arg(path)
         .args(["/remove", &format!("*{sid}"), "/C", "/Q", "/T"])
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command.status().is_ok_and(|status| status.success())
+}
+
+fn trusted_system_executable(name: &str) -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 261];
+    // SAFETY: buffer is writable for its declared length. GetSystemDirectoryW writes at most that
+    // many UTF-16 code units and returns the required length when the buffer is too small.
+    let mut length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return None;
+    }
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        // SAFETY: the resized buffer is writable for its declared length.
+        length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 || length as usize >= buffer.len() {
+            return None;
+        }
+    }
+    let directory = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+    Some(PathBuf::from(directory).join(name))
 }
 
 fn spawn_appcontainer(sid: PSID, cwd: &Path, executable: &str, argv: &[String]) -> Result<u8, u32> {
