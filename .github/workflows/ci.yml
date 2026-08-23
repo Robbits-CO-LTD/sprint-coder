@@ -252,6 +252,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
+
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
         uses: actions/cache@v6
