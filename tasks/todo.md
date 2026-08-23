@@ -514,7 +514,6 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - 信頼済み`cmd.exe`のUnix形式スイッチは`/d /s /c`へ正規化し、承認外のCommand Processor AutoRunを無効化する。
 - 非System32実行ファイルの仮想`api-ms-*` / `ext-ms-*` importは物理DLLを要求せず、その他の非ローカルDLLは引き続き実在するSystem32ファイルだけを許可する。
 - Grok 4.6の再レビューを反映し、信頼済み`cmd.exe`の全形式へ`/d`を強制する。API-setは信頼済みOS schemaに実在する契約だけを許可し、Workspace内の同名DLLによる偽装を拒否する。
-
 ## Issue #307 v0.5.1 installed Ollama regression (2026-08-23)
 
 ### 計画
@@ -531,8 +530,18 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - [x] Windows fast laneの失敗が、sandbox runner未構築による`.exe.sha256`欠落だと確定する
 - [x] #307と分離したIssue #335へ発見内容・影響・再現条件・完了条件を記録する
 - [x] `Windows focused smoke`へ既存のsandbox runnerビルド手順だけを追加する
-- [ ] 同ジョブと必須チェックの成功を確認する
+- [ ] #307のrenderer-only PRで同ジョブと必須チェックの成功を確認する
 
 ### Next Steps
 
 Windows fast laneを再検証し、PR・CI・マージ後、v0.5.1プレリリースを再構築してインストール版E2Eを再実行する。
+
+## Issue #335 Windows focused smoke sandbox runner (2026-08-23)
+
+- [x] `.exe.sha256`欠落の原因がfast laneのsandbox runner未構築だと確定する
+- [x] `Windows focused smoke`へ既存のビルド手順だけを追加する
+- [x] ローカルで従来の失敗テストが通ることを確認する
+- [x] PR #336をマージし、Issue #335をCLOSEDまで確認する
+- [ ] renderer-only PR #334で同ジョブの成功を確認する
+
+Next Steps: #307のrenderer-only PRでWindows fast laneを実証する。
