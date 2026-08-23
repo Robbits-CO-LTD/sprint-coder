@@ -3418,6 +3418,69 @@ const migrations = [
         ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
     `,
   },
+  {
+    version: 75,
+    checksum: 'managed-local-download-store-secure-v75',
+    sql: `
+      CREATE TABLE local_models (
+        id TEXT PRIMARY KEY CHECK (
+          length(id) = 64 AND id NOT GLOB '*[^0-9a-f]*'
+        ),
+        source TEXT NOT NULL CHECK (source IN ('hugging_face', 'localai_gallery')),
+        source_id TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 256),
+        immutable_revision TEXT NOT NULL CHECK (
+          length(immutable_revision) IN (40, 64)
+          AND immutable_revision NOT GLOB '*[^0-9a-f]*'
+        ),
+        quantization TEXT NOT NULL CHECK (length(quantization) BETWEEN 1 AND 64),
+        artifact_count INTEGER NOT NULL CHECK (artifact_count BETWEEN 1 AND 256),
+        total_bytes INTEGER NOT NULL CHECK (total_bytes > 0),
+        state TEXT NOT NULL CHECK (state IN ('installing', 'installed', 'deleting', 'delete_failed')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE local_model_artifacts (
+        model_id TEXT NOT NULL REFERENCES local_models(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND 256),
+        filename TEXT NOT NULL CHECK (
+          length(filename) BETWEEN 1 AND 512
+          AND filename NOT IN ('.', '..')
+          AND instr(filename, '/') = 0
+          AND instr(filename, char(92)) = 0
+          AND instr(filename, ':') = 0
+          AND instr(filename, char(0)) = 0
+        ),
+        sha256 TEXT NOT NULL CHECK (
+          length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+        etag TEXT CHECK (etag IS NULL OR length(etag) <= 512),
+        downloaded_bytes INTEGER NOT NULL DEFAULT 0
+          CHECK (downloaded_bytes >= 0 AND downloaded_bytes <= byte_length),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'downloaded', 'installed')),
+        PRIMARY KEY(model_id, ordinal),
+        UNIQUE(model_id, filename)
+      );
+      CREATE TABLE local_model_download_jobs (
+        id TEXT PRIMARY KEY,
+        model_id TEXT NOT NULL UNIQUE REFERENCES local_models(id) ON DELETE CASCADE,
+        state TEXT NOT NULL CHECK (state IN (
+          'queued', 'downloading', 'paused', 'interrupted', 'verifying',
+          'installed', 'failed', 'canceled'
+        )),
+        completed_artifacts INTEGER NOT NULL DEFAULT 0 CHECK (completed_artifacts BETWEEN 0 AND 256),
+        downloaded_bytes INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_bytes >= 0),
+        failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN (
+          'network', 'size_unknown', 'size_changed', 'disk_full', 'source_changed',
+          'hash_mismatch', 'missing_shard', 'unsafe_store', 'delete_failed'
+        )),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX local_model_download_jobs_state_idx
+        ON local_model_download_jobs(state, updated_at);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.

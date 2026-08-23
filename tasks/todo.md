@@ -1,3 +1,41 @@
+# Issue #122 Slice D — Download manager・model store（2026-08-23）
+
+### 計画
+
+- [x] 現行SQLite migration、userData保存、NativeSafeFs、download/recovery実装を読み、正典境界を固定する
+- [x] model・artifact・download jobを分離したbounded契約とSQLite state machineを追加する
+- [x] Main所有のHTTPS downloadをimmutable revision、size、空き容量、SHA-256、redirect再検証付きで実装する
+- [x] `.partial`、Range + If-Range、pause/resume/cancel/restart recovery、source変更、split GGUFをfail-closedで実装する
+- [x] model storeのcanonical path、atomic publish、symlink/hardlink/reparse escape、既存file置換、lease/job排他を拒否する
+- [x] hash mismatch、disk full、欠落shard、source changed、restart、delete失敗をfixtureで固定する
+- [ ] 対象型検査・テスト・lint・format、固定Grok 4.6レビュー、PR、全CI、マージを完了する
+
+### 実装境界
+
+- 保存先はMainが確定したuserData配下の専用rootだけとし、Rendererからpath、URL、hash、状態を直接書き込ませない。
+- source URLはSlice CのsourceId・immutable revision・artifact metadataからMainが組み立て、redirectごとにpublic HTTPSと許可origin/pathを再検証する。
+- size不明、強いSHA-256不明、空き容量不足、hash不一致、split shard欠落、source revision/ETag変化ではinstalledへ遷移しない。
+- `.partial`とresume metadataを保持するpauseと、確認済みcancelによるpartial削除を分ける。起動時の`downloading`は`interrupted`へ回復する。
+- filesystem公開成功後にだけDBをinstalledへ更新し、削除はfilesystem成功後にだけrecordを削除する。
+- sidecar起動、native binary packaging、Renderer UI、実モデル取得はSlice Dに含めない。通常検証はlocal HTTP fixtureと一時directoryで行う。
+
+### Next Steps
+
+1. 差分をコミットし、PRを作成する。
+2. 必須CIを確認し、許可済みのマージを行う。
+3. Epic #122へSlice Dの完了根拠を記録し、Slice Eへ進む。
+
+### 進捗
+
+- migration v75へmodel・artifact・download jobを分離し、Main所有の状態遷移と起動時interrupted回復を追加した。
+- 1件同時download、`.partial`、Range/If-Range、ETag、size・空き容量、stream SHA-256、split shard完全性、atomic directory公開を実装した。
+- LocalAI Galleryの可変`main`とshorthandは閲覧専用へ戻し、固定40/64桁revisionだけを取得可能にした。Main内managerも取得前に固定revisionへ置換する。
+- pauseはpartialを保持し、確認済みcancelだけがpartialを削除する。削除は`deleting`を永続化してからfilesystemを消し、成功後だけDB recordを削除する。
+- 契約50件、download/catalog 18件、SQLite Electron ABI統合155件相当、全workspace型検査、Prettier、lint（今回差分0件）をPASSした。
+- 固定`x-ai/grok-4.6`は初回4件、収束1回目2件のHIGHを検出。現行コードで裏取りして修正し、最終収束レビューはGOだった。
+
+---
+
 # Issue #122 Slice C — 公開catalog adapter（2026-08-23）
 
 ### 計画

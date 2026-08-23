@@ -772,15 +772,9 @@ function quantizationFromFilename(filename: string): string | null {
 
 function isSupportedGalleryArtifactUri(value: unknown): boolean {
   if (typeof value !== 'string' || value.length > 2_048) return false;
-  if (value.startsWith('huggingface://')) {
-    const parts = value.slice('huggingface://'.length).split('/');
-    return (
-      parts.length >= 3 &&
-      parts.every(
-        (part) => part !== '' && part !== '.' && part !== '..' && /^[a-zA-Z0-9._-]+$/u.test(part),
-      )
-    );
-  }
+  // The shorthand names a mutable default branch. Keep it viewable, but never expose it as a
+  // durable download authority until Main resolves an exact Hub commit.
+  if (value.startsWith('huggingface://')) return false;
   try {
     const url = new URL(value);
     return (
@@ -788,7 +782,7 @@ function isSupportedGalleryArtifactUri(value: unknown): boolean {
       url.origin === HF_ORIGIN &&
       url.username === '' &&
       url.password === '' &&
-      /^\/[^/]+\/[^/]+\/resolve\/[^/]+\/.+/u.test(url.pathname)
+      /^\/[^/]+\/[^/]+\/resolve\/(?:[a-f0-9]{40}|[a-f0-9]{64})\/.+/u.test(url.pathname)
     );
   } catch {
     return false;
@@ -797,12 +791,6 @@ function isSupportedGalleryArtifactUri(value: unknown): boolean {
 
 function normalizedGalleryArtifactUrl(value: unknown): string | null {
   if (!isSupportedGalleryArtifactUri(value) || typeof value !== 'string') return null;
-  if (value.startsWith('huggingface://')) {
-    const fields = value.slice('huggingface://'.length).split('/');
-    if (fields.length < 3) return null;
-    const [owner, repo, ...filename] = fields;
-    return `${HF_ORIGIN}/${owner}/${repo}/blob/main/${filename.map(encodeURIComponent).join('/')}`;
-  }
   return new URL(value).toString();
 }
 

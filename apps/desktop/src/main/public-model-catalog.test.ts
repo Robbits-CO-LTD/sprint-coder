@@ -220,7 +220,7 @@ describe('PublicModelCatalogService', () => {
   it('reaches 1,000 LocalAI entries without duplicates and returns only one bounded page', async () => {
     const yaml = Array.from({ length: 1_000 }, (_, index) => {
       const name = `model-${String(index).padStart(4, '0')}`;
-      return `- name: ${name}\n  license: apache-2.0\n  tags: [llm, gguf, code]\n  overrides:\n    backend: llama-cpp\n    parameters:\n      model: ${name}-Q4_K_M.gguf\n  files:\n    - filename: ${name}-Q4_K_M.gguf\n      uri: huggingface://acme/${name}/${name}-Q4_K_M.gguf\n      sha256: ${HASH}`;
+      return `- name: ${name}\n  license: apache-2.0\n  tags: [llm, gguf, code]\n  overrides:\n    backend: llama-cpp\n    parameters:\n      model: ${name}-Q4_K_M.gguf\n  files:\n    - filename: ${name}-Q4_K_M.gguf\n      uri: https://huggingface.co/acme/${name}/resolve/${REVISION}/${name}-Q4_K_M.gguf\n      sha256: ${HASH}`;
     }).join('\n');
     const fetch = vi
       .fn<PublicCatalogFetch>()
@@ -288,14 +288,14 @@ describe('PublicModelCatalogService', () => {
   overrides: { backend: llama-cpp }
   files:
     - filename: gallery-a-Q4_K_M.gguf
-      uri: huggingface://acme/gallery-a/gallery-a-Q4_K_M.gguf
+      uri: https://huggingface.co/acme/gallery-a/resolve/${REVISION}/gallery-a-Q4_K_M.gguf
       sha256: ${HASH}
 - name: gallery-b
   tags: [llm, gguf, code]
   overrides: { backend: llama-cpp }
   files:
     - filename: gallery-b-Q4_K_M.gguf
-      uri: huggingface://acme/gallery-b/gallery-b-Q4_K_M.gguf
+      uri: https://huggingface.co/acme/gallery-b/resolve/${REVISION}/gallery-b-Q4_K_M.gguf
       sha256: ${HASH}`;
     const service = new PublicModelCatalogService(async (url) =>
       url.includes('raw.githubusercontent.com') ? response(yaml) : response([hfModel('acme/hf')]),
