@@ -293,10 +293,10 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
 - [x] WindowsでモデルがUnix形式の`cmd.exe -c/-e`を生成する根本原因を特定
 - [x] 信頼済みSystem32の実行ファイルを確定した後に`cmd.exe /c`へ正規化する
 - [x] 承認画面と実行対象が同じ`/c`を保持する統合テストを追加する
-- [ ] 対象テスト・型チェック・Grok 4.6レビュー・実機E2Eを完了する
+- [x] 対象テスト・型チェック・Grok 4.6レビュー・実機E2Eを完了する
 - [ ] PR #323をマージし、Issue #321をliveでCLOSEDまで確認する
 
-Next Steps: 変更をコミット・pushし、Grok 4.6レビューとCI後に生成アプリの承認表示で再確認する。
+Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliveでCLOSEDまで確認する。
 
 ### 実機RCA追記
 
