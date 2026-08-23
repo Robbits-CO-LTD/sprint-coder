@@ -1,3 +1,41 @@
+# Issue #122 Slice B — Hardware inventory・fit推定（2026-08-23）
+
+### 計画
+
+- [x] Electron/Nodeが各OSで返せるCPU・RAM・GPU情報を現行APIと型定義で確認する
+- [x] 取得値と取得不能を区別するbounded `LocalHardwareSnapshot` 契約を追加する
+- [x] GGUF、context、KV cache、scratch、runtime reserve、offloadから内訳を計算するpure fit estimatorを追加する
+- [x] 推定4状態・非対応・実機検証2状態と、完全一致条件による検証失効規則を契約で固定する
+- [x] Apple統合メモリ、NVIDIA、GPU不明、CPU onlyのfixtureで判定と日本語表示を固定する
+- [ ] 対象型検査・テスト・lint・format、固定Grok 4.6レビュー、PR、全CI、マージを完了する
+
+### 実装境界
+
+- inventoryはOSやdriverが明示した値だけを記録し、GPU名・専用/共有メモリ・CPU featureを推測しない。
+- GPU検出とbackend利用可否は別状態とし、取得失敗は例外ではなく`unknown`または`partial`へ正規化する。
+- estimatorはI/Oを持たず、入力不足では`unknown`、明示されたruntime非対応だけ`unsupported`を返す。
+- estimatorは`verified_loaded`/`verified_tools`を生成しない。実機検証状態は完全一致fingerprintの照合でのみ再利用する。
+- Slice Bではcatalog、download、sidecar、Renderer UI、IPC公開を実装しない。
+
+### Next Steps
+
+1. commit・push・PRを作成する。
+2. ReviewBOTと全CIを確認し、必要な指摘だけ修正する。
+3. マージ後にSlice Cへ進む。
+
+### 進捗
+
+- NodeのRAM/CPU実測とElectronのdocumented GPU IDを採用し、保証されないVRAM・CPU feature・backend情報は明示的な不明へ正規化した。
+- GPU 0台と列挙失敗、Apple統合メモリとWindows dedicated/shared、既知値と取得不能を契約上で区別した。
+- `weights + KV cache + scratch + runtime reserve + safety margin` の内訳とCPU/GPU/offload判定をpure functionで固定した。
+- 実機検証はhost/model revision/artifact hash/quant/context/batch/offload/sidecar/backend完全一致時だけ再利用する。
+- contracts型検査、desktop型検査、対象eslint、format、diff check: PASS。
+- contracts 48 tests、hardware/fit 10 tests: PASS。
+- 固定Grok 4.6最終diffレビュー: GO。CRITICAL/HIGH 0件。
+- PR #329の初回Windows shard 3/3は、実行用コピーのnative handle解放直後に`EBUSY`となる既存cleanup競合で1件失敗した。テスト側と同じ有界retryを本体cleanupへ追加して再検証する。
+
+---
+
 # Issue #122 Slice A — Local AI分類・契約・ADR（2026-08-23）
 
 ### 計画

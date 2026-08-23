@@ -1904,6 +1904,303 @@ export const providerRuntimeKindSchema = z.enum([
 export type ProviderRuntimeKind = z.infer<typeof providerRuntimeKindSchema>;
 export const providerComputeLocationSchema = z.enum(['cloud', 'local']);
 export type ProviderComputeLocation = z.infer<typeof providerComputeLocationSchema>;
+const localHardwareByteCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const localHardwareUnknownComponentSchema = z.enum([
+  'system_memory',
+  'cpu_identity',
+  'cpu_features',
+  'gpu_devices',
+  'gpu_memory',
+  'backend_availability',
+]);
+export const localHardwareSnapshotSchema = z
+  .object({
+    version: z.literal(1),
+    status: z.enum(['complete', 'partial', 'unknown']),
+    observedAt: timestampSchema,
+    platform: z.enum(['darwin', 'win32', 'linux', 'other']),
+    architecture: z.string().min(1).max(32),
+    memory: z
+      .object({
+        totalBytes: localHardwareByteCountSchema.nullable(),
+        availableBytes: localHardwareByteCountSchema.nullable(),
+        topology: z.enum(['unified', 'discrete', 'shared', 'unknown']),
+      })
+      .strict(),
+    cpu: z
+      .object({
+        model: z.string().min(1).max(256).nullable(),
+        logicalCores: z.number().int().positive().max(4_096).nullable(),
+        features: z.array(z.string().regex(/^[a-z0-9._-]{1,32}$/)).max(64),
+        featuresStatus: z.enum(['known', 'unknown']),
+      })
+      .strict(),
+    gpuDevicesStatus: z.enum(['known', 'unknown']),
+    gpus: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(64),
+            active: z.boolean().nullable(),
+            vendorId: z.number().int().nonnegative().max(0xffffffff).nullable(),
+            deviceId: z.number().int().nonnegative().max(0xffffffff).nullable(),
+            vendorName: z.string().min(1).max(128).nullable(),
+            deviceName: z.string().min(1).max(256).nullable(),
+            memory: z
+              .object({
+                dedicatedTotalBytes: localHardwareByteCountSchema.nullable(),
+                dedicatedAvailableBytes: localHardwareByteCountSchema.nullable(),
+                sharedTotalBytes: localHardwareByteCountSchema.nullable(),
+                unifiedTotalBytes: localHardwareByteCountSchema.nullable(),
+              })
+              .strict(),
+          })
+          .strict(),
+      )
+      .max(16),
+    backends: z
+      .array(
+        z
+          .object({
+            kind: z.enum(['cpu', 'metal', 'cuda', 'vulkan']),
+            status: z.enum(['available', 'unavailable', 'unknown']),
+          })
+          .strict(),
+      )
+      .max(4),
+    /** Components with one or more unavailable required sub-fields. A partial component may retain
+     * independently observed values (for example total RAM when current free RAM failed). */
+    unknownComponents: z.array(localHardwareUnknownComponentSchema).max(6),
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    const unknown = new Set(snapshot.unknownComponents);
+    if (new Set(snapshot.unknownComponents).size !== snapshot.unknownComponents.length)
+      context.addIssue({ code: 'custom', message: 'Duplicate unknown hardware component' });
+    if (new Set(snapshot.backends.map((backend) => backend.kind)).size !== snapshot.backends.length)
+      context.addIssue({ code: 'custom', message: 'Duplicate local backend' });
+    if (new Set(snapshot.gpus.map((gpu) => gpu.id)).size !== snapshot.gpus.length)
+      context.addIssue({ code: 'custom', message: 'Duplicate GPU id' });
+    if (snapshot.gpuDevicesStatus === 'unknown' && snapshot.gpus.length > 0)
+      context.addIssue({
+        code: 'custom',
+        message: 'Unknown GPU enumeration cannot contain GPU devices',
+        path: ['gpus'],
+      });
+    if (snapshot.cpu.featuresStatus === 'unknown' && snapshot.cpu.features.length > 0)
+      context.addIssue({
+        code: 'custom',
+        message: 'Unknown CPU features cannot contain feature values',
+        path: ['cpu', 'features'],
+      });
+    if (
+      snapshot.memory.totalBytes !== null &&
+      snapshot.memory.availableBytes !== null &&
+      snapshot.memory.availableBytes > snapshot.memory.totalBytes
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Available system memory cannot exceed total memory',
+        path: ['memory', 'availableBytes'],
+      });
+    for (const [index, gpu] of snapshot.gpus.entries()) {
+      if (
+        gpu.memory.dedicatedTotalBytes !== null &&
+        gpu.memory.dedicatedAvailableBytes !== null &&
+        gpu.memory.dedicatedAvailableBytes > gpu.memory.dedicatedTotalBytes
+      )
+        context.addIssue({
+          code: 'custom',
+          message: 'Available dedicated GPU memory cannot exceed total dedicated GPU memory',
+          path: ['gpus', index, 'memory', 'dedicatedAvailableBytes'],
+        });
+    }
+    const expectedUnknown = new Set(
+      [
+        snapshot.memory.totalBytes === null || snapshot.memory.availableBytes === null
+          ? 'system_memory'
+          : null,
+        snapshot.cpu.model === null || snapshot.cpu.logicalCores === null ? 'cpu_identity' : null,
+        snapshot.cpu.featuresStatus === 'unknown' ? 'cpu_features' : null,
+        snapshot.gpuDevicesStatus === 'unknown' ? 'gpu_devices' : null,
+        snapshot.backends.length === 0 ||
+        snapshot.backends.some((backend) => backend.status === 'unknown')
+          ? 'backend_availability'
+          : null,
+        snapshot.gpuDevicesStatus === 'unknown' ||
+        snapshot.gpus.some((gpu) => {
+          if (snapshot.memory.topology === 'unified') return gpu.memory.unifiedTotalBytes === null;
+          if (snapshot.memory.topology === 'discrete')
+            return (
+              gpu.memory.dedicatedTotalBytes === null ||
+              gpu.memory.dedicatedAvailableBytes === null ||
+              (snapshot.platform === 'win32' && gpu.memory.sharedTotalBytes === null)
+            );
+          if (snapshot.memory.topology === 'shared') return gpu.memory.sharedTotalBytes === null;
+          return true;
+        })
+          ? 'gpu_memory'
+          : null,
+      ].filter(
+        (component): component is z.infer<typeof localHardwareUnknownComponentSchema> =>
+          component !== null,
+      ),
+    );
+    for (const component of expectedUnknown)
+      if (!unknown.has(component))
+        context.addIssue({
+          code: 'custom',
+          message: `Missing unknown component marker: ${component}`,
+          path: ['unknownComponents'],
+        });
+    for (const component of unknown)
+      if (!expectedUnknown.has(component))
+        context.addIssue({
+          code: 'custom',
+          message: `Unexpected unknown component marker: ${component}`,
+          path: ['unknownComponents'],
+        });
+    const allPrimaryFactsUnknown = [
+      'system_memory',
+      'cpu_identity',
+      'cpu_features',
+      'gpu_devices',
+      'backend_availability',
+    ].every((component) =>
+      unknown.has(component as z.infer<typeof localHardwareUnknownComponentSchema>),
+    );
+    if (snapshot.status === 'complete' && expectedUnknown.size > 0)
+      context.addIssue({
+        code: 'custom',
+        message: 'Complete hardware snapshot cannot contain unknown components',
+        path: ['status'],
+      });
+    if (snapshot.status === 'partial' && (expectedUnknown.size === 0 || allPrimaryFactsUnknown))
+      context.addIssue({
+        code: 'custom',
+        message: 'Partial hardware snapshot must contain both known and unknown facts',
+        path: ['status'],
+      });
+    if (snapshot.status === 'unknown' && !allPrimaryFactsUnknown)
+      context.addIssue({
+        code: 'custom',
+        message: 'Unknown hardware snapshot cannot contain usable primary facts',
+        path: ['status'],
+      });
+  });
+export type LocalHardwareSnapshot = z.infer<typeof localHardwareSnapshotSchema>;
+
+export const localFitStateSchema = z.enum([
+  'unknown',
+  'estimated_comfortable',
+  'estimated_cpu',
+  'estimated_insufficient',
+  'unsupported',
+  'verified_loaded',
+  'verified_tools',
+]);
+export type LocalFitState = z.infer<typeof localFitStateSchema>;
+export const localFitMemoryBreakdownSchema = z
+  .object({
+    weightsBytes: localHardwareByteCountSchema,
+    kvCacheBytes: localHardwareByteCountSchema,
+    scratchBytes: localHardwareByteCountSchema,
+    runtimeReserveBytes: localHardwareByteCountSchema,
+    safetyMarginBytes: localHardwareByteCountSchema,
+    requiredHostBytes: localHardwareByteCountSchema,
+    requiredAcceleratorBytes: localHardwareByteCountSchema,
+  })
+  .strict()
+  .superRefine((breakdown, context) => {
+    const expected =
+      breakdown.weightsBytes +
+      breakdown.kvCacheBytes +
+      breakdown.scratchBytes +
+      breakdown.runtimeReserveBytes +
+      breakdown.safetyMarginBytes;
+    if (
+      !Number.isSafeInteger(expected) ||
+      breakdown.requiredHostBytes + breakdown.requiredAcceleratorBytes !== expected
+    )
+      context.addIssue({ code: 'custom', message: 'Inconsistent local fit memory breakdown' });
+  });
+export type LocalFitMemoryBreakdown = z.infer<typeof localFitMemoryBreakdownSchema>;
+export const localVerificationBindingSchema = z
+  .object({
+    hostCapabilityFingerprint: digestSchema,
+    modelRepo: z.string().min(1).max(256),
+    immutableRevision: z.string().regex(/^[a-f0-9]{40,64}$/),
+    artifactHashes: z.array(digestSchema).min(1).max(256),
+    quantization: z.string().min(1).max(64),
+    contextTokens: z.number().int().positive().max(1_048_576),
+    kvCacheType: z.string().min(1).max(64),
+    batchSize: z.number().int().positive().max(1_048_576),
+    gpuOffloadRatio: z.number().min(0).max(1),
+    sidecarVersion: z.string().min(1).max(128),
+    backend: z.enum(['cpu', 'metal', 'cuda', 'vulkan']),
+  })
+  .strict()
+  .superRefine((binding, context) => {
+    if (new Set(binding.artifactHashes).size !== binding.artifactHashes.length)
+      context.addIssue({ code: 'custom', message: 'Duplicate local artifact hash' });
+  });
+export type LocalVerificationBinding = z.infer<typeof localVerificationBindingSchema>;
+export const localVerificationRecordSchema = z
+  .object({
+    level: z.enum(['loaded', 'tools']),
+    verifiedAt: timestampSchema,
+    binding: localVerificationBindingSchema,
+  })
+  .strict();
+export type LocalVerificationRecord = z.infer<typeof localVerificationRecordSchema>;
+export const localFitAssessmentSchema = z
+  .object({
+    state: localFitStateSchema,
+    label: z.string().min(1).max(120),
+    detail: z.string().min(1).max(500),
+    breakdown: localFitMemoryBreakdownSchema.nullable(),
+    verification: localVerificationRecordSchema.nullable(),
+  })
+  .strict()
+  .superRefine((assessment, context) => {
+    const estimated = assessment.state.startsWith('estimated_');
+    const verified = assessment.state.startsWith('verified_');
+    if (estimated && assessment.breakdown === null)
+      context.addIssue({
+        code: 'custom',
+        message: 'Estimated fit requires a memory breakdown',
+        path: ['breakdown'],
+      });
+    if (estimated && !/(推定|見込み)/u.test(`${assessment.label}${assessment.detail}`))
+      context.addIssue({
+        code: 'custom',
+        message: 'Estimated fit copy must identify itself as an estimate',
+        path: ['label'],
+      });
+    if (verified !== (assessment.verification !== null))
+      context.addIssue({
+        code: 'custom',
+        message: 'Verified fit and verification evidence must appear together',
+        path: ['verification'],
+      });
+    if (!estimated && !verified && assessment.breakdown !== null)
+      context.addIssue({
+        code: 'custom',
+        message: 'Unknown and unsupported fit cannot contain a memory estimate',
+        path: ['breakdown'],
+      });
+    if (
+      assessment.verification !== null &&
+      ((assessment.state === 'verified_tools' && assessment.verification.level !== 'tools') ||
+        (assessment.state === 'verified_loaded' && assessment.verification.level !== 'loaded'))
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Verified fit state must match its evidence level',
+        path: ['state'],
+      });
+  });
+export type LocalFitAssessment = z.infer<typeof localFitAssessmentSchema>;
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',
