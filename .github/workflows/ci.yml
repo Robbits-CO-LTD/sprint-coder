@@ -466,11 +466,10 @@ jobs:
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
 
   e2e-windows:
-    name: Windows dev-mode E2E smoke
+    name: Windows major E2E
     needs: classify
-    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -502,10 +501,29 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
-      - name: Dev-mode E2E auto-start smoke
-        run: npx playwright test tests/e2e/keyboard-smoke.spec.ts
+      - name: Run Windows major E2E
+        shell: pwsh
+        run: |
+          $logPath = Join-Path $env:RUNNER_TEMP 'windows-e2e.log'
+          & npx.cmd playwright test --config playwright.windows.config.ts 2>&1 |
+            Tee-Object -FilePath $logPath
+          $testExitCode = $LASTEXITCODE
+          if ($testExitCode -ne 0) {
+            exit $testExitCode
+          }
         env:
           SPRINT_CODER_E2E_MODE: dev
+      - name: Upload Windows E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results
+            playwright-report
+            ${{ runner.temp }}/windows-e2e.log
+          if-no-files-found: warn
+          retention-days: 14
 
   macos-result:
     name: build (macos-latest)
@@ -549,11 +567,11 @@ jobs:
           WINDOWS_E2E_RESULT: ${{ needs.e2e-windows.result }}
         run: |
           set -euo pipefail
+          test "${WINDOWS_E2E_RESULT}" = 'success'
           if [[ "${FULL_MATRIX}" == 'true' ]]; then
             test "${TEST_RESULT}" = 'success'
             test "${LINUX_PACKAGE_RESULT}" = 'success'
             test "${WINDOWS_PACKAGE_RESULT}" = 'success'
-            test "${WINDOWS_E2E_RESULT}" = 'success'
           else
             test "${SMOKE_RESULT}" = 'success'
           fi
