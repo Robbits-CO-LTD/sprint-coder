@@ -51,10 +51,10 @@ const SEARCH_DEBOUNCE_MS = 180;
 const UNKNOWN = '不明';
 
 /**
- * The two ways a Task can reach a model: a subscription the user is already signed in to, or an API
- * key they added. Which one a row is, is a property of its *connection* and only Main can classify
- * it — the picker names the two and hands the choice back as a catalog filter, so a connection that
- * changes category is Main's answer to change and not this component's.
+ * The three ways a Task can reach a model: a subscription the user is already signed in to, an API
+ * key they added, or a local Provider. Which one a row is, is a property of its *connection* and
+ * only Main can classify it — the picker names all three and hands the choice back as a catalog
+ * filter, so a connection that changes category is Main's answer to change and not this component's.
  *
  * 「サブスク」 is the default because it is the access that works without the user configuring
  * anything, so the picker opens on what the app can already use.
@@ -62,6 +62,7 @@ const UNKNOWN = '不明';
 export const MODEL_ACCESS_OPTIONS: readonly { id: ModelCatalogAccessType; label: string }[] = [
   { id: 'api', label: 'API' },
   { id: 'subscription', label: 'サブスク' },
+  { id: 'local', label: 'ローカル' },
 ];
 export const DEFAULT_ACCESS_TYPE: ModelCatalogAccessType = 'subscription';
 
@@ -227,9 +228,9 @@ export function catalogQuery(args: {
   };
 }
 
-/** The API / サブスク segmented control.
+/** The API / サブスク / ローカル segmented control.
  *
- * Two real `<button>`s in a group rather than a custom widget: they are keyboard-native already, and
+ * Three real `<button>`s in a group rather than a custom widget: they are keyboard-native already, and
  * `aria-pressed` states which one is on, so nothing here reimplements focus or key handling. Escape
  * is forwarded so the popup still closes while focus sits on the toggle — the same key the search
  * field honours one row above. */
