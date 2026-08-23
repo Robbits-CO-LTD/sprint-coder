@@ -240,13 +240,19 @@ export function normalizeTrustedWindowsCmdArgv(
     trustedSystemDirectory === undefined ||
     windowsPath.dirname(canonicalExecutable).toLowerCase() !==
       windowsPath.normalize(trustedSystemDirectory).toLowerCase() ||
-    windowsPath.basename(canonicalExecutable).toLowerCase() !== 'cmd.exe' ||
-    (argv[0] !== '-c' && argv[0] !== '-e')
+    windowsPath.basename(canonicalExecutable).toLowerCase() !== 'cmd.exe'
   )
     return argv;
+  const first = argv[0]?.toLowerCase();
+  if (first === '/d') return argv;
+  if (first === '-c' || first === '-e' || first === '/c') {
+    // Normalize the Unix-style aliases emitted by some providers as well as native `/c` so the
+    // approval and execution records share one canonical command form.
+    return ['/d', '/s', '/c', ...argv.slice(1)];
+  }
   // `/d` disables Command Processor AutoRun hooks so the approved argv is the only command that
-  // runs. `/s` gives the single command string the quoting semantics documented for `/c`.
-  return ['/d', '/s', '/c', ...argv.slice(1)];
+  // runs. Preserve other native switches (including `/k`) after the mandatory guard.
+  return ['/d', ...argv];
 }
 
 export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {

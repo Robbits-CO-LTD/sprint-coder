@@ -6,7 +6,7 @@ import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
-  isWindowsApiSetContract,
+  hasWindowsApiSetContract,
   prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
@@ -138,6 +138,29 @@ describe('hasUnsafeWindowsDllImport', () => {
     },
   );
 
+  windowsIt('accepts only API-set contracts provided by the trusted OS schema', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-api-set-'));
+    try {
+      const executable = join(directory, 'command.exe');
+      await writeFile(executable, peWithImport('API-MS-WIN-CORE-FILE-L1-1-0.DLL'));
+      await expect(sealExecutablePath(executable)).resolves.toMatchObject({ dependencies: [] });
+
+      await writeFile(executable, peWithImport('api-ms-evil-l1-1-0.dll'));
+      await writeFile(join(directory, 'api-ms-evil-l1-1-0.dll'), peWithImport('KERNEL32.dll'));
+      await expect(sealExecutablePath(executable)).rejects.toThrow(
+        'Windows execution image dependency is unavailable',
+      );
+
+      await writeFile(executable, peWithImport('payload.dll'));
+      await rm(join(directory, 'api-ms-evil-l1-1-0.dll'));
+      await expect(sealExecutablePath(executable)).rejects.toThrow(
+        'Windows execution image dependency is unavailable',
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   windowsIt('does not trust a System32 directory supplied through the environment', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-fake-system-root-'));
     const originalSystemRoot = process.env.SystemRoot;
@@ -170,14 +193,19 @@ describe('hasUnsafeWindowsDllImport', () => {
   });
 });
 
-describe('isWindowsApiSetContract', () => {
-  it('accepts virtual API-set contracts without treating ordinary DLL names as virtual', () => {
-    expect(isWindowsApiSetContract('api-ms-win-core-file-l1-1-0.dll')).toBe(true);
-    expect(
-      isWindowsApiSetContract('ext-ms-onecore-appmodel-staterepository-cache-l1-1-0.dll'),
-    ).toBe(true);
-    expect(isWindowsApiSetContract('kernel32.dll')).toBe(false);
-    expect(isWindowsApiSetContract('payload.dll')).toBe(false);
+describe('hasWindowsApiSetContract', () => {
+  it('requires a matching OS schema contract at an equal or newer revision', () => {
+    const schema = Buffer.from(
+      'API-MS-WIN-CORE-FILE-L1-1-1\0ext-ms-onecore-cache-l1-2-3\0',
+      'utf16le',
+    );
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core-file-l1-1-0.dll')).toBe(true);
+    expect(hasWindowsApiSetContract(schema, 'API-MS-WIN-CORE-FILE-L1-1-1.DLL')).toBe(true);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core-file-l1-1-2.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-evil-l1-1-0.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core-file-l1-1.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'kernel32.dll')).toBe(false);
   });
 });
 

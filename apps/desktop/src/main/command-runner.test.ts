@@ -270,6 +270,13 @@ describe('CommandRunner', () => {
         argv: ['-c', 'echo ollama-ok'],
       });
       expect(spec.argv).toEqual(['/d', '/s', '/c', 'echo ollama-ok']);
+
+      const nativeSpec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+        argv: ['/K', 'echo persistent'],
+      });
+      expect(nativeSpec.argv).toEqual(['/d', '/K', 'echo persistent']);
     },
   );
 

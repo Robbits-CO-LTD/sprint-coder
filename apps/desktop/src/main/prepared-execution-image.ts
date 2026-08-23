@@ -477,10 +477,19 @@ async function hasTrustedSystemElfRuntime(bytes: Buffer): Promise<boolean> {
 const WINDOWS_SYSTEM_DLL =
   /^(?:(?:(?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-\d+|(?:advapi32|avrt|bcrypt|cfgmgr32|combase|comctl32|comdlg32|crypt32|cryptbase|cryptnet|cryptui|d3d11|d3d12|dbgcore|dbghelp|dcomp|dhcpcsvc|dhcpcsvc6|dnsapi|dsound|dwmapi|dwrite|dxgi|gdi32|hid|hvsifiletrust|iertutil|imm32|iphlpapi|kernel32|kernelbase|mf|mfplat|mfreadwrite|msacm32|msvcp140|msvcrt|msvfw32|mswsock|ncrypt|netapi32|normaliz|ntasn1|ntdll|ole32|oleacc|oleaut32|powrprof|profapi|propsys|psapi|rpcrt4|sechost|secur32|setupapi|shcore|shell32|shlwapi|srvcli|ucrtbase|urlmon|user32|userenv|usp10|uxtheme|vcruntime140(?:_1)?|version|winhttp|wininet|winmm|wintrust|wlanapi|wldp|wpaxholder|ws2_32|wtsapi32))\.dll|winspool\.drv)$/iu;
 
-const WINDOWS_API_SET_CONTRACT = /^(?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-\d+\.dll$/iu;
+const WINDOWS_API_SET_CONTRACT = /^((?:api|ext)-ms-[a-z0-9-]+-l\d+-\d+-)(\d+)\.dll$/iu;
 
-export function isWindowsApiSetContract(name: string): boolean {
-  return WINDOWS_API_SET_CONTRACT.test(name);
+export function hasWindowsApiSetContract(schema: Buffer, name: string): boolean {
+  const match = WINDOWS_API_SET_CONTRACT.exec(name);
+  if (match === null) return false;
+  const prefix = match[1]!;
+  const requestedRevision = Number(match[2]);
+  const schemaText = schema.toString('utf16le');
+  const available = new RegExp(`${prefix.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(\\d+)`, 'giu');
+  for (const candidate of schemaText.matchAll(available)) {
+    if (Number(candidate[1]) >= requestedRevision) return true;
+  }
+  return false;
 }
 
 export function hasUnsafeWindowsDllImport(bytes: Buffer): boolean {
@@ -647,10 +656,25 @@ async function sealExecutablePathInternal(
     if (imports === null) throw new Error('Windows execution image has an invalid PE import table');
     const imageIsInSystem32 = await isWindowsSystem32Image(canonicalPath);
     const dependencies: SealedExecutableIdentity[] = [];
+    let apiSetSchema: Buffer | undefined;
     for (const name of imports) {
       if (basename(name) !== name || !/^[a-z0-9_.-]+\.(?:dll|drv)$/iu.test(name))
         throw new Error(`Windows execution image has an unsafe DLL import name: ${name}`);
       if (imageIsInSystem32 && WINDOWS_SYSTEM_DLL.test(name)) continue;
+      if (WINDOWS_API_SET_CONTRACT.test(name)) {
+        const systemDirectory = await windowsSystem32Directory();
+        if (systemDirectory === undefined)
+          throw new Error(`Windows execution image dependency is unavailable: ${name}`);
+        apiSetSchema ??= readWindowsImage(
+          join(systemDirectory, 'apisetschema.dll'),
+          true,
+          'Windows API-set schema',
+        );
+        if (!hasWindowsApiSetContract(apiSetSchema, name))
+          throw new Error(`Windows execution image dependency is unavailable: ${name}`);
+        // API-set contracts are virtual loader names. Never let a Workspace-local file shadow one.
+        continue;
+      }
       const dependencyPath = join(dirname(canonicalPath), name);
       let localDependency = true;
       try {
@@ -659,9 +683,6 @@ async function sealExecutablePathInternal(
         localDependency = false;
       }
       if (!localDependency) {
-        // API-set contracts are virtual loader names backed by the OS API-set schema and often do
-        // not exist as files in System32. They cannot be copied side-by-side from the Workspace.
-        if (isWindowsApiSetContract(name)) continue;
         if (!(await isWindowsSystem32Dependency(name)))
           throw new Error(`Windows execution image dependency is unavailable: ${name}`);
         continue;

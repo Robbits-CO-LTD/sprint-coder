@@ -367,6 +367,30 @@ describe('Provider workspace read tools', () => {
       normalizeTrustedWindowsCmdArgv(
         request.executable,
         trustedSystemDirectory,
+        ['/C', 'echo native'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/s', '/c', 'echo native']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['/K', 'echo persistent'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/K', 'echo persistent']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['/d', '/c', 'echo guarded'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/c', 'echo guarded']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
         request.argv,
         'linux',
       ),
