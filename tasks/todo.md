@@ -307,3 +307,10 @@ Next Steps: 変更をコミット・pushし、Grok 4.6レビューとCI後に生
 - 除外: Workspace ACL不足ではない。`cmd.exe /c`による同じWorkspaceへの書込みはexit 0で成功した。
 - 修正: ユーザー由来`NODE_OPTIONS`を継承せず固定値を設定し、drive rootへACLを広げずNode/npmの相対entrypointを起動可能にする。
 - Symptom Gone: 同じ相対Node entrypointをAppContainerで実行するWindows回帰テストとpackaged Ollama E2Eで確認する。
+
+### Codex CLI承認経路の実機RCA追記
+
+- 症状: Codex CLIは正しい`node.exe -e`を生成するが、実行前に`Turn is not eligible to request approval`で拒否される。
+- 原因箇所: `codex-adapter.ts`がツール呼び出し前のAssistantプリアンブルでTurnを`synthesizing`へ進め、後続の承認要求が永続層の許可状態から外れる。
+- 修正: Assistant deltaでは`executing`を維持し、`turn/completed`でのみ`synthesizing`へ進む。
+- 回帰防止: プリアンブルの後にmanaged toolを呼ぶ偽Codex app-serverで、呼び出し時点の最終stageが`executing`で`synthesizing`を含まないことを検証する。

@@ -813,7 +813,10 @@ function handleCodexNotification(
     return;
   }
   if (method === 'item/agentMessage/delta') {
-    advanceStage('synthesizing');
+    // Agent messages can be a preamble immediately before a managed tool request. Keep the Turn
+    // approval-eligible until app-server confirms the whole Turn is complete; otherwise a preamble
+    // moves durable state to `synthesizing` and Main rejects the following tool approval.
+    advanceStage('executing');
     const itemId = requiredString(params['itemId'], 'agent message item id');
     emit({
       type: 'delta',
