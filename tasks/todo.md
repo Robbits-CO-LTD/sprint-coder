@@ -526,6 +526,13 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - [ ] PR・CI・マージ後、v0.5.1プレリリースを再構築する
 - [ ] 公開インストーラーでOllama実応答と自動解放を確認する
 
+### CI完了阻害 #335
+
+- [x] Windows fast laneの失敗が、sandbox runner未構築による`.exe.sha256`欠落だと確定する
+- [x] #307と分離したIssue #335へ発見内容・影響・再現条件・完了条件を記録する
+- [x] `Windows focused smoke`へ既存のsandbox runnerビルド手順だけを追加する
+- [ ] 同ジョブと必須チェックの成功を確認する
+
 ### Next Steps
 
-PR・CI・マージ後、v0.5.1プレリリースを再構築してインストール版E2Eを再実行する。
+Windows fast laneを再検証し、PR・CI・マージ後、v0.5.1プレリリースを再構築してインストール版E2Eを再実行する。
