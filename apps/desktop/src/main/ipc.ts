@@ -489,6 +489,7 @@ import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-servi
 import {
   PROVIDER_NO_TOOL_GUIDANCE,
   PROVIDER_WORKSPACE_GUIDANCE,
+  providerWorkspaceGuidance,
   ManagedCodingHarness,
   WorkspaceToolRejection,
   providerDisclosureAuthorizationFacts,
@@ -5511,10 +5512,11 @@ export class IpcRouter {
             },
           )
         : undefined;
+      const workspaceGuidance = providerWorkspaceGuidance();
       if (!teamTurn)
         messages.unshift({
           role: 'system',
-          content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
+          content: workspaceToolsEligible ? workspaceGuidance : PROVIDER_NO_TOOL_GUIDANCE,
         });
       if (autoSkills.length > 0)
         messages.unshift({
@@ -5675,7 +5677,7 @@ export class IpcRouter {
           if (canRetryWithoutWorkspaceTools) {
             roundTools = Object.freeze([]);
             const guidanceIndex = messages.findIndex(
-              ({ role, content }) => role === 'system' && content === PROVIDER_WORKSPACE_GUIDANCE,
+              ({ role, content }) => role === 'system' && content === workspaceGuidance,
             );
             if (guidanceIndex >= 0)
               messages[guidanceIndex] = { role: 'system', content: PROVIDER_NO_TOOL_GUIDANCE };

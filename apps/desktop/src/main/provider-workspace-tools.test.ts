@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import {
   PROVIDER_WORKSPACE_GUIDANCE,
+  providerWorkspaceGuidance,
   ProviderWorkspaceTools,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
@@ -326,6 +327,14 @@ describe('Provider workspace read tools', () => {
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/Never delete or\s+overwrite data/);
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/send data over a network/);
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/report that accurately/);
+  });
+
+  it('tells Provider API models to use Windows command semantics on Windows', () => {
+    const guidance = providerWorkspaceGuidance('win32');
+    expect(guidance).toContain('The host OS is Windows');
+    expect(guidance).toContain('Never\nguess /bin/bash');
+    expect(guidance).toContain('never pass Unix flags such as -e');
+    expect(providerWorkspaceGuidance('linux')).toBe(PROVIDER_WORKSPACE_GUIDANCE);
   });
 
   it('lists one directory in bytewise order without following symlinks', async () => {
