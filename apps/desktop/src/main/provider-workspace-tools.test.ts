@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import {
   PROVIDER_WORKSPACE_GUIDANCE,
-  normalizeProviderToolInput,
   providerWorkspaceGuidance,
   ProviderWorkspaceTools,
   providerDisclosureAuthorizationFacts,
@@ -14,7 +13,7 @@ import {
   workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
-import { commandToolTruncated } from './default-tools';
+import { commandToolTruncated, normalizeWindowsCommandArgv } from './default-tools';
 import { approvalFactsForTool } from './approval-coordinator';
 import { workspaceMutationBinding } from './path-guard';
 import { ManagedCommandSessions } from './managed-command-sessions';
@@ -344,17 +343,20 @@ describe('Provider workspace read tools', () => {
       argv: ['-c', 'echo ollama-ok > ollama.txt'],
       purpose: 'create fixture',
     };
-    expect(normalizeProviderToolInput('exec_command', request, 'win32')).toEqual({
-      ...request,
-      argv: ['/c', 'echo ollama-ok > ollama.txt'],
-    });
-    expect(
-      normalizeProviderToolInput('exec_command', { ...request, argv: ['-e', 'echo ok'] }, 'win32'),
-    ).toMatchObject({ argv: ['/c', 'echo ok'] });
-    expect(normalizeProviderToolInput('exec_command', request, 'linux')).toBe(request);
-    expect(normalizeProviderToolInput('read_file', request, 'win32')).toBe(request);
-    const untrustedCmd = { ...request, executable: 'C:\\workspace\\cmd.exe' };
-    expect(normalizeProviderToolInput('exec_command', untrustedCmd, 'win32')).toBe(untrustedCmd);
+    expect(normalizeWindowsCommandArgv(request.executable, request.argv, 'win32')).toEqual([
+      '/c',
+      'echo ollama-ok > ollama.txt',
+    ]);
+    expect(normalizeWindowsCommandArgv(request.executable, ['-e', 'echo ok'], 'win32')).toEqual([
+      '/c',
+      'echo ok',
+    ]);
+    expect(normalizeWindowsCommandArgv(request.executable, request.argv, 'linux')).toBe(
+      request.argv,
+    );
+    expect(normalizeWindowsCommandArgv('C:\\workspace\\cmd.exe', request.argv, 'win32')).toBe(
+      request.argv,
+    );
   });
 
   it('lists one directory in bytewise order without following symlinks', async () => {
