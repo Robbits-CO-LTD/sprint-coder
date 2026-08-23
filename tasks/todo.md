@@ -1,3 +1,33 @@
+# Issue #318 Windows主要E2E自動化（2026-08-23）
+
+### 計画
+
+- [x] 現行CI、Playwright設定、Windows互換spec、除外対象を実コードで棚卸しする
+- [x] 受入条件を実装パスと検証へ束縛し、Grok 4.6の計画レビューを反映する
+- [x] ユーザー承認後、Windows専用Playwright設定・CI成果物・回帰テスト・文書を実装する
+- [x] Windows対象E2E、型検査、workflow回帰テストを通す
+- [ ] Grok 4.6最終レビュー、PR、必須テスト、マージ、Issue closeoutを完了する
+
+### Next Steps
+
+1. GitHub Windows E2Eで判明した8.3短縮パス由来のfixture不一致を修正する。
+2. 失敗した2specと最新commitの必須テストを再確認する。
+3. マージ後にIssueを完了処理する。
+
+### 進捗
+
+- Windows専用configへ主要8specを明示し、実CLI・credential・macOS専用specを除外した。
+- Windows E2Eを全通常CIで実行し、失敗時もtrace・screenshot・HTML report・stdout/stderrログをartifactへ保存するようにした。
+- fast/fullの両経路でWindows E2E成功を `CI required` の前提にした。
+- 回帰テスト4件、型検査、形式、YAML構文: PASS。
+- Windows実E2E: 19 passed / 2 intentional skipped / 0 failed（2分24秒）。
+- PR #327の初回Windows実行は17 passed / 2 intentional skipped / 2 failed。artifactから、
+  `tmpdir()`が返した`RUNNER~1`短縮パスとMainが永続化した正規パスの不一致を確認した。
+- 失敗時もtrace・screenshot・HTML report・実行ログがartifactへ保存され、成果物回収要件は実証済み。
+- 8.3短縮パス修正後の対象E2E: 4/4 PASS。固定Grok 4.6再レビュー: GO。
+
+---
+
 # Round 2: Chat Alphaゲート正式通過(2026-07-22開始)
 
 ## Issue #307 再発修正（2026-08-22）

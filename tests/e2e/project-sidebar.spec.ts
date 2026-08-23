@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,7 +22,9 @@ test.describe('Project Context Hub sidebar (A2)', () => {
 
   test.beforeAll(async () => {
     userDataDir = createUserDataDir('project-sidebar');
-    rootsDir = mkdtempSync(join(tmpdir(), 'sprint-coder-project-roots-'));
+    // The Windows runner can return an 8.3 temp path (RUNNER~1), but Project persistence returns
+    // canonical folder paths. Search with the same representation the user-facing picker shows.
+    rootsDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'sprint-coder-project-roots-')));
     test1 = join(rootsDir, 'test1');
     test2 = join(rootsDir, 'test2');
     mkdirSync(test1);
