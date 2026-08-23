@@ -18,7 +18,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -95,6 +95,10 @@ describe('CommandRunner', () => {
   });
 
   it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
+    const systemDirectory =
+      process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
+    const windowsRoot = dirname(systemDirectory);
+    const pathSystemDirectory = join(windowsRoot, 'System32');
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
       UserProfile: 'C:\\Users\\example',
@@ -109,8 +113,8 @@ describe('CommandRunner', () => {
 
     expect(environment).toMatchObject({
       PATH: [
-        'C:\\Windows\\System32',
-        'C:\\Windows',
+        pathSystemDirectory,
+        windowsRoot,
         'C:\\Program Files\\nodejs',
         'C:\\Program Files\\Git\\cmd',
       ].join(';'),
@@ -119,6 +123,9 @@ describe('CommandRunner', () => {
       APPDATA: 'C:\\Users\\example\\AppData\\Roaming',
       LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local',
       PROGRAMFILES: 'C:\\Program Files',
+      SYSTEMROOT: windowsRoot,
+      WINDIR: windowsRoot,
+      COMSPEC: join(systemDirectory, 'cmd.exe'),
     });
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
@@ -127,11 +134,15 @@ describe('CommandRunner', () => {
   });
 
   it('drops relative, UNC, duplicate, and empty Windows PATH entries before executable lookup', () => {
+    const systemDirectory =
+      process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
+    const windowsRoot = dirname(systemDirectory);
+    const pathSystemDirectory = join(windowsRoot, 'System32');
     const environment = buildControlledEnvironment('win32', {
       SystemRoot: 'C:\\Windows',
       PATH: 'relative\\bin;C:\\Windows\\System32;\\\\server\\tools;D:\\Tools;;d:\\tools\\',
     });
-    expect(environment['PATH']).toBe('C:\\Windows\\System32;C:\\Windows;D:\\Tools');
+    expect(environment['PATH']).toBe(`${pathSystemDirectory};${windowsRoot};D:\\Tools`);
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {

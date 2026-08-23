@@ -19,6 +19,7 @@ import {
 } from './path-guard';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
+import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   getTrustedWindowsSystemDirectory,
   prepareExecutionImage,
@@ -1225,7 +1226,7 @@ async function captureWindowsProcessTree(
 async function runTaskkill(pid: number, force: boolean): Promise<void> {
   const args = ['/PID', String(pid), '/T'];
   if (force) args.push('/F');
-  await execFileAsync('C:\\Windows\\System32\\taskkill.exe', args, {
+  await execFileAsync(join(getTrustedWindowsSystemDirectory(), 'taskkill.exe'), args, {
     shell: false,
     windowsHide: true,
     timeout: 3_000,
@@ -1245,7 +1246,7 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
     `[PSCustomObject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;` +
     `identity=('win32:' + $_.CreationDate.ToUniversalTime().Ticks)} } | ConvertTo-Json -Compress`;
   const { stdout } = await execFileAsync(
-    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    join(getTrustedWindowsSystemDirectory(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', script],
     { encoding: 'utf8', timeout: 3_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
   );
@@ -1255,22 +1256,22 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
     | { pid: number; parentPid: number; identity: string }[];
   const rows = Array.isArray(parsed) ? parsed : [parsed];
   return new Map(
-    rows
-      .filter(
-        (row) =>
-          Number.isInteger(row.pid) &&
-          row.pid > 0 &&
-          Number.isInteger(row.parentPid) &&
-          typeof row.identity === 'string',
-      )
-      .map((row) => [
-        row.pid,
-        {
-          pid: row.pid,
-          parentPid: row.parentPid,
-          processStartIdentity: row.identity,
-        },
-      ]),
+    rows.flatMap((row) => {
+      if (!Number.isInteger(row.pid) || row.pid <= 0) return [];
+      const identity = queryNativeProcessIdentity(row.pid);
+      return identity === null
+        ? []
+        : [
+            [
+              identity.pid,
+              {
+                pid: identity.pid,
+                parentPid: identity.parentPid,
+                processStartIdentity: identity.startIdentity,
+              },
+            ] as const,
+          ];
+    }),
   );
 }
 
@@ -1458,16 +1459,7 @@ export function readProcessStartIdentity(pid: number): string {
         timeout: 1_000,
       }).trim()}`;
     if (process.platform === 'win32')
-      return `win32:${execFileSync(
-        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-        [
-          '-NoProfile',
-          '-NonInteractive',
-          '-Command',
-          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
-        ],
-        { encoding: 'utf8', timeout: 3_000, windowsHide: true },
-      ).trim()}`;
+      return queryNativeProcessIdentity(pid)?.startIdentity ?? 'unavailable';
   } catch {
     return 'unavailable';
   }
@@ -1531,7 +1523,14 @@ export function buildControlledEnvironment(
     if (value !== undefined) environment[key] = value;
   }
   if (platform === 'win32') {
-    const windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
+    let windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
+    if (process.platform === 'win32') {
+      const systemDirectory = getTrustedWindowsSystemDirectory();
+      windowsRoot = windowsPath.dirname(systemDirectory);
+      environment['SYSTEMROOT'] = windowsRoot;
+      environment['WINDIR'] = windowsRoot;
+      environment['COMSPEC'] = windowsPath.join(systemDirectory, 'cmd.exe');
+    }
     environment['PATH'] = sanitizedWindowsPath(environment['PATH'], windowsRoot);
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];

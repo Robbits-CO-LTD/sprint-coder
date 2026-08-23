@@ -18,7 +18,7 @@ use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_CAPABILITIES};
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
-use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
@@ -268,12 +268,32 @@ fn acquire_workspace_mutex(profile: &str) -> Result<WorkspaceMutex, String> {
 }
 
 fn is_windows_system_path(path: &Path) -> bool {
-    let Some(windows_root) = std::env::var_os("SystemRoot").map(std::path::PathBuf::from) else {
+    let Some(windows_root) = trusted_windows_directory() else {
         return false;
     };
     let candidate = normalized_windows_path(path);
     let root = normalized_windows_path(&windows_root);
     candidate == root || candidate.starts_with(&format!("{root}\\"))
+}
+
+fn trusted_windows_directory() -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 261];
+    // SAFETY: buffer is writable for its declared length. GetWindowsDirectoryW writes at most
+    // that many UTF-16 code units and returns the required length when the buffer is too small.
+    let mut length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return None;
+    }
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 || length as usize >= buffer.len() {
+            return None;
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length as usize],
+    )))
 }
 
 fn is_path_inside(root: &Path, candidate: &Path) -> bool {
