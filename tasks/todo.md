@@ -514,3 +514,11 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - 信頼済み`cmd.exe`のUnix形式スイッチは`/d /s /c`へ正規化し、承認外のCommand Processor AutoRunを無効化する。
 - 非System32実行ファイルの仮想`api-ms-*` / `ext-ms-*` importは物理DLLを要求せず、その他の非ローカルDLLは引き続き実在するSystem32ファイルだけを許可する。
 - Grok 4.6の再レビューを反映し、信頼済み`cmd.exe`の全形式へ`/d`を強制する。API-setは信頼済みOS schemaに実在する契約だけを許可し、Workspace内の同名DLLによる偽装を拒否する。
+## Issue #335 Windows focused smoke sandbox runner (2026-08-23)
+
+- [x] `.exe.sha256`欠落の原因がfast laneのsandbox runner未構築だと確定する
+- [x] `Windows focused smoke`へ既存のビルド手順だけを追加する
+- [x] ローカルで従来の失敗テストが通ることを確認する
+- [ ] PRをマージ後、renderer-only PR #334で同ジョブの成功を確認する
+
+Next Steps: #335を先にマージし、#307のrenderer-only PRでWindows fast laneを実証する。
