@@ -457,7 +457,7 @@ describe('built-in subscription model capabilities', () => {
     });
 
     const catalog = new ModelCatalogService();
-    catalog.replaceCatalog(builtinModels, new Set(['builtin:codex-cli']));
+    catalog.replaceCatalog(builtinModels, new Map([['builtin:codex-cli', 'subscription']]));
     expect(
       catalog.query({
         taskId: 'task-1',

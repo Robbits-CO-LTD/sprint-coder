@@ -14,6 +14,16 @@ describe('bundled Provider Profiles', () => {
     expect(LOCAL_PROVIDER_PROFILES).toHaveLength(3);
     expect(BUNDLED_PROVIDER_PROFILES).toHaveLength(11);
     expect(new Set(BUNDLED_PROVIDER_PROFILES.map(({ id }) => id)).size).toBe(11);
+    expect(
+      [...PACK_A_PROVIDER_PROFILES, ...PACK_B_PROVIDER_PROFILES].map(
+        ({ computeLocation }) => computeLocation,
+      ),
+    ).toEqual(Array.from({ length: 8 }, () => 'cloud'));
+    expect(LOCAL_PROVIDER_PROFILES.map(({ computeLocation }) => computeLocation)).toEqual([
+      'local',
+      'local',
+      'local',
+    ]);
     for (const profile of BUNDLED_PROVIDER_PROFILES)
       expect(() => providerProfileSchema.parse(profile)).not.toThrow();
   });

@@ -28,6 +28,7 @@ import {
   openRouterConnectionCreateInputSchema,
   orcaRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionViewSchema,
   providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
@@ -827,7 +828,7 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.providersListConnections,
         emptyPayloadSchema,
-        z.array(providerConnectionSchema),
+        z.array(providerConnectionViewSchema),
         {},
       ),
     listProfiles: () =>

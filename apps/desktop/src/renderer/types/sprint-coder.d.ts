@@ -1166,7 +1166,7 @@ export interface SprintCoderApi {
     ): Promise<import('@sprint-coder/contracts').ModelSelection>;
   };
   providers: {
-    listConnections(): Promise<import('@sprint-coder/contracts').ProviderConnection[]>;
+    listConnections(): Promise<import('@sprint-coder/contracts').ProviderConnectionView[]>;
     listProfiles(): Promise<import('@sprint-coder/contracts').ProviderProfile[]>;
     createOpenAIConnection(
       input: import('@sprint-coder/contracts').OpenAIConnectionCreateInput,
