@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
 import type { EffectiveWorkspaceSet, ProviderTool } from '@sprint-coder/contracts';
 import {
   ToolRegistry,
@@ -86,6 +86,27 @@ export function providerWorkspaceGuidance(platform: NodeJS.Platform = process.pl
 guess /bin/bash or another Unix-only path. If cmd.exe is explicitly needed, use Windows switches
 such as /d, /s, and /c; never pass Unix flags such as -e. Prefer structured workspace file tools
 when they are available.`;
+}
+
+export function normalizeProviderToolInput(
+  toolName: string,
+  input: unknown,
+  platform: NodeJS.Platform = process.platform,
+): unknown {
+  if (platform !== 'win32' || toolName !== 'exec_command') return input;
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const request = input as Record<string, unknown>;
+  const executable = request['executable'];
+  const argv = request['argv'];
+  const systemCmd = win32.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe');
+  if (
+    typeof executable !== 'string' ||
+    win32.normalize(executable).toLowerCase() !== systemCmd.toLowerCase() ||
+    !Array.isArray(argv) ||
+    (argv[0] !== '-c' && argv[0] !== '-e')
+  )
+    return input;
+  return { ...request, argv: ['/c', ...argv.slice(1)] };
 }
 
 export const LIST_WORKSPACE_TOOL = createToolDefinition({

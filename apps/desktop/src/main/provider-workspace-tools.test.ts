@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import {
   PROVIDER_WORKSPACE_GUIDANCE,
+  normalizeProviderToolInput,
   providerWorkspaceGuidance,
   ProviderWorkspaceTools,
   providerDisclosureAuthorizationFacts,
@@ -335,6 +336,25 @@ describe('Provider workspace read tools', () => {
     expect(guidance).toContain('Never\nguess /bin/bash');
     expect(guidance).toContain('never pass Unix flags such as -e');
     expect(providerWorkspaceGuidance('linux')).toBe(PROVIDER_WORKSPACE_GUIDANCE);
+  });
+
+  it('normalizes Unix command switches generated for Windows cmd.exe before approval', () => {
+    const request = {
+      executable: 'C:\\Windows\\System32\\cmd.exe',
+      argv: ['-c', 'echo ollama-ok > ollama.txt'],
+      purpose: 'create fixture',
+    };
+    expect(normalizeProviderToolInput('exec_command', request, 'win32')).toEqual({
+      ...request,
+      argv: ['/c', 'echo ollama-ok > ollama.txt'],
+    });
+    expect(
+      normalizeProviderToolInput('exec_command', { ...request, argv: ['-e', 'echo ok'] }, 'win32'),
+    ).toMatchObject({ argv: ['/c', 'echo ok'] });
+    expect(normalizeProviderToolInput('exec_command', request, 'linux')).toBe(request);
+    expect(normalizeProviderToolInput('read_file', request, 'win32')).toBe(request);
+    const untrustedCmd = { ...request, executable: 'C:\\workspace\\cmd.exe' };
+    expect(normalizeProviderToolInput('exec_command', untrustedCmd, 'win32')).toBe(untrustedCmd);
   });
 
   it('lists one directory in bytewise order without following symlinks', async () => {

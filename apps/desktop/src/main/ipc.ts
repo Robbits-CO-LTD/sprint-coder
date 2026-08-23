@@ -489,6 +489,7 @@ import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-servi
 import {
   PROVIDER_NO_TOOL_GUIDANCE,
   PROVIDER_WORKSPACE_GUIDANCE,
+  normalizeProviderToolInput,
   providerWorkspaceGuidance,
   ManagedCodingHarness,
   WorkspaceToolRejection,
@@ -3511,7 +3512,7 @@ export class IpcRouter {
         turnId: ownerTurnId,
         callId: brokerCallId,
         providerName: request.toolName,
-        input: request.arguments,
+        input: normalizeProviderToolInput(request.toolName, request.arguments),
         signal,
       });
     } finally {
