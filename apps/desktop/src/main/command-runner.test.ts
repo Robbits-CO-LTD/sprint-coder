@@ -380,7 +380,9 @@ describe('CommandRunner', () => {
           return await prepareExecutionSpec({
             workspacePath: root,
             executable: join(systemDirectory, 'cmd.exe'),
-            argv: ['/d', '/s', '/c', 'echo command ok'],
+            // Node-based CI cannot load the Electron-ABI native identity helper, so keep the
+            // trusted command alive long enough to exercise the trusted PowerShell fallback too.
+            argv: ['/d', '/s', '/c', 'for /L %i in (1,1,200000) do @set x=%i'],
           });
         } finally {
           if (originalSystemRoot === undefined) delete process.env.SystemRoot;
@@ -393,7 +395,7 @@ describe('CommandRunner', () => {
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
       expect(result.exitCode).toBe(0);
     },
-    10_000,
+    15_000,
   );
 
   it.runIf(process.platform === 'win32')(

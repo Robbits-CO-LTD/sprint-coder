@@ -1259,18 +1259,12 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
     rows.flatMap((row) => {
       if (!Number.isInteger(row.pid) || row.pid <= 0) return [];
       const identity = queryNativeProcessIdentity(row.pid);
-      return identity === null
-        ? []
-        : [
-            [
-              identity.pid,
-              {
-                pid: identity.pid,
-                parentPid: identity.parentPid,
-                processStartIdentity: identity.startIdentity,
-              },
-            ] as const,
-          ];
+      const pid = identity?.pid ?? row.pid;
+      const parentPid = identity?.parentPid ?? row.parentPid;
+      const processStartIdentity = identity?.startIdentity ?? row.identity;
+      if (!Number.isInteger(parentPid) || parentPid < 0 || typeof processStartIdentity !== 'string')
+        return [];
+      return [[pid, { pid, parentPid, processStartIdentity }] as const];
     }),
   );
 }
@@ -1458,8 +1452,20 @@ export function readProcessStartIdentity(pid: number): string {
         encoding: 'utf8',
         timeout: 1_000,
       }).trim()}`;
-    if (process.platform === 'win32')
-      return queryNativeProcessIdentity(pid)?.startIdentity ?? 'unavailable';
+    if (process.platform === 'win32') {
+      const nativeIdentity = queryNativeProcessIdentity(pid);
+      if (nativeIdentity !== null) return nativeIdentity.startIdentity;
+      return `win32:${execFileSync(
+        join(getTrustedWindowsSystemDirectory(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+        ],
+        { encoding: 'utf8', timeout: 3_000, windowsHide: true },
+      ).trim()}`;
+    }
   } catch {
     return 'unavailable';
   }
