@@ -5,6 +5,7 @@ import {
   commandEnvelopeSchema,
   contextUsageSchema,
   executionResolutionSchema,
+  modelCatalogQueryInputSchema,
   modelSelectionSchema,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
@@ -430,6 +431,7 @@ describe('public contracts', () => {
         displayName: 'Example API',
         baseUrl: 'https://api.example.com/v1',
         baseUrlConfigurable: false,
+        computeLocation: 'cloud',
         protocol: 'chat_completions',
         modelsPath: '/models',
         curatedModels: [],
@@ -440,7 +442,32 @@ describe('public contracts', () => {
         sourceReference: 'https://docs.example.com/openai-compatibility',
         reviewedAt: '2026-07-28T00:00:00.000Z',
       }),
-    ).toMatchObject({ id: 'example', protocol: 'chat_completions' });
+    ).toMatchObject({ id: 'example', protocol: 'chat_completions', computeLocation: 'cloud' });
+  });
+
+  it('accepts all three model access filters and rejects a fourth entry', () => {
+    const base = {
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 50,
+    };
+    expect(
+      modelCatalogQueryInputSchema.parse({
+        ...base,
+        accessTypes: ['subscription', 'api', 'local'],
+      }).accessTypes,
+    ).toEqual(['subscription', 'api', 'local']);
+    expect(() =>
+      modelCatalogQueryInputSchema.parse({
+        ...base,
+        accessTypes: ['subscription', 'api', 'local', 'api'],
+      }),
+    ).toThrow();
   });
 
   it('allows an OpenAI-compatible Profile Connection to omit an optional API key', () => {

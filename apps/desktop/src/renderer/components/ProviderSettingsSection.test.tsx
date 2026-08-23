@@ -69,6 +69,7 @@ import {
 } from './ProviderSettingsSection';
 import type {
   ProviderConnection,
+  ProviderConnectionView,
   ProviderConnectionRateLimitLowerInput,
   ProviderProfile,
   ProviderVerificationStatus,
@@ -92,11 +93,12 @@ function rateLimit(
   };
 }
 
-function connection(overrides: Partial<ProviderConnection> = {}): ProviderConnection {
+function connection(overrides: Partial<ProviderConnectionView> = {}): ProviderConnectionView {
   return {
     id: 'conn-1',
     providerId: 'openai',
     runtimeKind: 'official_api',
+    computeLocation: 'cloud',
     displayName: '本番 OpenAI',
     enabled: true,
     secretReference: 'provider-secret:11111111-2222-4333-8444-555555555555',

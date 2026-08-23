@@ -34,7 +34,7 @@ export class ModelCatalogService {
 
   replaceCatalog(
     models: readonly ProviderModel[],
-    subscriptionConnectionIds: ReadonlySet<string> = new Set(),
+    accessTypesByConnection: ReadonlyMap<string, ModelCatalogAccessType> = new Map(),
   ): void {
     const unique = new Map<string, ProviderModel>();
     for (const candidate of models) {
@@ -48,9 +48,9 @@ export class ModelCatalogService {
     );
     const normalizedWithAccess = normalized.map((model) => ({
       model,
-      accessType: subscriptionConnectionIds.has(model.connectionId)
-        ? ('subscription' as const)
-        : ('api' as const),
+      // Unknown connections retain the pre-Local-AI behavior. Only an explicit Main-owned
+      // classification may promote a model into the local catalog.
+      accessType: accessTypesByConnection.get(model.connectionId) ?? ('api' as const),
     }));
     const fingerprint = JSON.stringify(
       normalizedWithAccess.map(({ model, accessType }) => ({

@@ -62,6 +62,7 @@ import {
   openRouterConnectionCreateInputSchema,
   orcaRouterConnectionCreateInputSchema,
   providerConnectionSchema,
+  providerConnectionViewSchema,
   providerConnectionModelReleaseUpdateInputSchema,
   providerConnectionRateLimitLowerInputSchema,
   providerProfileConnectionCreateInputSchema,
@@ -564,6 +565,10 @@ import {
   type OpenAICompatibleCredential,
 } from './provider-profile';
 import { BUNDLED_PROVIDER_PROFILES } from './bundled-provider-profiles';
+import {
+  providerConnectionView,
+  providerModelCatalogAccessType,
+} from './provider-compute-location';
 import {
   OllamaModelPreparationError,
   OpenAICompatibleProviderClient,
@@ -1681,8 +1686,11 @@ export class IpcRouter {
     this.handle(
       IPC_CHANNELS.providersListConnections,
       emptyPayloadSchema,
-      z.array(providerConnectionSchema),
-      () => [...this.providerConnections.list()],
+      z.array(providerConnectionViewSchema),
+      () =>
+        this.providerConnections
+          .list()
+          .map((connection) => providerConnectionView(connection, this.providerProfiles)),
     );
     this.handle(
       IPC_CHANNELS.providersListProfiles,
@@ -4821,9 +4829,9 @@ export class IpcRouter {
     const checkedAt = new Date().toISOString();
     this.reconcileBuiltinCapability('codex', codexCapability);
     this.reconcileBuiltinCapability('claude', claudeCapability);
+    const connections = this.providerConnections.list();
     const externalResults = await Promise.allSettled(
-      this.providerConnections
-        .list()
+      connections
         .filter(
           (connection) =>
             connection.enabled &&
@@ -4875,7 +4883,17 @@ export class IpcRouter {
         ),
         ...externalModels,
       ],
-      new Set(['builtin:codex-cli', 'builtin:claude-cli']),
+      new Map([
+        ['builtin:codex-cli', 'subscription'],
+        ['builtin:claude-cli', 'subscription'],
+        ...connections.map(
+          (connection) =>
+            [
+              connection.id,
+              providerModelCatalogAccessType(connection, this.providerProfiles),
+            ] as const,
+        ),
+      ]),
     );
   }
 

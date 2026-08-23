@@ -1,3 +1,54 @@
+# Issue #122 Slice A — Local AI分類・契約・ADR（2026-08-23）
+
+### 計画
+
+- [x] 現行のProvider/Profile/Connection/Model Catalog境界を固定し、Managed Local v1のADRを追加する
+- [x] `ProviderComputeLocation = cloud | local` と `ModelCatalogAccessType.local` を契約へ追加する
+- [x] 永続Connectionへ列を増やさず、MainがProfile/Runtimeからcompute locationを決定したViewだけをRendererへ返す
+- [x] Model Catalogの分類入力をsubscription集合からconnection別access mapへ置換し、外部Local接続を`local`だけへ出す
+- [x] 既存API/サブスク、query、選択、Team制限、fallbackが不変である回帰テストを追加する
+- [ ] 固定Grok 4.6のTier A事前レビューと最終レビュー、対象型検査・テスト、PR、全CI、マージを完了する
+
+### 実装境界
+
+- Slice AではManaged Localのdownload、sidecar、hardware inventory、UI再配置、Model Picker 3segment表示を実装しない。
+- compute locationはendpoint trust、processの実行場所、providerId文字列、base URLから推測しない。
+- 既存DBへ分類を保存せず、公式API/組み込みCLIはcloud、Profile接続はProfileの明示分類、mockはlocalとしてMainで導出する。
+- Profile不明・分類map未登録のconnectionは後方互換のため`cloud` / `api`へ戻し、明示分類なしに`local`へ昇格しない。
+- 各connection/modelのaccess分類は常に1種類とする。queryは複数分類のOR絞り込みを維持し、契約上限は3種類にする。
+- `ProviderConnectionView`は既存`ProviderConnection`全項目に`computeLocation`だけを加える上位互換とし、作成・検証・永続化の`ProviderConnection`は変更しない。
+- 回帰テストは、組み込みCLI=`subscription`、公式API/未分類=`api`、明示Local Profile=`local`、3分類OR query、既存selection/Team allowlist、Viewの既存項目保持、DB migrationなしを個別に固定する。
+
+### Next Steps
+
+1. Slice Aの計画と現行コードを5レンズで事前レビューする。
+2. 検証済みの指摘を計画へ反映し、実装する。
+3. 対象検証と最終レビュー後にPRを作成する。
+
+### 事前レビュー
+
+- 固定Grok 4.6総合レビュー: REVISE。CRITICAL 0、HIGH 1（分類map未登録時の既定値不足）。
+- HIGHは現行互換の`api`既定へ固定して計画へ反映。MEDIUMのView上位互換、明示Profile分類、契約整合も反映。
+- `accessTypes.max(2)`維持案はIssue本文の明示要件`max(3)`と衝突するため不採用。
+
+### 進捗
+
+- ADR-008へ`llama.cpp` sidecar、既存OpenAI互換Runtime再利用、明示分類、安全境界を記録した。
+- 永続化を変えず、Main導出の`ProviderConnectionView`とconnection別access mapを追加した。
+- Profile不明とmap未登録は`cloud` / `api`へ戻し、暗黙のlocal昇格を防止した。
+- contracts型検査: PASS。desktop型検査: PASS。
+- contracts対象テスト: 47 PASS。desktop対象テスト: 994 PASS。
+- 変更TypeScriptのeslint: PASS。変更ファイルのformatとdiff check: PASS。
+- 固定Grok 4.6最終diffレビュー: GO。CRITICAL/HIGH 0件。
+
+### Next Tasks
+
+1. 固定Grok 4.6で最終diffをレビューする。
+2. commit・push・PR後、ReviewBOTと全CIを確認する。
+3. Slice Aをマージした後、Slice Bへ進む。
+
+---
+
 # Issue #318 Windows主要E2E自動化（2026-08-23）
 
 ### 計画

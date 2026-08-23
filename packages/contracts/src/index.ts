@@ -1902,6 +1902,8 @@ export const providerRuntimeKindSchema = z.enum([
   'mock',
 ]);
 export type ProviderRuntimeKind = z.infer<typeof providerRuntimeKindSchema>;
+export const providerComputeLocationSchema = z.enum(['cloud', 'local']);
+export type ProviderComputeLocation = z.infer<typeof providerComputeLocationSchema>;
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',
@@ -1973,6 +1975,11 @@ export const providerConnectionSchema = z
   })
   .strict();
 export type ProviderConnection = z.infer<typeof providerConnectionSchema>;
+export const providerConnectionViewSchema = providerConnectionSchema.extend({
+  /** Main-derived inference location. This is deliberately not persisted with the Connection. */
+  computeLocation: providerComputeLocationSchema,
+});
+export type ProviderConnectionView = z.infer<typeof providerConnectionViewSchema>;
 export const providerConnectionModelReleaseUpdateInputSchema = z
   .object({
     connectionId: connectionIdSchema,
@@ -2051,6 +2058,8 @@ export const providerProfileSchema = z
     displayName: z.string().min(1).max(100),
     baseUrl: z.string().url().max(2_048),
     baseUrlConfigurable: z.boolean(),
+    /** Explicit inference location. Optional only for compatibility with older Profile fixtures. */
+    computeLocation: providerComputeLocationSchema.optional(),
     /** A bundled, declarative hint. Runtime code still applies its own fixed Ollama allow-list. */
     nativeModelLifecycle: z.literal('ollama').optional(),
     protocol: providerProfileProtocolSchema,
@@ -2637,7 +2646,7 @@ export const modelCatalogCapabilitySchema = z.enum([
   'reasoning',
 ]);
 export type ModelCatalogCapability = z.infer<typeof modelCatalogCapabilitySchema>;
-export const modelCatalogAccessTypeSchema = z.enum(['subscription', 'api']);
+export const modelCatalogAccessTypeSchema = z.enum(['subscription', 'api', 'local']);
 export type ModelCatalogAccessType = z.infer<typeof modelCatalogAccessTypeSchema>;
 export const modelCatalogQueryInputSchema = z
   .object({
@@ -2645,7 +2654,7 @@ export const modelCatalogQueryInputSchema = z
     text: z.string().max(200).default(''),
     connectionIds: z.array(connectionIdSchema).max(32).default([]),
     providerIds: z.array(providerIdSchema).max(32).default([]),
-    accessTypes: z.array(modelCatalogAccessTypeSchema).max(2).default([]),
+    accessTypes: z.array(modelCatalogAccessTypeSchema).max(3).default([]),
     capabilities: z.array(modelCatalogCapabilitySchema).max(4).default([]),
     availableOnly: z.boolean().default(true),
     cursor: z
@@ -3453,7 +3462,7 @@ export interface SprintCoderApi {
     setSelection(taskId: string, selection: ModelSelection): Promise<ModelSelection>;
   };
   providers: {
-    listConnections(): Promise<ProviderConnection[]>;
+    listConnections(): Promise<ProviderConnectionView[]>;
     listProfiles(): Promise<ProviderProfile[]>;
     createOpenAIConnection(input: OpenAIConnectionCreateInput): Promise<ProviderConnection>;
     createOpenRouterConnection(input: OpenRouterConnectionCreateInput): Promise<ProviderConnection>;

@@ -64,7 +64,7 @@ describe('ModelCatalogService', () => {
     expect(result.items[0]?.availabilityCheckedAt).toBe('2026-07-28T01:00:00.000Z');
   });
 
-  it('filters subscription and API models without exposing Runtime-specific state to Renderer', () => {
+  it('filters subscription, API, and local models without exposing Runtime-specific state to Renderer', () => {
     const service = new ModelCatalogService();
     const subscription = {
       ...model(1),
@@ -76,7 +76,18 @@ describe('ModelCatalogService', () => {
       connectionId: 'openrouter:connection-1',
       connectionDisplayName: 'OpenRouter',
     };
-    service.replaceCatalog([subscription, api], new Set(['builtin:claude-cli']));
+    const local = {
+      ...model(3),
+      connectionId: 'ollama:local',
+      connectionDisplayName: 'Local Ollama',
+    };
+    service.replaceCatalog(
+      [subscription, api, local],
+      new Map([
+        ['builtin:claude-cli', 'subscription'],
+        ['ollama:local', 'local'],
+      ]),
+    );
 
     const subscriptionResult = service.query({
       taskId: 'task-1',
@@ -100,6 +111,28 @@ describe('ModelCatalogService', () => {
       cursor: null,
       limit: 10,
     });
+    const localResult = service.query({
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      accessTypes: ['local'],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+    const apiOrLocalResult = service.query({
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      accessTypes: ['api', 'local'],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
 
     expect(subscriptionResult.items.map(({ connectionId }) => connectionId)).toEqual([
       'builtin:claude-cli',
@@ -107,6 +140,42 @@ describe('ModelCatalogService', () => {
     expect(apiResult.items.map(({ connectionId }) => connectionId)).toEqual([
       'openrouter:connection-1',
     ]);
+    expect(localResult.items.map(({ connectionId }) => connectionId)).toEqual(['ollama:local']);
+    expect(apiOrLocalResult.items.map(({ connectionId }) => connectionId).sort()).toEqual([
+      'ollama:local',
+      'openrouter:connection-1',
+    ]);
+  });
+
+  it('keeps an unmapped connection in API for backward compatibility', () => {
+    const service = new ModelCatalogService();
+    service.replaceCatalog([model(1)], new Map());
+
+    const api = service.query({
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      accessTypes: ['api'],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+    const local = service.query({
+      taskId: 'task-1',
+      text: '',
+      connectionIds: [],
+      providerIds: [],
+      accessTypes: ['local'],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+
+    expect(api.items).toHaveLength(1);
+    expect(local.items).toHaveLength(0);
   });
 
   it('searches stable provider names and model authors as well as connection names', () => {
