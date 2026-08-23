@@ -258,6 +258,19 @@ describe('CommandRunner', () => {
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
+  it.runIf(process.platform === 'win32')(
+    'seals trusted System32 cmd.exe with the Windows /c switch used by approval and execution',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+        argv: ['-c', 'echo ollama-ok'],
+      });
+      expect(spec.argv).toEqual(['/c', 'echo ollama-ok']);
+    },
+  );
+
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     'enforces workspace-write through the packaged sandbox helper',
     async () => {

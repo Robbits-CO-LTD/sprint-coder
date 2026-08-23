@@ -8,7 +8,6 @@ import {
   type JsonValue,
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
-import { win32 } from 'node:path';
 import { ToolBroker, type ToolAuthorizer } from './tool-broker';
 import {
   CommandRunner,
@@ -409,7 +408,7 @@ export function registerCommandRunnerTool(
         workspacePath: root.path,
         ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
         executable: request.executable,
-        argv: normalizeWindowsCommandArgv(request.executable, request.argv),
+        argv: request.argv,
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
       });
       const persisted = command.persistence.prepareCommand({
@@ -638,21 +637,6 @@ export function registerCommandRunnerTool(
       }
     },
   });
-}
-
-export function normalizeWindowsCommandArgv(
-  executable: string,
-  argv: readonly string[],
-  platform: NodeJS.Platform = process.platform,
-): readonly string[] {
-  if (platform !== 'win32') return argv;
-  const systemCmd = win32.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe');
-  if (
-    win32.normalize(executable).toLowerCase() !== systemCmd.toLowerCase() ||
-    (argv[0] !== '-c' && argv[0] !== '-e')
-  )
-    return argv;
-  return ['/c', ...argv.slice(1)];
 }
 
 export function registerManagedCommandControlTools(

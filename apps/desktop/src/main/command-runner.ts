@@ -131,7 +131,12 @@ export async function prepareExecutionSpec(
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
-  const allowSourceHardlinks = await isTrustedWindowsMultiLinkExecutable(executableCanonicalPath);
+  const trustedWindowsSystemDirectory =
+    process.platform === 'win32' ? await realpath(getTrustedWindowsSystemDirectory()) : undefined;
+  const allowSourceHardlinks = await isTrustedWindowsMultiLinkExecutable(
+    executableCanonicalPath,
+    trustedWindowsSystemDirectory,
+  );
   if (executableStats.nlink !== 1n && !allowSourceHardlinks)
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must have one link');
   const pathGuard = await createPathGuard({
@@ -150,7 +155,11 @@ export async function prepareExecutionSpec(
   const spec = createExecutionSpec({
     absoluteExecutable: executableCanonicalPath,
     executionIdentityDigest: sealedExecutableIdentityDigest(executableIdentity),
-    argv: input.argv,
+    argv: normalizeTrustedWindowsCmdArgv(
+      executableCanonicalPath,
+      trustedWindowsSystemDirectory,
+      input.argv,
+    ),
     cwdIdentity: {
       canonicalPath: pathGuard.resolvedPath,
       identityDigest: pathGuardIdentityDigest(pathGuard),
@@ -208,12 +217,34 @@ async function resolveBareExecutable(
   );
 }
 
-async function isTrustedWindowsMultiLinkExecutable(canonicalPath: string): Promise<boolean> {
+async function isTrustedWindowsMultiLinkExecutable(
+  canonicalPath: string,
+  trustedSystemDirectory?: string,
+): Promise<boolean> {
   if (process.platform !== 'win32') return false;
   if (canonicalPath.toLowerCase() === (await realpath(process.execPath)).toLowerCase()) return true;
-  const systemDirectory = await realpath(getTrustedWindowsSystemDirectory());
+  const systemDirectory =
+    trustedSystemDirectory ?? (await realpath(getTrustedWindowsSystemDirectory()));
   const childPath = relative(systemDirectory, canonicalPath);
   return childPath !== '' && !childPath.startsWith('..') && !isAbsolute(childPath);
+}
+
+export function normalizeTrustedWindowsCmdArgv(
+  canonicalExecutable: string,
+  trustedSystemDirectory: string | undefined,
+  argv: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  if (
+    platform !== 'win32' ||
+    trustedSystemDirectory === undefined ||
+    windowsPath.dirname(canonicalExecutable).toLowerCase() !==
+      windowsPath.normalize(trustedSystemDirectory).toLowerCase() ||
+    windowsPath.basename(canonicalExecutable).toLowerCase() !== 'cmd.exe' ||
+    (argv[0] !== '-c' && argv[0] !== '-e')
+  )
+    return argv;
+  return ['/c', ...argv.slice(1)];
 }
 
 export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {

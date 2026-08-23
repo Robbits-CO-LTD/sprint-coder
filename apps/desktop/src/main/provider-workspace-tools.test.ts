@@ -13,7 +13,8 @@ import {
   workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
-import { commandToolTruncated, normalizeWindowsCommandArgv } from './default-tools';
+import { commandToolTruncated } from './default-tools';
+import { normalizeTrustedWindowsCmdArgv } from './command-runner';
 import { approvalFactsForTool } from './approval-coordinator';
 import { workspaceMutationBinding } from './path-guard';
 import { ManagedCommandSessions } from './managed-command-sessions';
@@ -337,26 +338,56 @@ describe('Provider workspace read tools', () => {
     expect(providerWorkspaceGuidance('linux')).toBe(PROVIDER_WORKSPACE_GUIDANCE);
   });
 
-  it('normalizes Unix command switches generated for Windows cmd.exe before approval', () => {
+  it('normalizes Unix switches only after Windows cmd.exe is sealed in trusted System32', () => {
     const request = {
       executable: 'C:\\Windows\\System32\\cmd.exe',
       argv: ['-c', 'echo ollama-ok > ollama.txt'],
       purpose: 'create fixture',
     };
-    expect(normalizeWindowsCommandArgv(request.executable, request.argv, 'win32')).toEqual([
-      '/c',
-      'echo ollama-ok > ollama.txt',
-    ]);
-    expect(normalizeWindowsCommandArgv(request.executable, ['-e', 'echo ok'], 'win32')).toEqual([
-      '/c',
-      'echo ok',
-    ]);
-    expect(normalizeWindowsCommandArgv(request.executable, request.argv, 'linux')).toBe(
-      request.argv,
-    );
-    expect(normalizeWindowsCommandArgv('C:\\workspace\\cmd.exe', request.argv, 'win32')).toBe(
-      request.argv,
-    );
+    const trustedSystemDirectory = 'C:\\Windows\\System32';
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        request.argv,
+        'win32',
+      ),
+    ).toEqual(['/c', 'echo ollama-ok > ollama.txt']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['-e', 'echo ok'],
+        'win32',
+      ),
+    ).toEqual(['/c', 'echo ok']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        request.argv,
+        'linux',
+      ),
+    ).toBe(request.argv);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        'C:\\workspace\\cmd.exe',
+        trustedSystemDirectory,
+        request.argv,
+        'win32',
+      ),
+    ).toBe(request.argv);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\cmd.exe',
+        trustedSystemDirectory,
+        request.argv,
+        'win32',
+      ),
+    ).toBe(request.argv);
+    expect(
+      normalizeTrustedWindowsCmdArgv(request.executable, undefined, request.argv, 'win32'),
+    ).toBe(request.argv);
   });
 
   it('lists one directory in bytewise order without following symlinks', async () => {

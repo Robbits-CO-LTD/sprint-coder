@@ -30,10 +30,11 @@
 - PR作成後に必須CIとReviewBOTを確認する。
 
 Wave 1(並列):
+
 - [ ] A(Codex): operations ledger / MessagePort+snapshot+afterSeq / input queue(Queue/Steer/Stop&Send) / goal・pin・archive・draft・workspace永続化 / contracts v2
 - [ ] B(Sonnet): Markdown+sanitizer描画 / pin・archive・goal・workspace UI / draft永続化接続 / queue・steer UI / snapshot復元
 - [ ] C(Sonnet): eslint+prettier+CI(GitHub Actions 3OS matrix)
-Wave 2(完了 2026-07-22):
+      Wave 2(完了 2026-07-22):
 - [x] D(Codex): Production adapter(Codex CLI、read-only/no-tools、UtilityProcess)+ ADR
 - [x] E(Sonnet): Playwright E2E 4 specs(devモードfallbackで3回連続green)
 - [x] F(Codex+Sonnet): Context Ledger minimum + context %UI
@@ -42,6 +43,7 @@ Wave 2(完了 2026-07-22):
 ## Chat Alphaゲート判定(2026-07-22 Fable)
 
 **判定: 実質通過**(環境依存2件を除く)
+
 - 通過: 永続Chat/復元、streaming/中止/interrupted、input queue、operations ledger、snapshot+afterSeq、Markdown安全描画、Workspace選択、Codex production runtime(実CLI裏取り済み)、Context Ledger、キーボード完結、E2E 4本、114テスト、lint/format/CI定義
 - 環境依存の残件:
   1. ローカルpackaging不能 — extract-zipがElectron zipのelectron.icnsで決定論的ハング(Node 26/22両方で再現=バージョン非依存のマシン固有問題)。CI(GitHub Actions)では別環境のため要確認
@@ -191,9 +193,7 @@ Wave 2(完了 2026-07-22):
   4. 検証エージェント適用: preloadのPublicErrorをErrorインスタンス化(renderer側 "[object Object]" 防止)
   5. better-sqlite3をElectron ABI向けにrebuild(@electron/rebuild、リスクR2が実際に発現)
 - 検証: npm install成功 / typecheck 3 workspace成功 / test 104件全PASS / Electron実起動でRenderer window生成・DB(WAL)作成をmacOS実機確認
-- 追加の起動系バグ2件をFableが特定・修正(commit済み):
-  6. index.htmlがsrc/renderer配下にありVite rootの`/`が404 → apps/desktop直下へ移動(白画面の原因)
-  7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.sprintCoder未公開の原因)
+- 追加の起動系バグ2件をFableが特定・修正(commit済み): 6. index.htmlがsrc/renderer配下にありVite rootの`/`が404 → apps/desktop直下へ移動(白画面の原因) 7. main/preload両entryがindex.tsで`.vite/build/index.js`を上書き合戦 → preload出力名を明示分離(window.sprintCoder未公開の原因)
 - 2026-07-22 ユーザー実機確認: golden path #1(Task作成→hello送信→Run Card→mock streaming応答)成功のスクリーンショットを受領。Chat Alpha骨格ラウンド完了
 - 未了(次ラウンド送り): operations ledger(冪等性、Slice 1.2)、Forge起動時のnative自動rebuild恒久化(workspace hoisting対策)、npm audit 24件(critical 1)、E2E(Playwright Electron、Phase 0 spike対象)、Team/Canvas(Phase 5-6)
 
@@ -224,6 +224,7 @@ Wave 2(完了 2026-07-22):
 **判定: Team MVP blocking subset 全8項目通過**(コミット列: `8e77eaf` security → `b32b964` a11y → `779ebb2` reliability/perf。実装はSonnet子分2+Fable直接実装、レビュー・検証はFable)
 
 blocking subset証跡:
+
 1. crash recovery/interrupted・paused復元 — golden-path-1-restart-restore + team-flow restart e2e(既存)
 2. process tree停止・orphan検出 — process group ADR + cancel e2e + Codex/Claude実CLIスモークでcancel後orphan 0を機械証明
 3. sandbox/Broker bypass拒否/workspace外fs/無許可outbound/egress deny(macOS実証) — codex実CLIへの敵対的workspace外書込指示が拒否されることを実機証明、no-toolsプロファイル・egress事前denyをテスト化
@@ -234,6 +235,7 @@ blocking subset証跡:
 8. Phase 4.7 corpus baseline — assurance.test.ts + PHASE_4_7_CORPUS_BASELINE.md(suiteでグリーン維持)
 
 Public Beta送り(計画が明示的に許容する繰り延べ、未実施として記録):
+
 - 10.1: Conversation rewind/branch切替、crash storm circuit breaker、idempotency fuzz、Workspace restore/Safe rewind saga/emergency checkpoint(計画自体がPublic Beta candidate/feature flag指定)、Verified profile
 - 10.2: startup遅延化・Timeline virtualization等の最適化(全予算を現状実測でクリアしているため不要と判断)
 - 10.3: VoiceOver人手実施(台本はA11Y_AUDIT.mdに整備済み)、NVDA(Windows実機なし=Phase 8 beta gateの対象OS実機E2Eで実施)
@@ -250,6 +252,7 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
 - 次マイルストーン(未実装・記録): Leader自身の実tool use化 — アプリがMCPサーバとしてteam toolsを実Claude Leaderに提供する方式。現状はLeader=Mockシナリオ+Worker=実AIのハイブリッド
 
 ## 追記(2026-07-24 Fable): 雇用ペーシング
+
 - 一括瞬間雇用は「Leaderが動的採用している」体験を壊すため、雇用ごとに1.2秒のペーシングを導入(SPRINT_CODER_TEAM_PACING_MS で調整可)。真の動的採用(実Claude Leaderが依頼内容から役割を決める=MCP化)は引き続き次マイルストーン
 
 ## 追記(2026-07-24 Fable): LeaderのMCP化(実Claude LeaderがteamツールをMCP経由で駆動)
@@ -274,10 +277,23 @@ Team MVPリリース阻止条件はすべて解消。残Phase: Phase 8(Release: 
   4. Leader MCPソケットは複数Turn/複数Taskで1つのbridge・1つのsocketを使い回す設計(turnId×tokenで多重化)。同一プロセス内で同時に複数のteam Turnが走る場合の負荷は未検証
 
 ## 追記(2026-07-24 Fable): AI察知によるチーム化
+
 - SPRINT_CODER_LEADER_MCP=1時、team toolsをClaudeの全ターンに常時提供へ変更。キーワード(「チームで」)やボタンなしでも、Leaderが依頼内容から必要性を察知して雇用→自動昇格→Canvas自動遷移。ガイダンスに「本当に有益な時だけ・単純な依頼は直接回答」の抑制を明記
 - 実機実証: キーワードなしの並行検討依頼で「数学検討担当」を自己判断で雇用、Canvas自動遷移まで確認(12.7秒)。Mock経路e2eは無変更(3/3)
 
 ## 追記(2026-07-24 Fable): Leader MCPの厳密検証
+
 - 恒久opt-inスモーク tests/e2e/leader-mcp-smoke.spec.ts を追加(SPRINT_CODER_LEADER_MCP=1で実CLI実行)
 - 実測合格: (1) MCP経由の機械的証明 — Leaderが自己判断で2人雇用(数学検討担当/実装検討担当、固定トリオと不一致)+ペアノ公理からブール代数まで論じる非定型報告=Mock経路では不可能な出力 (2) ⬡ Teamを押さずにCanvas自動遷移(送信前は非表示をアサート) (3) 抑制 — 単純質問「1+1は?」ではチーム未作成(team null)を確認
 - follow-up記録: leader-MCPターン後のアプリquitが90秒超かかることがある(runtime-host子プロセス回収待ちの疑い)。スモークはclose 20秒+SIGKILLの保険付き
+
+## Issue #321 Ollama Windows command compatibility (2026-08-23)
+
+- [x] Ollamaのテキスト応答とtool calling対応を実機確認
+- [x] WindowsでモデルがUnix形式の`cmd.exe -c/-e`を生成する根本原因を特定
+- [x] 信頼済みSystem32の実行ファイルを確定した後に`cmd.exe /c`へ正規化する
+- [x] 承認画面と実行対象が同じ`/c`を保持する統合テストを追加する
+- [ ] 対象テスト・型チェック・Grok 4.6レビュー・実機E2Eを完了する
+- [ ] PR #323をマージし、Issue #321をliveでCLOSEDまで確認する
+
+Next Steps: 変更をコミット・pushし、Grok 4.6レビューとCI後に生成アプリの承認表示で再確認する。
