@@ -28,7 +28,10 @@ test.describe('file edits', () => {
 
   test.beforeEach(() => {
     userDataDir = createUserDataDir('file-edits');
-    workspaceDir = mkdtempSync(join(tmpdir(), 'sprint-coder-e2e-ws-'));
+    // GitHub's Windows runner may expose tmpdir() through an 8.3 alias (RUNNER~1), while Main
+    // deliberately persists the canonical Project root. Keep the fixture on that same identity so
+    // the native-dialog stub does not manufacture a false outside-Workspace selection.
+    workspaceDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'sprint-coder-e2e-ws-')));
   });
 
   test.afterEach(async () => {
@@ -110,7 +113,7 @@ test.describe('file edits', () => {
         configurable: true,
         value: async () => ({ canceled: false, filePaths: [selectedFile] }),
       });
-    }, realpathSync(filePath));
+    }, realpathSync.native(filePath));
 
     await page.getByTestId('open-file-button').click();
     const editor = page.getByRole('dialog', { name: 'ファイルを編集' });

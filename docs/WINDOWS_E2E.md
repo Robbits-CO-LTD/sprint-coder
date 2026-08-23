@@ -31,6 +31,7 @@ Node.js 22と依存関係を用意し、Windows PowerShellから実行します�
 
 ```powershell
 npm ci
+$env:SPRINT_CODER_E2E_MODE = 'dev'
 npx playwright test --config playwright.windows.config.ts
 ```
 

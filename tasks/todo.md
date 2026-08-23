@@ -10,8 +10,8 @@
 
 ### Next Steps
 
-1. 固定Grok 4.6で最終差分をレビューする。
-2. commit・push・PR後、最新commitの必須テストを確認する。
+1. GitHub Windows E2Eで判明した8.3短縮パス由来のfixture不一致を修正する。
+2. 失敗した2specと最新commitの必須テストを再確認する。
 3. マージ後にIssueを完了処理する。
 
 ### 進捗
@@ -21,6 +21,10 @@
 - fast/fullの両経路でWindows E2E成功を `CI required` の前提にした。
 - 回帰テスト4件、型検査、形式、YAML構文: PASS。
 - Windows実E2E: 19 passed / 2 intentional skipped / 0 failed（2分24秒）。
+- PR #327の初回Windows実行は17 passed / 2 intentional skipped / 2 failed。artifactから、
+  `tmpdir()`が返した`RUNNER~1`短縮パスとMainが永続化した正規パスの不一致を確認した。
+- 失敗時もtrace・screenshot・HTML report・実行ログがartifactへ保存され、成果物回収要件は実証済み。
+- 8.3短縮パス修正後の対象E2E: 4/4 PASS。固定Grok 4.6再レビュー: GO。
 
 ---
 
