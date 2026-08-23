@@ -18,7 +18,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { dirname, join } from 'node:path';
+import { join, win32 as windowsPath } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -97,8 +97,8 @@ describe('CommandRunner', () => {
   it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
     const systemDirectory =
       process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
-    const windowsRoot = dirname(systemDirectory);
-    const pathSystemDirectory = join(windowsRoot, 'System32');
+    const windowsRoot = windowsPath.dirname(systemDirectory);
+    const pathSystemDirectory = windowsPath.join(windowsRoot, 'System32');
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
       UserProfile: 'C:\\Users\\example',
@@ -125,7 +125,7 @@ describe('CommandRunner', () => {
       PROGRAMFILES: 'C:\\Program Files',
       SYSTEMROOT: windowsRoot,
       WINDIR: windowsRoot,
-      COMSPEC: join(systemDirectory, 'cmd.exe'),
+      COMSPEC: windowsPath.join(systemDirectory, 'cmd.exe'),
     });
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
@@ -136,8 +136,8 @@ describe('CommandRunner', () => {
   it('drops relative, UNC, duplicate, and empty Windows PATH entries before executable lookup', () => {
     const systemDirectory =
       process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
-    const windowsRoot = dirname(systemDirectory);
-    const pathSystemDirectory = join(windowsRoot, 'System32');
+    const windowsRoot = windowsPath.dirname(systemDirectory);
+    const pathSystemDirectory = windowsPath.join(windowsRoot, 'System32');
     const environment = buildControlledEnvironment('win32', {
       SystemRoot: 'C:\\Windows',
       PATH: 'relative\\bin;C:\\Windows\\System32;\\\\server\\tools;D:\\Tools;;d:\\tools\\',

@@ -1529,14 +1529,12 @@ export function buildControlledEnvironment(
     if (value !== undefined) environment[key] = value;
   }
   if (platform === 'win32') {
-    let windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
-    if (process.platform === 'win32') {
-      const systemDirectory = getTrustedWindowsSystemDirectory();
-      windowsRoot = windowsPath.dirname(systemDirectory);
-      environment['SYSTEMROOT'] = windowsRoot;
-      environment['WINDIR'] = windowsRoot;
-      environment['COMSPEC'] = windowsPath.join(systemDirectory, 'cmd.exe');
-    }
+    const systemDirectory =
+      process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
+    const windowsRoot = windowsPath.dirname(systemDirectory);
+    environment['SYSTEMROOT'] = windowsRoot;
+    environment['WINDIR'] = windowsRoot;
+    environment['COMSPEC'] = windowsPath.join(systemDirectory, 'cmd.exe');
     environment['PATH'] = sanitizedWindowsPath(environment['PATH'], windowsRoot);
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
