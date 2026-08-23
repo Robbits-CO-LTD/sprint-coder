@@ -83,6 +83,16 @@ type PosixExecutionAddon = Readonly<{
 
 const MAX_EXECUTION_IMAGE_BYTES = 512 * 1024 * 1024;
 
+async function removePreparedExecutionDirectory(directory: string): Promise<void> {
+  await rm(directory, {
+    recursive: true,
+    force: true,
+    // Windows can retain an executable image handle briefly after the native holder closes it.
+    maxRetries: process.platform === 'win32' ? 5 : 0,
+    retryDelay: 50,
+  });
+}
+
 export async function prepareExecutionImage(
   expected: SealedExecutableIdentity,
   allowScript = true,
@@ -287,7 +297,7 @@ export async function prepareExecutionImage(
               held = undefined;
             }
           } finally {
-            await rm(directory, { recursive: true, force: true });
+            await removePreparedExecutionDirectory(directory);
           }
         }
       },
@@ -298,7 +308,7 @@ export async function prepareExecutionImage(
     for (const id of windowsDependencyIds.splice(0)) windowsAddon().closePreparedExecutionImage(id);
     if (sealedId !== undefined) posixAddon().closeSealedExecutionImage(sealedId);
     await held?.close().catch(() => undefined);
-    await rm(directory, { recursive: true, force: true });
+    await removePreparedExecutionDirectory(directory);
     throw error;
   }
 }

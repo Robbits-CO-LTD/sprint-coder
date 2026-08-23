@@ -32,6 +32,7 @@
 - contracts型検査、desktop型検査、対象eslint、format、diff check: PASS。
 - contracts 48 tests、hardware/fit 10 tests: PASS。
 - 固定Grok 4.6最終diffレビュー: GO。CRITICAL/HIGH 0件。
+- PR #329の初回Windows shard 3/3は、実行用コピーのnative handle解放直後に`EBUSY`となる既存cleanup競合で1件失敗した。テスト側と同じ有界retryを本体cleanupへ追加して再検証する。
 
 ---
 
