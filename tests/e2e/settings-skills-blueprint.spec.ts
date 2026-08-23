@@ -33,8 +33,10 @@ test.describe('Settings v2 and Skill selection', () => {
     await expect(page.getByTestId('settings-team-research')).toBeVisible();
 
     await page.getByTestId('settings-nav-skills').click();
-    await expect(page.getByText('Skill Creator', { exact: true }).first()).toBeVisible();
-    await expect(page.getByText(/Chat Skill／Team Skill作成/)).toBeVisible();
+    await expect(dialog.getByText('skill-creator', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('sprint-coder-product', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('組み込みSkill', { exact: true }).first()).toBeVisible();
+    await expect(dialog.getByText('常時有効', { exact: true }).first()).toBeVisible();
     await page.getByTestId('settings-close').click();
 
     const textarea = page.getByTestId('composer-textarea');

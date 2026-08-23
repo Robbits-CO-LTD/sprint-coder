@@ -19,7 +19,9 @@ import {
 } from './path-guard';
 import { sanitizeTerminalOutput, type TerminalOutputSanitizer } from './ansi-sanitizer';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
+import { queryNativeProcessIdentity } from './native-process-identity';
 import {
+  getTrustedWindowsSystemDirectory,
   prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
@@ -129,7 +131,12 @@ export async function prepareExecutionSpec(
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
-  const allowSourceHardlinks = await isTrustedWindowsMultiLinkExecutable(executableCanonicalPath);
+  const trustedWindowsSystemDirectory =
+    process.platform === 'win32' ? await realpath(getTrustedWindowsSystemDirectory()) : undefined;
+  const allowSourceHardlinks = await isTrustedWindowsMultiLinkExecutable(
+    executableCanonicalPath,
+    trustedWindowsSystemDirectory,
+  );
   if (executableStats.nlink !== 1n && !allowSourceHardlinks)
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must have one link');
   const pathGuard = await createPathGuard({
@@ -148,7 +155,11 @@ export async function prepareExecutionSpec(
   const spec = createExecutionSpec({
     absoluteExecutable: executableCanonicalPath,
     executionIdentityDigest: sealedExecutableIdentityDigest(executableIdentity),
-    argv: input.argv,
+    argv: normalizeTrustedWindowsCmdArgv(
+      executableCanonicalPath,
+      trustedWindowsSystemDirectory,
+      input.argv,
+    ),
     cwdIdentity: {
       canonicalPath: pathGuard.resolvedPath,
       identityDigest: pathGuardIdentityDigest(pathGuard),
@@ -206,14 +217,42 @@ async function resolveBareExecutable(
   );
 }
 
-async function isTrustedWindowsMultiLinkExecutable(canonicalPath: string): Promise<boolean> {
+async function isTrustedWindowsMultiLinkExecutable(
+  canonicalPath: string,
+  trustedSystemDirectory?: string,
+): Promise<boolean> {
   if (process.platform !== 'win32') return false;
   if (canonicalPath.toLowerCase() === (await realpath(process.execPath)).toLowerCase()) return true;
-  const systemRoot = process.env['SystemRoot'];
-  if (systemRoot === undefined || !isAbsolute(systemRoot)) return false;
-  const systemDirectory = await realpath(join(systemRoot, 'System32'));
+  const systemDirectory =
+    trustedSystemDirectory ?? (await realpath(getTrustedWindowsSystemDirectory()));
   const childPath = relative(systemDirectory, canonicalPath);
   return childPath !== '' && !childPath.startsWith('..') && !isAbsolute(childPath);
+}
+
+export function normalizeTrustedWindowsCmdArgv(
+  canonicalExecutable: string,
+  trustedSystemDirectory: string | undefined,
+  argv: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  if (
+    platform !== 'win32' ||
+    trustedSystemDirectory === undefined ||
+    windowsPath.dirname(canonicalExecutable).toLowerCase() !==
+      windowsPath.normalize(trustedSystemDirectory).toLowerCase() ||
+    windowsPath.basename(canonicalExecutable).toLowerCase() !== 'cmd.exe'
+  )
+    return argv;
+  const first = argv[0]?.toLowerCase();
+  if (first === '/d') return argv;
+  if (first === '-c' || first === '-e' || first === '/c') {
+    // Normalize the Unix-style aliases emitted by some providers as well as native `/c` so the
+    // approval and execution records share one canonical command form.
+    return ['/d', '/s', '/c', ...argv.slice(1)];
+  }
+  // `/d` disables Command Processor AutoRun hooks so the approved argv is the only command that
+  // runs. Preserve other native switches (including `/k`) after the mandatory guard.
+  return ['/d', ...argv];
 }
 
 export function executionSpecPathGuard(spec: ExecutionSpec): PathGuard {
@@ -1226,7 +1265,7 @@ async function captureWindowsProcessTree(
 async function runTaskkill(pid: number, force: boolean): Promise<void> {
   const args = ['/PID', String(pid), '/T'];
   if (force) args.push('/F');
-  await execFileAsync('C:\\Windows\\System32\\taskkill.exe', args, {
+  await execFileAsync(join(getTrustedWindowsSystemDirectory(), 'taskkill.exe'), args, {
     shell: false,
     windowsHide: true,
     timeout: 3_000,
@@ -1246,7 +1285,7 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
     `[PSCustomObject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;` +
     `identity=('win32:' + $_.CreationDate.ToUniversalTime().Ticks)} } | ConvertTo-Json -Compress`;
   const { stdout } = await execFileAsync(
-    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    join(getTrustedWindowsSystemDirectory(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', script],
     { encoding: 'utf8', timeout: 3_000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
   );
@@ -1256,22 +1295,16 @@ async function queryWindowsProcesses(): Promise<ReadonlyMap<number, WindowsProce
     | { pid: number; parentPid: number; identity: string }[];
   const rows = Array.isArray(parsed) ? parsed : [parsed];
   return new Map(
-    rows
-      .filter(
-        (row) =>
-          Number.isInteger(row.pid) &&
-          row.pid > 0 &&
-          Number.isInteger(row.parentPid) &&
-          typeof row.identity === 'string',
-      )
-      .map((row) => [
-        row.pid,
-        {
-          pid: row.pid,
-          parentPid: row.parentPid,
-          processStartIdentity: row.identity,
-        },
-      ]),
+    rows.flatMap((row) => {
+      if (!Number.isInteger(row.pid) || row.pid <= 0) return [];
+      const identity = queryNativeProcessIdentity(row.pid);
+      const pid = identity?.pid ?? row.pid;
+      const parentPid = identity?.parentPid ?? row.parentPid;
+      const processStartIdentity = identity?.startIdentity ?? row.identity;
+      if (!Number.isInteger(parentPid) || parentPid < 0 || typeof processStartIdentity !== 'string')
+        return [];
+      return [[pid, { pid, parentPid, processStartIdentity }] as const];
+    }),
   );
 }
 
@@ -1458,9 +1491,11 @@ export function readProcessStartIdentity(pid: number): string {
         encoding: 'utf8',
         timeout: 1_000,
       }).trim()}`;
-    if (process.platform === 'win32')
+    if (process.platform === 'win32') {
+      const nativeIdentity = queryNativeProcessIdentity(pid);
+      if (nativeIdentity !== null) return nativeIdentity.startIdentity;
       return `win32:${execFileSync(
-        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        join(getTrustedWindowsSystemDirectory(), 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         [
           '-NoProfile',
           '-NonInteractive',
@@ -1469,6 +1504,7 @@ export function readProcessStartIdentity(pid: number): string {
         ],
         { encoding: 'utf8', timeout: 3_000, windowsHide: true },
       ).trim()}`;
+    }
   } catch {
     return 'unavailable';
   }
@@ -1532,8 +1568,17 @@ export function buildControlledEnvironment(
     if (value !== undefined) environment[key] = value;
   }
   if (platform === 'win32') {
-    const windowsRoot = environment['SYSTEMROOT'] ?? environment['WINDIR'] ?? 'C:\\Windows';
+    const systemDirectory =
+      process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
+    const windowsRoot = windowsPath.dirname(systemDirectory);
+    environment['SYSTEMROOT'] = windowsRoot;
+    environment['WINDIR'] = windowsRoot;
+    environment['COMSPEC'] = windowsPath.join(systemDirectory, 'cmd.exe');
     environment['PATH'] = sanitizedWindowsPath(environment['PATH'], windowsRoot);
+    // AppContainer cannot inspect drive-root ancestors while Node resolves a relative entrypoint.
+    // Preserve only the main path so workspace scripts and npm can start without granting the
+    // sandbox read access to C:\ or the user's profile hierarchy. Never inherit user NODE_OPTIONS.
+    environment['NODE_OPTIONS'] = '--preserve-symlinks-main';
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
     if (home === undefined && userProfile !== undefined) environment['HOME'] = userProfile;

@@ -182,6 +182,26 @@ bool Utf8ToWide(const std::string& input, std::wstring* output) {
                              static_cast<int>(input.size()), output->data(), length) == length;
 }
 
+napi_value GetTrustedSystemDirectory(napi_env env, napi_callback_info info) {
+  (void)info;
+  std::vector<wchar_t> buffer(MAX_PATH + 1, L'\0');
+  UINT length = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+  if (length == 0) return ThrowWindowsError(env, "GetSystemDirectoryW");
+  if (length >= buffer.size()) {
+    buffer.resize(static_cast<size_t>(length) + 1, L'\0');
+    length = GetSystemDirectoryW(buffer.data(), static_cast<UINT>(buffer.size()));
+    if (length == 0 || length >= buffer.size())
+      return ThrowWindowsError(env, "GetSystemDirectoryW");
+  }
+  napi_value result;
+  if (napi_create_string_utf16(env, reinterpret_cast<const char16_t*>(buffer.data()), length,
+                               &result) != napi_ok) {
+    napi_throw_error(env, "WINDOWS_NATIVE_FAILURE", "Could not encode the system directory");
+    return nullptr;
+  }
+  return result;
+}
+
 napi_value ThrowUnsafeImageFile(napi_env env, const char* code) {
   napi_value error;
   napi_create_error(env, nullptr, MakeString(env, "The selected image file is unsafe"), &error);
@@ -509,16 +529,22 @@ napi_value ReadNoReparseImageFile(napi_env env, napi_callback_info info) {
 }
 
 napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
-  size_t argc = 1;
-  napi_value argv[1];
-  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1) {
-    napi_throw_type_error(env, nullptr, "holdPreparedExecutionImage requires one absolute path");
+  size_t argc = 2;
+  napi_value argv[2];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 || argc > 2) {
+    napi_throw_type_error(env, nullptr,
+                          "holdPreparedExecutionImage requires a path and optional policy");
     return nullptr;
   }
   std::string path_utf8;
   std::wstring path;
   if (!ReadString(env, argv[0], &path_utf8) || !Utf8ToWide(path_utf8, &path))
     return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
+  bool allow_hardlinks = false;
+  if (argc == 2 && napi_get_value_bool(env, argv[1], &allow_hardlinks) != napi_ok) {
+    napi_throw_type_error(env, nullptr, "Invalid prepared image hardlink policy");
+    return nullptr;
+  }
   const DWORD full_length = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
   if (full_length == 0) return ThrowUnsafeImageFile(env, "UNSAFE_EXECUTION_IMAGE");
   std::vector<wchar_t> full_buffer(full_length, L'\0');
@@ -553,7 +579,8 @@ napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
   FILE_BASIC_INFO before_basic{};
   FILE_STANDARD_INFO before_standard{};
   constexpr LONGLONG kMaximumExecutionImageBytes = 512LL * 1024LL * 1024LL;
-  if (!QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard) ||
+  if (!QueryStableImageIdentity(file, &before_id, &before_basic, &before_standard,
+                                !allow_hardlinks) ||
       before_standard.EndOfFile.QuadPart < 1 ||
       before_standard.EndOfFile.QuadPart > kMaximumExecutionImageBytes) {
     CloseHandle(file);
@@ -577,7 +604,8 @@ napi_value HoldPreparedExecutionImage(napi_env env, napi_callback_info info) {
   FILE_ID_INFO after_id{};
   FILE_BASIC_INFO after_basic{};
   FILE_STANDARD_INFO after_standard{};
-  if (!QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard) ||
+  if (!QueryStableImageIdentity(file, &after_id, &after_basic, &after_standard,
+                                !allow_hardlinks) ||
       !SameImageIdentity(before_id, before_basic, before_standard, after_id, after_basic,
                          after_standard)) {
     CloseHandle(file);
@@ -1026,6 +1054,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"applyWindowsAcl", nullptr, ApplyWindowsAcl, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"readNoReparseImageFile", nullptr, ReadNoReparseImageFile, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"getTrustedSystemDirectory", nullptr, GetTrustedSystemDirectory, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"holdPreparedExecutionImage", nullptr, HoldPreparedExecutionImage, nullptr, nullptr, nullptr,
        napi_default, nullptr},

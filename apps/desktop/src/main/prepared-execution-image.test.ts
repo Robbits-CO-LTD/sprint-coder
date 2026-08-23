@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
   containsUnsafeElfLoaderPath,
   containsRelativeMachOLoaderPath,
   hasUnsafeWindowsDllImport,
+  hasWindowsApiSetContract,
+  prepareExecutionImage,
+  sealExecutablePath,
   sealedExecutableIdentityDigest,
 } from './prepared-execution-image';
 
@@ -81,6 +87,125 @@ describe('hasUnsafeWindowsDllImport', () => {
 
   it('fails closed for malformed images', () => {
     expect(hasUnsafeWindowsDllImport(Buffer.from('not a PE'))).toBe(true);
+  });
+
+  const windowsIt = process.platform === 'win32' ? it : it.skip;
+  windowsIt('does not recurse through allowlisted imports of a System32 executable', async () => {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    expect(systemRoot).toBeDefined();
+
+    const sealed = await sealExecutablePath(join(systemRoot!, 'System32', 'where.exe'), true);
+
+    expect(sealed.dependencies).toEqual([]);
+  });
+
+  windowsIt('launches a System32 image from its protected original directory', async () => {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    expect(systemRoot).toBeDefined();
+    const sealed = await sealExecutablePath(join(systemRoot!, 'System32', 'where.exe'), true);
+    const prepared = await prepareExecutionImage(sealed);
+    try {
+      expect(prepared.launchPath).toBe(await realpath(join(systemRoot!, 'System32', 'where.exe')));
+      expect(dirname(prepared.launchPath).toLocaleLowerCase()).toBe(
+        (await realpath(join(systemRoot!, 'System32'))).toLocaleLowerCase(),
+      );
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  windowsIt(
+    'still seals an allowlisted DLL deployed beside an application executable',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-system-dll-'));
+      try {
+        const executable = join(directory, 'command.exe');
+        const dependency = join(directory, 'vcruntime140.dll');
+        await writeFile(executable, peWithImport('VCRUNTIME140.dll'));
+        await writeFile(dependency, peWithImport('KERNEL32.dll'));
+
+        const sealed = await sealExecutablePath(executable);
+
+        expect(sealed.dependencies).toEqual([
+          expect.objectContaining({
+            canonicalPath: await realpath(dependency),
+            importName: 'vcruntime140.dll',
+          }),
+        ]);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  windowsIt('accepts only API-set contracts provided by the trusted OS schema', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-api-set-'));
+    try {
+      const executable = join(directory, 'command.exe');
+      await writeFile(executable, peWithImport('API-MS-WIN-CORE-FILE-L1-1-0.DLL'));
+      await expect(sealExecutablePath(executable)).resolves.toMatchObject({ dependencies: [] });
+
+      await writeFile(executable, peWithImport('api-ms-evil-l1-1-0.dll'));
+      await writeFile(join(directory, 'api-ms-evil-l1-1-0.dll'), peWithImport('KERNEL32.dll'));
+      await expect(sealExecutablePath(executable)).rejects.toThrow(
+        'Windows execution image dependency is unavailable',
+      );
+
+      await writeFile(executable, peWithImport('payload.dll'));
+      await rm(join(directory, 'api-ms-evil-l1-1-0.dll'));
+      await expect(sealExecutablePath(executable)).rejects.toThrow(
+        'Windows execution image dependency is unavailable',
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  windowsIt('does not trust a System32 directory supplied through the environment', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'sprint-coder-fake-system-root-'));
+    const originalSystemRoot = process.env.SystemRoot;
+    const originalWindir = process.env.WINDIR;
+    try {
+      const fakeSystem32 = join(directory, 'System32');
+      await mkdir(fakeSystem32);
+      const executable = join(fakeSystem32, 'command.exe');
+      const dependency = join(fakeSystem32, 'vcruntime140.dll');
+      await writeFile(executable, peWithImport('VCRUNTIME140.dll'));
+      await writeFile(dependency, peWithImport('KERNEL32.dll'));
+      process.env.SystemRoot = directory;
+      process.env.WINDIR = directory;
+
+      const sealed = await sealExecutablePath(executable);
+
+      expect(sealed.dependencies).toEqual([
+        expect.objectContaining({
+          canonicalPath: await realpath(dependency),
+          importName: 'vcruntime140.dll',
+        }),
+      ]);
+    } finally {
+      if (originalSystemRoot === undefined) delete process.env.SystemRoot;
+      else process.env.SystemRoot = originalSystemRoot;
+      if (originalWindir === undefined) delete process.env.WINDIR;
+      else process.env.WINDIR = originalWindir;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('hasWindowsApiSetContract', () => {
+  it('requires a matching OS schema contract at an equal or newer revision', () => {
+    const schema = Buffer.from(
+      'API-MS-WIN-CORE-FILE-L1-1-1\0ext-ms-onecore-cache-l1-2-3\0',
+      'utf16le',
+    );
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core-file-l1-1-0.dll')).toBe(true);
+    expect(hasWindowsApiSetContract(schema, 'API-MS-WIN-CORE-FILE-L1-1-1.DLL')).toBe(true);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core-file-l1-1-2.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-evil-l1-1-0.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'api-ms-win-core-file-l1-1.dll')).toBe(false);
+    expect(hasWindowsApiSetContract(schema, 'kernel32.dll')).toBe(false);
   });
 });
 

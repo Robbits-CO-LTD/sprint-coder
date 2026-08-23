@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { renameSync, writeFileSync } from 'node:fs';
 import {
   access,
@@ -17,7 +18,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
-import { join } from 'node:path';
+import { join, win32 as windowsPath } from 'node:path';
 import {
   CommandRunner,
   CommandRunnerError,
@@ -30,6 +31,7 @@ import {
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
+import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
   if (process.platform !== 'darwin' || input.executable !== process.execPath)
@@ -43,6 +45,23 @@ const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
 import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
+
+const normalizeIcaclsAcl = (value: string, path: string): string[] =>
+  [
+    ...new Set(
+      value
+        .split(/\r?\n/u)
+        .map((line, index) => {
+          const trimmed = line.trim();
+          const withoutPath =
+            index === 0 && trimmed.toLocaleLowerCase().startsWith(path.toLocaleLowerCase())
+              ? trimmed.slice(path.length).trim()
+              : trimmed;
+          return withoutPath.replace(/:\(I\)\(/u, ':(');
+        })
+        .filter((line) => line.length > 0),
+    ),
+  ].sort();
 
 afterEach(async () => {
   await Promise.all(
@@ -67,7 +86,19 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
+  it('normalizes equivalent explicit and inherited icacls entries', () => {
+    const path = 'C:\\Temp\\workspace';
+    const before = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+    const after = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\n  NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+
+    expect(normalizeIcaclsAcl(after, path)).toEqual(normalizeIcaclsAcl(before, path));
+  });
+
   it('sanitizes the Windows command PATH while inheriting absolute user paths case-insensitively', () => {
+    const systemDirectory =
+      process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
+    const windowsRoot = windowsPath.dirname(systemDirectory);
+    const pathSystemDirectory = windowsPath.join(windowsRoot, 'System32');
     const environment = buildControlledEnvironment('win32', {
       Path: 'C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd',
       UserProfile: 'C:\\Users\\example',
@@ -78,12 +109,13 @@ describe('CommandRunner', () => {
       LD_PRELOAD: '/workspace/attacker.so',
       LD_LIBRARY_PATH: '/workspace/lib',
       AWS_SECRET_ACCESS_KEY: 'must-not-cross',
+      NODE_OPTIONS: '--require C:\\workspace\\attacker.cjs',
     });
 
     expect(environment).toMatchObject({
       PATH: [
-        'C:\\Windows\\System32',
-        'C:\\Windows',
+        pathSystemDirectory,
+        windowsRoot,
         'C:\\Program Files\\nodejs',
         'C:\\Program Files\\Git\\cmd',
       ].join(';'),
@@ -92,6 +124,10 @@ describe('CommandRunner', () => {
       APPDATA: 'C:\\Users\\example\\AppData\\Roaming',
       LOCALAPPDATA: 'C:\\Users\\example\\AppData\\Local',
       PROGRAMFILES: 'C:\\Program Files',
+      SYSTEMROOT: windowsRoot,
+      WINDIR: windowsRoot,
+      COMSPEC: windowsPath.join(systemDirectory, 'cmd.exe'),
+      NODE_OPTIONS: '--preserve-symlinks-main',
     });
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
@@ -100,11 +136,15 @@ describe('CommandRunner', () => {
   });
 
   it('drops relative, UNC, duplicate, and empty Windows PATH entries before executable lookup', () => {
+    const systemDirectory =
+      process.platform === 'win32' ? getTrustedWindowsSystemDirectory() : 'C:\\Windows\\System32';
+    const windowsRoot = windowsPath.dirname(systemDirectory);
+    const pathSystemDirectory = windowsPath.join(windowsRoot, 'System32');
     const environment = buildControlledEnvironment('win32', {
       SystemRoot: 'C:\\Windows',
       PATH: 'relative\\bin;C:\\Windows\\System32;\\\\server\\tools;D:\\Tools;;d:\\tools\\',
     });
-    expect(environment['PATH']).toBe('C:\\Windows\\System32;C:\\Windows;D:\\Tools');
+    expect(environment['PATH']).toBe(`${pathSystemDirectory};${windowsRoot};D:\\Tools`);
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
@@ -220,6 +260,51 @@ describe('CommandRunner', () => {
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
+  it.runIf(process.platform === 'win32')(
+    'seals trusted System32 cmd.exe with the Windows /c switch used by approval and execution',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+        argv: ['-c', 'echo ollama-ok'],
+      });
+      expect(spec.argv).toEqual(['/d', '/s', '/c', 'echo ollama-ok']);
+
+      const nativeSpec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+        argv: ['/K', 'echo persistent'],
+      });
+      expect(nativeSpec.argv).toEqual(['/d', '/K', 'echo persistent']);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'runs a relative Node entrypoint without granting AppContainer access to drive ancestors',
+    async () => {
+      const root = await workspace();
+      await writeFile(
+        join(root, 'verify-node-main.mjs'),
+        "process.stdout.write('node-main-ok\\n');\n",
+      );
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: process.execPath,
+        argv: ['verify-node-main.mjs'],
+      });
+      const chunks: CommandOutputChunk[] = [];
+      const result = await new CommandRunner({ sandboxed: true }).run(spec, {
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(chunks.map(({ text }) => text).join('')).toContain('node-main-ok');
+    },
+    15_000,
+  );
+
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
     'enforces workspace-write through the packaged sandbox helper',
     async () => {
@@ -283,21 +368,81 @@ describe('CommandRunner', () => {
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-command-'));
       const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-win-sandbox-outside-'));
       roots.push(workspace, outside);
+      const nested = join(workspace, 'existing', 'nested');
+      const existing = join(nested, 'before.txt');
+      const protectedDirectory = join(workspace, 'protected');
+      const protectedFile = join(protectedDirectory, 'must-stay.txt');
+      await mkdir(nested, { recursive: true });
+      await mkdir(protectedDirectory);
+      await writeFile(existing, 'before');
+      await writeFile(protectedFile, 'protected');
+      execFileSync('C:\\Windows\\System32\\icacls.exe', [
+        protectedDirectory,
+        '/inheritance:d',
+        '/Q',
+      ]);
+      const aclBefore = [workspace, protectedDirectory].map((path) =>
+        execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+      );
       const spec = await prepareExecutionSpec({
         workspacePath: workspace,
         executable: process.execPath,
         argv: [
           '-e',
-          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { process.exitCode=7; }`,
+          `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(join(workspace, 'inside.txt'))},'inside'); fs.writeFileSync(${JSON.stringify(existing)},fs.readFileSync(${JSON.stringify(existing)},'utf8')+'-after'); let protectedDenied=false; let outsideDenied=false; try { fs.writeFileSync(${JSON.stringify(protectedFile)},'changed'); } catch { protectedDenied=true; } try { fs.writeFileSync(${JSON.stringify(join(outside, 'outside.txt'))},'outside'); } catch { outsideDenied=true; } process.exitCode=protectedDenied&&outsideDenied?23:24;`,
         ],
       });
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
-      expect(result.exitCode).toBe(7);
+      expect(result.exitCode).toBe(23);
       await expect(readFile(join(workspace, 'inside.txt'), 'utf8')).resolves.toBe('inside');
+      await expect(readFile(existing, 'utf8')).resolves.toBe('before-after');
+      await expect(readFile(protectedFile, 'utf8')).resolves.toBe('protected');
       await expect(readFile(join(outside, 'outside.txt'), 'utf8')).rejects.toMatchObject({
         code: 'ENOENT',
       });
+      const aclAfter = [workspace, protectedDirectory].map((path) =>
+        execFileSync('C:\\Windows\\System32\\icacls.exe', [path], { encoding: 'utf8' }),
+      );
+      // Editing a parent DACL can make Windows enumerate an inherited ACE alongside an identical
+      // explicit ACE. Compare that root ACL semantically while keeping the protected child exact.
+      expect(normalizeIcaclsAcl(aclAfter[0]!, workspace)).toEqual(
+        normalizeIcaclsAcl(aclBefore[0]!, workspace),
+      );
+      expect(aclAfter[1]).toBe(aclBefore[1]);
     },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'runs a held command from the trusted System32 even when the environment is spoofed',
+    async () => {
+      if (!(await probeSandboxRunner()).available) return;
+      const root = await workspace();
+      const systemDirectory = getTrustedWindowsSystemDirectory();
+      const originalSystemRoot = process.env.SystemRoot;
+      const originalWindir = process.env.WINDIR;
+      const spec = await (async () => {
+        process.env.SystemRoot = root;
+        process.env.WINDIR = root;
+        try {
+          return await prepareExecutionSpec({
+            workspacePath: root,
+            executable: join(systemDirectory, 'cmd.exe'),
+            // Node-based CI cannot load the Electron-ABI native identity helper, so keep the
+            // trusted command alive long enough to exercise the trusted PowerShell fallback too.
+            argv: ['/d', '/s', '/c', 'for /L %i in (1,1,200000) do @set x=%i'],
+          });
+        } finally {
+          if (originalSystemRoot === undefined) delete process.env.SystemRoot;
+          else process.env.SystemRoot = originalSystemRoot;
+          if (originalWindir === undefined) delete process.env.WINDIR;
+          else process.env.WINDIR = originalWindir;
+        }
+      })();
+
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(0);
+    },
+    15_000,
   );
 
   it.runIf(process.platform === 'win32')(
@@ -328,6 +473,7 @@ describe('CommandRunner', () => {
         await Promise.all([first.dispose(), second.dispose()]);
       }
     },
+    10_000,
   );
 
   it('rejects a replacement inode at a persisted Project root path', async () => {

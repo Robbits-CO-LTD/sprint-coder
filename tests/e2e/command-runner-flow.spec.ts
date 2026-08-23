@@ -76,7 +76,7 @@ test.describe('command runner flow', () => {
     await expect(card).toBeFocused();
     await expect(card).toContainText('run_command');
     await expect(card).toContainText(
-      process.platform === 'win32' ? 'where.exe' : '/usr/bin/printf',
+      process.platform === 'win32' ? 'cmd.exe' : '/usr/bin/printf',
     );
     const toDeny = await tabToApprovalButton(page, 'approval-deny');
     // The three decisions are the last stops and keep their order, whether or not the disclosure
@@ -108,16 +108,14 @@ test.describe('command runner flow', () => {
     await expect(commandCard).toBeVisible();
     await expect(commandCard).toContainText('変更の整合性を確認');
     await expect(commandCard).toContainText(
-      process.platform === 'win32' ? 'where.exe' : '/usr/bin/printf',
+      process.platform === 'win32' ? 'cmd.exe' : '/usr/bin/printf',
     );
     await expect(commandCard).toContainText('高リスク');
     await expect(page.getByTestId('run-card')).toHaveAttribute('data-run-status', 'completed', {
       timeout: 20_000,
     });
     await expect(commandCard).toContainText('exit 0');
-    await expect(commandCard).toContainText(
-      process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : 'command ok',
-    );
+    await expect(commandCard).toContainText('command ok');
     await expect(commandCard.getByTestId('command-duration')).toContainText(/\d/);
 
     const outputApiProof = await page.evaluate(async () => {
@@ -165,9 +163,7 @@ test.describe('command runner flow', () => {
       };
     });
     expect(outputApiProof).toMatchObject({ eof: true, crossTaskRejected: true });
-    expect(outputApiProof.text).toContain(
-      process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : 'command ok\n',
-    );
+    expect(outputApiProof.text).toContain('command ok');
     expect(outputApiProof.cursor).toBeGreaterThan(0);
     expect(outputApiProof.tailCursor).toBe(outputApiProof.cursor);
     expect(outputApiProof.pageBytes).toBeLessThanOrEqual(65_536);
@@ -186,9 +182,7 @@ test.describe('command runner flow', () => {
       .last();
     await expect(restoredCard).toBeVisible();
     await expect(restoredCard).toContainText('exit 0');
-    await expect(restoredCard).toContainText(
-      process.platform === 'win32' ? 'C:\\Windows\\System32\\where.exe' : 'command ok',
-    );
+    await expect(restoredCard).toContainText('command ok');
 
     await restoredPage.getByTestId('access-selector').click();
     await restoredPage.getByTestId('access-option-auto').click();

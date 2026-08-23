@@ -115,6 +115,7 @@ import {
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
   runBestEffortCancellation,
+  sandboxProfileForToolAuthorization,
   shouldStartNextQueuedAfterCancel,
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
@@ -141,6 +142,16 @@ describe('file edit tracking identity', () => {
     expect(fileEditTrackingKey('turn', 'root', 'Src/App.ts', 'win32')).toBe(
       fileEditTrackingKey('turn', 'root', 'src/app.ts', 'win32'),
     );
+  });
+});
+
+describe('tool authorization sandbox profiles', () => {
+  it('records unsandboxed command runners as full so Task grants can be revalidated', () => {
+    expect(sandboxProfileForToolAuthorization('command-runner', 'shell.execute')).toBe('full');
+    expect(sandboxProfileForToolAuthorization('built-in', 'workspace.write')).toBe(
+      'workspace-write',
+    );
+    expect(sandboxProfileForToolAuthorization('built-in', 'workspace.read')).toBe('read-only');
   });
 });
 

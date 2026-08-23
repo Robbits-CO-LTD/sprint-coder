@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +18,7 @@ use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_CAPABILITIES};
 use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
+use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
@@ -199,21 +200,21 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
     let executable_directory = executable_acl_required
         .then(|| executable_path.parent())
         .flatten();
-    if !set_acl(&root, &sid_string, true)
+    if !set_workspace_acl(&root, &sid_string)
         || executable_directory.is_some_and(|path| !set_read_tree_acl(path, &sid_string))
     {
-        let _ = remove_acl(&root, &sid_string, true);
+        let _ = remove_inherited_acl(&root, &sid_string);
         if let Some(path) = executable_directory {
-            let _ = remove_acl(path, &sid_string, true);
+            let _ = remove_tree_acl(path, &sid_string);
         }
         drop(sid);
         let _ = delete_appcontainer_profile(&profile);
         return Err("appcontainer_acl_failed".to_owned());
     }
     let result = spawn_appcontainer(sid.0, &root, executable, argv);
-    let workspace_acl_removed = remove_acl(&root, &sid_string, true);
+    let workspace_acl_removed = remove_inherited_acl(&root, &sid_string);
     let executable_acl_removed =
-        executable_directory.is_none_or(|path| remove_acl(path, &sid_string, true));
+        executable_directory.is_none_or(|path| remove_tree_acl(path, &sid_string));
     drop(sid);
     let profile_deleted = delete_appcontainer_profile(&profile);
     if !workspace_acl_removed || !executable_acl_removed || !profile_deleted {
@@ -267,12 +268,32 @@ fn acquire_workspace_mutex(profile: &str) -> Result<WorkspaceMutex, String> {
 }
 
 fn is_windows_system_path(path: &Path) -> bool {
-    let Some(windows_root) = std::env::var_os("SystemRoot").map(std::path::PathBuf::from) else {
+    let Some(windows_root) = trusted_windows_directory() else {
         return false;
     };
     let candidate = normalized_windows_path(path);
     let root = normalized_windows_path(&windows_root);
     candidate == root || candidate.starts_with(&format!("{root}\\"))
+}
+
+fn trusted_windows_directory() -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 261];
+    // SAFETY: buffer is writable for its declared length. GetWindowsDirectoryW writes at most
+    // that many UTF-16 code units and returns the required length when the buffer is too small.
+    let mut length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return None;
+    }
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        length = unsafe { GetWindowsDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 || length as usize >= buffer.len() {
+            return None;
+        }
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length as usize],
+    )))
 }
 
 fn is_path_inside(root: &Path, candidate: &Path) -> bool {
@@ -337,24 +358,26 @@ fn sid_string(sid: PSID) -> Option<String> {
     }
 }
 
-fn set_acl(path: &Path, sid: &str, recursive: bool) -> bool {
-    let grant = if recursive {
-        format!("*{sid}:(OI)(CI)M")
-    } else {
-        format!("*{sid}:RX")
+fn set_workspace_acl(path: &Path, sid: &str) -> bool {
+    // workspace-write is still bounded by the user's existing OS ACLs. Grant at the root so
+    // ordinary descendants inherit access, but deliberately do not traverse and rewrite entries
+    // whose inheritance was disabled; doing so is O(files) and stalls commands in large repos.
+    let grant = format!("*{sid}:(OI)(CI)M");
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
     };
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    let mut command = Command::new(icacls);
     command.arg(path).args(["/grant", &grant, "/C", "/Q"]);
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    if recursive {
-        command.arg("/T");
-    }
     command.status().is_ok_and(|status| status.success())
 }
 
 fn set_read_tree_acl(path: &Path, sid: &str) -> bool {
     let grant = format!("*{sid}:(OI)(CI)RX");
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
     command
         .arg(path)
         .args(["/grant", &grant, "/C", "/Q", "/T"])
@@ -363,16 +386,49 @@ fn set_read_tree_acl(path: &Path, sid: &str) -> bool {
     command.status().is_ok_and(|status| status.success())
 }
 
-fn remove_acl(path: &Path, sid: &str, recursive: bool) -> bool {
-    let mut command = Command::new(r"C:\Windows\System32\icacls.exe");
+fn remove_inherited_acl(path: &Path, sid: &str) -> bool {
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
     command
         .arg(path)
         .args(["/remove", &format!("*{sid}"), "/C", "/Q"]);
     command.stdout(Stdio::null()).stderr(Stdio::null());
-    if recursive {
-        command.arg("/T");
-    }
     command.status().is_ok_and(|status| status.success())
+}
+
+fn remove_tree_acl(path: &Path, sid: &str) -> bool {
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    let mut command = Command::new(icacls);
+    command
+        .arg(path)
+        .args(["/remove", &format!("*{sid}"), "/C", "/Q", "/T"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.status().is_ok_and(|status| status.success())
+}
+
+fn trusted_system_executable(name: &str) -> Option<PathBuf> {
+    let mut buffer = vec![0u16; 261];
+    // SAFETY: buffer is writable for its declared length. GetSystemDirectoryW writes at most that
+    // many UTF-16 code units and returns the required length when the buffer is too small.
+    let mut length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+    if length == 0 {
+        return None;
+    }
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        // SAFETY: the resized buffer is writable for its declared length.
+        length = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        if length == 0 || length as usize >= buffer.len() {
+            return None;
+        }
+    }
+    let directory = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+    Some(PathBuf::from(directory).join(name))
 }
 
 fn spawn_appcontainer(sid: PSID, cwd: &Path, executable: &str, argv: &[String]) -> Result<u8, u32> {

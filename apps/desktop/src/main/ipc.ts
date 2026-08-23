@@ -384,6 +384,16 @@ export function shouldStartNextQueuedAfterCancel(
   return startNextQueued !== false && runtimeStopped && canceledEventExists;
 }
 
+export function sandboxProfileForToolAuthorization(
+  implementationKind: ToolAuthorizationRequest['entry']['implementationKind'],
+  capability: Capability,
+) {
+  if (implementationKind === 'command-runner') return 'full' as const;
+  return capability === 'workspace.write' || capability === 'filesystem.external.write'
+    ? ('workspace-write' as const)
+    : ('read-only' as const);
+}
+
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import {
   ToolAuthorizationDeniedError,
@@ -403,6 +413,7 @@ import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure
 import {
   digestToolCatalogValue,
   permissionRequestFingerprint,
+  sessionGrantMatchesPermissionRequest,
   toolValueMatchesSchema,
   type Capability,
   type ToolCatalogSnapshot,
@@ -489,6 +500,7 @@ import { ModelCatalogService, teamModelIdentityKey } from './model-catalog-servi
 import {
   PROVIDER_NO_TOOL_GUIDANCE,
   PROVIDER_WORKSPACE_GUIDANCE,
+  providerWorkspaceGuidance,
   ManagedCodingHarness,
   WorkspaceToolRejection,
   providerDisclosureAuthorizationFacts,
@@ -1122,6 +1134,8 @@ export class IpcRouter {
       isTurnActive: (taskId, turnId) => this.persistence.getActiveTurnId(taskId) === turnId,
       evaluatePermission: ({ capability, request }) =>
         this.evaluateToolPermission(request, capability),
+      revalidateTaskGrant: ({ capability, request }) =>
+        this.revalidateApprovedTaskGrant(request, capability),
       publish: (_approval, event) => {
         const parsed = turnEventSchema.safeParse(event);
         if (parsed.success) this.publish(parsed.data);
@@ -3614,10 +3628,10 @@ export class IpcRouter {
     const facts = approvalFactsForTool(request, capability);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     const commandRunner = request.entry.implementationKind === 'command-runner';
-    const sandboxProfile =
-      capability === 'workspace.write' || capability === 'filesystem.external.write'
-        ? ('workspace-write' as const)
-        : ('read-only' as const);
+    const sandboxProfile = sandboxProfileForToolAuthorization(
+      request.entry.implementationKind,
+      capability,
+    );
     const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
     const ceilingEntry = {
       capability,
@@ -3788,6 +3802,37 @@ export class IpcRouter {
       },
       commandRunner,
     );
+  }
+
+  private revalidateApprovedTaskGrant(
+    request: ToolAuthorizationRequest,
+    capability: Capability,
+  ): boolean {
+    const facts = approvalFactsForTool(request, capability);
+    const sandboxProfile = sandboxProfileForToolAuthorization(
+      request.entry.implementationKind,
+      capability,
+    );
+    const now = new Date().toISOString();
+    const policyEpoch = this.persistence.getPermissionPolicy(request.context.taskId).policyEpoch;
+    if (policyEpoch !== request.context.policyEpoch) return false;
+    const permissionRequest = {
+      taskId: request.context.taskId,
+      subjectId: facts.subjectId,
+      capability,
+      resource: facts.resource,
+      operation: facts.operation,
+      providerEgress: 'none' as const,
+      sandboxProfile,
+      executionSpecDigest: facts.specDigest,
+      reviewerInputDigest: '0'.repeat(64),
+      risk: request.entry.risk,
+    };
+    return this.persistence
+      .listPermissionGrants(request.context.taskId, facts.subjectId, now)
+      .some((grant) =>
+        sessionGrantMatchesPermissionRequest(grant, permissionRequest, policyEpoch, now),
+      );
   }
 
   private dispatchStarted(started: StartedTurn): void {
@@ -5511,10 +5556,11 @@ export class IpcRouter {
             },
           )
         : undefined;
+      const workspaceGuidance = providerWorkspaceGuidance();
       if (!teamTurn)
         messages.unshift({
           role: 'system',
-          content: workspaceToolsEligible ? PROVIDER_WORKSPACE_GUIDANCE : PROVIDER_NO_TOOL_GUIDANCE,
+          content: workspaceToolsEligible ? workspaceGuidance : PROVIDER_NO_TOOL_GUIDANCE,
         });
       if (autoSkills.length > 0)
         messages.unshift({
@@ -5675,7 +5721,7 @@ export class IpcRouter {
           if (canRetryWithoutWorkspaceTools) {
             roundTools = Object.freeze([]);
             const guidanceIndex = messages.findIndex(
-              ({ role, content }) => role === 'system' && content === PROVIDER_WORKSPACE_GUIDANCE,
+              ({ role, content }) => role === 'system' && content === workspaceGuidance,
             );
             if (guidanceIndex >= 0)
               messages[guidanceIndex] = { role: 'system', content: PROVIDER_NO_TOOL_GUIDANCE };

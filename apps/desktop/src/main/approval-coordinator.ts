@@ -105,6 +105,10 @@ export class ApprovalCoordinator {
         | 'deny'
         | 'approval_required'
         | Promise<ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required'>;
+      revalidateTaskGrant?: (input: {
+        capability: Capability;
+        request: ToolAuthorizationRequest;
+      }) => boolean;
       publish: {
         bivarianceHack(approval: ApprovalLike, event?: unknown): void;
       }['bivarianceHack'];
@@ -361,6 +365,13 @@ export class ApprovalCoordinator {
                     ) ??
                       true)
                   );
+                if (
+                  this.options.revalidateTaskGrant?.({
+                    capability: waiter.capability,
+                    request: waiter.request,
+                  }) === true
+                )
+                  return true;
                 if (
                   this.options.persistence.hasTaskGrant?.({
                     taskId: command.taskId,

@@ -14,6 +14,7 @@ import {
   buildCodexTeamDynamicTools,
   buildCodexTurnInput,
   codexOperationForItem,
+  handleCodexNotification,
   parseCodexModels,
   probeCodex,
   readCodexModels,
@@ -27,7 +28,7 @@ import {
   codexInitializeCapabilities,
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
-import type { RuntimeFailureDiagnostic } from './protocol';
+import type { RuntimeCanonicalEvent, RuntimeFailureDiagnostic } from './protocol';
 
 const temporaryRoots: string[] = [];
 
@@ -353,6 +354,7 @@ describe('Codex runtime probe', () => {
         "  if (message.method === 'turn/start') {",
         "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
         "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+        "    send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'preamble', delta: '実行します。' } });",
         "    send({ jsonrpc: '2.0', id: 'managed-call', method: 'item/tool/call', params: { threadId: 'thread-managed', turnId: 'turn-1', callId: 'call-read', namespace: null, tool: 'read_file', arguments: { path: 'README.md' } } });",
         '  }',
         "  if (message.id === 'managed-call' && message.result?.success === true) {",
@@ -387,6 +389,8 @@ describe('Codex runtime probe', () => {
     );
     const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
     const calls: unknown[] = [];
+    const events: Array<{ type: string; stage?: string }> = [];
+    let stagesAtManagedCall: string[] = [];
     const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
     await new Promise<void>((resolve) => {
       adapter.start(
@@ -396,7 +400,9 @@ describe('Codex runtime probe', () => {
         () => undefined,
         root,
         'auto',
-        () => undefined,
+        (event: RuntimeCanonicalEvent) => {
+          events.push(event);
+        },
         () => undefined,
         () => resolve(),
         undefined,
@@ -409,6 +415,9 @@ describe('Codex runtime probe', () => {
         undefined,
         snapshot,
         async (call) => {
+          stagesAtManagedCall = events.flatMap((event) =>
+            event.type === 'stage' && event.stage !== undefined ? [event.stage] : [],
+          );
           calls.push(call);
           return { success: true, output: { content: 'managed' } };
         },
@@ -422,6 +431,8 @@ describe('Codex runtime probe', () => {
         catalogDigest: snapshot.digest,
       },
     ]);
+    expect(stagesAtManagedCall.at(-1)).toBe('executing');
+    expect(stagesAtManagedCall).not.toContain('synthesizing');
   });
 
   it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
@@ -824,19 +835,46 @@ describe('Codex runtime probe', () => {
     expect(boundary.finalText()).toBe('修正完了です。');
   });
 
-  it('advances app-server stages before assistant deltas can be persisted', () => {
+  it('keeps assistant preambles approval-eligible until the Codex turn completes', () => {
     const events: unknown[] = [];
     const emit = (event: unknown): void => {
       events.push(event);
     };
     let index = advanceCodexAppServerStage(-1, 'planning', emit);
-    index = advanceCodexAppServerStage(index, 'synthesizing', emit);
-    advanceCodexAppServerStage(index, 'executing', emit);
+    index = advanceCodexAppServerStage(index, 'executing', emit);
+    index = advanceCodexAppServerStage(index, 'executing', emit);
+    advanceCodexAppServerStage(index, 'synthesizing', emit);
     expect(events).toEqual([
       { type: 'stage', stage: 'understanding' },
       { type: 'stage', stage: 'planning' },
       { type: 'stage', stage: 'executing' },
       { type: 'stage', stage: 'synthesizing' },
+    ]);
+  });
+
+  it('keeps an app-server assistant preamble in executing before a later tool request', () => {
+    const stages: string[] = [];
+    const events: unknown[] = [];
+
+    handleCodexNotification(
+      {
+        method: 'item/agentMessage/delta',
+        params: { itemId: 'preamble', delta: 'まずWorkspaceを確認します。' },
+      },
+      (event) => events.push(event),
+      'assistant-message',
+      new CodexAgentMessageBoundary(),
+      (stage) => stages.push(stage),
+      () => undefined,
+    );
+
+    expect(stages).toEqual(['executing']);
+    expect(events).toEqual([
+      {
+        type: 'delta',
+        messageId: 'assistant-message',
+        delta: 'まずWorkspaceを確認します。',
+      },
     ]);
   });
 

@@ -797,7 +797,7 @@ export function isUnsupportedMultiRootError(error: unknown): boolean {
   );
 }
 
-function handleCodexNotification(
+export function handleCodexNotification(
   message: Record<string, unknown>,
   emit: EmitEvent,
   assistantMessageId: string,
@@ -813,7 +813,10 @@ function handleCodexNotification(
     return;
   }
   if (method === 'item/agentMessage/delta') {
-    advanceStage('synthesizing');
+    // Codex can stream an explanatory preamble before requesting a managed tool. Keep the
+    // durable Turn in `executing` so a later command or file mutation remains approval-eligible;
+    // `turn/completed` is the only reliable signal that the final synthesis has started.
+    advanceStage('executing');
     const itemId = requiredString(params['itemId'], 'agent message item id');
     emit({
       type: 'delta',

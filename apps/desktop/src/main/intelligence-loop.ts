@@ -11,6 +11,8 @@ import {
   type WorldState,
 } from './context-compiler';
 import type { ContextFragment, ProjectContextItem } from './context-ledger';
+import { join } from 'node:path';
+import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 
 export type ModelToolCall = {
   callId: string;
@@ -214,7 +216,10 @@ export function createDeterministicMockSampler(
 
 function commandFixture(): { executable: string; argv: string[] } {
   return process.platform === 'win32'
-    ? { executable: 'C:\\Windows\\System32\\where.exe', argv: ['where'] }
+    ? {
+        executable: join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+        argv: ['/d', '/s', '/c', 'echo command ok'],
+      }
     : { executable: '/usr/bin/printf', argv: ['command ok\\n'] };
 }
 

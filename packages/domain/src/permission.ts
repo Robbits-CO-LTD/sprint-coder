@@ -439,7 +439,7 @@ export function evaluatePermissionPolicy(input: {
 
   trace.push('remembered-grant');
   const rememberedGrant = policy.rememberedGrants.find((grant) =>
-    grantMatches(grant, request, policy.policyEpoch, now),
+    sessionGrantMatchesPermissionRequest(grant, request, policy.policyEpoch, now),
   );
   if (rememberedGrant !== undefined)
     return evaluation(
@@ -854,7 +854,7 @@ function ruleMatches(rule: PermissionRule, request: PermissionRequest): boolean 
   );
 }
 
-function grantMatches(
+export function sessionGrantMatchesPermissionRequest(
   grant: SessionGrant,
   request: PermissionRequest,
   policyEpoch: number,

@@ -273,7 +273,7 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
       const body =
         profile.protocol === 'responses'
           ? openAICompatibleResponseRequest(parsed)
-          : openAICompatibleChatCompletionRequest(parsed);
+          : openAICompatibleChatCompletionRequest(parsed, connection.providerId);
       const response = await this.authenticatedFetch(connection, profile, path, controller.signal, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -675,6 +675,7 @@ function isCompatibleModelList(value: unknown): value is CompatibleModelList {
 
 export function openAICompatibleChatCompletionRequest(
   request: ProviderExecutionRequest,
+  providerId?: string,
 ): Record<string, unknown> {
   return {
     model: request.modelId,
@@ -713,6 +714,7 @@ export function openAICompatibleChatCompletionRequest(
     ...(request.tools === undefined
       ? {}
       : {
+          ...(providerId === 'ollama' ? { reasoning_effort: 'none' } : {}),
           tools: request.tools.map((tool) => ({
             type: 'function',
             function: {

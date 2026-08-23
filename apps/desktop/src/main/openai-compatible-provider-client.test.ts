@@ -892,6 +892,26 @@ describe('openAICompatibleChatCompletionRequest', () => {
     });
   });
 
+  it('disables Ollama thinking when tools are present so the model reaches its tool call', () => {
+    const request = {
+      executionId: 'execution-ollama-tools',
+      connectionId: 'ollama:local',
+      modelId: 'gemma4:12b',
+      messages: [{ role: 'user' as const, content: 'create the file' }],
+      tools: [
+        { name: 'create_file', description: 'Create a file', inputSchema: { type: 'object' } },
+      ],
+    };
+
+    expect(openAICompatibleChatCompletionRequest(request, 'ollama')).toMatchObject({
+      reasoning_effort: 'none',
+      tools: [{ type: 'function', function: { name: 'create_file' } }],
+    });
+    expect(openAICompatibleChatCompletionRequest(request, 'openai')).not.toHaveProperty(
+      'reasoning_effort',
+    );
+  });
+
   it('preserves assistant tool calls and their results across provider rounds', () => {
     expect(
       openAICompatibleChatCompletionRequest({

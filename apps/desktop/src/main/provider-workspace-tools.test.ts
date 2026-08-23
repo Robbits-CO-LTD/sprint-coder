@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import {
   PROVIDER_WORKSPACE_GUIDANCE,
+  providerWorkspaceGuidance,
   ProviderWorkspaceTools,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
@@ -13,6 +14,7 @@ import {
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
 import { commandToolTruncated } from './default-tools';
+import { normalizeTrustedWindowsCmdArgv } from './command-runner';
 import { approvalFactsForTool } from './approval-coordinator';
 import { workspaceMutationBinding } from './path-guard';
 import { ManagedCommandSessions } from './managed-command-sessions';
@@ -326,6 +328,92 @@ describe('Provider workspace read tools', () => {
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/Never delete or\s+overwrite data/);
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/send data over a network/);
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/report that accurately/);
+  });
+
+  it('tells Provider API models to use Windows command semantics on Windows', () => {
+    const guidance = providerWorkspaceGuidance('win32');
+    expect(guidance).toContain('The host OS is Windows');
+    expect(guidance).toContain('Never\nguess /bin/bash');
+    expect(guidance).toContain('never pass Unix flags such as -e');
+    expect(guidance).toContain('cmd.exe echo writes CRLF');
+    expect(guidance).toContain('absolute node.exe with -e and node:fs');
+    expect(providerWorkspaceGuidance('linux')).toBe(PROVIDER_WORKSPACE_GUIDANCE);
+  });
+
+  it('normalizes Unix switches only after Windows cmd.exe is sealed in trusted System32', () => {
+    const request = {
+      executable: 'C:\\Windows\\System32\\cmd.exe',
+      argv: ['-c', 'echo ollama-ok > ollama.txt'],
+      purpose: 'create fixture',
+    };
+    const trustedSystemDirectory = 'C:\\Windows\\System32';
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        request.argv,
+        'win32',
+      ),
+    ).toEqual(['/d', '/s', '/c', 'echo ollama-ok > ollama.txt']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['-e', 'echo ok'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/s', '/c', 'echo ok']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['/C', 'echo native'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/s', '/c', 'echo native']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['/K', 'echo persistent'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/K', 'echo persistent']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        ['/d', '/c', 'echo guarded'],
+        'win32',
+      ),
+    ).toEqual(['/d', '/c', 'echo guarded']);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        request.executable,
+        trustedSystemDirectory,
+        request.argv,
+        'linux',
+      ),
+    ).toBe(request.argv);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        'C:\\workspace\\cmd.exe',
+        trustedSystemDirectory,
+        request.argv,
+        'win32',
+      ),
+    ).toBe(request.argv);
+    expect(
+      normalizeTrustedWindowsCmdArgv(
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\cmd.exe',
+        trustedSystemDirectory,
+        request.argv,
+        'win32',
+      ),
+    ).toBe(request.argv);
+    expect(
+      normalizeTrustedWindowsCmdArgv(request.executable, undefined, request.argv, 'win32'),
+    ).toBe(request.argv);
   });
 
   it('lists one directory in bytewise order without following symlinks', async () => {
