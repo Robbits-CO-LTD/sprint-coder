@@ -14,6 +14,7 @@ import {
   buildCodexTeamDynamicTools,
   buildCodexTurnInput,
   codexOperationForItem,
+  handleCodexNotification,
   parseCodexModels,
   probeCodex,
   readCodexModels,
@@ -824,19 +825,46 @@ describe('Codex runtime probe', () => {
     expect(boundary.finalText()).toBe('修正完了です。');
   });
 
-  it('advances app-server stages before assistant deltas can be persisted', () => {
+  it('keeps assistant preambles approval-eligible until the Codex turn completes', () => {
     const events: unknown[] = [];
     const emit = (event: unknown): void => {
       events.push(event);
     };
     let index = advanceCodexAppServerStage(-1, 'planning', emit);
-    index = advanceCodexAppServerStage(index, 'synthesizing', emit);
-    advanceCodexAppServerStage(index, 'executing', emit);
+    index = advanceCodexAppServerStage(index, 'executing', emit);
+    index = advanceCodexAppServerStage(index, 'executing', emit);
+    advanceCodexAppServerStage(index, 'synthesizing', emit);
     expect(events).toEqual([
       { type: 'stage', stage: 'understanding' },
       { type: 'stage', stage: 'planning' },
       { type: 'stage', stage: 'executing' },
       { type: 'stage', stage: 'synthesizing' },
+    ]);
+  });
+
+  it('keeps an app-server assistant preamble in executing before a later tool request', () => {
+    const stages: string[] = [];
+    const events: unknown[] = [];
+
+    handleCodexNotification(
+      {
+        method: 'item/agentMessage/delta',
+        params: { itemId: 'preamble', delta: 'まずWorkspaceを確認します。' },
+      },
+      (event) => events.push(event),
+      'assistant-message',
+      new CodexAgentMessageBoundary(),
+      (stage) => stages.push(stage),
+      () => undefined,
+    );
+
+    expect(stages).toEqual(['executing']);
+    expect(events).toEqual([
+      {
+        type: 'delta',
+        messageId: 'assistant-message',
+        delta: 'まずWorkspaceを確認します。',
+      },
     ]);
   });
 

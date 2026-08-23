@@ -82,7 +82,7 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
   }),
   providerName: 'exec_command',
   description:
-    'Execute one sealed executable and argv in the managed OS sandbox. Long-running work may continue as an owned background session.',
+    'Execute one sealed executable and argv in the managed OS sandbox. Long-running work may continue as an owned background session. On Windows, launch developer executables directly with an absolute .exe path: cmd.exe or PowerShell cannot start PATH child programs inside the AppContainer. When native write tools are unavailable, call Windows PowerShell directly and use Set-Content only for files inside the Workspace. Run Node tests with node.exe --test --test-isolation=none because the default test isolation launches a blocked child process.',
   parallelism: 'serial',
   maxOutputBytes: 2 * 1024 * 1024,
   supportsCancellation: true,
