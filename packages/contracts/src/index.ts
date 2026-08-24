@@ -4067,6 +4067,7 @@ export interface SprintCoderApi {
     pause(jobId: string): Promise<LocalDownloadJob>;
     resume(jobId: string): Promise<LocalDownloadJob>;
     cancel(jobId: string, confirmed: true): Promise<LocalDownloadJob>;
+    verify(modelId: string): Promise<LocalFitAssessment>;
     delete(modelId: string): Promise<void>;
   };
   permissions: {
@@ -4244,6 +4245,7 @@ export const IPC_CHANNELS = {
   localAIPause: 'sprint-coder:local-ai:pause',
   localAIResume: 'sprint-coder:local-ai:resume',
   localAICancel: 'sprint-coder:local-ai:cancel',
+  localAIVerify: 'sprint-coder:local-ai:verify',
   localAIDelete: 'sprint-coder:local-ai:delete',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',

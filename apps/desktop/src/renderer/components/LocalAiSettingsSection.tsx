@@ -3,6 +3,7 @@ import type {
   InstalledLocalModel,
   LocalDownloadJob,
   LocalHardwareSnapshot,
+  LocalFitAssessment,
   ManagedLocalRuntimeSnapshot,
   PublicModelArtifact,
   PublicModelCatalogDetail,
@@ -39,6 +40,8 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [fitByModel, setFitByModel] = useState<Record<string, LocalFitAssessment>>({});
   const mounted = useRef(true);
 
   async function refresh(includeHardware = false): Promise<void> {
@@ -93,6 +96,21 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
     }
   }
 
+  async function verifyModel(modelId: string): Promise<void> {
+    setVerifyingId(modelId);
+    setError(null);
+    try {
+      const fit = await localAiApi()!.verify(modelId);
+      setFitByModel((current) => ({ ...current, [modelId]: fit }));
+      await refresh();
+      setStatus(`${fit.label}。`);
+    } catch {
+      setError('動作確認を完了できませんでした。モデルは削除されていません。再試行できます。');
+    } finally {
+      setVerifyingId(null);
+    }
+  }
+
   return (
     <section className="settings-local-ai" aria-labelledby="settings-local-ai-title">
       <div className="settings-section-heading">
@@ -141,6 +159,9 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
           />
           <InstalledModelList
             models={installed}
+            verifyingId={verifyingId}
+            fitByModel={fitByModel}
+            onVerify={(id) => void verifyModel(id)}
             onDelete={(id) =>
               void mutate(() => localAiApi()!.delete(id), '端末からモデルを削除しました。')
             }
@@ -328,9 +349,15 @@ function LocalDownloadList({
 
 function InstalledModelList({
   models,
+  verifyingId,
+  fitByModel,
+  onVerify,
   onDelete,
 }: {
   models: readonly InstalledLocalModel[];
+  verifyingId: string | null;
+  fitByModel: Readonly<Record<string, LocalFitAssessment>>;
+  onVerify: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -351,8 +378,17 @@ function InstalledModelList({
                 <small>
                   {model.quantization} · {formatLocalBytes(model.totalBytes)}
                 </small>
+                {fitByModel[model.id] !== undefined && <small>{fitByModel[model.id]!.label}</small>}
               </div>
               <div className="local-ai-row-actions">
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  disabled={verifyingId !== null}
+                  onClick={() => onVerify(model.id)}
+                >
+                  {verifyingId === model.id ? '確認中…' : '動作確認'}
+                </button>
                 {confirming === model.id ? (
                   <>
                     <span>端末から削除しますか？</span>

@@ -7,6 +7,7 @@ import type {
   ModelSelection,
   ProviderModel,
 } from '@sprint-coder/contracts';
+import { requestOpenLocalAiSettings } from '../lib/settings-navigation';
 import { useAppStore } from '../store/appStore';
 import {
   resolveTriggerLabel,
@@ -682,7 +683,22 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
           </div>
           {page.items.length === 0 && !loading && (
             <div className="mpv2-empty">
-              {failed ? 'モデル一覧を取得できませんでした' : '一致するモデルがありません'}
+              {failed ? (
+                'モデル一覧を取得できませんでした'
+              ) : accessType === 'local' && query === '' ? (
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={() => {
+                    close(false);
+                    requestOpenLocalAiSettings();
+                  }}
+                >
+                  Local AI Selectorでモデルを追加
+                </button>
+              ) : (
+                '一致するモデルがありません'
+              )}
             </div>
           )}
           {loading && page.items.length > 0 && <div className="mpv2-more">読み込み中…</div>}

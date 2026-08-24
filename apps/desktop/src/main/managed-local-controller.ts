@@ -2,6 +2,8 @@ import type {
   InstalledLocalModel,
   LocalDownloadJob,
   LocalHardwareSnapshot,
+  LocalFitAssessment,
+  LocalVerificationBinding,
   LocalModelInstallInput,
   ManagedLocalRuntimeSnapshot,
   ProviderModel,
@@ -11,9 +13,11 @@ import type {
   PublicModelCatalogQuery,
 } from '@sprint-coder/contracts';
 import { managedLocalRuntimeSnapshotSchema } from '@sprint-coder/contracts';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
+import { applyReusableLocalVerification } from './local-fit-estimator';
 import {
   LocalModelDownloadManager,
   LocalModelDownloadRepository,
@@ -24,6 +28,7 @@ import { PublicModelCatalogService } from './public-model-catalog';
 import type { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
 import type { ManagedLocalModelLease } from './managed-local-runtime-lifecycle';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
+import { runManagedLocalSelfTest } from './managed-local-self-test';
 
 type ControllerDependencies = Readonly<{
   databasePath: string;
@@ -127,31 +132,60 @@ export class ManagedLocalController {
     return this.manager.listInstalledModels();
   }
 
-  listProviderModels(connectionId: string, providerId: string): readonly ProviderModel[] {
+  async listProviderModels(
+    connectionId: string,
+    providerId: string,
+  ): Promise<readonly ProviderModel[]> {
     const observedAt = new Date().toISOString();
     const unknown = { value: null, source: 'unknown' as const };
-    return this.manager
-      .listInstalledModels()
-      .filter(({ state, artifactCount }) => state === 'installed' && artifactCount === 1)
-      .map((model) => ({
-        connectionId,
-        connectionDisplayName: 'Managed Local',
-        providerId,
-        providerDisplayName: 'Managed Local',
-        modelAuthor: { value: model.sourceId.split('/')[0] ?? null, source: 'runtime_metadata' },
-        modelId: model.id,
-        displayName: `${model.sourceId} · ${model.quantization}`,
-        available: this.lifecycle !== null && this.bundle !== null,
-        availabilityCheckedAt: observedAt,
-        contextWindow: { value: 8_192, source: 'runtime_metadata', observedAt },
-        maxOutputTokens: unknown,
-        // A successful G2 tool self-test promotes this capability. Merely being GGUF is not proof
-        // that its embedded chat template can emit valid function calls.
-        toolCalling: unknown,
-        structuredOutput: unknown,
-        multimodalInput: { value: false, source: 'runtime_metadata', observedAt },
-        reasoning: unknown,
-      }));
+    const hardware = await this.collectHardware();
+    const backend = this.availableBackend(hardware);
+    return Promise.all(
+      this.manager
+        .listInstalledModels()
+        .filter(({ state, artifactCount }) => state === 'installed' && artifactCount === 1)
+        .map(async (model) => {
+          const verified =
+            backend === null
+              ? null
+              : applyReusableLocalVerification(
+                  {
+                    state: 'unknown',
+                    label: '未判定',
+                    detail: 'Model Pickerでは保存済み実測の完全一致だけを確認します。',
+                    breakdown: null,
+                    verification: null,
+                  },
+                  this.verificationBinding(model.id, hardware, backend),
+                  this.manager.verification(model.id),
+                );
+          return {
+            connectionId,
+            connectionDisplayName: 'Managed Local',
+            providerId,
+            providerDisplayName: 'Managed Local',
+            modelAuthor: {
+              value: model.sourceId.split('/')[0] ?? null,
+              source: 'runtime_metadata',
+            },
+            modelId: model.id,
+            displayName: `${model.sourceId} · ${model.quantization}`,
+            available: this.lifecycle !== null && this.bundle !== null && backend !== null,
+            availabilityCheckedAt: observedAt,
+            contextWindow: { value: 8_192, source: 'runtime_metadata', observedAt },
+            maxOutputTokens: unknown,
+            // A successful G2 tool self-test promotes this capability. Merely being GGUF is not proof
+            // that its embedded chat template can emit valid function calls.
+            toolCalling:
+              verified?.state === 'verified_tools'
+                ? { value: true, source: 'runtime_metadata' as const, observedAt }
+                : unknown,
+            structuredOutput: unknown,
+            multimodalInput: { value: false, source: 'runtime_metadata', observedAt },
+            reasoning: unknown,
+          };
+        }),
+    );
   }
 
   async acquireRuntime(
@@ -167,14 +201,8 @@ export class ManagedLocalController {
     if (model === undefined || model.artifactCount !== 1)
       throw new Error('Managed Local model is not startable');
     const hardware = await this.collectHardware();
-    const available = new Set(
-      hardware.backends.filter(({ status }) => status === 'available').map(({ kind }) => kind),
-    );
-    const backend =
-      this.bundle.manifest.candidateBackends.find(
-        (candidate) => candidate !== 'cpu' && available.has(candidate),
-      ) ?? 'cpu';
-    if (!available.has(backend)) throw new Error('Managed Local backend is unavailable');
+    const backend = this.availableBackend(hardware);
+    if (backend === null) throw new Error('Managed Local backend is unavailable');
     const contextTokens = 8_192;
     return this.lifecycle.acquire(
       {
@@ -200,6 +228,71 @@ export class ManagedLocalController {
       automaticRelease,
       signal,
     );
+  }
+
+  async verify(modelId: string): Promise<LocalFitAssessment> {
+    if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
+    const lease = await this.acquireRuntime(modelId, false, new AbortController().signal);
+    try {
+      const snapshot = this.lifecycle?.snapshot();
+      if (snapshot?.fit === null || snapshot?.fit === undefined || snapshot.backend === null)
+        throw new Error('Managed Local fit evidence is unavailable');
+      const hardware = await this.collectHardware();
+      const binding = this.verificationBinding(modelId, hardware, snapshot.backend);
+      const save = (level: 'loaded' | 'tools') =>
+        this.manager.saveVerification(modelId, {
+          level,
+          verifiedAt: new Date().toISOString(),
+          binding,
+        });
+      await runManagedLocalSelfTest({
+        session: lease.session,
+        modelId,
+        scratchRoot: join(this.store.rootPath, 'scratch'),
+        nonce: randomUUID(),
+        onLoaded: () => void save('loaded'),
+      });
+      const record = save('tools');
+      return applyReusableLocalVerification(snapshot.fit, binding, record);
+    } finally {
+      await lease.release();
+    }
+  }
+
+  private availableBackend(
+    hardware: LocalHardwareSnapshot,
+  ): LocalVerificationBinding['backend'] | null {
+    if (this.bundle === null) return null;
+    const available = new Set(
+      hardware.backends.filter(({ status }) => status === 'available').map(({ kind }) => kind),
+    );
+    const backend =
+      this.bundle.manifest.candidateBackends.find(
+        (candidate) => candidate !== 'cpu' && available.has(candidate),
+      ) ?? 'cpu';
+    return available.has(backend) ? backend : null;
+  }
+
+  private verificationBinding(
+    modelId: string,
+    hardware: LocalHardwareSnapshot,
+    backend: LocalVerificationBinding['backend'],
+  ): LocalVerificationBinding {
+    if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
+    const model = this.manager.modelRecord(modelId);
+    return {
+      hostCapabilityFingerprint: hardwareFingerprint(hardware),
+      modelRepo: model.sourceId,
+      immutableRevision: model.immutableRevision,
+      artifactHashes: this.manager.artifactExpectations(modelId).map(({ sha256 }) => sha256),
+      quantization: model.quantization,
+      contextTokens: 8_192,
+      kvCacheType: 'f16',
+      batchSize: 512,
+      gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,
+      sidecarVersion: this.bundle.manifest.runtimeVersion,
+      backend,
+    };
   }
 
   async install(input: LocalModelInstallInput): Promise<LocalDownloadJob> {
@@ -354,4 +447,30 @@ function huggingFaceResolveUrl(
     .split('/')
     .map(encodeURIComponent)
     .join('/')}`;
+}
+
+function hardwareFingerprint(hardware: LocalHardwareSnapshot): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: hardware.version,
+        platform: hardware.platform,
+        architecture: hardware.architecture,
+        totalMemoryBytes: hardware.memory.totalBytes,
+        topology: hardware.memory.topology,
+        cpu: hardware.cpu,
+        gpus: hardware.gpus.map(({ id, vendorId, deviceId, vendorName, deviceName, memory }) => ({
+          id,
+          vendorId,
+          deviceId,
+          vendorName,
+          deviceName,
+          dedicatedTotalBytes: memory.dedicatedTotalBytes,
+          sharedTotalBytes: memory.sharedTotalBytes,
+          unifiedTotalBytes: memory.unifiedTotalBytes,
+        })),
+        backends: hardware.backends,
+      }),
+    )
+    .digest('hex');
 }

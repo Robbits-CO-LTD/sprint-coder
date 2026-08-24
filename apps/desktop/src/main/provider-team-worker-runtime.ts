@@ -57,6 +57,16 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     };
     executionId?: string;
   }): Promise<unknown>;
+  managedToolsConnectionId?: string;
+  prepareManagedTools?(input: {
+    worker: AgentRecord;
+    executionId: string;
+    workspaceSet: RuntimeWorkspaceSet;
+  }): Promise<{
+    tools: readonly ProviderTool[];
+    execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>;
+    release(): void;
+  }>;
 }>;
 
 type ActiveProviderWorker = {
@@ -113,7 +123,15 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.executionId ?? input.envelope.deliveryId;
-    if (input.worker.writeCapable)
+    const managedToolSession =
+      input.workspaceSet === undefined || connection.id !== this.deps.managedToolsConnectionId
+        ? undefined
+        : await this.deps.prepareManagedTools?.({
+            worker: input.worker,
+            executionId,
+            workspaceSet: input.workspaceSet,
+          });
+    if (input.worker.writeCapable && managedToolSession === undefined)
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
@@ -145,9 +163,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       15_000,
     );
     heartbeat.unref();
-    const availableTools = input.worker.canDelegate
-      ? this.deps.managerTools
-      : this.deps.workerTools;
+    const availableTools = [
+      ...(input.worker.canDelegate ? this.deps.managerTools : this.deps.workerTools),
+      ...(managedToolSession?.tools ?? []),
+    ];
     const webSearch =
       connection.providerId === 'openrouter' ||
       connection.providerId === 'orcarouter' ||
@@ -304,14 +323,16 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             label: `${input.worker.canDelegate ? 'Manager' : 'Worker'}が${toolCall.name}を実行中`,
             at: new Date().toISOString(),
           });
-          const result = await this.deps.executeManagerTool({
-            worker: input.worker,
-            name: toolCall.name,
-            input: toolCall.input,
-            reportCursor,
-            modelCatalogAudit,
-            ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
-          });
+          const result = managedToolSession?.tools.some(({ name }) => name === toolCall.name)
+            ? await managedToolSession.execute(toolCall.name, toolCall.input, controller.signal)
+            : await this.deps.executeManagerTool({
+                worker: input.worker,
+                name: toolCall.name,
+                input: toolCall.input,
+                reportCursor,
+                modelCatalogAudit,
+                ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+              });
           input.onEvent?.({
             type: 'activity',
             phase: 'executing',
@@ -362,6 +383,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         ...(providerUsage === undefined ? {} : { providerUsage }),
       };
     } finally {
+      managedToolSession?.release();
       await modelLease?.release();
       clearInterval(heartbeat);
       input.signal?.removeEventListener('abort', abortFromCaller);

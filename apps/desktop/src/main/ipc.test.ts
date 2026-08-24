@@ -1543,6 +1543,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.localAIPause]: localDownloadJobInputSchema,
   [IPC_CHANNELS.localAIResume]: localDownloadJobInputSchema,
   [IPC_CHANNELS.localAICancel]: localDownloadCancelInputSchema,
+  [IPC_CHANNELS.localAIVerify]: installedLocalModelInputSchema,
   [IPC_CHANNELS.localAIDelete]: installedLocalModelInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsListAutoDecisions]: taskIdPayloadSchema,

@@ -9,6 +9,7 @@ import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
 import { SettingsDialog } from './components/SettingsDialog';
+import { OPEN_LOCAL_AI_SETTINGS_EVENT } from './lib/settings-navigation';
 import { TaskBoundaryProvider } from './components/TaskBoundary';
 import { AppTitlebar } from './components/AppTitlebar';
 import { List, Plus } from './components/icons';
@@ -99,6 +100,11 @@ export default function App() {
   const setupWasVisibleRef = useRef(false);
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
+
+  useEffect(() => {
+    window.addEventListener(OPEN_LOCAL_AI_SETTINGS_EVENT, openSettings);
+    return () => window.removeEventListener(OPEN_LOCAL_AI_SETTINGS_EVENT, openSettings);
+  }, [openSettings]);
 
   const selectTaskFromUi = useCallback(
     async (taskId: string): Promise<boolean> => {
