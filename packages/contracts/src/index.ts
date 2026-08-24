@@ -2399,6 +2399,64 @@ export const installedLocalModelSchema = z
   })
   .strict();
 export type InstalledLocalModel = z.infer<typeof installedLocalModelSchema>;
+export const managedLocalRuntimeFailureCodeSchema = z.enum([
+  'unsupported_target',
+  'bundle_invalid',
+  'backend_unavailable',
+  'memory_unknown',
+  'memory_insufficient',
+  'model_busy',
+  'startup_failed',
+  'health_failed',
+  'crashed',
+  'stop_timeout',
+]);
+export const managedLocalRuntimeRecoverySchema = z
+  .object({
+    lowerContextTokens: z.number().int().min(256).max(1_048_576).nullable(),
+    useCpuOnly: z.boolean(),
+    detail: z.string().min(1).max(500),
+  })
+  .strict();
+export const managedLocalRuntimeSnapshotSchema = z
+  .object({
+    state: z.enum(['unavailable', 'stopped', 'starting', 'running', 'stopping', 'crashed']),
+    target: z
+      .string()
+      .regex(/^(?:darwin|win32|linux)-(?:x64|arm64)$/u)
+      .nullable(),
+    runtimeVersion: z
+      .string()
+      .regex(/^[a-zA-Z0-9._+-]{1,64}$/u)
+      .nullable(),
+    modelId: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .nullable(),
+    backend: z.enum(['cpu', 'metal', 'cuda', 'vulkan']).nullable(),
+    activeLeaseCount: z.number().int().nonnegative().max(10_000),
+    fit: localFitAssessmentSchema.nullable(),
+    failureCode: managedLocalRuntimeFailureCodeSchema.nullable(),
+    recovery: managedLocalRuntimeRecoverySchema.nullable(),
+    observedAt: timestampSchema,
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    if (
+      snapshot.state === 'running' &&
+      (snapshot.target === null ||
+        snapshot.runtimeVersion === null ||
+        snapshot.modelId === null ||
+        snapshot.backend === null)
+    )
+      context.addIssue({ code: 'custom', message: 'Running Managed Local state is incomplete' });
+    if ((snapshot.failureCode === null) !== (snapshot.recovery === null))
+      context.addIssue({
+        code: 'custom',
+        message: 'Managed Local failure and recovery guidance must appear together',
+      });
+  });
+export type ManagedLocalRuntimeSnapshot = z.infer<typeof managedLocalRuntimeSnapshotSchema>;
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',

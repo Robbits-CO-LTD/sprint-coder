@@ -1694,3 +1694,62 @@ describe('Managed Local download contracts', () => {
     expect(model).not.toHaveProperty('path');
   });
 });
+
+describe('Managed Local runtime contracts', () => {
+  it('publishes bounded lifecycle facts without endpoint, token, or filesystem paths', () => {
+    const snapshot = contracts.managedLocalRuntimeSnapshotSchema.parse({
+      state: 'running',
+      target: 'darwin-arm64',
+      runtimeVersion: 'b10516',
+      modelId: 'a'.repeat(64),
+      backend: 'metal',
+      activeLeaseCount: 1,
+      fit: {
+        state: 'estimated_comfortable',
+        label: '推定: 快適に動く見込み',
+        detail: '統合メモリの推定必要量が現在の空き容量に収まります。',
+        breakdown: {
+          weightsBytes: 100,
+          kvCacheBytes: 20,
+          scratchBytes: 10,
+          runtimeReserveBytes: 10,
+          safetyMarginBytes: 10,
+          requiredHostBytes: 100,
+          requiredAcceleratorBytes: 50,
+        },
+        verification: null,
+      },
+      failureCode: null,
+      recovery: null,
+      observedAt: '2026-08-24T00:00:00.000Z',
+    });
+    expect(snapshot).not.toHaveProperty('baseUrl');
+    expect(snapshot).not.toHaveProperty('token');
+    expect(snapshot).not.toHaveProperty('modelPath');
+  });
+
+  it('rejects incomplete running state and unpaired recovery guidance', () => {
+    const stopped = {
+      state: 'stopped',
+      target: 'linux-x64',
+      runtimeVersion: 'b10516',
+      modelId: null,
+      backend: null,
+      activeLeaseCount: 0,
+      fit: null,
+      failureCode: null,
+      recovery: null,
+      observedAt: '2026-08-24T00:00:00.000Z',
+    };
+    expect(contracts.managedLocalRuntimeSnapshotSchema.parse(stopped)).toEqual(stopped);
+    expect(() =>
+      contracts.managedLocalRuntimeSnapshotSchema.parse({ ...stopped, state: 'running' }),
+    ).toThrow();
+    expect(() =>
+      contracts.managedLocalRuntimeSnapshotSchema.parse({
+        ...stopped,
+        failureCode: 'memory_insufficient',
+      }),
+    ).toThrow();
+  });
+});

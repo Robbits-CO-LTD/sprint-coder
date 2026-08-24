@@ -92,3 +92,13 @@ tokenを出さない。`/props`が無認証401・認証済み200になること�
 health、listen、request、stopはすべてbounded timeoutとし、stop deadline後は同じowned childだけを
 強制終了する。child環境はlocale、Windows root、専用scratch/cacheだけへ制限し、PATH、loader injection、
 home、provider secretを継承しない。Mainのauthenticated fetchは固定loopback originとbounded pathだけを許可する。
+
+E4のLifecycleはloaded modelを同時に1つだけ所有する。同一modelのleaseは共有し、別model要求はactive leaseが
+0になるまで待って旧sessionを停止してから起動する。automatic release要求は最終leaseまで保持し、途中で
+解除したleaseの意図を失わない。activeまたはloaded modelは停止成功前に削除できない。
+
+各load直前にhardware inventoryを再取得してfit estimatorを再実行する。unknown、unsupported、
+estimated insufficient、GPU条件を満たさないCPU fallback候補は起動せず、context半減とCPU-onlyの
+recovery guidanceを返す。5秒ごとにfree/total memoryを確認し、512MBまたはtotalの5%の大きい方を
+下回るcritical pressureではactive Turnのdrainを要求し、bounded deadline後にowned sidecarを停止する。
+通常quitとupdate installもrouter drain後にLifecycleをdisposeし、sidecarを残さない。

@@ -25,6 +25,7 @@ async function fixture(input?: {
   bytes?: readonly Buffer[];
   fetch?: typeof globalThis.fetch;
   availableBytes?: number;
+  assertModelDeletable?: (modelId: string) => void;
 }) {
   const root = await mkdtemp(join(tmpdir(), 'sprint-coder-local-model-'));
   roots.push(root);
@@ -58,6 +59,7 @@ async function fixture(input?: {
   const manager = new LocalModelDownloadManager(
     repository,
     store,
+    input?.assertModelDeletable ?? (() => undefined),
     fetch,
     () => '2026-08-23T00:00:00.000Z',
     async () => input?.availableBytes ?? 1024 * 1024 * 1024,
@@ -212,14 +214,32 @@ if (runsWithElectronAbi)
       const unsafeEntry = join(modelPath, 'unexpected-directory');
       await mkdir(unsafeEntry);
 
-      await expect(env.manager.deleteInstalled(installed.modelId, 0)).rejects.toMatchObject({
+      await expect(env.manager.deleteInstalled(installed.modelId)).rejects.toMatchObject({
         code: 'unsafe_store',
       });
       expect(env.repository.getJob(queued.id).state).toBe('installed');
 
       await rm(unsafeEntry, { recursive: true });
-      await env.manager.deleteInstalled(installed.modelId, 0);
+      await env.manager.deleteInstalled(installed.modelId);
       expect(() => env.repository.getJob(queued.id)).toThrow('not found');
+      env.repository.close();
+    });
+
+    it('consults the Main-owned lifecycle gate before changing filesystem or DB state', async () => {
+      const env = await fixture({
+        bytes: [Buffer.from('leased model')],
+        assertModelDeletable: () => {
+          throw new Error('Model has an active lease');
+        },
+      });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+
+      await expect(env.manager.deleteInstalled(installed.modelId)).rejects.toThrow('active lease');
+      expect(env.repository.getJob(queued.id).state).toBe('installed');
+      expect(await readdir(join(env.store.rootPath, 'models', installed.modelId))).not.toHaveLength(
+        0,
+      );
       env.repository.close();
     });
   });
