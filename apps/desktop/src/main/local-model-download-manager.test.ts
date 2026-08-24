@@ -69,6 +69,15 @@ async function fixture(input?: {
 
 if (runsWithElectronAbi)
   describe('LocalModelDownloadManager', () => {
+    it('reopens an existing model store so the desktop can restart with the same userData', async () => {
+      const env = await fixture();
+
+      const reopened = await LocalModelStore.open(env.store.rootPath);
+
+      expect(reopened.rootPath).toBe(env.store.rootPath);
+      env.repository.close();
+    });
+
     it('publishes every verified split GGUF shard before marking the model installed', async () => {
       const env = await fixture();
       const queued = env.manager.enqueue(env.plan);
@@ -77,6 +86,21 @@ if (runsWithElectronAbi)
 
       expect(installed.state).toBe('installed');
       expect(installed.completedArtifacts).toBe(2);
+      expect(env.manager.listJobs()).toEqual([installed]);
+      expect(env.manager.listInstalledModels()).toMatchObject([
+        {
+          id: installed.modelId,
+          source: 'hugging_face',
+          sourceId: 'owner/model',
+          quantization: 'Q4_K_M',
+          state: 'installed',
+        },
+      ]);
+      expect(env.manager.modelRecord(installed.modelId)).toMatchObject({
+        sourceId: 'owner/model',
+        immutableRevision: 'a'.repeat(40),
+      });
+      expect(env.manager.artifactExpectations(installed.modelId)).toHaveLength(2);
       const modelPath = join(env.store.rootPath, 'models', installed.modelId);
       expect(await readdir(modelPath)).toEqual(['001.gguf', '002.gguf']);
       expect(await readFile(join(modelPath, '001.gguf'))).toEqual(env.bytes[0]);

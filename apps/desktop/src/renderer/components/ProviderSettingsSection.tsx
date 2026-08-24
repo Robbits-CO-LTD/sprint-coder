@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   ProviderConnection,
+  ProviderConnectionView,
   ProviderConnectionRateLimitLowerInput,
   ProviderProfile,
   ProviderVerificationStatus,
@@ -26,7 +27,7 @@ function providerApi(): ProvidersApi | null {
 
 /** Both loaders are `async` so that a synchronous throw also arrives as a rejection, which is what
  * the `Promise.allSettled` in `refresh` reads. */
-async function loadConnections(api: ProvidersApi): Promise<ProviderConnection[]> {
+async function loadConnections(api: ProvidersApi): Promise<ProviderConnectionView[]> {
   return api.listConnections();
 }
 
@@ -678,6 +679,73 @@ export function ProviderConnectionCard({
   );
 }
 
+function ConnectionGroup({
+  title,
+  description,
+  connections,
+  busy,
+  verifyingId,
+  savingRateLimitId,
+  savingModelReleaseId,
+  rateLimitSupported,
+  onRetry,
+  onSaveRateLimit,
+  onSetModelRelease,
+}: {
+  title: string;
+  description: string;
+  connections: readonly ProviderConnectionView[];
+  busy: boolean;
+  verifyingId: string | null;
+  savingRateLimitId: string | null;
+  savingModelReleaseId: string | null;
+  rateLimitSupported: boolean;
+  onRetry: (connection: ProviderConnection) => void;
+  onSaveRateLimit: (connection: ProviderConnection, input: string) => void;
+  onSetModelRelease: (connection: ProviderConnection, enabled: boolean) => void;
+}) {
+  const id = `settings-connections-${title === 'Cloud AI' ? 'cloud' : 'local'}`;
+  return (
+    <section className="settings-connection-group" aria-labelledby={id}>
+      <div className="settings-connection-group-heading">
+        <div>
+          <h4 id={id}>{title}</h4>
+          <p>{description}</p>
+        </div>
+        <span className="settings-count-badge">{connections.length}件</span>
+      </div>
+      {connections.length === 0 ? (
+        <p className="settings-hint">登録済みの接続はありません。</p>
+      ) : (
+        <ul className="settings-connection-list" aria-label={`${title}の登録済み接続`}>
+          {connections.map((connection) => (
+            <ProviderConnectionCard
+              key={connection.id}
+              connection={connection}
+              verifying={verifyingId === connection.id}
+              disabled={busy}
+              onRetry={onRetry}
+              rateLimit={{
+                supported: rateLimitSupported,
+                saving: savingRateLimitId === connection.id,
+                onSave: onSaveRateLimit,
+              }}
+              {...(typeof providerApi()?.setAutomaticModelRelease !== 'function'
+                ? {}
+                : {
+                    modelRelease: {
+                      saving: savingModelReleaseId === connection.id,
+                      onChange: onSetModelRelease,
+                    },
+                  })}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /** The add form, split out so it can be rendered — and tested — in the one state the section itself
  * never starts in: open. Every value it edits belongs to the section, plaintext key included, so
  * closing the disclosure is what clears it. */
@@ -965,7 +1033,7 @@ export function ProviderAddConnectionForm({
 }
 
 export function ProviderSettingsSection({ active }: { active: boolean }) {
-  const [connections, setConnections] = useState<ProviderConnection[] | null>(null);
+  const [connections, setConnections] = useState<ProviderConnectionView[] | null>(null);
   const [profiles, setProfiles] = useState<readonly ProviderProfile[]>([]);
   const [profilesFailed, setProfilesFailed] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -1061,7 +1129,12 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     setVerifyingId(connection.id);
     try {
       const updated = await api.verifyConnection(connection.id);
-      setConnections((current) => upsertConnection(current ?? [], updated));
+      setConnections(
+        (current) =>
+          current?.map((connection) =>
+            connection.id === updated.id ? { ...connection, ...updated } : connection,
+          ) ?? null,
+      );
       setStatus(
         `${updated.displayName}の検証結果: ${VERIFICATION_LABEL[updated.verification.status]}`,
       );
@@ -1085,7 +1158,12 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
       const updated = await lowerConcurrencyLimit(api, connection, input);
       // Only Main's own answer reaches the list: a failure below leaves the card showing the limit
       // that is actually in force, never the number that was typed.
-      setConnections((current) => upsertConnection(current ?? [], updated));
+      setConnections(
+        (current) =>
+          current?.map((connection) =>
+            connection.id === updated.id ? { ...connection, ...updated } : connection,
+          ) ?? null,
+      );
       setStatus(
         `${updated.displayName}の${CONCURRENCY_LABEL}を${concurrencyLimitText(
           updated.rateLimit.maxConcurrentRequests,
@@ -1111,7 +1189,12 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
         connectionId: connection.id,
         automaticModelRelease: enabled,
       });
-      setConnections((current) => upsertConnection(current ?? [], updated));
+      setConnections(
+        (current) =>
+          current?.map((connection) =>
+            connection.id === updated.id ? { ...connection, ...updated } : connection,
+          ) ?? null,
+      );
       setStatus(`${updated.displayName}のモデル自動解放を${enabled ? '有効' : '無効'}にしました。`);
     } catch {
       setError(MODEL_RELEASE_ERROR);
@@ -1139,10 +1222,12 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
         profileId: current.profileId,
       }));
       setShowKey(false);
-      setConnections((current) => upsertConnection(current ?? [], created));
       setStatus(
         `${created.displayName}を追加しました。検証結果: ${VERIFICATION_LABEL[created.verification.status]}`,
       );
+      // Compute location is classified in Main and only returned by listConnections. Reload the
+      // derived view instead of teaching the Renderer how to guess from Provider ids or URLs.
+      await refresh();
     } catch (error) {
       setError(providerCreateErrorMessage(error));
     } finally {
@@ -1159,6 +1244,8 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   }
 
   const listed = connections ?? [];
+  const cloudConnections = listed.filter(({ computeLocation }) => computeLocation === 'cloud');
+  const localConnections = listed.filter(({ computeLocation }) => computeLocation === 'local');
 
   return (
     <section
@@ -1202,32 +1289,36 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
             </div>
           ) : (
             <>
-              <p className="settings-list-label">{CONNECTION_LIST_LABEL}</p>
-              <ul className="settings-connection-list" aria-label={CONNECTION_LIST_LABEL}>
-                {listed.map((connection) => (
-                  <ProviderConnectionCard
-                    key={connection.id}
-                    connection={connection}
-                    verifying={verifyingId === connection.id}
-                    disabled={busy}
-                    onRetry={(target) => void retryVerification(target)}
-                    rateLimit={{
-                      supported: rateLimitSupported,
-                      saving: savingRateLimitId === connection.id,
-                      onSave: (target, input) => void lowerRateLimit(target, input),
-                    }}
-                    {...(typeof providerApi()?.setAutomaticModelRelease !== 'function'
-                      ? {}
-                      : {
-                          modelRelease: {
-                            saving: savingModelReleaseId === connection.id,
-                            onChange: (target: ProviderConnection, enabled: boolean) =>
-                              void setAutomaticModelRelease(target, enabled),
-                          },
-                        })}
-                  />
-                ))}
-              </ul>
+              <ConnectionGroup
+                title="Cloud AI"
+                description="外部サービス上で推論するAPI・サブスクリプション接続"
+                connections={cloudConnections}
+                busy={busy}
+                verifyingId={verifyingId}
+                savingRateLimitId={savingRateLimitId}
+                savingModelReleaseId={savingModelReleaseId}
+                rateLimitSupported={rateLimitSupported}
+                onRetry={(target) => void retryVerification(target)}
+                onSaveRateLimit={(target, input) => void lowerRateLimit(target, input)}
+                onSetModelRelease={(target, enabled) =>
+                  void setAutomaticModelRelease(target, enabled)
+                }
+              />
+              <ConnectionGroup
+                title="外部Local AI"
+                description="Ollamaなど、このPCまたはLAN内で推論する接続"
+                connections={localConnections}
+                busy={busy}
+                verifyingId={verifyingId}
+                savingRateLimitId={savingRateLimitId}
+                savingModelReleaseId={savingModelReleaseId}
+                rateLimitSupported={rateLimitSupported}
+                onRetry={(target) => void retryVerification(target)}
+                onSaveRateLimit={(target, input) => void lowerRateLimit(target, input)}
+                onSetModelRelease={(target, enabled) =>
+                  void setAutomaticModelRelease(target, enabled)
+                }
+              />
             </>
           )}
 

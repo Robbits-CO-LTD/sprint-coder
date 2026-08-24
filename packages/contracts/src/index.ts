@@ -2302,6 +2302,7 @@ export const publicModelArtifactSchema = z
     installability: publicModelInstallabilitySchema,
   })
   .strict();
+export type PublicModelArtifact = z.infer<typeof publicModelArtifactSchema>;
 export const publicModelCatalogDetailSchema = z
   .object({
     item: publicModelCatalogItemSchema,
@@ -2344,6 +2345,8 @@ export const localDownloadJobSchema = z
   .object({
     id: z.string().uuid(),
     modelId: z.string().regex(/^[a-f0-9]{64}$/u),
+    /** Human-readable catalog identity. Optional across mixed-version preload upgrades. */
+    sourceId: z.string().min(1).max(256).optional(),
     state: localDownloadJobStateSchema,
     artifactCount: z.number().int().min(1).max(256),
     completedArtifacts: z.number().int().min(0).max(256),
@@ -2457,6 +2460,27 @@ export const managedLocalRuntimeSnapshotSchema = z
       });
   });
 export type ManagedLocalRuntimeSnapshot = z.infer<typeof managedLocalRuntimeSnapshotSchema>;
+export const localModelInstallInputSchema = z
+  .object({
+    source: z.enum(['hugging_face', 'localai_gallery']),
+    sourceId: z.string().min(1).max(256),
+    artifactIds: z.array(z.string().min(1).max(320)).min(1).max(256),
+    quantization: z.string().min(1).max(64),
+    confirmed: z.literal(true),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    if (new Set(input.artifactIds).size !== input.artifactIds.length)
+      context.addIssue({ code: 'custom', path: ['artifactIds'], message: 'Duplicate artifact id' });
+  });
+export type LocalModelInstallInput = z.infer<typeof localModelInstallInputSchema>;
+export const localDownloadJobInputSchema = z.object({ jobId: z.string().uuid() }).strict();
+export const localDownloadCancelInputSchema = localDownloadJobInputSchema.extend({
+  confirmed: z.literal(true),
+});
+export const installedLocalModelInputSchema = z
+  .object({ modelId: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
 export const providerVerificationStatusSchema = z.enum([
   'not_required',
   'unverified',
@@ -4032,6 +4056,19 @@ export interface SprintCoderApi {
       input: ProviderConnectionModelReleaseUpdateInput,
     ): Promise<ProviderConnection>;
   };
+  localAI: {
+    hardware(): Promise<LocalHardwareSnapshot>;
+    runtime(): Promise<ManagedLocalRuntimeSnapshot>;
+    query(input: PublicModelCatalogQuery): Promise<PublicModelCatalogPage>;
+    detail(input: PublicModelCatalogDetailInput): Promise<PublicModelCatalogDetail>;
+    listJobs(): Promise<LocalDownloadJob[]>;
+    listInstalled(): Promise<InstalledLocalModel[]>;
+    install(input: LocalModelInstallInput): Promise<LocalDownloadJob>;
+    pause(jobId: string): Promise<LocalDownloadJob>;
+    resume(jobId: string): Promise<LocalDownloadJob>;
+    cancel(jobId: string, confirmed: true): Promise<LocalDownloadJob>;
+    delete(modelId: string): Promise<void>;
+  };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
@@ -4197,6 +4234,17 @@ export const IPC_CHANNELS = {
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
   providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
+  localAIHardware: 'sprint-coder:local-ai:hardware',
+  localAIRuntime: 'sprint-coder:local-ai:runtime',
+  localAICatalogQuery: 'sprint-coder:local-ai:catalog-query',
+  localAICatalogDetail: 'sprint-coder:local-ai:catalog-detail',
+  localAIListJobs: 'sprint-coder:local-ai:list-jobs',
+  localAIListInstalled: 'sprint-coder:local-ai:list-installed',
+  localAIInstall: 'sprint-coder:local-ai:install',
+  localAIPause: 'sprint-coder:local-ai:pause',
+  localAIResume: 'sprint-coder:local-ai:resume',
+  localAICancel: 'sprint-coder:local-ai:cancel',
+  localAIDelete: 'sprint-coder:local-ai:delete',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',

@@ -18,6 +18,8 @@ import { basename, extname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import {
   localDownloadJobSchema,
+  installedLocalModelSchema,
+  type InstalledLocalModel,
   type LocalDownloadFailureCode,
   type LocalDownloadJob,
   type LocalDownloadJobState,
@@ -60,6 +62,7 @@ type ArtifactRow = Readonly<{
 type JobRow = Readonly<{
   id: string;
   model_id: string;
+  source_id: string;
   state: LocalDownloadJobState;
   completed_artifacts: number;
   downloaded_bytes: number;
@@ -157,16 +160,110 @@ export class LocalModelDownloadRepository {
   getJob(id: string): LocalDownloadJob {
     const row = this.db
       .prepare(
-        `SELECT j.*, m.artifact_count, m.total_bytes
+        `SELECT j.*, m.source_id, m.artifact_count, m.total_bytes
          FROM local_model_download_jobs j
          JOIN local_models m ON m.id = j.model_id
          WHERE j.id = ?`,
       )
       .get(id) as JobRow | undefined;
     if (row === undefined) throw new Error('Local download job not found');
+    return this.parseJob(row);
+  }
+
+  listJobs(): readonly LocalDownloadJob[] {
+    const rows = this.db
+      .prepare(
+        `SELECT j.*, m.source_id, m.artifact_count, m.total_bytes
+         FROM local_model_download_jobs j
+         JOIN local_models m ON m.id = j.model_id
+         ORDER BY j.created_at DESC, j.id DESC`,
+      )
+      .all() as JobRow[];
+    return rows.map((row) => this.parseJob(row));
+  }
+
+  listInstalledModels(): readonly InstalledLocalModel[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, source, source_id, immutable_revision, quantization, artifact_count,
+                total_bytes, state, created_at, updated_at
+         FROM local_models
+         WHERE state IN ('installed', 'deleting', 'delete_failed')
+         ORDER BY updated_at DESC, id DESC`,
+      )
+      .all() as Array<{
+      id: string;
+      source: string;
+      source_id: string;
+      immutable_revision: string;
+      quantization: string;
+      artifact_count: number;
+      total_bytes: number;
+      state: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+    return rows.map((row) =>
+      installedLocalModelSchema.parse({
+        id: row.id,
+        source: row.source,
+        sourceId: row.source_id,
+        immutableRevision: row.immutable_revision,
+        quantization: row.quantization,
+        artifactCount: row.artifact_count,
+        totalBytes: row.total_bytes,
+        state: row.state,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }),
+    );
+  }
+
+  modelRecord(modelId: string): Readonly<{
+    source: 'hugging_face' | 'localai_gallery';
+    sourceId: string;
+    immutableRevision: string;
+    quantization: string;
+  }> {
+    const row = this.db
+      .prepare(
+        `SELECT source, source_id, immutable_revision, quantization
+         FROM local_models WHERE id = ?`,
+      )
+      .get(modelId) as
+      | {
+          source: 'hugging_face' | 'localai_gallery';
+          source_id: string;
+          immutable_revision: string;
+          quantization: string;
+        }
+      | undefined;
+    if (row === undefined) throw new Error('Local model not found');
+    return {
+      source: row.source,
+      sourceId: row.source_id,
+      immutableRevision: row.immutable_revision,
+      quantization: row.quantization,
+    };
+  }
+
+  artifactExpectations(modelId: string): readonly Readonly<{
+    filename: string;
+    sizeBytes: number;
+    sha256: string;
+  }>[] {
+    return this.artifacts(modelId).map((artifact) => ({
+      filename: artifact.filename.replace(/^\d{3}-/u, ''),
+      sizeBytes: artifact.byte_length,
+      sha256: artifact.sha256,
+    }));
+  }
+
+  private parseJob(row: JobRow): LocalDownloadJob {
     return localDownloadJobSchema.parse({
       id: row.id,
       modelId: row.model_id,
+      sourceId: row.source_id,
       state: row.state,
       artifactCount: row.artifact_count,
       completedArtifacts: row.completed_artifacts,
@@ -339,8 +436,8 @@ export class LocalModelStore {
     if (!lexical.isDirectory() || lexical.isSymbolicLink())
       throw new LocalModelDownloadError('unsafe_store', 'Model root must be a real directory');
     const canonical = await realpath(rootPath);
-    await mkdir(join(canonical, 'partials'), { mode: 0o700 });
-    await mkdir(join(canonical, 'models'), { mode: 0o700 });
+    await mkdir(join(canonical, 'partials'), { recursive: true, mode: 0o700 });
+    await mkdir(join(canonical, 'models'), { recursive: true, mode: 0o700 });
     const markerPath = join(canonical, MARKER);
     try {
       await writeFile(markerPath, 'managed-local-v1\n', { flag: 'wx', mode: 0o600 });
@@ -450,6 +547,28 @@ export class LocalModelDownloadManager {
 
   recoverInterrupted(): number {
     return this.repository.recoverInterrupted(this.now());
+  }
+
+  getJob(jobId: string): LocalDownloadJob {
+    return this.repository.getJob(jobId);
+  }
+
+  listJobs(): readonly LocalDownloadJob[] {
+    return this.repository.listJobs();
+  }
+
+  listInstalledModels(): readonly InstalledLocalModel[] {
+    return this.repository.listInstalledModels();
+  }
+
+  modelRecord(modelId: string): ReturnType<LocalModelDownloadRepository['modelRecord']> {
+    return this.repository.modelRecord(modelId);
+  }
+
+  artifactExpectations(
+    modelId: string,
+  ): ReturnType<LocalModelDownloadRepository['artifactExpectations']> {
+    return this.repository.artifactExpectations(modelId);
   }
 
   enqueue(input: LocalModelInstallPlan): LocalDownloadJob {

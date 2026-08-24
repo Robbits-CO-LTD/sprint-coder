@@ -24,6 +24,18 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
+  installedLocalModelInputSchema,
+  installedLocalModelSchema,
+  localDownloadCancelInputSchema,
+  localDownloadJobInputSchema,
+  localDownloadJobSchema,
+  localHardwareSnapshotSchema,
+  localModelInstallInputSchema,
+  managedLocalRuntimeSnapshotSchema,
+  publicModelCatalogDetailInputSchema,
+  publicModelCatalogDetailSchema,
+  publicModelCatalogPageSchema,
+  publicModelCatalogQuerySchema,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   orcaRouterConnectionCreateInputSchema,
@@ -908,6 +920,64 @@ const api: SprintCoderApi = {
         providerConnectionSchema,
         input,
       ),
+  },
+  localAI: {
+    hardware: () =>
+      invoke(IPC_CHANNELS.localAIHardware, emptyPayloadSchema, localHardwareSnapshotSchema, {}),
+    runtime: () =>
+      invoke(
+        IPC_CHANNELS.localAIRuntime,
+        emptyPayloadSchema,
+        managedLocalRuntimeSnapshotSchema,
+        {},
+      ),
+    query: (input) =>
+      invoke(
+        IPC_CHANNELS.localAICatalogQuery,
+        publicModelCatalogQuerySchema,
+        publicModelCatalogPageSchema,
+        input,
+      ),
+    detail: (input) =>
+      invoke(
+        IPC_CHANNELS.localAICatalogDetail,
+        publicModelCatalogDetailInputSchema,
+        publicModelCatalogDetailSchema,
+        input,
+      ),
+    listJobs: () =>
+      invoke(IPC_CHANNELS.localAIListJobs, emptyPayloadSchema, z.array(localDownloadJobSchema), {}),
+    listInstalled: () =>
+      invoke(
+        IPC_CHANNELS.localAIListInstalled,
+        emptyPayloadSchema,
+        z.array(installedLocalModelSchema),
+        {},
+      ),
+    install: (input) =>
+      invoke(
+        IPC_CHANNELS.localAIInstall,
+        localModelInstallInputSchema,
+        localDownloadJobSchema,
+        input,
+      ),
+    pause: (jobId) =>
+      invoke(IPC_CHANNELS.localAIPause, localDownloadJobInputSchema, localDownloadJobSchema, {
+        jobId,
+      }),
+    resume: (jobId) =>
+      invoke(IPC_CHANNELS.localAIResume, localDownloadJobInputSchema, localDownloadJobSchema, {
+        jobId,
+      }),
+    cancel: (jobId, confirmed) =>
+      invoke(IPC_CHANNELS.localAICancel, localDownloadCancelInputSchema, localDownloadJobSchema, {
+        jobId,
+        confirmed,
+      }),
+    delete: (modelId) =>
+      invoke(IPC_CHANNELS.localAIDelete, installedLocalModelInputSchema, z.undefined(), {
+        modelId,
+      }),
   },
   permissions: {
     get: (taskId) =>

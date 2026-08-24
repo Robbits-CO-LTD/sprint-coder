@@ -1199,6 +1199,28 @@ export interface SprintCoderApi {
       input: import('@sprint-coder/contracts').ProviderConnectionModelReleaseUpdateInput,
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
   };
+  localAI: {
+    hardware(): Promise<import('@sprint-coder/contracts').LocalHardwareSnapshot>;
+    runtime(): Promise<import('@sprint-coder/contracts').ManagedLocalRuntimeSnapshot>;
+    query(
+      input: import('@sprint-coder/contracts').PublicModelCatalogQuery,
+    ): Promise<import('@sprint-coder/contracts').PublicModelCatalogPage>;
+    detail(
+      input: import('@sprint-coder/contracts').PublicModelCatalogDetailInput,
+    ): Promise<import('@sprint-coder/contracts').PublicModelCatalogDetail>;
+    listJobs(): Promise<import('@sprint-coder/contracts').LocalDownloadJob[]>;
+    listInstalled(): Promise<import('@sprint-coder/contracts').InstalledLocalModel[]>;
+    install(
+      input: import('@sprint-coder/contracts').LocalModelInstallInput,
+    ): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
+    pause(jobId: string): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
+    resume(jobId: string): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
+    cancel(
+      jobId: string,
+      confirmed: true,
+    ): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
+    delete(modelId: string): Promise<void>;
+  };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;

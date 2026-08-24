@@ -11,6 +11,7 @@ import {
 } from '../lib/runtime-labels';
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
 import { ProviderSettingsSection } from './ProviderSettingsSection';
+import { LocalAiSettingsSection } from './LocalAiSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
 import type {
@@ -227,6 +228,7 @@ export function LegacyBody({
           <TeamModelRestrictionSetting active={open} />
           <TeamModelSelectionGuidanceSetting active={open} />
           <TeamResearchSetting active={open} />
+          <LocalAiSettingsSection active={open} />
           {/* Unmounting clears the renderer-local plaintext credential state. */}
           {open && <ProviderSettingsSection active={open} />}
           <SkillSettingsSection
@@ -316,6 +318,7 @@ export function WorkspaceBody({
               <ModelGroup />
               <EffortGroup />
               <AccessDefaultGroup />
+              <LocalAiSettingsSection active={open} />
               {/* Unmounting clears the renderer-local plaintext credential state. */}
               {open && <ProviderSettingsSection active={open} />}
             </WorkspacePage>
