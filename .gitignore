@@ -5,6 +5,8 @@ apps/desktop/out/
 apps/desktop/native-safe-fs/build/
 apps/desktop/sandbox-runner/build/
 apps/desktop/sandbox-runner/target/
+apps/desktop/managed-local/cache/
+apps/desktop/managed-local/build/
 apps/desktop/.vite-user-data/
 *.log
 test-results/

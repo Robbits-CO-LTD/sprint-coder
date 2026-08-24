@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants, type BigIntStats } from 'node:fs';
-import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readlink, realpath, type FileHandle } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { z } from 'zod';
 
@@ -45,6 +45,12 @@ const managedLocalArtifactSchema = z
     sha256: z.string().regex(SHA256),
     byteLength: z.number().int().positive().max(MAX_ARTIFACT_BYTES),
     backend: managedLocalBackendSchema.optional(),
+    aliasTarget: z
+      .string()
+      .min(1)
+      .max(512)
+      .refine(safeArtifactPath, 'Unsafe alias target')
+      .optional(),
   })
   .strict()
   .superRefine((artifact, context) => {
@@ -53,6 +59,18 @@ const managedLocalArtifactSchema = z
         code: 'custom',
         path: ['backend'],
         message: 'Only runtime dependencies may be backend-specific',
+      });
+    if (artifact.role !== 'runtime_dependency' && artifact.aliasTarget !== undefined)
+      context.addIssue({
+        code: 'custom',
+        path: ['aliasTarget'],
+        message: 'Only runtime dependencies may be aliases',
+      });
+    if (artifact.aliasTarget === artifact.path)
+      context.addIssue({
+        code: 'custom',
+        path: ['aliasTarget'],
+        message: 'Runtime alias cannot target itself',
       });
   });
 
@@ -91,6 +109,23 @@ export const managedLocalSidecarManifestSchema = z
     const paths = manifest.artifacts.map(({ path }) => path);
     if (new Set(paths).size !== paths.length)
       context.addIssue({ code: 'custom', path: ['artifacts'], message: 'Duplicate artifact path' });
+    for (const [index, artifact] of manifest.artifacts.entries()) {
+      if (artifact.aliasTarget === undefined) continue;
+      const target = manifest.artifacts.find(({ path }) => path === artifact.aliasTarget);
+      const parent = artifact.path.split('/').slice(0, -1).join('/');
+      const targetParent = artifact.aliasTarget.split('/').slice(0, -1).join('/');
+      if (
+        target === undefined ||
+        target.aliasTarget !== undefined ||
+        target.role !== 'runtime_dependency' ||
+        parent !== targetParent
+      )
+        context.addIssue({
+          code: 'custom',
+          path: ['artifacts', index, 'aliasTarget'],
+          message: 'Runtime alias must target a declared regular dependency in the same directory',
+        });
+    }
     for (const role of ['server', 'license'] as const) {
       if (manifest.artifacts.filter((artifact) => artifact.role === role).length !== 1)
         context.addIssue({
@@ -128,6 +163,24 @@ const managedLocalSidecarPinSchema = z
 
 export type ManagedLocalSidecarPin = z.infer<typeof managedLocalSidecarPinSchema>;
 
+declare const __SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__: unknown;
+
+function compiledManagedLocalSidecarPins(
+  value: unknown,
+): Readonly<Partial<Record<ManagedLocalTargetKey, ManagedLocalSidecarPin>>> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw new Error('Invalid compiled Managed Local sidecar pins');
+  const pins: Partial<Record<ManagedLocalTargetKey, ManagedLocalSidecarPin>> = {};
+  for (const [target, rawPin] of Object.entries(value)) {
+    const parsedTarget = /^(?:darwin|win32|linux)-(?:x64|arm64)$/u.test(target);
+    const parsedPin = managedLocalSidecarPinSchema.safeParse(rawPin);
+    if (!parsedTarget || !parsedPin.success || parsedPin.data.target !== target)
+      throw new Error('Invalid compiled Managed Local sidecar pin');
+    pins[target as ManagedLocalTargetKey] = Object.freeze(parsedPin.data);
+  }
+  return Object.freeze(pins);
+}
+
 /**
  * Populated only by a later native-build Slice after the exact target artifact has been built,
  * signed where required, launch-probed, and its final packaged manifest digest is known.
@@ -135,7 +188,11 @@ export type ManagedLocalSidecarPin = z.infer<typeof managedLocalSidecarPinSchema
  */
 export const BUNDLED_MANAGED_LOCAL_SIDECAR_PINS: Readonly<
   Partial<Record<ManagedLocalTargetKey, ManagedLocalSidecarPin>>
-> = Object.freeze({});
+> = compiledManagedLocalSidecarPins(
+  typeof __SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__ === 'undefined'
+    ? {}
+    : __SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__,
+);
 
 export type VerifiedManagedLocalSidecarBundle = Readonly<{
   target: ManagedLocalTargetKey;
@@ -197,6 +254,7 @@ export function managedLocalSidecarBundleRoot(
     '..',
     'managed-local',
     'build',
+    'managed-local',
     input.target,
   );
 }
@@ -259,7 +317,7 @@ export async function verifyManagedLocalSidecarBundle(
 
   const artifactPaths = new Map<string, string>();
   for (const artifact of manifest.artifacts) {
-    const path = await resolveBundleArtifact(root, artifact.path);
+    const path = await resolveBundleArtifact(root, artifact);
     const digest = await hashStableRegularFile(path, artifact.byteLength);
     if (digest !== artifact.sha256)
       throw new ManagedLocalSidecarError(
@@ -324,8 +382,12 @@ async function canonicalBundleRoot(rootPath: string): Promise<string> {
   }
 }
 
-async function resolveBundleArtifact(root: string, artifactPath: string): Promise<string> {
+async function resolveBundleArtifact(
+  root: string,
+  artifact: ManagedLocalArtifact,
+): Promise<string> {
   try {
+    const artifactPath = artifact.path;
     const parts = artifactPath.split('/');
     let parent = root;
     for (const part of parts.slice(0, -1)) {
@@ -335,6 +397,18 @@ async function resolveBundleArtifact(root: string, artifactPath: string): Promis
     }
     const candidate = join(root, ...parts);
     const lexical = await lstat(candidate, { bigint: true });
+    if (artifact.aliasTarget !== undefined) {
+      if (!lexical.isSymbolicLink()) throw new Error('unsafe');
+      const linkTarget = await readlink(candidate);
+      const expectedLeaf = artifact.aliasTarget.split('/').at(-1);
+      if (linkTarget !== expectedLeaf) throw new Error('unsafe');
+      const declaredTarget = join(root, ...artifact.aliasTarget.split('/'));
+      const targetInfo = await lstat(declaredTarget, { bigint: true });
+      if (!targetInfo.isFile() || targetInfo.isSymbolicLink()) throw new Error('unsafe');
+      const canonical = await realpath(candidate);
+      if (canonical !== (await realpath(declaredTarget))) throw new Error('escape');
+      return canonical;
+    }
     if (!lexical.isFile() || lexical.isSymbolicLink()) throw new Error('unsafe');
     const canonical = await realpath(candidate);
     const child = relative(root, canonical);

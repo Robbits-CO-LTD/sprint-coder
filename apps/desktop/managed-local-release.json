@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "runtime": "llama.cpp",
+  "runtimeVersion": "b10516",
+  "upstreamRepository": "https://github.com/ggml-org/llama.cpp",
+  "upstreamRevision": "b95502ba9aa0eb73a2f4fc8878d7fbe6a847a0b9",
+  "releasedAt": "2026-08-20T13:20:04Z",
+  "licenseSize": 1078,
+  "licenseSha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+  "targets": {
+    "darwin-arm64": {
+      "archiveName": "llama-b10516-bin-macos-arm64.tar.gz",
+      "archiveSize": 11089823,
+      "archiveSha256": "ee3324327d621026ae80c24031670e65fa62a0b23a3a027dbe2f65f240affd30",
+      "candidateBackends": ["cpu", "metal"]
+    },
+    "darwin-x64": {
+      "archiveName": "llama-b10516-bin-macos-x64.tar.gz",
+      "archiveSize": 11395897,
+      "archiveSha256": "b7adecf7bd2cde577ddabee8357a72409165d8104f43b4acee9f1b98cc9c447a",
+      "candidateBackends": ["cpu", "metal"]
+    },
+    "linux-arm64": {
+      "archiveName": "llama-b10516-bin-ubuntu-arm64.tar.gz",
+      "archiveSize": 13529264,
+      "archiveSha256": "e7491dca79c9799fc3ae169675a79f5777d3027e31ffb08ae679e5e0a7ae3c97",
+      "candidateBackends": ["cpu"]
+    },
+    "linux-x64": {
+      "archiveName": "llama-b10516-bin-ubuntu-x64.tar.gz",
+      "archiveSize": 16667775,
+      "archiveSha256": "f263a91280471b4c33c4999d7c76259c0f3a0a53a0b3e692b2c0b84380137a35",
+      "candidateBackends": ["cpu"]
+    },
+    "win32-arm64": {
+      "archiveName": "llama-b10516-bin-win-cpu-arm64.zip",
+      "archiveSize": 12256210,
+      "archiveSha256": "4b136692ab17009722e350d5bb8e5905f9af6bcd43d2897f0655186a9cc65db6",
+      "candidateBackends": ["cpu"]
+    },
+    "win32-x64": {
+      "archiveName": "llama-b10516-bin-win-cpu-x64.zip",
+      "archiveSize": 18506923,
+      "archiveSha256": "fbbbc55e0eb2e1b07f9dcb9488616c98ed47d9003b90e15e7c8c7812c4307cd3",
+      "candidateBackends": ["cpu"]
+    }
+  }
+}

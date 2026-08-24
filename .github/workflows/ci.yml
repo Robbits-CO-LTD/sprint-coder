@@ -48,7 +48,7 @@ jobs:
             printf '%s\n' "${changed_files}"
 
             # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
-            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-native-safe-fs\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|native-safe-fs/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
+            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
               full_matrix=true
             fi
           fi
@@ -175,10 +175,9 @@ jobs:
         run: npx vitest run --shard=${{ matrix.shard }}
 
   package-macos:
-    # Fast PRs still prove the production Forge boundary, independently from test shards.
+    # Every CI invocation proves the production Forge boundary and its pinned Managed Local bundle.
     name: macOS production package smoke
     needs: classify
-    if: github.event_name == 'pull_request' && needs.classify.outputs.full_matrix != 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -538,7 +537,6 @@ jobs:
       - name: Verify macOS and package coverage
         shell: bash
         env:
-          FULL_MATRIX: ${{ needs.classify.outputs.full_matrix }}
           PACKAGE_TEST_RESULT: ${{ needs.package-tests.result }}
           MACOS_TEST_RESULT: ${{ needs.test-macos.result }}
           MACOS_PACKAGE_RESULT: ${{ needs.package-macos.result }}
@@ -546,11 +544,7 @@ jobs:
           set -euo pipefail
           test "${PACKAGE_TEST_RESULT}" = 'success'
           test "${MACOS_TEST_RESULT}" = 'success'
-          if [[ "${FULL_MATRIX}" == 'true' ]]; then
-            test "${MACOS_PACKAGE_RESULT}" = 'skipped'
-          else
-            test "${MACOS_PACKAGE_RESULT}" = 'success'
-          fi
+          test "${MACOS_PACKAGE_RESULT}" = 'success'
 
   windows-result:
     name: build (windows-2022)

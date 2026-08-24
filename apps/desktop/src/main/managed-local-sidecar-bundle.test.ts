@@ -228,6 +228,46 @@ describe('Managed Local sidecar bundle boundary', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
+    'accepts only a manifest-declared same-directory alias to a regular dependency',
+    async () => {
+      const env = await fixture();
+      const dependencyBytes = Buffer.from('shared runtime dependency');
+      const dependencyPath = join(env.root, 'bin', 'libggml.0.dylib');
+      const aliasPath = join(env.root, 'bin', 'libggml.dylib');
+      await writeFile(dependencyPath, dependencyBytes, { mode: 0o600 });
+      await symlink('libggml.0.dylib', aliasPath, 'file');
+      const manifest = {
+        ...env.manifest,
+        artifacts: [
+          ...env.manifest.artifacts,
+          {
+            role: 'runtime_dependency' as const,
+            path: 'bin/libggml.0.dylib',
+            sha256: sha256(dependencyBytes),
+            byteLength: dependencyBytes.byteLength,
+          },
+          {
+            role: 'runtime_dependency' as const,
+            path: 'bin/libggml.dylib',
+            aliasTarget: 'bin/libggml.0.dylib',
+            sha256: sha256(dependencyBytes),
+            byteLength: dependencyBytes.byteLength,
+          },
+        ],
+      };
+      const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+      await writeFile(env.manifestPath, manifestBytes);
+
+      const verified = await verifyManagedLocalSidecarBundle(env.root, {
+        ...env.pin,
+        manifestSha256: sha256(manifestBytes),
+      });
+
+      expect(verified.artifactPaths['bin/libggml.dylib']).toBe(dependencyPath);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'rejects symlinked bundle roots, parent directories, and non-executable servers',
     async () => {
       const rootLink = await fixture();
@@ -276,7 +316,15 @@ describe('Managed Local sidecar bundle boundary', () => {
         moduleDirectory: '/repo/apps/desktop/.vite/build',
       }),
     ).toBe(
-      join('/repo/apps/desktop/.vite/build', '..', '..', 'managed-local', 'build', 'linux-arm64'),
+      join(
+        '/repo/apps/desktop/.vite/build',
+        '..',
+        '..',
+        'managed-local',
+        'build',
+        'managed-local',
+        'linux-arm64',
+      ),
     );
     expect(managedLocalTargetKey('darwin', 'arm64')).toBe('darwin-arm64');
     expect(managedLocalTargetKey('freebsd', 'x64')).toBeNull();

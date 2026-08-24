@@ -1,11 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -17,12 +10,17 @@ import config, {
   DMG_BACKGROUND_PATH,
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
+  isManagedLocalPackagedPath,
+  MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
   refreshPackagedSandboxRunnerDigest,
   verifyBundledNodeResources,
 } from './forge.config';
-import { macAutoUpdateEligibleForIdentity } from './vite.main.config';
+import {
+  macAutoUpdateEligibleForIdentity,
+  managedLocalSidecarPinsForBuild,
+} from './vite.main.config';
 import {
   planWindowsWizardInstaller,
   SQUIRREL_SETUP_EXE,
@@ -78,6 +76,23 @@ describe('native package target', () => {
     );
   });
 
+  it('prepares and packages only the native Managed Local resource tree', () => {
+    expect(config.packagerConfig?.extraResource).toContain(MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT);
+    expect(typeof config.hooks?.generateAssets).toBe('function');
+    expect(typeof config.hooks?.postPackage).toBe('function');
+    expect(
+      isManagedLocalPackagedPath(
+        '/Applications/Sprint Coder.app/Contents/Resources/managed-local/darwin-arm64/bin/llama-server',
+      ),
+    ).toBe(true);
+    expect(
+      isManagedLocalPackagedPath(
+        'C:\\Sprint Coder\\resources\\managed-local\\win32-x64\\bin\\llama-server.exe',
+      ),
+    ).toBe(true);
+    expect(isManagedLocalPackagedPath('C:\\Sprint Coder\\Sprint Coder.exe')).toBe(false);
+  });
+
   it.runIf(process.platform === 'win32')(
     'accepts only the pinned signed Node executable used by Windows packages',
     () => {
@@ -131,6 +146,28 @@ describe('macOS auto-update signing gate', () => {
   });
 });
 
+describe('Managed Local Vite pin injection', () => {
+  it('defaults to no supported target and reads only the generated build pin', () => {
+    expect(managedLocalSidecarPinsForBuild('/definitely/missing/pins.json')).toEqual({});
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-managed-local-pins-'));
+    try {
+      const path = resolve(root, 'pins.json');
+      const pin = {
+        'darwin-arm64': {
+          target: 'darwin-arm64',
+          runtimeVersion: 'b10516',
+          upstreamRevision: 'a'.repeat(40),
+          manifestSha256: 'b'.repeat(64),
+        },
+      };
+      writeFileSync(path, JSON.stringify(pin));
+      expect(managedLocalSidecarPinsForBuild(path)).toEqual(pin);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('macOS sandbox runner sealing', () => {
   it('regenerates the packaged digest from the post-signing runner bytes', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-runner-seal-'));
@@ -144,9 +181,7 @@ describe('macOS sandbox runner sealing', () => {
 
       const digest = refreshPackagedSandboxRunnerDigest(appPath);
 
-      expect(digest).toBe(
-        createHash('sha256').update('post-signing-runner-bytes').digest('hex'),
-      );
+      expect(digest).toBe(createHash('sha256').update('post-signing-runner-bytes').digest('hex'));
       expect(readFileSync(`${runner}.sha256`, 'utf8')).toBe(`${digest}\n`);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -161,6 +196,14 @@ describe('release artifacts', () => {
       'utf8',
     );
     const ciWorkflow = readFileSync(resolve(__dirname, '../../.github/workflows/ci.yml'), 'utf8');
+    const macPackageJob = ciWorkflow.slice(
+      ciWorkflow.indexOf('\n  package-macos:'),
+      ciWorkflow.indexOf('\n  windows-smoke:'),
+    );
+    const macResultJob = ciWorkflow.slice(
+      ciWorkflow.indexOf('\n  macos-result:'),
+      ciWorkflow.indexOf('\n  windows-result:'),
+    );
     const provisioner = readFileSync(resolve(__dirname, 'scripts/ensure-inno-setup.ps1'), 'utf8');
     const unsignedVerifier = readFileSync(
       resolve(__dirname, 'scripts/verify-unsigned-windows-release.ps1'),
@@ -183,6 +226,9 @@ describe('release artifacts', () => {
     );
     expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
+    expect(macPackageJob).not.toContain('if: github.event_name');
+    expect(macResultJob).toContain('test "${MACOS_PACKAGE_RESULT}" = \'success\'');
+    expect(ciWorkflow).toContain('build-(native-safe-fs|managed-local-sidecar)');
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');
     expect(unsignedVerifier).toContain('Sprint-Coder-Installer.exe');
     expect(unsignedVerifier).toContain('Sprint-Coder-Setup.exe');

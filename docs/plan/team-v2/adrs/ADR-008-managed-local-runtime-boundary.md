@@ -71,3 +71,17 @@ Slice Eはnative artifact、process、lease、platform packagingを一つの変�
 
 E1のmanifestにある`candidateBackends`はbundleに含まれる候補であり、実行可能性の証明ではない。
 実際のbackend可用性はE2のnative launch probeとE3の起動時probeが成功した場合だけ公開する。
+
+E2はllama.cpp `b10516`（commit `b95502ba9aa0eb73a2f4fc8878d7fbe6a847a0b9`）の
+公式native release assetをtarget別のsizeとSHA-256へpinする。package時だけnative host用assetを
+GitHub releaseから取得し、archive traversalを拒否して`llama-server`、LICENSE、必要な共有library
+だけをmaterializeする。通常runtimeからbinaryをdownloadせず、PATH上の既存binaryも使わない。
+
+macOSは正式identityがあるrelease buildではVite build前にsidecarを署名し、local/CIのad-hoc buildでは
+上流の有効なlinker署名を保持する。Windows署名設定がある場合もpackage前にsidecarを署名する。
+その最終artifactからmanifestを作り、manifest digestをVite buildのMainへcompile-time pinとして埋め込む。
+PackagerはManaged Local subtreeを再署名せず、postPackageでartifact、manifest、Main内pinの一致を再読する。
+
+上流archiveの同一directory内library aliasは、manifestが通常fileのtargetを明示する場合だけsymlinkとして
+保持できる。Mainはalias名、同一directory、targetの非symlink性、target hashを再検証する。
+任意target、親directory symlink、archive外escape、hardlinkは引き続き拒否する。
