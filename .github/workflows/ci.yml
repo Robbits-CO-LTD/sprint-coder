@@ -479,6 +479,11 @@ jobs:
         run: npx vitest run src/main/managed-local-runtime-supervisor.test.ts
         env:
           SPRINT_CODER_MANAGED_LOCAL_LIVE: '1'
+      - name: Managed Local coding smoke (CPU fallback)
+        working-directory: apps/desktop
+        run: npx vitest run src/main/managed-local-coding-live-smoke.test.ts
+        env:
+          SPRINT_CODER_MANAGED_LOCAL_CODING_LIVE: '1'
       - name: Verify Windows wizard artifact
         shell: pwsh
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1

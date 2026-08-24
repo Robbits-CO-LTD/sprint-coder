@@ -1,9 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
+import {
+  collectLocalHardwareSnapshot,
+  parseDarwinAvailableMemory,
+} from './local-hardware-inventory';
 
 const GiB = 2 ** 30;
 
 describe('local hardware inventory', () => {
+  it('counts only reclaimable macOS pages as available memory', () => {
+    expect(
+      parseDarwinAvailableMemory(`Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free: 10.
+Pages active: 999.
+Pages inactive: 20.
+Pages speculative: 3.
+Pages wired down: 999.
+Pages purgeable: 2.
+Pages occupied by compressor: 999.
+`),
+    ).toBe(35 * 16_384);
+    expect(parseDarwinAvailableMemory('malformed')).toBeNull();
+  });
+
   it('represents Apple Silicon memory as unified without calling it VRAM', async () => {
     const snapshot = await collectLocalHardwareSnapshot({
       now: () => new Date('2026-08-23T00:00:00.000Z'),

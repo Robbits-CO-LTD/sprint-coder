@@ -25,8 +25,11 @@ import {
   type LocalModelInstallPlan,
 } from './local-model-download-manager';
 import { PublicModelCatalogService } from './public-model-catalog';
-import type { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
-import type { ManagedLocalModelLease } from './managed-local-runtime-lifecycle';
+import {
+  ManagedLocalLifecycleError,
+  type ManagedLocalModelLease,
+  type ManagedLocalRuntimeLifecycle,
+} from './managed-local-runtime-lifecycle';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 import { runManagedLocalSelfTest } from './managed-local-self-test';
 
@@ -156,7 +159,12 @@ export class ManagedLocalController {
                     breakdown: null,
                     verification: null,
                   },
-                  this.verificationBinding(model.id, hardware, backend),
+                  this.verificationBinding(
+                    model.id,
+                    hardware,
+                    backend,
+                    this.manager.verification(model.id)?.binding.contextTokens ?? 8_192,
+                  ),
                   this.manager.verification(model.id),
                 );
           return {
@@ -172,7 +180,11 @@ export class ManagedLocalController {
             displayName: `${model.sourceId} · ${model.quantization}`,
             available: this.lifecycle !== null && this.bundle !== null && backend !== null,
             availabilityCheckedAt: observedAt,
-            contextWindow: { value: 8_192, source: 'runtime_metadata', observedAt },
+            contextWindow: {
+              value: this.manager.verification(model.id)?.binding.contextTokens ?? 8_192,
+              source: 'runtime_metadata',
+              observedAt,
+            },
             maxOutputTokens: unknown,
             // A successful G2 tool self-test promotes this capability. Merely being GGUF is not proof
             // that its embedded chat template can emit valid function calls.
@@ -192,6 +204,7 @@ export class ManagedLocalController {
     modelId: string,
     automaticRelease: boolean,
     signal: AbortSignal,
+    contextOverride?: number,
   ): Promise<ManagedLocalModelLease> {
     if (this.lifecycle === null || this.bundle === null)
       throw new Error('Managed Local runtime is unavailable');
@@ -203,7 +216,8 @@ export class ManagedLocalController {
     const hardware = await this.collectHardware();
     const backend = this.availableBackend(hardware);
     if (backend === null) throw new Error('Managed Local backend is unavailable');
-    const contextTokens = 8_192;
+    const contextTokens =
+      contextOverride ?? this.manager.verification(modelId)?.binding.contextTokens ?? 8_192;
     return this.lifecycle.acquire(
       {
         id: model.id,
@@ -232,13 +246,28 @@ export class ManagedLocalController {
 
   async verify(modelId: string): Promise<LocalFitAssessment> {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
-    const lease = await this.acquireRuntime(modelId, false, new AbortController().signal);
+    let lease: ManagedLocalModelLease | null = null;
+    let contextTokens = 8_192;
+    for (const candidate of [8_192, 4_096, 2_048, 1_024, 512, 256]) {
+      try {
+        lease = await this.acquireRuntime(modelId, false, new AbortController().signal, candidate);
+        contextTokens = candidate;
+        break;
+      } catch (error) {
+        if (
+          !(error instanceof ManagedLocalLifecycleError) ||
+          !['memory_insufficient', 'memory_unknown'].includes(error.code)
+        )
+          throw error;
+      }
+    }
+    if (lease === null) throw new Error('Managed Local has insufficient memory at minimum context');
     try {
       const snapshot = this.lifecycle?.snapshot();
       if (snapshot?.fit === null || snapshot?.fit === undefined || snapshot.backend === null)
         throw new Error('Managed Local fit evidence is unavailable');
       const hardware = await this.collectHardware();
-      const binding = this.verificationBinding(modelId, hardware, snapshot.backend);
+      const binding = this.verificationBinding(modelId, hardware, snapshot.backend, contextTokens);
       const save = (level: 'loaded' | 'tools') =>
         this.manager.saveVerification(modelId, {
           level,
@@ -277,6 +306,7 @@ export class ManagedLocalController {
     modelId: string,
     hardware: LocalHardwareSnapshot,
     backend: LocalVerificationBinding['backend'],
+    contextTokens: number,
   ): LocalVerificationBinding {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
     const model = this.manager.modelRecord(modelId);
@@ -286,7 +316,7 @@ export class ManagedLocalController {
       immutableRevision: model.immutableRevision,
       artifactHashes: this.manager.artifactExpectations(modelId).map(({ sha256 }) => sha256),
       quantization: model.quantization,
-      contextTokens: 8_192,
+      contextTokens,
       kvCacheType: 'f16',
       batchSize: 512,
       gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,

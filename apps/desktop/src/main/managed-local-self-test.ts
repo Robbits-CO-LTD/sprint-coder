@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { ManagedLocalRuntimeSession } from './managed-local-runtime-supervisor';
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const SELF_TEST_COMPLETION_TIMEOUT_MS = 120_000;
 
 export async function runManagedLocalSelfTest(
   input: Readonly<{
@@ -45,7 +46,7 @@ export async function runManagedLocalSelfTest(
         },
       },
     ],
-    tool_choice: 'auto',
+    tool_choice: { type: 'function', function: { name: toolName } },
     max_tokens: 128,
   });
   const call = toolCall(requested, toolName, input.nonce);
@@ -88,7 +89,12 @@ async function completion(
   const response = await session.authenticatedFetch('/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      ...body,
+      reasoning_effort: 'none',
+      chat_template_kwargs: { enable_thinking: false },
+    }),
+    signal: AbortSignal.timeout(SELF_TEST_COMPLETION_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`Managed Local self-test HTTP ${response.status}`);
   const declared = Number(response.headers.get('content-length'));

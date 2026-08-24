@@ -711,6 +711,12 @@ export function openAICompatibleChatCompletionRequest(
           }
         : {}),
     })),
+    ...(providerId === 'sprint-managed-local'
+      ? {
+          reasoning_effort: 'none',
+          chat_template_kwargs: { enable_thinking: false },
+        }
+      : {}),
     ...(request.tools === undefined
       ? {}
       : {
