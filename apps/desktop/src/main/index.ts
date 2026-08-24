@@ -42,6 +42,7 @@ import {
 } from './managed-local-sidecar-bundle';
 import { ManagedLocalRuntimeSupervisor } from './managed-local-runtime-supervisor';
 import { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
+import { ManagedLocalController } from './managed-local-controller';
 import { secureLogger, writeSecureLogEntry } from './secure-logger';
 import { combineLogSinks, createPersistentLog, resolveDiagnosticLogRoot } from './persistent-log';
 import {
@@ -72,6 +73,7 @@ let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
 let autoUpdateController: AutoUpdateController | null = null;
 let managedLocalLifecycle: ManagedLocalRuntimeLifecycle | null = null;
+let managedLocalController: ManagedLocalController | null = null;
 let managedLocalMemoryTimer: ReturnType<typeof setInterval> | null = null;
 let shutdownCommitted = false;
 let shutdownInFlight = false;
@@ -144,8 +146,9 @@ if (squirrelStartup || !hasLock) {
       nativeSafeFs = loadNativeSafeFs({
         lockDirectoryPath: join(app.getPath('userData'), 'native-safe-fs-locks'),
       });
+      const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
       persistence = new SqlitePersistenceClient(
-        join(app.getPath('userData'), 'sprint-coder.sqlite3'),
+        databasePath,
         (binding) => nativeSafeFs!.assertSession(binding),
         (workspaceKey, minimumFence) =>
           nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
@@ -166,12 +169,24 @@ if (squirrelStartup || !hasLock) {
         if (rootId === null) return null;
         return workspace.roots.find((root) => root.rootId === rootId) ?? null;
       });
+      managedLocalController = await ManagedLocalController.create({
+        databasePath,
+        storeRoot: join(app.getPath('userData'), 'local-models'),
+        lifecycle: managedLocalLifecycle,
+        bundle: managedLocalBundle,
+      });
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
           ? 'app://bundle'
           : new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL).origin;
-      router = new IpcRouter(mainWindow, persistence, trustedOrigin, workspaceEdit);
+      router = new IpcRouter(
+        mainWindow,
+        persistence,
+        trustedOrigin,
+        workspaceEdit,
+        managedLocalController,
+      );
       await router.initialize();
       router.register();
       await loadRenderer(mainWindow);
@@ -402,6 +417,12 @@ async function disposeApplicationResources(): Promise<void> {
     await router?.dispose();
   } catch (error) {
     secureLogger.error('CommandRunner shutdown did not fully drain', error);
+  }
+  try {
+    await managedLocalController?.dispose();
+    managedLocalController = null;
+  } catch (error) {
+    secureLogger.error('Managed Local controller shutdown did not fully drain', error);
   }
   try {
     await managedLocalLifecycle?.dispose();

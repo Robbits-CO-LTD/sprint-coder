@@ -77,6 +77,21 @@ if (runsWithElectronAbi)
 
       expect(installed.state).toBe('installed');
       expect(installed.completedArtifacts).toBe(2);
+      expect(env.manager.listJobs()).toEqual([installed]);
+      expect(env.manager.listInstalledModels()).toMatchObject([
+        {
+          id: installed.modelId,
+          source: 'hugging_face',
+          sourceId: 'owner/model',
+          quantization: 'Q4_K_M',
+          state: 'installed',
+        },
+      ]);
+      expect(env.manager.modelRecord(installed.modelId)).toMatchObject({
+        sourceId: 'owner/model',
+        immutableRevision: 'a'.repeat(40),
+      });
+      expect(env.manager.artifactExpectations(installed.modelId)).toHaveLength(2);
       const modelPath = join(env.store.rootPath, 'models', installed.modelId);
       expect(await readdir(modelPath)).toEqual(['001.gguf', '002.gguf']);
       expect(await readFile(join(modelPath, '001.gguf'))).toEqual(env.bytes[0]);

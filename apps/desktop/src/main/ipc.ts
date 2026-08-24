@@ -55,6 +55,18 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
+  installedLocalModelInputSchema,
+  installedLocalModelSchema,
+  localDownloadCancelInputSchema,
+  localDownloadJobInputSchema,
+  localDownloadJobSchema,
+  localHardwareSnapshotSchema,
+  localModelInstallInputSchema,
+  managedLocalRuntimeSnapshotSchema,
+  publicModelCatalogDetailInputSchema,
+  publicModelCatalogDetailSchema,
+  publicModelCatalogPageSchema,
+  publicModelCatalogQuerySchema,
   type ModelSelection,
   type NormalizedProviderUsage,
   type NormalizedProviderError,
@@ -245,6 +257,7 @@ import {
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
+import type { ManagedLocalController } from './managed-local-controller';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
@@ -780,6 +793,7 @@ export class IpcRouter {
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
+    private readonly managedLocal: ManagedLocalController | null = null,
   ) {
     this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
     this.attachmentCustodyStore = new AttachmentCustodyStore(
@@ -1682,6 +1696,69 @@ export class IpcRouter {
           multiProviderModelPickerV2: multiProviderModelPickerV2Enabled(),
         };
       },
+    );
+    this.handle(IPC_CHANNELS.localAIHardware, emptyPayloadSchema, localHardwareSnapshotSchema, () =>
+      this.managedLocal!.hardware(),
+    );
+    this.handle(
+      IPC_CHANNELS.localAIRuntime,
+      emptyPayloadSchema,
+      managedLocalRuntimeSnapshotSchema,
+      () => this.managedLocal!.runtime(),
+    );
+    this.handle(
+      IPC_CHANNELS.localAICatalogQuery,
+      publicModelCatalogQuerySchema,
+      publicModelCatalogPageSchema,
+      (input) => this.managedLocal!.query(input),
+    );
+    this.handle(
+      IPC_CHANNELS.localAICatalogDetail,
+      publicModelCatalogDetailInputSchema,
+      publicModelCatalogDetailSchema,
+      (input) => this.managedLocal!.detail(input),
+    );
+    this.handle(
+      IPC_CHANNELS.localAIListJobs,
+      emptyPayloadSchema,
+      z.array(localDownloadJobSchema),
+      () => [...this.managedLocal!.listJobs()],
+    );
+    this.handle(
+      IPC_CHANNELS.localAIListInstalled,
+      emptyPayloadSchema,
+      z.array(installedLocalModelSchema),
+      () => [...this.managedLocal!.listInstalled()],
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAIInstall,
+      localModelInstallInputSchema,
+      localDownloadJobSchema,
+      (input) => this.managedLocal!.install(input),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAIPause,
+      localDownloadJobInputSchema,
+      localDownloadJobSchema,
+      (input) => this.managedLocal!.pause(input.jobId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAIResume,
+      localDownloadJobInputSchema,
+      localDownloadJobSchema,
+      (input) => this.managedLocal!.resume(input.jobId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAICancel,
+      localDownloadCancelInputSchema,
+      localDownloadJobSchema,
+      (input) => this.managedLocal!.cancel(input.jobId, input.confirmed),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAIDelete,
+      installedLocalModelInputSchema,
+      z.undefined(),
+      (input) => this.managedLocal!.delete(input.modelId),
     );
     this.handle(
       IPC_CHANNELS.providersListConnections,
