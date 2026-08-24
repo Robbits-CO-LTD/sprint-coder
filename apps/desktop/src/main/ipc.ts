@@ -597,6 +597,12 @@ import {
   sanitizeGeneratedTaskTitle,
 } from './model-task-title';
 import { TaskTitleAbortRegistry, TaskTitleRuntimePool } from './task-title-runtime-pool';
+import {
+  MANAGED_LOCAL_CONNECTION_ID,
+  MANAGED_LOCAL_PROVIDER_ID,
+  ManagedLocalProviderRuntime,
+  managedLocalConnection,
+} from './managed-local-provider-runtime';
 
 const MODEL_RESEARCH_GUIDANCE = `
 このTeamでは「Worker採用前にモデルをWeb調査」が有効です。各Workerを雇う前に必ず次の順序を守ってください。
@@ -763,6 +769,7 @@ export class IpcRouter {
   );
   private readonly providerSecrets: ProviderSecretStorage;
   private readonly compatibleRuntime: OpenAICompatibleProviderClient;
+  private readonly managedLocalProviderRuntime: ManagedLocalProviderRuntime | null;
   private readonly providerEgressTrustForConnection: (
     connection: ProviderConnection,
   ) => 'trusted-local' | 'trusted-remote';
@@ -813,6 +820,7 @@ export class IpcRouter {
       return parseOpenAICompatibleCredential(providerSecrets.get(connection.secretReference));
     };
     this.providerEgressTrustForConnection = (connection) => {
+      if (connection.id === MANAGED_LOCAL_CONNECTION_ID) return 'trusted-local';
       if (connection.runtimeKind !== 'openai_compatible') return 'trusted-remote';
       return resolvedProfileEndpointTrust(
         this.providerProfiles.get(connection.providerId),
@@ -828,6 +836,26 @@ export class IpcRouter {
       providerId: null,
       runtime: this.compatibleRuntime,
     });
+    if (this.managedLocal === null) this.managedLocalProviderRuntime = null;
+    else {
+      const existing = this.persistence
+        .listProviderConnections()
+        .find(({ id }) => id === MANAGED_LOCAL_CONNECTION_ID);
+      if (existing === undefined)
+        this.persistence.createProviderConnection(managedLocalConnection());
+      else if (
+        existing.providerId !== MANAGED_LOCAL_PROVIDER_ID ||
+        existing.runtimeKind !== 'openai_compatible' ||
+        existing.secretReference !== null
+      )
+        throw new Error('Managed Local virtual Connection identity changed');
+      this.managedLocalProviderRuntime = new ManagedLocalProviderRuntime(this.managedLocal);
+      this.providerRegistry.register({
+        runtimeKind: 'openai_compatible',
+        providerId: MANAGED_LOCAL_PROVIDER_ID,
+        runtime: this.managedLocalProviderRuntime,
+      });
+    }
     const openAI = new OpenAIProviderClient((connection) => {
       if (connection.secretReference === null)
         throw new Error('OpenAI Connection has no secret reference');
@@ -1767,6 +1795,7 @@ export class IpcRouter {
       () =>
         this.providerConnections
           .list()
+          .filter(({ id }) => id !== MANAGED_LOCAL_CONNECTION_ID)
           .map((connection) => providerConnectionView(connection, this.providerProfiles)),
     );
     this.handle(
@@ -3429,6 +3458,7 @@ export class IpcRouter {
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     await this.compatibleRuntime.dispose();
+    await this.managedLocalProviderRuntime?.dispose();
     this.claudeRuntime.dispose();
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
@@ -4854,6 +4884,7 @@ export class IpcRouter {
     connection: ProviderConnection,
     allowLocalPrompt = true,
   ): Promise<ProviderConnection> {
+    if (connection.id === MANAGED_LOCAL_CONNECTION_ID) return connection;
     if (connection.runtimeKind !== 'openai_compatible') return connection;
     if (connection.secretReference === null)
       throw new Error('Provider Profile Connection has no secret reference');
@@ -4906,7 +4937,20 @@ export class IpcRouter {
     const checkedAt = new Date().toISOString();
     this.reconcileBuiltinCapability('codex', codexCapability);
     this.reconcileBuiltinCapability('claude', claudeCapability);
-    const connections = this.providerConnections.list();
+    const connections = this.providerConnections
+      .list()
+      .filter(({ id }) => id !== MANAGED_LOCAL_CONNECTION_ID);
+    const managedConnection =
+      this.managedLocalProviderRuntime === null
+        ? null
+        : this.persistence.getProviderConnection(MANAGED_LOCAL_CONNECTION_ID);
+    const managedModels =
+      managedConnection === null
+        ? []
+        : await this.managedLocalProviderRuntime!.listModels(
+            managedConnection,
+            new AbortController().signal,
+          );
     const externalResults = await Promise.allSettled(
       connections
         .filter(
@@ -4959,10 +5003,12 @@ export class IpcRouter {
           checkedAt,
         ),
         ...externalModels,
+        ...managedModels,
       ],
       new Map([
         ['builtin:codex-cli', 'subscription'],
         ['builtin:claude-cli', 'subscription'],
+        ...(managedConnection === null ? [] : ([[MANAGED_LOCAL_CONNECTION_ID, 'local']] as const)),
         ...connections.map(
           (connection) =>
             [
