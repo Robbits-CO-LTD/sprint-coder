@@ -5,11 +5,19 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+import { extractFile as extractAsarFile } from '@electron/asar';
+import { sign as signWindowsFiles } from '@electron/windows-sign';
 import { createHash } from 'node:crypto';
 import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
+import {
+  managedLocalTargetKey,
+  verifyManagedLocalSidecarBundle,
+  type ManagedLocalSidecarPin,
+  type ManagedLocalTargetKey,
+} from './src/main/managed-local-sidecar-bundle';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -67,6 +75,16 @@ const ciPackage = process.env['CI'] === '1' || process.env['CI'] === 'true';
 const allowAdhocCodeSign = process.env['SPRINT_CODER_ALLOW_ADHOC_CODESIGN'] === '1';
 const allowUnsignedWindows = process.env['SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS'] === '1';
 const windowsSign = resolveWindowsSignOptions(process.env);
+const packagerWindowsSign =
+  windowsSign === undefined
+    ? undefined
+    : {
+        ...windowsSign,
+        hookFunction: async (file: string) => {
+          if (isManagedLocalPackagedPath(file)) return;
+          await signWindowsFiles({ files: [file], ...windowsSign });
+        },
+      };
 const BUNDLED_NODE_VERSION = '22.23.2';
 const BUNDLED_NODE_SHA256 = '0D0F5E39F9F3D9587BC19F73EAB3C2C9C4903FD02D6DBF9C853DD81B3D95FAD4';
 const BUNDLED_NODE_SIGNER_SUBJECT =
@@ -90,13 +108,85 @@ function sandboxRunnerResources(): string[] {
   return [executable, `${executable}.sha256`];
 }
 
-export function refreshPackagedSandboxRunnerDigest(appPath: string): string {
-  const executable = join(
-    appPath,
-    'Contents',
-    'Resources',
-    'sprint-coder-sandbox-runner',
+export const MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT = resolve(
+  __dirname,
+  'managed-local',
+  'build',
+  'managed-local',
+);
+
+function managedLocalSidecarResources(): string[] {
+  return [MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT];
+}
+
+export function isManagedLocalPackagedPath(path: string): boolean {
+  const normalized = path.replaceAll('\\', '/').toLowerCase();
+  return normalized.includes('/resources/managed-local/');
+}
+
+function managedLocalPackageTarget(
+  platform: ForgePlatform,
+  architecture: string,
+): ManagedLocalTargetKey | null {
+  if (!['darwin', 'linux', 'win32'].includes(platform)) return null;
+  return managedLocalTargetKey(platform as NodeJS.Platform, architecture);
+}
+
+function buildManagedLocalSidecar(platform: ForgePlatform, architecture: string): void {
+  assertNativePackagingHost(platform);
+  const target = managedLocalPackageTarget(platform, architecture);
+  if (target === null)
+    throw new Error(`Unsupported Managed Local package target: ${platform}-${architecture}`);
+  execFileSync(
+    process.execPath,
+    [resolve(__dirname, '..', '..', 'build-managed-local-sidecar.mjs'), target],
+    {
+      cwd: resolve(__dirname, '..', '..'),
+      stdio: 'inherit',
+      windowsHide: true,
+    },
   );
+}
+
+function generatedManagedLocalPin(target: ManagedLocalTargetKey): ManagedLocalSidecarPin {
+  const path = resolve(__dirname, 'managed-local', 'build', 'managed-local-sidecar-pins.json');
+  const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  const pin = value[target] as ManagedLocalSidecarPin | undefined;
+  if (pin === undefined || pin.target !== target)
+    throw new Error('Generated Managed Local sidecar pin is unavailable');
+  return pin;
+}
+
+export async function verifyPackagedManagedLocalSidecar(
+  outputPath: string,
+  platform: ForgePlatform,
+  architecture: string,
+): Promise<void> {
+  const target = managedLocalPackageTarget(platform, architecture);
+  if (target === null) throw new Error('Packaged Managed Local target is unsupported');
+  let resources: string;
+  if (platform === 'darwin') {
+    const appBundles = readdirSync(outputPath, { withFileTypes: true }).filter(
+      (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
+    );
+    if (appBundles.length !== 1)
+      throw new Error(`Expected one packaged macOS app, found ${appBundles.length}`);
+    resources = join(outputPath, appBundles[0]!.name, 'Contents', 'Resources');
+  } else {
+    resources = join(outputPath, 'resources');
+  }
+  const pin = generatedManagedLocalPin(target);
+  await verifyManagedLocalSidecarBundle(join(resources, 'managed-local', target), pin);
+  const packagedMain = extractAsarFile(
+    join(resources, 'app.asar'),
+    join('.vite', 'build', 'index.js'),
+  ).toString('utf8');
+  if (!packagedMain.includes(pin.manifestSha256) || !packagedMain.includes(pin.upstreamRevision))
+    throw new Error('Packaged Main does not contain the Managed Local compile-time pin');
+}
+
+export function refreshPackagedSandboxRunnerDigest(appPath: string): string {
+  const executable = join(appPath, 'Contents', 'Resources', 'sprint-coder-sandbox-runner');
   if (!lstatSync(executable).isFile())
     throw new Error('Packaged macOS sandbox runner was not found');
   const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
@@ -234,6 +324,7 @@ function signAdhocBundle(appPath: string): void {
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
+      if (isManagedLocalPackagedPath(path)) continue;
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         visit(path);
@@ -279,7 +370,11 @@ const config: ForgeConfig = {
     // Linux libvips is version-suffixed (for example libvips-cpp.so.8.18.3), so matching only
     // files that end in `.so` leaves Sharp's shared library trapped inside app.asar.
     asar: { unpack: NATIVE_ASAR_UNPACK_GLOB },
-    extraResource: [...bundledNodeResources(), ...sandboxRunnerResources()],
+    extraResource: [
+      ...bundledNodeResources(),
+      ...sandboxRunnerResources(),
+      ...managedLocalSidecarResources(),
+    ],
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,
@@ -289,9 +384,10 @@ const config: ForgeConfig = {
       : {
           osxSign: {
             identity: macCodeSignIdentity,
+            ignore: isManagedLocalPackagedPath,
           },
         }),
-    ...(windowsSign === undefined ? {} : { windowsSign }),
+    ...(packagerWindowsSign === undefined ? {} : { windowsSign: packagerWindowsSign }),
     afterCopy: [
       (buildPath, _electronVersion, _platform, _arch, done) => {
         try {
@@ -304,12 +400,23 @@ const config: ForgeConfig = {
     ],
   },
   hooks: {
+    generateAssets: async (_forgeConfig, platform, architecture) => {
+      buildManagedLocalSidecar(platform, architecture);
+    },
     prePackage: async (_forgeConfig, platform) => {
       assertNativePackagingHost(platform);
       if (platform === 'win32') verifyBundledNodeResources();
     },
     postPackage: async (_forgeConfig, packageResult) => {
-      if (packageResult.platform !== 'darwin') return;
+      if (packageResult.platform !== 'darwin') {
+        for (const outputPath of packageResult.outputPaths)
+          await verifyPackagedManagedLocalSidecar(
+            outputPath,
+            packageResult.platform,
+            packageResult.arch,
+          );
+        return;
+      }
       if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)
         throw new Error(
           'SPRINT_CODER_CODESIGN_IDENTITY is required for a CI or production macOS package',
@@ -336,6 +443,11 @@ const config: ForgeConfig = {
           '/usr/bin/codesign',
           ['--verify', '--deep', '--strict', '--verbose=2', appPath],
           { stdio: 'inherit' },
+        );
+        await verifyPackagedManagedLocalSidecar(
+          outputPath,
+          packageResult.platform,
+          packageResult.arch,
         );
       }
     },

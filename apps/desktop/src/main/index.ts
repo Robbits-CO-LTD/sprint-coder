@@ -35,6 +35,10 @@ import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
+import {
+  loadBundledManagedLocalSidecar,
+  ManagedLocalSidecarError,
+} from './managed-local-sidecar-bundle';
 import { secureLogger, writeSecureLogEntry } from './secure-logger';
 import { combineLogSinks, createPersistentLog, resolveDiagnosticLogRoot } from './persistent-log';
 import {
@@ -130,6 +134,7 @@ if (squirrelStartup || !hasLock) {
     .whenReady()
     .then(async () => {
       if (!isDevelopment) registerProductionProtocol();
+      await initializeManagedLocalSidecarCapability();
       nativeSafeFs = loadNativeSafeFs({
         lockDirectoryPath: join(app.getPath('userData'), 'native-safe-fs-locks'),
       });
@@ -200,6 +205,23 @@ if (squirrelStartup || !hasLock) {
       );
       app.exit(1);
     });
+}
+
+async function initializeManagedLocalSidecarCapability(): Promise<void> {
+  try {
+    const bundle = await loadBundledManagedLocalSidecar();
+    secureLogger.info('Managed Local sidecar bundle verified', {
+      process: 'main',
+      target: bundle.target,
+      runtimeVersion: bundle.manifest.runtimeVersion,
+      candidateBackends: bundle.manifest.candidateBackends,
+    });
+  } catch (error) {
+    secureLogger.warn('Managed Local sidecar is unavailable', {
+      process: 'main',
+      code: error instanceof ManagedLocalSidecarError ? error.code : 'unknown',
+    });
+  }
 }
 
 function initializePersistentDiagnostics(): void {
