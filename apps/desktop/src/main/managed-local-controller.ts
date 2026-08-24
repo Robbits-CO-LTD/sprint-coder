@@ -4,12 +4,15 @@ import type {
   LocalHardwareSnapshot,
   LocalModelInstallInput,
   ManagedLocalRuntimeSnapshot,
+  ProviderModel,
   PublicModelCatalogDetail,
   PublicModelCatalogDetailInput,
   PublicModelCatalogPage,
   PublicModelCatalogQuery,
 } from '@sprint-coder/contracts';
 import { managedLocalRuntimeSnapshotSchema } from '@sprint-coder/contracts';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
 import {
   LocalModelDownloadManager,
@@ -19,6 +22,7 @@ import {
 } from './local-model-download-manager';
 import { PublicModelCatalogService } from './public-model-catalog';
 import type { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
+import type { ManagedLocalModelLease } from './managed-local-runtime-lifecycle';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 
 type ControllerDependencies = Readonly<{
@@ -43,6 +47,7 @@ export class ManagedLocalController {
   private constructor(
     private readonly lifecycle: ManagedLocalRuntimeLifecycle | null,
     private readonly bundle: VerifiedManagedLocalSidecarBundle | null,
+    private readonly store: LocalModelStore,
     repository: LocalModelDownloadRepository,
     manager: LocalModelDownloadManager,
     catalog: PublicModelCatalogService,
@@ -57,6 +62,7 @@ export class ManagedLocalController {
   static async create(dependencies: ControllerDependencies): Promise<ManagedLocalController> {
     const repository = new LocalModelDownloadRepository(dependencies.databasePath);
     const store = await LocalModelStore.open(dependencies.storeRoot);
+    await mkdir(join(store.rootPath, 'scratch'), { recursive: true, mode: 0o700 });
     const manager = new LocalModelDownloadManager(
       repository,
       store,
@@ -68,6 +74,7 @@ export class ManagedLocalController {
     return new ManagedLocalController(
       dependencies.lifecycle,
       dependencies.bundle,
+      store,
       repository,
       manager,
       dependencies.catalog ?? new PublicModelCatalogService(dependencies.fetch ?? globalThis.fetch),
@@ -118,6 +125,81 @@ export class ManagedLocalController {
 
   listInstalled(): readonly InstalledLocalModel[] {
     return this.manager.listInstalledModels();
+  }
+
+  listProviderModels(connectionId: string, providerId: string): readonly ProviderModel[] {
+    const observedAt = new Date().toISOString();
+    const unknown = { value: null, source: 'unknown' as const };
+    return this.manager
+      .listInstalledModels()
+      .filter(({ state, artifactCount }) => state === 'installed' && artifactCount === 1)
+      .map((model) => ({
+        connectionId,
+        connectionDisplayName: 'Managed Local',
+        providerId,
+        providerDisplayName: 'Managed Local',
+        modelAuthor: { value: model.sourceId.split('/')[0] ?? null, source: 'runtime_metadata' },
+        modelId: model.id,
+        displayName: `${model.sourceId} · ${model.quantization}`,
+        available: this.lifecycle !== null && this.bundle !== null,
+        availabilityCheckedAt: observedAt,
+        contextWindow: { value: 8_192, source: 'runtime_metadata', observedAt },
+        maxOutputTokens: unknown,
+        // A successful G2 tool self-test promotes this capability. Merely being GGUF is not proof
+        // that its embedded chat template can emit valid function calls.
+        toolCalling: unknown,
+        structuredOutput: unknown,
+        multimodalInput: { value: false, source: 'runtime_metadata', observedAt },
+        reasoning: unknown,
+      }));
+  }
+
+  async acquireRuntime(
+    modelId: string,
+    automaticRelease: boolean,
+    signal: AbortSignal,
+  ): Promise<ManagedLocalModelLease> {
+    if (this.lifecycle === null || this.bundle === null)
+      throw new Error('Managed Local runtime is unavailable');
+    const model = this.manager
+      .listInstalledModels()
+      .find((candidate) => candidate.id === modelId && candidate.state === 'installed');
+    if (model === undefined || model.artifactCount !== 1)
+      throw new Error('Managed Local model is not startable');
+    const hardware = await this.collectHardware();
+    const available = new Set(
+      hardware.backends.filter(({ status }) => status === 'available').map(({ kind }) => kind),
+    );
+    const backend =
+      this.bundle.manifest.candidateBackends.find(
+        (candidate) => candidate !== 'cpu' && available.has(candidate),
+      ) ?? 'cpu';
+    if (!available.has(backend)) throw new Error('Managed Local backend is unavailable');
+    const contextTokens = 8_192;
+    return this.lifecycle.acquire(
+      {
+        id: model.id,
+        modelRoot: join(this.store.rootPath, 'models', model.id),
+        modelPath: join(this.store.rootPath, 'models', model.id, '001.gguf'),
+        scratchRoot: join(this.store.rootPath, 'scratch'),
+        backend,
+        gpuLayers: backend === 'cpu' ? 0 : 999,
+        contextTokens,
+        batchSize: 512,
+        fit: {
+          weightsBytes: model.totalBytes,
+          contextTokens,
+          kvBytesPerToken: 128 * 1_024,
+          scratchBytes: Math.max(256 * 1_024 * 1_024, Math.ceil(model.totalBytes * 0.1)),
+          runtimeReserveBytes: 768 * 1_024 * 1_024,
+          safetyFactor: 1.15,
+          gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,
+          runtimeCompatibility: 'supported',
+        },
+      },
+      automaticRelease,
+      signal,
+    );
   }
 
   async install(input: LocalModelInstallInput): Promise<LocalDownloadJob> {
