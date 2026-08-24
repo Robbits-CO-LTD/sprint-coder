@@ -1213,6 +1213,9 @@ export interface SprintCoderApi {
     install(
       input: import('@sprint-coder/contracts').LocalModelInstallInput,
     ): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
+    fit(
+      input: import('@sprint-coder/contracts').LocalModelFitInput,
+    ): Promise<import('@sprint-coder/contracts').LocalFitAssessment>;
     pause(jobId: string): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
     resume(jobId: string): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
     cancel(

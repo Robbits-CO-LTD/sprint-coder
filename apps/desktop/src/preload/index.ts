@@ -32,6 +32,7 @@ import {
   localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localModelInstallInputSchema,
+  localModelFitInputSchema,
   managedLocalRuntimeSnapshotSchema,
   publicModelCatalogDetailInputSchema,
   publicModelCatalogDetailSchema,
@@ -962,6 +963,8 @@ const api: SprintCoderApi = {
         localDownloadJobSchema,
         input,
       ),
+    fit: (input) =>
+      invoke(IPC_CHANNELS.localAIFit, localModelFitInputSchema, localFitAssessmentSchema, input),
     pause: (jobId) =>
       invoke(IPC_CHANNELS.localAIPause, localDownloadJobInputSchema, localDownloadJobSchema, {
         jobId,

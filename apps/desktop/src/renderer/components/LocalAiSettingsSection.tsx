@@ -445,6 +445,8 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
   const [selected, setSelected] = useState<PublicModelCatalogItem | null>(null);
   const [detail, setDetail] = useState<PublicModelCatalogDetail | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<PublicModelArtifact | null>(null);
+  const [selectedFit, setSelectedFit] = useState<LocalFitAssessment | null>(null);
+  const [fitLoading, setFitLoading] = useState(false);
   const [licenseAccepted, setLicenseAccepted] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -479,6 +481,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     setSelected(item);
     setDetail(null);
     setSelectedArtifact(null);
+    setSelectedFit(null);
     setLicenseAccepted(false);
     setConfirming(false);
     setBusy(true);
@@ -520,6 +523,27 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
       setError('導入を開始できませんでした。メタデータと空き容量を確認してください。');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function chooseArtifact(artifact: PublicModelArtifact): Promise<void> {
+    if (detail === null) return;
+    setSelectedArtifact(artifact);
+    setSelectedFit(null);
+    setFitLoading(true);
+    try {
+      setSelectedFit(
+        await localAiApi()!.fit({
+          source: detail.item.source,
+          sourceId: detail.item.sourceId,
+          artifactId: artifact.id,
+          contextTokens: 8_192,
+        }),
+      );
+    } catch {
+      setError('このPCでの実行見込みを計算できませんでした。');
+    } finally {
+      setFitLoading(false);
     }
   }
 
@@ -693,7 +717,9 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
             <ModelDetail
               detail={detail}
               selectedArtifact={selectedArtifact}
-              onArtifact={setSelectedArtifact}
+              selectedFit={selectedFit}
+              fitLoading={fitLoading}
+              onArtifact={(artifact) => void chooseArtifact(artifact)}
               licenseAccepted={licenseAccepted}
               onLicense={setLicenseAccepted}
               confirming={confirming}
@@ -721,6 +747,8 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
 function ModelDetail({
   detail,
   selectedArtifact,
+  selectedFit,
+  fitLoading,
   onArtifact,
   licenseAccepted,
   onLicense,
@@ -731,6 +759,8 @@ function ModelDetail({
 }: {
   detail: PublicModelCatalogDetail;
   selectedArtifact: PublicModelArtifact | null;
+  selectedFit: LocalFitAssessment | null;
+  fitLoading: boolean;
   onArtifact: (artifact: PublicModelArtifact) => void;
   licenseAccepted: boolean;
   onLicense: (value: boolean) => void;
@@ -757,6 +787,10 @@ function ModelDetail({
         <div>
           <dt>Architecture</dt>
           <dd>{detail.architecture ?? '不明'}</dd>
+        </div>
+        <div>
+          <dt>Parameters</dt>
+          <dd>{detail.parameterCount?.toLocaleString() ?? '不明'}</dd>
         </div>
         <div>
           <dt>Context</dt>
@@ -791,6 +825,8 @@ function ModelDetail({
           ))}
         </fieldset>
       )}
+      {fitLoading && <p className="settings-hint">このPCでの実行見込みを計算中…</p>}
+      {selectedFit !== null && <LocalFitSummary fit={selectedFit} />}
       {selectedArtifact !== null &&
         (confirming ? (
           <div className="local-ai-install-confirm">
@@ -835,6 +871,42 @@ function ModelDetail({
           </button>
         ))}
     </article>
+  );
+}
+
+function LocalFitSummary({ fit }: { fit: LocalFitAssessment }) {
+  return (
+    <div className="local-ai-fit-summary" data-state={fit.state}>
+      <strong>{fit.label}</strong>
+      <p>{fit.detail}</p>
+      {fit.breakdown !== null && (
+        <dl>
+          <div>
+            <dt>Weights</dt>
+            <dd>{formatLocalBytes(fit.breakdown.weightsBytes)}</dd>
+          </div>
+          <div>
+            <dt>KV cache</dt>
+            <dd>{formatLocalBytes(fit.breakdown.kvCacheBytes)}</dd>
+          </div>
+          <div>
+            <dt>Scratch</dt>
+            <dd>{formatLocalBytes(fit.breakdown.scratchBytes)}</dd>
+          </div>
+          <div>
+            <dt>Runtime reserve</dt>
+            <dd>{formatLocalBytes(fit.breakdown.runtimeReserveBytes)}</dd>
+          </div>
+          <div>
+            <dt>Host / accelerator</dt>
+            <dd>
+              {formatLocalBytes(fit.breakdown.requiredHostBytes)} /{' '}
+              {formatLocalBytes(fit.breakdown.requiredAcceleratorBytes)}
+            </dd>
+          </div>
+        </dl>
+      )}
+    </div>
   );
 }
 

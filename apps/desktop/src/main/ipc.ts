@@ -63,6 +63,7 @@ import {
   localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localModelInstallInputSchema,
+  localModelFitInputSchema,
   managedLocalRuntimeSnapshotSchema,
   publicModelCatalogDetailInputSchema,
   publicModelCatalogDetailSchema,
@@ -1804,6 +1805,12 @@ export class IpcRouter {
       localModelInstallInputSchema,
       localDownloadJobSchema,
       (input) => this.managedLocal!.install(input),
+    );
+    this.handle(
+      IPC_CHANNELS.localAIFit,
+      localModelFitInputSchema,
+      localFitAssessmentSchema,
+      (input) => this.managedLocal!.fit(input),
     );
     this.handleMutation(
       IPC_CHANNELS.localAIPause,

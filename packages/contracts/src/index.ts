@@ -2474,6 +2474,15 @@ export const localModelInstallInputSchema = z
       context.addIssue({ code: 'custom', path: ['artifactIds'], message: 'Duplicate artifact id' });
   });
 export type LocalModelInstallInput = z.infer<typeof localModelInstallInputSchema>;
+export const localModelFitInputSchema = z
+  .object({
+    source: z.enum(['hugging_face', 'localai_gallery']),
+    sourceId: z.string().min(1).max(256),
+    artifactId: z.string().min(1).max(320),
+    contextTokens: z.number().int().min(256).max(1_048_576),
+  })
+  .strict();
+export type LocalModelFitInput = z.infer<typeof localModelFitInputSchema>;
 export const localDownloadJobInputSchema = z.object({ jobId: z.string().uuid() }).strict();
 export const localDownloadCancelInputSchema = localDownloadJobInputSchema.extend({
   confirmed: z.literal(true),
@@ -4064,6 +4073,7 @@ export interface SprintCoderApi {
     listJobs(): Promise<LocalDownloadJob[]>;
     listInstalled(): Promise<InstalledLocalModel[]>;
     install(input: LocalModelInstallInput): Promise<LocalDownloadJob>;
+    fit(input: LocalModelFitInput): Promise<LocalFitAssessment>;
     pause(jobId: string): Promise<LocalDownloadJob>;
     resume(jobId: string): Promise<LocalDownloadJob>;
     cancel(jobId: string, confirmed: true): Promise<LocalDownloadJob>;
@@ -4242,6 +4252,7 @@ export const IPC_CHANNELS = {
   localAIListJobs: 'sprint-coder:local-ai:list-jobs',
   localAIListInstalled: 'sprint-coder:local-ai:list-installed',
   localAIInstall: 'sprint-coder:local-ai:install',
+  localAIFit: 'sprint-coder:local-ai:fit',
   localAIPause: 'sprint-coder:local-ai:pause',
   localAIResume: 'sprint-coder:local-ai:resume',
   localAICancel: 'sprint-coder:local-ai:cancel',
