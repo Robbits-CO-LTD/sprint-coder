@@ -5,6 +5,7 @@ import type {
   LocalFitAssessment,
   LocalVerificationBinding,
   LocalModelInstallInput,
+  LocalModelFitInput,
   ManagedLocalRuntimeSnapshot,
   ProviderModel,
   PublicModelCatalogDetail,
@@ -17,7 +18,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
-import { applyReusableLocalVerification } from './local-fit-estimator';
+import { applyReusableLocalVerification, estimateLocalModelFit } from './local-fit-estimator';
 import {
   LocalModelDownloadManager,
   LocalModelDownloadRepository,
@@ -286,6 +287,38 @@ export class ManagedLocalController {
     } finally {
       await lease.release();
     }
+  }
+
+  async fit(input: LocalModelFitInput): Promise<LocalFitAssessment> {
+    const detail = await this.catalog.detail({ source: input.source, sourceId: input.sourceId });
+    const artifact = detail.artifacts.find(({ id }) => id === input.artifactId);
+    if (artifact === undefined) throw new Error('Public model artifact was not found');
+    const hardware = await this.collectHardware();
+    const backend = this.availableBackend(hardware);
+    return estimateLocalModelFit(
+      {
+        weightsBytes: artifact.sizeBytes,
+        contextTokens: input.contextTokens,
+        kvBytesPerToken: 128 * 1_024,
+        scratchBytes:
+          artifact.sizeBytes === null
+            ? null
+            : Math.max(256 * 1_024 * 1_024, Math.ceil(artifact.sizeBytes * 0.1)),
+        runtimeReserveBytes: 768 * 1_024 * 1_024,
+        safetyFactor: 1.15,
+        gpuOffloadRatio: backend === null || backend === 'cpu' ? 0 : 0.8,
+        runtimeCompatibility:
+          artifact.format === 'gguf' && artifact.installability.state === 'installable'
+            ? 'supported'
+            : artifact.format === 'other'
+              ? 'unsupported'
+              : 'unknown',
+        acceleratorBackend:
+          backend === null ? 'unknown' : backend === 'cpu' ? 'unavailable' : 'available',
+        cpuBackend: hardware.backends.find(({ kind }) => kind === 'cpu')?.status ?? 'unknown',
+      },
+      hardware,
+    );
   }
 
   private availableBackend(

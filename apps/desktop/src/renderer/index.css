@@ -7658,6 +7658,40 @@ button.composer-permission-chip[aria-expanded='true'] {
   border-radius: var(--r-sm);
   background: var(--accent-wash);
 }
+.local-ai-fit-summary {
+  margin: 12px 0;
+  padding: 10px 11px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+}
+.local-ai-fit-summary > strong {
+  font-size: 12px;
+}
+.local-ai-fit-summary > p {
+  margin: 4px 0 8px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.local-ai-fit-summary dl {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+.local-ai-fit-summary dl > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+}
+.local-ai-fit-summary dt,
+.local-ai-fit-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 10.5px;
+}
+.local-ai-fit-summary dt {
+  color: var(--text-secondary);
+}
 .local-ai-install-confirm p,
 .local-ai-install-confirm label {
   font-size: 11px;
