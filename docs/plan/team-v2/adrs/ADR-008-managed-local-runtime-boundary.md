@@ -56,3 +56,18 @@ Rendererには既存項目を保つ`ProviderConnectionView`を返す。
 
 Model Catalogはconnectionごとの明示access mapを受け取る。
 mapにないconnectionは従来どおり`api`へ分類する。
+
+Slice Eはnative artifact、process、lease、platform packagingを一つの変更へ混在させず、
+次の順に安全境界を固定する。
+
+1. E1: applicationにcompile-time pinされたmanifestだけを受理し、manifest自身と全artifactの
+   target、revision、size、SHA-256、license、CPU fallback、symlink/hardlink、実行権限をMainで
+   fail-closedに検証する。pinがないtargetではPATH探索やruntime downloadへfallbackしない。
+2. E2: pin済み`llama-server`を各native hostでbuild・sign・launch probeし、最終artifactと
+   manifestをpackageへ同梱する。GPU backendはprobe済みmatrixだけをmanifestへ載せる。
+3. E3: OS割当loopback port、起動ごとのsecret token、引数配列、bounded log、health timeoutを
+   所有するprocess supervisorを実装する。
+4. E4: single-loaded-model lease、memory再計測、drain、crash/hang/quit/update失効を統合する。
+
+E1のmanifestにある`candidateBackends`はbundleに含まれる候補であり、実行可能性の証明ではない。
+実際のbackend可用性はE2のnative launch probeとE3の起動時probeが成功した場合だけ公開する。
