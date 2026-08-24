@@ -69,6 +69,15 @@ async function fixture(input?: {
 
 if (runsWithElectronAbi)
   describe('LocalModelDownloadManager', () => {
+    it('reopens an existing model store so the desktop can restart with the same userData', async () => {
+      const env = await fixture();
+
+      const reopened = await LocalModelStore.open(env.store.rootPath);
+
+      expect(reopened.rootPath).toBe(env.store.rootPath);
+      env.repository.close();
+    });
+
     it('publishes every verified split GGUF shard before marking the model installed', async () => {
       const env = await fixture();
       const queued = env.manager.enqueue(env.plan);

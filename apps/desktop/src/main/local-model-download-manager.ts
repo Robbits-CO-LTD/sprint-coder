@@ -436,8 +436,8 @@ export class LocalModelStore {
     if (!lexical.isDirectory() || lexical.isSymbolicLink())
       throw new LocalModelDownloadError('unsafe_store', 'Model root must be a real directory');
     const canonical = await realpath(rootPath);
-    await mkdir(join(canonical, 'partials'), { mode: 0o700 });
-    await mkdir(join(canonical, 'models'), { mode: 0o700 });
+    await mkdir(join(canonical, 'partials'), { recursive: true, mode: 0o700 });
+    await mkdir(join(canonical, 'models'), { recursive: true, mode: 0o700 });
     const markerPath = join(canonical, MARKER);
     try {
       await writeFile(markerPath, 'managed-local-v1\n', { flag: 'wx', mode: 0o600 });
