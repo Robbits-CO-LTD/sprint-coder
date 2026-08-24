@@ -439,6 +439,7 @@ export class LocalModelDownloadManager {
   constructor(
     private readonly repository: LocalModelDownloadRepository,
     private readonly store: LocalModelStore,
+    private readonly assertModelDeletable: (modelId: string) => void,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly availableBytes: (path: string) => Promise<number> = async (path) => {
@@ -504,8 +505,8 @@ export class LocalModelDownloadManager {
     return this.repository.transition(jobId, 'canceled', this.now(), latest.failureCode);
   }
 
-  async deleteInstalled(modelId: string, activeLeaseCount: number): Promise<void> {
-    if (activeLeaseCount !== 0) throw new Error('Model has an active lease');
+  async deleteInstalled(modelId: string): Promise<void> {
+    this.assertModelDeletable(modelId);
     this.repository.beginDelete(modelId, this.now());
     try {
       await this.store.deleteInstalled(modelId);

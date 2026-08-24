@@ -167,5 +167,9 @@ describe('local fit estimator', () => {
     expect(
       applyReusableLocalVerification(estimate, { ...binding, contextTokens: 16_384 }, record).state,
     ).toBe('estimated_comfortable');
+    expect(
+      applyReusableLocalVerification(estimate, { ...binding, sidecarVersion: 'b10516' }, record)
+        .state,
+    ).toBe('estimated_comfortable');
   });
 });
