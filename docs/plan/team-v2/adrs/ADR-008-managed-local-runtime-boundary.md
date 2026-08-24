@@ -85,3 +85,10 @@ PackagerはManaged Local subtreeを再署名せず、postPackageでartifact、ma
 上流archiveの同一directory内library aliasは、manifestが通常fileのtargetを明示する場合だけsymlinkとして
 保持できる。Mainはalias名、同一directory、targetの非symlink性、target hashを再検証する。
 任意target、親directory symlink、archive外escape、hardlinkは引き続き拒否する。
+
+E3のSupervisorは`127.0.0.1`と`--port 0`を固定し、llama-serverが報告したOS割当portだけを使う。
+起動ごとに256-bit tokenを生成して`LLAMA_API_KEY`だけでchildへ渡し、argv、Renderer、DB、診断logへ
+tokenを出さない。`/props`が無認証401・認証済み200になることを確認してからrunningへ遷移する。
+health、listen、request、stopはすべてbounded timeoutとし、stop deadline後は同じowned childだけを
+強制終了する。child環境はlocale、Windows root、専用scratch/cacheだけへ制限し、PATH、loader injection、
+home、provider secretを継承しない。Mainのauthenticated fetchは固定loopback originとbounded pathだけを許可する。
