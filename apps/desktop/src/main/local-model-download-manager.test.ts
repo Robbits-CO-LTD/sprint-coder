@@ -101,6 +101,24 @@ if (runsWithElectronAbi)
         immutableRevision: 'a'.repeat(40),
       });
       expect(env.manager.artifactExpectations(installed.modelId)).toHaveLength(2);
+      const verification = env.manager.saveVerification(installed.modelId, {
+        level: 'tools',
+        verifiedAt: '2026-08-23T00:00:00.000Z',
+        binding: {
+          hostCapabilityFingerprint: 'b'.repeat(64),
+          modelRepo: 'owner/model',
+          immutableRevision: 'a'.repeat(40),
+          artifactHashes: env.plan.artifacts.map(({ sha256 }) => sha256),
+          quantization: 'Q4_K_M',
+          contextTokens: 8192,
+          kvCacheType: 'f16',
+          batchSize: 512,
+          gpuOffloadRatio: 0,
+          sidecarVersion: 'b10516',
+          backend: 'cpu',
+        },
+      });
+      expect(env.manager.verification(installed.modelId)).toEqual(verification);
       const modelPath = join(env.store.rootPath, 'models', installed.modelId);
       expect(await readdir(modelPath)).toEqual(['001.gguf', '002.gguf']);
       expect(await readFile(join(modelPath, '001.gguf'))).toEqual(env.bytes[0]);

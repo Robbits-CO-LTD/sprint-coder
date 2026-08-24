@@ -19,10 +19,12 @@ import Database from 'better-sqlite3';
 import {
   localDownloadJobSchema,
   installedLocalModelSchema,
+  localVerificationRecordSchema,
   type InstalledLocalModel,
   type LocalDownloadFailureCode,
   type LocalDownloadJob,
   type LocalDownloadJobState,
+  type LocalVerificationRecord,
 } from '@sprint-coder/contracts';
 
 const DIGEST = /^[a-f0-9]{64}$/u;
@@ -257,6 +259,35 @@ export class LocalModelDownloadRepository {
       sizeBytes: artifact.byte_length,
       sha256: artifact.sha256,
     }));
+  }
+
+  verification(modelId: string): LocalVerificationRecord | null {
+    const row = this.db
+      .prepare(
+        'SELECT level, verified_at, binding_json FROM local_model_verifications WHERE model_id = ?',
+      )
+      .get(modelId) as { level: string; verified_at: string; binding_json: string } | undefined;
+    if (row === undefined) return null;
+    return localVerificationRecordSchema.parse({
+      level: row.level,
+      verifiedAt: row.verified_at,
+      binding: JSON.parse(row.binding_json) as unknown,
+    });
+  }
+
+  saveVerification(modelId: string, input: LocalVerificationRecord): LocalVerificationRecord {
+    const record = localVerificationRecordSchema.parse(input);
+    this.db
+      .prepare(
+        `INSERT INTO local_model_verifications(model_id, level, verified_at, binding_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(model_id) DO UPDATE SET
+           level = excluded.level,
+           verified_at = excluded.verified_at,
+           binding_json = excluded.binding_json`,
+      )
+      .run(modelId, record.level, record.verifiedAt, JSON.stringify(record.binding));
+    return this.verification(modelId)!;
   }
 
   private parseJob(row: JobRow): LocalDownloadJob {
@@ -569,6 +600,14 @@ export class LocalModelDownloadManager {
     modelId: string,
   ): ReturnType<LocalModelDownloadRepository['artifactExpectations']> {
     return this.repository.artifactExpectations(modelId);
+  }
+
+  verification(modelId: string): LocalVerificationRecord | null {
+    return this.repository.verification(modelId);
+  }
+
+  saveVerification(modelId: string, record: LocalVerificationRecord): LocalVerificationRecord {
+    return this.repository.saveVerification(modelId, record);
   }
 
   enqueue(input: LocalModelInstallPlan): LocalDownloadJob {

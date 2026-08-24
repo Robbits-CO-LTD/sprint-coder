@@ -3481,6 +3481,21 @@ const migrations = [
         ON local_model_download_jobs(state, updated_at);
     `,
   },
+  {
+    version: 76,
+    checksum: 'managed-local-verification-v76',
+    sql: `
+      CREATE TABLE local_model_verifications (
+        model_id TEXT PRIMARY KEY REFERENCES local_models(id) ON DELETE CASCADE,
+        level TEXT NOT NULL CHECK (level IN ('loaded', 'tools')),
+        verified_at TEXT NOT NULL,
+        binding_json TEXT NOT NULL CHECK (
+          json_valid(binding_json)
+          AND length(CAST(binding_json AS BLOB)) <= 8192
+        )
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.

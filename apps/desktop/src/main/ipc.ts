@@ -60,6 +60,7 @@ import {
   localDownloadCancelInputSchema,
   localDownloadJobInputSchema,
   localDownloadJobSchema,
+  localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localModelInstallInputSchema,
   managedLocalRuntimeSnapshotSchema,
@@ -1054,6 +1055,46 @@ export class IpcRouter {
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
+      managedToolsConnectionId: MANAGED_LOCAL_CONNECTION_ID,
+      prepareManagedTools: async ({ worker, executionId, workspaceSet }) => {
+        const modelId = worker.modelSelection.requestedModel;
+        if (modelId === null || this.managedLocal === null)
+          throw new Error('Managed Local Worker model selection is incomplete');
+        const verifiedModel = (
+          await this.managedLocal.listProviderModels(
+            MANAGED_LOCAL_CONNECTION_ID,
+            MANAGED_LOCAL_PROVIDER_ID,
+          )
+        ).find((model) => model.modelId === modelId);
+        if (verifiedModel?.toolCalling.value !== true)
+          throw new Error('Managed Local Worker requires a matching tool self-test');
+        const snapshot = await this.prepareWorkerManagedCatalog(
+          'provider',
+          worker.taskId,
+          executionId,
+          workspaceSet,
+          worker.canDelegate,
+          worker.writeCapable ? 'workspace-write' : 'read-only',
+        );
+        return {
+          tools: providerToolsFromSnapshot(snapshot),
+          execute: (name: string, input: unknown, signal: AbortSignal) =>
+            this.dispatchManagedRuntimeTool(
+              worker.taskId,
+              executionId,
+              {
+                callId: `managed-local:${randomUUID()}`,
+                toolName: name,
+                arguments: input,
+                catalogDigest: snapshot.digest,
+              },
+              signal,
+            ),
+          release: () => {
+            this.managedWorkerTurn.delete(executionId);
+          },
+        };
+      },
       executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit, executionId }) =>
         executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
           requesterAgentId: worker.id,
@@ -1781,6 +1822,12 @@ export class IpcRouter {
       localDownloadCancelInputSchema,
       localDownloadJobSchema,
       (input) => this.managedLocal!.cancel(input.jobId, input.confirmed),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAIVerify,
+      installedLocalModelInputSchema,
+      localFitAssessmentSchema,
+      (input) => this.managedLocal!.verify(input.modelId),
     );
     this.handleMutation(
       IPC_CHANNELS.localAIDelete,
@@ -4691,7 +4738,7 @@ export class IpcRouter {
   }
 
   private async prepareWorkerManagedCatalog(
-    kind: 'claude' | 'codex',
+    kind: 'claude' | 'codex' | 'provider',
     taskId: string,
     runtimeTurnId: string,
     runtimeWorkspace: RuntimeWorkspaceSet,

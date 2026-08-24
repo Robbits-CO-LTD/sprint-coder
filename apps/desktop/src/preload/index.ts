@@ -29,6 +29,7 @@ import {
   localDownloadCancelInputSchema,
   localDownloadJobInputSchema,
   localDownloadJobSchema,
+  localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localModelInstallInputSchema,
   managedLocalRuntimeSnapshotSchema,
@@ -973,6 +974,10 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.localAICancel, localDownloadCancelInputSchema, localDownloadJobSchema, {
         jobId,
         confirmed,
+      }),
+    verify: (modelId) =>
+      invoke(IPC_CHANNELS.localAIVerify, installedLocalModelInputSchema, localFitAssessmentSchema, {
+        modelId,
       }),
     delete: (modelId) =>
       invoke(IPC_CHANNELS.localAIDelete, installedLocalModelInputSchema, z.undefined(), {

@@ -1219,6 +1219,7 @@ export interface SprintCoderApi {
       jobId: string,
       confirmed: true,
     ): Promise<import('@sprint-coder/contracts').LocalDownloadJob>;
+    verify(modelId: string): Promise<import('@sprint-coder/contracts').LocalFitAssessment>;
     delete(modelId: string): Promise<void>;
   };
   permissions: {

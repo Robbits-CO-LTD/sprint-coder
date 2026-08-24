@@ -308,6 +308,109 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     ).rejects.toThrow('External API Worker cannot write');
   });
 
+  it('lets only the Managed Local connection give a write-capable Worker audited workspace tools', async () => {
+    const managedConnection: ProviderConnection = {
+      ...connection,
+      id: 'managed-local:runtime',
+      providerId: 'sprint-managed-local',
+      runtimeKind: 'openai_compatible',
+      secretReference: null,
+      verification: { status: 'not_required', verifiedAt: null, expiresAt: null, message: null },
+    };
+    let round = 0;
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      async *execute() {
+        round += 1;
+        if (round === 1) {
+          yield {
+            type: 'tool_call',
+            callId: 'write-1',
+            name: 'create_file',
+            input: { rootId: 'root-1', path: 'result.txt', text: 'verified' },
+          };
+          yield { type: 'completed', stopReason: 'tool_calls' };
+          return;
+        }
+        yield { type: 'output_delta', text: 'ファイル作成を完了しました' };
+        yield { type: 'completed', stopReason: 'stop' };
+      },
+      cancel: vi.fn(),
+    };
+    const registry = new MainProviderRegistry();
+    registry.register({
+      runtimeKind: 'openai_compatible',
+      providerId: 'sprint-managed-local',
+      runtime,
+    });
+    const execute = vi.fn(async () => ({ ok: true }));
+    const release = vi.fn();
+    const adapter = new ProviderAwareTeamWorkerRuntime({
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+      verification: {
+        requireVerifiedForExecution: async () => managedConnection,
+      } as unknown as ProviderVerificationService,
+      registry,
+      getConnection: () => managedConnection,
+      authorizeEgress: () => true,
+      managerGuidance: 'manager',
+      managerTools: [],
+      workerGuidance: 'Use workspace tools.',
+      workerTools: [],
+      managedToolsConnectionId: managedConnection.id,
+      prepareManagedTools: vi.fn(async () => ({
+        tools: [
+          {
+            name: 'create_file',
+            description: 'Create one file.',
+            inputSchema: { type: 'object' },
+          },
+        ],
+        execute,
+        release,
+      })),
+      executeManagerTool: vi.fn(),
+    });
+
+    const result = await adapter.execute({
+      worker: {
+        ...providerWorker(),
+        writeCapable: true,
+        modelSelection: {
+          connectionId: managedConnection.id,
+          requestedProvider: managedConnection.providerId,
+          requestedModel: 'a'.repeat(64),
+        },
+      },
+      envelope,
+      executionId: 'managed-worker-execution',
+      content: 'ファイルを作成してください',
+      workspaceSet: {
+        primaryRootId: 'root-1',
+        roots: [
+          {
+            rootId: 'root-1',
+            path: '/workspace',
+            label: 'workspace',
+            role: 'primary',
+          },
+        ],
+        digest: 'b'.repeat(64),
+      },
+    });
+
+    expect(execute).toHaveBeenCalledWith(
+      'create_file',
+      { rootId: 'root-1', path: 'result.txt', text: 'verified' },
+      expect.any(AbortSignal),
+    );
+    expect(release).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      completion: { summary: 'ファイル作成を完了しました' },
+    });
+  });
+
   it('lets an external API Manager execute coordinator-bound Team tools and continue', async () => {
     const requests: unknown[] = [];
     const release = vi.fn(async () => undefined);
