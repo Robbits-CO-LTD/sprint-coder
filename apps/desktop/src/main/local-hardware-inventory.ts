@@ -1,4 +1,6 @@
 import { arch, cpus, freemem, platform, totalmem } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { localHardwareSnapshotSchema, type LocalHardwareSnapshot } from '@sprint-coder/contracts';
 
 type Platform = LocalHardwareSnapshot['platform'];
@@ -18,6 +20,7 @@ export type LocalHardwareInventoryDependencies = Readonly<{
   architecture?: () => string;
   totalMemory?: () => number;
   freeMemory?: () => number;
+  availableMemory?: () => Promise<number | null>;
   cpuInfo?: () => ReadonlyArray<Readonly<{ model: string }>>;
   gpuInfo?: () => Promise<unknown>;
   cpuFeatures?: () => Promise<readonly string[] | null>;
@@ -31,6 +34,37 @@ const EMPTY_GPU_MEMORY: GpuMemory = {
   sharedTotalBytes: null,
   unifiedTotalBytes: null,
 };
+const execFileAsync = promisify(execFile);
+
+export function parseDarwinAvailableMemory(input: string): number | null {
+  const pageSize = /page size of (\d+) bytes/u.exec(input)?.[1];
+  if (pageSize === undefined) return null;
+  const size = Number(pageSize);
+  if (!Number.isSafeInteger(size) || size <= 0) return null;
+  let pages = 0;
+  for (const label of ['Pages free', 'Pages inactive', 'Pages speculative', 'Pages purgeable']) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const value = new RegExp(`^${escaped}:\\s+(\\d+)\\.?$`, 'mu').exec(input)?.[1];
+    if (value === undefined) return null;
+    pages += Number(value);
+  }
+  const bytes = pages * size;
+  return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null;
+}
+
+async function defaultDarwinAvailableMemory(): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/vm_stat', [], {
+      timeout: 2_000,
+      maxBuffer: 64 * 1_024,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    return parseDarwinAvailableMemory(stdout);
+  } catch {
+    return null;
+  }
+}
 
 function normalizePlatform(value: NodeJS.Platform): Platform {
   return value === 'darwin' || value === 'win32' || value === 'linux' ? value : 'other';
@@ -123,7 +157,16 @@ export async function collectLocalHardwareSnapshot(
   const hostPlatform = normalizePlatform((dependencies.platform ?? platform)());
   const architecture = (dependencies.architecture ?? arch)().slice(0, 32) || 'unknown';
   const totalBytes = finiteBytes(dependencies.totalMemory ?? totalmem);
-  const availableBytes = finiteBytes(dependencies.freeMemory ?? freemem);
+  const fallbackAvailableBytes = finiteBytes(dependencies.freeMemory ?? freemem);
+  const probedAvailableBytes =
+    hostPlatform === 'darwin' &&
+    dependencies.platform === undefined &&
+    dependencies.freeMemory === undefined
+      ? await (dependencies.availableMemory ?? defaultDarwinAvailableMemory)()
+      : dependencies.availableMemory === undefined
+        ? null
+        : await optionalProbe(dependencies.availableMemory);
+  const availableBytes = probedAvailableBytes ?? fallbackAvailableBytes;
   const cpuEntries = (() => {
     try {
       return (dependencies.cpuInfo ?? cpus)();

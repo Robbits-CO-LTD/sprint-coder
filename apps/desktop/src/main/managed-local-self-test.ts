@@ -45,7 +45,7 @@ export async function runManagedLocalSelfTest(
         },
       },
     ],
-    tool_choice: 'auto',
+    tool_choice: { type: 'function', function: { name: toolName } },
     max_tokens: 128,
   });
   const call = toolCall(requested, toolName, input.nonce);
@@ -88,7 +88,11 @@ async function completion(
   const response = await session.authenticatedFetch('/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      ...body,
+      reasoning_effort: 'none',
+      chat_template_kwargs: { enable_thinking: false },
+    }),
   });
   if (!response.ok) throw new Error(`Managed Local self-test HTTP ${response.status}`);
   const declared = Number(response.headers.get('content-length'));
