@@ -332,6 +332,71 @@ describe('Codex runtime probe', () => {
     expect(events.at(-1)).toMatchObject({ type: 'completed' });
   });
 
+  it('records redacted missing Team tools and stops before thread/start', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-missing-team-tools-'));
+    temporaryRoots.push(root);
+    const script = join(root, 'missing-team-tools.mjs');
+    const methodLog = join(root, 'methods.log');
+    const availableTool = TEAM_CORE_MCP_TOOL_NAMES[0] as string;
+    await writeFile(
+      script,
+      [
+        "import { appendFileSync } from 'node:fs';",
+        "import { createInterface } from 'node:readline';",
+        `const methodLog = ${JSON.stringify(methodLog)};`,
+        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+        "createInterface({ input: process.stdin }).on('line', (line) => {",
+        '  const message = JSON.parse(line);',
+        "  appendFileSync(methodLog, String(message.method) + '\\n');",
+        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+        "  if (message.method === 'mcpServerStatus/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ name: 'team', tools: " +
+          JSON.stringify({ [availableTool]: { name: availableTool, inputSchema: {} } }) +
+          ' }] } });',
+        '});',
+      ].join('\n'),
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+    const failures: Array<{ error: { code: string }; diagnostic?: RuntimeFailureDiagnostic }> = [];
+
+    await new Promise<void>((resolve) => {
+      adapter.start(
+        'missing-team-tools-turn',
+        'private user input',
+        [],
+        () => undefined,
+        root,
+        'auto',
+        () => undefined,
+        (error, diagnostic) =>
+          failures.push(diagnostic === undefined ? { error } : { error, diagnostic }),
+        () => resolve(),
+        {
+          socketPath: '\\\\.\\pipe\\sensitive-team-pipe',
+          token: 'sensitive-turn-token',
+          guidance: 'private team guidance',
+          toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+        },
+      );
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.error.code).toBe('RUNTIME_FAILED');
+    expect(failures[0]?.diagnostic?.capabilityMismatch).toEqual({
+      missingTools: TEAM_CORE_MCP_TOOL_NAMES.filter((name) => name !== availableTool),
+      unexpectedTools: [],
+    });
+    const methods = (await readFile(methodLog, 'utf8')).trim().split('\n');
+    expect(methods).toContain('initialize');
+    expect(methods).toContain('mcpServerStatus/list');
+    expect(methods).not.toContain('thread/start');
+    expect(methods).not.toContain('turn/start');
+    const diagnosticText = JSON.stringify(failures[0]?.diagnostic);
+    expect(diagnosticText).not.toContain('sensitive-turn-token');
+    expect(diagnosticText).not.toContain('sensitive-team-pipe');
+    expect(diagnosticText).not.toContain('private user input');
+    expect(diagnosticText).not.toContain('private team guidance');
+  });
+
   it('routes a managed dynamic tool to the client and disables Codex native environments', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-codex-'));
     temporaryRoots.push(root);
