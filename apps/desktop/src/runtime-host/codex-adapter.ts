@@ -633,7 +633,10 @@ export class CodexRuntimeAdapter {
             threadId: null,
           });
           const inventory = validateCodexTeamMcpInventory(inventoryResponse, teamMcp.toolNames);
-          if (!inventory.ok) throw new CodexTeamMcpUnavailableError();
+          if (!inventory.ok) {
+            diagnostics.recordCapabilityMismatch(inventory.missingTools, []);
+            throw new CodexTeamMcpUnavailableError();
+          }
           teamDynamicTools = buildCodexTeamDynamicTools(inventoryResponse, teamMcp.toolNames);
         }
         await send('skills/extraRoots/set', {

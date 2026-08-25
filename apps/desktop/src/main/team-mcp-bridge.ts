@@ -188,6 +188,7 @@ interface BridgeConnection {
   write(data: string): unknown;
   destroy(): void;
   once(event: 'close', listener: () => void): this;
+  removeListener(event: 'close', listener: () => void): this;
   on(event: 'data', listener: (chunk: Buffer) => void): this;
   on(event: 'error', listener: () => void): this;
 }
@@ -275,6 +276,7 @@ type Registered = TeamMcpRegistration & {
   modelCatalogQueried: boolean;
   researchedModels: Set<string>;
   runtimeProcessIdentity: NativeProcessIdentity | null;
+  runtimeProcessBindingWaiters: Set<(identity: NativeProcessIdentity | null) => void>;
 };
 
 function modelSelectionKey(selection: {
@@ -565,12 +567,15 @@ export class TeamMcpBridge {
    * Call this before starting the Claude runtime for that turn, and always pair it with
    * `unregister` on completion/failure/cancel — an un-unregistered turn keeps its token live. */
   register(turnId: string, registration: TeamMcpRegistration): void {
+    const previous = this.registrations.get(turnId);
+    if (previous !== undefined) this.releaseRuntimeProcessBindingWaiters(previous, null);
     this.registrations.set(turnId, {
       ...registration,
       waitCursor: registration.initialWaitCursor ?? 0,
       modelCatalogQueried: false,
       researchedModels: new Set(),
       runtimeProcessIdentity: null,
+      runtimeProcessBindingWaiters: new Set(),
     });
   }
 
@@ -580,6 +585,7 @@ export class TeamMcpBridge {
     const observed = queryNativeProcessIdentity(reported.pid);
     if (observed === null || !sameNativeProcessIdentity(observed, reported)) return false;
     registration.runtimeProcessIdentity = observed;
+    this.releaseRuntimeProcessBindingWaiters(registration, observed);
     return true;
   }
 
@@ -599,6 +605,8 @@ export class TeamMcpBridge {
   }
 
   unregister(turnId: string): void {
+    const registration = this.registrations.get(turnId);
+    if (registration !== undefined) this.releaseRuntimeProcessBindingWaiters(registration, null);
     this.registrations.delete(turnId);
   }
 
@@ -614,6 +622,7 @@ export class TeamMcpBridge {
     socket.once('close', () => this.sockets.delete(socket));
     let buffer = '';
     let authenticated = false;
+    const authenticationDeadline = Date.now() + this.authenticationTimeoutMs;
     const authenticationTimer = setTimeout(() => socket.destroy(), this.authenticationTimeoutMs);
     authenticationTimer.unref();
     const markAuthenticated = () => {
@@ -632,7 +641,14 @@ export class TeamMcpBridge {
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
-        if (line.trim() !== '') void this.handleLine(socket, peerIdentity, line, markAuthenticated);
+        if (line.trim() !== '')
+          void this.handleLine(
+            socket,
+            peerIdentity,
+            line,
+            markAuthenticated,
+            authenticationDeadline,
+          );
       }
     });
     socket.on('error', () => socket.destroy());
@@ -643,6 +659,7 @@ export class TeamMcpBridge {
     peerIdentity: NativeProcessIdentity | null,
     line: string,
     markAuthenticated: () => void,
+    authenticationDeadline: number,
   ): Promise<void> {
     let request: { requestId?: unknown; token?: unknown; tool?: unknown; args?: unknown };
     try {
@@ -670,7 +687,27 @@ export class TeamMcpBridge {
       socket.destroy();
       return;
     }
-    const [, peerRegistration] = found;
+    const [turnId, initialRegistration] = found;
+    let peerRegistration = initialRegistration;
+    if (peerRegistration.runtimeProcessIdentity === null) {
+      const boundIdentity = await this.waitForRuntimeProcessBinding(
+        turnId,
+        peerRegistration,
+        socket,
+        authenticationDeadline,
+      );
+      const currentRegistration = this.registrations.get(turnId);
+      if (
+        boundIdentity === null ||
+        currentRegistration === undefined ||
+        currentRegistration.runtimeProcessBindingWaiters !==
+          peerRegistration.runtimeProcessBindingWaiters
+      ) {
+        socket.destroy();
+        return;
+      }
+      peerRegistration = currentRegistration;
+    }
     if (
       peerIdentity === null ||
       peerRegistration.runtimeProcessIdentity === null ||
@@ -685,7 +722,7 @@ export class TeamMcpBridge {
       return;
     }
     if (request.tool === '__authenticate__') {
-      const [, registration] = found;
+      const registration = peerRegistration;
       respond({
         ok: true,
         result: {
@@ -702,7 +739,7 @@ export class TeamMcpBridge {
       });
       return;
     }
-    const [turnId, registration] = found;
+    const registration = peerRegistration;
     try {
       const managedTool = registration.managedTools?.find(({ name }) => name === request.tool);
       const allowedTools = new Set<string>(teamMcpToolNamesForCapabilities(registration));
@@ -856,7 +893,56 @@ export class TeamMcpBridge {
     return undefined;
   }
 
+  private waitForRuntimeProcessBinding(
+    turnId: string,
+    registration: Registered,
+    socket: BridgeConnection,
+    authenticationDeadline: number,
+  ): Promise<NativeProcessIdentity | null> {
+    if (registration.runtimeProcessIdentity !== null)
+      return Promise.resolve(registration.runtimeProcessIdentity);
+    const remainingMs = authenticationDeadline - Date.now();
+    if (remainingMs <= 0) return Promise.resolve(null);
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (identity: NativeProcessIdentity | null): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.removeListener('close', onClose);
+        registration.runtimeProcessBindingWaiters.delete(finish);
+        resolve(identity);
+      };
+      const onClose = (): void => finish(null);
+      registration.runtimeProcessBindingWaiters.add(finish);
+      socket.once('close', onClose);
+      const timer = setTimeout(() => finish(null), remainingMs);
+      timer.unref();
+
+      const currentRegistration = this.registrations.get(turnId);
+      if (
+        currentRegistration === undefined ||
+        currentRegistration.runtimeProcessBindingWaiters !==
+          registration.runtimeProcessBindingWaiters
+      )
+        finish(null);
+      else if (currentRegistration.runtimeProcessIdentity !== null)
+        finish(currentRegistration.runtimeProcessIdentity);
+    });
+  }
+
+  private releaseRuntimeProcessBindingWaiters(
+    registration: Registered,
+    identity: NativeProcessIdentity | null,
+  ): void {
+    for (const finish of [...registration.runtimeProcessBindingWaiters]) finish(identity);
+    registration.runtimeProcessBindingWaiters.clear();
+  }
+
   async dispose(): Promise<void> {
+    for (const registration of this.registrations.values())
+      this.releaseRuntimeProcessBindingWaiters(registration, null);
     this.registrations.clear();
     this.startPromise = null;
     const server = this.server;

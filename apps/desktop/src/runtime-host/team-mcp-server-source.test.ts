@@ -27,6 +27,8 @@ type Harness = {
   bridgeReceived: { requestId: unknown; token: unknown; tool: unknown; args: unknown }[];
   bridgeRespond(response: unknown, pendingIndex?: number): void;
   disconnectBridge(): void;
+  bridgeAuthenticationAttempts(): number;
+  bridgeOpenSocketCount(): number;
 };
 
 const harnesses: Harness[] = [];
@@ -52,6 +54,7 @@ async function startHarness(
     };
     allowedTools?: readonly string[] | null;
     managedTools?: readonly { name: string; description: string; inputSchema: object }[];
+    rejectFirstAuthentication?: boolean;
   } = {},
 ): Promise<Harness> {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-mcp-test-'));
@@ -66,6 +69,7 @@ async function startHarness(
   const bridgeReceived: { requestId: unknown; token: unknown; tool: unknown; args: unknown }[] = [];
   const bridgeResponders: { requestId: unknown; respond(response: unknown): void }[] = [];
   const bridgeSockets = new Set<Socket>();
+  let authenticationAttempts = 0;
   const fakeBridge = createServer((socket) => {
     bridgeSockets.add(socket);
     socket.once('close', () => bridgeSockets.delete(socket));
@@ -90,6 +94,11 @@ async function startHarness(
           args: unknown;
         };
         if (request.tool === '__authenticate__') {
+          authenticationAttempts += 1;
+          if (options.rejectFirstAuthentication === true && authenticationAttempts === 1) {
+            socket.destroy();
+            continue;
+          }
           socket.write(
             `${JSON.stringify({
               requestId: request.requestId,
@@ -170,12 +179,29 @@ async function startHarness(
     disconnectBridge: () => {
       for (const socket of bridgeSockets) socket.destroy();
     },
+    bridgeAuthenticationAttempts: () => authenticationAttempts,
+    bridgeOpenSocketCount: () => bridgeSockets.size,
   };
   harnesses.push(harness);
   return harness;
 }
 
 describe('team-mcp-server-source (MCP stdio handshake)', () => {
+  it('uses a fresh connection for tools/list after warm-up authentication is rejected', async () => {
+    const harness = await startHarness({ rejectFirstAuthentication: true });
+    await vi_waitFor(
+      () => harness.bridgeAuthenticationAttempts() === 1 && harness.bridgeOpenSocketCount() === 0,
+    );
+
+    harness.send({ jsonrpc: '2.0', id: 30, method: 'tools/list' });
+    const reply = await harness.nextMessage();
+    const tools = (reply['result'] as { tools: { name: string }[] }).tools;
+
+    expect(reply['id']).toBe(30);
+    expect(tools.map(({ name }) => name).sort()).toEqual([...TEAM_MCP_TOOL_NAMES].sort());
+    expect(harness.bridgeAuthenticationAttempts()).toBe(2);
+  });
+
   it('responds to initialize, ignores notifications/initialized, and lists the Team tools', async () => {
     const harness = await startHarness();
     harness.send({
@@ -482,6 +508,14 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     const replies = [await harness.nextMessage(), await harness.nextMessage()];
     expect(new Set(replies.map((reply) => reply['id']))).toEqual(new Set([26, 27]));
     for (const reply of replies) expect(reply['result']).toMatchObject({ isError: true });
+
+    harness.send({ jsonrpc: '2.0', id: 28, method: 'tools/list' });
+    const reconnected = await harness.nextMessage();
+    expect(reconnected['id']).toBe(28);
+    expect((reconnected['result'] as { tools: unknown[] }).tools).toHaveLength(
+      TEAM_MCP_TOOL_NAMES.length,
+    );
+    expect(harness.bridgeAuthenticationAttempts()).toBe(2);
   });
 
   it('marks the MCP result isError:true when the bridge reports a failure', async () => {

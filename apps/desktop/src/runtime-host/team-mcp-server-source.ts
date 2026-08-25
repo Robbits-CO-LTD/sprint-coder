@@ -339,11 +339,8 @@ const TOOLS = [
   },
 ];
 
-let socket = null;
-let socketReady = null;
-let availableTools = [];
-const pending = new Map();
-let sockBuffer = '';
+let activeConnection = null;
+let nextConnectionGeneration = 1;
 let nextBridgeRequestId = 1;
 const NORMAL_BRIDGE_TIMEOUT_MS =
   process.env.NODE_ENV === 'test' && process.env.TEAM_BRIDGE_TEST_NORMAL_TIMEOUT_MS
@@ -360,64 +357,108 @@ function bridgeRequestId() {
   return id;
 }
 
-function handleSocketData(chunk) {
-  sockBuffer += chunk.toString('utf8');
+function handleSocketData(connection, chunk) {
+  if (connection.cleaned) return;
+  connection.buffer += chunk.toString('utf8');
   let idx;
-  while ((idx = sockBuffer.indexOf('\\n')) >= 0) {
-    const line = sockBuffer.slice(0, idx);
-    sockBuffer = sockBuffer.slice(idx + 1);
+  while ((idx = connection.buffer.indexOf('\\n')) >= 0) {
+    const line = connection.buffer.slice(0, idx);
+    connection.buffer = connection.buffer.slice(idx + 1);
     if (!line.trim()) continue;
     let response;
     try {
       response = JSON.parse(line);
     } catch (error) {
-      rejectPending(error);
-      continue;
+      cleanupConnection(connection, error);
+      return;
     }
     const waiter =
       response && typeof response.requestId === 'string'
-        ? pending.get(response.requestId)
+        ? connection.pending.get(response.requestId)
         : undefined;
     if (!waiter) continue;
-    pending.delete(response.requestId);
+    connection.pending.delete(response.requestId);
     clearTimeout(waiter.timer);
     waiter.resolve(response);
   }
 }
 
-function rejectPending(error) {
-  for (const waiter of pending.values()) {
+function rejectPending(connection, error) {
+  for (const waiter of connection.pending.values()) {
     clearTimeout(waiter.timer);
     waiter.reject(error);
   }
-  pending.clear();
+  connection.pending.clear();
 }
 
-function writeBridgeRequest(sock, tool, args, timeoutMs) {
+function cleanupConnection(connection, error) {
+  if (connection.cleaned) return;
+  connection.cleaned = true;
+  if (activeConnection?.generation === connection.generation) activeConnection = null;
+  rejectPending(connection, error);
+  connection.buffer = '';
+  connection.availableTools = [];
+  const currentSocket = connection.socket;
+  connection.socket = null;
+  if (currentSocket && !currentSocket.destroyed) currentSocket.destroy();
+  connection.rejectReady(error);
+}
+
+function writeBridgeRequest(connection, tool, args, timeoutMs) {
   return new Promise((resolve, reject) => {
+    const sock = connection.socket;
+    if (connection.cleaned || !sock || sock.destroyed) {
+      reject(new Error('team bridge connection is unavailable'));
+      return;
+    }
     const requestId = bridgeRequestId();
     const timer = setTimeout(() => {
-      if (!pending.delete(requestId)) return;
+      if (!connection.pending.delete(requestId)) return;
       reject(new Error('team bridge request timed out: ' + tool));
     }, timeoutMs);
     timer.unref();
-    pending.set(requestId, { resolve, reject, timer });
-    sock.write(
-      JSON.stringify({ requestId: requestId, token: TOKEN, tool: tool, args: args }) + '\\n',
-    );
+    connection.pending.set(requestId, { resolve, reject, timer });
+    try {
+      sock.write(
+        JSON.stringify({ requestId: requestId, token: TOKEN, tool: tool, args: args }) + '\\n',
+      );
+    } catch (error) {
+      if (connection.pending.delete(requestId)) {
+        clearTimeout(timer);
+        reject(error);
+      }
+      cleanupConnection(connection, error);
+    }
   });
 }
 
 function connectSocket() {
-  if (socketReady) return socketReady;
-  socketReady = new Promise((resolve, reject) => {
+  if (activeConnection) return activeConnection.ready;
+  const connection = {
+    generation: nextConnectionGeneration,
+    socket: null,
+    ready: null,
+    resolveReady: () => {},
+    rejectReady: () => {},
+    availableTools: [],
+    pending: new Map(),
+    buffer: '',
+    cleaned: false,
+  };
+  nextConnectionGeneration += 1;
+  activeConnection = connection;
+  connection.ready = new Promise((resolve, reject) => {
+    connection.resolveReady = resolve;
+    connection.rejectReady = reject;
     const s = net.createConnection(SOCKET_PATH);
-    s.on('data', handleSocketData);
+    connection.socket = s;
+    s.on('data', (chunk) => handleSocketData(connection, chunk));
     s.once('connect', () => {
-      writeBridgeRequest(s, '__authenticate__', {}, NORMAL_BRIDGE_TIMEOUT_MS).then(
+      writeBridgeRequest(connection, '__authenticate__', {}, NORMAL_BRIDGE_TIMEOUT_MS).then(
         (response) => {
+          if (connection.cleaned) return;
           if (!response || response.ok !== true) {
-            reject(new Error('team bridge authentication failed'));
+            cleanupConnection(connection, new Error('team bridge authentication failed'));
             return;
           }
           const allowedTools = response.result && response.result.allowedTools;
@@ -431,36 +472,37 @@ function connectSocket() {
             allowedTools.some((name) => typeof name !== 'string' || !knownStaticNames.has(name)) ||
             new Set(allowedTools).size !== allowedTools.length
           ) {
-            reject(new Error('team bridge returned an invalid allowed tool inventory'));
+            cleanupConnection(
+              connection,
+              new Error('team bridge returned an invalid allowed tool inventory'),
+            );
             return;
           }
           const allowedNames = new Set(allowedTools);
           const managedNames = new Set(managedTools.map((tool) => tool && tool.name));
-          availableTools = managedTools.concat(
+          connection.availableTools = managedTools.concat(
             TOOLS.filter(
               (tool) => !managedNames.has(tool.name) && allowedNames.has(tool.name),
             ),
           );
-          resolve(s);
+          connection.resolveReady(connection);
         },
-        reject,
+        (error) => cleanupConnection(connection, error),
       );
     });
-    s.on('error', (error) => {
-      reject(error);
-      rejectPending(error);
-    });
-    s.on('close', () => rejectPending(new Error('team bridge connection closed')));
-    socket = s;
+    s.on('error', (error) => cleanupConnection(connection, error));
+    s.on('close', () =>
+      cleanupConnection(connection, new Error('team bridge connection closed')),
+    );
   });
-  return socketReady;
+  return connection.ready;
 }
 
 function callBridge(tool, args) {
   return connectSocket().then(
-    (sock) =>
+    (connection) =>
       writeBridgeRequest(
-        sock,
+        connection,
         tool,
         args,
         tool === 'team_wait_reports' ||
@@ -545,7 +587,8 @@ function handleLine(line) {
       return;
     }
     connectSocket().then(
-      () => send({ jsonrpc: '2.0', id: message.id, result: { tools: availableTools } }),
+      (connection) =>
+        send({ jsonrpc: '2.0', id: message.id, result: { tools: connection.availableTools } }),
       () => send({ jsonrpc: '2.0', id: message.id, result: { tools: [] } }),
     );
     return;

@@ -195,9 +195,71 @@ describe('TeamMcpBridge', () => {
     );
   });
 
-  it('rejects a copied bearer token until the runtime process is strongly bound', async () => {
+  it('waits within the authentication deadline for a delayed runtime process binding', async () => {
     const coordinator = fakeCoordinator();
-    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath());
+    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath(), 1_000);
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = ProductionTeamMcpBridge.generateToken();
+    bridge.register('turn-delayed', { taskId: 'task-delayed', token });
+
+    const authentication = roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      1_500,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    const identity = queryNativeProcessIdentity(process.pid);
+    expect(identity).not.toBeNull();
+    expect(bridge.bindRuntimeProcess('turn-delayed', identity!)).toBe(true);
+
+    const { lines } = await authentication;
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { authenticated: true },
+    });
+    if (process.platform === 'win32') expect(socketPath).toMatch(/^\\\\\.\\pipe\\/);
+  });
+
+  it('keeps an invalid token fail-closed while a valid token is waiting for process binding', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath(), 1_000);
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = ProductionTeamMcpBridge.generateToken();
+    bridge.register('turn-valid-pending', { taskId: 'task-valid', token });
+
+    const validAuthentication = roundTrip(
+      socketPath as string,
+      { token, tool: '__authenticate__', args: {} },
+      1_500,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const invalidAuthentication = await roundTrip(
+      socketPath as string,
+      { token: 'invalid-token', tool: '__authenticate__', args: {} },
+      500,
+    );
+    expect(invalidAuthentication.lines).toHaveLength(0);
+    expect(invalidAuthentication.closed).toBe(true);
+
+    const identity = queryNativeProcessIdentity(process.pid);
+    expect(identity).not.toBeNull();
+    expect(bridge.bindRuntimeProcess('turn-valid-pending', identity!)).toBe(true);
+    const validResult = await validAuthentication;
+    expect(JSON.parse(validResult.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { authenticated: true },
+    });
+  });
+
+  it('rejects a copied bearer token when runtime binding misses the existing deadline', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath(), 100);
     bridges.push(bridge);
     const socketPath = await bridge.ensureStarted();
     const token = ProductionTeamMcpBridge.generateToken();
@@ -205,11 +267,7 @@ describe('TeamMcpBridge', () => {
 
     const { lines, closed } = await roundTrip(
       socketPath as string,
-      {
-        token,
-        tool: '__authenticate__',
-        args: {},
-      },
+      { token, tool: '__authenticate__', args: {} },
       1_000,
     );
 
@@ -217,7 +275,28 @@ describe('TeamMcpBridge', () => {
     expect(closed).toBe(true);
   });
 
-  it('rejects a stolen token from outside the registered CLI process tree', async () => {
+  it('releases a pending process-binding authentication when the turn is unregistered', async () => {
+    const coordinator = fakeCoordinator();
+    const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath(), 1_000);
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = ProductionTeamMcpBridge.generateToken();
+    bridge.register('turn-unregister-wait', { taskId: 'task-victim', token });
+
+    const authentication = roundTrip(
+      socketPath as string,
+      { token, tool: '__authenticate__', args: {} },
+      1_500,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    bridge.unregister('turn-unregister-wait');
+
+    const { lines, closed } = await authentication;
+    expect(lines).toHaveLength(0);
+    expect(closed).toBe(true);
+  });
+
+  it("rejects a valid token used from another turn's process tree", async () => {
     const coordinator = fakeCoordinator();
     const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath());
     bridges.push(bridge);
@@ -235,9 +314,16 @@ describe('TeamMcpBridge', () => {
       expect(victimIdentity).not.toBeNull();
       bridge.register('turn-victim', { taskId: 'task-victim', token });
       expect(bridge.bindRuntimeProcess('turn-victim', victimIdentity!)).toBe(true);
+      const attackerIdentity = queryNativeProcessIdentity(process.pid);
+      expect(attackerIdentity).not.toBeNull();
+      bridge.register('turn-attacker', {
+        taskId: 'task-attacker',
+        token: ProductionTeamMcpBridge.generateToken(),
+      });
+      expect(bridge.bindRuntimeProcess('turn-attacker', attackerIdentity!)).toBe(true);
 
-      // The test process owns the copied settings/token but is the victim CLI's parent, not one
-      // of its descendants. A token-only bridge would accept this request.
+      // The test process is strongly bound to a different turn and owns the copied victim token,
+      // but it is the victim CLI's parent rather than one of its descendants.
       const { lines, closed } = await roundTrip(socketPath as string, {
         token,
         tool: '__authenticate__',
