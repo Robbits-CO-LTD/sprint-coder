@@ -11,7 +11,7 @@
       "conditions": [
         ["OS=='win'", {
           "sources!": ["native_safe_fs.cc"],
-          "sources": ["native_safe_fs_win.cc"],
+          "sources": ["native_safe_fs_win.cc", "native_safe_fs_win_mutation.cc"],
           "libraries": ["Advapi32.lib"]
         }]
       ],

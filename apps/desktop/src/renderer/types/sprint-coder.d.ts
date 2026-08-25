@@ -792,6 +792,8 @@ export type TeamExecutionIsolation = {
     isolatedPath: string;
     identity: string;
     mutationKey: string;
+    isolatedIdentity: string | null;
+    isolatedMutationKey: string | null;
   }>;
   reason: string | null;
 };

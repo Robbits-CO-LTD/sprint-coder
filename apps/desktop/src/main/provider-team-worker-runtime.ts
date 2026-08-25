@@ -25,6 +25,7 @@ import { projectContextProviderMessages } from './project-context-delivery';
 import { applyWorkerContextInheritance, reserveTeamWorkerContext } from './team-worker-runtime';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
+import { providerMessagesForEgressPolicy } from './provider-egress';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -237,7 +238,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             worker: input.worker,
             executionId,
             connection,
-            prompt: JSON.stringify(messages),
+            prompt: JSON.stringify(providerMessagesForEgressPolicy(messages)),
             context: inheritedContext,
           })
         )

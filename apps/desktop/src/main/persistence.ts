@@ -4497,7 +4497,13 @@ export interface PersistenceClient {
     revision: number;
   }): CanvasViewRecord;
   getWorkspace(taskId: string): string | null;
-  getMutationWorkspacePath(taskId: string, turnId: string, rootId: string | null): string | null;
+  getMutationWorkspacePath(
+    taskId: string,
+    turnId: string,
+    rootId: string | null,
+    workspaceKey?: string | null,
+    rootIdentityDigest?: string | null,
+  ): string | null;
   setWorkspace(taskId: string, path: string): void;
   setWorkspaceBinding(
     taskId: string,
@@ -4737,6 +4743,14 @@ export interface PersistenceClient {
     failureClass: AssuranceFailureClass | null;
     createdAt: string;
   }): AssuranceRound;
+  recordWorkspaceReadVerification(input: {
+    taskId: string;
+    turnId: string;
+    rootId: string;
+    path: string;
+    content: string;
+    createdAt: string;
+  }): AssuranceRound | null;
   recordCommandVerification(input: {
     taskId: string;
     turnId: string;
@@ -10652,13 +10666,68 @@ export class SqlitePersistenceClient implements PersistenceClient {
       : null;
   }
 
-  getMutationWorkspacePath(taskId: string, turnId: string, rootId: string | null): string | null {
+  getMutationWorkspacePath(
+    taskId: string,
+    turnId: string,
+    rootId: string | null,
+    workspaceKey?: string | null,
+    rootIdentityDigest?: string | null,
+  ): string | null {
     if (rootId === null) return this.getWorkspace(taskId);
     this.getTurn(taskId, turnId);
     const row = this.db
-      .prepare(`SELECT canonical_path FROM turn_workspace_roots WHERE turn_id = ? AND root_id = ?`)
-      .get(turnId, rootId) as { canonical_path: string } | undefined;
-    return row?.canonical_path ?? null;
+      .prepare(
+        `SELECT canonical_path, workspace_key, root_identity_digest
+         FROM turn_workspace_roots WHERE turn_id = ? AND root_id = ?`,
+      )
+      .get(turnId, rootId) as
+      { canonical_path: string; workspace_key: string; root_identity_digest: string } | undefined;
+    if (
+      row !== undefined &&
+      (workspaceKey === undefined ||
+        (row.workspace_key === workspaceKey && row.root_identity_digest === rootIdentityDigest))
+    )
+      return row.canonical_path;
+    if (workspaceKey === undefined || rootIdentityDigest === undefined) return null;
+    return (
+      this.findSealedTeamIsolationRoot(taskId, rootId, workspaceKey, rootIdentityDigest, true)
+        ?.isolatedPath ?? null
+    );
+  }
+
+  private findSealedTeamIsolationRoot(
+    taskId: string,
+    rootId: string,
+    workspaceKey: string | null,
+    rootIdentityDigest: string | null,
+    includeRecoverable = false,
+  ): TeamExecutionIsolation['roots'][number] | null {
+    if (workspaceKey === null || rootIdentityDigest === null) return null;
+    const rows = this.db
+      .prepare(
+        `SELECT isolation.* FROM team_execution_isolations isolation
+         INNER JOIN team_executions execution ON execution.id = isolation.execution_id
+         INNER JOIN teams team ON team.id = execution.team_id
+         WHERE team.task_id = ?
+           AND isolation.phase IN (
+             'running', 'finalizing', 'waiting_integration', 'integrating',
+             'waiting_resume', 'quarantined'
+           )
+         ORDER BY isolation.created_at DESC, isolation.execution_id DESC`,
+      )
+      .all(taskId) as TeamExecutionIsolationRow[];
+    for (const row of rows) {
+      const isolation = toTeamExecutionIsolation(row);
+      if (!includeRecoverable && isolation.phase !== 'running') continue;
+      const root = isolation.roots.find(
+        (candidate) =>
+          candidate.rootId === rootId &&
+          candidate.isolatedMutationKey === workspaceKey &&
+          candidate.isolatedIdentity === rootIdentityDigest,
+      );
+      if (root !== undefined) return root;
+    }
+    return null;
   }
 
   getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet {
@@ -12821,8 +12890,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
         rootId === null
           ? task.mutation_scope_key === input.workspaceKey &&
             task.mutation_root_identity_digest === input.rootIdentityDigest
-          : sealedRoot?.workspace_key === input.workspaceKey &&
-            sealedRoot.root_identity_digest === input.rootIdentityDigest;
+          : (sealedRoot?.workspace_key === input.workspaceKey &&
+              sealedRoot.root_identity_digest === input.rootIdentityDigest) ||
+            this.findSealedTeamIsolationRoot(
+              input.taskId,
+              rootId,
+              input.workspaceKey,
+              input.rootIdentityDigest,
+              input.purpose === 'recovery',
+            ) !== null;
       if (!bindingMatches) throw new MutationQuarantinedError();
       this.getTurn(input.taskId, input.turnId);
       const saga = this.getEditSaga(input.sagaId);
@@ -13344,9 +13420,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
               { workspace_key: string; root_identity_digest: string } | undefined);
       if (request.rootId !== null && sealedRoot === undefined)
         throw new OperationConflictError('Edit Saga root is not in the Turn Workspace snapshot');
-      const boundWorkspaceKey = sealedRoot?.workspace_key ?? task.mutation_scope_key;
+      const isolatedRoot =
+        request.rootId === null
+          ? null
+          : this.findSealedTeamIsolationRoot(
+              request.taskId,
+              request.rootId,
+              request.workspaceKey,
+              request.rootIdentityDigest,
+            );
+      const boundWorkspaceKey =
+        isolatedRoot === null
+          ? (sealedRoot?.workspace_key ?? task.mutation_scope_key)
+          : request.workspaceKey;
       const boundRootIdentityDigest =
-        sealedRoot?.root_identity_digest ?? task.mutation_root_identity_digest;
+        isolatedRoot === null
+          ? (sealedRoot?.root_identity_digest ?? task.mutation_root_identity_digest)
+          : request.rootIdentityDigest;
       if (
         (request.workspaceKey !== null && request.workspaceKey !== boundWorkspaceKey) ||
         (request.rootIdentityDigest !== null &&
@@ -13601,6 +13691,50 @@ export class SqlitePersistenceClient implements PersistenceClient {
     });
   }
 
+  recordWorkspaceReadVerification(input: {
+    taskId: string;
+    turnId: string;
+    rootId: string;
+    path: string;
+    content: string;
+    createdAt: string;
+  }): AssuranceRound | null {
+    const contentHash = createHash('sha256').update(input.content).digest('hex');
+    const boundRootId = input.rootId === 'legacy-primary' ? null : input.rootId;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM edit_sagas
+         WHERE task_id = ? AND turn_id = ? AND root_id IS ? AND state = 'committed'
+         ORDER BY updated_at DESC, id DESC`,
+      )
+      .all(input.taskId, input.turnId, boundRootId) as EditSagaRow[];
+    const saga = rows
+      .map(toEditSaga)
+      .find((candidate) =>
+        candidate.steps.some(
+          ({ operation }) =>
+            operation.destination === null &&
+            operation.path === input.path &&
+            operation.postHash === contentHash,
+        ),
+      );
+    if (saga === undefined) return null;
+    if (
+      this.listEvidenceRecords(input.taskId, input.turnId).some(
+        ({ criterionId }) => criterionId === `verification:${saga.id}`,
+      )
+    )
+      return null;
+    return this.recordAssuranceVerification({
+      taskId: input.taskId,
+      turnId: input.turnId,
+      sagaId: saga.id,
+      outcome: 'passed',
+      failureClass: null,
+      createdAt: input.createdAt,
+    });
+  }
+
   private insertAcceptanceContract(contract: AcceptanceContract): void {
     this.db
       .prepare(
@@ -13745,7 +13879,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
         if (parsedSeed.leaseFence !== String(lease.fence)) throw new MutationLeaseStaleError();
         const saga = this.getEditSaga(parsedSeed.sagaId);
         const step = saga.steps[parsedSeed.ordinal - 1];
-        const workspacePath = this.getMutationWorkspacePath(saga.taskId, saga.turnId, saga.rootId);
+        const workspacePath = this.getMutationWorkspacePath(
+          saga.taskId,
+          saga.turnId,
+          saga.rootId,
+          saga.workspaceKey,
+          saga.rootIdentityDigest,
+        );
         const expected =
           step === undefined || workspacePath === null
             ? null

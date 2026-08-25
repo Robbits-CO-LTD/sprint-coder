@@ -267,6 +267,113 @@ describe('Main PermissionBroker', () => {
     ).toThrow('effective Workspace root');
   });
 
+  it('authorizes a guard against a sealed Team Worker isolation Workspace', async () => {
+    const workerWorkspacePath = join(testRoot, 'AppData', 'team-worker');
+    await mkdir(join(workerWorkspacePath, 'src'), { recursive: true });
+    await writeFile(join(workerWorkspacePath, 'src', 'app.ts'), 'safe');
+    const workerGuard = await createPathGuard({
+      rootId: 'worker-root',
+      workspacePath: workerWorkspacePath,
+      targetPath: 'src/app.ts',
+      operation: 'read',
+    });
+    const protectedResource = workspacePermissionResourceFromGuard(workerGuard);
+    expect(protectedResource.classification).toBe('app-private');
+    const isolatedResource = workspacePermissionResourceFromGuard(
+      workerGuard,
+      'sealed-team-isolation',
+    );
+    await mkdir(join(workerWorkspacePath, '.ssh'), { recursive: true });
+    await writeFile(join(workerWorkspacePath, '.ssh', 'id_rsa'), 'not-a-real-key');
+    const credentialGuard = await createPathGuard({
+      rootId: 'worker-root',
+      workspacePath: workerWorkspacePath,
+      targetPath: '.ssh/id_rsa',
+      operation: 'read',
+    });
+    expect(
+      workspacePermissionResourceFromGuard(credentialGuard, 'sealed-team-isolation').classification,
+    ).toBe('credential');
+    const workerRequest: PermissionRequest & {
+      resource: Extract<PermissionRequest['resource'], { kind: 'workspace-path' }>;
+    } = {
+      ...request,
+      resource: isolatedResource,
+    };
+    const workerCeiling: CapabilityCeiling = {
+      entries: [
+        {
+          capability: 'workspace.read',
+          resourceSet: { kind: 'workspace', workspaceId: workerRequest.resource.workspaceId },
+          operations: ['read'],
+          expiresAt: '2026-07-22T13:00:00.000Z',
+          providerEgress: ['none'],
+          sandboxProfiles: ['read-only'],
+        },
+      ],
+      maxWorkerDepth: 0,
+      maxConcurrentWorkers: 0,
+    };
+    const workspace = {
+      source: 'task' as const,
+      projectId: null,
+      primaryRootId: 'worker-root',
+      roots: [
+        {
+          rootId: 'worker-root',
+          path: workerGuard.workspacePath,
+          label: 'Worker isolation',
+          role: 'primary' as const,
+          status: 'available' as const,
+        },
+      ],
+      digest: 'e'.repeat(64),
+    };
+    const { broker } = fixture();
+    const basePolicy = {
+      managedDeny: [],
+      projectDeny: [],
+      parentCeiling: workerCeiling,
+      modeCeiling: workerCeiling,
+      sandbox: { feasible: true as const, profile: 'read-only' as const },
+      allowRules: [
+        {
+          capability: 'workspace.read' as const,
+          resourceSet: {
+            kind: 'path-exact' as const,
+            canonicalPath: workerRequest.resource.canonicalPath,
+          },
+          operations: ['read' as const],
+        },
+      ],
+    };
+
+    expect(() =>
+      broker.evaluate({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        request: workerRequest,
+        now: NOW,
+        basePolicy,
+        pathGuard: workerGuard,
+        workspace,
+      }),
+    ).toThrow('Permission path facts are not derived');
+
+    expect(
+      broker.evaluate({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        request: workerRequest,
+        now: NOW,
+        basePolicy,
+        pathGuard: workerGuard,
+        workspace,
+        workspaceAuthority: 'sealed-team-isolation',
+      }),
+    ).toMatchObject({ decision: 'allow' });
+  });
+
   it('authorizes a command guard against its sealed Turn roots', async () => {
     const sealedGuard = await createPathGuard({
       rootId: 'root-a',

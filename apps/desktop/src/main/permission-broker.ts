@@ -10,6 +10,7 @@ import {
   type PermissionRequest,
   type PermissionOperation,
 } from '@sprint-coder/domain';
+import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
 import type { PermissionPolicyRecord, PersistenceClient } from './persistence';
 import {
   pathGuardIdentityDigest,
@@ -34,6 +35,19 @@ export type PermissionPolicyBase = Omit<
 export interface PolicyRevocationCoordinator {
   policyEpochChanged(taskId: string, policyEpoch: number): Promise<void> | void;
 }
+
+type PermissionEvaluationInput = {
+  taskId: string;
+  turnId?: string;
+  request: PermissionRequest;
+  basePolicy: PermissionPolicyBase;
+  now: string;
+  pathGuard?: PathGuard;
+  /** A sealed, execution-specific Workspace such as a Team Worker isolation root. */
+  workspace?: EffectiveWorkspaceSet;
+  /** The sealed Workspace is an app-created Team isolation root, not app-private data. */
+  workspaceAuthority?: 'sealed-team-isolation';
+};
 
 class NoActivePolicySubjects implements PolicyRevocationCoordinator {
   policyEpochChanged(): void {
@@ -109,41 +123,20 @@ export class PermissionBroker {
     return { revokedGrants, policyEpoch };
   }
 
-  evaluate(input: {
-    taskId: string;
-    turnId?: string;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): PermissionEvaluation {
+  evaluate(input: PermissionEvaluationInput): PermissionEvaluation {
     if (input.request.capability === 'shell.execute')
       throw new Error('Shell requests must use evaluateShell so every segment is authorized');
     return this.evaluateSingle(input);
   }
 
-  preview(input: {
-    taskId: string;
-    turnId?: string;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): PermissionEvaluation {
+  preview(input: PermissionEvaluationInput): PermissionEvaluation {
     if (input.request.capability === 'shell.execute')
       throw new Error('Shell requests must use previewExecutionSpec');
     this.assertTrustedRequestFacts(input);
     return this.evaluateCurrentPolicy(input);
   }
 
-  previewExecutionSpec(input: {
-    taskId: string;
-    turnId?: string;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): PermissionEvaluation {
+  previewExecutionSpec(input: PermissionEvaluationInput): PermissionEvaluation {
     if (input.request.capability !== 'shell.execute')
       throw new Error('ExecutionSpec preview requires shell.execute');
     this.assertTrustedRequestFacts(input);
@@ -151,14 +144,7 @@ export class PermissionBroker {
   }
 
   commitEvaluation(
-    input: {
-      taskId: string;
-      turnId?: string;
-      request: PermissionRequest;
-      basePolicy: PermissionPolicyBase;
-      now: string;
-      pathGuard?: PathGuard;
-    },
+    input: PermissionEvaluationInput,
     evaluation: PermissionEvaluation,
     autoDecision?: Parameters<PermissionPersistence['commitPermissionEvaluation']>[3],
   ) {
@@ -173,14 +159,7 @@ export class PermissionBroker {
     );
   }
 
-  evaluateExecutionSpec(input: {
-    taskId: string;
-    turnId?: string;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): PermissionEvaluation {
+  evaluateExecutionSpec(input: PermissionEvaluationInput): PermissionEvaluation {
     if (input.request.capability !== 'shell.execute')
       throw new Error('ExecutionSpec evaluation requires shell.execute');
     return this.evaluateSingle(input);
@@ -222,14 +201,7 @@ export class PermissionBroker {
     });
   }
 
-  private evaluateSingle(input: {
-    taskId: string;
-    turnId?: string;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): PermissionEvaluation {
+  private evaluateSingle(input: PermissionEvaluationInput): PermissionEvaluation {
     this.assertTrustedRequestFacts(input);
     const evaluation = this.evaluateCurrentPolicy(input);
     this.commitEvaluation(input, evaluation);
@@ -279,14 +251,9 @@ export class PermissionBroker {
     });
   }
 
-  revalidate(input: {
-    taskId: string;
-    permit: ExecutionPermit;
-    request: PermissionRequest;
-    basePolicy: PermissionPolicyBase;
-    now: string;
-    pathGuard?: PathGuard;
-  }): ReturnType<typeof revalidateExecutionPermit> {
+  revalidate(
+    input: PermissionEvaluationInput & { permit: ExecutionPermit },
+  ): ReturnType<typeof revalidateExecutionPermit> {
     try {
       this.assertTrustedRequestFacts(input);
     } catch {
@@ -337,6 +304,8 @@ export class PermissionBroker {
     turnId?: string;
     request: PermissionRequest;
     pathGuard?: PathGuard;
+    workspace?: EffectiveWorkspaceSet;
+    workspaceAuthority?: 'sealed-team-isolation';
   }): void {
     if (input.taskId !== input.request.taskId) throw new Error('Permission Task binding mismatch');
     const resource = input.request.resource;
@@ -345,9 +314,10 @@ export class PermissionBroker {
     if (resource.kind !== 'workspace-path') return;
     const guard = input.pathGuard;
     const workspace =
-      input.turnId === undefined
+      input.workspace ??
+      (input.turnId === undefined
         ? this.persistence.getEffectiveWorkspaceSet(input.taskId)
-        : this.persistence.readTurnWorkspaceSetForTask(input.taskId, input.turnId);
+        : this.persistence.readTurnWorkspaceSetForTask(input.taskId, input.turnId));
     if (workspace === null) throw new Error('Permission Turn Workspace snapshot is unavailable');
     const rootId = guard?.rootId === 'legacy-primary' ? workspace.primaryRootId : guard?.rootId;
     const root = workspace.roots.find((candidate) => candidate.rootId === rootId);
@@ -358,7 +328,7 @@ export class PermissionBroker {
       guard.workspacePath !== root.path
     )
       throw new Error('Permission path guard is not bound to an effective Workspace root');
-    const trusted = workspacePermissionResourceFromGuard(guard);
+    const trusted = workspacePermissionResourceFromGuard(guard, input.workspaceAuthority);
     if (
       trusted.workspaceId !== resource.workspaceId ||
       trusted.canonicalPath !== resource.canonicalPath ||

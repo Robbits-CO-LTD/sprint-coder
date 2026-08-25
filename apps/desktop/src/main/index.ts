@@ -603,6 +603,8 @@ async function wireEditSagaRecovery(
         lease.taskId,
         lease.turnId,
         lease.rootId,
+        lease.workspaceKey,
+        lease.rootIdentityDigest,
       );
       if (workspacePath === null) throw new MutationLeaseStaleError();
       const root = await lstat(workspacePath, { bigint: true });
@@ -660,29 +662,35 @@ async function wireEditSagaRecovery(
       releasedFences: releasedRecoveryFences,
       now: () => new Date().toISOString(),
     });
+    const fullMutation = probe.capabilities.mutationScope === 'full';
     return {
       turnWorkspaceSetFor: (taskId, turnId) =>
         persistence.readTurnWorkspaceSetForTask(taskId, turnId),
       turnRootMutationBindingsFor: (turnId) => persistence.getTurnWorkspaceMutationBindings(turnId),
       revisions: new FileRevisionRegistry(),
       apply: (request) => executor.apply(request),
-      createDirectory: ({ taskId, turnId, rootId, path, guard, boundary }) =>
-        executeWorkspaceCreateDirectory(
-          { rootId, path },
-          { taskId, turnId },
-          {
-            turnWorkspaceSetFor: (candidateTaskId, candidateTurnId) =>
-              persistence.readTurnWorkspaceSetForTask(candidateTaskId, candidateTurnId),
-            turnRootMutationBindingsFor: (candidateTurnId) =>
-              persistence.getTurnWorkspaceMutationBindings(candidateTurnId),
-            revisions: new FileRevisionRegistry(),
-            apply: (request) => executor.apply(request),
-            policyEpochFor: (candidateTaskId) =>
-              persistence.getPermissionPolicy(candidateTaskId).policyEpoch,
-          },
-          guard,
-          boundary,
-        ),
+      supportsPatch: fullMutation,
+      ...(probe.capabilities.directoryOwnership === 'workspace-probed'
+        ? {
+            createDirectory: ({ taskId, turnId, rootId, path, guard, boundary }) =>
+              executeWorkspaceCreateDirectory(
+                { rootId, path },
+                { taskId, turnId },
+                {
+                  turnWorkspaceSetFor: (candidateTaskId, candidateTurnId) =>
+                    persistence.readTurnWorkspaceSetForTask(candidateTaskId, candidateTurnId),
+                  turnRootMutationBindingsFor: (candidateTurnId) =>
+                    persistence.getTurnWorkspaceMutationBindings(candidateTurnId),
+                  revisions: new FileRevisionRegistry(),
+                  apply: (request) => executor.apply(request),
+                  policyEpochFor: (candidateTaskId) =>
+                    persistence.getPermissionPolicy(candidateTaskId).policyEpoch,
+                },
+                guard,
+                boundary,
+              ),
+          }
+        : {}),
       policyEpochFor: (taskId) => persistence.getPermissionPolicy(taskId).policyEpoch,
     };
   } catch (error) {

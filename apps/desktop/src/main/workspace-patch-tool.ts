@@ -168,6 +168,7 @@ export type WorkspacePatchDeps = Readonly<{
   ) => ReadonlyMap<string, { workspaceKey: string; rootIdentityDigest: string }>;
   revisions: FileRevisionRegistry;
   apply: (request: EditSagaApplyRequest) => Promise<EditSagaSnapshot>;
+  supportsPatch?: boolean;
   createDirectory?: (input: {
     taskId: string;
     turnId: string;

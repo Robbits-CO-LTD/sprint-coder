@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import type { TaskSummary } from '@sprint-coder/contracts';
+import type { ProviderExecutionRequest, TaskSummary } from '@sprint-coder/contracts';
 import type { PermissionEvaluation, PermissionRequest, ProviderEgress } from '@sprint-coder/domain';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
@@ -10,6 +10,32 @@ export type ProviderEgressDecision = Readonly<{
   allowed: boolean;
   evaluation: PermissionEvaluation;
 }>;
+
+/** Normalize Provider-owned transport values before scanning the egress policy projection. */
+export function providerMessagesForEgressPolicy(
+  messages: ProviderExecutionRequest['messages'],
+): readonly unknown[] {
+  return messages.map((message) => ({
+    ...message,
+    ...(message.toolCallId === undefined ? {} : { toolCallId: 'provider-tool-call-id' }),
+    ...(message.toolCalls === undefined
+      ? {}
+      : {
+          toolCalls: message.toolCalls.map((toolCall) => ({
+            ...toolCall,
+            callId: 'provider-tool-call-id',
+          })),
+        }),
+    ...(message.inlineImages === undefined
+      ? {}
+      : {
+          inlineImages: message.inlineImages.map(({ mimeType }) => ({
+            mimeType,
+            bytes: 'redacted-image-bytes',
+          })),
+        }),
+  }));
+}
 
 export type ProviderEgressInput = {
   broker: PermissionBroker;

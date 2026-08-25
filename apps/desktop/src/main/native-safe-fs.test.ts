@@ -5,6 +5,7 @@ import {
   link,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rename,
@@ -383,9 +384,274 @@ describe('NativeSafeFs authority boundary', () => {
     });
   });
 
-  it.runIf(process.platform === 'win32')('keeps the Windows stub fail-closed', async () => {
-    const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
-    await expect(boundary.probe()).resolves.toMatchObject({ available: false });
+  describe.runIf(process.platform === 'win32')('Windows add-only backend', () => {
+    it('publishes only the proven native file-add mutation scope', async () => {
+      const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
+      await expect(boundary.probe()).resolves.toMatchObject({
+        available: true,
+        capabilities: {
+          mutation: true,
+          mutationScope: 'add-only',
+          directoryOwnership: false,
+        },
+      });
+    });
+
+    it('applies and cleans a journaled add through handle-relative Windows operations', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('windows added\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '821' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['added.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, bytes);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+      const effect = await boundary.applyIntentEffect(session, intent);
+      expect(effect).toEqual({
+        source: intent.auxObservation,
+        destination: { state: 'absent' },
+        auxiliary: { state: 'absent' },
+      });
+      await expect(readFile(join(input.workspace, 'added.txt'))).resolves.toEqual(bytes);
+      intent = transitionNativeMutationIntent(intent, {
+        state: 'effect_observed',
+        effectObservation: effect,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+      await expect(boundary.cleanupIntentAuxiliary(session, intent)).resolves.toEqual({
+        state: 'absent',
+      });
+      await boundary.closeSession(session);
+    });
+
+    it('keeps an externally created destination and the staged artifact on collision', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('staged windows add\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '822' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['collision.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, bytes);
+      await writeFile(join(input.workspace, 'collision.txt'), 'external windows write\n');
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(join(input.workspace, 'collision.txt'), 'utf8')).resolves.toBe(
+        'external windows write\n',
+      );
+      await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(bytes);
+      await boundary.closeSession(session);
+    });
+
+    it('rejects an update intent before mutation while the add-only scope is active', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'existing.txt');
+      const original = Buffer.from('original windows bytes\n');
+      const replacement = Buffer.from('replacement windows bytes\n');
+      await writeFile(sourcePath, original);
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '825' });
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['existing.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+        code: 'UNSUPPORTED_PLATFORM',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(sourcePath)).resolves.toEqual(original);
+      await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(
+        replacement,
+      );
+      await boundary.closeSession(session);
+    });
+
+    it('rejects a non-reserved staged leaf in the raw native contract', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('must not become visible\n');
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '826' });
+      const raw = require(nativeSafeFsAddonPath()) as {
+        stageIntentArtifact(input: Record<string, unknown>, bytes: Buffer): unknown;
+      };
+
+      expect(() =>
+        raw.stageIntentArtifact(
+          {
+            sessionId: session.id,
+            intentId: 'forged-stage',
+            intentDigest: '1'.repeat(64),
+            recordDigest: '2'.repeat(64),
+            revision: 1,
+            parentSegments: [],
+            leafName: 'visible.txt',
+            expectedContentHash: createHash('sha256').update(bytes).digest('hex'),
+            expectedSize: bytes.byteLength,
+            expectedMode: 0o100600,
+          },
+          bytes,
+        ),
+      ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
+      await expect(readFile(join(input.workspace, 'visible.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await boundary.closeSession(session);
+    });
+
+    it('rejects a forged add shape before moving its staged artifact', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('shape-bound windows add\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '827' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['shape-target.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, bytes);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const raw = require(nativeSafeFsAddonPath()) as {
+        applyIntentEffect(input: Record<string, unknown>): unknown;
+      };
+
+      expect(() =>
+        raw.applyIntentEffect({
+          sessionId: session.id,
+          intentId: intent.id,
+          intentDigest: intent.intentDigest,
+          recordDigest: intent.recordDigest,
+          revision: intent.revision,
+          kind: 'add',
+          sourceSegments: intent.sourceSegments,
+          destinationSegments: ['forged-destination.txt'],
+          auxiliarySegments: [...intent.temp!.parentSegments, intent.temp!.leafName],
+          expectedSource: intent.expectedSource,
+          expectedDestination: intent.expectedDestination,
+          expectedAuxiliary: intent.auxObservation,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_PLATFORM' }));
+      await expect(readFile(join(input.workspace, 'shape-target.txt'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(bytes);
+      await boundary.closeSession(session);
+    });
+
+    it('does not publish while another handle can write the staged artifact', async () => {
+      const input = await fixture();
+      const bytes = Buffer.from('exclusively verified windows add\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '828' });
+      let intent = nativeIntent({
+        session,
+        kind: 'add',
+        sourceSegments: ['exclusive-target.txt'],
+        expectedSource: { state: 'absent' },
+        artifactBytes: bytes,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, bytes);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const writer = await open(join(input.workspace, intent.temp!.leafName), 'r+');
+      try {
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(readFile(join(input.workspace, 'exclusive-target.txt'))).rejects.toMatchObject(
+          {
+            code: 'ENOENT',
+          },
+        );
+      } finally {
+        await writer.close();
+        await boundary.closeSession(session);
+      }
+    });
+
+    it('holds one durable workspace lock and rejects stale fences after release', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const first = await boundary.openSession({ ...input, fence: '823' });
+      await expect(boundary.openSession({ ...input, fence: '824' })).rejects.toMatchObject({
+        code: 'LOCK_BUSY',
+      } satisfies Partial<NativeSafeFsError>);
+      await boundary.closeSession(first);
+      await expect(boundary.openSession({ ...input, fence: '823' })).rejects.toMatchObject({
+        code: 'STALE_FENCE',
+      } satisfies Partial<NativeSafeFsError>);
+      const second = await boundary.openSession({ ...input, fence: '824' });
+      await boundary.closeSession(second);
+    });
+
+    it('does not roll the durable fence backward after synchronous invalidation', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const first = await boundary.openSession({ ...input, fence: '830' });
+      await boundary.closeSession(first);
+      boundary.invalidateWorkspace(input.workspaceKey, '840');
+
+      await expect(boundary.openSession({ ...input, fence: '835' })).rejects.toMatchObject({
+        code: 'STALE_FENCE',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(join(input.locks, `${input.workspaceKey}.lock`), 'utf8')).resolves.toBe(
+        '830',
+      );
+    });
+
+    it('durably invalidates and releases an active session at the same fence', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const active = await boundary.openSession({ ...input, fence: '860' });
+      boundary.invalidateWorkspace(input.workspaceKey, '860');
+
+      await expect(boundary.closeSession(active)).rejects.toMatchObject({
+        code: 'STALE_SESSION',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(join(input.locks, `${input.workspaceKey}.lock`), 'utf8')).resolves.toBe(
+        '860',
+      );
+      await expect(boundary.openSession({ ...input, fence: '860' })).rejects.toMatchObject({
+        code: 'STALE_FENCE',
+      } satisfies Partial<NativeSafeFsError>);
+      const next = await boundary.openSession({ ...input, fence: '861' });
+      await boundary.closeSession(next);
+    });
+
+    it('rejects a hardlink substituted durable lock without changing its other name', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const first = await boundary.openSession({ ...input, fence: '850' });
+      await boundary.closeSession(first);
+      const lockPath = join(input.locks, `${input.workspaceKey}.lock`);
+      const protectedPath = join(input.root, 'protected.txt');
+      await rm(lockPath);
+      await writeFile(protectedPath, 'protected windows bytes\n');
+      await link(protectedPath, lockPath);
+
+      await expect(boundary.openSession({ ...input, fence: '851' })).rejects.toMatchObject({
+        code: 'UNSAFE_LOCK',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(protectedPath, 'utf8')).resolves.toBe('protected windows bytes\n');
+    });
   });
 
   describe.skipIf(process.platform === 'win32')('POSIX backend', () => {
@@ -414,6 +680,7 @@ describe('NativeSafeFs authority boundary', () => {
           durableFence: true,
           synchronousInvalidation: true,
           mutation: true,
+          mutationScope: 'full',
           directoryOwnership: 'workspace-probed',
         },
       });

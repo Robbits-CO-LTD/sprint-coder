@@ -13,6 +13,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "native_safe_fs_win_mutation.h"
+
 namespace {
 
 std::mutex jobs_mutex;
@@ -996,14 +998,16 @@ napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
   napi_value available;
-  napi_get_boolean(env, false, &available);
+  napi_get_boolean(env, true, &available);
   napi_set_named_property(env, result, "available", available);
   napi_value version;
   napi_create_uint32(env, 1, &version);
   napi_set_named_property(env, result, "apiVersion", version);
   napi_set_named_property(env, result, "platform", MakeString(env, "win32"));
-  napi_set_named_property(env, result, "unavailableReason",
-                          MakeString(env, "Windows backend is not implemented"));
+  napi_set_named_property(env, result, "capabilities", WindowsMutationProbeCapabilities(env));
+  napi_value unavailable_reason;
+  napi_get_null(env, &unavailable_reason);
+  napi_set_named_property(env, result, "unavailableReason", unavailable_reason);
   return result;
 }
 
@@ -1024,16 +1028,18 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"queryNamedPipePeerIdentity", nullptr, QueryNamedPipePeerIdentity, nullptr, nullptr, nullptr,
        napi_default, nullptr},
-      {"openSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"invalidateWorkspace", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
+      {"openSession", nullptr, WindowsMutationOpenSession, nullptr, nullptr, nullptr, napi_default,
        nullptr},
-      {"observeIntent", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"stageIntentArtifact", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
-       nullptr},
-      {"applyIntentEffect", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
-       nullptr},
-      {"cleanupIntentAuxiliary", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
-       nullptr},
+      {"invalidateWorkspace", nullptr, WindowsMutationInvalidateWorkspace, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
+      {"observeIntent", nullptr, WindowsMutationObserveIntent, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"stageIntentArtifact", nullptr, WindowsMutationStageIntentArtifact, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
+      {"applyIntentEffect", nullptr, WindowsMutationApplyIntentEffect, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"cleanupIntentAuxiliary", nullptr, WindowsMutationCleanupIntentAuxiliary, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
       {"observeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"createDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"inspectDirectoryOwnership", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
@@ -1043,7 +1049,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"removeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cleanupDirectoryRemoval", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
        nullptr},
-      {"closeSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"closeSession", nullptr, WindowsMutationCloseSession, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"assignProcessToOwnedJob", nullptr, AssignProcessToOwnedJob, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"terminateOwnedJob", nullptr, TerminateOwnedJob, nullptr, nullptr, nullptr, napi_default,
