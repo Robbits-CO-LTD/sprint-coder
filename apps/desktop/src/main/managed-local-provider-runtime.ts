@@ -1,4 +1,5 @@
 import {
+  canonicalProviderEventSchema,
   providerExecutionRequestSchema,
   type CanonicalProviderEvent,
   type ProviderConnection,
@@ -12,9 +13,14 @@ import type { ManagedLocalRuntimeSession } from './managed-local-runtime-supervi
 import type { ProviderModelLease } from './ollama-model-lifecycle';
 import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
 import { ProviderStreamBudget } from './provider-stream-budget';
+import { secureLogger } from './secure-logger';
+import { redactSecrets } from './secret-redactor';
 
 export const MANAGED_LOCAL_CONNECTION_ID = 'managed-local:runtime';
 export const MANAGED_LOCAL_PROVIDER_ID = 'sprint-managed-local';
+const MAX_FORCED_TOOL_RESPONSE_BYTES = 1024 * 1024;
+
+class ManagedLocalProtocolError extends Error {}
 
 type ActiveSession = {
   session: ManagedLocalRuntimeSession;
@@ -104,15 +110,42 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
     else signal.addEventListener('abort', abort, { once: true });
     this.executions.set(parsed.executionId, controller);
     try {
-      const response = await active.session.authenticatedFetch('/v1/chat/completions', {
+      const forcedToolName =
+        typeof parsed.toolChoice === 'object' ? parsed.toolChoice.name : undefined;
+      const compatibleRequest = openAICompatibleChatCompletionRequest(
+        forcedToolName === undefined
+          ? parsed
+          : {
+              ...parsed,
+              messages: managedLocalForcedToolMessages(parsed.messages, forcedToolName),
+              tools: parsed.tools?.filter(({ name }) => name === forcedToolName),
+            },
+        MANAGED_LOCAL_PROVIDER_ID,
+      );
+      const body =
+        forcedToolName === undefined
+          ? compatibleRequest
+          : {
+              ...compatibleRequest,
+              stream: false,
+              stream_options: undefined,
+              max_tokens: 1024,
+            };
+      let response = await active.session.authenticatedFetch('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          openAICompatibleChatCompletionRequest(parsed, MANAGED_LOCAL_PROVIDER_ID),
-        ),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
-      if (!response.ok || response.body === null) {
+      const responseBody = response.body;
+      if (!response.ok || (forcedToolName === undefined && responseBody === null)) {
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          secureLogger.warn('Managed Local runtime rejected a Provider request', {
+            status: response.status,
+            detail: redactSecrets(detail.slice(0, 500)),
+          });
+        }
         yield {
           type: 'error',
           error: {
@@ -125,23 +158,63 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
         };
         return;
       }
+      if (forcedToolName !== undefined) {
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            for (const event of await managedLocalForcedToolEvents(response, forcedToolName))
+              yield event;
+            return;
+          } catch (error) {
+            if (
+              !(error instanceof ManagedLocalProtocolError) ||
+              error.message !== 'Managed Local forced tool call is missing' ||
+              attempt >= 3
+            )
+              throw error;
+            secureLogger.warn('Managed Local forced tool generation will retry', {
+              toolName: forcedToolName,
+              attempt,
+            });
+            response = await active.session.authenticatedFetch('/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: controller.signal,
+            });
+            if (!response.ok)
+              throw new ManagedLocalProtocolError('Managed Local forced tool retry was rejected');
+          }
+        }
+        throw new ManagedLocalProtocolError('Managed Local forced tool call is missing');
+      }
       yield* normalizeOpenAIChatCompletionsStream(
-        response.body,
+        responseBody!,
         connection.providerId,
         parsed.modelId,
         budget.beginCall(),
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof ManagedLocalProtocolError)
+        secureLogger.warn('Managed Local forced tool response was rejected', {
+          reason: error.message,
+        });
       yield {
         type: 'error',
         error: {
-          category: controller.signal.aborted ? 'canceled' : 'network',
+          category: controller.signal.aborted
+            ? 'canceled'
+            : error instanceof ManagedLocalProtocolError
+              ? 'internal'
+              : 'network',
           message: controller.signal.aborted
             ? 'Managed Local execution was canceled'
-            : 'Managed Local runtime could not be reached',
-          retryable: !controller.signal.aborted,
+            : error instanceof ManagedLocalProtocolError
+              ? error.message
+              : 'Managed Local runtime could not be reached',
+          retryable: !controller.signal.aborted && !(error instanceof ManagedLocalProtocolError),
           retryAfterMs: null,
-          providerCode: null,
+          providerCode:
+            error instanceof ManagedLocalProtocolError ? 'forced_tool_response_invalid' : null,
         },
       };
     } finally {
@@ -159,6 +232,89 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
     for (const controller of this.executions.values()) controller.abort();
     this.executions.clear();
   }
+}
+
+export function managedLocalForcedToolMessages(
+  messages: ProviderExecutionRequest['messages'],
+  forcedToolName: string,
+): ProviderExecutionRequest['messages'] {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1)
+    if (messages[index]?.role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  if (latestUserIndex < 0)
+    throw new ManagedLocalProtocolError('Managed Local forced tool user message is missing');
+  const systemContent = [
+    `Call exactly ${forcedToolName} now. Extract only that tool's arguments from the latest user request. Do not answer with text and do not perform later steps yet.`,
+    ...messages.filter(({ role }) => role === 'system').map(({ content }) => content),
+  ].join('\n\n');
+  return [{ role: 'system', content: systemContent }, messages[latestUserIndex]!];
+}
+
+export async function managedLocalForcedToolEvents(
+  response: Response,
+  expectedName: string,
+): Promise<readonly CanonicalProviderEvent[]> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_FORCED_TOOL_RESPONSE_BYTES)
+    throw new ManagedLocalProtocolError('Managed Local forced tool response is too large');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_FORCED_TOOL_RESPONSE_BYTES)
+    throw new ManagedLocalProtocolError('Managed Local forced tool response is too large');
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    throw new ManagedLocalProtocolError('Managed Local forced tool response is invalid');
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    throw new ManagedLocalProtocolError('Managed Local forced tool response is invalid');
+  const choices = (value as Record<string, unknown>).choices;
+  if (!Array.isArray(choices) || choices.length !== 1)
+    throw new ManagedLocalProtocolError('Managed Local forced tool choices are invalid');
+  const choice = choices[0];
+  if (choice === null || typeof choice !== 'object' || Array.isArray(choice))
+    throw new ManagedLocalProtocolError('Managed Local forced tool choice is invalid');
+  const message = (choice as Record<string, unknown>).message;
+  if (message === null || typeof message !== 'object' || Array.isArray(message))
+    throw new ManagedLocalProtocolError('Managed Local forced tool message is invalid');
+  const calls = (message as Record<string, unknown>).tool_calls;
+  if (!Array.isArray(calls) || calls.length !== 1)
+    throw new ManagedLocalProtocolError('Managed Local forced tool call is missing');
+  const call = calls[0];
+  if (call === null || typeof call !== 'object' || Array.isArray(call))
+    throw new ManagedLocalProtocolError('Managed Local forced tool call is invalid');
+  const record = call as Record<string, unknown>;
+  const fn = record.function;
+  if (
+    typeof record.id !== 'string' ||
+    record.id.length < 1 ||
+    fn === null ||
+    typeof fn !== 'object' ||
+    Array.isArray(fn) ||
+    (fn as Record<string, unknown>).name !== expectedName
+  )
+    throw new ManagedLocalProtocolError('Managed Local forced tool identity is invalid');
+  const rawArguments = (fn as Record<string, unknown>).arguments;
+  if (typeof rawArguments !== 'string' || rawArguments.length > 64 * 1024)
+    throw new ManagedLocalProtocolError('Managed Local forced tool arguments are invalid');
+  let input: unknown;
+  try {
+    input = JSON.parse(rawArguments);
+  } catch {
+    throw new ManagedLocalProtocolError('Managed Local forced tool arguments are invalid');
+  }
+  return Object.freeze([
+    canonicalProviderEventSchema.parse({
+      type: 'tool_call',
+      callId: record.id,
+      name: expectedName,
+      input,
+    }),
+    canonicalProviderEventSchema.parse({ type: 'completed', stopReason: 'tool_calls' }),
+  ]);
 }
 
 export function managedLocalConnection(now = new Date()): ProviderConnection {

@@ -13,13 +13,18 @@ import {
 } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
 import { readdirSync } from 'node:fs';
-import { lstat, mkdir } from 'node:fs/promises';
+import { lstat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
-import { loadNativeSafeFs, nativeSafeFsAddonLocation, type NativeSafeFs } from './native-safe-fs';
+import {
+  loadNativeSafeFs,
+  nativeSafeFsAddonLocation,
+  prepareNativeSafeFsLockDirectory,
+  type NativeSafeFs,
+} from './native-safe-fs';
 import { SqliteEditSagaLeaseGuard, SqlitePersistenceClient } from './persistence';
 import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
 import { reconcileUserFileSaves } from './user-file-save-saga';
@@ -143,9 +148,10 @@ if (squirrelStartup || !hasLock) {
       if (!isDevelopment) registerProductionProtocol();
       const managedLocalBundle = await initializeManagedLocalSidecarCapability();
       if (managedLocalBundle !== null) initializeManagedLocalLifecycle(managedLocalBundle);
-      nativeSafeFs = loadNativeSafeFs({
-        lockDirectoryPath: join(app.getPath('userData'), 'native-safe-fs-locks'),
-      });
+      const nativeSafeFsLockDirectory = await prepareNativeSafeFsLockDirectory(
+        app.getPath('userData'),
+      );
+      nativeSafeFs = loadNativeSafeFs({ lockDirectoryPath: nativeSafeFsLockDirectory });
       const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
       persistence = new SqlitePersistenceClient(
         databasePath,
@@ -161,6 +167,7 @@ if (squirrelStartup || !hasLock) {
         persistence,
         nativeSafeFs,
         startupQuarantines,
+        nativeSafeFsLockDirectory,
       );
       await reconcileUserFileSaves(persistence, (taskId, requestedRootId) => {
         const workspace = persistence!.getEffectiveWorkspaceSet(taskId);
@@ -535,6 +542,7 @@ async function wireEditSagaRecovery(
   persistence: SqlitePersistenceClient,
   nativeSafeFs: NativeSafeFs,
   startupQuarantines: ReturnType<SqlitePersistenceClient['initializeMutationRecovery']>,
+  lockDirectoryPath: string,
 ): Promise<WorkspacePatchDeps | undefined> {
   // Slice 4.7d/4.7e: connect the NativeSafeFs edit boundary to the Edit Saga executor and
   // its restart recovery. The workspace mutation path stays fail-closed — no write
@@ -587,8 +595,6 @@ async function wireEditSagaRecovery(
       });
       return undefined;
     }
-    const lockDirectoryPath = join(app.getPath('userData'), 'native-safe-fs-locks');
-    await mkdir(lockDirectoryPath, { recursive: true, mode: 0o700 });
     const sessions = new Map<string, NativeSafeFsSession>();
     const resolveSession = async (lease: MutationLeaseToken): Promise<NativeSafeFsSession> => {
       const existing = sessions.get(lease.leaseId);

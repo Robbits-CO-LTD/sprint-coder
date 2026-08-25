@@ -52,7 +52,7 @@ export function parseDarwinAvailableMemory(input: string): number | null {
   return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null;
 }
 
-async function defaultDarwinAvailableMemory(): Promise<number | null> {
+export async function collectDarwinAvailableMemory(): Promise<number | null> {
   try {
     const { stdout } = await execFileAsync('/usr/bin/vm_stat', [], {
       timeout: 2_000,
@@ -64,6 +64,11 @@ async function defaultDarwinAvailableMemory(): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+export async function collectLocalAvailableMemoryBytes(): Promise<number> {
+  if (platform() !== 'darwin') return freemem();
+  return (await collectDarwinAvailableMemory()) ?? freemem();
 }
 
 function normalizePlatform(value: NodeJS.Platform): Platform {
@@ -162,7 +167,7 @@ export async function collectLocalHardwareSnapshot(
     hostPlatform === 'darwin' &&
     dependencies.platform === undefined &&
     dependencies.freeMemory === undefined
-      ? await (dependencies.availableMemory ?? defaultDarwinAvailableMemory)()
+      ? await (dependencies.availableMemory ?? collectDarwinAvailableMemory)()
       : dependencies.availableMemory === undefined
         ? null
         : await optionalProbe(dependencies.availableMemory);

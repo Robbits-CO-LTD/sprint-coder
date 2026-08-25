@@ -1416,6 +1416,21 @@ describe('CommandRunner', () => {
     } satisfies Partial<CommandRunnerError>);
   });
 
+  it.runIf(process.platform === 'darwin')(
+    'allows a multi-link executable only from the root-owned non-writable macOS system tree',
+    async () => {
+      const root = await workspace();
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: '/usr/bin/python3',
+        argv: ['--version'],
+        cwd: '.',
+      });
+      expect(spec).toMatchObject({ absoluteExecutable: '/usr/bin/python3' });
+      await expect(new CommandRunner().run(spec)).resolves.toMatchObject({ exitCode: 0 });
+    },
+  );
+
   it.runIf(process.platform !== 'win32')(
     'rejects an executable rewritten in place after preparation',
     async () => {

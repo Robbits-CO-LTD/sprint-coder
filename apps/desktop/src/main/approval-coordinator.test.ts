@@ -11,7 +11,11 @@ import {
   type Capability,
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
-import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
+import {
+  ApprovalCoordinator,
+  approvalFactsForTool,
+  sandboxProfileForToolAuthorization,
+} from './approval-coordinator';
 import {
   ToolBroker,
   type ToolAuthorizationDecision,
@@ -46,6 +50,7 @@ type StoredApproval = {
   decision: Decision | null;
   expiresAt: string;
   display?: { target: string; impact: string; execution: string };
+  sandboxProfile?: 'read-only' | 'workspace-write' | 'full';
 };
 
 type StoredGrant = {
@@ -175,6 +180,16 @@ const toolContext: ToolExecutionContext = {
   policyEpoch: 7,
 };
 
+describe('approval sandbox profile binding', () => {
+  it('records built-in writes as workspace-write so the approved grant can revalidate', () => {
+    expect(sandboxProfileForToolAuthorization('built-in', 'workspace.write')).toBe(
+      'workspace-write',
+    );
+    expect(sandboxProfileForToolAuthorization('built-in', 'workspace.read')).toBe('read-only');
+    expect(sandboxProfileForToolAuthorization('command-runner', 'shell.execute')).toBe('full');
+  });
+});
+
 function createHarness(input?: {
   evaluatePermission?: (input: {
     capability: Capability;
@@ -222,6 +237,7 @@ function createBroker(
   requiredCapabilities: readonly Capability[] = ['network.fetch'],
 ) {
   const registry = new ToolRegistry();
+  const workspaceWrite = requiredCapabilities.includes('workspace.write');
   const definition = createToolDefinition({
     toolId: createToolId({
       provider: 'builtin',
@@ -230,7 +246,7 @@ function createBroker(
       version: '1',
     }),
     providerName: 'approval_fetch',
-    kind: 'network',
+    kind: workspaceWrite ? 'fileWrite' : 'network',
     schemaVersion: 1,
     inputSchema: {
       type: 'object',
@@ -244,7 +260,7 @@ function createBroker(
       required: ['ok'],
       additionalProperties: false,
     },
-    sideEffect: 'network',
+    sideEffect: workspaceWrite ? 'write' : 'network',
     risk: 'medium',
     requiredCapabilities,
     executionTarget: 'main',
@@ -295,6 +311,26 @@ function resolveCommand(approval: StoredApproval, decision: Decision) {
 }
 
 describe('ApprovalCoordinator', () => {
+  it('persists the shared workspace-write profile on a built-in write approval', async () => {
+    const harness = createHarness();
+    const { broker } = createBroker(harness.coordinator.authorizeTool.bind(harness.coordinator), [
+      'workspace.write',
+    ]);
+    broker.startTurn(toolContext, 'mock');
+    const dispatch = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-workspace-write-profile',
+      providerName: 'approval_fetch',
+      input: { origin: 'workspace-fixture' },
+    });
+    const approval = await waitForPublished(harness);
+
+    expect(approval.sandboxProfile).toBe('workspace-write');
+    harness.coordinator.resolve(resolveCommand(approval, 'allow_task'));
+    await expect(dispatch).resolves.toEqual({ ok: true });
+  });
+
   it('keeps a user choice separate from permission scope and never creates a Task grant', async () => {
     const harness = createHarness();
     const registry = new ToolRegistry();

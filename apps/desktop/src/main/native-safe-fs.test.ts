@@ -25,6 +25,7 @@ import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
   nativeSafeFsAddonPath,
+  prepareNativeSafeFsLockDirectory,
   resolveNativeSafeFsAddonLocation,
 } from './native-safe-fs';
 import type {
@@ -388,6 +389,19 @@ describe('NativeSafeFs authority boundary', () => {
   });
 
   describe.skipIf(process.platform === 'win32')('POSIX backend', () => {
+    it('canonicalizes a symlink-aliased userData path before binding the lock directory', async () => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'native-safe-fs-lock-canonical-')));
+      cleanup.push(root);
+      const userData = join(root, 'real-user-data');
+      const alias = join(root, 'aliased-user-data');
+      await mkdir(userData);
+      await symlink(userData, alias, 'dir');
+
+      const lockDirectory = await prepareNativeSafeFsLockDirectory(alias);
+
+      expect(lockDirectory).toBe(await realpath(join(userData, 'native-safe-fs-locks')));
+    });
+
     it('loads a N-API capability probe with the journaled mutation primitives enabled', async () => {
       const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
       await expect(boundary.probe()).resolves.toMatchObject({

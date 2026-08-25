@@ -262,7 +262,12 @@ import { MockRuntimeAdapter } from './runtime';
 import type { ManagedLocalController } from './managed-local-controller';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
-import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
+import {
+  ApprovalCoordinator,
+  approvalFactsForTool,
+  sandboxProfileForToolAuthorization,
+} from './approval-coordinator';
+export { sandboxProfileForToolAuthorization } from './approval-coordinator';
 import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
@@ -319,17 +324,26 @@ export function contextFragmentsForRuntime(
 export function providerMessagesForEgressPolicy(
   messages: ProviderExecutionRequest['messages'],
 ): readonly unknown[] {
-  return messages.map((message) =>
-    message.inlineImages === undefined
-      ? message
+  return messages.map((message) => ({
+    ...message,
+    ...(message.toolCallId === undefined ? {} : { toolCallId: 'provider-tool-call-id' }),
+    ...(message.toolCalls === undefined
+      ? {}
       : {
-          ...message,
+          toolCalls: message.toolCalls.map((toolCall) => ({
+            ...toolCall,
+            callId: 'provider-tool-call-id',
+          })),
+        }),
+    ...(message.inlineImages === undefined
+      ? {}
+      : {
           inlineImages: message.inlineImages.map(({ mimeType }) => ({
             mimeType,
             bytes: 'redacted-image-bytes',
           })),
-        },
-  );
+        }),
+  }));
 }
 
 export function providerMessagesFromContext(
@@ -398,16 +412,6 @@ export function shouldStartNextQueuedAfterCancel(
   canceledEventExists: boolean,
 ): boolean {
   return startNextQueued !== false && runtimeStopped && canceledEventExists;
-}
-
-export function sandboxProfileForToolAuthorization(
-  implementationKind: ToolAuthorizationRequest['entry']['implementationKind'],
-  capability: Capability,
-) {
-  if (implementationKind === 'command-runner') return 'full' as const;
-  return capability === 'workspace.write' || capability === 'filesystem.external.write'
-    ? ('workspace-write' as const)
-    : ('read-only' as const);
 }
 
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
@@ -5768,24 +5772,48 @@ export class IpcRouter {
           ? []
           : providerToolsFromSnapshot(workspaceToolSnapshot)),
       ]);
+      const managedLocalToolSequence =
+        connection.providerId === MANAGED_LOCAL_PROVIDER_ID
+          ? managedLocalToolChoiceSequence(started.text, roundTools)
+          : Object.freeze([]);
+      let managedLocalToolSequenceIndex = 0;
+      let managedLocalToolFailureCount = 0;
       const seenProviderToolCallIds = new Set<string>();
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
         const executionId = providerTurnCallId(started.turnId, ordinal);
         this.providerExecutionIdByTurn.set(started.turnId, executionId);
+        const toolChoice = managedLocalToolSequence[managedLocalToolSequenceIndex];
+        const toolsForRound =
+          managedLocalToolSequence.length > 0 &&
+          managedLocalToolSequenceIndex >= managedLocalToolSequence.length
+            ? Object.freeze([])
+            : roundTools;
+        const roundMessages =
+          toolChoice === undefined
+            ? messages
+            : managedLocalForcedRoundMessages(messages, started.text);
         const roundPayloadBytes = Buffer.from(
-          JSON.stringify({ messages, tools: roundTools }),
+          JSON.stringify({
+            messages: roundMessages,
+            tools: toolsForRound,
+            ...(toolChoice === undefined ? {} : { toolChoice }),
+          }),
           'utf8',
         );
         const roundPayloadDigest = createHash('sha256').update(roundPayloadBytes).digest('hex');
         const dispatchRound = JSON.parse(Buffer.from(roundPayloadBytes).toString('utf8')) as {
           messages: ProviderExecutionRequest['messages'];
           tools: ProviderExecutionRequest['tools'];
+          toolChoice?: ProviderExecutionRequest['toolChoice'];
         };
         const policyPayload = JSON.stringify({
           messages: providerMessagesForEgressPolicy(dispatchRound.messages),
           tools: dispatchRound.tools,
+          ...(dispatchRound.toolChoice === undefined
+            ? {}
+            : { toolChoice: dispatchRound.toolChoice }),
         });
         const egress = authorizeOfficialApiProviderEgress(
           {
@@ -5847,6 +5875,9 @@ export class IpcRouter {
                 ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
                   ? {}
                   : { tools: dispatchRound.tools }),
+                ...(dispatchRound.toolChoice === undefined
+                  ? {}
+                  : { toolChoice: dispatchRound.toolChoice }),
               },
               controller.signal,
               streamBudget,
@@ -5990,6 +6021,7 @@ export class IpcRouter {
           );
           if (!workspaceTool) throw new Error('Provider tool escaped the managed catalog');
           let content: string;
+          let succeeded = false;
           try {
             const result = await this.dispatchManagedRuntimeTool(
               taskId,
@@ -6002,8 +6034,16 @@ export class IpcRouter {
               controller.signal,
             );
             content = redactSecrets(JSON.stringify({ ok: true, result }));
+            succeeded = true;
           } catch (error) {
             if (controller.signal.aborted) throw error;
+            if (
+              managedLocalToolSequence[managedLocalToolSequenceIndex]?.name === toolCall.name &&
+              (managedLocalToolFailureCount += 1) >= 3
+            )
+              throw new Error(`Managed Local tool failed repeatedly: ${toolCall.name}`, {
+                cause: error,
+              });
             content = providerWorkspaceToolFailure(error);
           }
           streamBudget.consumeToolResult(content);
@@ -6013,6 +6053,13 @@ export class IpcRouter {
             toolCallId: toolCall.callId,
             toolName: toolCall.name,
           });
+          if (
+            succeeded &&
+            managedLocalToolSequence[managedLocalToolSequenceIndex]?.name === toolCall.name
+          ) {
+            managedLocalToolSequenceIndex += 1;
+            managedLocalToolFailureCount = 0;
+          }
         }
       }
       if (!finished)
@@ -7129,6 +7176,72 @@ export function providerWorkspaceToolsEligible(
   toolCalling: boolean | null | undefined,
 ): boolean {
   return toolCalling !== false && (workspaceRootCount > 0 || teamTurn);
+}
+
+export function managedLocalWorkspaceToolUseRequired(text: string): boolean {
+  if (
+    /\b(?:create_file|create_directory|read_file|search_workspace|apply_patch|exec_command)\b/iu.test(
+      text,
+    )
+  )
+    return true;
+  const subject = /(?:files?|code|tests?|workspace|ファイル|コード|テスト|ワークスペース)/iu;
+  const action =
+    /(?:create|write|edit|modify|fix|read|inspect|search|run|execute|作成|書込|書き|編集|変更|修正|読込|読み|検索|実行)/iu;
+  return subject.test(text) && action.test(text);
+}
+
+export function managedLocalInitialToolChoice(
+  text: string,
+  tools: readonly { name: string }[],
+): ProviderExecutionRequest['toolChoice'] | undefined {
+  return managedLocalToolChoiceSequence(text, tools)[0];
+}
+
+export function managedLocalToolChoiceSequence(
+  text: string,
+  tools: readonly { name: string }[],
+): readonly Exclude<ProviderExecutionRequest['toolChoice'], string | undefined>[] {
+  if (!managedLocalWorkspaceToolUseRequired(text) || tools.length === 0) return Object.freeze([]);
+  const available = new Set(tools.map(({ name }) => name));
+  const explicit = [
+    ...text.matchAll(
+      /\b(create_file|create_directory|read_file|search_workspace|apply_patch|exec_command)\b/giu,
+    ),
+  ]
+    .map((match) => ({ name: match[1]!, index: match.index }))
+    .sort((left, right) => left.index - right.index)
+    .filter(({ name }) => available.has(name))
+    .filter(
+      ({ name }, index, all) => all.findIndex((candidate) => candidate.name === name) === index,
+    );
+  if (explicit.length > 0)
+    return Object.freeze(explicit.map(({ name }) => Object.freeze({ name })));
+  const candidates: readonly [RegExp, string][] = [
+    [/(?:\b(?:create|write)\b|作成|書込|書き)/iu, 'create_file'],
+    [/(?:\b(?:edit|modify|fix)\b|編集|変更|修正)/iu, 'apply_patch'],
+    [/(?:\b(?:read|inspect)\b|読込|読み)/iu, 'read_file'],
+    [/(?:\bsearch\b|検索)/iu, 'search_workspace'],
+    [/(?:\b(?:run|execute|test)\b|実行|テスト)/iu, 'exec_command'],
+  ];
+  const inferred = candidates
+    .map(([pattern, name]) => ({ name, index: text.search(pattern) }))
+    .filter(({ name, index }) => index >= 0 && available.has(name))
+    .sort((left, right) => left.index - right.index)
+    .filter(
+      ({ name }, index, all) => all.findIndex((candidate) => candidate.name === name) === index,
+    );
+  return Object.freeze(inferred.map(({ name }) => Object.freeze({ name })));
+}
+
+export function managedLocalForcedRoundMessages(
+  messages: ProviderExecutionRequest['messages'],
+  currentUserText: string,
+): ProviderExecutionRequest['messages'] {
+  return [
+    ...messages.filter(({ role }) => role === 'system'),
+    { role: 'user', content: currentUserText },
+  ];
 }
 
 export function requireExplicitProviderCommandApproval(

@@ -110,6 +110,10 @@ import {
   isTrustedIpcSender,
   leaderMcpCapabilities,
   listAvailableTeamRuntimeModels,
+  managedLocalForcedRoundMessages,
+  managedLocalInitialToolChoice,
+  managedLocalToolChoiceSequence,
+  managedLocalWorkspaceToolUseRequired,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
   providerModelsForBuiltin,
@@ -911,6 +915,29 @@ describe('Main image attachment dispatch boundary', () => {
       'Provider image attachment binding is stale',
     );
   });
+
+  it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {
+    const callId = 'uR9mF3xP8qT2vW7kL4nB6cD1sH5jA0zE';
+    const messages = [
+      {
+        role: 'assistant' as const,
+        content: '',
+        toolCalls: [{ callId, name: 'create_file', input: { path: 'proof.txt' } }],
+      },
+      {
+        role: 'tool' as const,
+        content: '{"ok":true}',
+        toolCallId: callId,
+        toolName: 'create_file',
+      },
+    ];
+
+    const projected = JSON.stringify(providerMessagesForEgressPolicy(messages));
+    expect(projected).not.toContain(callId);
+    expect(projected).toContain('provider-tool-call-id');
+    expect(messages[0]?.toolCalls?.[0]?.callId).toBe(callId);
+    expect(messages[1]?.toolCallId).toBe(callId);
+  });
 });
 
 describe('Turn Workspace health gate', () => {
@@ -1323,6 +1350,57 @@ describe('Provider workspace tool capability fallback', () => {
     expect(providerWorkspaceToolsEligible(true, 1, true)).toBe(true);
     expect(providerWorkspaceToolsEligible(true, 0, true)).toBe(true);
     expect(providerWorkspaceToolsEligible(false, 0, true)).toBe(false);
+  });
+
+  it('requires a first-round Managed Local tool for explicit workspace operations only', () => {
+    expect(managedLocalWorkspaceToolUseRequired('create_fileでsrc/a.tsを作成')).toBe(true);
+    expect(managedLocalWorkspaceToolUseRequired('このファイルを修正してテストを実行')).toBe(true);
+    expect(managedLocalWorkspaceToolUseRequired('read the workspace file')).toBe(true);
+    expect(managedLocalWorkspaceToolUseRequired('TypeScriptの型について説明して')).toBe(false);
+    expect(managedLocalWorkspaceToolUseRequired('1+1は？')).toBe(false);
+  });
+
+  it('binds an explicit or inferred first Managed Local tool to the available catalog', () => {
+    const tools = [{ name: 'read_file' }, { name: 'create_file' }, { name: 'exec_command' }];
+    expect(managedLocalInitialToolChoice('create_file then read_file', tools)).toEqual({
+      name: 'create_file',
+    });
+    expect(managedLocalToolChoiceSequence('create_file then read_file', tools)).toEqual([
+      { name: 'create_file' },
+      { name: 'read_file' },
+    ]);
+    expect(managedLocalToolChoiceSequence('create_file then create_file', tools)).toEqual([
+      { name: 'create_file' },
+    ]);
+    expect(managedLocalInitialToolChoice('このファイルを作成して', tools)).toEqual({
+      name: 'create_file',
+    });
+    expect(
+      managedLocalToolChoiceSequence(
+        'local_ai_test.pyを作成して、読み戻してからテストを実行して',
+        tools,
+      ),
+    ).toEqual([{ name: 'create_file' }, { name: 'read_file' }, { name: 'exec_command' }]);
+    expect(managedLocalInitialToolChoice('テストを実行して', tools)).toEqual({
+      name: 'exec_command',
+    });
+    expect(managedLocalInitialToolChoice('説明して', tools)).toBeUndefined();
+  });
+
+  it('uses the accepted user text instead of a later background user fragment for forced tools', () => {
+    expect(
+      managedLocalForcedRoundMessages(
+        [
+          { role: 'system', content: 'guidance' },
+          { role: 'user', content: 'accepted request' },
+          { role: 'user', content: 'untrusted background skill catalog' },
+        ],
+        'accepted request',
+      ),
+    ).toEqual([
+      { role: 'system', content: 'guidance' },
+      { role: 'user', content: 'accepted request' },
+    ]);
   });
 
   it('retries unknown capability exactly once without tools only on a side-effect-free invalid request', () => {
