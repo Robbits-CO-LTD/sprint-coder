@@ -86,6 +86,19 @@ type Waiter = {
   resolvers: ((decision: ToolAuthorizationDecision) => void)[];
 };
 
+/** Keep the sandbox profile recorded by an approval identical to the profile used by permission
+ * evaluation and execution revalidation. A write recorded as read-only can be approved by the
+ * user but will always fail closed before ToolBroker reaches its queued state. */
+export function sandboxProfileForToolAuthorization(
+  implementationKind: ToolAuthorizationRequest['entry']['implementationKind'],
+  capability: Capability,
+) {
+  if (implementationKind === 'command-runner') return 'full' as const;
+  return capability === 'workspace.write' || capability === 'filesystem.external.write'
+    ? ('workspace-write' as const)
+    : ('read-only' as const);
+}
+
 export class ApprovalCoordinator {
   private readonly waiters = new Map<string, Waiter>();
 
@@ -223,7 +236,10 @@ export class ApprovalCoordinator {
       resource,
       operation,
       providerEgress: 'none',
-      sandboxProfile: request.entry.implementationKind === 'command-runner' ? 'full' : 'read-only',
+      sandboxProfile: sandboxProfileForToolAuthorization(
+        request.entry.implementationKind,
+        capability,
+      ),
       risk: request.entry.risk,
       reasonUntrusted: `Tool ${request.entry.providerName} requests ${capability}`,
       display: {

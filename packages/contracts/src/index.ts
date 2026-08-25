@@ -2948,6 +2948,12 @@ export const providerExecutionRequestSchema = z
       )
       .min(1),
     tools: z.array(providerToolSchema).max(128).optional(),
+    toolChoice: z
+      .union([
+        z.enum(['auto', 'required']),
+        z.object({ name: z.string().min(1).max(256) }).strict(),
+      ])
+      .optional(),
     webSearch: z.boolean().optional(),
     structuredOutput: providerStructuredOutputSchema.optional(),
   })

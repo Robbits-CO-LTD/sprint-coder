@@ -22,6 +22,7 @@ import { nativeSafeFsAddonPath } from './native-safe-fs';
 import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   getTrustedWindowsSystemDirectory,
+  isRootOwnedSystemExecutable,
   prepareExecutionImage,
   sealExecutablePath,
   sealedExecutableIdentityDigest,
@@ -133,10 +134,14 @@ export async function prepareExecutionSpec(
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
   const trustedWindowsSystemDirectory =
     process.platform === 'win32' ? await realpath(getTrustedWindowsSystemDirectory()) : undefined;
-  const allowSourceHardlinks = await isTrustedWindowsMultiLinkExecutable(
-    executableCanonicalPath,
-    trustedWindowsSystemDirectory,
-  );
+  const allowSourceHardlinks =
+    (await isTrustedWindowsMultiLinkExecutable(
+      executableCanonicalPath,
+      trustedWindowsSystemDirectory,
+    )) ||
+    (process.platform === 'darwin' &&
+      executableStats.nlink > 1n &&
+      (await isRootOwnedSystemExecutable(executableCanonicalPath)));
   if (executableStats.nlink !== 1n && !allowSourceHardlinks)
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must have one link');
   const pathGuard = await createPathGuard({

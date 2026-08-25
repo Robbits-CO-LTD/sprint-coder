@@ -1,4 +1,4 @@
-import { freemem, totalmem } from 'node:os';
+import { totalmem } from 'node:os';
 import {
   managedLocalRuntimeSnapshotSchema,
   type LocalFitAssessment,
@@ -6,7 +6,10 @@ import {
   type ManagedLocalRuntimeSnapshot,
 } from '@sprint-coder/contracts';
 import { estimateLocalModelFit, type LocalFitEstimateInput } from './local-fit-estimator';
-import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
+import {
+  collectLocalAvailableMemoryBytes,
+  collectLocalHardwareSnapshot,
+} from './local-hardware-inventory';
 import {
   ManagedLocalRuntimeSupervisor,
   type ManagedLocalRuntimeSession,
@@ -77,7 +80,9 @@ type LifecycleDependencies = Readonly<{
     activeLeases: number,
     reason: 'switch' | 'memory_pressure' | 'dispose',
   ) => void | Promise<void>;
-  memory?: () => Readonly<{ availableBytes: number; totalBytes: number }>;
+  memory?: () =>
+    | Readonly<{ availableBytes: number; totalBytes: number }>
+    | Promise<Readonly<{ availableBytes: number; totalBytes: number }>>;
 }>;
 
 export class ManagedLocalRuntimeLifecycle {
@@ -88,7 +93,9 @@ export class ManagedLocalRuntimeLifecycle {
   private readonly nowMs: () => number;
   private readonly drainTimeoutMs: number;
   private readonly onDrainRequested: NonNullable<LifecycleDependencies['onDrainRequested']>;
-  private readonly memory: () => Readonly<{ availableBytes: number; totalBytes: number }>;
+  private readonly memory: () =>
+    | Readonly<{ availableBytes: number; totalBytes: number }>
+    | Promise<Readonly<{ availableBytes: number; totalBytes: number }>>;
   private current: CurrentModel | null = null;
   private phase: 'open' | 'draining' | 'disposed' = 'open';
   private tail: Promise<void> = Promise.resolve();
@@ -116,7 +123,11 @@ export class ManagedLocalRuntimeLifecycle {
     this.drainTimeoutMs = boundedTimeout(dependencies.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS);
     this.onDrainRequested = dependencies.onDrainRequested ?? (() => undefined);
     this.memory =
-      dependencies.memory ?? (() => ({ availableBytes: freemem(), totalBytes: totalmem() }));
+      dependencies.memory ??
+      (async () => ({
+        availableBytes: await collectLocalAvailableMemoryBytes(),
+        totalBytes: totalmem(),
+      }));
   }
 
   snapshot(): ManagedLocalRuntimeSnapshot {
@@ -250,7 +261,7 @@ export class ManagedLocalRuntimeLifecycle {
 
   async pollMemoryPressure(): Promise<boolean> {
     if (this.phase !== 'open' || this.current === null) return false;
-    const memory = this.memory();
+    const memory = await this.memory();
     if (
       !Number.isSafeInteger(memory.availableBytes) ||
       !Number.isSafeInteger(memory.totalBytes) ||

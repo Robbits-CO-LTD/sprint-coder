@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import {
   parseNativeMutationIntentSnapshot,
@@ -246,6 +247,15 @@ export function nativeSafeFsAddonLocation(): NativeSafeFsAddonLocation {
 
 export function nativeSafeFsAddonPath(): string {
   return nativeSafeFsAddonLocation().addonPath;
+}
+
+/** NativeSafeFs deliberately refuses symlinks in its absolute directory walk. macOS commonly
+ * returns userData below the `/var` alias, so bind the addon to the real directory identity rather
+ * than weakening the native O_NOFOLLOW boundary. */
+export async function prepareNativeSafeFsLockDirectory(userDataPath: string): Promise<string> {
+  const candidate = join(userDataPath, 'native-safe-fs-locks');
+  await mkdir(candidate, { recursive: true, mode: 0o700 });
+  return realpath(candidate);
 }
 
 export function loadNativeSafeFs(

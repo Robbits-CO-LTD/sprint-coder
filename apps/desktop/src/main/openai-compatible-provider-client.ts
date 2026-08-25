@@ -713,6 +713,7 @@ export function openAICompatibleChatCompletionRequest(
     })),
     ...(providerId === 'sprint-managed-local'
       ? {
+          max_tokens: 512,
           reasoning_effort: 'none',
           chat_template_kwargs: { enable_thinking: false },
         }
@@ -729,6 +730,17 @@ export function openAICompatibleChatCompletionRequest(
               parameters: tool.inputSchema,
             },
           })),
+          ...(request.toolChoice === undefined
+            ? {}
+            : {
+                tool_choice:
+                  typeof request.toolChoice === 'string'
+                    ? request.toolChoice
+                    : {
+                        type: 'function',
+                        function: { name: request.toolChoice.name },
+                      },
+              }),
         }),
     ...(request.structuredOutput === undefined
       ? {}

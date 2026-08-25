@@ -719,7 +719,8 @@ async function sealExecutablePathInternal(
     assertReadableImageSize(before);
     const bytes = await source.readFile();
     const after = await source.stat({ bigint: true });
-    if (!sameStats(before, after)) throw new Error('Shebang interpreter changed');
+    if (!sameIdentityStats(before, after, allowHardlinks))
+      throw new Error('Shebang interpreter changed');
     if (bytes.byteLength < 1 || bytes.byteLength > MAX_EXECUTION_IMAGE_BYTES)
       throw new Error('Shebang interpreter exceeds the size limit');
     const shebang = !allowScript ? undefined : parseShebang(bytes);
@@ -825,7 +826,7 @@ async function readExpectedWindowsImage(
   return bytes;
 }
 
-async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
+export async function isRootOwnedSystemExecutable(path: string): Promise<boolean> {
   if (process.getuid?.() === 0) return false;
   const systemPrefixes = ['/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/', '/System/'];
   if (!systemPrefixes.some((prefix) => path.startsWith(prefix))) return false;
@@ -869,7 +870,8 @@ async function readStablePosixImage(expected: SealedExecutableIdentity): Promise
     assertReadableImageSize(before);
     const bytes = await source.readFile();
     const after = await source.stat({ bigint: true });
-    if (!sameStats(before, after)) throw new Error('Executable changed while pinned');
+    if (!sameIdentityStats(before, after, expected.allowSourceHardlinks === true))
+      throw new Error('Executable changed while pinned');
     return bytes;
   } finally {
     await source.close();
