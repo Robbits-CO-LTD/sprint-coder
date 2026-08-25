@@ -111,10 +111,16 @@ try {
     }
   }
 
+  $nugetVersion = [string](& node -e "process.stdout.write(require('electron-winstaller').convertVersion(process.argv[1]))" $version)
+  Assert-NativeSuccess 'Resolve Squirrel package version'
+  if ([string]::IsNullOrWhiteSpace($nugetVersion)) {
+    throw "Could not resolve the Squirrel package version for $version."
+  }
+  $nupkgName = "SprintCoder-$($nugetVersion.Trim())-full.nupkg"
   $makeRoot = Join-Path $repositoryRoot 'apps\desktop\out\make'
   $installer = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Installer.exe'
   $releasesFile = Join-Path $makeRoot 'squirrel.windows\x64\RELEASES'
-  $nupkg = Join-Path $makeRoot "squirrel.windows\x64\SprintCoder-$version-full.nupkg"
+  $nupkg = Join-Path $makeRoot "squirrel.windows\x64\$nupkgName"
   $portableZip = Join-Path $makeRoot "zip\win32\x64\Sprint Coder-win32-x64-$version.zip"
   foreach ($path in @($installer, $releasesFile, $nupkg, $portableZip)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required artifact was not found: $path" }
@@ -130,7 +136,7 @@ try {
   }
 
   $releasesContent = Get-Content -Raw -LiteralPath $releasesFile
-  if ($releasesContent -notmatch [regex]::Escape("SprintCoder-$version-full.nupkg")) {
+  if ($releasesContent -notmatch [regex]::Escape($nupkgName)) {
     throw 'RELEASES does not reference the expected full nupkg.'
   }
 
@@ -139,7 +145,7 @@ try {
   try {
     $stagedInstaller = Join-Path $stagingDirectory 'Sprint-Coder-Installer.exe'
     $stagedReleases = Join-Path $stagingDirectory 'RELEASES'
-    $stagedNupkg = Join-Path $stagingDirectory "SprintCoder-$version-full.nupkg"
+    $stagedNupkg = Join-Path $stagingDirectory $nupkgName
     $stagedPortableZip = Join-Path $stagingDirectory "Sprint-Coder-win32-x64-$version.zip"
     Copy-Item -LiteralPath $installer -Destination $stagedInstaller
     Copy-Item -LiteralPath $releasesFile -Destination $stagedReleases
@@ -153,7 +159,7 @@ try {
     $release = $releaseJson | ConvertFrom-Json
     Assert-ReleaseState $release $headCommit
     $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", "SprintCoder-$version-full.nupkg", 'RELEASES')) {
+    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", $nupkgName, 'RELEASES')) {
       if ($assetNames -contains $expected) {
         throw "Release asset already exists and will not be overwritten: $expected"
       }
@@ -171,7 +177,7 @@ try {
     $release = $releaseJson | ConvertFrom-Json
     Assert-ReleaseState $release $headCommit
     $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", "SprintCoder-$version-full.nupkg", 'RELEASES')) {
+    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", $nupkgName, 'RELEASES')) {
       if ($assetNames -notcontains $expected) { throw "Uploaded asset was not found on GitHub: $expected" }
     }
 

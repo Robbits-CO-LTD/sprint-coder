@@ -8,11 +8,16 @@ Set-StrictMode -Version Latest
 
 $desktopRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $version = [string](Get-Content -Raw -LiteralPath (Join-Path $desktopRoot 'package.json') | ConvertFrom-Json).version
+$nugetVersion = [string](& node -e "process.stdout.write(require('electron-winstaller').convertVersion(process.argv[1]))" $version)
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($nugetVersion)) {
+  throw "Could not resolve the Squirrel package version for $version."
+}
+$nupkgName = "SprintCoder-$($nugetVersion.Trim())-full.nupkg"
 $makeRoot = Join-Path $desktopRoot 'out\make'
 $installer = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Installer.exe'
 $rawSetup = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Setup.exe'
 $releasesFile = Join-Path $makeRoot 'squirrel.windows\x64\RELEASES'
-$nupkg = Join-Path $makeRoot "squirrel.windows\x64\SprintCoder-$version-full.nupkg"
+$nupkg = Join-Path $makeRoot "squirrel.windows\x64\$nupkgName"
 $portableSource = Join-Path $makeRoot "zip\win32\x64\Sprint Coder-win32-x64-$version.zip"
 $portableAsset = Join-Path $makeRoot "zip\win32\x64\Sprint-Coder-win32-x64-$version.zip"
 $appExecutable = Join-Path $desktopRoot 'out\Sprint Coder-win32-x64\Sprint Coder.exe'
@@ -39,7 +44,7 @@ $appSignature = Get-AuthenticodeSignature -LiteralPath $appExecutable
 if ($appSignature.Status -ne 'NotSigned') {
   throw "Expected an explicitly unsigned packaged app, got $($appSignature.Status)."
 }
-if ((Get-Content -Raw -LiteralPath $releasesFile) -notmatch [regex]::Escape("SprintCoder-$version-full.nupkg")) {
+if ((Get-Content -Raw -LiteralPath $releasesFile) -notmatch [regex]::Escape($nupkgName)) {
   throw 'RELEASES does not reference the expected full nupkg.'
 }
 
