@@ -194,6 +194,8 @@ describe('TeamExecutionStatus', () => {
             isolatedPath: '/tmp/primary',
             identity: '1'.repeat(64),
             mutationKey: '2'.repeat(64),
+            isolatedIdentity: '3'.repeat(64),
+            isolatedMutationKey: '4'.repeat(64),
           },
         ],
         reason: 'Primary integration failed',

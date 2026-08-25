@@ -982,7 +982,7 @@ export class EditSagaExecutor {
           saga,
           'compensation_precondition_failed',
           step.ordinal,
-          errorMessage(error),
+          `${failure}; compensation failed: ${errorMessage(error)}`,
           observed?.state === 'drift' ? observed.observation : null,
         );
       }

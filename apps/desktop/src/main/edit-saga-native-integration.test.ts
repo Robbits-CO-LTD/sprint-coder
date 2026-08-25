@@ -329,6 +329,80 @@ async function expectMissing(path: string): Promise<void> {
 }
 
 if (runsWithElectronAbi) {
+  describe.runIf(process.platform === 'win32')('Windows add-only EditSaga integration', () => {
+    it('commits an add through the real native boundary', async () => {
+      const env = await fixture('windows-add');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const operation = Object.freeze({
+        kind: 'add' as const,
+        path: 'windows-add.txt',
+        canonicalPath: join(env.workspace, 'windows-add.txt'),
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: null,
+        preRevision: null,
+        preImage: null,
+        postImage: 'WINDOWS_ADD',
+        preHash: null,
+        postHash: hash('WINDOWS_ADD'),
+      });
+      const facts = {
+        version: 1 as const,
+        policyEpoch: 0,
+        operations: Object.freeze([operation]),
+      };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-add-instance'),
+      );
+
+      const saga = await executor.apply(
+        buildRequest({
+          id: 'windows-add-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'windows-add-operation',
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        }),
+      );
+      const verification = persistence.recordWorkspaceReadVerification({
+        taskId: task.id,
+        turnId: turn.turnId,
+        rootId: 'legacy-primary',
+        path: operation.path,
+        content: 'WINDOWS_ADD',
+        createdAt: '2026-07-23T00:00:01.000Z',
+      });
+
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+      expect(saga).toMatchObject({ state: 'committed', recovery: null });
+      expect(verification).toMatchObject({ decision: 'complete' });
+      await expect(readFile(operation.canonicalPath, 'utf8')).resolves.toBe('WINDOWS_ADD');
+    });
+  });
+
   describe.skipIf(process.platform === 'win32')('EditSagaExecutor native integration', () => {
     it('runs the Provider create_directory call through the durable Saga to a terminal intent', async () => {
       const env = await fixture('mkdir');

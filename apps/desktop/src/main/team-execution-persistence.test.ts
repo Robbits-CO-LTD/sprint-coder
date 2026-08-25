@@ -48,7 +48,7 @@ function createExecutionFixture(persistence: SqlitePersistenceClient) {
     instruction: 'Implement the bounded execution.',
     now: '2026-07-28T11:00:00.000Z',
   });
-  return { team, leader, worker, execution };
+  return { task, team, leader, worker, execution };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -102,7 +102,7 @@ if (runsWithElectronAbi)
 
     it('persists multi-repository isolation and leases every mutation key atomically', () => {
       const { persistence, path } = createPersistence();
-      const { team, leader } = createExecutionFixture(persistence);
+      const { task, team, leader } = createExecutionFixture(persistence);
       const writer = persistence.registerTeamWorker({
         teamId: team.id,
         role: 'writer',
@@ -159,6 +159,8 @@ if (runsWithElectronAbi)
           isolatedPath: '/isolated/one',
           identity: '1'.repeat(64),
           mutationKey: '3'.repeat(64),
+          isolatedIdentity: '5'.repeat(64),
+          isolatedMutationKey: '7'.repeat(64),
         },
         {
           rootId: '10000000-0000-4000-8000-000000000002',
@@ -169,6 +171,8 @@ if (runsWithElectronAbi)
           isolatedPath: '/isolated/two',
           identity: '2'.repeat(64),
           mutationKey: '4'.repeat(64),
+          isolatedIdentity: '6'.repeat(64),
+          isolatedMutationKey: '8'.repeat(64),
         },
       ];
       const isolation = persistence.createTeamExecutionIsolation({
@@ -185,6 +189,25 @@ if (runsWithElectronAbi)
           now: '2026-08-02T00:00:02.000Z',
         }),
       ).toMatchObject({ phase: 'running', revision: 2 });
+      const turn = persistence.startTurn(task.id, 'sealed Team isolation mutation');
+      expect(
+        persistence.getMutationWorkspacePath(
+          task.id,
+          turn.turnId,
+          roots[0]!.rootId,
+          roots[0]!.isolatedMutationKey,
+          roots[0]!.isolatedIdentity,
+        ),
+      ).toBe(roots[0]!.isolatedPath);
+      expect(
+        persistence.getMutationWorkspacePath(
+          task.id,
+          turn.turnId,
+          roots[0]!.rootId,
+          roots[0]!.mutationKey,
+          roots[0]!.identity,
+        ),
+      ).toBeNull();
 
       persistence.acquireTeamIntegrationRootLeases({
         executionId: first.id,

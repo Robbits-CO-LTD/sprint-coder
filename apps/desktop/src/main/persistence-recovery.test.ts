@@ -473,26 +473,66 @@ if (runsWithElectronAbi)
   });
 
 describe('recovery suite Electron ABI bridge', () => {
+  const runElectronAbiTests = async (testNamePattern: string) => {
+    if (runsWithElectronAbi) return ''; // already inside the bridge run
+    const result = await execFileAsync(
+      electronTestExecutablePath(),
+      [
+        join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+        'run',
+        'src/main/persistence-recovery.test.ts',
+        '-t',
+        testNamePattern,
+      ],
+      {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+        timeout: recoveryBridgeTimeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    );
+    return result.stdout ?? '';
+  };
+
+  // Vitest 3's worker RPC has a fixed 60s response deadline. A single bridge test containing all
+  // recovery cases can exceed it on Windows CI even though the Electron child is still healthy.
+  // Keep each bridge invocation below that control-plane limit while preserving the same coverage.
   it(
-    'runs the corruption-recovery and projection-perf suites with the Electron Node ABI',
+    'runs the first crash-recovery group with the Electron Node ABI',
     async () => {
-      if (runsWithElectronAbi) return; // already inside the bridge run
-      const result = await execFileAsync(
-        electronTestExecutablePath(),
-        [
-          join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-          'run',
-          'src/main/persistence-recovery.test.ts',
-        ],
-        {
-          cwd: process.cwd(),
-          encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          timeout: recoveryBridgeTimeoutMs,
-          maxBuffer: 10 * 1024 * 1024,
-        },
+      await runElectronAbiTests(
+        'resumes recovery after a process exit at (after_main_retired_before_sidecar_cleanup|after_corrupt_wal_bundled)',
       );
-      const perfLine = /\[perf\] 10k-event reopen\+projection: \d+ms/.exec(result.stdout ?? '');
+    },
+    recoveryBridgeTimeoutMs + 30_000,
+  );
+
+  it(
+    'runs the remaining crash-recovery group with the Electron Node ABI',
+    async () => {
+      await runElectronAbiTests(
+        'resumes recovery after a process exit at (after_main_retired|after_staging_validated|before_publish)$',
+      );
+    },
+    recoveryBridgeTimeoutMs + 30_000,
+  );
+
+  it(
+    'runs the non-crash corruption-recovery group with the Electron Node ABI',
+    async () => {
+      await runElectronAbiTests(
+        'database corruption recovery \\(backup/restore\\) > (?!resumes recovery after a process exit)',
+      );
+    },
+    recoveryBridgeTimeoutMs + 30_000,
+  );
+
+  it(
+    'runs the projection-perf suite with the Electron Node ABI',
+    async () => {
+      const stdout = await runElectronAbiTests('10k-event projection restore');
+      const perfLine = /\[perf\] 10k-event reopen\+projection: \d+ms/.exec(stdout);
       // Surface the measured projection time in the outer run's output for the gate record.
       if (perfLine) console.info(perfLine[0]);
     },

@@ -575,6 +575,8 @@ export const teamExecutionIsolationSchema = z
             isolatedPath: z.string().min(1).max(4_096),
             identity: z.string().length(64),
             mutationKey: z.string().length(64),
+            isolatedIdentity: z.string().length(64).nullable().default(null),
+            isolatedMutationKey: z.string().length(64).nullable().default(null),
           })
           .strict(),
       )

@@ -104,9 +104,11 @@ import {
   cancelRuntimeWithFinalCleanup,
   fileEditTrackingKey,
   IpcRouter,
+  authorizationTurnIsActive,
   invalidModelUserMessage,
   isCommittedProviderWorkspaceChange,
   isCommittedProviderWorkspaceMutation,
+  isCompleteProviderWorkspaceRead,
   isTrustedIpcSender,
   leaderMcpCapabilities,
   listAvailableTeamRuntimeModels,
@@ -938,6 +940,18 @@ describe('Main image attachment dispatch boundary', () => {
     expect(messages[0]?.toolCalls?.[0]?.callId).toBe(callId);
     expect(messages[1]?.toolCallId).toBe(callId);
   });
+
+  it('keeps a parent Turn authorization alive only while its durable Worker is active', () => {
+    const workers = [
+      { taskId: 'task-worker', parentTurnId: 'turn-parent' },
+      { taskId: 'task-other', parentTurnId: 'turn-other' },
+    ];
+
+    expect(authorizationTurnIsActive('turn-active', 'task-worker', 'turn-active', [])).toBe(true);
+    expect(authorizationTurnIsActive(null, 'task-worker', 'turn-parent', workers)).toBe(true);
+    expect(authorizationTurnIsActive(null, 'task-worker', 'turn-other', workers)).toBe(false);
+    expect(authorizationTurnIsActive(null, 'task-worker', 'turn-parent', [])).toBe(false);
+  });
 });
 
 describe('Turn Workspace health gate', () => {
@@ -1327,6 +1341,19 @@ describe('Provider Team completion and model errors', () => {
 });
 
 describe('Provider workspace tool capability fallback', () => {
+  it('recognizes only complete workspace reads as verification evidence', () => {
+    const complete = {
+      rootId: 'root-1',
+      path: 'generated/file.ts',
+      content: 'verified',
+      truncated: false,
+    } as const;
+
+    expect(isCompleteProviderWorkspaceRead(complete)).toBe(true);
+    expect(isCompleteProviderWorkspaceRead({ ...complete, truncated: true })).toBe(false);
+    expect(isCompleteProviderWorkspaceRead({ ...complete, content: undefined })).toBe(false);
+  });
+
   it('records directory changes without treating them as Edit Saga assurance subjects', () => {
     const directory = {
       rootId: 'root-1',

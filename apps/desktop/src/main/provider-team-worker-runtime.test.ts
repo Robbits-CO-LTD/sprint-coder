@@ -317,6 +317,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       secretReference: null,
       verification: { status: 'not_required', verifiedAt: null, expiresAt: null, message: null },
     };
+    const providerOwnedCallId = 'uR9mF3xP8qT2vW7kL4nB6cD1sH5jA0zE';
     let round = 0;
     const runtime: ProviderRuntime = {
       verify: vi.fn(),
@@ -326,7 +327,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
         if (round === 1) {
           yield {
             type: 'tool_call',
-            callId: 'write-1',
+            callId: providerOwnedCallId,
             name: 'create_file',
             input: { rootId: 'root-1', path: 'result.txt', text: 'verified' },
           };
@@ -346,6 +347,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
     const execute = vi.fn(async () => ({ ok: true }));
     const release = vi.fn();
+    const egressPrompts: string[] = [];
     const adapter = new ProviderAwareTeamWorkerRuntime({
       fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
       verification: {
@@ -353,7 +355,10 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       } as unknown as ProviderVerificationService,
       registry,
       getConnection: () => managedConnection,
-      authorizeEgress: () => true,
+      authorizeEgress: ({ prompt }) => {
+        egressPrompts.push(prompt);
+        return true;
+      },
       managerGuidance: 'manager',
       managerTools: [],
       workerGuidance: 'Use workspace tools.',
@@ -406,6 +411,9 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       expect.any(AbortSignal),
     );
     expect(release).toHaveBeenCalledOnce();
+    expect(egressPrompts).toHaveLength(2);
+    expect(egressPrompts[1]).not.toContain(providerOwnedCallId);
+    expect(egressPrompts[1]).toContain('provider-tool-call-id');
     expect(result).toMatchObject({
       completion: { summary: 'ファイル作成を完了しました' },
     });

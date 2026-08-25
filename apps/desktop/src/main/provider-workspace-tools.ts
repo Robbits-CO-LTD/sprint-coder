@@ -432,7 +432,7 @@ export class ManagedCodingHarness {
         registry.register(definition);
     if (deps.workspaceEdit !== undefined) {
       registry.register(WORKSPACE_CREATE_FILE_TOOL);
-      registry.register(WORKSPACE_PATCH_TOOL);
+      if (deps.workspaceEdit.supportsPatch !== false) registry.register(WORKSPACE_PATCH_TOOL);
       if (deps.workspaceEdit.createDirectory !== undefined)
         registry.register(WORKSPACE_CREATE_DIRECTORY_TOOL);
     }
@@ -529,24 +529,40 @@ export class ManagedCodingHarness {
           );
         },
       });
-      this.broker.registerImplementation({
-        toolId: WORKSPACE_PATCH_TOOL.toolId,
-        implementationKind: 'built-in',
-        prepare: (input, context, control) =>
-          this.prepareMutation('patch', input, context, control.callId),
-        resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'write'),
-        execute: (input, context) => {
-          const prepared = input as PreparedWorkspaceInput;
-          if (
-            typeof prepared.raw === 'object' &&
-            prepared.raw !== null &&
-            Array.isArray((prepared.raw as Record<string, unknown>)['operations'])
-          )
-            return executeWorkspacePatchBatch(
+      if (deps.workspaceEdit.supportsPatch !== false)
+        this.broker.registerImplementation({
+          toolId: WORKSPACE_PATCH_TOOL.toolId,
+          implementationKind: 'built-in',
+          prepare: (input, context, control) =>
+            this.prepareMutation('patch', input, context, control.callId),
+          resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'write'),
+          execute: (input, context) => {
+            const prepared = input as PreparedWorkspaceInput;
+            if (
+              typeof prepared.raw === 'object' &&
+              prepared.raw !== null &&
+              Array.isArray((prepared.raw as Record<string, unknown>)['operations'])
+            )
+              return executeWorkspacePatchBatch(
+                prepared.raw,
+                context,
+                deps.workspaceEdit!,
+                prepared.guards ?? [prepared.guard],
+                {
+                  workspace: prepared.workspace,
+                  ...(prepared.mutationBinding === undefined
+                    ? {}
+                    : { mutationBinding: prepared.mutationBinding }),
+                },
+              );
+            if (prepared.readGuard === undefined)
+              throw new Error('apply_patch requires an issued read guard');
+            return executeWorkspacePatch(
               prepared.raw,
               context,
               deps.workspaceEdit!,
-              prepared.guards ?? [prepared.guard],
+              prepared.guard,
+              prepared.readGuard,
               {
                 workspace: prepared.workspace,
                 ...(prepared.mutationBinding === undefined
@@ -554,23 +570,8 @@ export class ManagedCodingHarness {
                   : { mutationBinding: prepared.mutationBinding }),
               },
             );
-          if (prepared.readGuard === undefined)
-            throw new Error('apply_patch requires an issued read guard');
-          return executeWorkspacePatch(
-            prepared.raw,
-            context,
-            deps.workspaceEdit!,
-            prepared.guard,
-            prepared.readGuard,
-            {
-              workspace: prepared.workspace,
-              ...(prepared.mutationBinding === undefined
-                ? {}
-                : { mutationBinding: prepared.mutationBinding }),
-            },
-          );
-        },
-      });
+          },
+        });
       if (deps.workspaceEdit.createDirectory !== undefined)
         this.broker.registerImplementation({
           toolId: WORKSPACE_CREATE_DIRECTORY_TOOL.toolId,
@@ -628,7 +629,9 @@ export class ManagedCodingHarness {
         ? []
         : [
             WORKSPACE_CREATE_FILE_TOOL.toolId,
-            WORKSPACE_PATCH_TOOL.toolId,
+            ...(this.deps.workspaceEdit.supportsPatch === false
+              ? []
+              : [WORKSPACE_PATCH_TOOL.toolId]),
             ...(this.deps.workspaceEdit.createDirectory === undefined
               ? []
               : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),

@@ -64,6 +64,7 @@ import type {
 } from './persistence';
 import type { WorkerWorktreeManager } from './worker-worktree';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import { workspaceMutationBinding } from './path-guard';
 
 export type WorkerRuntimeResult = Readonly<{
   claims?: Readonly<{
@@ -2950,7 +2951,14 @@ export class TeamCoordinator {
     if (existing !== null) {
       if (existing.phase !== 'preparing' && existing.phase !== 'running')
         throw new Error(`Team execution isolation cannot run from ${existing.phase}`);
-      if (existing.phase === 'running') return existing;
+      if (
+        existing.phase === 'running' &&
+        existing.roots.every(
+          ({ isolatedIdentity, isolatedMutationKey }) =>
+            isolatedIdentity !== null && isolatedMutationKey !== null,
+        )
+      )
+        return existing;
       for (const repository of existing.repositories)
         await this.ensurePreflightWorktreeCreated(executionId, {
           agentId,
@@ -2961,6 +2969,7 @@ export class TeamCoordinator {
       return this.persistence.updateTeamExecutionIsolation({
         executionId,
         phase: 'running',
+        roots: await bindIsolatedMutationRoots(existing.roots),
         resumeKind: null,
         reason: null,
         now: this.isoNow(),
@@ -3019,6 +3028,8 @@ export class TeamCoordinator {
         isolatedPath: resolve(repositoryRecord.worktreePath, repositoryRelative),
         identity: binding.rootIdentityDigest,
         mutationKey: binding.workspaceKey,
+        isolatedIdentity: null,
+        isolatedMutationKey: null,
       };
     });
     const recorded = this.persistence.createTeamExecutionIsolation({
@@ -3037,6 +3048,7 @@ export class TeamCoordinator {
     return this.persistence.updateTeamExecutionIsolation({
       executionId: recorded.executionId,
       phase: 'running',
+      roots: await bindIsolatedMutationRoots(recorded.roots),
       resumeKind: null,
       reason: null,
       now: this.isoNow(),
@@ -3839,6 +3851,22 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
 
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {
   return `${executionId}-${repositoryOrdinal}`;
+}
+
+async function bindIsolatedMutationRoots(
+  roots: TeamExecutionIsolation['roots'],
+): Promise<TeamExecutionIsolation['roots']> {
+  return Promise.all(
+    roots.map(async (root) => {
+      const binding = await workspaceMutationBinding(root.isolatedPath);
+      return {
+        ...root,
+        isolatedPath: binding.canonicalPath,
+        isolatedIdentity: binding.rootIdentityDigest,
+        isolatedMutationKey: binding.workspaceKey,
+      };
+    }),
+  );
 }
 
 function isolationLeaseBindings(

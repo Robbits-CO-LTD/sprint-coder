@@ -324,6 +324,50 @@ describe('Provider workspace read tools', () => {
     expect(created).toEqual(['discord-mcp']);
   });
 
+  it('publishes only create_file when the native mutation scope is add-only', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-add-only-'));
+    roots.push(root);
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'c'.repeat(64),
+    };
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 3,
+      authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions: new FileRevisionRegistry(),
+        apply: async () => {
+          throw new Error('not used');
+        },
+        supportsPatch: false,
+        policyEpochFor: () => 3,
+      },
+    });
+    const snapshot = tools.startTurn(
+      {
+        taskId: 'task-add-only',
+        turnId: 'turn-add-only',
+        workspaceId: workspace.digest,
+        policyEpoch: 3,
+      },
+      'ollama',
+    );
+
+    const names = providerToolsFromSnapshot(snapshot).map(({ name }) => name);
+    expect(names).toContain('create_file');
+    expect(names).not.toContain('apply_patch');
+    expect(names).not.toContain('create_directory');
+  });
+
   it('states the high-impact and honesty constraints in the Provider system guidance', () => {
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/Never delete or\s+overwrite data/);
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/send data over a network/);

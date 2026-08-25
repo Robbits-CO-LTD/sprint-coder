@@ -40,6 +40,7 @@ export type NativeSafeFsProbe = Readonly<{
     durableFence: boolean;
     synchronousInvalidation: boolean;
     mutation: boolean;
+    mutationScope: 'none' | 'add-only' | 'full';
     directoryOwnership: 'workspace-probed' | false;
   }>;
   unavailableReason: string | null;
@@ -829,7 +830,12 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
     (capabilities as Record<string, unknown>)['durableFence'] !== true ||
     (capabilities as Record<string, unknown>)['synchronousInvalidation'] !== true ||
     (capabilities as Record<string, unknown>)['mutation'] !== true ||
-    (capabilities as Record<string, unknown>)['directoryOwnership'] !== 'workspace-probed'
+    !['add-only', 'full'].includes(
+      (capabilities as Record<string, unknown>)['mutationScope'] as string,
+    ) ||
+    ![false, 'workspace-probed'].includes(
+      (capabilities as Record<string, unknown>)['directoryOwnership'] as false | string,
+    )
   )
     throw new Error('Invalid native probe');
   return Object.freeze({
@@ -842,7 +848,10 @@ function parseProbe(value: unknown): NativeSafeFsProbe {
       durableFence: true,
       synchronousInvalidation: true,
       mutation: true,
-      directoryOwnership: 'workspace-probed',
+      mutationScope: (capabilities as Record<string, unknown>)['mutationScope'] as
+        'add-only' | 'full',
+      directoryOwnership: (capabilities as Record<string, unknown>)['directoryOwnership'] as
+        'workspace-probed' | false,
     }),
     unavailableReason: null,
   });
@@ -885,6 +894,7 @@ function unavailableProbe(reason: string | null): NativeSafeFsProbe {
       durableFence: false,
       synchronousInvalidation: false,
       mutation: false,
+      mutationScope: 'none',
       directoryOwnership: false,
     }),
     unavailableReason: reason ?? 'NativeSafeFs addon is unavailable',

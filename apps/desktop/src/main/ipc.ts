@@ -19,7 +19,7 @@ import {
   resolve as resolvePath,
   sep,
 } from 'node:path';
-import { workspaceMutationBinding } from './path-guard';
+import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
 import { CommandRunnerError } from './command-runner';
 import { pathComparisonKey } from '../path-comparison';
 import { TeamSubscriptionRegistry } from './team-subscription-registry';
@@ -659,6 +659,18 @@ type CliTaskTitleJob = {
   resolve: (title: string | null) => void;
 };
 
+export function authorizationTurnIsActive(
+  activeTurnId: string | null,
+  taskId: string,
+  turnId: string,
+  managedWorkerTurns: Iterable<Readonly<{ taskId: string; parentTurnId: string }>>,
+): boolean {
+  if (activeTurnId === turnId) return true;
+  for (const worker of managedWorkerTurns)
+    if (worker.taskId === taskId && worker.parentTurnId === turnId) return true;
+  return false;
+}
+
 export class IpcRouter {
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
@@ -1021,7 +1033,7 @@ export class IpcRouter {
           ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog)
           : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
-      releaseManagedTurn: (turnId) => this.managedWorkerTurn.delete(turnId),
+      releaseManagedTurn: (turnId) => this.releaseManagedWorkerTurn(turnId),
       invokeManagedTool: (taskId, turnId, request, signal) =>
         this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
       bindTeamMcpProcess: (turnId, identity) =>
@@ -1095,9 +1107,7 @@ export class IpcRouter {
               },
               signal,
             ),
-          release: () => {
-            this.managedWorkerTurn.delete(executionId);
-          },
+          release: () => this.releaseManagedWorkerTurn(executionId),
         };
       },
       executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit, executionId }) =>
@@ -1224,7 +1234,13 @@ export class IpcRouter {
       now: () => new Date().toISOString(),
       expiresAt: () => new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
       getCurrentPolicyEpoch: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
-      isTurnActive: (taskId, turnId) => this.persistence.getActiveTurnId(taskId) === turnId,
+      isTurnActive: (taskId, turnId) =>
+        authorizationTurnIsActive(
+          this.persistence.getActiveTurnId(taskId),
+          taskId,
+          turnId,
+          this.managedWorkerTurn.values(),
+        ),
       evaluatePermission: ({ capability, request }) =>
         this.evaluateToolPermission(request, capability),
       revalidateTaskGrant: ({ capability, request }) =>
@@ -3704,6 +3720,15 @@ export class IpcRouter {
       if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
     }
     const workspace = this.persistence.readTurnWorkspaceSetForTask(taskId, ownerTurnId);
+    if (isCompleteProviderWorkspaceRead(result))
+      this.persistence.recordWorkspaceReadVerification({
+        taskId,
+        turnId: ownerTurnId,
+        rootId: result.rootId,
+        path: result.path,
+        content: result.content,
+        createdAt: new Date().toISOString(),
+      });
     if (worker === undefined && workspace !== null && isCommittedProviderWorkspaceChange(result)) {
       const root = workspace.roots.find(({ rootId }) => rootId === result.rootId);
       if (root !== undefined)
@@ -3725,6 +3750,21 @@ export class IpcRouter {
     }
     if (worker !== undefined) this.cliTeamWorkerRuntime.recordManagedToolResult(turnId, result);
     return result;
+  }
+
+  private releaseManagedWorkerTurn(runtimeTurnId: string): void {
+    const worker = this.managedWorkerTurn.get(runtimeTurnId);
+    if (worker === undefined) return;
+    this.managedWorkerTurn.delete(runtimeTurnId);
+    if (
+      !authorizationTurnIsActive(
+        this.persistence.getActiveTurnId(worker.taskId),
+        worker.taskId,
+        worker.parentTurnId,
+        this.managedWorkerTurn.values(),
+      )
+    )
+      this.approvalCoordinator.turnEnded(worker.taskId, worker.parentTurnId, 'finished');
   }
 
   private finishAndAdvance(
@@ -3789,7 +3829,8 @@ export class IpcRouter {
         ? { ...event, resolvedModel }
         : event,
     );
-    this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
+    if (!authorizationTurnIsActive(null, taskId, turnId, this.managedWorkerTurn.values()))
+      this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
     if (state === 'completed' && pendingTaskTitle !== undefined)
       void this.generateAndApplyTaskTitle(pendingTaskTitle);
@@ -3798,7 +3839,25 @@ export class IpcRouter {
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
-    const facts = approvalFactsForTool(request, capability);
+    const rawFacts = approvalFactsForTool(request, capability);
+    const pathGuard = workspaceToolAuthorizationGuard(
+      request.input,
+      rawFacts.operation === 'read' || rawFacts.operation === 'write'
+        ? rawFacts.operation
+        : undefined,
+    );
+    const managedWorkerWorkspace = this.managedWorkerCall.get(
+      JSON.stringify([request.context.turnId, request.callId]),
+    )?.workspace;
+    const facts =
+      managedWorkerWorkspace !== undefined &&
+      rawFacts.resource.kind === 'workspace-path' &&
+      pathGuard !== undefined
+        ? {
+            ...rawFacts,
+            resource: workspacePermissionResourceFromGuard(pathGuard, 'sealed-team-isolation'),
+          }
+        : rawFacts;
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     const commandRunner = request.entry.implementationKind === 'command-runner';
     const sandboxProfile = sandboxProfileForToolAuthorization(
@@ -3849,11 +3908,13 @@ export class IpcRouter {
         sandbox: { feasible: true, profile: sandboxProfile },
       },
       now: new Date().toISOString(),
+      ...(managedWorkerWorkspace === undefined
+        ? {}
+        : {
+            workspace: managedWorkerWorkspace,
+            workspaceAuthority: 'sealed-team-isolation' as const,
+          }),
     };
-    const pathGuard = workspaceToolAuthorizationGuard(
-      request.input,
-      facts.operation === 'read' || facts.operation === 'write' ? facts.operation : undefined,
-    );
     const evaluate = (reviewerDecision?: Awaited<ReturnType<AutoReviewer['review']>>) => {
       const input = {
         ...evaluationInput,
@@ -7304,6 +7365,22 @@ export function isCommittedProviderWorkspaceChange(result: unknown): result is R
     (record['kind'] === 'add' || record['kind'] === 'update') &&
     typeof record['rootId'] === 'string' &&
     typeof record['path'] === 'string'
+  );
+}
+
+export function isCompleteProviderWorkspaceRead(result: unknown): result is Readonly<{
+  rootId: string;
+  path: string;
+  content: string;
+  truncated: false;
+}> {
+  if (typeof result !== 'object' || result === null) return false;
+  const record = result as Record<string, unknown>;
+  return (
+    typeof record['rootId'] === 'string' &&
+    typeof record['path'] === 'string' &&
+    typeof record['content'] === 'string' &&
+    record['truncated'] === false
   );
 }
 

@@ -35,7 +35,13 @@ import { randomBytes } from 'node:crypto';
 // The durable intent driver seam. SqlitePersistenceClient satisfies this; every
 // transition is journaled before the matching native effect (ADR §Decision).
 export interface NativeMutationJournal {
-  getMutationWorkspacePath(taskId: string, turnId: string, rootId: string | null): string | null;
+  getMutationWorkspacePath(
+    taskId: string,
+    turnId: string,
+    rootId: string | null,
+    workspaceKey?: string | null,
+    rootIdentityDigest?: string | null,
+  ): string | null;
   prepareNativeMutationIntent(
     seed: NativeMutationIntentSeed,
     lease: MutationLeaseToken,
@@ -175,7 +181,16 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         ? { state: 'pre', observation }
         : { state: 'post', observation };
     }
-    const intent = createNativeMutationIntentSnapshot(
+    const id = this.intentId(token.sagaId, step.ordinal, 'forward');
+    let intent: NativeMutationIntentSnapshot | null = null;
+    if (process.platform === 'win32') {
+      try {
+        intent = this.journal.getNativeMutationIntent?.(id) ?? null;
+      } catch {
+        // A pre-effect observation has no durable intent yet.
+      }
+    }
+    intent ??= createNativeMutationIntentSnapshot(
       this.buildSeed(step, token, session, 'forward'),
       randomBytes(16).toString('hex'),
     );
@@ -452,6 +467,8 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       token.taskId,
       token.turnId,
       token.rootId,
+      token.workspaceKey,
+      token.rootIdentityDigest,
     );
     if (workspacePath === null) throw new MutationLeaseStaleError();
     const binding = expectedNativeMutationBinding(

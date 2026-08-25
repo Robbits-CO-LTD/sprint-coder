@@ -265,6 +265,7 @@ function workspaceRootIdentityDigest(
 
 export function workspacePermissionResourceFromGuard(
   guard: PathGuard,
+  workspaceAuthority?: 'sealed-team-isolation',
 ): Extract<PermissionResource, { kind: 'workspace-path' }> {
   if (!isIssuedPathGuard(guard))
     throw new PathGuardError('INVALID_PATH', 'PathGuard was not issued by canonical validation');
@@ -275,11 +276,19 @@ export function workspacePermissionResourceFromGuard(
       .digest('hex'),
     canonicalPath: guard.resolvedPath,
     identityDigest: pathGuardIdentityDigest(guard),
-    classification: classifyWorkspacePath(guard.workspacePath, guard.resolvedPath),
+    classification: classifyWorkspacePath(
+      guard.workspacePath,
+      guard.resolvedPath,
+      workspaceAuthority,
+    ),
   });
 }
 
-function classifyWorkspacePath(workspacePath: string, resolvedPath: string): PathClassification {
+function classifyWorkspacePath(
+  workspacePath: string,
+  resolvedPath: string,
+  workspaceAuthority?: 'sealed-team-isolation',
+): PathClassification {
   const parts = relative(workspacePath, resolvedPath)
     .split(/[\\/]+/)
     .map((part) => part.toLowerCase());
@@ -287,46 +296,55 @@ function classifyWorkspacePath(workspacePath: string, resolvedPath: string): Pat
     .split(/[\\/]+/)
     .filter(Boolean)
     .map((part) => part.toLowerCase());
+  const classificationParts =
+    workspaceAuthority === 'sealed-team-isolation' ? parts : absoluteParts;
   const name = parts.at(-1) ?? '';
-  if (isAtOrBelow('/System', resolvedPath) || isAtOrBelow('/Library', resolvedPath))
-    return 'os-protected';
   if (
-    isAtOrBelow('/proc', resolvedPath) ||
-    isAtOrBelow('/sys', resolvedPath) ||
-    isAtOrBelow('/dev', resolvedPath) ||
-    isAtOrBelow('/run', resolvedPath) ||
-    isAtOrBelow('/boot', resolvedPath) ||
-    isAtOrBelow('/etc', resolvedPath) ||
-    isAtOrBelow('/private/etc', resolvedPath) ||
-    isAtOrBelow('/private/var/root', resolvedPath)
+    workspaceAuthority === undefined &&
+    (isAtOrBelow('/System', resolvedPath) || isAtOrBelow('/Library', resolvedPath))
   )
     return 'os-protected';
   if (
-    absoluteParts.includes('windows') ||
-    absoluteParts.includes('system32') ||
-    absoluteParts.includes('programdata') ||
-    absoluteParts.includes('program files') ||
-    absoluteParts.includes('program files (x86)')
+    workspaceAuthority === undefined &&
+    (isAtOrBelow('/proc', resolvedPath) ||
+      isAtOrBelow('/sys', resolvedPath) ||
+      isAtOrBelow('/dev', resolvedPath) ||
+      isAtOrBelow('/run', resolvedPath) ||
+      isAtOrBelow('/boot', resolvedPath) ||
+      isAtOrBelow('/etc', resolvedPath) ||
+      isAtOrBelow('/private/etc', resolvedPath) ||
+      isAtOrBelow('/private/var/root', resolvedPath))
   )
     return 'os-protected';
   if (
-    absoluteParts.includes('.ssh') ||
-    absoluteParts.includes('.aws') ||
-    absoluteParts.includes('.gnupg') ||
-    absoluteParts.includes('.kube') ||
-    absoluteParts.includes('gcloud') ||
-    absoluteParts.includes('keychains')
+    classificationParts.includes('windows') ||
+    classificationParts.includes('system32') ||
+    classificationParts.includes('programdata') ||
+    classificationParts.includes('program files') ||
+    classificationParts.includes('program files (x86)')
+  )
+    return 'os-protected';
+  if (
+    classificationParts.includes('.ssh') ||
+    classificationParts.includes('.aws') ||
+    classificationParts.includes('.gnupg') ||
+    classificationParts.includes('.kube') ||
+    classificationParts.includes('gcloud') ||
+    classificationParts.includes('keychains')
   )
     return 'credential';
-  if (absoluteParts.includes('appdata')) return 'app-private';
+  if (classificationParts.includes('appdata')) return 'app-private';
   if (
-    absoluteParts.includes('.git') ||
-    absoluteParts.includes('.codex') ||
-    absoluteParts.includes('.sprint-coder') ||
-    absoluteParts.includes('.sprint-coder-team')
+    classificationParts.includes('.git') ||
+    classificationParts.includes('.codex') ||
+    classificationParts.includes('.sprint-coder') ||
+    classificationParts.includes('.sprint-coder-team')
   )
     return 'app-private';
-  if (absoluteParts.includes('library') && absoluteParts.includes('application support'))
+  if (
+    classificationParts.includes('library') &&
+    classificationParts.includes('application support')
+  )
     return 'app-private';
   if (
     parts.some(

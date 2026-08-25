@@ -3397,6 +3397,7 @@ napi_value Probe(napi_env env, napi_callback_info) {
     napi_set_named_property(env, capabilities, name, boolean);
   }
   napi_set_named_property(env, capabilities, "mutation", boolean);
+  napi_set_named_property(env, capabilities, "mutationScope", MakeString(env, "full"));
   napi_set_named_property(env, capabilities, "directoryOwnership",
                           MakeString(env, "workspace-probed"));
   napi_set_named_property(env, result, "capabilities", capabilities);
