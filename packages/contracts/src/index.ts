@@ -2439,6 +2439,9 @@ export const managedLocalRuntimeSnapshotSchema = z
       .regex(/^[a-f0-9]{64}$/u)
       .nullable(),
     backend: z.enum(['cpu', 'metal', 'cuda', 'vulkan']).nullable(),
+    gpuLayers: z.number().int().min(0).max(4_096).nullable(),
+    contextTokens: z.number().int().min(256).max(1_048_576).nullable(),
+    batchSize: z.number().int().positive().max(1_048_576).nullable(),
     activeLeaseCount: z.number().int().nonnegative().max(10_000),
     fit: localFitAssessmentSchema.nullable(),
     failureCode: managedLocalRuntimeFailureCodeSchema.nullable(),
@@ -2447,14 +2450,46 @@ export const managedLocalRuntimeSnapshotSchema = z
   })
   .strict()
   .superRefine((snapshot, context) => {
+    const summaryFields = [
+      snapshot.backend,
+      snapshot.gpuLayers,
+      snapshot.contextTokens,
+      snapshot.batchSize,
+    ];
+    if (
+      summaryFields.some((value) => value === null) !==
+      summaryFields.every((value) => value === null)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Managed Local effective settings must be complete or absent',
+      });
     if (
       snapshot.state === 'running' &&
       (snapshot.target === null ||
         snapshot.runtimeVersion === null ||
         snapshot.modelId === null ||
-        snapshot.backend === null)
+        snapshot.backend === null ||
+        snapshot.gpuLayers === null ||
+        snapshot.contextTokens === null ||
+        snapshot.batchSize === null)
     )
       context.addIssue({ code: 'custom', message: 'Running Managed Local state is incomplete' });
+    if (snapshot.backend === 'cpu' && snapshot.gpuLayers !== null && snapshot.gpuLayers !== 0)
+      context.addIssue({
+        code: 'custom',
+        message: 'CPU Managed Local runtime must use zero GPU layers',
+      });
+    if (
+      snapshot.backend !== null &&
+      snapshot.backend !== 'cpu' &&
+      snapshot.gpuLayers !== null &&
+      snapshot.gpuLayers === 0
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Accelerated Managed Local runtime must use GPU layers',
+      });
     if ((snapshot.failureCode === null) !== (snapshot.recovery === null))
       context.addIssue({
         code: 'custom',

@@ -98,6 +98,10 @@ class FakeSession {
     target: 'darwin-arm64',
     runtimeVersion: 'b10516',
     baseUrl: 'http://127.0.0.1:43210/v1',
+    backend: 'metal',
+    gpuLayers: 99,
+    contextTokens: 4096,
+    batchSize: 512,
     startedAt: '2026-08-24T00:00:00.000Z',
     stoppedAt: null,
     exitCode: null,
@@ -206,6 +210,20 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     const second = await subject.acquire(model, false);
 
     expect(supervisor.starts).toHaveLength(1);
+    expect(supervisor.starts[0]).toMatchObject({
+      backend: 'metal',
+      gpuLayers: 99,
+      contextTokens: 4096,
+      batchSize: 512,
+    });
+    expect(subject.snapshot()).toMatchObject({
+      state: 'running',
+      backend: 'metal',
+      gpuLayers: 99,
+      contextTokens: 4096,
+      batchSize: 512,
+      runtimeVersion: 'b10516',
+    });
     expect(subject.activeLeaseCount(model.id)).toBe(2);
     await first.release();
     expect(supervisor.sessions[0]?.stopCount).toBe(0);
@@ -263,6 +281,16 @@ describe('ManagedLocalRuntimeLifecycle', () => {
       code: 'memory_unknown',
     });
     expect(unknown.supervisor.starts).toHaveLength(0);
+  });
+
+  it('rejects a descriptor whose backend is absent from the verified bundle', async () => {
+    const { subject, supervisor } = lifecycle();
+    const model = await descriptor('8', { backend: 'cuda' });
+
+    await expect(subject.acquire(model, false)).rejects.toMatchObject({
+      code: 'backend_unavailable',
+    });
+    expect(supervisor.starts).toHaveLength(0);
   });
 
   it('keeps active and loaded models undeletable', async () => {

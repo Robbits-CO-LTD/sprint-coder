@@ -147,9 +147,12 @@ export class ManagedLocalRuntimeLifecycle {
     return managedLocalRuntimeSnapshotSchema.parse({
       state: crashed ? 'crashed' : this.phase === 'draining' ? 'stopping' : runtime.state,
       target: this.bundle.target,
-      runtimeVersion: this.bundle.manifest.runtimeVersion,
+      runtimeVersion: runtime.runtimeVersion,
       modelId: current.descriptor.id,
-      backend: current.descriptor.backend,
+      backend: runtime.backend,
+      gpuLayers: runtime.gpuLayers,
+      contextTokens: runtime.contextTokens,
+      batchSize: runtime.batchSize,
       activeLeaseCount: current.leases.size,
       fit: current.fit,
       failureCode: failure?.code ?? null,
@@ -163,7 +166,7 @@ export class ManagedLocalRuntimeLifecycle {
     automaticRelease: boolean,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<ManagedLocalModelLease> {
-    validateDescriptor(descriptor);
+    validateDescriptor(descriptor, this.bundle.manifest.candidateBackends);
     for (;;) {
       if (signal.aborted) throw canceled();
       const result = await this.exclusive(async () => {
@@ -192,6 +195,7 @@ export class ManagedLocalRuntimeLifecycle {
             modelPath: descriptor.modelPath,
             modelAlias: descriptor.id,
             scratchRoot: descriptor.scratchRoot,
+            backend: descriptor.backend,
             contextTokens: descriptor.contextTokens,
             batchSize: descriptor.batchSize,
             gpuLayers: descriptor.gpuLayers,
@@ -401,6 +405,9 @@ export class ManagedLocalRuntimeLifecycle {
       runtimeVersion: this.bundle.manifest.runtimeVersion,
       modelId: null,
       backend: null,
+      gpuLayers: null,
+      contextTokens: null,
+      batchSize: null,
       activeLeaseCount: 0,
       fit: this.lastFailure?.fit ?? null,
       failureCode: this.lastFailure?.code ?? null,
@@ -444,16 +451,22 @@ export class ManagedLocalRuntimeLifecycle {
   }
 }
 
-function validateDescriptor(descriptor: ManagedLocalModelDescriptor): void {
+function validateDescriptor(
+  descriptor: ManagedLocalModelDescriptor,
+  candidateBackends: readonly ManagedLocalBackend[],
+): void {
   if (
     !/^[a-f0-9]{64}$/u.test(descriptor.id) ||
-    !['cpu', 'metal', 'cuda', 'vulkan'].includes(descriptor.backend) ||
+    !candidateBackends.includes(descriptor.backend) ||
     !Number.isInteger(descriptor.gpuLayers) ||
     descriptor.gpuLayers < 0 ||
+    descriptor.gpuLayers > 4_096 ||
     !Number.isInteger(descriptor.contextTokens) ||
     descriptor.contextTokens < 256 ||
+    descriptor.contextTokens > 1_048_576 ||
     !Number.isInteger(descriptor.batchSize) ||
     descriptor.batchSize < 1 ||
+    descriptor.batchSize > 1_048_576 ||
     descriptor.fit.contextTokens !== descriptor.contextTokens ||
     (descriptor.backend === 'cpu' &&
       (descriptor.gpuLayers !== 0 || descriptor.fit.gpuOffloadRatio !== 0)) ||

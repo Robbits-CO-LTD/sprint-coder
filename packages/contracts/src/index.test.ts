@@ -1703,6 +1703,9 @@ describe('Managed Local runtime contracts', () => {
       runtimeVersion: 'b10516',
       modelId: 'a'.repeat(64),
       backend: 'metal',
+      gpuLayers: 99,
+      contextTokens: 4096,
+      batchSize: 512,
       activeLeaseCount: 1,
       fit: {
         state: 'estimated_comfortable',
@@ -1735,6 +1738,9 @@ describe('Managed Local runtime contracts', () => {
       runtimeVersion: 'b10516',
       modelId: null,
       backend: null,
+      gpuLayers: null,
+      contextTokens: null,
+      batchSize: null,
       activeLeaseCount: 0,
       fit: null,
       failureCode: null,
@@ -1749,6 +1755,28 @@ describe('Managed Local runtime contracts', () => {
       contracts.managedLocalRuntimeSnapshotSchema.parse({
         ...stopped,
         failureCode: 'memory_insufficient',
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.managedLocalRuntimeSnapshotSchema.parse({
+        ...stopped,
+        backend: 'cpu',
+        gpuLayers: 0,
+        contextTokens: 4096,
+        batchSize: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.managedLocalRuntimeSnapshotSchema.parse({
+        ...stopped,
+        state: 'running',
+        target: 'darwin-arm64',
+        runtimeVersion: 'b10516',
+        modelId: 'a'.repeat(64),
+        backend: 'cpu',
+        gpuLayers: 1,
+        contextTokens: 4096,
+        batchSize: 512,
       }),
     ).toThrow();
   });

@@ -172,6 +172,94 @@ describe('ManagedLocalRuntimeSupervisor', () => {
     expect(env.child.kills).toEqual(['SIGTERM']);
   });
 
+  it('binds validated model settings to llama.cpp argv and the secret-free runtime snapshot', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    const session = await env.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4096,
+      batchSize: 1024,
+      gpuLayers: 0,
+    });
+
+    expect(env.spawnArgs()).toEqual(
+      expect.arrayContaining([
+        '--model',
+        modelPath,
+        '--ctx-size',
+        '4096',
+        '--batch-size',
+        '1024',
+        '--ubatch-size',
+        '512',
+        '--n-gpu-layers',
+        '0',
+        '--jinja',
+      ]),
+    );
+    expect(session.snapshot()).toMatchObject({
+      state: 'running',
+      runtimeVersion: 'b10516',
+      backend: 'cpu',
+      gpuLayers: 0,
+      contextTokens: 4096,
+      batchSize: 1024,
+    });
+    await session.stop();
+  });
+
+  it('rejects a model backend that is not declared by the verified sidecar', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    await expect(
+      env.supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath,
+        modelAlias: 'a'.repeat(64),
+        backend: 'metal',
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 99,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(env.spawnArgs()).toEqual([]);
+  });
+
+  it('rejects out-of-range and inconsistent model settings before spawning', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+    const base = {
+      kind: 'model' as const,
+      ...paths,
+      modelPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu' as const,
+      contextTokens: 4096,
+      batchSize: 512,
+      gpuLayers: 0,
+    };
+
+    for (const invalid of [{ contextTokens: 255 }, { batchSize: 0 }, { gpuLayers: 1 }]) {
+      await expect(env.supervisor.start({ ...base, ...invalid })).rejects.toMatchObject({
+        code: 'invalid_input',
+      });
+    }
+    expect(env.spawnArgs()).toEqual([]);
+  });
+
   it('rejects a server that does not enforce authentication and owns cleanup', async () => {
     const paths = await directories();
     const env = harness({
@@ -230,6 +318,7 @@ describe('ManagedLocalRuntimeSupervisor', () => {
         ...paths,
         modelPath: outside,
         modelAlias: 'a'.repeat(64),
+        backend: 'cpu',
         contextTokens: 4096,
         batchSize: 512,
         gpuLayers: 0,
