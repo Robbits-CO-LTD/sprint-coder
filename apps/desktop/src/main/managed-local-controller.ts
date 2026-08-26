@@ -22,6 +22,7 @@ import type {
   LocalModelFitInput,
   ManagedLocalRuntimeSnapshot,
   ProviderModel,
+  PublicModelArtifact,
   PublicModelCatalogDetail,
   PublicModelCatalogDetailInput,
   PublicModelCatalogPage,
@@ -183,13 +184,12 @@ export class ManagedLocalController {
   ): Promise<ManagedLocalLaunchSettingsView> {
     const settings = managedLocalLaunchSettingsSchema.parse(input);
     this.assertLaunchSettingsEditable(modelId);
-    const configured = this.manager.setLaunchSettings(modelId, settings);
     const hardware = await this.collectHardware();
-    return managedLocalLaunchSettingsView(
-      modelId,
-      configured,
-      resolveManagedLocalLaunchSettings(configured, hardware, this.bundle),
-    );
+    const effective = resolveManagedLocalLaunchSettings(settings, hardware, this.bundle);
+    if (effective === null)
+      throw new Error('Managed Local backend is unavailable on this device and runtime bundle');
+    const configured = this.manager.setLaunchSettings(modelId, settings);
+    return managedLocalLaunchSettingsView(modelId, configured, effective);
   }
 
   async listProviderModels(
@@ -347,6 +347,7 @@ export class ManagedLocalController {
       const hardware = await this.collectHardware();
       const binding = this.verificationBinding(modelId, hardware, {
         backend: snapshot.backend,
+        gpuLayers: snapshot.gpuLayers,
         contextTokens,
         batchSize: snapshot.batchSize,
       });
@@ -373,23 +374,36 @@ export class ManagedLocalController {
   async fit(input: LocalModelFitInput): Promise<LocalFitAssessment> {
     const detail = await this.catalog.detail({ source: input.source, sourceId: input.sourceId });
     const artifact = detail.artifacts.find(({ id }) => id === input.artifactId);
-    if (artifact === undefined) throw new Error('Public model artifact was not found');
+    if (artifact === undefined || artifact.role !== 'model')
+      throw new Error('Public model artifact was not found');
+    const mmproj =
+      input.mmprojArtifactId === undefined
+        ? null
+        : detail.artifacts.find(({ id }) => id === input.mmprojArtifactId);
+    if (input.mmprojArtifactId !== undefined && !compatibleMultimodalPair(artifact, mmproj))
+      throw new Error('Public mmproj artifact is not compatible with the selected model');
+    const weightsBytes =
+      artifact.sizeBytes === null || (mmproj !== null && mmproj.sizeBytes === null)
+        ? null
+        : artifact.sizeBytes + (mmproj?.sizeBytes ?? 0);
     const hardware = await this.collectHardware();
     const backend = this.availableBackend(hardware);
     return estimateLocalModelFit(
       {
-        weightsBytes: artifact.sizeBytes,
+        weightsBytes,
         contextTokens: input.contextTokens,
         kvBytesPerToken: 128 * 1_024,
         scratchBytes:
-          artifact.sizeBytes === null
+          weightsBytes === null
             ? null
-            : Math.max(256 * 1_024 * 1_024, Math.ceil(artifact.sizeBytes * 0.1)),
+            : Math.max(256 * 1_024 * 1_024, Math.ceil(weightsBytes * 0.1)),
         runtimeReserveBytes: 768 * 1_024 * 1_024,
         safetyFactor: 1.15,
         gpuOffloadRatio: backend === null || backend === 'cpu' ? 0 : 0.8,
         runtimeCompatibility:
-          artifact.format === 'gguf' && artifact.installability.state === 'installable'
+          artifact.format === 'gguf' &&
+          artifact.installability.state === 'installable' &&
+          (mmproj === null || mmproj.installability.state === 'installable')
             ? 'supported'
             : artifact.format === 'other'
               ? 'unsupported'
@@ -425,7 +439,10 @@ export class ManagedLocalController {
   private verificationBinding(
     modelId: string,
     hardware: LocalHardwareSnapshot,
-    launch: Pick<ManagedLocalEffectiveLaunchSettings, 'backend' | 'contextTokens' | 'batchSize'>,
+    launch: Pick<
+      ManagedLocalEffectiveLaunchSettings,
+      'backend' | 'gpuLayers' | 'contextTokens' | 'batchSize'
+    >,
   ): LocalVerificationBinding {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
     const model = this.manager.modelRecord(modelId);
@@ -438,6 +455,7 @@ export class ManagedLocalController {
       contextTokens: launch.contextTokens,
       kvCacheType: 'f16',
       batchSize: launch.batchSize,
+      gpuLayers: launch.gpuLayers,
       gpuOffloadRatio: launch.backend === 'cpu' ? 0 : 0.8,
       sidecarVersion: this.bundle.manifest.runtimeVersion,
       backend: launch.backend,
@@ -588,7 +606,7 @@ export function installPlan(
     throw new Error('Immutable Hugging Face revision is required');
   if (new Set(artifactIds).size !== artifactIds.length)
     throw new Error('Duplicate public model artifact');
-  const selected = artifactIds.map((id) => {
+  const selectedCatalog = artifactIds.map((id) => {
     const artifact = detail.artifacts.find((candidate) => candidate.id === id);
     if (
       artifact === undefined ||
@@ -603,6 +621,19 @@ export function installPlan(
       (artifact.role === 'mmproj' && !isMmprojFilename(artifact.filename))
     )
       throw new Error('Selected public model artifact is not installable');
+    return artifact;
+  });
+  const selectedModels = selectedCatalog.filter(({ role }) => role === 'model');
+  const selectedMmproj = selectedCatalog.filter(({ role }) => role === 'mmproj');
+  if (selectedModels.length === 0) throw new Error('A model GGUF artifact is required');
+  if (selectedMmproj.length > 1) throw new Error('Only one mmproj artifact is supported');
+  if (
+    selectedMmproj.length === 1 &&
+    (selectedModels.length !== 1 ||
+      !compatibleMultimodalPair(selectedModels[0]!, selectedMmproj[0]))
+  )
+    throw new Error('Selected mmproj is not compatible with the model GGUF');
+  const selected = selectedCatalog.map((artifact) => {
     return {
       role: artifact.role,
       filename: artifact.filename,
@@ -618,8 +649,6 @@ export function installPlan(
   });
   const modelArtifacts = selected.filter(({ role }) => role === 'model');
   const mmprojArtifacts = selected.filter(({ role }) => role === 'mmproj');
-  if (modelArtifacts.length === 0) throw new Error('A model GGUF artifact is required');
-  if (mmprojArtifacts.length > 1) throw new Error('Only one mmproj artifact is supported');
   // The model is always ordinal 1 and the projector follows it. This makes the persisted bundle
   // self-describing even after a restart, while allowing callers to select the projector first.
   const ordered = [...modelArtifacts, ...mmprojArtifacts];
@@ -686,6 +715,19 @@ function huggingFaceResolveUrl(
 
 function isMmprojFilename(input: string): boolean {
   return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(input.split(/[\\/]/u).at(-1) ?? '');
+}
+
+function compatibleMultimodalPair(
+  model: PublicModelArtifact,
+  mmproj: PublicModelArtifact | null | undefined,
+): mmproj is PublicModelArtifact {
+  return (
+    model.role === 'model' &&
+    mmproj?.role === 'mmproj' &&
+    model.multimodalCompatibilityKey !== undefined &&
+    model.multimodalCompatibilityKey !== null &&
+    model.multimodalCompatibilityKey === mmproj.multimodalCompatibilityKey
+  );
 }
 
 function hardwareFingerprint(hardware: LocalHardwareSnapshot): string {

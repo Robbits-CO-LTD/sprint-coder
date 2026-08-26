@@ -303,31 +303,36 @@ export class PublicModelCatalogService {
     const item = normalizeHuggingFaceItem(value);
     if (item === null) throw new Error('Invalid Hugging Face model detail');
     const siblings = arrayOfRecords(value.siblings).slice(0, 256);
-    const artifacts = siblings
-      .filter((file) => typeof file.rfilename === 'string')
-      .map((file) => {
-        const filename = boundedString(file.rfilename, 512)!;
-        const lfs = asOptionalRecord(file.lfs);
-        const sha256 = digestOrNull(lfs?.sha256 ?? file.blobId);
-        const format = filename.toLowerCase().endsWith('.gguf')
-          ? ('gguf' as const)
-          : ('other' as const);
-        const role = format === 'gguf' ? artifactRoleFromFilename(filename) : null;
-        return {
-          id: artifactId('hugging_face', sourceId, filename),
-          filename,
-          format,
-          role: role ?? 'model',
-          quantization: format === 'gguf' ? quantizationFromFilename(filename) : null,
-          sizeBytes: safeByteCount(lfs?.size ?? file.size),
-          sha256,
-          sourceUrl:
-            item.immutableRevision === null
-              ? null
-              : huggingFaceArtifactViewUrl(sourceId, item.immutableRevision, filename),
-          installability: artifactInstallability(item, format, sha256),
-        };
-      });
+    const artifacts = bindGenericMmprojArtifacts(
+      siblings
+        .filter((file) => typeof file.rfilename === 'string')
+        .map((file) => {
+          const filename = boundedString(file.rfilename, 512)!;
+          const lfs = asOptionalRecord(file.lfs);
+          const sha256 = digestOrNull(lfs?.sha256 ?? file.blobId);
+          const format = filename.toLowerCase().endsWith('.gguf')
+            ? ('gguf' as const)
+            : ('other' as const);
+          const role = format === 'gguf' ? artifactRoleFromFilename(filename) : null;
+          const quantization = format === 'gguf' ? quantizationFromFilename(filename) : null;
+          return {
+            id: artifactId('hugging_face', sourceId, filename),
+            filename,
+            format,
+            role: role ?? 'model',
+            multimodalCompatibilityKey:
+              role === null ? null : multimodalCompatibilityKey(filename, role, quantization),
+            quantization,
+            sizeBytes: safeByteCount(lfs?.size ?? file.size),
+            sha256,
+            sourceUrl:
+              item.immutableRevision === null
+                ? null
+                : huggingFaceArtifactViewUrl(sourceId, item.immutableRevision, filename),
+            installability: artifactInstallability(item, format, sha256),
+          };
+        }),
+    );
     const cardData = asOptionalRecord(value.cardData);
     const gguf = asOptionalRecord(value.gguf);
     return {
@@ -599,43 +604,48 @@ function normalizeGalleryDetail(record: Record<string, unknown>): PublicModelCat
 function galleryArtifacts(record: Record<string, unknown>, name: string) {
   const backend = boundedString(asOptionalRecord(record.overrides)?.backend, 128)?.toLowerCase();
   const supportedBackend = backend === 'llama' || backend === 'llama-cpp';
-  return arrayOfRecords(record.files)
-    .slice(0, 256)
-    .map((file, index) => {
-      const filename = boundedString(file.filename, 512) ?? `artifact-${index + 1}`;
-      const format = filename.toLowerCase().endsWith('.gguf')
-        ? ('gguf' as const)
-        : ('other' as const);
-      const role = format === 'gguf' ? artifactRoleFromFilename(filename) : null;
-      const sha256 = digestOrNull(file.sha256);
-      const supportedUri = isSupportedGalleryArtifactUri(file.uri);
-      const installability: PublicModelInstallability = !supportedBackend
-        ? {
-            state: 'unsupported',
-            reason: 'このgallery backendはManaged Local v1では実行できません。',
-          }
-        : format !== 'gguf'
-          ? { state: 'unsupported', reason: 'Managed Local v1はGGUFだけを取得できます。' }
-          : sha256 === null
-            ? { state: 'metadata_required', reason: 'SHA-256がないため取得できません。' }
-            : !supportedUri
-              ? {
-                  state: 'unsupported',
-                  reason: 'このartifactの取得元はManaged Local v1の許可対象外です。',
-                }
-              : { state: 'installable', reason: 'GGUFとSHA-256を確認済みです。' };
-      return {
-        id: artifactId('localai_gallery', name, filename),
-        filename,
-        format,
-        role: role ?? 'model',
-        quantization: format === 'gguf' ? quantizationFromFilename(filename) : null,
-        sizeBytes: safeByteCount(file.size),
-        sha256,
-        sourceUrl: normalizedGalleryArtifactUrl(file.uri),
-        installability,
-      };
-    });
+  return bindGenericMmprojArtifacts(
+    arrayOfRecords(record.files)
+      .slice(0, 256)
+      .map((file, index) => {
+        const filename = boundedString(file.filename, 512) ?? `artifact-${index + 1}`;
+        const format = filename.toLowerCase().endsWith('.gguf')
+          ? ('gguf' as const)
+          : ('other' as const);
+        const role = format === 'gguf' ? artifactRoleFromFilename(filename) : null;
+        const quantization = format === 'gguf' ? quantizationFromFilename(filename) : null;
+        const sha256 = digestOrNull(file.sha256);
+        const supportedUri = isSupportedGalleryArtifactUri(file.uri);
+        const installability: PublicModelInstallability = !supportedBackend
+          ? {
+              state: 'unsupported',
+              reason: 'このgallery backendはManaged Local v1では実行できません。',
+            }
+          : format !== 'gguf'
+            ? { state: 'unsupported', reason: 'Managed Local v1はGGUFだけを取得できます。' }
+            : sha256 === null
+              ? { state: 'metadata_required', reason: 'SHA-256がないため取得できません。' }
+              : !supportedUri
+                ? {
+                    state: 'unsupported',
+                    reason: 'このartifactの取得元はManaged Local v1の許可対象外です。',
+                  }
+                : { state: 'installable', reason: 'GGUFとSHA-256を確認済みです。' };
+        return {
+          id: artifactId('localai_gallery', name, filename),
+          filename,
+          format,
+          role: role ?? 'model',
+          multimodalCompatibilityKey:
+            role === null ? null : multimodalCompatibilityKey(filename, role, quantization),
+          quantization,
+          sizeBytes: safeByteCount(file.size),
+          sha256,
+          sourceUrl: normalizedGalleryArtifactUrl(file.uri),
+          installability,
+        };
+      }),
+  );
 }
 
 function galleryInstallability(
@@ -786,6 +796,43 @@ function quantizationFromFilename(filename: string): string | null {
 function artifactRoleFromFilename(filename: string): 'model' | 'mmproj' {
   const leaf = filename.split(/[\\/]/u).at(-1) ?? '';
   return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(leaf) ? 'mmproj' : 'model';
+}
+
+function multimodalCompatibilityKey(
+  filename: string,
+  role: 'model' | 'mmproj',
+  quantization: string | null,
+): string | null {
+  const leaf = filename.split(/[\\/]/u).at(-1) ?? '';
+  let stem = leaf.replace(/\.gguf$/iu, '').replace(/[-_.]\d{5}-of-\d{5}$/iu, '');
+  if (role === 'mmproj') stem = stem.replace(/^mmproj[-_.]+/iu, '');
+  if (quantization !== null) {
+    const escaped = quantization.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    stem = stem.replace(new RegExp(`(?:^|[-_.])${escaped}$`, 'iu'), '');
+  }
+  const key = stem
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '');
+  return key.length >= 1 && key.length <= 128 ? key : null;
+}
+
+function bindGenericMmprojArtifacts<
+  T extends { role: 'model' | 'mmproj'; multimodalCompatibilityKey: string | null },
+>(artifacts: readonly T[]): T[] {
+  const modelKeys = new Set(
+    artifacts
+      .filter(({ role }) => role === 'model')
+      .map(({ multimodalCompatibilityKey }) => multimodalCompatibilityKey)
+      .filter((key): key is string => key !== null),
+  );
+  if (modelKeys.size !== 1) return [...artifacts];
+  const [onlyModelKey] = modelKeys;
+  return artifacts.map((artifact) =>
+    artifact.role === 'mmproj' && artifact.multimodalCompatibilityKey === null
+      ? { ...artifact, multimodalCompatibilityKey: onlyModelKey! }
+      : artifact,
+  );
 }
 
 function isSupportedGalleryArtifactUri(value: unknown): boolean {

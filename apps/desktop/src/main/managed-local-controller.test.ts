@@ -70,6 +70,7 @@ function detail(overrides: Partial<PublicModelCatalogDetail> = {}): PublicModelC
         filename: 'weights/model-Q4_K_M.gguf',
         format: 'gguf',
         role: 'model',
+        multimodalCompatibilityKey: 'model',
         quantization: 'Q4_K_M',
         sizeBytes: 1_234,
         sha256: HASH,
@@ -106,6 +107,7 @@ describe('installPlan', () => {
       filename: 'mmproj-model-f16.gguf',
       format: 'gguf' as const,
       role: 'mmproj' as const,
+      multimodalCompatibilityKey: 'model',
       quantization: 'F16',
       sizeBytes: 567,
       sha256: 'c'.repeat(64),
@@ -142,6 +144,7 @@ describe('installPlan', () => {
       filename: 'mmproj-model-f16.gguf',
       format: 'gguf' as const,
       role: 'mmproj' as const,
+      multimodalCompatibilityKey: 'model',
       quantization: 'F16',
       sizeBytes: 567,
       sha256: 'c'.repeat(64),
@@ -181,6 +184,18 @@ describe('installPlan', () => {
         'Q4_K_M',
       ),
     ).toThrow('identity changed');
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [
+            detail().artifacts[0]!,
+            { ...projector, multimodalCompatibilityKey: 'different-family' },
+          ],
+        }),
+        ['artifact-q4', 'artifact-mmproj'],
+        'Q4_K_M',
+      ),
+    ).toThrow('not compatible');
   });
 
   it('rejects mutable, browse-only, mismatched, and non-Hugging-Face artifacts', () => {

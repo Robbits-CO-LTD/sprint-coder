@@ -142,6 +142,7 @@ describe('local fit estimator', () => {
       contextTokens: 8192,
       kvCacheType: 'f16',
       batchSize: 512,
+      gpuLayers: 99,
       gpuOffloadRatio: 1,
       sidecarVersion: '1.0.0',
       backend: 'metal',
@@ -170,6 +171,9 @@ describe('local fit estimator', () => {
     expect(
       applyReusableLocalVerification(estimate, { ...binding, sidecarVersion: 'b10516' }, record)
         .state,
+    ).toBe('estimated_comfortable');
+    expect(
+      applyReusableLocalVerification(estimate, { ...binding, gpuLayers: 50 }, record).state,
     ).toBe('estimated_comfortable');
   });
 });

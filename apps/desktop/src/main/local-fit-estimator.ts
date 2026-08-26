@@ -164,6 +164,7 @@ function equalBinding(left: LocalVerificationBinding, right: LocalVerificationBi
     left.contextTokens === right.contextTokens &&
     left.kvCacheType === right.kvCacheType &&
     left.batchSize === right.batchSize &&
+    left.gpuLayers === right.gpuLayers &&
     left.gpuOffloadRatio === right.gpuOffloadRatio &&
     left.sidecarVersion === right.sidecarVersion &&
     left.backend === right.backend &&

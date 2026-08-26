@@ -158,6 +158,13 @@ function installApi(
       toolCall: { maxOutputTokens: 1_024, thinking: false, reasoningEffort: 'none' },
     }),
   );
+  const fit = vi.fn(async () => ({
+    state: 'unknown' as const,
+    label: '未判定',
+    detail: '実行条件を確認できませんでした。',
+    breakdown: null,
+    verification: null,
+  }));
   window.sprintCoder = {
     localAI: {
       hardware: vi.fn(async () => hardware),
@@ -168,6 +175,7 @@ function installApi(
       setInferenceSettings,
       query: vi.fn(async () => ({ items: [catalogDetail.item], nextCursor: null, errors: [] })),
       detail: vi.fn(async () => catalogDetail),
+      fit,
       install,
       pause: vi.fn(),
       resume: vi.fn(),
@@ -175,7 +183,7 @@ function installApi(
       delete: vi.fn(),
     },
   } as unknown as NonNullable<Window['sprintCoder']>;
-  return { install, inferenceSettings, setInferenceSettings };
+  return { install, inferenceSettings, setInferenceSettings, fit };
 }
 
 async function flush(): Promise<void> {
@@ -265,21 +273,34 @@ describe('LocalAiSettingsSection', () => {
     const imageDetail: PublicModelCatalogDetail = {
       ...detail,
       artifacts: [
-        ...detail.artifacts,
+        { ...detail.artifacts[0]!, multimodalCompatibilityKey: 'model' },
         {
           id: 'artifact-mmproj',
           filename: 'mmproj-model-f16.gguf',
           format: 'gguf',
           role: 'mmproj',
+          multimodalCompatibilityKey: 'model',
           quantization: null,
           sizeBytes: 234_000_000,
           sha256: projectorHash,
           sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-model-f16.gguf`,
           installability: { state: 'installable', reason: 'Ready' },
         },
+        {
+          id: 'artifact-mmproj-other',
+          filename: 'mmproj-other-family-f16.gguf',
+          format: 'gguf',
+          role: 'mmproj',
+          multimodalCompatibilityKey: 'other-family',
+          quantization: null,
+          sizeBytes: 100_000_000,
+          sha256: 'd'.repeat(64),
+          sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-other-family-f16.gguf`,
+          installability: { state: 'installable', reason: 'Ready' },
+        },
       ],
     };
-    const { install } = installApi({ catalogDetail: imageDetail });
+    const { install, fit } = installApi({ catalogDetail: imageDetail });
     const container = document.createElement('div');
     document.body.append(container);
     const root = createRoot(container);
@@ -305,9 +326,18 @@ describe('LocalAiSettingsSection', () => {
     await act(async () =>
       (container.querySelector('input[name="local-ai-artifact"]') as HTMLInputElement).click(),
     );
+    expect(container.textContent).not.toContain('mmproj-other-family-f16.gguf');
     await act(async () =>
       (container.querySelectorAll('input[name="local-ai-mmproj"]')[1] as HTMLInputElement).click(),
     );
+    await flush();
+    expect(fit).toHaveBeenLastCalledWith({
+      source: 'hugging_face',
+      sourceId: 'acme/model',
+      artifactId: 'artifact-q4',
+      mmprojArtifactId: 'artifact-mmproj',
+      contextTokens: 8_192,
+    });
     await act(async () =>
       [...container.querySelectorAll('button')]
         .find((item) => item.textContent === 'このGGUFを導入')!

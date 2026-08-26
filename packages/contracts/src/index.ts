@@ -2137,6 +2137,8 @@ export const localVerificationBindingSchema = z
     contextTokens: z.number().int().positive().max(1_048_576),
     kvCacheType: z.string().min(1).max(64),
     batchSize: z.number().int().positive().max(1_048_576),
+    /** Optional for read compatibility; new verifications always bind the effective layer count. */
+    gpuLayers: z.number().int().min(0).max(4_096).optional(),
     gpuOffloadRatio: z.number().min(0).max(1),
     sidecarVersion: z.string().min(1).max(128),
     backend: z.enum(['cpu', 'metal', 'cuda', 'vulkan']),
@@ -2299,6 +2301,13 @@ export const publicModelArtifactSchema = z
     format: z.enum(['gguf', 'other']),
     /** Semantic role within a Managed Local model bundle. A projector is still GGUF bytes. */
     role: z.enum(['model', 'mmproj']).default('model'),
+    /** Fail-closed family key derived from the immutable artifact filename for model/mmproj pairing. */
+    multimodalCompatibilityKey: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u)
+      .max(128)
+      .nullable()
+      .optional(),
     quantization: z.string().min(1).max(64).nullable(),
     sizeBytes: localHardwareByteCountSchema.nullable(),
     sha256: digestSchema.nullable(),
@@ -2683,6 +2692,7 @@ export const localModelFitInputSchema = z
     source: z.enum(['hugging_face', 'localai_gallery']),
     sourceId: z.string().min(1).max(256),
     artifactId: z.string().min(1).max(320),
+    mmprojArtifactId: z.string().min(1).max(320).optional(),
     contextTokens: z.number().int().min(256).max(1_048_576),
   })
   .strict();

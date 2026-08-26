@@ -719,9 +719,11 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     }
   }
 
-  async function chooseArtifact(artifact: PublicModelArtifact): Promise<void> {
+  async function assessFit(
+    artifact: PublicModelArtifact,
+    mmproj: PublicModelArtifact | null,
+  ): Promise<void> {
     if (detail === null) return;
-    setSelectedArtifact(artifact);
     setSelectedFit(null);
     setFitLoading(true);
     try {
@@ -730,6 +732,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
           source: detail.item.source,
           sourceId: detail.item.sourceId,
           artifactId: artifact.id,
+          ...(mmproj === null ? {} : { mmprojArtifactId: mmproj.id }),
           contextTokens: 8_192,
         }),
       );
@@ -738,6 +741,23 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     } finally {
       setFitLoading(false);
     }
+  }
+
+  async function chooseArtifact(artifact: PublicModelArtifact): Promise<void> {
+    const compatibleProjector =
+      selectedMmproj?.multimodalCompatibilityKey !== undefined &&
+      selectedMmproj.multimodalCompatibilityKey !== null &&
+      selectedMmproj.multimodalCompatibilityKey === artifact.multimodalCompatibilityKey
+        ? selectedMmproj
+        : null;
+    setSelectedArtifact(artifact);
+    setSelectedMmproj(compatibleProjector);
+    await assessFit(artifact, compatibleProjector);
+  }
+
+  async function chooseMmproj(artifact: PublicModelArtifact | null): Promise<void> {
+    setSelectedMmproj(artifact);
+    if (selectedArtifact !== null) await assessFit(selectedArtifact, artifact);
   }
 
   const items = page?.items ?? [];
@@ -914,7 +934,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
               selectedFit={selectedFit}
               fitLoading={fitLoading}
               onArtifact={(artifact) => void chooseArtifact(artifact)}
-              onMmproj={setSelectedMmproj}
+              onMmproj={(artifact) => void chooseMmproj(artifact)}
               licenseAccepted={licenseAccepted}
               onLicense={setLicenseAccepted}
               confirming={confirming}
@@ -972,7 +992,12 @@ function ModelDetail({
     ({ installability, role }) => installability.state === 'installable' && role === 'model',
   );
   const projectors = detail.artifacts.filter(
-    ({ installability, role }) => installability.state === 'installable' && role === 'mmproj',
+    ({ installability, role, multimodalCompatibilityKey }) =>
+      installability.state === 'installable' &&
+      role === 'mmproj' &&
+      selectedArtifact?.multimodalCompatibilityKey !== undefined &&
+      selectedArtifact.multimodalCompatibilityKey !== null &&
+      selectedArtifact.multimodalCompatibilityKey === multimodalCompatibilityKey,
   );
   return (
     <article className="local-ai-model-detail">
