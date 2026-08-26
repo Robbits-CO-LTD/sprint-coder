@@ -18,6 +18,11 @@ import { basename, extname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import {
   MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+  MANAGED_LOCAL_DEFAULT_BATCH_SIZE,
+  MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS,
+  MANAGED_LOCAL_DEFAULT_GPU_LAYERS,
+  managedLocalLaunchSettingsMapSchema,
+  managedLocalLaunchSettingsSchema,
   managedLocalInferenceSettingsMapSchema,
   managedLocalInferenceSettingsSchema,
   localDownloadJobSchema,
@@ -28,6 +33,7 @@ import {
   type LocalDownloadJob,
   type LocalDownloadJobState,
   type ManagedLocalInferenceSettings,
+  type ManagedLocalLaunchSettings,
   type LocalVerificationRecord,
 } from '@sprint-coder/contracts';
 
@@ -43,6 +49,14 @@ const DEFAULT_INFERENCE_SETTINGS: ManagedLocalInferenceSettings = Object.freeze(
   thinking: false,
 });
 const MAX_INFERENCE_SETTINGS_BYTES = 32 * 1024;
+const LAUNCH_SETTINGS_KEY = 'managed-local.launch-settings';
+const DEFAULT_LAUNCH_SETTINGS: ManagedLocalLaunchSettings = Object.freeze({
+  backend: 'auto',
+  gpuLayers: MANAGED_LOCAL_DEFAULT_GPU_LAYERS,
+  contextTokens: MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS,
+  batchSize: MANAGED_LOCAL_DEFAULT_BATCH_SIZE,
+});
+const MAX_LAUNCH_SETTINGS_BYTES = 32 * 1024;
 
 export type LocalModelArtifactRole = 'model' | 'mmproj';
 
@@ -356,6 +370,52 @@ export class LocalModelDownloadRepository {
     return { ...settings };
   }
 
+  getLaunchSettings(modelId: string): ManagedLocalLaunchSettings {
+    this.assertInstalledLaunchModel(modelId);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(LAUNCH_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_LAUNCH_SETTINGS_BYTES)
+      return this.defaultLaunchSettings(modelId);
+    try {
+      const map = managedLocalLaunchSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      return map[modelId] === undefined ? this.defaultLaunchSettings(modelId) : { ...map[modelId] };
+    } catch {
+      // A malformed optional settings blob must not prevent an installed model from running.
+      return this.defaultLaunchSettings(modelId);
+    }
+  }
+
+  setLaunchSettings(
+    modelId: string,
+    input: ManagedLocalLaunchSettings,
+  ): ManagedLocalLaunchSettings {
+    this.assertInstalledLaunchModel(modelId);
+    const settings = managedLocalLaunchSettingsSchema.parse(input);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(LAUNCH_SETTINGS_KEY) as { value: string } | undefined;
+    let current: Record<string, ManagedLocalLaunchSettings> = {};
+    if (row !== undefined && Buffer.byteLength(row.value, 'utf8') <= MAX_LAUNCH_SETTINGS_BYTES) {
+      try {
+        current = managedLocalLaunchSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      } catch {
+        // Replace only the malformed optional blob; the model itself remains intact.
+      }
+    }
+    current[modelId] = settings;
+    const serialized = JSON.stringify(managedLocalLaunchSettingsMapSchema.parse(current));
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_LAUNCH_SETTINGS_BYTES)
+      throw new Error('Managed Local launch settings are too large');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(LAUNCH_SETTINGS_KEY, serialized, new Date().toISOString());
+    return { ...settings };
+  }
+
   private assertInstalledInferenceModel(modelId: string): void {
     if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
     const row = this.db.prepare('SELECT state FROM local_models WHERE id = ?').get(modelId) as
@@ -366,6 +426,24 @@ export class LocalModelDownloadRepository {
       artifacts.filter(({ role }) => role === 'mmproj').length > 1
     )
       throw new Error('Managed Local model is not available for inference settings');
+  }
+
+  private assertInstalledLaunchModel(modelId: string): void {
+    if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
+    const row = this.db
+      .prepare('SELECT state, artifact_count FROM local_models WHERE id = ?')
+      .get(modelId) as { state: string; artifact_count: number } | undefined;
+    if (row?.state !== 'installed' || row.artifact_count < 1)
+      throw new Error('Managed Local model is not available for launch settings');
+  }
+
+  private defaultLaunchSettings(modelId: string): ManagedLocalLaunchSettings {
+    return {
+      ...DEFAULT_LAUNCH_SETTINGS,
+      // Preserve the pre-settings behavior for models whose verified fit selected a lower context.
+      contextTokens:
+        this.verification(modelId)?.binding.contextTokens ?? MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS,
+    };
   }
 
   private parseJob(row: JobRow): LocalDownloadJob {
@@ -742,6 +820,17 @@ export class LocalModelDownloadManager {
     settings: ManagedLocalInferenceSettings,
   ): ManagedLocalInferenceSettings {
     return this.repository.setInferenceSettings(modelId, settings);
+  }
+
+  getLaunchSettings(modelId: string): ManagedLocalLaunchSettings {
+    return this.repository.getLaunchSettings(modelId);
+  }
+
+  setLaunchSettings(
+    modelId: string,
+    settings: ManagedLocalLaunchSettings,
+  ): ManagedLocalLaunchSettings {
+    return this.repository.setLaunchSettings(modelId, settings);
   }
 
   enqueue(input: LocalModelInstallPlan): LocalDownloadJob {

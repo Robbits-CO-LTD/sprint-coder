@@ -7555,6 +7555,75 @@ button.composer-permission-chip[aria-expanded='true'] {
 .local-ai-effective-settings dt {
   color: var(--text-secondary);
 }
+.local-ai-launch-card {
+  flex: 1 0 100%;
+  min-width: 0;
+  padding: 10px;
+  border-top: 1px solid var(--hairline);
+}
+.local-ai-launch-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.local-ai-launch-heading strong {
+  font-size: 11.5px;
+}
+.local-ai-launch-heading small {
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.local-ai-launch-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.local-ai-launch-controls .settings-field {
+  flex: 1 1 145px;
+  min-width: 120px;
+}
+.local-ai-launch-controls .settings-field-label {
+  font-size: 10.5px;
+}
+.local-ai-launch-controls input[type='number'],
+.local-ai-launch-controls select {
+  width: 100%;
+}
+.local-ai-launch-card > .settings-hint {
+  margin: 8px 0 0;
+}
+.local-ai-launch-effective {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+}
+.local-ai-launch-effective > strong {
+  font-size: 10.5px;
+}
+.local-ai-launch-effective dl {
+  display: grid;
+  gap: 4px;
+  margin: 5px 0 0;
+}
+.local-ai-launch-effective dl > div {
+  display: grid;
+  grid-template-columns: 126px minmax(0, 1fr);
+  gap: 8px;
+}
+.local-ai-launch-effective dt,
+.local-ai-launch-effective dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 10.5px;
+}
+.local-ai-launch-effective dt {
+  color: var(--text-secondary);
+}
 .local-ai-selector {
   display: flex;
   flex-direction: column;

@@ -57,6 +57,9 @@ import {
   modelSelectionSchema,
   installedLocalModelInputSchema,
   installedLocalModelSchema,
+  managedLocalLaunchSettingsGetInputSchema,
+  managedLocalLaunchSettingsSetInputSchema,
+  managedLocalLaunchSettingsViewSchema,
   managedLocalInferenceSettingsGetInputSchema,
   managedLocalInferenceSettingsSetInputSchema,
   managedLocalInferenceSettingsViewSchema,
@@ -1798,6 +1801,24 @@ export class IpcRouter {
       emptyPayloadSchema,
       managedLocalRuntimeSnapshotSchema,
       () => this.managedLocal!.runtime(),
+    );
+    this.handle(
+      IPC_CHANNELS.localAILaunchSettings,
+      managedLocalLaunchSettingsGetInputSchema,
+      managedLocalLaunchSettingsViewSchema,
+      (input) => this.managedLocal!.getLaunchSettings(input.modelId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAISetLaunchSettings,
+      managedLocalLaunchSettingsSetInputSchema,
+      managedLocalLaunchSettingsViewSchema,
+      (input) =>
+        this.managedLocal!.setLaunchSettings(input.modelId, {
+          backend: input.backend,
+          gpuLayers: input.gpuLayers,
+          contextTokens: input.contextTokens,
+          batchSize: input.batchSize,
+        }),
     );
     this.handle(
       IPC_CHANNELS.localAIInferenceSettings,

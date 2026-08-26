@@ -1,9 +1,40 @@
 import { describe, expect, it } from 'vitest';
-import type { PublicModelCatalogDetail } from '@sprint-coder/contracts';
-import { installPlan } from './managed-local-controller';
+import type {
+  LocalHardwareSnapshot,
+  ManagedLocalLaunchSettings,
+  PublicModelCatalogDetail,
+} from '@sprint-coder/contracts';
+import { installPlan, resolveManagedLocalLaunchSettings } from './managed-local-controller';
+import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 
 const REVISION = 'b'.repeat(40);
 const HASH = 'a'.repeat(64);
+
+function bundle(): VerifiedManagedLocalSidecarBundle {
+  return {
+    target: 'darwin-arm64',
+    rootPath: '/fixture/managed-local',
+    manifest: {
+      schemaVersion: 1,
+      runtime: 'llama.cpp',
+      runtimeVersion: 'b10516',
+      upstreamRepository: 'https://github.com/ggml-org/llama.cpp',
+      upstreamRevision: 'b'.repeat(40),
+      platform: 'darwin',
+      architecture: 'arm64',
+      candidateBackends: ['cpu', 'metal'],
+      artifacts: [],
+    },
+    manifestSha256: 'c'.repeat(64),
+    serverPath: '/fixture/managed-local/bin/llama-server',
+    licensePath: '/fixture/managed-local/licenses/LICENSE',
+    artifactPaths: {},
+  };
+}
+
+function hardware(backends: LocalHardwareSnapshot['backends']): LocalHardwareSnapshot {
+  return { backends } as LocalHardwareSnapshot;
+}
 
 function detail(overrides: Partial<PublicModelCatalogDetail> = {}): PublicModelCatalogDetail {
   return {
@@ -199,5 +230,60 @@ describe('installPlan', () => {
         'Q4_K_M',
       ),
     ).toThrow('identity changed');
+  });
+});
+
+describe('resolveManagedLocalLaunchSettings', () => {
+  const configured: ManagedLocalLaunchSettings = {
+    backend: 'auto',
+    gpuLayers: 999,
+    contextTokens: 8_192,
+    batchSize: 512,
+  };
+
+  it('selects an available allowlisted accelerator for auto and keeps configured values', () => {
+    expect(
+      resolveManagedLocalLaunchSettings(
+        configured,
+        hardware([
+          { kind: 'cpu', status: 'available' },
+          { kind: 'metal', status: 'available' },
+        ]),
+        bundle(),
+      ),
+    ).toEqual({
+      backend: 'metal',
+      gpuLayers: 999,
+      contextTokens: 8_192,
+      batchSize: 512,
+      runtimeVersion: 'b10516',
+    });
+  });
+
+  it('falls back to zero GPU layers for auto CPU execution and rejects unavailable backends', () => {
+    expect(
+      resolveManagedLocalLaunchSettings(
+        configured,
+        hardware([{ kind: 'cpu', status: 'available' }]),
+        bundle(),
+      ),
+    ).toMatchObject({ backend: 'cpu', gpuLayers: 0 });
+    expect(
+      resolveManagedLocalLaunchSettings(
+        { ...configured, gpuLayers: 0 },
+        hardware([
+          { kind: 'cpu', status: 'available' },
+          { kind: 'metal', status: 'available' },
+        ]),
+        bundle(),
+      ),
+    ).toMatchObject({ backend: 'cpu', gpuLayers: 0 });
+    expect(
+      resolveManagedLocalLaunchSettings(
+        { ...configured, backend: 'metal' },
+        hardware([{ kind: 'cpu', status: 'available' }]),
+        bundle(),
+      ),
+    ).toBeNull();
   });
 });

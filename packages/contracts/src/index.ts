@@ -2407,6 +2407,93 @@ export const installedLocalModelSchema = z
   .strict();
 export type InstalledLocalModel = z.infer<typeof installedLocalModelSchema>;
 
+/** Typed, allowlisted llama.cpp launch controls stored per installed model. */
+export const MANAGED_LOCAL_DEFAULT_GPU_LAYERS = 999;
+export const MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS = 8_192;
+export const MANAGED_LOCAL_DEFAULT_BATCH_SIZE = 512;
+export const MANAGED_LOCAL_MAX_GPU_LAYERS = 4_096;
+export const MANAGED_LOCAL_MAX_CONTEXT_TOKENS = 1_048_576;
+export const MANAGED_LOCAL_MAX_BATCH_SIZE = 1_048_576;
+export const managedLocalLaunchBackendSchema = z.enum(['auto', 'cpu', 'metal', 'cuda', 'vulkan']);
+export type ManagedLocalLaunchBackend = z.infer<typeof managedLocalLaunchBackendSchema>;
+export const managedLocalEffectiveLaunchBackendSchema = z.enum(['cpu', 'metal', 'cuda', 'vulkan']);
+export type ManagedLocalEffectiveLaunchBackend = z.infer<
+  typeof managedLocalEffectiveLaunchBackendSchema
+>;
+export const managedLocalLaunchSettingsSchema = z
+  .object({
+    backend: managedLocalLaunchBackendSchema,
+    gpuLayers: z.number().int().min(0).max(MANAGED_LOCAL_MAX_GPU_LAYERS),
+    contextTokens: z.number().int().min(256).max(MANAGED_LOCAL_MAX_CONTEXT_TOKENS),
+    batchSize: z.number().int().positive().max(MANAGED_LOCAL_MAX_BATCH_SIZE),
+  })
+  .strict()
+  .superRefine((settings, context) => {
+    if (settings.backend === 'cpu' && settings.gpuLayers !== 0)
+      context.addIssue({
+        code: 'custom',
+        path: ['gpuLayers'],
+        message: 'CPU Managed Local launch must use zero GPU layers',
+      });
+    if (settings.backend !== 'auto' && settings.backend !== 'cpu' && settings.gpuLayers === 0)
+      context.addIssue({
+        code: 'custom',
+        path: ['gpuLayers'],
+        message: 'Accelerated Managed Local launch must use GPU layers',
+      });
+  });
+export type ManagedLocalLaunchSettings = z.infer<typeof managedLocalLaunchSettingsSchema>;
+export const managedLocalLaunchSettingsMapSchema = z
+  .record(z.string().regex(/^[a-f0-9]{64}$/u), managedLocalLaunchSettingsSchema)
+  .superRefine((settings, context) => {
+    if (Object.keys(settings).length > 256)
+      context.addIssue({ code: 'custom', message: 'Too many Managed Local launch settings' });
+  });
+export type ManagedLocalLaunchSettingsMap = z.infer<typeof managedLocalLaunchSettingsMapSchema>;
+export const managedLocalLaunchSettingsGetInputSchema = z
+  .object({ modelId: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+export const managedLocalLaunchSettingsSetInputSchema = managedLocalLaunchSettingsGetInputSchema
+  .extend(managedLocalLaunchSettingsSchema.shape)
+  .strict();
+export type ManagedLocalLaunchSettingsSetInput = z.infer<
+  typeof managedLocalLaunchSettingsSetInputSchema
+>;
+export const managedLocalEffectiveLaunchSettingsSchema = z
+  .object({
+    backend: managedLocalEffectiveLaunchBackendSchema,
+    gpuLayers: z.number().int().min(0).max(MANAGED_LOCAL_MAX_GPU_LAYERS),
+    contextTokens: z.number().int().min(256).max(MANAGED_LOCAL_MAX_CONTEXT_TOKENS),
+    batchSize: z.number().int().positive().max(MANAGED_LOCAL_MAX_BATCH_SIZE),
+    runtimeVersion: z.string().regex(/^[a-zA-Z0-9._+-]{1,64}$/u),
+  })
+  .strict()
+  .superRefine((settings, context) => {
+    if (settings.backend === 'cpu' && settings.gpuLayers !== 0)
+      context.addIssue({
+        code: 'custom',
+        path: ['gpuLayers'],
+        message: 'CPU Managed Local launch must use zero GPU layers',
+      });
+    if (settings.backend !== 'cpu' && settings.gpuLayers === 0)
+      context.addIssue({
+        code: 'custom',
+        path: ['gpuLayers'],
+        message: 'Accelerated Managed Local launch must use GPU layers',
+      });
+  });
+export type ManagedLocalEffectiveLaunchSettings = z.infer<
+  typeof managedLocalEffectiveLaunchSettingsSchema
+>;
+export const managedLocalLaunchSettingsViewSchema = z
+  .object({
+    modelId: z.string().regex(/^[a-f0-9]{64}$/u),
+    configured: managedLocalLaunchSettingsSchema,
+    effective: managedLocalEffectiveLaunchSettingsSchema.nullable(),
+  })
+  .strict();
+export type ManagedLocalLaunchSettingsView = z.infer<typeof managedLocalLaunchSettingsViewSchema>;
+
 /**
  * Request-level controls that Managed Local can actually honour.  llama.cpp does not expose the
  * built-in CLI's provider-specific Effort control, so this contract deliberately contains the
@@ -4191,6 +4278,10 @@ export interface SprintCoderApi {
   localAI: {
     hardware(): Promise<LocalHardwareSnapshot>;
     runtime(): Promise<ManagedLocalRuntimeSnapshot>;
+    launchSettings(modelId: string): Promise<ManagedLocalLaunchSettingsView>;
+    setLaunchSettings(
+      input: ManagedLocalLaunchSettingsSetInput,
+    ): Promise<ManagedLocalLaunchSettingsView>;
     inferenceSettings(modelId: string): Promise<ManagedLocalInferenceSettingsView>;
     setInferenceSettings(
       input: ManagedLocalInferenceSettingsSetInput,
@@ -4374,6 +4465,8 @@ export const IPC_CHANNELS = {
   providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
   localAIHardware: 'sprint-coder:local-ai:hardware',
   localAIRuntime: 'sprint-coder:local-ai:runtime',
+  localAILaunchSettings: 'sprint-coder:local-ai:launch-settings',
+  localAISetLaunchSettings: 'sprint-coder:local-ai:set-launch-settings',
   localAIInferenceSettings: 'sprint-coder:local-ai:inference-settings',
   localAISetInferenceSettings: 'sprint-coder:local-ai:set-inference-settings',
   localAICatalogQuery: 'sprint-coder:local-ai:catalog-query',

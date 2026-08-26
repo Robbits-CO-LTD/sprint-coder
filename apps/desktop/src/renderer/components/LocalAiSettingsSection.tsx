@@ -14,6 +14,7 @@ import type {
   PublicModelCatalogQuery,
 } from '@sprint-coder/contracts';
 import { ArrowLeft, Pause, Play, Search, Trash } from './icons';
+import { ManagedLocalLaunchSettingsCard } from './ManagedLocalLaunchSettingsCard';
 
 type LocalAiApi = NonNullable<Window['sprintCoder']>['localAI'];
 const ROW_HEIGHT = 58;
@@ -161,6 +162,7 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
           />
           <InstalledModelList
             models={installed}
+            runtime={runtime}
             verifyingId={verifyingId}
             fitByModel={fitByModel}
             onVerify={(id) => void verifyModel(id)}
@@ -363,12 +365,14 @@ function LocalDownloadList({
 
 function InstalledModelList({
   models,
+  runtime,
   verifyingId,
   fitByModel,
   onVerify,
   onDelete,
 }: {
   models: readonly InstalledLocalModel[];
+  runtime: ManagedLocalRuntimeSnapshot | null;
   verifyingId: string | null;
   fitByModel: Readonly<Record<string, LocalFitAssessment>>;
   onVerify: (id: string) => void;
@@ -438,6 +442,9 @@ function InstalledModelList({
               </div>
               {model.state === 'installed' && (
                 <ManagedLocalInferenceSettingsCard modelId={model.id} />
+              )}
+              {model.state === 'installed' && (
+                <ManagedLocalLaunchSettingsCard modelId={model.id} runtime={runtime} />
               )}
             </li>
           ))}

@@ -1,10 +1,16 @@
 import {
   MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+  managedLocalEffectiveLaunchSettingsSchema,
   managedLocalInferenceSettingsSchema,
+  managedLocalLaunchSettingsSchema,
+  managedLocalLaunchSettingsViewSchema,
   managedLocalInferenceSettingsViewSchema,
   managedLocalRuntimeSnapshotSchema,
+  type ManagedLocalEffectiveLaunchSettings,
   type ManagedLocalInferenceSettings,
   type ManagedLocalInferenceSettingsView,
+  type ManagedLocalLaunchSettings,
+  type ManagedLocalLaunchSettingsView,
 } from '@sprint-coder/contracts';
 import type {
   InstalledLocalModel,
@@ -161,6 +167,31 @@ export class ManagedLocalController {
     );
   }
 
+  async getLaunchSettings(modelId: string): Promise<ManagedLocalLaunchSettingsView> {
+    const configured = this.manager.getLaunchSettings(modelId);
+    const hardware = await this.collectHardware();
+    return managedLocalLaunchSettingsView(
+      modelId,
+      configured,
+      resolveManagedLocalLaunchSettings(configured, hardware, this.bundle),
+    );
+  }
+
+  async setLaunchSettings(
+    modelId: string,
+    input: ManagedLocalLaunchSettings,
+  ): Promise<ManagedLocalLaunchSettingsView> {
+    const settings = managedLocalLaunchSettingsSchema.parse(input);
+    this.assertLaunchSettingsEditable(modelId);
+    const configured = this.manager.setLaunchSettings(modelId, settings);
+    const hardware = await this.collectHardware();
+    return managedLocalLaunchSettingsView(
+      modelId,
+      configured,
+      resolveManagedLocalLaunchSettings(configured, hardware, this.bundle),
+    );
+  }
+
   async listProviderModels(
     connectionId: string,
     providerId: string,
@@ -168,7 +199,6 @@ export class ManagedLocalController {
     const observedAt = new Date().toISOString();
     const unknown = { value: null, source: 'unknown' as const };
     const hardware = await this.collectHardware();
-    const backend = this.availableBackend(hardware);
     const models = await Promise.all(
       this.manager
         .listInstalledModels()
@@ -178,8 +208,10 @@ export class ManagedLocalController {
           const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
           const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
           if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1) return null;
+          const configured = this.manager.getLaunchSettings(model.id);
+          const effective = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
           const verified =
-            backend === null
+            effective === null
               ? null
               : applyReusableLocalVerification(
                   {
@@ -189,12 +221,7 @@ export class ManagedLocalController {
                     breakdown: null,
                     verification: null,
                   },
-                  this.verificationBinding(
-                    model.id,
-                    hardware,
-                    backend,
-                    this.manager.verification(model.id)?.binding.contextTokens ?? 8_192,
-                  ),
+                  this.verificationBinding(model.id, hardware, effective),
                   this.manager.verification(model.id),
                 );
           return {
@@ -208,10 +235,10 @@ export class ManagedLocalController {
             },
             modelId: model.id,
             displayName: `${model.sourceId} · ${model.quantization}`,
-            available: this.lifecycle !== null && this.bundle !== null && backend !== null,
+            available: this.lifecycle !== null && effective !== null,
             availabilityCheckedAt: observedAt,
             contextWindow: {
-              value: this.manager.verification(model.id)?.binding.contextTokens ?? 8_192,
+              value: effective?.contextTokens ?? configured.contextTokens,
               source: 'runtime_metadata',
               observedAt,
             },
@@ -254,10 +281,10 @@ export class ManagedLocalController {
       throw new Error('Managed Local model is not startable');
     await this.manager.assertInstalledIntegrity(model.id);
     const hardware = await this.collectHardware();
-    const backend = this.availableBackend(hardware);
-    if (backend === null) throw new Error('Managed Local backend is unavailable');
-    const contextTokens =
-      contextOverride ?? this.manager.verification(modelId)?.binding.contextTokens ?? 8_192;
+    const configured = this.manager.getLaunchSettings(modelId);
+    const launch = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
+    if (launch === null) throw new Error('Managed Local launch settings are unavailable');
+    const contextTokens = contextOverride ?? launch.contextTokens;
     return this.lifecycle.acquire(
       {
         id: model.id,
@@ -268,10 +295,10 @@ export class ManagedLocalController {
             ? this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'mmproj'))
             : null,
         scratchRoot: join(this.store.rootPath, 'scratch'),
-        backend,
-        gpuLayers: backend === 'cpu' ? 0 : 999,
+        backend: launch.backend,
+        gpuLayers: launch.gpuLayers,
         contextTokens,
-        batchSize: 512,
+        batchSize: launch.batchSize,
         fit: {
           weightsBytes: model.totalBytes,
           contextTokens,
@@ -279,7 +306,7 @@ export class ManagedLocalController {
           scratchBytes: Math.max(256 * 1_024 * 1_024, Math.ceil(model.totalBytes * 0.1)),
           runtimeReserveBytes: 768 * 1_024 * 1_024,
           safetyFactor: 1.15,
-          gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,
+          gpuOffloadRatio: launch.backend === 'cpu' ? 0 : 0.8,
           runtimeCompatibility: 'supported',
         },
       },
@@ -308,10 +335,21 @@ export class ManagedLocalController {
     if (lease === null) throw new Error('Managed Local has insufficient memory at minimum context');
     try {
       const snapshot = this.lifecycle?.snapshot();
-      if (snapshot?.fit === null || snapshot?.fit === undefined || snapshot.backend === null)
+      if (
+        snapshot?.fit === null ||
+        snapshot?.fit === undefined ||
+        snapshot.backend === null ||
+        snapshot.contextTokens === null ||
+        snapshot.batchSize === null ||
+        snapshot.gpuLayers === null
+      )
         throw new Error('Managed Local fit evidence is unavailable');
       const hardware = await this.collectHardware();
-      const binding = this.verificationBinding(modelId, hardware, snapshot.backend, contextTokens);
+      const binding = this.verificationBinding(modelId, hardware, {
+        backend: snapshot.backend,
+        contextTokens,
+        batchSize: snapshot.batchSize,
+      });
       const save = (level: 'loaded' | 'tools') =>
         this.manager.saveVerification(modelId, {
           level,
@@ -378,11 +416,16 @@ export class ManagedLocalController {
     return available.has(backend) ? backend : null;
   }
 
+  private assertLaunchSettingsEditable(modelId: string): void {
+    const runtime = this.lifecycle?.snapshot();
+    if (runtime?.modelId === modelId && ['starting', 'running', 'stopping'].includes(runtime.state))
+      throw new Error('Managed Local launch settings apply after the model is stopped');
+  }
+
   private verificationBinding(
     modelId: string,
     hardware: LocalHardwareSnapshot,
-    backend: LocalVerificationBinding['backend'],
-    contextTokens: number,
+    launch: Pick<ManagedLocalEffectiveLaunchSettings, 'backend' | 'contextTokens' | 'batchSize'>,
   ): LocalVerificationBinding {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
     const model = this.manager.modelRecord(modelId);
@@ -392,12 +435,12 @@ export class ManagedLocalController {
       immutableRevision: model.immutableRevision,
       artifactHashes: this.manager.artifactExpectations(modelId).map(({ sha256 }) => sha256),
       quantization: model.quantization,
-      contextTokens,
+      contextTokens: launch.contextTokens,
       kvCacheType: 'f16',
-      batchSize: 512,
-      gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,
+      batchSize: launch.batchSize,
+      gpuOffloadRatio: launch.backend === 'cpu' ? 0 : 0.8,
       sidecarVersion: this.bundle.manifest.runtimeVersion,
-      backend,
+      backend: launch.backend,
     };
   }
 
@@ -503,6 +546,35 @@ export class ManagedLocalController {
   }
 }
 
+export function resolveManagedLocalLaunchSettings(
+  configuredInput: ManagedLocalLaunchSettings,
+  hardware: LocalHardwareSnapshot,
+  bundle: VerifiedManagedLocalSidecarBundle | null,
+): ManagedLocalEffectiveLaunchSettings | null {
+  const configured = managedLocalLaunchSettingsSchema.safeParse(configuredInput);
+  if (!configured.success || bundle === null) return null;
+  const available = new Set(
+    hardware.backends.filter(({ status }) => status === 'available').map(({ kind }) => kind),
+  );
+  const backend =
+    configured.data.backend === 'auto'
+      ? configured.data.gpuLayers === 0
+        ? 'cpu'
+        : (bundle.manifest.candidateBackends.find(
+            (candidate) => candidate !== 'cpu' && available.has(candidate),
+          ) ?? 'cpu')
+      : configured.data.backend;
+  if (!bundle.manifest.candidateBackends.includes(backend) || !available.has(backend)) return null;
+  const effective = managedLocalEffectiveLaunchSettingsSchema.safeParse({
+    backend,
+    gpuLayers: backend === 'cpu' ? 0 : configured.data.gpuLayers,
+    contextTokens: configured.data.contextTokens,
+    batchSize: configured.data.batchSize,
+    runtimeVersion: bundle.manifest.runtimeVersion,
+  });
+  return effective.success ? effective.data : null;
+}
+
 export function installPlan(
   detail: PublicModelCatalogDetail,
   artifactIds: readonly string[],
@@ -582,6 +654,15 @@ function managedLocalInferenceSettingsView(
       reasoningEffort: 'none',
     },
   });
+}
+
+function managedLocalLaunchSettingsView(
+  modelId: string,
+  configuredInput: ManagedLocalLaunchSettings,
+  effective: ManagedLocalEffectiveLaunchSettings | null,
+): ManagedLocalLaunchSettingsView {
+  const configured = managedLocalLaunchSettingsSchema.parse(configuredInput);
+  return managedLocalLaunchSettingsViewSchema.parse({ modelId, configured, effective });
 }
 
 function huggingFaceResolveUrl(

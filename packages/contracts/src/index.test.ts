@@ -10,6 +10,11 @@ import {
   localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localVerificationRecordSchema,
+  managedLocalEffectiveLaunchSettingsSchema,
+  managedLocalLaunchSettingsMapSchema,
+  managedLocalLaunchSettingsSchema,
+  managedLocalLaunchSettingsSetInputSchema,
+  managedLocalLaunchSettingsViewSchema,
   managedLocalInferenceSettingsSchema,
   managedLocalInferenceSettingsSetInputSchema,
   managedLocalInferenceSettingsViewSchema,
@@ -1755,6 +1760,88 @@ describe('Managed Local inference settings contracts', () => {
         },
       }).effective.reasoningEffort,
     ).toBeNull();
+  });
+});
+
+describe('Managed Local launch settings contracts', () => {
+  it('keeps per-model llama.cpp launch controls typed and bounded', () => {
+    const modelId = 'a'.repeat(64);
+    expect(
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toEqual({ backend: 'auto', gpuLayers: 999, contextTokens: 8_192, batchSize: 512 });
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'cuda',
+        gpuLayers: 0,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'cpu',
+        gpuLayers: 1,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'auto',
+        gpuLayers: 4_097,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(
+      managedLocalLaunchSettingsMapSchema.parse({
+        [modelId]: { backend: 'cpu', gpuLayers: 0, contextTokens: 4_096, batchSize: 512 },
+      }),
+    ).toEqual({
+      [modelId]: { backend: 'cpu', gpuLayers: 0, contextTokens: 4_096, batchSize: 512 },
+    });
+    expect(
+      managedLocalLaunchSettingsSetInputSchema.parse({
+        modelId,
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toMatchObject({ modelId, backend: 'auto' });
+    expect(
+      managedLocalLaunchSettingsViewSchema.parse({
+        modelId,
+        configured: { backend: 'auto', gpuLayers: 999, contextTokens: 8_192, batchSize: 512 },
+        effective: {
+          backend: 'cpu',
+          gpuLayers: 0,
+          contextTokens: 8_192,
+          batchSize: 512,
+          runtimeVersion: 'b10516',
+        },
+      }).effective,
+    ).toEqual({
+      backend: 'cpu',
+      gpuLayers: 0,
+      contextTokens: 8_192,
+      batchSize: 512,
+      runtimeVersion: 'b10516',
+    });
+    expect(
+      managedLocalEffectiveLaunchSettingsSchema.parse({
+        backend: 'metal',
+        gpuLayers: 99,
+        contextTokens: 4_096,
+        batchSize: 256,
+        runtimeVersion: 'b10516',
+      }).backend,
+    ).toBe('metal');
   });
 });
 

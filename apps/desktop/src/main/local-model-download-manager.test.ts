@@ -197,6 +197,37 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('persists typed Managed Local launch settings per installed model in the existing settings table', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+
+      expect(env.manager.getLaunchSettings(installed.modelId)).toEqual({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      });
+      expect(
+        env.manager.setLaunchSettings(installed.modelId, {
+          backend: 'cpu',
+          gpuLayers: 0,
+          contextTokens: 4_096,
+          batchSize: 256,
+        }),
+      ).toEqual({ backend: 'cpu', gpuLayers: 0, contextTokens: 4_096, batchSize: 256 });
+      env.repository.close();
+
+      const reopened = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      expect(reopened.getLaunchSettings(installed.modelId)).toEqual({
+        backend: 'cpu',
+        gpuLayers: 0,
+        contextTokens: 4_096,
+        batchSize: 256,
+      });
+      reopened.close();
+    });
+
     it('never publishes a hash mismatch or a missing shard as installed', async () => {
       const wrong = Buffer.from('tampered bytes');
       const env = await fixture({

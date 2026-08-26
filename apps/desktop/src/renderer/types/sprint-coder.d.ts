@@ -1204,6 +1204,12 @@ export interface SprintCoderApi {
   localAI: {
     hardware(): Promise<import('@sprint-coder/contracts').LocalHardwareSnapshot>;
     runtime(): Promise<import('@sprint-coder/contracts').ManagedLocalRuntimeSnapshot>;
+    launchSettings(
+      modelId: string,
+    ): Promise<import('@sprint-coder/contracts').ManagedLocalLaunchSettingsView>;
+    setLaunchSettings(
+      input: import('@sprint-coder/contracts').ManagedLocalLaunchSettingsSetInput,
+    ): Promise<import('@sprint-coder/contracts').ManagedLocalLaunchSettingsView>;
     inferenceSettings(
       modelId: string,
     ): Promise<import('@sprint-coder/contracts').ManagedLocalInferenceSettingsView>;
