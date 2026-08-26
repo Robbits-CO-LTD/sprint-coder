@@ -28,6 +28,8 @@ export type ManagedLocalRuntimeStartInput =
       kind: 'model';
       modelRoot: string;
       modelPath: string;
+      /** Optional multimodal projector, validated inside the same model store. */
+      mmprojPath?: string;
       modelAlias: string;
       scratchRoot: string;
       backend: ManagedLocalBackend;
@@ -165,6 +167,7 @@ export class ManagedLocalRuntimeSupervisor {
       token,
       prepared.modelRoot,
       ...(prepared.modelPath === null ? [] : [prepared.modelPath]),
+      ...(prepared.mmprojPath === null ? [] : [prepared.mmprojPath]),
     ]);
     const args = runtimeArguments(input, prepared, settings);
     let child: ChildProcess;
@@ -385,6 +388,7 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
   Readonly<{
     modelRoot: string;
     modelPath: string | null;
+    mmprojPath: string | null;
     scratchRoot: string;
   }>
 > {
@@ -392,19 +396,55 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
   const scratchRoot = await canonicalDirectory(input.scratchRoot, 'scratch root');
   if (pathsOverlap(modelRoot, scratchRoot))
     throw new ManagedLocalRuntimeError('invalid_input', 'Model and scratch roots must be disjoint');
-  if (input.kind === 'router_probe') return { modelRoot, modelPath: null, scratchRoot };
+  if (input.kind === 'router_probe')
+    return { modelRoot, modelPath: null, mmprojPath: null, scratchRoot };
   if (!MODEL_ALIAS.test(input.modelAlias))
     throw new ManagedLocalRuntimeError('invalid_input', 'Invalid Managed Local model settings');
-  const modelPath = await realpath(input.modelPath).catch(() => null);
-  if (modelPath === null || extname(modelPath).toLowerCase() !== '.gguf')
-    throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local model must be a GGUF file');
-  const child = relative(modelRoot, modelPath);
+  const modelPath = await validateModelArtifactPath(input.modelPath, modelRoot, 'model');
+  const mmprojPath =
+    input.mmprojPath === undefined
+      ? null
+      : await validateModelArtifactPath(input.mmprojPath, modelRoot, 'mmproj');
+  if (mmprojPath === modelPath)
+    throw new ManagedLocalRuntimeError(
+      'invalid_input',
+      'Managed Local model and mmproj must differ',
+    );
+  return { modelRoot, modelPath, mmprojPath, scratchRoot };
+}
+
+async function validateModelArtifactPath(
+  inputPath: string,
+  modelRoot: string,
+  label: 'model' | 'mmproj',
+): Promise<string> {
+  const lexicalInfo = await lstat(inputPath, { bigint: true }).catch(() => null);
+  if (
+    lexicalInfo === null ||
+    !lexicalInfo.isFile() ||
+    lexicalInfo.isSymbolicLink() ||
+    lexicalInfo.nlink !== 1n
+  )
+    throw new ManagedLocalRuntimeError('invalid_input', `Managed Local ${label} is unsafe`);
+  const artifactPath = await realpath(inputPath).catch(() => null);
+  if (artifactPath === null || extname(artifactPath).toLowerCase() !== '.gguf')
+    throw new ManagedLocalRuntimeError(
+      'invalid_input',
+      `Managed Local ${label} must be a GGUF file`,
+    );
+  const child = relative(modelRoot, artifactPath);
   if (child === '' || child.startsWith('..') || isAbsolute(child))
-    throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local model escaped its store');
-  const modelInfo = await lstat(modelPath, { bigint: true });
-  if (!modelInfo.isFile() || modelInfo.isSymbolicLink() || modelInfo.nlink !== 1n)
-    throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local model is unsafe');
-  return { modelRoot, modelPath, scratchRoot };
+    throw new ManagedLocalRuntimeError('invalid_input', `Managed Local ${label} escaped its store`);
+  const info = await lstat(artifactPath, { bigint: true });
+  if (
+    !info.isFile() ||
+    info.isSymbolicLink() ||
+    info.nlink !== 1n ||
+    lexicalInfo.dev !== info.dev ||
+    lexicalInfo.ino !== info.ino
+  )
+    throw new ManagedLocalRuntimeError('invalid_input', `Managed Local ${label} is unsafe`);
+  return artifactPath;
 }
 
 async function canonicalDirectory(path: string, label: string): Promise<string> {
@@ -428,7 +468,12 @@ async function canonicalDirectory(path: string, label: string): Promise<string> 
 
 function runtimeArguments(
   input: ManagedLocalRuntimeStartInput,
-  prepared: Readonly<{ modelRoot: string; modelPath: string | null; scratchRoot: string }>,
+  prepared: Readonly<{
+    modelRoot: string;
+    modelPath: string | null;
+    mmprojPath: string | null;
+    scratchRoot: string;
+  }>,
   settings: EffectiveModelSettings | null,
 ): readonly string[] {
   const common = [
@@ -450,7 +495,7 @@ function runtimeArguments(
   if (input.kind === 'router_probe') return [...common, '--models-dir', prepared.modelRoot];
   if (settings === null)
     throw new ManagedLocalRuntimeError('invalid_input', 'Invalid Managed Local model settings');
-  return [
+  const args = [
     ...common,
     '--model',
     prepared.modelPath!,
@@ -466,6 +511,8 @@ function runtimeArguments(
     String(settings.gpuLayers),
     '--jinja',
   ];
+  if (prepared.mmprojPath !== null) args.push('--mmproj', prepared.mmprojPath);
+  return args;
 }
 
 function validateModelSettings(

@@ -1656,6 +1656,20 @@ describe('retired external Skill import surface', () => {
 });
 
 describe('Managed Local download contracts', () => {
+  it('defaults legacy GGUF artifacts to the model role at the contract boundary', () => {
+    const artifact = contracts.publicModelArtifactSchema.parse({
+      id: 'artifact-legacy',
+      filename: 'model-Q4_K_M.gguf',
+      format: 'gguf',
+      quantization: 'Q4_K_M',
+      sizeBytes: 1024,
+      sha256: 'a'.repeat(64),
+      sourceUrl: 'https://huggingface.co/acme/model/blob/' + 'b'.repeat(40) + '/model.gguf',
+      installability: { state: 'installable', reason: 'Ready' },
+    });
+    expect(artifact.role).toBe('model');
+  });
+
   it('accepts bounded public progress and rejects impossible completion counts', () => {
     const job = {
       id: '11111111-1111-4111-8111-111111111111',

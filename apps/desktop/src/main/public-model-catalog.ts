@@ -312,10 +312,12 @@ export class PublicModelCatalogService {
         const format = filename.toLowerCase().endsWith('.gguf')
           ? ('gguf' as const)
           : ('other' as const);
+        const role = format === 'gguf' ? artifactRoleFromFilename(filename) : null;
         return {
           id: artifactId('hugging_face', sourceId, filename),
           filename,
           format,
+          role: role ?? 'model',
           quantization: format === 'gguf' ? quantizationFromFilename(filename) : null,
           sizeBytes: safeByteCount(lfs?.size ?? file.size),
           sha256,
@@ -604,6 +606,7 @@ function galleryArtifacts(record: Record<string, unknown>, name: string) {
       const format = filename.toLowerCase().endsWith('.gguf')
         ? ('gguf' as const)
         : ('other' as const);
+      const role = format === 'gguf' ? artifactRoleFromFilename(filename) : null;
       const sha256 = digestOrNull(file.sha256);
       const supportedUri = isSupportedGalleryArtifactUri(file.uri);
       const installability: PublicModelInstallability = !supportedBackend
@@ -625,6 +628,7 @@ function galleryArtifacts(record: Record<string, unknown>, name: string) {
         id: artifactId('localai_gallery', name, filename),
         filename,
         format,
+        role: role ?? 'model',
         quantization: format === 'gguf' ? quantizationFromFilename(filename) : null,
         sizeBytes: safeByteCount(file.size),
         sha256,
@@ -644,10 +648,12 @@ function galleryInstallability(
       state: 'unsupported',
       reason: 'このgallery backendはManaged Local v1では実行できません。',
     };
-  const gguf = artifacts.filter((artifact) => artifact.format === 'gguf');
-  if (gguf.length === 0)
+  const models = artifacts.filter(
+    (artifact) => artifact.format === 'gguf' && artifact.role === 'model',
+  );
+  if (models.length === 0)
     return { state: 'unsupported', reason: 'Managed Local v1で使えるGGUF artifactがありません。' };
-  if (gguf.some((artifact) => artifact.installability.state !== 'installable'))
+  if (models.some((artifact) => artifact.installability.state !== 'installable'))
     return { state: 'metadata_required', reason: 'GGUFの取得元またはSHA-256を解決できません。' };
   return { state: 'installable', reason: 'Managed Local v1で解決できるGGUFです。' };
 }
@@ -670,10 +676,12 @@ function artifactInstallability(
 
 function withInstallabilityFromArtifacts(
   item: PublicModelCatalogItem,
-  artifacts: readonly { installability: PublicModelInstallability }[],
+  artifacts: readonly { role: 'model' | 'mmproj'; installability: PublicModelInstallability }[],
 ): PublicModelCatalogItem {
   if (item.gated || item.private) return item;
-  return artifacts.some(({ installability }) => installability.state === 'installable')
+  return artifacts.some(
+    ({ role, installability }) => role === 'model' && installability.state === 'installable',
+  )
     ? {
         ...item,
         installability: { state: 'installable', reason: '取得可能なGGUF artifactがあります。' },
@@ -768,6 +776,15 @@ function quantizationFromFilename(filename: string): string | null {
       .exec(filename)?.[1]
       ?.toUpperCase() ?? null
   );
+}
+
+/**
+ * llama.cpp keeps multimodal projector weights in GGUF files too. Treat only the conventional
+ * standalone `mmproj` filename token as a projector; arbitrary `.gguf` files remain model
+ * artifacts until a catalog explicitly classifies them.
+ */
+function artifactRoleFromFilename(filename: string): 'model' | 'mmproj' {
+  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(filename) ? 'mmproj' : 'model';
 }
 
 function isSupportedGalleryArtifactUri(value: unknown): boolean {

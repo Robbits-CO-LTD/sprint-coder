@@ -325,6 +325,44 @@ describe('ManagedLocalRuntimeSupervisor', () => {
       }),
     ).rejects.toMatchObject({ code: 'invalid_input' });
 
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    const mmprojPath = join(paths.modelRoot, 'mmproj-model-f16.gguf');
+    await writeFile(modelPath, 'model');
+    await writeFile(mmprojPath, 'projector');
+    const imageEnv = harness();
+    const imageSession = await imageEnv.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      mmprojPath,
+      modelAlias: 'a'.repeat(64),
+      contextTokens: 4096,
+      batchSize: 512,
+      gpuLayers: 0,
+    });
+    expect(imageEnv.spawnArgs()).toEqual(
+      expect.arrayContaining(['--model', modelPath, '--mmproj', mmprojPath]),
+    );
+    imageEnv.child.stderr.write(`projector=${mmprojPath}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(imageSession.diagnostics()).not.toContain(mmprojPath);
+    await imageSession.stop();
+
+    const outsideProjector = join(dirname(paths.modelRoot), 'outside-mmproj.gguf');
+    await writeFile(outsideProjector, 'outside projector');
+    await expect(
+      harness().supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath,
+        mmprojPath: outsideProjector,
+        modelAlias: 'a'.repeat(64),
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+
     await expect(
       env.supervisor.start({
         kind: 'router_probe',

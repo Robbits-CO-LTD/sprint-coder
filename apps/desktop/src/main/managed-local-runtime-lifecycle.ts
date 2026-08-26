@@ -27,6 +27,8 @@ export type ManagedLocalModelDescriptor = Readonly<{
   id: string;
   modelRoot: string;
   modelPath: string;
+  /** Optional for mixed-version callers; Main supplies this only for image-capable bundles. */
+  mmprojPath?: string | null;
   scratchRoot: string;
   backend: ManagedLocalBackend;
   gpuLayers: number;
@@ -193,6 +195,9 @@ export class ManagedLocalRuntimeLifecycle {
             kind: 'model',
             modelRoot: descriptor.modelRoot,
             modelPath: descriptor.modelPath,
+            ...(descriptor.mmprojPath === undefined || descriptor.mmprojPath === null
+              ? {}
+              : { mmprojPath: descriptor.mmprojPath }),
             modelAlias: descriptor.id,
             scratchRoot: descriptor.scratchRoot,
             backend: descriptor.backend,

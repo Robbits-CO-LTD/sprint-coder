@@ -34,11 +34,14 @@ const DISK_RESERVE_BYTES = 64 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const MARKER = '.sprint-coder-local-models-v1';
 
+export type LocalModelArtifactRole = 'model' | 'mmproj';
+
 export type LocalModelInstallArtifact = Readonly<{
   filename: string;
   sizeBytes: number;
   sha256: string;
   sourceUrl: string;
+  role: LocalModelArtifactRole;
 }>;
 
 /** Main-internal input assembled from a catalog detail; never exposed as an IPC request. */
@@ -58,6 +61,7 @@ type ArtifactRow = Readonly<{
   byte_length: number;
   etag: string | null;
   downloaded_bytes: number;
+  role: LocalModelArtifactRole;
   state: 'pending' | 'downloaded' | 'installed';
 }>;
 
@@ -106,9 +110,12 @@ export class LocalModelDownloadRepository {
     const exists = this.db
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_models'")
       .get();
-    if (exists === undefined) {
+    const hasArtifactRole = (
+      this.db.prepare("PRAGMA table_info('local_model_artifacts')").all() as { name: string }[]
+    ).some(({ name }) => name === 'role');
+    if (exists === undefined || !hasArtifactRole) {
       this.db.close();
-      throw new Error('Managed Local schema migration v75 has not been applied');
+      throw new Error('Managed Local schema migration v77 has not been applied');
     }
   }
 
@@ -136,8 +143,8 @@ export class LocalModelDownloadRepository {
         );
       const insertArtifact = this.db.prepare(
         `INSERT INTO local_model_artifacts(
-          model_id, ordinal, filename, sha256, byte_length, state
-        ) VALUES (?, ?, ?, ?, ?, 'pending')`,
+            model_id, ordinal, filename, sha256, byte_length, role, state
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
       );
       plan.artifacts.forEach((artifact, index) =>
         insertArtifact.run(
@@ -146,6 +153,7 @@ export class LocalModelDownloadRepository {
           safeStoredFilename(artifact.filename, index + 1),
           artifact.sha256,
           artifact.sizeBytes,
+          artifact.role,
         ),
       );
       this.db
@@ -253,11 +261,13 @@ export class LocalModelDownloadRepository {
     filename: string;
     sizeBytes: number;
     sha256: string;
+    role: LocalModelArtifactRole;
   }>[] {
     return this.artifacts(modelId).map((artifact) => ({
       filename: artifact.filename.replace(/^\d{3}-/u, ''),
       sizeBytes: artifact.byte_length,
       sha256: artifact.sha256,
+      role: artifact.role,
     }));
   }
 
@@ -503,6 +513,13 @@ export class LocalModelStore {
     );
   }
 
+  installedPath(modelId: string, ordinal: number): string {
+    assertModelId(modelId);
+    if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > MAX_ARTIFACTS)
+      throw new LocalModelDownloadError('unsafe_store', 'Invalid artifact ordinal');
+    return join(this.rootPath, 'models', modelId, `${String(ordinal).padStart(3, '0')}.gguf`);
+  }
+
   async publish(modelId: string, artifacts: readonly ArtifactRow[]): Promise<void> {
     assertModelId(modelId);
     if (artifacts.length === 0 || artifacts.some((item) => item.state !== 'downloaded'))
@@ -600,6 +617,44 @@ export class LocalModelDownloadManager {
     modelId: string,
   ): ReturnType<LocalModelDownloadRepository['artifactExpectations']> {
     return this.repository.artifactExpectations(modelId);
+  }
+
+  /**
+   * Re-checks the immutable bytes before a runtime consumes an installed bundle. The download
+   * hash check protects the network-to-store transition; this second check protects the later
+   * runtime boundary from an on-disk replacement, symlink, or hardlink.
+   */
+  async assertInstalledIntegrity(modelId: string): Promise<void> {
+    assertModelId(modelId);
+    const rows = this.repository.artifacts(modelId);
+    if (rows.length === 0 || rows.some((row) => row.state !== 'installed'))
+      throw new LocalModelDownloadError(
+        'missing_shard',
+        'Installed model artifacts are incomplete',
+      );
+    for (const row of rows) {
+      const path = this.store.installedPath(modelId, row.ordinal);
+      let info: Awaited<ReturnType<typeof lstat>>;
+      try {
+        info = await lstat(path);
+      } catch (error: unknown) {
+        if (isNodeError(error, 'ENOENT'))
+          throw new LocalModelDownloadError('missing_shard', 'Installed model artifact is missing');
+        throw error;
+      }
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'Installed model artifact is not a private regular file',
+        );
+      if (info.size !== row.byte_length)
+        throw new LocalModelDownloadError('size_changed', 'Installed model artifact size changed');
+      if ((await sha256File(path)) !== row.sha256)
+        throw new LocalModelDownloadError(
+          'hash_mismatch',
+          'Installed model artifact hash mismatch',
+        );
+    }
   }
 
   verification(modelId: string): LocalVerificationRecord | null {
@@ -769,6 +824,13 @@ function validatePlan(input: LocalModelInstallPlan): LocalModelInstallPlan {
   const artifacts = input.artifacts.map((artifact) => {
     if (artifact.filename.length < 1 || artifact.filename.length > 512)
       throw new Error('Invalid artifact filename');
+    if (!['model', 'mmproj'].includes(artifact.role)) throw new Error('Invalid artifact role');
+    if (!artifact.filename.toLowerCase().endsWith('.gguf'))
+      throw new Error('Managed Local artifacts must be GGUF files');
+    if (artifact.role === 'mmproj' && !isMmprojFilename(artifact.filename))
+      throw new Error('mmproj artifact filename is not recognized');
+    if (artifact.role === 'model' && isMmprojFilename(artifact.filename))
+      throw new Error('mmproj artifact must be classified explicitly');
     if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 1)
       throw new LocalModelDownloadError('size_unknown', 'Artifact size is required');
     if (!DIGEST.test(artifact.sha256)) throw new Error('Artifact SHA-256 is required');
@@ -777,6 +839,10 @@ function validatePlan(input: LocalModelInstallPlan): LocalModelInstallPlan {
       ? { ...artifact, sourceUrl: pinGallerySourceUrl(artifact.sourceUrl, input.immutableRevision) }
       : artifact;
   });
+  const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
+  const projectorArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
+  if (modelArtifacts.length === 0) throw new Error('A model artifact is required');
+  if (projectorArtifacts.length > 1) throw new Error('Only one mmproj artifact is supported');
   const totalBytes = artifacts.reduce((sum, artifact) => sum + artifact.sizeBytes, 0);
   if (!Number.isSafeInteger(totalBytes)) throw new Error('Model download size exceeds safe bounds');
   return { ...input, artifacts };
@@ -790,11 +856,18 @@ function modelIdFor(plan: LocalModelInstallPlan): string {
         sourceId: plan.sourceId,
         revision: plan.immutableRevision,
         quantization: plan.quantization,
-        artifacts: plan.artifacts.map(({ filename, sizeBytes, sha256 }) => ({
-          filename,
-          sizeBytes,
-          sha256,
-        })),
+        artifacts: plan.artifacts.some(({ role }) => role === 'mmproj')
+          ? plan.artifacts.map(({ filename, sizeBytes, sha256, role }) => ({
+              filename,
+              sizeBytes,
+              sha256,
+              role,
+            }))
+          : plan.artifacts.map(({ filename, sizeBytes, sha256 }) => ({
+              filename,
+              sizeBytes,
+              sha256,
+            })),
       }),
     )
     .digest('hex');
@@ -854,6 +927,10 @@ function safeStoredFilename(input: string, ordinal: number): string {
   const leaf = input.split(/[\\/]/u).at(-1)?.replace(/[:\0]/gu, '_') ?? 'artifact.gguf';
   const safeLeaf = leaf === '' || leaf === '.' || leaf === '..' ? 'artifact.gguf' : leaf;
   return `${String(ordinal).padStart(3, '0')}-${safeLeaf}`.slice(0, 512);
+}
+
+function isMmprojFilename(input: string): boolean {
+  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(input.split(/[\\/]/u).at(-1) ?? '');
 }
 
 async function fetchValidated(

@@ -147,11 +147,15 @@ export class ManagedLocalController {
     const unknown = { value: null, source: 'unknown' as const };
     const hardware = await this.collectHardware();
     const backend = this.availableBackend(hardware);
-    return Promise.all(
+    const models = await Promise.all(
       this.manager
         .listInstalledModels()
-        .filter(({ state, artifactCount }) => state === 'installed' && artifactCount === 1)
-        .map(async (model) => {
+        .filter(({ state }) => state === 'installed')
+        .map(async (model): Promise<ProviderModel | null> => {
+          const artifacts = this.manager.artifactExpectations(model.id);
+          const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
+          const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
+          if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1) return null;
           const verified =
             backend === null
               ? null
@@ -197,11 +201,16 @@ export class ManagedLocalController {
                 ? { value: true, source: 'runtime_metadata' as const, observedAt }
                 : unknown,
             structuredOutput: unknown,
-            multimodalInput: { value: false, source: 'runtime_metadata', observedAt },
+            multimodalInput: {
+              value: mmprojArtifacts.length === 1,
+              source: 'runtime_metadata',
+              observedAt,
+            },
             reasoning: unknown,
           };
         }),
     );
+    return models.filter((model): model is ProviderModel => model !== null);
   }
 
   async acquireRuntime(
@@ -215,8 +224,13 @@ export class ManagedLocalController {
     const model = this.manager
       .listInstalledModels()
       .find((candidate) => candidate.id === modelId && candidate.state === 'installed');
-    if (model === undefined || model.artifactCount !== 1)
+    if (model === undefined) throw new Error('Managed Local model is not startable');
+    const artifacts = this.manager.artifactExpectations(model.id);
+    const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
+    const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
+    if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1)
       throw new Error('Managed Local model is not startable');
+    await this.manager.assertInstalledIntegrity(model.id);
     const hardware = await this.collectHardware();
     const backend = this.availableBackend(hardware);
     if (backend === null) throw new Error('Managed Local backend is unavailable');
@@ -226,7 +240,11 @@ export class ManagedLocalController {
       {
         id: model.id,
         modelRoot: join(this.store.rootPath, 'models', model.id),
-        modelPath: join(this.store.rootPath, 'models', model.id, '001.gguf'),
+        modelPath: this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'model')),
+        mmprojPath:
+          mmprojArtifacts.length === 1
+            ? this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'mmproj'))
+            : null,
         scratchRoot: join(this.store.rootPath, 'scratch'),
         backend,
         gpuLayers: backend === 'cpu' ? 0 : 999,
@@ -436,7 +454,10 @@ export class ManagedLocalController {
     // full model id (which also binds the original path) before any byte is resumed.
     const selected = expected.map((item) => {
       const matches = detail.artifacts.filter(
-        (artifact) => artifact.sizeBytes === item.sizeBytes && artifact.sha256 === item.sha256,
+        (artifact) =>
+          artifact.sizeBytes === item.sizeBytes &&
+          artifact.sha256 === item.sha256 &&
+          artifact.role === item.role,
       );
       if (matches.length !== 1) throw new Error('Public catalog artifact identity is ambiguous');
       return matches[0]!;
@@ -449,6 +470,14 @@ export class ManagedLocalController {
       record.quantization,
       record.immutableRevision,
     );
+  }
+
+  private artifactOrdinal(modelId: string, role: 'model' | 'mmproj'): number {
+    const ordinal = this.manager
+      .artifactExpectations(modelId)
+      .findIndex((artifact) => artifact.role === role);
+    if (ordinal < 0) throw new Error(`Managed Local ${role} artifact is missing`);
+    return ordinal + 1;
   }
 }
 
@@ -463,6 +492,8 @@ export function installPlan(
   const revision = detail.item.immutableRevision;
   if (revision === null || (expectedRevision !== undefined && revision !== expectedRevision))
     throw new Error('Immutable Hugging Face revision is required');
+  if (new Set(artifactIds).size !== artifactIds.length)
+    throw new Error('Duplicate public model artifact');
   const selected = artifactIds.map((id) => {
     const artifact = detail.artifacts.find((candidate) => candidate.id === id);
     if (
@@ -472,10 +503,14 @@ export function installPlan(
       artifact.sizeBytes === null ||
       artifact.sha256 === null ||
       artifact.sourceUrl === null ||
-      (artifact.quantization !== null && artifact.quantization !== quantization)
+      (artifact.role === 'model' &&
+        artifact.quantization !== null &&
+        artifact.quantization !== quantization) ||
+      (artifact.role === 'mmproj' && !isMmprojFilename(artifact.filename))
     )
       throw new Error('Selected public model artifact is not installable');
     return {
+      role: artifact.role,
       filename: artifact.filename,
       sizeBytes: artifact.sizeBytes,
       sha256: artifact.sha256,
@@ -487,12 +522,19 @@ export function installPlan(
       ),
     };
   });
+  const modelArtifacts = selected.filter(({ role }) => role === 'model');
+  const mmprojArtifacts = selected.filter(({ role }) => role === 'mmproj');
+  if (modelArtifacts.length === 0) throw new Error('A model GGUF artifact is required');
+  if (mmprojArtifacts.length > 1) throw new Error('Only one mmproj artifact is supported');
+  // The model is always ordinal 1 and the projector follows it. This makes the persisted bundle
+  // self-describing even after a restart, while allowing callers to select the projector first.
+  const ordered = [...modelArtifacts, ...mmprojArtifacts];
   return {
     source: detail.item.source,
     sourceId: detail.item.sourceId,
     immutableRevision: revision,
     quantization,
-    artifacts: selected,
+    artifacts: ordered,
   };
 }
 
@@ -513,6 +555,10 @@ function huggingFaceResolveUrl(
     .split('/')
     .map(encodeURIComponent)
     .join('/')}`;
+}
+
+function isMmprojFilename(input: string): boolean {
+  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(input.split(/[\\/]/u).at(-1) ?? '');
 }
 
 function hardwareFingerprint(hardware: LocalHardwareSnapshot): string {

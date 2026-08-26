@@ -2297,6 +2297,8 @@ export const publicModelArtifactSchema = z
     id: z.string().min(1).max(320),
     filename: z.string().min(1).max(512),
     format: z.enum(['gguf', 'other']),
+    /** Semantic role within a Managed Local model bundle. A projector is still GGUF bytes. */
+    role: z.enum(['model', 'mmproj']).default('model'),
     quantization: z.string().min(1).max(64).nullable(),
     sizeBytes: localHardwareByteCountSchema.nullable(),
     sha256: digestSchema.nullable(),

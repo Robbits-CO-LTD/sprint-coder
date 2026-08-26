@@ -232,6 +232,18 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     expect(subject.snapshot()).toMatchObject({ state: 'stopped', activeLeaseCount: 0 });
   });
 
+  it('forwards an image projector to the supervisor without exposing arbitrary arguments', async () => {
+    const model = await descriptor('a');
+    const mmprojPath = join(model.modelRoot, 'mmproj-model-f16.gguf');
+    await writeFile(mmprojPath, 'projector');
+    const { subject, supervisor } = lifecycle();
+
+    const lease = await subject.acquire({ ...model, mmprojPath }, false);
+
+    expect(supervisor.starts[0]).toMatchObject({ kind: 'model', mmprojPath });
+    await lease.release();
+  });
+
   it('drains the active model before switching and never overlaps two sessions', async () => {
     const firstModel = await descriptor('a');
     const secondModel = await descriptor('b');

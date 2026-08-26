@@ -44,6 +44,7 @@ async function fixture(input?: {
       sizeBytes: value.byteLength,
       sha256: createHash('sha256').update(value).digest('hex'),
       sourceUrl: `https://huggingface.co/owner/model/resolve/${'a'.repeat(40)}/model-${index + 1}.gguf`,
+      role: 'model',
     })),
   };
   const fetch =
@@ -122,6 +123,48 @@ if (runsWithElectronAbi)
       const modelPath = join(env.store.rootPath, 'models', installed.modelId);
       expect(await readdir(modelPath)).toEqual(['001.gguf', '002.gguf']);
       expect(await readFile(join(modelPath, '001.gguf'))).toEqual(env.bytes[0]);
+      env.repository.close();
+    });
+
+    it('persists a projector role and rejects an installed mmproj after byte tampering', async () => {
+      const modelBytes = Buffer.from('model weights');
+      const projectorBytes = Buffer.from('projector weights');
+      const env = await fixture({
+        bytes: [modelBytes, projectorBytes],
+        fetch: async (url) => {
+          const body = String(url).includes('mmproj') ? projectorBytes : modelBytes;
+          return new Response(new Uint8Array(body), {
+            status: 200,
+            headers: { 'content-length': String(body.byteLength) },
+          });
+        },
+      });
+      const plan: LocalModelInstallPlan = {
+        ...env.plan,
+        artifacts: [
+          { ...env.plan.artifacts[0]!, filename: 'model-Q4_K_M.gguf', role: 'model' },
+          {
+            ...env.plan.artifacts[1]!,
+            filename: 'mmproj-model-f16.gguf',
+            role: 'mmproj',
+            sha256: createHash('sha256').update(projectorBytes).digest('hex'),
+            sourceUrl: `https://huggingface.co/owner/model/resolve/${'a'.repeat(40)}/mmproj-model-f16.gguf`,
+          },
+        ],
+      };
+      const queued = env.manager.enqueue(plan);
+      const installed = await env.manager.run(queued.id, plan);
+
+      expect(installed.state).toBe('installed');
+      expect(env.manager.artifactExpectations(installed.modelId)).toEqual([
+        expect.objectContaining({ filename: 'model-Q4_K_M.gguf', role: 'model' }),
+        expect.objectContaining({ filename: 'mmproj-model-f16.gguf', role: 'mmproj' }),
+      ]);
+      const projectorPath = join(env.store.rootPath, 'models', installed.modelId, '002.gguf');
+      await writeFile(projectorPath, Buffer.alloc(projectorBytes.byteLength, 0));
+      await expect(env.manager.assertInstalledIntegrity(installed.modelId)).rejects.toMatchObject({
+        code: 'hash_mismatch',
+      });
       env.repository.close();
     });
 

@@ -94,6 +94,7 @@ const detail: PublicModelCatalogDetail = {
       id: 'artifact-q4',
       filename: 'model-Q4_K_M.gguf',
       format: 'gguf',
+      role: 'model',
       quantization: 'Q4_K_M',
       sizeBytes: 1_234_000_000,
       sha256: HASH,

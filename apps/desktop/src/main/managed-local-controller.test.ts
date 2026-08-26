@@ -38,6 +38,7 @@ function detail(overrides: Partial<PublicModelCatalogDetail> = {}): PublicModelC
         id: 'artifact-q4',
         filename: 'weights/model-Q4_K_M.gguf',
         format: 'gguf',
+        role: 'model',
         quantization: 'Q4_K_M',
         sizeBytes: 1_234,
         sha256: HASH,
@@ -58,6 +59,7 @@ describe('installPlan', () => {
       quantization: 'Q4_K_M',
       artifacts: [
         {
+          role: 'model',
           filename: 'weights/model-Q4_K_M.gguf',
           sizeBytes: 1_234,
           sha256: HASH,
@@ -65,6 +67,89 @@ describe('installPlan', () => {
         },
       ],
     });
+  });
+
+  it('pins one compatible mmproj after the model even when selection order is reversed', () => {
+    const projector = {
+      id: 'artifact-mmproj',
+      filename: 'mmproj-model-f16.gguf',
+      format: 'gguf' as const,
+      role: 'mmproj' as const,
+      quantization: 'F16',
+      sizeBytes: 567,
+      sha256: 'c'.repeat(64),
+      sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+      installability: { state: 'installable' as const, reason: 'Ready' },
+    };
+    const plan = installPlan(
+      detail({ artifacts: [detail().artifacts[0]!, projector] }),
+      ['artifact-mmproj', 'artifact-q4'],
+      'Q4_K_M',
+    );
+
+    expect(plan.artifacts).toEqual([
+      {
+        role: 'model',
+        filename: 'weights/model-Q4_K_M.gguf',
+        sizeBytes: 1_234,
+        sha256: HASH,
+        sourceUrl: `https://huggingface.co/acme/model/resolve/${REVISION}/weights/model-Q4_K_M.gguf`,
+      },
+      {
+        role: 'mmproj',
+        filename: 'mmproj-model-f16.gguf',
+        sizeBytes: 567,
+        sha256: 'c'.repeat(64),
+        sourceUrl: `https://huggingface.co/acme/model/resolve/${REVISION}/mmproj-model-f16.gguf`,
+      },
+    ]);
+  });
+
+  it('rejects an unclassified projector, a second projector, and a projector from another repo', () => {
+    const projector = {
+      id: 'artifact-mmproj',
+      filename: 'mmproj-model-f16.gguf',
+      format: 'gguf' as const,
+      role: 'mmproj' as const,
+      quantization: 'F16',
+      sizeBytes: 567,
+      sha256: 'c'.repeat(64),
+      sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+      installability: { state: 'installable' as const, reason: 'Ready' },
+    };
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [{ ...projector, filename: 'vision-f16.gguf' }],
+        }),
+        ['artifact-mmproj'],
+        'Q4_K_M',
+      ),
+    ).toThrow('not installable');
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [detail().artifacts[0]!, projector, { ...projector, id: 'artifact-mmproj-2' }],
+        }),
+        ['artifact-q4', 'artifact-mmproj', 'artifact-mmproj-2'],
+        'Q4_K_M',
+      ),
+    ).toThrow('Only one mmproj');
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [
+            detail().artifacts[0]!,
+            {
+              ...projector,
+              sourceUrl: `https://huggingface.co/other/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+            },
+          ],
+        }),
+        ['artifact-q4', 'artifact-mmproj'],
+        'Q4_K_M',
+      ),
+    ).toThrow('identity changed');
   });
 
   it('rejects mutable, browse-only, mismatched, and non-Hugging-Face artifacts', () => {
