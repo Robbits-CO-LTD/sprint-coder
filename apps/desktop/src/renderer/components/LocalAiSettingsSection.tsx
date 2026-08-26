@@ -461,6 +461,7 @@ function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
 
   useEffect(() => {
     let disposed = false;
@@ -511,6 +512,7 @@ function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
     }
     setSaving(true);
     setError(null);
+    setStatus('');
     try {
       const result = await api.setInferenceSettings({
         modelId,
@@ -520,6 +522,7 @@ function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
       setView(result);
       setMaxOutputTokens(String(result.configured.maxOutputTokens));
       setThinking(result.configured.thinking);
+      setStatus('推論設定を保存しました。');
     } catch {
       setError('Managed Localの推論設定を保存できませんでした。変更内容を確認してください。');
     } finally {
@@ -611,6 +614,9 @@ function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
           {error}
         </p>
       )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
     </article>
   );
 }

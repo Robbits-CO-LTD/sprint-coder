@@ -73,6 +73,7 @@ export function ManagedLocalLaunchSettingsCard({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
 
   useEffect(() => {
     let disposed = false;
@@ -142,6 +143,7 @@ export function ManagedLocalLaunchSettingsCard({
     }
     setSaving(true);
     setError(null);
+    setStatus('');
     try {
       const result = await api.setLaunchSettings({
         modelId,
@@ -155,6 +157,7 @@ export function ManagedLocalLaunchSettingsCard({
       setGpuLayers(String(result.configured.gpuLayers));
       setContextTokens(String(result.configured.contextTokens));
       setBatchSize(String(result.configured.batchSize));
+      setStatus('起動設定を保存しました。');
     } catch {
       setError(
         'Managed Localの起動設定を保存できませんでした。実行中のモデルは停止後に変更してください。',
@@ -294,6 +297,9 @@ export function ManagedLocalLaunchSettingsCard({
           {error}
         </p>
       )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
     </article>
   );
 }

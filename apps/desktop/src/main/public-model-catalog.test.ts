@@ -204,7 +204,7 @@ describe('PublicModelCatalogService', () => {
       response(
         hfModel('acme/vision', {
           siblings: [
-            { rfilename: 'mmproj-model-f16.gguf', lfs: { size: 567, sha256: HASH } },
+            { rfilename: 'vision/mmproj-model-f16.gguf', lfs: { size: 567, sha256: HASH } },
             { rfilename: 'model-Q4_K_M.gguf', lfs: { size: 1234, sha256: HASH } },
           ],
         }),
@@ -215,7 +215,7 @@ describe('PublicModelCatalogService', () => {
     expect(detail.item.installability.state).toBe('installable');
     expect(detail.artifacts).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ filename: 'mmproj-model-f16.gguf', role: 'mmproj' }),
+        expect.objectContaining({ filename: 'vision/mmproj-model-f16.gguf', role: 'mmproj' }),
         expect.objectContaining({ filename: 'model-Q4_K_M.gguf', role: 'model' }),
       ]),
     );

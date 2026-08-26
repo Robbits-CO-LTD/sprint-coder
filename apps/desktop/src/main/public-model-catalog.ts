@@ -784,7 +784,8 @@ function quantizationFromFilename(filename: string): string | null {
  * artifacts until a catalog explicitly classifies them.
  */
 function artifactRoleFromFilename(filename: string): 'model' | 'mmproj' {
-  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(filename) ? 'mmproj' : 'model';
+  const leaf = filename.split(/[\\/]/u).at(-1) ?? '';
+  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(leaf) ? 'mmproj' : 'model';
 }
 
 function isSupportedGalleryArtifactUri(value: unknown): boolean {
