@@ -160,6 +160,10 @@ if (runsWithElectronAbi)
         expect.objectContaining({ filename: 'model-Q4_K_M.gguf', role: 'model' }),
         expect.objectContaining({ filename: 'mmproj-model-f16.gguf', role: 'mmproj' }),
       ]);
+      expect(env.manager.getInferenceSettings(installed.modelId)).toEqual({
+        maxOutputTokens: 512,
+        thinking: false,
+      });
       const projectorPath = join(env.store.rootPath, 'models', installed.modelId, '002.gguf');
       await writeFile(projectorPath, Buffer.alloc(projectorBytes.byteLength, 0));
       await expect(env.manager.assertInstalledIntegrity(installed.modelId)).rejects.toMatchObject({

@@ -233,6 +233,18 @@ function RuntimeCard({ runtime }: { runtime: ManagedLocalRuntimeSnapshot | null 
           <dd>{runtime?.backend ?? '未選択'}</dd>
         </div>
         <div>
+          <dt>GPU layers</dt>
+          <dd>{runtime?.gpuLayers ?? '未起動'}</dd>
+        </div>
+        <div>
+          <dt>Context</dt>
+          <dd>{runtime?.contextTokens?.toLocaleString() ?? '未起動'} tokens</dd>
+        </div>
+        <div>
+          <dt>Batch</dt>
+          <dd>{runtime?.batchSize?.toLocaleString() ?? '未起動'}</dd>
+        </div>
+        <div>
           <dt>使用中</dt>
           <dd>{runtime?.activeLeaseCount ?? 0} task</dd>
         </div>
@@ -424,7 +436,7 @@ function InstalledModelList({
                   </button>
                 )}
               </div>
-              {model.state === 'installed' && model.artifactCount === 1 && (
+              {model.state === 'installed' && (
                 <ManagedLocalInferenceSettingsCard modelId={model.id} />
               )}
             </li>
@@ -611,6 +623,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
   const [selected, setSelected] = useState<PublicModelCatalogItem | null>(null);
   const [detail, setDetail] = useState<PublicModelCatalogDetail | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<PublicModelArtifact | null>(null);
+  const [selectedMmproj, setSelectedMmproj] = useState<PublicModelArtifact | null>(null);
   const [selectedFit, setSelectedFit] = useState<LocalFitAssessment | null>(null);
   const [fitLoading, setFitLoading] = useState(false);
   const [licenseAccepted, setLicenseAccepted] = useState(false);
@@ -647,6 +660,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     setSelected(item);
     setDetail(null);
     setSelectedArtifact(null);
+    setSelectedMmproj(null);
     setSelectedFit(null);
     setLicenseAccepted(false);
     setConfirming(false);
@@ -679,7 +693,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
       await localAiApi()!.install({
         source: detail.item.source,
         sourceId: detail.item.sourceId,
-        artifactIds: [selectedArtifact.id],
+        artifactIds: [selectedArtifact.id, ...(selectedMmproj === null ? [] : [selectedMmproj.id])],
         quantization: selectedArtifact.quantization,
         confirmed: true,
       });
@@ -883,9 +897,11 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
             <ModelDetail
               detail={detail}
               selectedArtifact={selectedArtifact}
+              selectedMmproj={selectedMmproj}
               selectedFit={selectedFit}
               fitLoading={fitLoading}
               onArtifact={(artifact) => void chooseArtifact(artifact)}
+              onMmproj={setSelectedMmproj}
               licenseAccepted={licenseAccepted}
               onLicense={setLicenseAccepted}
               confirming={confirming}
@@ -913,9 +929,11 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
 function ModelDetail({
   detail,
   selectedArtifact,
+  selectedMmproj,
   selectedFit,
   fitLoading,
   onArtifact,
+  onMmproj,
   licenseAccepted,
   onLicense,
   confirming,
@@ -925,9 +943,11 @@ function ModelDetail({
 }: {
   detail: PublicModelCatalogDetail;
   selectedArtifact: PublicModelArtifact | null;
+  selectedMmproj: PublicModelArtifact | null;
   selectedFit: LocalFitAssessment | null;
   fitLoading: boolean;
   onArtifact: (artifact: PublicModelArtifact) => void;
+  onMmproj: (artifact: PublicModelArtifact | null) => void;
   licenseAccepted: boolean;
   onLicense: (value: boolean) => void;
   confirming: boolean;
@@ -936,7 +956,10 @@ function ModelDetail({
   busy: boolean;
 }) {
   const installable = detail.artifacts.filter(
-    ({ installability }) => installability.state === 'installable',
+    ({ installability, role }) => installability.state === 'installable' && role === 'model',
+  );
+  const projectors = detail.artifacts.filter(
+    ({ installability, role }) => installability.state === 'installable' && role === 'mmproj',
   );
   return (
     <article className="local-ai-model-detail">
@@ -991,6 +1014,40 @@ function ModelDetail({
           ))}
         </fieldset>
       )}
+      {selectedArtifact !== null && projectors.length > 0 && (
+        <fieldset className="local-ai-artifacts">
+          <legend>画像 projector（任意）</legend>
+          <label>
+            <input
+              type="radio"
+              name="local-ai-mmproj"
+              checked={selectedMmproj === null}
+              onChange={() => onMmproj(null)}
+            />
+            <span>
+              <strong>使用しない</strong>
+              <small>テキスト入力のみ</small>
+            </span>
+          </label>
+          {projectors.map((artifact) => (
+            <label key={artifact.id}>
+              <input
+                type="radio"
+                name="local-ai-mmproj"
+                checked={selectedMmproj?.id === artifact.id}
+                onChange={() => onMmproj(artifact)}
+              />
+              <span>
+                <strong>{artifact.filename}</strong>
+                <small>{formatLocalBytes(artifact.sizeBytes)} · SHA-256確認済み</small>
+              </span>
+            </label>
+          ))}
+          <small className="settings-hint">
+            同じrepository・immutable revisionで公開された検証済みmmprojだけを選択できます。
+          </small>
+        </fieldset>
+      )}
       {fitLoading && <p className="settings-hint">このPCでの実行見込みを計算中…</p>}
       {selectedFit !== null && <LocalFitSummary fit={selectedFit} />}
       {selectedArtifact !== null &&
@@ -998,7 +1055,11 @@ function ModelDetail({
           <div className="local-ai-install-confirm">
             <strong>端末へダウンロードします</strong>
             <p>
-              {formatLocalBytes(selectedArtifact.sizeBytes)}
+              {formatLocalBytes(
+                selectedArtifact.sizeBytes === null
+                  ? null
+                  : selectedArtifact.sizeBytes + (selectedMmproj?.sizeBytes ?? 0),
+              )}
               を使用します。取得後にサイズとSHA-256を検証します。
             </p>
             <label>

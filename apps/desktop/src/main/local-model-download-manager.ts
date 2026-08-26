@@ -358,10 +358,13 @@ export class LocalModelDownloadRepository {
 
   private assertInstalledInferenceModel(modelId: string): void {
     if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
-    const row = this.db
-      .prepare('SELECT state, artifact_count FROM local_models WHERE id = ?')
-      .get(modelId) as { state: string; artifact_count: number } | undefined;
-    if (row?.state !== 'installed' || row.artifact_count !== 1)
+    const row = this.db.prepare('SELECT state FROM local_models WHERE id = ?').get(modelId) as
+      { state: string } | undefined;
+    const artifacts = row?.state === 'installed' ? this.artifacts(modelId) : [];
+    if (
+      artifacts.filter(({ role }) => role === 'model').length !== 1 ||
+      artifacts.filter(({ role }) => role === 'mmproj').length > 1
+    )
       throw new Error('Managed Local model is not available for inference settings');
   }
 

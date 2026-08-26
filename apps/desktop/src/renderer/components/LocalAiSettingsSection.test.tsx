@@ -111,7 +111,14 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-function installApi(input: { installed?: readonly InstalledLocalModel[] } = {}) {
+function installApi(
+  input: {
+    installed?: readonly InstalledLocalModel[];
+    catalogDetail?: PublicModelCatalogDetail;
+    runtime?: ManagedLocalRuntimeSnapshot;
+  } = {},
+) {
+  const catalogDetail = input.catalogDetail ?? detail;
   const install = vi.fn(async () => ({
     id: '11111111-1111-4111-8111-111111111111',
     modelId: HASH,
@@ -154,13 +161,13 @@ function installApi(input: { installed?: readonly InstalledLocalModel[] } = {}) 
   window.sprintCoder = {
     localAI: {
       hardware: vi.fn(async () => hardware),
-      runtime: vi.fn(async () => runtime),
+      runtime: vi.fn(async () => input.runtime ?? runtime),
       listJobs: vi.fn(async () => []),
       listInstalled: vi.fn(async () => input.installed ?? []),
       inferenceSettings,
       setInferenceSettings,
-      query: vi.fn(async () => ({ items: [detail.item], nextCursor: null, errors: [] })),
-      detail: vi.fn(async () => detail),
+      query: vi.fn(async () => ({ items: [catalogDetail.item], nextCursor: null, errors: [] })),
+      detail: vi.fn(async () => catalogDetail),
       install,
       pause: vi.fn(),
       resume: vi.fn(),
@@ -180,7 +187,17 @@ async function flush(): Promise<void> {
 
 describe('LocalAiSettingsSection', () => {
   it('shows truthful device and runtime facts', async () => {
-    installApi();
+    installApi({
+      runtime: {
+        ...runtime,
+        state: 'running',
+        modelId: HASH,
+        backend: 'metal',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      },
+    });
     const container = document.createElement('div');
     document.body.append(container);
     const root = createRoot(container);
@@ -188,7 +205,10 @@ describe('LocalAiSettingsSection', () => {
     await flush();
     expect(container.textContent).toContain('Apple M4');
     expect(container.textContent).toContain('16.0 GB');
-    expect(container.textContent).toContain('停止中');
+    expect(container.textContent).toContain('実行中');
+    expect(container.textContent).toContain('GPU layers999');
+    expect(container.textContent).toContain('Context8,192 tokens');
+    expect(container.textContent).toContain('Batch512');
     await act(async () => root.unmount());
   });
 
@@ -234,6 +254,82 @@ describe('LocalAiSettingsSection', () => {
       source: 'hugging_face',
       sourceId: 'acme/model',
       artifactIds: ['artifact-q4'],
+      quantization: 'Q4_K_M',
+      confirmed: true,
+    });
+    await act(async () => root.unmount());
+  });
+
+  it('lets an image model install one verified mmproj with the selected model GGUF', async () => {
+    const projectorHash = 'c'.repeat(64);
+    const imageDetail: PublicModelCatalogDetail = {
+      ...detail,
+      artifacts: [
+        ...detail.artifacts,
+        {
+          id: 'artifact-mmproj',
+          filename: 'mmproj-model-f16.gguf',
+          format: 'gguf',
+          role: 'mmproj',
+          quantization: null,
+          sizeBytes: 234_000_000,
+          sha256: projectorHash,
+          sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+          installability: { state: 'installable', reason: 'Ready' },
+        },
+      ],
+    };
+    const { install } = installApi({ catalogDetail: imageDetail });
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<LocalAiSettingsSection active />));
+    await flush();
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((item) => item.textContent === 'Local AI Selector')!
+        .click(),
+    );
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((item) => item.textContent === '検索')!
+        .click(),
+    );
+    await flush();
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((item) => item.textContent?.includes('Acme Code 1B'))!
+        .click(),
+    );
+    await flush();
+    await act(async () =>
+      (container.querySelector('input[name="local-ai-artifact"]') as HTMLInputElement).click(),
+    );
+    await act(async () =>
+      (container.querySelectorAll('input[name="local-ai-mmproj"]')[1] as HTMLInputElement).click(),
+    );
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((item) => item.textContent === 'このGGUFを導入')!
+        .click(),
+    );
+    await act(async () =>
+      (
+        container.querySelector(
+          '.local-ai-install-confirm input[type="checkbox"]',
+        ) as HTMLInputElement
+      ).click(),
+    );
+    await act(async () =>
+      [...container.querySelectorAll('button')]
+        .find((item) => item.textContent === 'ダウンロード開始')!
+        .click(),
+    );
+    await flush();
+    expect(install).toHaveBeenCalledWith({
+      source: 'hugging_face',
+      sourceId: 'acme/model',
+      artifactIds: ['artifact-q4', 'artifact-mmproj'],
       quantization: 'Q4_K_M',
       confirmed: true,
     });
