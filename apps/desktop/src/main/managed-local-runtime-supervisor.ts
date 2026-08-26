@@ -528,7 +528,8 @@ function validateModelSettings(
     input.contextTokens > 1_048_576 ||
     !Number.isInteger(input.batchSize) ||
     input.batchSize < 1 ||
-    input.batchSize > 1_048_576 ||
+    input.batchSize > 4_096 ||
+    input.batchSize > input.contextTokens ||
     !Number.isInteger(input.gpuLayers) ||
     input.gpuLayers < 0 ||
     input.gpuLayers > 4_096 ||

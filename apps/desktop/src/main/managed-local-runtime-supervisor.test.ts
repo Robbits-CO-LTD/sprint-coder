@@ -252,7 +252,13 @@ describe('ManagedLocalRuntimeSupervisor', () => {
       gpuLayers: 0,
     };
 
-    for (const invalid of [{ contextTokens: 255 }, { batchSize: 0 }, { gpuLayers: 1 }]) {
+    for (const invalid of [
+      { contextTokens: 255 },
+      { batchSize: 0 },
+      { batchSize: 4_097 },
+      { contextTokens: 256, batchSize: 512 },
+      { gpuLayers: 1 },
+    ]) {
       await expect(env.supervisor.start({ ...base, ...invalid })).rejects.toMatchObject({
         code: 'invalid_input',
       });

@@ -471,7 +471,8 @@ function validateDescriptor(
     descriptor.contextTokens > 1_048_576 ||
     !Number.isInteger(descriptor.batchSize) ||
     descriptor.batchSize < 1 ||
-    descriptor.batchSize > 1_048_576 ||
+    descriptor.batchSize > 4_096 ||
+    descriptor.batchSize > descriptor.contextTokens ||
     descriptor.fit.contextTokens !== descriptor.contextTokens ||
     (descriptor.backend === 'cpu' &&
       (descriptor.gpuLayers !== 0 || descriptor.fit.gpuOffloadRatio !== 0)) ||
