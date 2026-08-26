@@ -379,7 +379,7 @@ export class ManagedLocalController {
     const mmproj =
       input.mmprojArtifactId === undefined
         ? null
-        : detail.artifacts.find(({ id }) => id === input.mmprojArtifactId);
+        : (detail.artifacts.find(({ id }) => id === input.mmprojArtifactId) ?? null);
     if (input.mmprojArtifactId !== undefined && !compatibleMultimodalPair(artifact, mmproj))
       throw new Error('Public mmproj artifact is not compatible with the selected model');
     const weightsBytes =
@@ -637,10 +637,10 @@ export function installPlan(
     return {
       role: artifact.role,
       filename: artifact.filename,
-      sizeBytes: artifact.sizeBytes,
-      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes!,
+      sha256: artifact.sha256!,
       sourceUrl: huggingFaceResolveUrl(
-        artifact.sourceUrl,
+        artifact.sourceUrl!,
         detail.item.sourceId,
         revision,
         artifact.filename,
