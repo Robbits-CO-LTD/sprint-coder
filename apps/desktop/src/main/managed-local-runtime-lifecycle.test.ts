@@ -251,6 +251,28 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     await second.release();
   });
 
+  it('accepts a bounded verification fallback when batch is reduced with context', async () => {
+    const model = await descriptor('3', {
+      contextTokens: 256,
+      batchSize: 256,
+      fit: {
+        weightsBytes: 2 * 1024 ** 3,
+        contextTokens: 256,
+        kvBytesPerToken: 128 * 1024,
+        scratchBytes: 256 * 1024 ** 2,
+        runtimeReserveBytes: 512 * 1024 ** 2,
+        safetyFactor: 1.2,
+        gpuOffloadRatio: 0.75,
+        runtimeCompatibility: 'supported',
+      },
+    });
+    const { subject, supervisor } = lifecycle();
+    const lease = await subject.acquire(model, false);
+
+    expect(supervisor.starts[0]).toMatchObject({ contextTokens: 256, batchSize: 256 });
+    await lease.release();
+  });
+
   it('forwards an image projector to the supervisor without exposing arbitrary arguments', async () => {
     const model = await descriptor('a');
     const mmprojPath = join(model.modelRoot, 'mmproj-model-f16.gguf');

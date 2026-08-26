@@ -287,6 +287,9 @@ export class ManagedLocalController {
     const launch = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
     if (launch === null) throw new Error('Managed Local launch settings are unavailable');
     const contextTokens = contextOverride ?? launch.contextTokens;
+    // Verification may deliberately probe a lower context than the saved setting. Keep that
+    // temporary probe valid without mutating the user's configured batch size.
+    const batchSize = managedLocalProbeBatchSize(launch.batchSize, contextTokens);
     return this.lifecycle.acquire(
       {
         id: model.id,
@@ -300,7 +303,7 @@ export class ManagedLocalController {
         backend: launch.backend,
         gpuLayers: launch.gpuLayers,
         contextTokens,
-        batchSize: launch.batchSize,
+        batchSize,
         fit: {
           weightsBytes: model.totalBytes,
           contextTokens,
@@ -666,6 +669,10 @@ export function managedLocalReusesLoadedModel(
   modelId: string,
 ): boolean {
   return snapshot.modelId === modelId && ['starting', 'running'].includes(snapshot.state);
+}
+
+export function managedLocalProbeBatchSize(batchSize: number, contextTokens: number): number {
+  return Math.min(batchSize, contextTokens);
 }
 
 function managedLocalInferenceSettingsView(

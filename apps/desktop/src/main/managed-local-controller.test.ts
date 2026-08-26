@@ -6,6 +6,7 @@ import type {
 } from '@sprint-coder/contracts';
 import {
   installPlan,
+  managedLocalProbeBatchSize,
   managedLocalReusesLoadedModel,
   resolveManagedLocalLaunchSettings,
 } from './managed-local-controller';
@@ -317,5 +318,12 @@ describe('managedLocalReusesLoadedModel', () => {
     expect(
       managedLocalReusesLoadedModel({ state: 'running', modelId: 'f'.repeat(64) }, modelId),
     ).toBe(false);
+  });
+});
+
+describe('managedLocalProbeBatchSize', () => {
+  it('reduces only a verification probe batch that exceeds the fallback context', () => {
+    expect(managedLocalProbeBatchSize(512, 8_192)).toBe(512);
+    expect(managedLocalProbeBatchSize(512, 256)).toBe(256);
   });
 });
