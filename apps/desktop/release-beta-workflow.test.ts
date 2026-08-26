@@ -6,6 +6,14 @@ const workflow = readFileSync(
   resolve(__dirname, '../../.github/workflows/release-beta.yml'),
   'utf8',
 );
+const unsignedWindowsVerifier = readFileSync(
+  resolve(__dirname, 'scripts/verify-unsigned-windows-release.ps1'),
+  'utf8',
+);
+const signedWindowsRelease = readFileSync(
+  resolve(__dirname, '../../.agents/skills/release/scripts/release-windows.ps1'),
+  'utf8',
+);
 
 describe('release signing and notarization', () => {
   it('parallelizes validation while keeping signed builds and draft publication behind every gate', () => {
@@ -93,6 +101,14 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('*-full.nupkg');
     expect(workflow).toContain("-name 'RELEASES'");
     expect(workflow).toContain('Windows版はコード署名されていません');
+  });
+
+  it('uses the Squirrel-normalized NuGet version for stable and beta Windows update packages', () => {
+    for (const script of [unsignedWindowsVerifier, signedWindowsRelease]) {
+      expect(script).toContain("require('electron-winstaller').convertVersion(process.argv[1])");
+      expect(script).toContain('SprintCoder-$($nugetVersion.Trim())-full.nupkg');
+      expect(script).not.toContain('SprintCoder-$version-full.nupkg');
+    }
   });
 
   it('normalizes cross-platform asset names before creating manifests and uploading drafts', () => {
