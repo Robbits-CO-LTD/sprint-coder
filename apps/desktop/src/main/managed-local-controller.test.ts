@@ -4,7 +4,11 @@ import type {
   ManagedLocalLaunchSettings,
   PublicModelCatalogDetail,
 } from '@sprint-coder/contracts';
-import { installPlan, resolveManagedLocalLaunchSettings } from './managed-local-controller';
+import {
+  installPlan,
+  managedLocalReusesLoadedModel,
+  resolveManagedLocalLaunchSettings,
+} from './managed-local-controller';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 
 const REVISION = 'b'.repeat(40);
@@ -300,5 +304,18 @@ describe('resolveManagedLocalLaunchSettings', () => {
         bundle(),
       ),
     ).toBeNull();
+  });
+});
+
+describe('managedLocalReusesLoadedModel', () => {
+  const modelId = 'e'.repeat(64);
+
+  it('skips another full artifact hash only for the already loaded model', () => {
+    expect(managedLocalReusesLoadedModel({ state: 'running', modelId }, modelId)).toBe(true);
+    expect(managedLocalReusesLoadedModel({ state: 'starting', modelId }, modelId)).toBe(true);
+    expect(managedLocalReusesLoadedModel({ state: 'stopped', modelId: null }, modelId)).toBe(false);
+    expect(
+      managedLocalReusesLoadedModel({ state: 'running', modelId: 'f'.repeat(64) }, modelId),
+    ).toBe(false);
   });
 });

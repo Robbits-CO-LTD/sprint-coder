@@ -279,7 +279,9 @@ export class ManagedLocalController {
     const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
     if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1)
       throw new Error('Managed Local model is not startable');
-    await this.manager.assertInstalledIntegrity(model.id);
+    const active = this.lifecycle.snapshot();
+    const reusesLoadedModel = managedLocalReusesLoadedModel(active, model.id);
+    if (!reusesLoadedModel) await this.manager.assertInstalledIntegrity(model.id);
     const hardware = await this.collectHardware();
     const configured = this.manager.getLaunchSettings(modelId);
     const launch = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
@@ -318,11 +320,9 @@ export class ManagedLocalController {
   async verify(modelId: string): Promise<LocalFitAssessment> {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
     let lease: ManagedLocalModelLease | null = null;
-    let contextTokens = 8_192;
     for (const candidate of [8_192, 4_096, 2_048, 1_024, 512, 256]) {
       try {
         lease = await this.acquireRuntime(modelId, false, new AbortController().signal, candidate);
-        contextTokens = candidate;
         break;
       } catch (error) {
         if (
@@ -348,7 +348,7 @@ export class ManagedLocalController {
       const binding = this.verificationBinding(modelId, hardware, {
         backend: snapshot.backend,
         gpuLayers: snapshot.gpuLayers,
-        contextTokens,
+        contextTokens: snapshot.contextTokens,
         batchSize: snapshot.batchSize,
       });
       const save = (level: 'loaded' | 'tools') =>
@@ -659,6 +659,13 @@ export function installPlan(
     quantization,
     artifacts: ordered,
   };
+}
+
+export function managedLocalReusesLoadedModel(
+  snapshot: Pick<ManagedLocalRuntimeSnapshot, 'state' | 'modelId'>,
+  modelId: string,
+): boolean {
+  return snapshot.modelId === modelId && ['starting', 'running'].includes(snapshot.state);
 }
 
 function managedLocalInferenceSettingsView(

@@ -232,6 +232,25 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     expect(subject.snapshot()).toMatchObject({ state: 'stopped', activeLeaseCount: 0 });
   });
 
+  it('reports the loaded session settings when a same-model lease requests a different context', async () => {
+    const model = await descriptor('2');
+    const { subject, supervisor } = lifecycle();
+    const first = await subject.acquire(model, false);
+    const second = await subject.acquire(
+      {
+        ...model,
+        contextTokens: 8_192,
+        fit: { ...model.fit, contextTokens: 8_192 },
+      },
+      false,
+    );
+
+    expect(supervisor.starts).toHaveLength(1);
+    expect(subject.snapshot()).toMatchObject({ contextTokens: 4_096 });
+    await first.release();
+    await second.release();
+  });
+
   it('forwards an image projector to the supervisor without exposing arbitrary arguments', async () => {
     const model = await descriptor('a');
     const mmprojPath = join(model.modelRoot, 'mmproj-model-f16.gguf');
