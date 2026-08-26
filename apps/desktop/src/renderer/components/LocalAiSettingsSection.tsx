@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { MANAGED_LOCAL_MAX_OUTPUT_TOKENS } from '@sprint-coder/contracts';
 import type {
   InstalledLocalModel,
   LocalDownloadJob,
   LocalHardwareSnapshot,
   LocalFitAssessment,
+  ManagedLocalInferenceSettingsView,
   ManagedLocalRuntimeSnapshot,
   PublicModelArtifact,
   PublicModelCatalogDetail,
@@ -422,11 +424,175 @@ function InstalledModelList({
                   </button>
                 )}
               </div>
+              {model.state === 'installed' && model.artifactCount === 1 && (
+                <ManagedLocalInferenceSettingsCard modelId={model.id} />
+              )}
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
+  const [view, setView] = useState<ManagedLocalInferenceSettingsView | null>(null);
+  const [maxOutputTokens, setMaxOutputTokens] = useState('');
+  const [thinking, setThinking] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    const api = localAiApi();
+    if (api === null || typeof api.inferenceSettings !== 'function') {
+      queueMicrotask(() => {
+        if (disposed) return;
+        setLoading(false);
+        setError('この環境ではManaged Localの推論設定を確認できません。');
+      });
+      return () => {
+        disposed = true;
+      };
+    }
+    queueMicrotask(() => {
+      if (disposed) return;
+      setLoading(true);
+      setError(null);
+    });
+    void api
+      .inferenceSettings(modelId)
+      .then((result) => {
+        if (disposed) return;
+        setView(result);
+        setMaxOutputTokens(String(result.configured.maxOutputTokens));
+        setThinking(result.configured.thinking);
+      })
+      .catch(() => {
+        if (!disposed) setError('Managed Localの推論設定を取得できませんでした。');
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [modelId]);
+
+  async function save(): Promise<void> {
+    const api = localAiApi();
+    if (api === null || typeof api.setInferenceSettings !== 'function') return;
+    const parsed = Number(maxOutputTokens);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MANAGED_LOCAL_MAX_OUTPUT_TOKENS) {
+      setError(
+        `最大出力トークンは1〜${MANAGED_LOCAL_MAX_OUTPUT_TOKENS.toLocaleString()}の整数で指定してください。`,
+      );
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await api.setInferenceSettings({
+        modelId,
+        maxOutputTokens: parsed,
+        thinking,
+      });
+      setView(result);
+      setMaxOutputTokens(String(result.configured.maxOutputTokens));
+      setThinking(result.configured.thinking);
+    } catch {
+      setError('Managed Localの推論設定を保存できませんでした。変更内容を確認してください。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const dirty =
+    view !== null &&
+    (maxOutputTokens !== String(view.configured.maxOutputTokens) ||
+      thinking !== view.configured.thinking);
+
+  return (
+    <article className="local-ai-inference-card" data-testid={`local-ai-inference-${modelId}`}>
+      <div className="local-ai-inference-heading">
+        <strong>Managed Localの推論設定</strong>
+        <small>このモデル専用</small>
+      </div>
+      {loading ? (
+        <p className="settings-hint">推論設定を読み込んでいます。</p>
+      ) : view === null ? null : (
+        <>
+          <div className="local-ai-inference-controls">
+            <label className="settings-field" htmlFor={`local-ai-max-output-${modelId}`}>
+              <span className="settings-field-label">最大出力トークン</span>
+              <input
+                id={`local-ai-max-output-${modelId}`}
+                data-testid={`local-ai-max-output-${modelId}`}
+                className="settings-text-input"
+                type="number"
+                min={1}
+                max={MANAGED_LOCAL_MAX_OUTPUT_TOKENS}
+                step={1}
+                value={maxOutputTokens}
+                onChange={(event) => setMaxOutputTokens(event.target.value)}
+              />
+            </label>
+            <label className="local-ai-checkbox">
+              <input
+                type="checkbox"
+                data-testid={`local-ai-thinking-${modelId}`}
+                checked={thinking}
+                onChange={(event) => setThinking(event.target.checked)}
+              />
+              Thinking（思考）を有効にする
+            </label>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              data-testid={`local-ai-inference-save-${modelId}`}
+              disabled={saving || !dirty}
+              onClick={() => void save()}
+            >
+              {saving ? '保存中…' : '推論設定を保存'}
+            </button>
+          </div>
+          <p className="settings-hint" data-testid={`local-ai-effort-note-${modelId}`}>
+            CLIのReasoning effortはManaged Localには適用されません。Thinkingはllama.cppの
+            <code>chat_template_kwargs.enable_thinking</code>へ反映します。
+          </p>
+          <div
+            className="local-ai-effective-settings"
+            data-testid={`local-ai-effective-${modelId}`}
+          >
+            <strong>次回リクエストの実効値</strong>
+            <dl>
+              <div>
+                <dt>max_tokens</dt>
+                <dd>{view.effective.maxOutputTokens.toLocaleString()}</dd>
+              </div>
+              <div>
+                <dt>enable_thinking</dt>
+                <dd>{view.effective.thinking ? 'true' : 'false'}</dd>
+              </div>
+              <div>
+                <dt>reasoning_effort</dt>
+                <dd>{view.effective.reasoningEffort ?? '送信しない'}</dd>
+              </div>
+              <div>
+                <dt>ツール呼出時</dt>
+                <dd>max_tokens {view.toolCall.maxOutputTokens.toLocaleString()} · Thinking off</dd>
+              </div>
+            </dl>
+          </div>
+        </>
+      )}
+      {error !== null && (
+        <p className="settings-provider-error" role="alert">
+          {error}
+        </p>
+      )}
+    </article>
   );
 }
 

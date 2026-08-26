@@ -57,6 +57,9 @@ import {
   modelSelectionSchema,
   installedLocalModelInputSchema,
   installedLocalModelSchema,
+  managedLocalInferenceSettingsGetInputSchema,
+  managedLocalInferenceSettingsSetInputSchema,
+  managedLocalInferenceSettingsViewSchema,
   localDownloadCancelInputSchema,
   localDownloadJobInputSchema,
   localDownloadJobSchema,
@@ -1795,6 +1798,22 @@ export class IpcRouter {
       emptyPayloadSchema,
       managedLocalRuntimeSnapshotSchema,
       () => this.managedLocal!.runtime(),
+    );
+    this.handle(
+      IPC_CHANNELS.localAIInferenceSettings,
+      managedLocalInferenceSettingsGetInputSchema,
+      managedLocalInferenceSettingsViewSchema,
+      (input) => this.managedLocal!.getInferenceSettings(input.modelId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAISetInferenceSettings,
+      managedLocalInferenceSettingsSetInputSchema,
+      managedLocalInferenceSettingsViewSchema,
+      (input) =>
+        this.managedLocal!.setInferenceSettings(input.modelId, {
+          maxOutputTokens: input.maxOutputTokens,
+          thinking: input.thinking,
+        }),
     );
     this.handle(
       IPC_CHANNELS.localAICatalogQuery,

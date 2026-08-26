@@ -168,6 +168,31 @@ if (runsWithElectronAbi)
       env.repository.close();
     });
 
+    it('persists Managed Local inference settings per installed model in the existing settings table', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+
+      expect(env.manager.getInferenceSettings(installed.modelId)).toEqual({
+        maxOutputTokens: 512,
+        thinking: false,
+      });
+      expect(
+        env.manager.setInferenceSettings(installed.modelId, {
+          maxOutputTokens: 4_096,
+          thinking: true,
+        }),
+      ).toEqual({ maxOutputTokens: 4_096, thinking: true });
+      env.repository.close();
+
+      const reopened = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      expect(reopened.getInferenceSettings(installed.modelId)).toEqual({
+        maxOutputTokens: 4_096,
+        thinking: true,
+      });
+      reopened.close();
+    });
+
     it('never publishes a hash mismatch or a missing shard as installed', async () => {
       const wrong = Buffer.from('tampered bytes');
       const env = await fixture({

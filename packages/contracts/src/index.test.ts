@@ -10,6 +10,11 @@ import {
   localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localVerificationRecordSchema,
+  managedLocalInferenceSettingsSchema,
+  managedLocalInferenceSettingsSetInputSchema,
+  managedLocalInferenceSettingsViewSchema,
+  managedLocalInferenceSettingsMapSchema,
+  MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   permissionSettingsSchema,
@@ -1706,6 +1711,50 @@ describe('Managed Local download contracts', () => {
     });
     expect(model).not.toHaveProperty('sourceUrl');
     expect(model).not.toHaveProperty('path');
+  });
+});
+
+describe('Managed Local inference settings contracts', () => {
+  it('keeps request controls bounded and identifies the unsupported effort field', () => {
+    const modelId = 'a'.repeat(64);
+    expect(
+      managedLocalInferenceSettingsSchema.parse({ maxOutputTokens: 2_048, thinking: true }),
+    ).toEqual({
+      maxOutputTokens: 2_048,
+      thinking: true,
+    });
+    expect(() =>
+      managedLocalInferenceSettingsSchema.parse({ maxOutputTokens: 0, thinking: false }),
+    ).toThrow();
+    expect(() =>
+      managedLocalInferenceSettingsSchema.parse({ maxOutputTokens: 131_073, thinking: false }),
+    ).toThrow();
+    expect(
+      managedLocalInferenceSettingsMapSchema.parse({
+        [modelId]: { maxOutputTokens: 512, thinking: false },
+      }),
+    ).toEqual({
+      [modelId]: { maxOutputTokens: 512, thinking: false },
+    });
+    expect(
+      managedLocalInferenceSettingsSetInputSchema.parse({
+        modelId,
+        maxOutputTokens: 1_024,
+        thinking: false,
+      }),
+    ).toEqual({ modelId, maxOutputTokens: 1_024, thinking: false });
+    expect(
+      managedLocalInferenceSettingsViewSchema.parse({
+        modelId,
+        configured: { maxOutputTokens: 2_048, thinking: true },
+        effective: { maxOutputTokens: 2_048, thinking: true, reasoningEffort: null },
+        toolCall: {
+          maxOutputTokens: MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+          thinking: false,
+          reasoningEffort: 'none',
+        },
+      }).effective.reasoningEffort,
+    ).toBeNull();
   });
 });
 

@@ -1,3 +1,11 @@
+import {
+  MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+  managedLocalInferenceSettingsSchema,
+  managedLocalInferenceSettingsViewSchema,
+  managedLocalRuntimeSnapshotSchema,
+  type ManagedLocalInferenceSettings,
+  type ManagedLocalInferenceSettingsView,
+} from '@sprint-coder/contracts';
 import type {
   InstalledLocalModel,
   LocalDownloadJob,
@@ -13,7 +21,6 @@ import type {
   PublicModelCatalogPage,
   PublicModelCatalogQuery,
 } from '@sprint-coder/contracts';
-import { managedLocalRuntimeSnapshotSchema } from '@sprint-coder/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -137,6 +144,21 @@ export class ManagedLocalController {
 
   listInstalled(): readonly InstalledLocalModel[] {
     return this.manager.listInstalledModels();
+  }
+
+  getInferenceSettings(modelId: string): ManagedLocalInferenceSettingsView {
+    return managedLocalInferenceSettingsView(modelId, this.manager.getInferenceSettings(modelId));
+  }
+
+  setInferenceSettings(
+    modelId: string,
+    input: ManagedLocalInferenceSettings,
+  ): ManagedLocalInferenceSettingsView {
+    const settings = managedLocalInferenceSettingsSchema.parse(input);
+    return managedLocalInferenceSettingsView(
+      modelId,
+      this.manager.setInferenceSettings(modelId, settings),
+    );
   }
 
   async listProviderModels(
@@ -536,6 +558,30 @@ export function installPlan(
     quantization,
     artifacts: ordered,
   };
+}
+
+function managedLocalInferenceSettingsView(
+  modelId: string,
+  configuredInput: ManagedLocalInferenceSettings,
+): ManagedLocalInferenceSettingsView {
+  const configured = managedLocalInferenceSettingsSchema.parse(configuredInput);
+  return managedLocalInferenceSettingsViewSchema.parse({
+    modelId,
+    configured,
+    effective: {
+      maxOutputTokens: configured.maxOutputTokens,
+      thinking: configured.thinking,
+      // llama.cpp only defines reasoning_effort=none for this API. When thinking is enabled the
+      // field is omitted, so the UI can distinguish a real setting from a silently ignored one.
+      reasoningEffort: configured.thinking ? null : 'none',
+    },
+    // Forced tool extraction is intentionally deterministic and does not inherit user thinking.
+    toolCall: {
+      maxOutputTokens: MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+      thinking: false,
+      reasoningEffort: 'none',
+    },
+  });
 }
 
 function huggingFaceResolveUrl(

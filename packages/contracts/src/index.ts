@@ -2406,6 +2406,84 @@ export const installedLocalModelSchema = z
   })
   .strict();
 export type InstalledLocalModel = z.infer<typeof installedLocalModelSchema>;
+
+/**
+ * Request-level controls that Managed Local can actually honour.  llama.cpp does not expose the
+ * built-in CLI's provider-specific Effort control, so this contract deliberately contains the
+ * template's thinking switch instead of pretending that `low`/`high` map to a local runtime.
+ */
+export const MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS = 512;
+export const MANAGED_LOCAL_MAX_OUTPUT_TOKENS = 131_072;
+export const MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS = 1_024;
+const managedLocalMaxOutputTokensSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(MANAGED_LOCAL_MAX_OUTPUT_TOKENS);
+export const managedLocalInferenceSettingsSchema = z
+  .object({
+    maxOutputTokens: managedLocalMaxOutputTokensSchema,
+    thinking: z.boolean(),
+  })
+  .strict();
+export type ManagedLocalInferenceSettings = z.infer<typeof managedLocalInferenceSettingsSchema>;
+export const managedLocalInferenceSettingsMapSchema = z
+  .record(z.string().regex(/^[a-f0-9]{64}$/u), managedLocalInferenceSettingsSchema)
+  .superRefine((settings, context) => {
+    if (Object.keys(settings).length > 256)
+      context.addIssue({ code: 'custom', message: 'Too many Managed Local model settings' });
+  });
+export type ManagedLocalInferenceSettingsMap = z.infer<
+  typeof managedLocalInferenceSettingsMapSchema
+>;
+export const managedLocalInferenceSettingsGetInputSchema = z
+  .object({ modelId: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+export const managedLocalInferenceSettingsSetInputSchema =
+  managedLocalInferenceSettingsGetInputSchema
+    .extend(managedLocalInferenceSettingsSchema.shape)
+    .strict();
+export type ManagedLocalInferenceSettingsSetInput = z.infer<
+  typeof managedLocalInferenceSettingsSetInputSchema
+>;
+
+/** The values that the next ordinary `/v1/chat/completions` request will contain. */
+export const managedLocalEffectiveInferenceSettingsSchema = z
+  .object({
+    maxOutputTokens: managedLocalMaxOutputTokensSchema,
+    thinking: z.boolean(),
+    /** `null` means the field is omitted; llama.cpp only gives `none` a defined meaning here. */
+    reasoningEffort: z.literal('none').nullable(),
+  })
+  .strict();
+export type ManagedLocalEffectiveInferenceSettings = z.infer<
+  typeof managedLocalEffectiveInferenceSettingsSchema
+>;
+
+/** Tool extraction is a bounded internal subrequest and intentionally disables thinking. */
+export const managedLocalToolInferenceSettingsSchema = z
+  .object({
+    maxOutputTokens: z.literal(MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS),
+    thinking: z.literal(false),
+    reasoningEffort: z.literal('none'),
+  })
+  .strict();
+export type ManagedLocalToolInferenceSettings = z.infer<
+  typeof managedLocalToolInferenceSettingsSchema
+>;
+
+export const managedLocalInferenceSettingsViewSchema = z
+  .object({
+    modelId: z.string().regex(/^[a-f0-9]{64}$/u),
+    configured: managedLocalInferenceSettingsSchema,
+    effective: managedLocalEffectiveInferenceSettingsSchema,
+    toolCall: managedLocalToolInferenceSettingsSchema,
+  })
+  .strict();
+export type ManagedLocalInferenceSettingsView = z.infer<
+  typeof managedLocalInferenceSettingsViewSchema
+>;
+
 export const managedLocalRuntimeFailureCodeSchema = z.enum([
   'unsupported_target',
   'bundle_invalid',
@@ -4113,6 +4191,10 @@ export interface SprintCoderApi {
   localAI: {
     hardware(): Promise<LocalHardwareSnapshot>;
     runtime(): Promise<ManagedLocalRuntimeSnapshot>;
+    inferenceSettings(modelId: string): Promise<ManagedLocalInferenceSettingsView>;
+    setInferenceSettings(
+      input: ManagedLocalInferenceSettingsSetInput,
+    ): Promise<ManagedLocalInferenceSettingsView>;
     query(input: PublicModelCatalogQuery): Promise<PublicModelCatalogPage>;
     detail(input: PublicModelCatalogDetailInput): Promise<PublicModelCatalogDetail>;
     listJobs(): Promise<LocalDownloadJob[]>;
@@ -4292,6 +4374,8 @@ export const IPC_CHANNELS = {
   providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
   localAIHardware: 'sprint-coder:local-ai:hardware',
   localAIRuntime: 'sprint-coder:local-ai:runtime',
+  localAIInferenceSettings: 'sprint-coder:local-ai:inference-settings',
+  localAISetInferenceSettings: 'sprint-coder:local-ai:set-inference-settings',
   localAICatalogQuery: 'sprint-coder:local-ai:catalog-query',
   localAICatalogDetail: 'sprint-coder:local-ai:catalog-detail',
   localAIListJobs: 'sprint-coder:local-ai:list-jobs',

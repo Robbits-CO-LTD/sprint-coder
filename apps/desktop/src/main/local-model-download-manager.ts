@@ -17,6 +17,9 @@ import {
 import { basename, extname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import {
+  MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+  managedLocalInferenceSettingsMapSchema,
+  managedLocalInferenceSettingsSchema,
   localDownloadJobSchema,
   installedLocalModelSchema,
   localVerificationRecordSchema,
@@ -24,6 +27,7 @@ import {
   type LocalDownloadFailureCode,
   type LocalDownloadJob,
   type LocalDownloadJobState,
+  type ManagedLocalInferenceSettings,
   type LocalVerificationRecord,
 } from '@sprint-coder/contracts';
 
@@ -33,6 +37,12 @@ const MAX_ARTIFACTS = 256;
 const DISK_RESERVE_BYTES = 64 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const MARKER = '.sprint-coder-local-models-v1';
+const INFERENCE_SETTINGS_KEY = 'managed-local.inference-settings';
+const DEFAULT_INFERENCE_SETTINGS: ManagedLocalInferenceSettings = Object.freeze({
+  maxOutputTokens: MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+  thinking: false,
+});
+const MAX_INFERENCE_SETTINGS_BYTES = 32 * 1024;
 
 export type LocalModelArtifactRole = 'model' | 'mmproj';
 
@@ -298,6 +308,61 @@ export class LocalModelDownloadRepository {
       )
       .run(modelId, record.level, record.verifiedAt, JSON.stringify(record.binding));
     return this.verification(modelId)!;
+  }
+
+  getInferenceSettings(modelId: string): ManagedLocalInferenceSettings {
+    this.assertInstalledInferenceModel(modelId);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(INFERENCE_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_INFERENCE_SETTINGS_BYTES)
+      return { ...DEFAULT_INFERENCE_SETTINGS };
+    try {
+      const map = managedLocalInferenceSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      return map[modelId] === undefined ? { ...DEFAULT_INFERENCE_SETTINGS } : { ...map[modelId] };
+    } catch {
+      // A malformed optional settings blob must not prevent a downloaded model from running.
+      return { ...DEFAULT_INFERENCE_SETTINGS };
+    }
+  }
+
+  setInferenceSettings(
+    modelId: string,
+    input: ManagedLocalInferenceSettings,
+  ): ManagedLocalInferenceSettings {
+    this.assertInstalledInferenceModel(modelId);
+    const settings = managedLocalInferenceSettingsSchema.parse(input);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(INFERENCE_SETTINGS_KEY) as { value: string } | undefined;
+    let current: Record<string, ManagedLocalInferenceSettings> = {};
+    if (row !== undefined && Buffer.byteLength(row.value, 'utf8') <= MAX_INFERENCE_SETTINGS_BYTES) {
+      try {
+        current = managedLocalInferenceSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      } catch {
+        // Replace only the malformed optional blob; the model itself remains intact.
+      }
+    }
+    current[modelId] = settings;
+    const serialized = JSON.stringify(managedLocalInferenceSettingsMapSchema.parse(current));
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_INFERENCE_SETTINGS_BYTES)
+      throw new Error('Managed Local inference settings are too large');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(INFERENCE_SETTINGS_KEY, serialized, new Date().toISOString());
+    return { ...settings };
+  }
+
+  private assertInstalledInferenceModel(modelId: string): void {
+    if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
+    const row = this.db
+      .prepare('SELECT state, artifact_count FROM local_models WHERE id = ?')
+      .get(modelId) as { state: string; artifact_count: number } | undefined;
+    if (row?.state !== 'installed' || row.artifact_count !== 1)
+      throw new Error('Managed Local model is not available for inference settings');
   }
 
   private parseJob(row: JobRow): LocalDownloadJob {
@@ -663,6 +728,17 @@ export class LocalModelDownloadManager {
 
   saveVerification(modelId: string, record: LocalVerificationRecord): LocalVerificationRecord {
     return this.repository.saveVerification(modelId, record);
+  }
+
+  getInferenceSettings(modelId: string): ManagedLocalInferenceSettings {
+    return this.repository.getInferenceSettings(modelId);
+  }
+
+  setInferenceSettings(
+    modelId: string,
+    settings: ManagedLocalInferenceSettings,
+  ): ManagedLocalInferenceSettings {
+    return this.repository.setInferenceSettings(modelId, settings);
   }
 
   enqueue(input: LocalModelInstallPlan): LocalDownloadJob {

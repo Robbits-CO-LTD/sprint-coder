@@ -3,7 +3,9 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  InstalledLocalModel,
   LocalHardwareSnapshot,
+  ManagedLocalInferenceSettingsView,
   ManagedLocalRuntimeSnapshot,
   PublicModelCatalogDetail,
 } from '@sprint-coder/contracts';
@@ -109,7 +111,7 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-function installApi() {
+function installApi(input: { installed?: readonly InstalledLocalModel[] } = {}) {
   const install = vi.fn(async () => ({
     id: '11111111-1111-4111-8111-111111111111',
     modelId: HASH,
@@ -122,12 +124,41 @@ function installApi() {
     createdAt: '2026-08-24T00:00:00.000Z',
     updatedAt: '2026-08-24T00:00:00.000Z',
   }));
+  const inferenceSettings = vi.fn(
+    async (modelId: string): Promise<ManagedLocalInferenceSettingsView> => ({
+      modelId,
+      configured: { maxOutputTokens: 512, thinking: false },
+      effective: { maxOutputTokens: 512, thinking: false, reasoningEffort: 'none' },
+      toolCall: { maxOutputTokens: 1_024, thinking: false, reasoningEffort: 'none' },
+    }),
+  );
+  const setInferenceSettings = vi.fn(
+    async (settings: {
+      modelId: string;
+      maxOutputTokens: number;
+      thinking: boolean;
+    }): Promise<ManagedLocalInferenceSettingsView> => ({
+      modelId: settings.modelId,
+      configured: {
+        maxOutputTokens: settings.maxOutputTokens,
+        thinking: settings.thinking,
+      },
+      effective: {
+        maxOutputTokens: settings.maxOutputTokens,
+        thinking: settings.thinking,
+        reasoningEffort: settings.thinking ? null : 'none',
+      },
+      toolCall: { maxOutputTokens: 1_024, thinking: false, reasoningEffort: 'none' },
+    }),
+  );
   window.sprintCoder = {
     localAI: {
       hardware: vi.fn(async () => hardware),
       runtime: vi.fn(async () => runtime),
       listJobs: vi.fn(async () => []),
-      listInstalled: vi.fn(async () => []),
+      listInstalled: vi.fn(async () => input.installed ?? []),
+      inferenceSettings,
+      setInferenceSettings,
       query: vi.fn(async () => ({ items: [detail.item], nextCursor: null, errors: [] })),
       detail: vi.fn(async () => detail),
       install,
@@ -137,7 +168,7 @@ function installApi() {
       delete: vi.fn(),
     },
   } as unknown as NonNullable<Window['sprintCoder']>;
-  return install;
+  return { install, inferenceSettings, setInferenceSettings };
 }
 
 async function flush(): Promise<void> {
@@ -162,7 +193,7 @@ describe('LocalAiSettingsSection', () => {
   });
 
   it('requires an explicit license acknowledgement before starting an immutable install', async () => {
-    const install = installApi();
+    const { install } = installApi();
     const container = document.createElement('div');
     document.body.append(container);
     const root = createRoot(container);
@@ -212,5 +243,57 @@ describe('LocalAiSettingsSection', () => {
   it('formats unknown and byte totals without overstating precision', () => {
     expect(formatLocalBytes(null)).toBe('不明');
     expect(formatLocalBytes(1_500_000_000)).toBe('1.5 GB');
+  });
+
+  it('edits a model-specific request setting and shows the effective Managed Local fields', async () => {
+    const model: InstalledLocalModel = {
+      id: HASH,
+      source: 'hugging_face',
+      sourceId: 'acme/model',
+      immutableRevision: REVISION,
+      quantization: 'Q4_K_M',
+      artifactCount: 1,
+      totalBytes: 1_234_000_000,
+      state: 'installed',
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    };
+    const api = installApi({ installed: [model] });
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<LocalAiSettingsSection active />));
+    await flush();
+    const maxTokens = container.querySelector(
+      `[data-testid="local-ai-max-output-${HASH}"]`,
+    ) as HTMLInputElement;
+    expect(maxTokens.value).toBe('512');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+        maxTokens,
+        '4096',
+      );
+      maxTokens.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const thinking = container.querySelector(
+      `[data-testid="local-ai-thinking-${HASH}"]`,
+    ) as HTMLInputElement;
+    await act(async () => thinking.click());
+    const save = container.querySelector(
+      `[data-testid="local-ai-inference-save-${HASH}"]`,
+    ) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    await act(async () => save.click());
+    await flush();
+    expect(api.setInferenceSettings).toHaveBeenCalledWith({
+      modelId: HASH,
+      maxOutputTokens: 4_096,
+      thinking: true,
+    });
+    expect(
+      container.querySelector(`[data-testid="local-ai-effective-${HASH}"]`)?.textContent,
+    ).toContain('4,096');
+    expect(container.textContent).toContain('Reasoning effortはManaged Localには適用されません');
+    await act(async () => root.unmount());
   });
 });
