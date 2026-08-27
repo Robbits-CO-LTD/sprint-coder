@@ -58,6 +58,27 @@ type ControllerDependencies = Readonly<{
   collectHardware?: () => Promise<LocalHardwareSnapshot>;
 }>;
 
+export class ManagedLocalModelOperationQueue {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async run<T>(modelId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(modelId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.tails.set(modelId, tail);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.tails.get(modelId) === tail) this.tails.delete(modelId);
+    }
+  }
+}
+
 export class ManagedLocalController {
   private readonly repository: LocalModelDownloadRepository;
   private readonly manager: LocalModelDownloadManager;
@@ -65,6 +86,7 @@ export class ManagedLocalController {
   private readonly collectHardware: () => Promise<LocalHardwareSnapshot>;
   private readonly plans = new Map<string, LocalModelInstallPlan>();
   private readonly requested = new Set<string>();
+  private readonly modelOperations = new ManagedLocalModelOperationQueue();
   private pumpPromise: Promise<void> | null = null;
 
   private constructor(
@@ -183,13 +205,15 @@ export class ManagedLocalController {
     input: ManagedLocalLaunchSettings,
   ): Promise<ManagedLocalLaunchSettingsView> {
     const settings = managedLocalLaunchSettingsSchema.parse(input);
-    this.assertLaunchSettingsEditable(modelId);
-    const hardware = await this.collectHardware();
-    const effective = resolveManagedLocalLaunchSettings(settings, hardware, this.bundle);
-    if (effective === null)
-      throw new Error('Managed Local backend is unavailable on this device and runtime bundle');
-    const configured = this.manager.setLaunchSettings(modelId, settings);
-    return managedLocalLaunchSettingsView(modelId, configured, effective);
+    return this.modelOperations.run(modelId, async () => {
+      this.assertLaunchSettingsEditable(modelId);
+      const hardware = await this.collectHardware();
+      const effective = resolveManagedLocalLaunchSettings(settings, hardware, this.bundle);
+      if (effective === null)
+        throw new Error('Managed Local backend is unavailable on this device and runtime bundle');
+      const configured = this.manager.setLaunchSettings(modelId, settings);
+      return managedLocalLaunchSettingsView(modelId, configured, effective);
+    });
   }
 
   async listProviderModels(
@@ -263,6 +287,17 @@ export class ManagedLocalController {
   }
 
   async acquireRuntime(
+    modelId: string,
+    automaticRelease: boolean,
+    signal: AbortSignal,
+    contextOverride?: number,
+  ): Promise<ManagedLocalModelLease> {
+    return this.modelOperations.run(modelId, () =>
+      this.acquireRuntimeUnlocked(modelId, automaticRelease, signal, contextOverride),
+    );
+  }
+
+  private async acquireRuntimeUnlocked(
     modelId: string,
     automaticRelease: boolean,
     signal: AbortSignal,

@@ -6,6 +6,7 @@ import type {
 } from '@sprint-coder/contracts';
 import {
   installPlan,
+  ManagedLocalModelOperationQueue,
   managedLocalProbeBatchSize,
   managedLocalReusesLoadedModel,
   resolveManagedLocalLaunchSettings,
@@ -325,5 +326,34 @@ describe('managedLocalProbeBatchSize', () => {
   it('reduces only a verification probe batch that exceeds the fallback context', () => {
     expect(managedLocalProbeBatchSize(512, 8_192)).toBe(512);
     expect(managedLocalProbeBatchSize(512, 256)).toBe(256);
+  });
+});
+
+describe('ManagedLocalModelOperationQueue', () => {
+  it('serializes settings and startup for the same model without blocking another model', async () => {
+    const queue = new ManagedLocalModelOperationQueue();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = queue.run('model-a', async () => {
+      events.push('a:first:start');
+      await firstGate;
+      events.push('a:first:end');
+    });
+    await Promise.resolve();
+    const second = queue.run('model-a', async () => {
+      events.push('a:second');
+    });
+    const other = queue.run('model-b', async () => {
+      events.push('b:first');
+    });
+    await other;
+    expect(events).toEqual(['a:first:start', 'b:first']);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(['a:first:start', 'b:first', 'a:first:end', 'a:second']);
   });
 });
