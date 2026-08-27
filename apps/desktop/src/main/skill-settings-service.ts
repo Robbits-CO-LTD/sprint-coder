@@ -1,18 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type {
-  SkillCandidateSummary,
-  SkillCatalog,
-  SkillCatalogItem,
-  SkillDraft,
-  SkillDraftCreateInput,
-  SkillImportResult,
-  SkillPreviewResult,
-  SkillProvider,
-  SkillActivationPolicy,
-  SkillRef,
-  SkillScanResult,
-  TurnSkillSelection,
+import { z } from 'zod';
+import {
+  skillDraftCreateInputSchema,
+  type SkillActivationPolicy,
+  type SkillCandidateSummary,
+  type SkillCatalog,
+  type SkillCatalogItem,
+  type SkillDraft,
+  type SkillDraftCreateInput,
+  type SkillImportResult,
+  type SkillPreviewResult,
+  type SkillProvider,
+  type SkillRef,
+  type SkillScanResult,
+  type TurnSkillSelection,
 } from '@sprint-coder/contracts';
 import {
   SkillStore,
@@ -25,6 +27,7 @@ import {
 import { buildSkillCatalogContext, SkillCatalogContextError } from './skill-catalog-context';
 import { createPortableSkillFile } from './skill-compatibility';
 import { expandSkillArguments } from '../runtime-host/skill-arguments';
+import { clipPublicMessage, formatZodIssues } from './zod-issue-message';
 
 const PREVIEW_TTL_MS = 5 * 60 * 1_000;
 const MAX_PREVIEWS = 64;
@@ -605,9 +608,24 @@ export function skillSettingsPublicError(error: unknown): SkillSettingsError {
       return new SkillSettingsError('SOURCE_CHANGED', 'Skillがプレビュー後に変更されました');
     if (error.code === 'CONFLICT')
       return new SkillSettingsError('INVALID_SKILL', '同名のSkillが既に存在します');
+    if (error.code === 'INVALID_SKILL' && error.publicDetail !== undefined)
+      return new SkillSettingsError('INVALID_SKILL', clipPublicMessage(error.publicDetail));
     return new SkillSettingsError('INVALID_SKILL', 'Skillを安全に読み込めません');
   }
   return new SkillSettingsError('INVALID_SKILL', 'Skillの読み込みに失敗しました');
+}
+
+export async function createSkillDraftWithPublicError(
+  service: Pick<SkillSettingsService, 'createDraft'>,
+  input: unknown,
+): Promise<SkillDraft> {
+  try {
+    return await service.createDraft(skillDraftCreateInputSchema.parse(input));
+  } catch (error) {
+    if (error instanceof z.ZodError)
+      throw new SkillSettingsError('INVALID_SKILL', formatZodIssues(error));
+    throw skillSettingsPublicError(error);
+  }
 }
 
 function key(provider: SkillProvider, skillId: string): string {

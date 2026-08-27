@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { z } from 'zod';
 import {
   skillCompatibilityReportSchema,
   skillDraftSchema,
@@ -27,6 +28,7 @@ import {
   portableSkillCompatibility,
 } from './skill-compatibility';
 import { secureWindowsPath, secureWindowsPaths } from './windows-acl';
+import { formatBlueprintJsonSyntaxError, formatZodIssues } from './zod-issue-message';
 import {
   assertStableDirectoryIdentity,
   assertStableSingleLinkFile,
@@ -167,6 +169,7 @@ export class SkillStoreError extends Error {
       'UNAVAILABLE' | 'INVALID_SKILL' | 'UNSAFE_SOURCE' | 'SOURCE_CHANGED' | 'CONFLICT',
     message: string,
     readonly preserveContestedPath = false,
+    readonly publicDetail?: string,
   ) {
     super(message);
     this.name = 'SkillStoreError';
@@ -425,7 +428,33 @@ export class SkillStore {
     if (skillFile === undefined) throw new SkillStoreError('INVALID_SKILL', 'SKILL.md is required');
     const { name, description, compatibility } = analyzeSkill(skillFile.bytes, canonical);
     const blueprint = canonical.find(({ path }) => path === 'team/blueprint.json');
-    if (blueprint !== undefined) teamBlueprintSchema.parse(JSON.parse(blueprint.content));
+    if (blueprint !== undefined) {
+      let parsedBlueprint: unknown;
+      try {
+        parsedBlueprint = JSON.parse(blueprint.content);
+      } catch (error) {
+        if (error instanceof SyntaxError)
+          throw new SkillStoreError(
+            'INVALID_SKILL',
+            'Team Blueprint JSON is invalid',
+            false,
+            formatBlueprintJsonSyntaxError(error),
+          );
+        throw error;
+      }
+      try {
+        teamBlueprintSchema.parse(parsedBlueprint);
+      } catch (error) {
+        if (error instanceof z.ZodError)
+          throw new SkillStoreError(
+            'INVALID_SKILL',
+            'Team Blueprint schema is invalid',
+            false,
+            formatZodIssues(error),
+          );
+        throw error;
+      }
+    }
     canonical.sort((left, right) => left.path.localeCompare(right.path));
     const digest = createHash('sha256');
     for (const file of canonical)
@@ -1326,7 +1355,7 @@ async function writeExclusive(
   } catch (error) {
     if (error instanceof SkillStoreError)
       throw created && !error.preserveContestedPath
-        ? new SkillStoreError(error.code, error.message, true)
+        ? new SkillStoreError(error.code, error.message, true, error.publicDetail)
         : error;
     throw new SkillStoreError('SOURCE_CHANGED', 'Skill destination changed identity', created);
   } finally {

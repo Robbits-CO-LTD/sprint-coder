@@ -676,6 +676,9 @@ socket.once('error', (error) => {
   it('allows Draft creation only for a turn explicitly bound to skill-creator', async () => {
     const createSkillDraft = vi.fn(async (input: unknown) => ({
       id: 'draft-1',
+      skillId: 'reviewer',
+      kind: 'chat',
+      files: [{ path: 'SKILL.md', content: 'x' }],
       input,
     }));
     const bridge = new TeamMcpBridge(
@@ -709,7 +712,12 @@ socket.once('error', (error) => {
     });
     expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
       ok: true,
-      result: { id: 'draft-1' },
+      result: {
+        id: 'draft-1',
+        skillId: 'reviewer',
+        kind: 'chat',
+        files: [{ path: 'SKILL.md', content: 'x' }],
+      },
     });
     expect(createSkillDraft).toHaveBeenCalledOnce();
   });

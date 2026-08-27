@@ -149,6 +149,7 @@ import { requiresTeamWorkersInput } from './team-tools';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
+import { SkillSettingsError } from './skill-settings-service';
 
 describe('file edit tracking identity', () => {
   it('deduplicates Windows relative paths that differ only by casing', () => {
@@ -585,6 +586,17 @@ describe('image attachment public errors', () => {
       userMessage: '画像添付の状態が変わりました。最新の一覧を確認してください。',
       retryable: false,
     });
+  });
+});
+
+describe('Skill Draft public errors', () => {
+  it('clips actionable validation details to the public message limit', () => {
+    const result = toPublicError(new SkillSettingsError('INVALID_SKILL', 'x'.repeat(600)));
+
+    expect(result.code).toBe('INVALID_REQUEST');
+    expect(result.userMessage).toHaveLength(500);
+    expect(result.userMessage.endsWith('…')).toBe(true);
+    expect(result.retryable).toBe(false);
   });
 });
 

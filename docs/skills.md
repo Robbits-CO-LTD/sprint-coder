@@ -28,5 +28,33 @@ AIの候補になります。候補はTurn開始時にdigest固定され、最�
 `scripts/`、`references/`、`assets/`を同梱できます。更新で互換性や権限要求が変わった場合は
 再度内容の確認が必要です。
 
+### Skill Draftを作成する
+
+`skill_draft_create`は、インストール前の確認用Draftを作ります。入力には次の3項目が必要です。
+
+```json
+{
+  "kind": "chat",
+  "skillId": "review-helper",
+  "files": [
+    {
+      "path": "SKILL.md",
+      "content": "---\nname: Review Helper\ndescription: Review code safely.\n---\n"
+    }
+  ]
+}
+```
+
+- `kind`: `chat`または`team`
+- `skillId`: 英数字で始まる128文字以内のID
+- `files`: `path`と`content`を持つ1件以上の配列
+
+Team Skillでは、`files`へ`team/blueprint.json`を必ず含めてください。Blueprintには
+`version`、`kind`、`policy`、`leaderInstructions`、1件以上の`roles`が必要です。
+
+作成に成功すると、応答へDraft ID、Skill ID、種類、ファイル一覧が入ります。Draft IDを
+確認できない場合は未作成です。不正なBlueprintでは、エラーが`roles[0].parentKey`のように
+修正対象を示します。
+
 作成済みSkillは元形式、またはPortable Exportとして書き出せます。Exportには管理manifest、
 ローカル絶対パス、無効化・自動発火marker、認証情報を含めません。

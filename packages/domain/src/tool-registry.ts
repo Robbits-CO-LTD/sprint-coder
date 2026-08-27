@@ -609,6 +609,9 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
     'const',
     'minimum',
     'maximum',
+    'pattern',
+    'minLength',
+    'maxLength',
     'allOf',
     'if',
     'then',
@@ -637,6 +640,31 @@ function validateSupportedSchema(schema: JsonValue, label: string): void {
     Number(record['minimum']) > Number(record['maximum'])
   )
     throw new Error(`Invalid ${label}: minimum exceeds maximum`);
+  const pattern = record['pattern'];
+  const minLength = record['minLength'];
+  const maxLength = record['maxLength'];
+  if (pattern !== undefined || minLength !== undefined || maxLength !== undefined) {
+    if (record['type'] !== 'string')
+      throw new Error(`Invalid ${label}: string constraints require a string schema`);
+    if (pattern !== undefined) {
+      if (typeof pattern !== 'string')
+        throw new Error(`Invalid ${label}: malformed string pattern`);
+      try {
+        new RegExp(pattern);
+      } catch {
+        throw new Error(`Invalid ${label}: malformed string pattern`);
+      }
+    }
+    if (
+      [minLength, maxLength].some(
+        (bound) =>
+          bound !== undefined &&
+          (typeof bound !== 'number' || !Number.isSafeInteger(bound) || bound < 0),
+      ) ||
+      (typeof minLength === 'number' && typeof maxLength === 'number' && minLength > maxLength)
+    )
+      throw new Error(`Invalid ${label}: malformed string bounds`);
+  }
   if (
     record['type'] === 'object' ||
     record['properties'] !== undefined ||
