@@ -10,6 +10,7 @@ import {
   REPO_ROOT,
   resolveE2EMode,
   stopDevServer,
+  warnAboutUnbuiltDevNativePrerequisites,
 } from './helpers';
 import type { DevServerHandle } from './helpers';
 
@@ -74,6 +75,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       removeUserDataDir(prepared.temporaryRoot);
     };
   }
+
+  // Surfaced before the dev server starts: a missing native layer otherwise costs 90s of startup
+  // and then reads as a product bug in whichever specs depend on it.
+  warnAboutUnbuiltDevNativePrerequisites();
 
   console.log('[e2e globalSetup] Ensuring dev server + main/preload dev build are ready...');
   const devServer: DevServerHandle = await ensureDevServerReady(90_000);

@@ -125,6 +125,17 @@ describe('design-token contrast audit (WCAG 2.2 AA)', () => {
     expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
   });
 
+  // --accent is also used as a solid *fill* (.setup-primary, .settings-primary-button), and it is a
+  // light tone: white on it measures 2.19 and axe reports it as a serious violation. --accent-ink is
+  // the one sanctioned foreground for that fill, so it carries the bar on both fill states.
+  it.each(['accent', 'accent-hover'] as const)(
+    '--accent-ink is readable on the --%s fill',
+    (fill) => {
+      const ratio = contrastRatio(tokenRgb('accent-ink'), tokenRgb(fill));
+      expect(ratio, `--accent-ink on --${fill}`).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT);
+    },
+  );
+
   // Disabled text is exempt from WCAG 1.4.3, so --text-disabled has no contrast bar. What it does
   // need is to stay clearly *below* --text-muted, or the two stop being visually distinguishable
   // and "disabled" loses its meaning.

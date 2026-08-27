@@ -177,6 +177,95 @@ export function resolveE2EMode(): E2EMode {
   return 'packaged';
 }
 
+/**
+ * Reports native prerequisites that were never built for Electron, before the suite starts.
+ *
+ * `npm run prepare:desktop` (electron-rebuild + native-safe-fs + sandbox-runner) is wired into
+ * `package`/`make`, but nothing in the `start`/dev path builds these — so a fresh clone or a new
+ * git worktree runs E2E against an app whose native layer is missing or built for Node's ABI.
+ * Each gap then surfaces as a plausible-looking product failure rather than a setup error:
+ * a better-sqlite3 ABI mismatch aborts main-process init so no window is ever created and every
+ * spec dies on `firstWindow` timeout; a missing native-safe-fs addon makes the manual editor
+ * report 保存できませんでした; a missing sandbox-runner stops run_command approvals from appearing.
+ *
+ * This warns rather than throwing, because "built" is not the same bar for every run: Windows CI
+ * deliberately builds no sandbox-runner (no Rust toolchain) and runs a spec list that never
+ * executes a command, so a hard gate here would fail a configuration that is entirely correct.
+ * Let the spec that actually needs an artifact be the one that fails, and make its cause legible.
+ */
+export function warnAboutUnbuiltDevNativePrerequisites(): void {
+  const missing: string[] = [];
+
+  const addon = join(
+    DESKTOP_ROOT,
+    'native-safe-fs',
+    'build',
+    'Release',
+    'sprint_coder_native_safe_fs.node',
+  );
+  if (!existsSync(addon))
+    missing.push(
+      `native-safe-fs addon (${relative(REPO_ROOT, addon)}) — the manual file editor cannot save`,
+    );
+
+  const runnerName =
+    process.platform === 'win32'
+      ? 'sprint-coder-sandbox-runner.exe'
+      : 'sprint-coder-sandbox-runner';
+  const runner = join(DESKTOP_ROOT, 'sandbox-runner', 'build', 'Release', runnerName);
+  if (!existsSync(runner))
+    missing.push(
+      `sandbox-runner binary (${relative(REPO_ROOT, runner)}) — run_command approvals never appear`,
+    );
+
+  // The addon itself is the thing main requires, so it is checked before any metadata about it:
+  // a configure that succeeded and a rebuild that then failed leaves config.gypi behind without a
+  // .node, which is exactly the state that aborts init and times out every spec in firstWindow.
+  const sqliteAddon = join(
+    REPO_ROOT,
+    'node_modules',
+    'better-sqlite3',
+    'build',
+    'Release',
+    'better_sqlite3.node',
+  );
+  const abiConsequence = 'main-process init aborts, so every spec times out in firstWindow';
+  if (!existsSync(sqliteAddon)) {
+    missing.push(`better-sqlite3 addon (${relative(REPO_ROOT, sqliteAddon)}) — ${abiConsequence}`);
+  } else {
+    // It must also be built against Electron's ABI, not the ambient Node's. node-gyp records what
+    // it targeted in config.gypi, so this compares intent rather than guessing from mtimes. A
+    // missing gypi proves nothing (a prebuilt binary leaves none) and is not reported; a gypi that
+    // cannot be read is reported rather than passed over, so an unverified ABI never looks clean.
+    const gypi = join(REPO_ROOT, 'node_modules', 'better-sqlite3', 'build', 'config.gypi');
+    const electronPackage = join(REPO_ROOT, 'node_modules', 'electron', 'package.json');
+    if (existsSync(gypi)) {
+      const target = /"target"\s*:\s*"([^"]+)"/.exec(readFileSync(gypi, 'utf8'))?.[1];
+      const electronVersion = existsSync(electronPackage)
+        ? (JSON.parse(readFileSync(electronPackage, 'utf8')) as { version?: string }).version
+        : undefined;
+      if (target === undefined || electronVersion === undefined) {
+        missing.push(
+          "better-sqlite3's ABI could not be verified (unreadable config.gypi target or Electron " +
+            `version) — if it was built for Node rather than Electron, ${abiConsequence}`,
+        );
+      } else if (target !== electronVersion) {
+        missing.push(
+          `better-sqlite3 is built for target ${target}, but Electron is ${electronVersion} — ` +
+            abiConsequence,
+        );
+      }
+    }
+  }
+
+  if (missing.length === 0) return;
+  console.warn(
+    `[e2e globalSetup] Native prerequisites not built for Electron:\n  - ${missing.join('\n  - ')}\n` +
+      '[e2e globalSetup] Specs that need them will fail. Fix with: ' +
+      '`npm run prepare:desktop --workspace @sprint-coder/desktop`',
+  );
+}
+
 /** Resolves the repo's own Electron binary via node_modules/electron/path.txt, the same
  * indirection the `electron` npm package itself uses — works across mac/win/linux without
  * hardcoding a platform-specific layout. */

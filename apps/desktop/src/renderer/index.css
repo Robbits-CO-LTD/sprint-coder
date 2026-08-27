@@ -39,6 +39,9 @@
      blue merely to look active is now neutral and earns emphasis from tone instead. */
   --accent: #8ab0f0;
   --accent-hover: #a8c6f7;
+  /* The only foreground sanctioned on an --accent (or --accent-hover) *fill*. The accent is a light
+     tone, so white on it lands at 2.19:1 — far under WCAG AA. This ink reaches 8.75:1 instead. */
+  --accent-ink: #061019;
   /* An accent-tinted *fill*, not a foreground. Use --text-primary for copy placed on this surface;
      --accent remains an interaction/state colour rather than body text on its own tint. */
   --accent-muted: #26344a;
@@ -538,7 +541,7 @@ body {
 .setup-primary {
   margin-top: 34px;
   padding: 0 17px;
-  color: #061019;
+  color: var(--accent-ink);
   background: var(--accent);
 }
 
@@ -7208,7 +7211,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-primary-button {
   background: var(--accent);
   border-color: transparent;
-  color: white;
+  color: var(--accent-ink);
 }
 .settings-secondary-button:disabled,
 .settings-primary-button:disabled {
