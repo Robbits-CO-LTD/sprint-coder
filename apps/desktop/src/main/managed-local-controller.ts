@@ -235,9 +235,8 @@ export class ManagedLocalController {
         .filter(({ state }) => state === 'installed')
         .map(async (model): Promise<ProviderModel | null> => {
           const artifacts = this.manager.artifactExpectations(model.id);
-          const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
-          const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
-          if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1) return null;
+          const imageInputCapability = managedLocalImageInputCapability(artifacts);
+          if (imageInputCapability === null) return null;
           const configured = this.manager.getLaunchSettings(model.id);
           const effective = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
           const binding =
@@ -285,7 +284,7 @@ export class ManagedLocalController {
                 : unknown,
             structuredOutput: unknown,
             multimodalInput: {
-              value: managedLocalMultimodal(artifacts),
+              value: imageInputCapability,
               source: 'runtime_metadata',
               observedAt,
             },
@@ -294,6 +293,14 @@ export class ManagedLocalController {
         }),
     );
     return models.filter((model): model is ProviderModel => model !== null);
+  }
+
+  imageInputCapability(modelId: string): boolean | null {
+    const installed = this.manager
+      .listInstalledModels()
+      .find((model) => model.id === modelId && model.state === 'installed');
+    if (installed === undefined) return null;
+    return managedLocalImageInputCapability(this.manager.artifactExpectations(modelId));
   }
 
   async acquireRuntime(
@@ -753,6 +760,18 @@ export function managedLocalMultimodal(
   artifacts: readonly { role: 'model' | 'mmproj' }[],
 ): boolean {
   return artifacts.filter(({ role }) => role === 'mmproj').length === 1;
+}
+
+/** Mirrors the Provider catalog boundary: only one model file and at most one projector are valid. */
+export function managedLocalImageInputCapability(
+  artifacts: readonly { role: 'model' | 'mmproj' }[],
+): boolean | null {
+  if (
+    artifacts.filter(({ role }) => role === 'model').length !== 1 ||
+    artifacts.filter(({ role }) => role === 'mmproj').length > 1
+  )
+    return null;
+  return managedLocalMultimodal(artifacts);
 }
 
 export function managedLocalLaunchSettingsEditAction(

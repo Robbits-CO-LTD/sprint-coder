@@ -7,6 +7,7 @@ import type {
 import {
   installPlan,
   managedLocalGpuOffloadRatio,
+  managedLocalImageInputCapability,
   managedLocalLaunchSettingsEditAction,
   managedLocalMultimodal,
   ManagedLocalModelOperationQueue,
@@ -348,6 +349,18 @@ describe('managedLocalMultimodal', () => {
     expect(
       managedLocalMultimodal([{ role: 'model' }, { role: 'mmproj' }, { role: 'mmproj' }]),
     ).toBe(false);
+  });
+});
+
+describe('managedLocalImageInputCapability', () => {
+  it('matches the Provider catalog boundary and rejects ambiguous bundles', () => {
+    expect(managedLocalImageInputCapability([{ role: 'model' }])).toBe(false);
+    expect(managedLocalImageInputCapability([{ role: 'model' }, { role: 'mmproj' }])).toBe(true);
+    expect(managedLocalImageInputCapability([{ role: 'mmproj' }])).toBeNull();
+    expect(managedLocalImageInputCapability([{ role: 'model' }, { role: 'model' }])).toBeNull();
+    expect(
+      managedLocalImageInputCapability([{ role: 'model' }, { role: 'mmproj' }, { role: 'mmproj' }]),
+    ).toBeNull();
   });
 });
 
