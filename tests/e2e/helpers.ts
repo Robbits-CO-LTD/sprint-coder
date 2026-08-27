@@ -218,21 +218,43 @@ export function warnAboutUnbuiltDevNativePrerequisites(): void {
       `sandbox-runner binary (${relative(REPO_ROOT, runner)}) — run_command approvals never appear`,
     );
 
-  // better-sqlite3 must be built against Electron's ABI, not the ambient Node's. node-gyp records
-  // what it targeted in config.gypi, so this compares intent rather than guessing from mtimes.
-  // Its absence proves nothing (a prebuilt binary leaves no gypi), so only a mismatch is reported.
-  const gypi = join(REPO_ROOT, 'node_modules', 'better-sqlite3', 'build', 'config.gypi');
-  const electronPackage = join(REPO_ROOT, 'node_modules', 'electron', 'package.json');
-  if (existsSync(gypi) && existsSync(electronPackage)) {
-    const target = /"target"\s*:\s*"([^"]+)"/.exec(readFileSync(gypi, 'utf8'))?.[1];
-    const electronVersion = (
-      JSON.parse(readFileSync(electronPackage, 'utf8')) as { version?: string }
-    ).version;
-    if (target !== undefined && electronVersion !== undefined && target !== electronVersion) {
-      missing.push(
-        `better-sqlite3 is built for target ${target}, but Electron is ${electronVersion} — ` +
-          'main-process init will abort and every spec will time out in firstWindow',
-      );
+  // The addon itself is the thing main requires, so it is checked before any metadata about it:
+  // a configure that succeeded and a rebuild that then failed leaves config.gypi behind without a
+  // .node, which is exactly the state that aborts init and times out every spec in firstWindow.
+  const sqliteAddon = join(
+    REPO_ROOT,
+    'node_modules',
+    'better-sqlite3',
+    'build',
+    'Release',
+    'better_sqlite3.node',
+  );
+  const abiConsequence = 'main-process init aborts, so every spec times out in firstWindow';
+  if (!existsSync(sqliteAddon)) {
+    missing.push(`better-sqlite3 addon (${relative(REPO_ROOT, sqliteAddon)}) — ${abiConsequence}`);
+  } else {
+    // It must also be built against Electron's ABI, not the ambient Node's. node-gyp records what
+    // it targeted in config.gypi, so this compares intent rather than guessing from mtimes. A
+    // missing gypi proves nothing (a prebuilt binary leaves none) and is not reported; a gypi that
+    // cannot be read is reported rather than passed over, so an unverified ABI never looks clean.
+    const gypi = join(REPO_ROOT, 'node_modules', 'better-sqlite3', 'build', 'config.gypi');
+    const electronPackage = join(REPO_ROOT, 'node_modules', 'electron', 'package.json');
+    if (existsSync(gypi)) {
+      const target = /"target"\s*:\s*"([^"]+)"/.exec(readFileSync(gypi, 'utf8'))?.[1];
+      const electronVersion = existsSync(electronPackage)
+        ? (JSON.parse(readFileSync(electronPackage, 'utf8')) as { version?: string }).version
+        : undefined;
+      if (target === undefined || electronVersion === undefined) {
+        missing.push(
+          "better-sqlite3's ABI could not be verified (unreadable config.gypi target or Electron " +
+            `version) — if it was built for Node rather than Electron, ${abiConsequence}`,
+        );
+      } else if (target !== electronVersion) {
+        missing.push(
+          `better-sqlite3 is built for target ${target}, but Electron is ${electronVersion} — ` +
+            abiConsequence,
+        );
+      }
     }
   }
 
