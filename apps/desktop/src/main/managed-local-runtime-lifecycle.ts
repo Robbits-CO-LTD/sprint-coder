@@ -20,6 +20,7 @@ import type {
 } from './managed-local-sidecar-bundle';
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_IDLE_RELEASE_MS = 60_000;
 const CRITICAL_MEMORY_FLOOR_BYTES = 512 * 1024 * 1024;
 const CRITICAL_MEMORY_RATIO = 0.05;
 
@@ -77,6 +78,7 @@ type LifecycleDependencies = Readonly<{
   now?: () => Date;
   nowMs?: () => number;
   drainTimeoutMs?: number;
+  idleReleaseMs?: number;
   onDrainRequested?: (
     modelId: string,
     activeLeases: number,
@@ -94,6 +96,7 @@ export class ManagedLocalRuntimeLifecycle {
   private readonly now: () => Date;
   private readonly nowMs: () => number;
   private readonly drainTimeoutMs: number;
+  private readonly idleReleaseMs: number;
   private readonly onDrainRequested: NonNullable<LifecycleDependencies['onDrainRequested']>;
   private readonly memory: () =>
     | Readonly<{ availableBytes: number; totalBytes: number }>
@@ -102,6 +105,7 @@ export class ManagedLocalRuntimeLifecycle {
   private phase: 'open' | 'draining' | 'disposed' = 'open';
   private tail: Promise<void> = Promise.resolve();
   private readonly changed = new Set<() => void>();
+  private idleReleaseGeneration = 0;
   private lastFailure: Readonly<{
     code: Exclude<ManagedLocalRuntimeSnapshot['failureCode'], null>;
     fit: LocalFitAssessment | null;
@@ -123,6 +127,7 @@ export class ManagedLocalRuntimeLifecycle {
     this.now = dependencies.now ?? (() => new Date());
     this.nowMs = dependencies.nowMs ?? Date.now;
     this.drainTimeoutMs = boundedTimeout(dependencies.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS);
+    this.idleReleaseMs = boundedIdleRelease(dependencies.idleReleaseMs ?? DEFAULT_IDLE_RELEASE_MS);
     this.onDrainRequested = dependencies.onDrainRequested ?? (() => undefined);
     this.memory =
       dependencies.memory ??
@@ -343,6 +348,8 @@ export class ManagedLocalRuntimeLifecycle {
   }
 
   private createLease(current: CurrentModel, automaticRelease: boolean): ManagedLocalModelLease {
+    this.cancelIdleRelease();
+    current.pendingStop = false;
     const id = Symbol(current.descriptor.id);
     current.leases.set(id, automaticRelease);
     this.notifyChanged();
@@ -368,8 +375,10 @@ export class ManagedLocalRuntimeLifecycle {
           current.pendingStop ||= current.leases.get(id) === true;
           current.leases.delete(id);
           this.notifyChanged();
-          if (current.leases.size === 0 && current.pendingStop && this.phase === 'open')
-            await this.stopCurrent();
+          if (current.leases.size === 0 && current.pendingStop && this.phase === 'open') {
+            if (this.idleReleaseMs === 0) await this.stopCurrent();
+            else this.scheduleIdleRelease(current);
+          }
         });
       },
     });
@@ -390,6 +399,7 @@ export class ManagedLocalRuntimeLifecycle {
   }
 
   private async stopCurrent(): Promise<void> {
+    this.cancelIdleRelease();
     const current = this.current;
     if (current === null) return;
     this.current = null;
@@ -399,6 +409,7 @@ export class ManagedLocalRuntimeLifecycle {
 
   private reconcileCrash(): void {
     if (this.current?.session.snapshot().state !== 'crashed') return;
+    this.cancelIdleRelease();
     this.current = null;
     this.notifyChanged();
   }
@@ -454,6 +465,28 @@ export class ManagedLocalRuntimeLifecycle {
   private notifyChanged(): void {
     for (const changed of [...this.changed]) changed();
   }
+
+  private scheduleIdleRelease(current: CurrentModel): void {
+    const generation = ++this.idleReleaseGeneration;
+    const timer = setTimeout(() => {
+      void this.exclusive(async () => {
+        if (
+          generation !== this.idleReleaseGeneration ||
+          this.current !== current ||
+          current.leases.size !== 0 ||
+          !current.pendingStop ||
+          this.phase !== 'open'
+        )
+          return;
+        await this.stopCurrent();
+      }).catch(() => undefined);
+    }, this.idleReleaseMs);
+    timer.unref();
+  }
+
+  private cancelIdleRelease(): void {
+    this.idleReleaseGeneration += 1;
+  }
 }
 
 function validateDescriptor(
@@ -502,6 +535,12 @@ function recovery(
 function boundedTimeout(value: number): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > 60_000)
     throw new RangeError('Managed Local drain timeout is invalid');
+  return value;
+}
+
+function boundedIdleRelease(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10 * 60_000)
+    throw new RangeError('Managed Local idle release timeout is invalid');
   return value;
 }
 

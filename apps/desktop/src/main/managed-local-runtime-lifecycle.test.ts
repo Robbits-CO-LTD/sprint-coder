@@ -181,6 +181,7 @@ function lifecycle(
     supervisor?: FakeSupervisor;
     hardware?: LocalHardwareSnapshot;
     drainTimeoutMs?: number;
+    idleReleaseMs?: number;
     onDrainRequested?: (
       modelId: string,
       active: number,
@@ -195,6 +196,7 @@ function lifecycle(
     supervisor,
     collectHardware: async () => input.hardware ?? hardware(),
     ...(input.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: input.drainTimeoutMs }),
+    idleReleaseMs: input.idleReleaseMs ?? 0,
     ...(input.onDrainRequested === undefined ? {} : { onDrainRequested: input.onDrainRequested }),
     ...(input.memory === undefined ? {} : { memory: input.memory }),
   });
@@ -230,6 +232,31 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     await second.release();
     expect(supervisor.sessions[0]?.stopCount).toBe(1);
     expect(subject.snapshot()).toMatchObject({ state: 'stopped', activeLeaseCount: 0 });
+  });
+
+  it('keeps an automatically released model warm briefly and cancels the stop for a new lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const model = await descriptor('7');
+      const { subject, supervisor } = lifecycle({ idleReleaseMs: 1_000 });
+      const first = await subject.acquire(model, true);
+      await first.release();
+      expect(supervisor.sessions[0]?.stopCount).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(500);
+      const reuse = await subject.acquire(model, false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(supervisor.starts).toHaveLength(1);
+      expect(supervisor.sessions[0]?.stopCount).toBe(0);
+      await reuse.release();
+
+      const automatic = await subject.acquire(model, true);
+      await automatic.release();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(supervisor.sessions[0]?.stopCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports the loaded session settings when a same-model lease requests a different context', async () => {

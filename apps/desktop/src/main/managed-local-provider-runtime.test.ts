@@ -221,10 +221,10 @@ describe('ManagedLocalProviderRuntime', () => {
       'a'.repeat(64),
       new AbortController().signal,
     );
-    expect(connection.automaticModelRelease).toBe(false);
+    expect(connection.automaticModelRelease).toBe(true);
     expect(controller.acquireRuntime).toHaveBeenCalledWith(
       'a'.repeat(64),
-      false,
+      true,
       expect.any(AbortSignal),
     );
 

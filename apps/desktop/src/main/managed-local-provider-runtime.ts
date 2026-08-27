@@ -64,7 +64,11 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
     signal: AbortSignal,
   ): Promise<ProviderModelLease> {
     assertManagedConnection(connection);
-    const lease = await this.controller.acquireRuntime(modelId, false, signal);
+    const lease = await this.controller.acquireRuntime(
+      modelId,
+      connection.automaticModelRelease !== false,
+      signal,
+    );
     const current = this.sessions.get(modelId);
     if (current !== undefined && current.session !== lease.session) {
       await lease.release();
@@ -333,7 +337,7 @@ export function managedLocalConnection(now = new Date()): ProviderConnection {
     runtimeKind: 'openai_compatible',
     displayName: 'Managed Local',
     enabled: true,
-    automaticModelRelease: false,
+    automaticModelRelease: true,
     secretReference: null,
     verification: {
       status: 'not_required',
