@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants, type BigIntStats } from 'node:fs';
+import { constants } from 'node:fs';
 import {
   lstat,
   mkdir,
@@ -727,7 +727,6 @@ export class LocalModelStore {
 
 export class LocalModelDownloadManager {
   private readonly controllers = new Map<string, AbortController>();
-  private readonly integrityFingerprints = new Map<string, readonly string[]>();
   private activeJobId: string | null = null;
 
   constructor(
@@ -781,50 +780,29 @@ export class LocalModelDownloadManager {
         'missing_shard',
         'Installed model artifacts are incomplete',
       );
-    const observed: Array<{ path: string; sha256: string; fingerprint: string }> = [];
     for (const row of rows) {
       const path = this.store.installedPath(modelId, row.ordinal);
-      let info: BigIntStats;
+      let info: Awaited<ReturnType<typeof lstat>>;
       try {
-        info = await lstat(path, { bigint: true });
+        info = await lstat(path);
       } catch (error: unknown) {
         if (isNodeError(error, 'ENOENT'))
           throw new LocalModelDownloadError('missing_shard', 'Installed model artifact is missing');
         throw error;
       }
-      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1n)
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
         throw new LocalModelDownloadError(
           'unsafe_store',
           'Installed model artifact is not a private regular file',
         );
-      if (info.size !== BigInt(row.byte_length))
+      if (info.size !== row.byte_length)
         throw new LocalModelDownloadError('size_changed', 'Installed model artifact size changed');
-      observed.push({
-        path,
-        sha256: row.sha256,
-        fingerprint: [info.dev, info.ino, info.size, info.nlink, info.mtimeNs, info.ctimeNs].join(
-          ':',
-        ),
-      });
-    }
-    const cached = this.integrityFingerprints.get(modelId);
-    if (
-      cached !== undefined &&
-      cached.length === observed.length &&
-      cached.every((fingerprint, index) => fingerprint === observed[index]?.fingerprint)
-    )
-      return;
-    this.integrityFingerprints.delete(modelId);
-    for (const artifact of observed)
-      if ((await sha256File(artifact.path)) !== artifact.sha256)
+      if ((await sha256File(path)) !== row.sha256)
         throw new LocalModelDownloadError(
           'hash_mismatch',
           'Installed model artifact hash mismatch',
         );
-    this.integrityFingerprints.set(
-      modelId,
-      Object.freeze(observed.map(({ fingerprint }) => fingerprint)),
-    );
+    }
   }
 
   verification(modelId: string): LocalVerificationRecord | null {
@@ -912,7 +890,6 @@ export class LocalModelDownloadManager {
 
   async deleteInstalled(modelId: string): Promise<void> {
     this.assertModelDeletable(modelId);
-    this.integrityFingerprints.delete(modelId);
     this.repository.beginDelete(modelId, this.now());
     try {
       await this.store.deleteInstalled(modelId);
