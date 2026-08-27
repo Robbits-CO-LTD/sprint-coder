@@ -15,6 +15,7 @@ import {
   managedLocalLaunchSettingsSchema,
   managedLocalLaunchSettingsSetInputSchema,
   managedLocalLaunchSettingsViewSchema,
+  managedLocalMicroBatchSize,
   managedLocalInferenceSettingsSchema,
   managedLocalInferenceSettingsSetInputSchema,
   managedLocalInferenceSettingsViewSchema,
@@ -1764,6 +1765,13 @@ describe('Managed Local inference settings contracts', () => {
 });
 
 describe('Managed Local launch settings contracts', () => {
+  it('derives the physical micro batch from the effective logical batch', () => {
+    expect(managedLocalMicroBatchSize(511)).toBe(511);
+    expect(managedLocalMicroBatchSize(512)).toBe(512);
+    expect(managedLocalMicroBatchSize(513)).toBe(512);
+    expect(managedLocalMicroBatchSize(4_096)).toBe(512);
+  });
+
   it('keeps per-model llama.cpp launch controls typed and bounded', () => {
     const modelId = 'a'.repeat(64);
     expect(
@@ -1841,6 +1849,7 @@ describe('Managed Local launch settings contracts', () => {
           batchSize: 512,
           runtimeVersion: 'b10516',
         },
+        multimodal: false,
       }).effective,
     ).toEqual({
       backend: 'cpu',
@@ -1849,6 +1858,13 @@ describe('Managed Local launch settings contracts', () => {
       batchSize: 512,
       runtimeVersion: 'b10516',
     });
+    expect(() =>
+      managedLocalLaunchSettingsViewSchema.parse({
+        modelId,
+        configured: { backend: 'cpu', gpuLayers: 0, contextTokens: 8_192, batchSize: 512 },
+        effective: null,
+      }),
+    ).toThrow();
     expect(
       managedLocalEffectiveLaunchSettingsSchema.parse({
         backend: 'metal',

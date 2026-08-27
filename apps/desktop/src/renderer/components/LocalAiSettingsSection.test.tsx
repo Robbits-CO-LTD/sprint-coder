@@ -327,6 +327,8 @@ describe('LocalAiSettingsSection', () => {
       (container.querySelector('input[name="local-ai-artifact"]') as HTMLInputElement).click(),
     );
     expect(container.textContent).not.toContain('mmproj-other-family-f16.gguf');
+    expect(container.textContent).toContain('ファイル名の互換キーが一致');
+    expect(container.textContent).toContain('GGUF内部のvision architecture照合は行いません');
     await act(async () =>
       (container.querySelectorAll('input[name="local-ai-mmproj"]')[1] as HTMLInputElement).click(),
     );

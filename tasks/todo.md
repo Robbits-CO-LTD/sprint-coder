@@ -1,3 +1,31 @@
+# Issue #353 Managed Local AI実効設定（2026-08-27）
+
+### 計画
+
+- [x] Issue、公開計画、PR #354の最新head、必須CI、全review threadをlive再取得する
+- [x] Tier A計画を契約形式で再掲し、AC/INVと全必須レイヤーのbindingをPASSさせる
+- [x] 既存PRの計画ギャップ（Micro batch / Chat template / mmproj / 要求値見出し）を最小補完する
+- [x] GPU layersを固定80% offloadとして扱う未解決reviewを根本修正し、境界テストを追加する
+- [x] contracts/desktop型検査、対象テスト、lint、formatをPASSさせる
+- [ ] packaged buildのManaged Local設定E2E、ReviewBOT、PR CIを確認する
+- [ ] exact headのHuman Gate後にマージし、Issue #353をCLOSEDまで確認する
+
+### Next Steps
+
+1. 最新commitをPR #354へpushし、ReviewBOTと全CIを固定する。
+2. repository packaged buildでManaged Local設定を実機確認する。
+3. exact headのマージ承認が必要な地点で停止する。
+
+### 進捗
+
+- Micro batch導出をcontractsへ集約し、起動argvとUIが同じ値を使うようにした。
+- 起動設定UIへChat template、mmproj、要求値であることを示す見出しを追加した。
+- mmprojの有無をモデル単位のviewへ追加し、互換性がファイル名由来である限界を明示した。
+- GGUF metadata prefixからblock countだけを有界に読み、実効GPU layersとの比率でoffload見積りを行う。取得不能時は固定80%へ戻さずfail-closedにした。
+- contracts型検査・56テスト、desktop型検査・対象63テストがPASS。lintはエラー0件・既存warning 2件、formatはPASS。
+
+---
+
 # Issue #122 Slice D — Download manager・model store（2026-08-23）
 
 ### 計画
@@ -514,6 +542,7 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - 信頼済み`cmd.exe`のUnix形式スイッチは`/d /s /c`へ正規化し、承認外のCommand Processor AutoRunを無効化する。
 - 非System32実行ファイルの仮想`api-ms-*` / `ext-ms-*` importは物理DLLを要求せず、その他の非ローカルDLLは引き続き実在するSystem32ファイルだけを許可する。
 - Grok 4.6の再レビューを反映し、信頼済み`cmd.exe`の全形式へ`/d`を強制する。API-setは信頼済みOS schemaに実在する契約だけを許可し、Workspace内の同名DLLによる偽装を拒否する。
+
 ## Issue #307 v0.5.1 installed Ollama regression (2026-08-23)
 
 ### 計画

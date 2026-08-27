@@ -2423,6 +2423,12 @@ export const MANAGED_LOCAL_DEFAULT_BATCH_SIZE = 512;
 export const MANAGED_LOCAL_MAX_GPU_LAYERS = 4_096;
 export const MANAGED_LOCAL_MAX_CONTEXT_TOKENS = 1_048_576;
 export const MANAGED_LOCAL_MAX_BATCH_SIZE = 4_096;
+export const MANAGED_LOCAL_MAX_MICRO_BATCH_SIZE = 512;
+
+/** llama.cpp `--ubatch-size` in tokens, derived from the effective logical batch size. */
+export function managedLocalMicroBatchSize(batchSize: number): number {
+  return Math.min(batchSize, MANAGED_LOCAL_MAX_MICRO_BATCH_SIZE);
+}
 export const managedLocalLaunchBackendSchema = z.enum(['auto', 'cpu', 'metal', 'cuda', 'vulkan']);
 export type ManagedLocalLaunchBackend = z.infer<typeof managedLocalLaunchBackendSchema>;
 export const managedLocalEffectiveLaunchBackendSchema = z.enum(['cpu', 'metal', 'cuda', 'vulkan']);
@@ -2511,6 +2517,8 @@ export const managedLocalLaunchSettingsViewSchema = z
     modelId: z.string().regex(/^[a-f0-9]{64}$/u),
     configured: managedLocalLaunchSettingsSchema,
     effective: managedLocalEffectiveLaunchSettingsSchema.nullable(),
+    /** Whether one verified projector will be passed to llama.cpp as `--mmproj`. */
+    multimodal: z.boolean(),
   })
   .strict();
 export type ManagedLocalLaunchSettingsView = z.infer<typeof managedLocalLaunchSettingsViewSchema>;

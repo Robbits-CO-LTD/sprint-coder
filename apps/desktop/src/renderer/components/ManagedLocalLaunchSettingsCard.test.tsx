@@ -56,6 +56,7 @@ function view(input?: Partial<ManagedLocalLaunchSettingsView>): ManagedLocalLaun
       batchSize: 512,
       runtimeVersion: 'b10516',
     },
+    multimodal: false,
     ...input,
   };
 }
@@ -65,8 +66,8 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
-function installApi(runtime = stoppedRuntime) {
-  const launchSettings = vi.fn(async () => view());
+function installApi(runtime = stoppedRuntime, launchView = view()) {
+  const launchSettings = vi.fn(async () => launchView);
   const setLaunchSettings = vi.fn(
     async (input: ManagedLocalLaunchSettingsSetInput): Promise<ManagedLocalLaunchSettingsView> =>
       view({
@@ -157,6 +158,10 @@ describe('ManagedLocalLaunchSettingsCard', () => {
     expect(
       container.querySelector(`[data-testid="local-ai-launch-effective-${MODEL_ID}"]`)?.textContent,
     ).toContain('b10516');
+    expect(container.textContent).toContain('次回起動時に指定する値');
+    expect(container.textContent).toContain('Micro batch256');
+    expect(container.textContent).toContain('Chat template--jinja（固定）');
+    expect(container.textContent).toContain('mmproj使用しない');
     await act(async () => root.unmount());
   });
 
@@ -178,7 +183,7 @@ describe('ManagedLocalLaunchSettingsCard', () => {
       ).disabled,
     ).toBe(true);
     expect(container.textContent).toContain('実行中のため変更できません');
-    expect(container.textContent).toContain('現在の実効値');
+    expect(container.textContent).toContain('起動時に指定した値');
     expect(
       container.querySelector(`[data-testid="local-ai-launch-effective-${MODEL_ID}"]`)?.textContent,
     ).toContain('999');
@@ -204,7 +209,25 @@ describe('ManagedLocalLaunchSettingsCard', () => {
       ).disabled,
     ).toBe(false);
     expect(container.textContent).toContain('保存時に待機中のモデルを停止します');
-    expect(container.textContent).toContain('現在の実効値');
+    expect(container.textContent).toContain('起動時に指定した値');
+    await act(async () => root.unmount());
+  });
+
+  it('shows the model-scoped projector state while stopped and running', async () => {
+    installApi(stoppedRuntime, view({ multimodal: true }));
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(<ManagedLocalLaunchSettingsCard modelId={MODEL_ID} runtime={stoppedRuntime} />),
+    );
+    await flush();
+    expect(container.textContent).toContain('mmproj使用する');
+
+    await act(async () =>
+      root.render(<ManagedLocalLaunchSettingsCard modelId={MODEL_ID} runtime={activeRuntime} />),
+    );
+    expect(container.textContent).toContain('mmproj使用する');
     await act(async () => root.unmount());
   });
 });

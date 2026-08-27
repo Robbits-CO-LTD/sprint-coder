@@ -3,6 +3,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, relative } from 'node:path';
 import type { Readable } from 'node:stream';
+import { managedLocalMicroBatchSize } from '@sprint-coder/contracts';
 import {
   loadBundledManagedLocalSidecar,
   type ManagedLocalBackend,
@@ -506,7 +507,7 @@ function runtimeArguments(
     '--batch-size',
     String(settings.batchSize),
     '--ubatch-size',
-    String(Math.min(settings.batchSize, 512)),
+    String(managedLocalMicroBatchSize(settings.batchSize)),
     '--n-gpu-layers',
     String(settings.gpuLayers),
     '--jinja',

@@ -9,6 +9,7 @@ import {
   MANAGED_LOCAL_MAX_BATCH_SIZE,
   MANAGED_LOCAL_MAX_CONTEXT_TOKENS,
   MANAGED_LOCAL_MAX_GPU_LAYERS,
+  managedLocalMicroBatchSize,
 } from '@sprint-coder/contracts';
 
 type LocalAiApi = NonNullable<Window['sprintCoder']>['localAI'];
@@ -275,7 +276,7 @@ export function ManagedLocalLaunchSettingsCard({
             className="local-ai-launch-effective"
             data-testid={`local-ai-launch-effective-${modelId}`}
           >
-            <strong>{loaded ? '現在の実効値' : '次回起動時の実効値'}</strong>
+            <strong>{loaded ? '起動時に指定した値' : '次回起動時に指定する値'}</strong>
             {effective === null ? (
               <p>この端末で利用可能なbackendを解決できません。</p>
             ) : (
@@ -295,6 +296,18 @@ export function ManagedLocalLaunchSettingsCard({
                 <div>
                   <dt>Batch</dt>
                   <dd>{effective.batchSize.toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>Micro batch</dt>
+                  <dd>{managedLocalMicroBatchSize(effective.batchSize).toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt>Chat template</dt>
+                  <dd>--jinja（固定）</dd>
+                </div>
+                <div>
+                  <dt>mmproj</dt>
+                  <dd>{view.multimodal ? '使用する' : '使用しない'}</dd>
                 </div>
                 <div>
                   <dt>llama.cpp</dt>

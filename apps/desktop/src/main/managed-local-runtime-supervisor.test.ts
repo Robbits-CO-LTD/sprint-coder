@@ -215,6 +215,32 @@ describe('ManagedLocalRuntimeSupervisor', () => {
     await session.stop();
   });
 
+  it.each([
+    { batchSize: 511, microBatchSize: '511' },
+    { batchSize: 512, microBatchSize: '512' },
+    { batchSize: 1_024, microBatchSize: '512' },
+  ])('derives --ubatch-size from batch $batchSize', async ({ batchSize, microBatchSize }) => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    const session = await env.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      modelAlias: 'b'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4_096,
+      batchSize,
+      gpuLayers: 0,
+    });
+
+    const args = env.spawnArgs();
+    expect(args[args.indexOf('--ubatch-size') + 1]).toBe(microBatchSize);
+    await session.stop();
+  });
+
   it('rejects a model backend that is not declared by the verified sidecar', async () => {
     const paths = await directories();
     const modelPath = join(paths.modelRoot, 'model.gguf');

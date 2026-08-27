@@ -6,7 +6,9 @@ import type {
 } from '@sprint-coder/contracts';
 import {
   installPlan,
+  managedLocalGpuOffloadRatio,
   managedLocalLaunchSettingsEditAction,
+  managedLocalMultimodal,
   ManagedLocalModelOperationQueue,
   managedLocalProbeBatchSize,
   managedLocalReusesLoadedModel,
@@ -327,6 +329,25 @@ describe('managedLocalProbeBatchSize', () => {
   it('reduces only a verification probe batch that exceeds the fallback context', () => {
     expect(managedLocalProbeBatchSize(512, 8_192)).toBe(512);
     expect(managedLocalProbeBatchSize(512, 256)).toBe(256);
+  });
+});
+
+describe('managedLocalGpuOffloadRatio', () => {
+  it('distinguishes partial from full layer offload and clamps all-layer sentinels', () => {
+    expect(managedLocalGpuOffloadRatio(1, 40)).toBe(0.025);
+    expect(managedLocalGpuOffloadRatio(20, 40)).toBe(0.5);
+    expect(managedLocalGpuOffloadRatio(40, 40)).toBe(1);
+    expect(managedLocalGpuOffloadRatio(999, 40)).toBe(1);
+  });
+});
+
+describe('managedLocalMultimodal', () => {
+  it('reports exactly one projector artifact', () => {
+    expect(managedLocalMultimodal([{ role: 'model' }])).toBe(false);
+    expect(managedLocalMultimodal([{ role: 'model' }, { role: 'mmproj' }])).toBe(true);
+    expect(
+      managedLocalMultimodal([{ role: 'model' }, { role: 'mmproj' }, { role: 'mmproj' }]),
+    ).toBe(false);
   });
 });
 

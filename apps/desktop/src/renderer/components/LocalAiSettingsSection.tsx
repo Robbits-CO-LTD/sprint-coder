@@ -1082,7 +1082,9 @@ function ModelDetail({
             </label>
           ))}
           <small className="settings-hint">
-            同じrepository・immutable revisionで公開された検証済みmmprojだけを選択できます。
+            同じrepository・immutable
+            revisionで公開され、ファイル名の互換キーが一致する検証済みmmprojだけを選択できます。GGUF内部のvision
+            architecture照合は行いません。
           </small>
         </fieldset>
       )}
