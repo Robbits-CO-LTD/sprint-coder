@@ -90,6 +90,12 @@ describe('release signing and notarization', () => {
       '/usr/sbin/spctl --assess --type execute --verbose=2 "${app_path}"',
     );
     const make = workflow.indexOf('npx electron-forge make --skip-package');
+    const dmgSign = workflow.indexOf(
+      '/usr/bin/codesign --force --sign "${MACOS_CODESIGN_IDENTITY}" --timestamp "${dmg_path}"',
+    );
+    const dmgVerify = workflow.indexOf(
+      '/usr/bin/codesign --verify --strict --verbose=2 "${dmg_path}"',
+    );
     const dmgSubmit = workflow.indexOf('xcrun notarytool submit "${dmg_path}"');
     const dmgAccepted = workflow.indexOf('if [[ "${dmg_notarization_status}" != \'Accepted\' ]]');
     const dmgStaple = workflow.indexOf('xcrun stapler staple "${dmg_path}"');
@@ -102,7 +108,9 @@ describe('release signing and notarization', () => {
     expect(appStaple).toBeGreaterThan(appAccepted);
     expect(appGatekeeper).toBeGreaterThan(appStaple);
     expect(make).toBeGreaterThan(appGatekeeper);
-    expect(dmgSubmit).toBeGreaterThan(make);
+    expect(dmgSign).toBeGreaterThan(make);
+    expect(dmgVerify).toBeGreaterThan(dmgSign);
+    expect(dmgSubmit).toBeGreaterThan(dmgVerify);
     expect(dmgAccepted).toBeGreaterThan(dmgSubmit);
     expect(dmgStaple).toBeGreaterThan(dmgAccepted);
     expect(dmgGatekeeper).toBeGreaterThan(dmgStaple);
