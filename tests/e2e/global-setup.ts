@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   DESKTOP_ROOT,
   OUT_DIR,
+  assertDevNativePrerequisitesBuilt,
   ensureDevServerReady,
   isPackagedAvailable,
   preparePackagedAppForPlaywright,
@@ -74,6 +75,10 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
       removeUserDataDir(prepared.temporaryRoot);
     };
   }
+
+  // Checked before the dev server starts: a missing native layer costs 90s of startup and then
+  // fails as a product bug in every spec, so it is worth one existence check up front.
+  assertDevNativePrerequisitesBuilt();
 
   console.log('[e2e globalSetup] Ensuring dev server + main/preload dev build are ready...');
   const devServer: DevServerHandle = await ensureDevServerReady(90_000);

@@ -177,6 +177,63 @@ export function resolveE2EMode(): E2EMode {
   return 'packaged';
 }
 
+/**
+ * Fails fast when the desktop app's native prerequisites have not been built for Electron.
+ *
+ * `npm run prepare:desktop` (electron-rebuild + native-safe-fs + sandbox-runner) is wired into
+ * `package`/`make`, but nothing in the `start`/dev path builds these — so a fresh clone or a new
+ * git worktree runs E2E against an app whose native layer is missing or built for Node's ABI.
+ * Each gap then surfaces as a plausible-looking product failure rather than a setup error:
+ * a better-sqlite3 ABI mismatch aborts main-process init so no window is ever created and every
+ * spec dies on `firstWindow` timeout; a missing native-safe-fs addon makes the manual editor
+ * report 保存できませんでした; a missing sandbox-runner stops run_command approvals from appearing.
+ * Naming the one command that fixes all three is much cheaper than re-debugging that each time.
+ */
+export function assertDevNativePrerequisitesBuilt(): void {
+  const missing: string[] = [];
+
+  const addon = join(
+    DESKTOP_ROOT,
+    'native-safe-fs',
+    'build',
+    'Release',
+    'sprint_coder_native_safe_fs.node',
+  );
+  if (!existsSync(addon)) missing.push(`native-safe-fs addon (${relative(REPO_ROOT, addon)})`);
+
+  const runnerName =
+    process.platform === 'win32'
+      ? 'sprint-coder-sandbox-runner.exe'
+      : 'sprint-coder-sandbox-runner';
+  const runner = join(DESKTOP_ROOT, 'sandbox-runner', 'build', 'Release', runnerName);
+  if (!existsSync(runner)) missing.push(`sandbox-runner binary (${relative(REPO_ROOT, runner)})`);
+
+  // better-sqlite3 must be built against Electron's ABI, not the ambient Node's. node-gyp records
+  // what it targeted in config.gypi, so this compares intent rather than guessing from mtimes.
+  const gypi = join(REPO_ROOT, 'node_modules', 'better-sqlite3', 'build', 'config.gypi');
+  const electronPackage = join(REPO_ROOT, 'node_modules', 'electron', 'package.json');
+  if (!existsSync(gypi)) {
+    missing.push('better-sqlite3 native build (node_modules/better-sqlite3/build)');
+  } else if (existsSync(electronPackage)) {
+    const target = /"target"\s*:\s*"([^"]+)"/.exec(readFileSync(gypi, 'utf8'))?.[1];
+    const electronVersion = (
+      JSON.parse(readFileSync(electronPackage, 'utf8')) as { version?: string }
+    ).version;
+    if (target !== undefined && electronVersion !== undefined && target !== electronVersion) {
+      missing.push(
+        `better-sqlite3 is built for target ${target}, but Electron is ${electronVersion} ` +
+          '(main-process init will abort and no window will open)',
+      );
+    }
+  }
+
+  if (missing.length === 0) return;
+  throw new Error(
+    `Dev-mode E2E prerequisites are not built:\n  - ${missing.join('\n  - ')}\n\n` +
+      'Run `npm run prepare:desktop --workspace @sprint-coder/desktop` once, then re-run the suite.',
+  );
+}
+
 /** Resolves the repo's own Electron binary via node_modules/electron/path.txt, the same
  * indirection the `electron` npm package itself uses — works across mac/win/linux without
  * hardcoding a platform-specific layout. */
