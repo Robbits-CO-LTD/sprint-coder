@@ -40,10 +40,9 @@ import {
   type LocalModelInstallPlan,
 } from './local-model-download-manager';
 import { PublicModelCatalogService } from './public-model-catalog';
-import {
-  ManagedLocalLifecycleError,
-  type ManagedLocalModelLease,
-  type ManagedLocalRuntimeLifecycle,
+import type {
+  ManagedLocalModelLease,
+  ManagedLocalRuntimeLifecycle,
 } from './managed-local-runtime-lifecycle';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 import { runManagedLocalSelfTest } from './managed-local-self-test';
@@ -357,20 +356,15 @@ export class ManagedLocalController {
 
   async verify(modelId: string): Promise<LocalFitAssessment> {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
-    let lease: ManagedLocalModelLease | null = null;
-    for (const candidate of [8_192, 4_096, 2_048, 1_024, 512, 256]) {
-      try {
-        lease = await this.acquireRuntime(modelId, false, new AbortController().signal, candidate);
-        break;
-      } catch (error) {
-        if (
-          !(error instanceof ManagedLocalLifecycleError) ||
-          !['memory_insufficient', 'memory_unknown'].includes(error.code)
-        )
-          throw error;
-      }
-    }
-    if (lease === null) throw new Error('Managed Local has insufficient memory at minimum context');
+    // Verification evidence is reusable only for the exact saved launch setting. Memory recovery
+    // is surfaced to the user, who can lower context explicitly before verifying again.
+    const contextTokens = this.manager.getLaunchSettings(modelId).contextTokens;
+    const lease = await this.acquireRuntime(
+      modelId,
+      false,
+      new AbortController().signal,
+      contextTokens,
+    );
     try {
       const snapshot = this.lifecycle?.snapshot();
       if (
