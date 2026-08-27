@@ -24,6 +24,72 @@ function stream(): ReadableStream<Uint8Array> {
 }
 
 describe('ManagedLocalProviderRuntime', () => {
+  it('publishes a stable image capability snapshot from the installed Managed Local bundle', async () => {
+    const modelId = 'b'.repeat(64);
+    const controller = {
+      imageInputCapability: vi.fn(() => true),
+    } as unknown as ManagedLocalController;
+    const runtime = new ManagedLocalProviderRuntime(controller, () => 1_234);
+    const connection = managedLocalConnection();
+
+    const first = await runtime.captureImageInputCapability!(
+      connection,
+      modelId,
+      new AbortController().signal,
+    );
+    const second = await runtime.captureImageInputCapability!(
+      connection,
+      modelId,
+      new AbortController().signal,
+    );
+
+    expect(first).toEqual({
+      value: true,
+      revision: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      capturedAtMs: 1_234,
+    });
+    expect(second.revision).toBe(first.revision);
+    expect(controller.imageInputCapability).toHaveBeenNthCalledWith(1, modelId);
+    expect(controller.imageInputCapability).toHaveBeenNthCalledWith(2, modelId);
+  });
+
+  it.each([
+    [false, 'known text-only bundle'],
+    [null, 'unavailable bundle identity'],
+  ] as const)('publishes %s for a %s', async (value, _description) => {
+    const modelId = 'c'.repeat(64);
+    const runtime = new ManagedLocalProviderRuntime(
+      { imageInputCapability: vi.fn(() => value) } as unknown as ManagedLocalController,
+      () => 2_345,
+    );
+
+    await expect(
+      runtime.captureImageInputCapability!(
+        managedLocalConnection(),
+        modelId,
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ value, capturedAtMs: 2_345 });
+  });
+
+  it('does not capture image capability after cancellation', async () => {
+    const controller = {
+      imageInputCapability: vi.fn(() => true),
+    } as unknown as ManagedLocalController;
+    const runtime = new ManagedLocalProviderRuntime(controller);
+    const aborted = new AbortController();
+    aborted.abort(new Error('canceled'));
+
+    await expect(
+      runtime.captureImageInputCapability!(
+        managedLocalConnection(),
+        'd'.repeat(64),
+        aborted.signal,
+      ),
+    ).rejects.toThrow('canceled');
+    expect(controller.imageInputCapability).not.toHaveBeenCalled();
+  });
+
   it('uses non-stream deterministic sampling for a named forced tool subrequest', async () => {
     const authenticatedFetch = vi.fn(async (_path: string, init?: RequestInit) => {
       const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;

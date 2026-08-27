@@ -8,12 +8,17 @@ import {
   type ProviderExecutionRequest,
   type ProviderModel,
 } from '@sprint-coder/contracts';
+import { digestCanonical } from './context-compiler';
 import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
 import { normalizeOpenAIChatCompletionsStream } from './openai-chat-completions-stream';
 import type { ManagedLocalController } from './managed-local-controller';
 import type { ManagedLocalRuntimeSession } from './managed-local-runtime-supervisor';
 import type { ProviderModelLease } from './ollama-model-lifecycle';
-import type { ProviderRuntime, ProviderVerificationResult } from './provider-runtime';
+import type {
+  ProviderImageInputCapabilitySnapshot,
+  ProviderRuntime,
+  ProviderVerificationResult,
+} from './provider-runtime';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { secureLogger } from './secure-logger';
 import { redactSecrets } from './secret-redactor';
@@ -35,7 +40,10 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
   private readonly sessions = new Map<string, ActiveSession>();
   private readonly executions = new Map<string, AbortController>();
 
-  constructor(private readonly controller: ManagedLocalController) {}
+  constructor(
+    private readonly controller: ManagedLocalController,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   async verify(
     _connection: ProviderConnection,
@@ -56,6 +64,27 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
   ): Promise<readonly ProviderModel[]> {
     assertManagedConnection(connection);
     return this.controller.listProviderModels(connection.id, connection.providerId);
+  }
+
+  async captureImageInputCapability(
+    connection: ProviderConnection,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderImageInputCapabilitySnapshot> {
+    assertManagedConnection(connection);
+    if (signal.aborted) throw signal.reason;
+    const value = this.controller.imageInputCapability(modelId);
+    return Object.freeze({
+      value,
+      revision: digestCanonical({
+        connectionId: connection.id,
+        providerId: connection.providerId,
+        modelId,
+        value,
+        source: 'managed_local_immutable_artifacts_v1',
+      }),
+      capturedAtMs: this.now(),
+    });
   }
 
   async acquireModelLease(
