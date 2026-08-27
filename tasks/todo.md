@@ -560,9 +560,17 @@ Next Steps: #307のrenderer-only PRでWindows fast laneを実証する。
 - [ ] 候補commitを固定し、計画へ結び付けた高リスクレビューを完了する
 - [ ] PRの全CIとReviewBOTを確認し、マージ承認後にIssue closeoutを行う
 
+### マージ後の実ランタイム追補
+
+- [x] Chat / Team Draft作成、Blueprintのpath・JSON位置、Codex Team MCPの`kind`不足を実機確認する
+- [x] API Providerで`skillId`違反が`Workspace tool execution failed`へ潰れる再現条件を確定する
+- [x] ProviderのSkill Draft公開エラーだけを安全に保持する最小修正と回帰テストを追加する
+- [x] 対象テスト・型検査・実ランタイム再試験を完了する
+- [ ] 追補PRのレビュー・必須CI・マージ後に#352をCLOSEDまで確認する
+
 ### Next Steps
 
-差分を自己レビューして候補commitを固定し、計画・base・headへ結び付けた高リスクレビューを行う。
+追補差分をcommitしてレビュー・必須CIを通し、マージ承認後に#352のcloseoutを完了する。
 
 ### 検証
 
