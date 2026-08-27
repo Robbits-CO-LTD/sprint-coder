@@ -641,7 +641,10 @@ release PRを作成し、ReviewBOTと全CIを確認する。Windowsは現行仕�
 - [x] macOSアプリ本体のDeveloper ID署名、Apple公証Accepted、staple、codesign検証を確認する
 - [x] 現行workflowにDMG公証・stapleとapp/DMGのGatekeeper評価がないことを特定する
 - [x] release workflowへ不足するfail-closed検証と回帰テストを追加する
-- [ ] 修正PRのレビュー・全CIを通し、v0.6.1成果物を再生成する
+- [x] app/DMGの公証・staple成功後、DMGだけがGatekeeperで`source=no usable signature`として拒否されることを実ログで確認する
+- [x] DMG署名修正のdesktop型検査、workflow/Forge関連テスト28件、format確認を完了する
+- [ ] DMGをDeveloper IDで署名・検証してから公証する修正PRのレビュー・全CIを通す
+- [ ] v0.6.1成果物を最新コミットで再生成する
 - [ ] DMGを含む全必須検証の成功後にGitHub Pre-releaseを公開する
 
 公開済み成果物はまだない。必須のmacOS配布検証が揃うまでDraftのまま維持する。

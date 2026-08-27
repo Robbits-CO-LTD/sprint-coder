@@ -361,6 +361,9 @@ jobs:
           fi
           dmg_path="${dmg_paths[0]}"
 
+          /usr/bin/codesign --force --sign "${MACOS_CODESIGN_IDENTITY}" --timestamp "${dmg_path}"
+          /usr/bin/codesign --verify --strict --verbose=2 "${dmg_path}"
+
           xcrun notarytool submit "${dmg_path}" \
             --key "${MACOS_API_KEY_PATH}" \
             --key-id "${APPLE_API_KEY_ID}" \
