@@ -3496,6 +3496,14 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 77,
+    checksum: 'managed-local-mmproj-artifact-role-v77',
+    sql: `
+      ALTER TABLE local_model_artifacts ADD COLUMN role TEXT NOT NULL DEFAULT 'model'
+        CHECK (role IN ('model', 'mmproj'));
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.

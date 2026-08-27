@@ -3,8 +3,10 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, relative } from 'node:path';
 import type { Readable } from 'node:stream';
+import { managedLocalMicroBatchSize } from '@sprint-coder/contracts';
 import {
   loadBundledManagedLocalSidecar,
+  type ManagedLocalBackend,
   type VerifiedManagedLocalSidecarBundle,
 } from './managed-local-sidecar-bundle';
 
@@ -27,8 +29,11 @@ export type ManagedLocalRuntimeStartInput =
       kind: 'model';
       modelRoot: string;
       modelPath: string;
+      /** Optional multimodal projector, validated inside the same model store. */
+      mmprojPath?: string;
       modelAlias: string;
       scratchRoot: string;
+      backend: ManagedLocalBackend;
       contextTokens: number;
       batchSize: number;
       gpuLayers: number;
@@ -47,6 +52,10 @@ export type ManagedLocalRuntimeSnapshot = Readonly<{
   target: string;
   runtimeVersion: string;
   baseUrl: string | null;
+  backend: ManagedLocalBackend | null;
+  gpuLayers: number | null;
+  contextTokens: number | null;
+  batchSize: number | null;
   startedAt: string;
   stoppedAt: string | null;
   exitCode: number | null;
@@ -101,6 +110,14 @@ type ActiveRuntime = {
   stopPromise: Promise<ManagedLocalRuntimeSnapshot> | null;
 };
 
+type EffectiveModelSettings = Readonly<{
+  backend: ManagedLocalBackend;
+  gpuLayers: number;
+  contextTokens: number;
+  batchSize: number;
+  runtimeVersion: string;
+}>;
+
 export class ManagedLocalRuntimeSupervisor {
   private readonly loadBundle: () => Promise<VerifiedManagedLocalSidecarBundle>;
   private readonly spawnProcess: SpawnProcess;
@@ -142,6 +159,7 @@ export class ManagedLocalRuntimeSupervisor {
     if (this.active !== null && !['stopped', 'crashed'].includes(this.active.snapshot.state))
       throw new ManagedLocalRuntimeError('already_running', 'A Managed Local runtime is active');
     const bundle = await this.loadBundle();
+    const settings = input.kind === 'model' ? validateModelSettings(input, bundle) : null;
     const prepared = await prepareStartInput(input);
     const token = this.randomToken();
     if (!/^[a-zA-Z0-9_-]{32,128}$/u.test(token))
@@ -150,8 +168,9 @@ export class ManagedLocalRuntimeSupervisor {
       token,
       prepared.modelRoot,
       ...(prepared.modelPath === null ? [] : [prepared.modelPath]),
+      ...(prepared.mmprojPath === null ? [] : [prepared.mmprojPath]),
     ]);
-    const args = runtimeArguments(input, prepared);
+    const args = runtimeArguments(input, prepared, settings);
     let child: ChildProcess;
     try {
       child = this.spawnProcess(bundle.serverPath, args, {
@@ -174,8 +193,12 @@ export class ManagedLocalRuntimeSupervisor {
       snapshot: {
         state: 'starting',
         target: bundle.target,
-        runtimeVersion: bundle.manifest.runtimeVersion,
+        runtimeVersion: settings?.runtimeVersion ?? bundle.manifest.runtimeVersion,
         baseUrl: null,
+        backend: settings?.backend ?? null,
+        gpuLayers: settings?.gpuLayers ?? null,
+        contextTokens: settings?.contextTokens ?? null,
+        batchSize: settings?.batchSize ?? null,
         startedAt,
         stoppedAt: null,
         exitCode: null,
@@ -366,6 +389,7 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
   Readonly<{
     modelRoot: string;
     modelPath: string | null;
+    mmprojPath: string | null;
     scratchRoot: string;
   }>
 > {
@@ -373,30 +397,55 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
   const scratchRoot = await canonicalDirectory(input.scratchRoot, 'scratch root');
   if (pathsOverlap(modelRoot, scratchRoot))
     throw new ManagedLocalRuntimeError('invalid_input', 'Model and scratch roots must be disjoint');
-  if (input.kind === 'router_probe') return { modelRoot, modelPath: null, scratchRoot };
-  if (
-    !MODEL_ALIAS.test(input.modelAlias) ||
-    !Number.isInteger(input.contextTokens) ||
-    input.contextTokens < 256 ||
-    input.contextTokens > 1_048_576 ||
-    !Number.isInteger(input.batchSize) ||
-    input.batchSize < 1 ||
-    input.batchSize > 1_048_576 ||
-    !Number.isInteger(input.gpuLayers) ||
-    input.gpuLayers < 0 ||
-    input.gpuLayers > 4096
-  )
+  if (input.kind === 'router_probe')
+    return { modelRoot, modelPath: null, mmprojPath: null, scratchRoot };
+  if (!MODEL_ALIAS.test(input.modelAlias))
     throw new ManagedLocalRuntimeError('invalid_input', 'Invalid Managed Local model settings');
-  const modelPath = await realpath(input.modelPath).catch(() => null);
-  if (modelPath === null || extname(modelPath).toLowerCase() !== '.gguf')
-    throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local model must be a GGUF file');
-  const child = relative(modelRoot, modelPath);
+  const modelPath = await validateModelArtifactPath(input.modelPath, modelRoot, 'model');
+  const mmprojPath =
+    input.mmprojPath === undefined
+      ? null
+      : await validateModelArtifactPath(input.mmprojPath, modelRoot, 'mmproj');
+  if (mmprojPath === modelPath)
+    throw new ManagedLocalRuntimeError(
+      'invalid_input',
+      'Managed Local model and mmproj must differ',
+    );
+  return { modelRoot, modelPath, mmprojPath, scratchRoot };
+}
+
+async function validateModelArtifactPath(
+  inputPath: string,
+  modelRoot: string,
+  label: 'model' | 'mmproj',
+): Promise<string> {
+  const lexicalInfo = await lstat(inputPath, { bigint: true }).catch(() => null);
+  if (
+    lexicalInfo === null ||
+    !lexicalInfo.isFile() ||
+    lexicalInfo.isSymbolicLink() ||
+    lexicalInfo.nlink !== 1n
+  )
+    throw new ManagedLocalRuntimeError('invalid_input', `Managed Local ${label} is unsafe`);
+  const artifactPath = await realpath(inputPath).catch(() => null);
+  if (artifactPath === null || extname(artifactPath).toLowerCase() !== '.gguf')
+    throw new ManagedLocalRuntimeError(
+      'invalid_input',
+      `Managed Local ${label} must be a GGUF file`,
+    );
+  const child = relative(modelRoot, artifactPath);
   if (child === '' || child.startsWith('..') || isAbsolute(child))
-    throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local model escaped its store');
-  const modelInfo = await lstat(modelPath, { bigint: true });
-  if (!modelInfo.isFile() || modelInfo.isSymbolicLink() || modelInfo.nlink !== 1n)
-    throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local model is unsafe');
-  return { modelRoot, modelPath, scratchRoot };
+    throw new ManagedLocalRuntimeError('invalid_input', `Managed Local ${label} escaped its store`);
+  const info = await lstat(artifactPath, { bigint: true });
+  if (
+    !info.isFile() ||
+    info.isSymbolicLink() ||
+    info.nlink !== 1n ||
+    lexicalInfo.dev !== info.dev ||
+    lexicalInfo.ino !== info.ino
+  )
+    throw new ManagedLocalRuntimeError('invalid_input', `Managed Local ${label} is unsafe`);
+  return artifactPath;
 }
 
 async function canonicalDirectory(path: string, label: string): Promise<string> {
@@ -420,7 +469,13 @@ async function canonicalDirectory(path: string, label: string): Promise<string> 
 
 function runtimeArguments(
   input: ManagedLocalRuntimeStartInput,
-  prepared: Readonly<{ modelRoot: string; modelPath: string | null; scratchRoot: string }>,
+  prepared: Readonly<{
+    modelRoot: string;
+    modelPath: string | null;
+    mmprojPath: string | null;
+    scratchRoot: string;
+  }>,
+  settings: EffectiveModelSettings | null,
 ): readonly string[] {
   const common = [
     '--host',
@@ -439,22 +494,57 @@ function runtimeArguments(
     '--log-timestamps',
   ];
   if (input.kind === 'router_probe') return [...common, '--models-dir', prepared.modelRoot];
-  return [
+  if (settings === null)
+    throw new ManagedLocalRuntimeError('invalid_input', 'Invalid Managed Local model settings');
+  const args = [
     ...common,
     '--model',
     prepared.modelPath!,
     '--alias',
     input.modelAlias,
     '--ctx-size',
-    String(input.contextTokens),
+    String(settings.contextTokens),
     '--batch-size',
-    String(input.batchSize),
+    String(settings.batchSize),
     '--ubatch-size',
-    String(Math.min(input.batchSize, 512)),
+    String(managedLocalMicroBatchSize(settings.batchSize)),
     '--n-gpu-layers',
-    String(input.gpuLayers),
+    String(settings.gpuLayers),
     '--jinja',
   ];
+  if (prepared.mmprojPath !== null) args.push('--mmproj', prepared.mmprojPath);
+  return args;
+}
+
+function validateModelSettings(
+  input: Extract<ManagedLocalRuntimeStartInput, { kind: 'model' }>,
+  bundle: VerifiedManagedLocalSidecarBundle,
+): EffectiveModelSettings {
+  const validBackend = ['cpu', 'metal', 'cuda', 'vulkan'].includes(input.backend);
+  if (
+    !validBackend ||
+    !bundle.manifest.candidateBackends.includes(input.backend) ||
+    !Number.isInteger(input.contextTokens) ||
+    input.contextTokens < 256 ||
+    input.contextTokens > 1_048_576 ||
+    !Number.isInteger(input.batchSize) ||
+    input.batchSize < 1 ||
+    input.batchSize > 4_096 ||
+    input.batchSize > input.contextTokens ||
+    !Number.isInteger(input.gpuLayers) ||
+    input.gpuLayers < 0 ||
+    input.gpuLayers > 4_096 ||
+    (input.backend === 'cpu' && input.gpuLayers !== 0) ||
+    (input.backend !== 'cpu' && input.gpuLayers === 0)
+  )
+    throw new ManagedLocalRuntimeError('invalid_input', 'Invalid Managed Local model settings');
+  return Object.freeze({
+    backend: input.backend,
+    gpuLayers: input.gpuLayers,
+    contextTokens: input.contextTokens,
+    batchSize: input.batchSize,
+    runtimeVersion: bundle.manifest.runtimeVersion,
+  });
 }
 
 export function managedLocalEnvironment(

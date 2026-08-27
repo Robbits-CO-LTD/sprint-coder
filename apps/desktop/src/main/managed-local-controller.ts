@@ -1,3 +1,17 @@
+import {
+  MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+  managedLocalEffectiveLaunchSettingsSchema,
+  managedLocalInferenceSettingsSchema,
+  managedLocalLaunchSettingsSchema,
+  managedLocalLaunchSettingsViewSchema,
+  managedLocalInferenceSettingsViewSchema,
+  managedLocalRuntimeSnapshotSchema,
+  type ManagedLocalEffectiveLaunchSettings,
+  type ManagedLocalInferenceSettings,
+  type ManagedLocalInferenceSettingsView,
+  type ManagedLocalLaunchSettings,
+  type ManagedLocalLaunchSettingsView,
+} from '@sprint-coder/contracts';
 import type {
   InstalledLocalModel,
   LocalDownloadJob,
@@ -8,16 +22,17 @@ import type {
   LocalModelFitInput,
   ManagedLocalRuntimeSnapshot,
   ProviderModel,
+  PublicModelArtifact,
   PublicModelCatalogDetail,
   PublicModelCatalogDetailInput,
   PublicModelCatalogPage,
   PublicModelCatalogQuery,
 } from '@sprint-coder/contracts';
-import { managedLocalRuntimeSnapshotSchema } from '@sprint-coder/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
+import { readGgufBlockCount } from './gguf-metadata';
 import { applyReusableLocalVerification, estimateLocalModelFit } from './local-fit-estimator';
 import {
   LocalModelDownloadManager,
@@ -26,10 +41,9 @@ import {
   type LocalModelInstallPlan,
 } from './local-model-download-manager';
 import { PublicModelCatalogService } from './public-model-catalog';
-import {
-  ManagedLocalLifecycleError,
-  type ManagedLocalModelLease,
-  type ManagedLocalRuntimeLifecycle,
+import type {
+  ManagedLocalModelLease,
+  ManagedLocalRuntimeLifecycle,
 } from './managed-local-runtime-lifecycle';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 import { runManagedLocalSelfTest } from './managed-local-self-test';
@@ -44,6 +58,27 @@ type ControllerDependencies = Readonly<{
   collectHardware?: () => Promise<LocalHardwareSnapshot>;
 }>;
 
+export class ManagedLocalModelOperationQueue {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async run<T>(modelId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(modelId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.tails.set(modelId, tail);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.tails.get(modelId) === tail) this.tails.delete(modelId);
+    }
+  }
+}
+
 export class ManagedLocalController {
   private readonly repository: LocalModelDownloadRepository;
   private readonly manager: LocalModelDownloadManager;
@@ -51,6 +86,7 @@ export class ManagedLocalController {
   private readonly collectHardware: () => Promise<LocalHardwareSnapshot>;
   private readonly plans = new Map<string, LocalModelInstallPlan>();
   private readonly requested = new Set<string>();
+  private readonly modelOperations = new ManagedLocalModelOperationQueue();
   private pumpPromise: Promise<void> | null = null;
 
   private constructor(
@@ -108,6 +144,9 @@ export class ManagedLocalController {
       runtimeVersion: this.bundle?.manifest.runtimeVersion ?? null,
       modelId: null,
       backend: null,
+      gpuLayers: null,
+      contextTokens: null,
+      batchSize: null,
       activeLeaseCount: 0,
       fit: null,
       failureCode: 'unsupported_target',
@@ -136,6 +175,53 @@ export class ManagedLocalController {
     return this.manager.listInstalledModels();
   }
 
+  getInferenceSettings(modelId: string): ManagedLocalInferenceSettingsView {
+    return managedLocalInferenceSettingsView(modelId, this.manager.getInferenceSettings(modelId));
+  }
+
+  setInferenceSettings(
+    modelId: string,
+    input: ManagedLocalInferenceSettings,
+  ): ManagedLocalInferenceSettingsView {
+    const settings = managedLocalInferenceSettingsSchema.parse(input);
+    return managedLocalInferenceSettingsView(
+      modelId,
+      this.manager.setInferenceSettings(modelId, settings),
+    );
+  }
+
+  async getLaunchSettings(modelId: string): Promise<ManagedLocalLaunchSettingsView> {
+    const configured = this.manager.getLaunchSettings(modelId);
+    const hardware = await this.collectHardware();
+    return managedLocalLaunchSettingsView(
+      modelId,
+      configured,
+      resolveManagedLocalLaunchSettings(configured, hardware, this.bundle),
+      managedLocalMultimodal(this.manager.artifactExpectations(modelId)),
+    );
+  }
+
+  async setLaunchSettings(
+    modelId: string,
+    input: ManagedLocalLaunchSettings,
+  ): Promise<ManagedLocalLaunchSettingsView> {
+    const settings = managedLocalLaunchSettingsSchema.parse(input);
+    return this.modelOperations.run(modelId, async () => {
+      await this.prepareLaunchSettingsEdit(modelId);
+      const hardware = await this.collectHardware();
+      const effective = resolveManagedLocalLaunchSettings(settings, hardware, this.bundle);
+      if (effective === null)
+        throw new Error('Managed Local backend is unavailable on this device and runtime bundle');
+      const configured = this.manager.setLaunchSettings(modelId, settings);
+      return managedLocalLaunchSettingsView(
+        modelId,
+        configured,
+        effective,
+        managedLocalMultimodal(this.manager.artifactExpectations(modelId)),
+      );
+    });
+  }
+
   async listProviderModels(
     connectionId: string,
     providerId: string,
@@ -143,14 +229,23 @@ export class ManagedLocalController {
     const observedAt = new Date().toISOString();
     const unknown = { value: null, source: 'unknown' as const };
     const hardware = await this.collectHardware();
-    const backend = this.availableBackend(hardware);
-    return Promise.all(
+    const models = await Promise.all(
       this.manager
         .listInstalledModels()
-        .filter(({ state, artifactCount }) => state === 'installed' && artifactCount === 1)
-        .map(async (model) => {
+        .filter(({ state }) => state === 'installed')
+        .map(async (model): Promise<ProviderModel | null> => {
+          const artifacts = this.manager.artifactExpectations(model.id);
+          const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
+          const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
+          if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1) return null;
+          const configured = this.manager.getLaunchSettings(model.id);
+          const effective = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
+          const binding =
+            effective === null
+              ? null
+              : await this.verificationBinding(model.id, hardware, effective);
           const verified =
-            backend === null
+            binding === null
               ? null
               : applyReusableLocalVerification(
                   {
@@ -160,12 +255,7 @@ export class ManagedLocalController {
                     breakdown: null,
                     verification: null,
                   },
-                  this.verificationBinding(
-                    model.id,
-                    hardware,
-                    backend,
-                    this.manager.verification(model.id)?.binding.contextTokens ?? 8_192,
-                  ),
+                  binding,
                   this.manager.verification(model.id),
                 );
           return {
@@ -179,10 +269,10 @@ export class ManagedLocalController {
             },
             modelId: model.id,
             displayName: `${model.sourceId} · ${model.quantization}`,
-            available: this.lifecycle !== null && this.bundle !== null && backend !== null,
+            available: this.lifecycle !== null && effective !== null,
             availabilityCheckedAt: observedAt,
             contextWindow: {
-              value: this.manager.verification(model.id)?.binding.contextTokens ?? 8_192,
+              value: effective?.contextTokens ?? configured.contextTokens,
               source: 'runtime_metadata',
               observedAt,
             },
@@ -194,14 +284,30 @@ export class ManagedLocalController {
                 ? { value: true, source: 'runtime_metadata' as const, observedAt }
                 : unknown,
             structuredOutput: unknown,
-            multimodalInput: { value: false, source: 'runtime_metadata', observedAt },
+            multimodalInput: {
+              value: managedLocalMultimodal(artifacts),
+              source: 'runtime_metadata',
+              observedAt,
+            },
             reasoning: unknown,
           };
         }),
     );
+    return models.filter((model): model is ProviderModel => model !== null);
   }
 
   async acquireRuntime(
+    modelId: string,
+    automaticRelease: boolean,
+    signal: AbortSignal,
+    contextOverride?: number,
+  ): Promise<ManagedLocalModelLease> {
+    return this.modelOperations.run(modelId, () =>
+      this.acquireRuntimeUnlocked(modelId, automaticRelease, signal, contextOverride),
+    );
+  }
+
+  private async acquireRuntimeUnlocked(
     modelId: string,
     automaticRelease: boolean,
     signal: AbortSignal,
@@ -212,23 +318,40 @@ export class ManagedLocalController {
     const model = this.manager
       .listInstalledModels()
       .find((candidate) => candidate.id === modelId && candidate.state === 'installed');
-    if (model === undefined || model.artifactCount !== 1)
+    if (model === undefined) throw new Error('Managed Local model is not startable');
+    const artifacts = this.manager.artifactExpectations(model.id);
+    const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
+    const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
+    if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1)
       throw new Error('Managed Local model is not startable');
+    const active = this.lifecycle.snapshot();
+    const reusesLoadedModel = managedLocalReusesLoadedModel(active, model.id);
+    if (!reusesLoadedModel) await this.manager.assertInstalledIntegrity(model.id);
     const hardware = await this.collectHardware();
-    const backend = this.availableBackend(hardware);
-    if (backend === null) throw new Error('Managed Local backend is unavailable');
-    const contextTokens =
-      contextOverride ?? this.manager.verification(modelId)?.binding.contextTokens ?? 8_192;
+    const configured = this.manager.getLaunchSettings(modelId);
+    const launch = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
+    if (launch === null) throw new Error('Managed Local launch settings are unavailable');
+    const contextTokens = contextOverride ?? launch.contextTokens;
+    // Verification may deliberately probe a lower context than the saved setting. Keep that
+    // temporary probe valid without mutating the user's configured batch size.
+    const batchSize = managedLocalProbeBatchSize(launch.batchSize, contextTokens);
+    const modelPath = this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'model'));
+    const gpuOffloadRatio = await this.installedGpuOffloadRatio(modelPath, launch);
+    if (gpuOffloadRatio === null)
+      throw new Error('Managed Local model layer metadata is unavailable for GPU fit');
     return this.lifecycle.acquire(
       {
         id: model.id,
         modelRoot: join(this.store.rootPath, 'models', model.id),
-        modelPath: join(this.store.rootPath, 'models', model.id, '001.gguf'),
+        modelPath,
+        mmprojPath: managedLocalMultimodal(artifacts)
+          ? this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'mmproj'))
+          : null,
         scratchRoot: join(this.store.rootPath, 'scratch'),
-        backend,
-        gpuLayers: backend === 'cpu' ? 0 : 999,
+        backend: launch.backend,
+        gpuLayers: launch.gpuLayers,
         contextTokens,
-        batchSize: 512,
+        batchSize,
         fit: {
           weightsBytes: model.totalBytes,
           contextTokens,
@@ -236,7 +359,7 @@ export class ManagedLocalController {
           scratchBytes: Math.max(256 * 1_024 * 1_024, Math.ceil(model.totalBytes * 0.1)),
           runtimeReserveBytes: 768 * 1_024 * 1_024,
           safetyFactor: 1.15,
-          gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,
+          gpuOffloadRatio,
           runtimeCompatibility: 'supported',
         },
       },
@@ -247,28 +370,35 @@ export class ManagedLocalController {
 
   async verify(modelId: string): Promise<LocalFitAssessment> {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
-    let lease: ManagedLocalModelLease | null = null;
-    let contextTokens = 8_192;
-    for (const candidate of [8_192, 4_096, 2_048, 1_024, 512, 256]) {
-      try {
-        lease = await this.acquireRuntime(modelId, false, new AbortController().signal, candidate);
-        contextTokens = candidate;
-        break;
-      } catch (error) {
-        if (
-          !(error instanceof ManagedLocalLifecycleError) ||
-          !['memory_insufficient', 'memory_unknown'].includes(error.code)
-        )
-          throw error;
-      }
-    }
-    if (lease === null) throw new Error('Managed Local has insufficient memory at minimum context');
+    // Verification evidence is reusable only for the exact saved launch setting. Memory recovery
+    // is surfaced to the user, who can lower context explicitly before verifying again.
+    const contextTokens = this.manager.getLaunchSettings(modelId).contextTokens;
+    const lease = await this.acquireRuntime(
+      modelId,
+      false,
+      new AbortController().signal,
+      contextTokens,
+    );
     try {
       const snapshot = this.lifecycle?.snapshot();
-      if (snapshot?.fit === null || snapshot?.fit === undefined || snapshot.backend === null)
+      if (
+        snapshot?.fit === null ||
+        snapshot?.fit === undefined ||
+        snapshot.backend === null ||
+        snapshot.contextTokens === null ||
+        snapshot.batchSize === null ||
+        snapshot.gpuLayers === null
+      )
         throw new Error('Managed Local fit evidence is unavailable');
       const hardware = await this.collectHardware();
-      const binding = this.verificationBinding(modelId, hardware, snapshot.backend, contextTokens);
+      const binding = await this.verificationBinding(modelId, hardware, {
+        backend: snapshot.backend,
+        gpuLayers: snapshot.gpuLayers,
+        contextTokens: snapshot.contextTokens,
+        batchSize: snapshot.batchSize,
+      });
+      if (binding === null)
+        throw new Error('Managed Local model layer metadata is unavailable for verification');
       const save = (level: 'loaded' | 'tools') =>
         this.manager.saveVerification(modelId, {
           level,
@@ -292,23 +422,36 @@ export class ManagedLocalController {
   async fit(input: LocalModelFitInput): Promise<LocalFitAssessment> {
     const detail = await this.catalog.detail({ source: input.source, sourceId: input.sourceId });
     const artifact = detail.artifacts.find(({ id }) => id === input.artifactId);
-    if (artifact === undefined) throw new Error('Public model artifact was not found');
+    if (artifact === undefined || artifact.role !== 'model')
+      throw new Error('Public model artifact was not found');
+    const mmproj =
+      input.mmprojArtifactId === undefined
+        ? null
+        : (detail.artifacts.find(({ id }) => id === input.mmprojArtifactId) ?? null);
+    if (input.mmprojArtifactId !== undefined && !compatibleMultimodalPair(artifact, mmproj))
+      throw new Error('Public mmproj artifact is not compatible with the selected model');
+    const weightsBytes =
+      artifact.sizeBytes === null || (mmproj !== null && mmproj.sizeBytes === null)
+        ? null
+        : artifact.sizeBytes + (mmproj?.sizeBytes ?? 0);
     const hardware = await this.collectHardware();
     const backend = this.availableBackend(hardware);
     return estimateLocalModelFit(
       {
-        weightsBytes: artifact.sizeBytes,
+        weightsBytes,
         contextTokens: input.contextTokens,
         kvBytesPerToken: 128 * 1_024,
         scratchBytes:
-          artifact.sizeBytes === null
+          weightsBytes === null
             ? null
-            : Math.max(256 * 1_024 * 1_024, Math.ceil(artifact.sizeBytes * 0.1)),
+            : Math.max(256 * 1_024 * 1_024, Math.ceil(weightsBytes * 0.1)),
         runtimeReserveBytes: 768 * 1_024 * 1_024,
         safetyFactor: 1.15,
         gpuOffloadRatio: backend === null || backend === 'cpu' ? 0 : 0.8,
         runtimeCompatibility:
-          artifact.format === 'gguf' && artifact.installability.state === 'installable'
+          artifact.format === 'gguf' &&
+          artifact.installability.state === 'installable' &&
+          (mmproj === null || mmproj.installability.state === 'installable')
             ? 'supported'
             : artifact.format === 'other'
               ? 'unsupported'
@@ -335,27 +478,51 @@ export class ManagedLocalController {
     return available.has(backend) ? backend : null;
   }
 
-  private verificationBinding(
+  private async prepareLaunchSettingsEdit(modelId: string): Promise<void> {
+    const runtime = this.lifecycle?.snapshot();
+    if (runtime === undefined) return;
+    const action = managedLocalLaunchSettingsEditAction(runtime, modelId);
+    if (action === 'reject')
+      throw new Error('Managed Local launch settings apply after the model is stopped');
+    if (action === 'stop') await this.lifecycle!.stopModel(modelId);
+  }
+
+  private async verificationBinding(
     modelId: string,
     hardware: LocalHardwareSnapshot,
-    backend: LocalVerificationBinding['backend'],
-    contextTokens: number,
-  ): LocalVerificationBinding {
+    launch: Pick<
+      ManagedLocalEffectiveLaunchSettings,
+      'backend' | 'gpuLayers' | 'contextTokens' | 'batchSize'
+    >,
+  ): Promise<LocalVerificationBinding | null> {
     if (this.bundle === null) throw new Error('Managed Local runtime is unavailable');
     const model = this.manager.modelRecord(modelId);
+    const modelPath = this.store.installedPath(modelId, this.artifactOrdinal(modelId, 'model'));
+    const gpuOffloadRatio = await this.installedGpuOffloadRatio(modelPath, launch);
+    if (gpuOffloadRatio === null) return null;
     return {
       hostCapabilityFingerprint: hardwareFingerprint(hardware),
       modelRepo: model.sourceId,
       immutableRevision: model.immutableRevision,
       artifactHashes: this.manager.artifactExpectations(modelId).map(({ sha256 }) => sha256),
       quantization: model.quantization,
-      contextTokens,
+      contextTokens: launch.contextTokens,
       kvCacheType: 'f16',
-      batchSize: 512,
-      gpuOffloadRatio: backend === 'cpu' ? 0 : 0.8,
+      batchSize: launch.batchSize,
+      gpuLayers: launch.gpuLayers,
+      gpuOffloadRatio,
       sidecarVersion: this.bundle.manifest.runtimeVersion,
-      backend,
+      backend: launch.backend,
     };
+  }
+
+  private async installedGpuOffloadRatio(
+    modelPath: string,
+    launch: Pick<ManagedLocalEffectiveLaunchSettings, 'backend' | 'gpuLayers'>,
+  ): Promise<number | null> {
+    if (launch.backend === 'cpu') return 0;
+    const blockCount = await readGgufBlockCount(modelPath);
+    return blockCount === null ? null : managedLocalGpuOffloadRatio(launch.gpuLayers, blockCount);
   }
 
   async install(input: LocalModelInstallInput): Promise<LocalDownloadJob> {
@@ -433,7 +600,10 @@ export class ManagedLocalController {
     // full model id (which also binds the original path) before any byte is resumed.
     const selected = expected.map((item) => {
       const matches = detail.artifacts.filter(
-        (artifact) => artifact.sizeBytes === item.sizeBytes && artifact.sha256 === item.sha256,
+        (artifact) =>
+          artifact.sizeBytes === item.sizeBytes &&
+          artifact.sha256 === item.sha256 &&
+          artifact.role === item.role,
       );
       if (matches.length !== 1) throw new Error('Public catalog artifact identity is ambiguous');
       return matches[0]!;
@@ -447,6 +617,43 @@ export class ManagedLocalController {
       record.immutableRevision,
     );
   }
+
+  private artifactOrdinal(modelId: string, role: 'model' | 'mmproj'): number {
+    const ordinal = this.manager
+      .artifactExpectations(modelId)
+      .findIndex((artifact) => artifact.role === role);
+    if (ordinal < 0) throw new Error(`Managed Local ${role} artifact is missing`);
+    return ordinal + 1;
+  }
+}
+
+export function resolveManagedLocalLaunchSettings(
+  configuredInput: ManagedLocalLaunchSettings,
+  hardware: LocalHardwareSnapshot,
+  bundle: VerifiedManagedLocalSidecarBundle | null,
+): ManagedLocalEffectiveLaunchSettings | null {
+  const configured = managedLocalLaunchSettingsSchema.safeParse(configuredInput);
+  if (!configured.success || bundle === null) return null;
+  const available = new Set(
+    hardware.backends.filter(({ status }) => status === 'available').map(({ kind }) => kind),
+  );
+  const backend =
+    configured.data.backend === 'auto'
+      ? configured.data.gpuLayers === 0
+        ? 'cpu'
+        : (bundle.manifest.candidateBackends.find(
+            (candidate) => candidate !== 'cpu' && available.has(candidate),
+          ) ?? 'cpu')
+      : configured.data.backend;
+  if (!bundle.manifest.candidateBackends.includes(backend) || !available.has(backend)) return null;
+  const effective = managedLocalEffectiveLaunchSettingsSchema.safeParse({
+    backend,
+    gpuLayers: backend === 'cpu' ? 0 : configured.data.gpuLayers,
+    contextTokens: configured.data.contextTokens,
+    batchSize: configured.data.batchSize,
+    runtimeVersion: bundle.manifest.runtimeVersion,
+  });
+  return effective.success ? effective.data : null;
 }
 
 export function installPlan(
@@ -460,7 +667,9 @@ export function installPlan(
   const revision = detail.item.immutableRevision;
   if (revision === null || (expectedRevision !== undefined && revision !== expectedRevision))
     throw new Error('Immutable Hugging Face revision is required');
-  const selected = artifactIds.map((id) => {
+  if (new Set(artifactIds).size !== artifactIds.length)
+    throw new Error('Duplicate public model artifact');
+  const selectedCatalog = artifactIds.map((id) => {
     const artifact = detail.artifacts.find((candidate) => candidate.id === id);
     if (
       artifact === undefined ||
@@ -469,28 +678,124 @@ export function installPlan(
       artifact.sizeBytes === null ||
       artifact.sha256 === null ||
       artifact.sourceUrl === null ||
-      (artifact.quantization !== null && artifact.quantization !== quantization)
+      (artifact.role === 'model' &&
+        artifact.quantization !== null &&
+        artifact.quantization !== quantization) ||
+      (artifact.role === 'mmproj' && !isMmprojFilename(artifact.filename))
     )
       throw new Error('Selected public model artifact is not installable');
+    return artifact;
+  });
+  const selectedModels = selectedCatalog.filter(({ role }) => role === 'model');
+  const selectedMmproj = selectedCatalog.filter(({ role }) => role === 'mmproj');
+  if (selectedModels.length === 0) throw new Error('A model GGUF artifact is required');
+  if (selectedMmproj.length > 1) throw new Error('Only one mmproj artifact is supported');
+  if (
+    selectedMmproj.length === 1 &&
+    (selectedModels.length !== 1 ||
+      !compatibleMultimodalPair(selectedModels[0]!, selectedMmproj[0]))
+  )
+    throw new Error('Selected mmproj is not compatible with the model GGUF');
+  const selected = selectedCatalog.map((artifact) => {
     return {
+      role: artifact.role,
       filename: artifact.filename,
-      sizeBytes: artifact.sizeBytes,
-      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes!,
+      sha256: artifact.sha256!,
       sourceUrl: huggingFaceResolveUrl(
-        artifact.sourceUrl,
+        artifact.sourceUrl!,
         detail.item.sourceId,
         revision,
         artifact.filename,
       ),
     };
   });
+  const modelArtifacts = selected.filter(({ role }) => role === 'model');
+  const mmprojArtifacts = selected.filter(({ role }) => role === 'mmproj');
+  // The model is always ordinal 1 and the projector follows it. This makes the persisted bundle
+  // self-describing even after a restart, while allowing callers to select the projector first.
+  const ordered = [...modelArtifacts, ...mmprojArtifacts];
   return {
     source: detail.item.source,
     sourceId: detail.item.sourceId,
     immutableRevision: revision,
     quantization,
-    artifacts: selected,
+    artifacts: ordered,
   };
+}
+
+export function managedLocalReusesLoadedModel(
+  snapshot: Pick<ManagedLocalRuntimeSnapshot, 'state' | 'modelId'>,
+  modelId: string,
+): boolean {
+  return snapshot.modelId === modelId && ['starting', 'running'].includes(snapshot.state);
+}
+
+export function managedLocalProbeBatchSize(batchSize: number, contextTokens: number): number {
+  return Math.min(batchSize, contextTokens);
+}
+
+/** Estimates the fraction of layer-scoped model memory requested for accelerator offload. */
+export function managedLocalGpuOffloadRatio(gpuLayers: number, modelLayerCount: number): number {
+  if (
+    !Number.isSafeInteger(gpuLayers) ||
+    gpuLayers < 0 ||
+    !Number.isSafeInteger(modelLayerCount) ||
+    modelLayerCount < 1 ||
+    modelLayerCount > 4_096
+  )
+    throw new Error('Invalid Managed Local layer metadata');
+  return Math.min(gpuLayers, modelLayerCount) / modelLayerCount;
+}
+
+/** Managed Local passes `--mmproj` exactly when one projector artifact is installed. */
+export function managedLocalMultimodal(
+  artifacts: readonly { role: 'model' | 'mmproj' }[],
+): boolean {
+  return artifacts.filter(({ role }) => role === 'mmproj').length === 1;
+}
+
+export function managedLocalLaunchSettingsEditAction(
+  snapshot: Pick<ManagedLocalRuntimeSnapshot, 'state' | 'modelId' | 'activeLeaseCount'>,
+  modelId: string,
+): 'allow' | 'stop' | 'reject' {
+  if (snapshot.modelId !== modelId) return 'allow';
+  if (snapshot.state === 'running' && snapshot.activeLeaseCount === 0) return 'stop';
+  return ['starting', 'running', 'stopping'].includes(snapshot.state) ? 'reject' : 'allow';
+}
+
+function managedLocalInferenceSettingsView(
+  modelId: string,
+  configuredInput: ManagedLocalInferenceSettings,
+): ManagedLocalInferenceSettingsView {
+  const configured = managedLocalInferenceSettingsSchema.parse(configuredInput);
+  return managedLocalInferenceSettingsViewSchema.parse({
+    modelId,
+    configured,
+    effective: {
+      maxOutputTokens: configured.maxOutputTokens,
+      thinking: configured.thinking,
+      // llama.cpp only defines reasoning_effort=none for this API. When thinking is enabled the
+      // field is omitted, so the UI can distinguish a real setting from a silently ignored one.
+      reasoningEffort: configured.thinking ? null : 'none',
+    },
+    // Forced tool extraction is intentionally deterministic and does not inherit user thinking.
+    toolCall: {
+      maxOutputTokens: MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+      thinking: false,
+      reasoningEffort: 'none',
+    },
+  });
+}
+
+function managedLocalLaunchSettingsView(
+  modelId: string,
+  configuredInput: ManagedLocalLaunchSettings,
+  effective: ManagedLocalEffectiveLaunchSettings | null,
+  multimodal: boolean,
+): ManagedLocalLaunchSettingsView {
+  const configured = managedLocalLaunchSettingsSchema.parse(configuredInput);
+  return managedLocalLaunchSettingsViewSchema.parse({ modelId, configured, effective, multimodal });
 }
 
 function huggingFaceResolveUrl(
@@ -510,6 +815,23 @@ function huggingFaceResolveUrl(
     .split('/')
     .map(encodeURIComponent)
     .join('/')}`;
+}
+
+function isMmprojFilename(input: string): boolean {
+  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(input.split(/[\\/]/u).at(-1) ?? '');
+}
+
+function compatibleMultimodalPair(
+  model: PublicModelArtifact,
+  mmproj: PublicModelArtifact | null | undefined,
+): mmproj is PublicModelArtifact {
+  return (
+    model.role === 'model' &&
+    mmproj?.role === 'mmproj' &&
+    model.multimodalCompatibilityKey !== undefined &&
+    model.multimodalCompatibilityKey !== null &&
+    model.multimodalCompatibilityKey === mmproj.multimodalCompatibilityKey
+  );
 }
 
 function hardwareFingerprint(hardware: LocalHardwareSnapshot): string {

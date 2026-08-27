@@ -191,11 +191,54 @@ describe('PublicModelCatalogService', () => {
     expect(detail.item.installability.state).toBe('installable');
     expect(detail.artifacts[1]).toMatchObject({
       filename: 'model-Q4_K_M.gguf',
+      role: 'model',
       sizeBytes: 1234,
       sha256: HASH,
       quantization: 'Q4_K_M',
       installability: { state: 'installable' },
     });
+  });
+
+  it('classifies a conventional mmproj GGUF without making a projector-only repo installable', async () => {
+    const service = new PublicModelCatalogService(async () =>
+      response(
+        hfModel('acme/vision', {
+          siblings: [
+            { rfilename: 'vision/mmproj-model-F16.gguf', lfs: { size: 567, sha256: HASH } },
+            {
+              rfilename: 'Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf',
+              lfs: { size: 1234, sha256: HASH },
+            },
+          ],
+        }),
+      ),
+    );
+    const detail = await service.detail({ source: 'hugging_face', sourceId: 'acme/vision' });
+
+    expect(detail.item.installability.state).toBe('installable');
+    expect(detail.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filename: 'vision/mmproj-model-F16.gguf',
+          role: 'mmproj',
+          multimodalCompatibilityKey: 'qwen2-5-vl-7b-instruct',
+        }),
+        expect.objectContaining({
+          filename: 'Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf',
+          role: 'model',
+          multimodalCompatibilityKey: 'qwen2-5-vl-7b-instruct',
+        }),
+      ]),
+    );
+
+    const projectorOnly = await new PublicModelCatalogService(async () =>
+      response(
+        hfModel('acme/projector-only', {
+          siblings: [{ rfilename: 'mmproj-model-f16.gguf', lfs: { size: 567, sha256: HASH } }],
+        }),
+      ),
+    ).detail({ source: 'hugging_face', sourceId: 'acme/projector-only' });
+    expect(projectorOnly.item.installability.state).toBe('metadata_required');
   });
 
   it('does not mark a Hugging Face artifact installable without an immutable revision', async () => {

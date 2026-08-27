@@ -26,6 +26,12 @@ import {
   modelSelectionSchema,
   installedLocalModelInputSchema,
   installedLocalModelSchema,
+  managedLocalLaunchSettingsGetInputSchema,
+  managedLocalLaunchSettingsSetInputSchema,
+  managedLocalLaunchSettingsViewSchema,
+  managedLocalInferenceSettingsGetInputSchema,
+  managedLocalInferenceSettingsSetInputSchema,
+  managedLocalInferenceSettingsViewSchema,
   localDownloadCancelInputSchema,
   localDownloadJobInputSchema,
   localDownloadJobSchema,
@@ -932,6 +938,34 @@ const api: SprintCoderApi = {
         emptyPayloadSchema,
         managedLocalRuntimeSnapshotSchema,
         {},
+      ),
+    launchSettings: (modelId) =>
+      invoke(
+        IPC_CHANNELS.localAILaunchSettings,
+        managedLocalLaunchSettingsGetInputSchema,
+        managedLocalLaunchSettingsViewSchema,
+        { modelId },
+      ),
+    setLaunchSettings: (input) =>
+      invoke(
+        IPC_CHANNELS.localAISetLaunchSettings,
+        managedLocalLaunchSettingsSetInputSchema,
+        managedLocalLaunchSettingsViewSchema,
+        input,
+      ),
+    inferenceSettings: (modelId) =>
+      invoke(
+        IPC_CHANNELS.localAIInferenceSettings,
+        managedLocalInferenceSettingsGetInputSchema,
+        managedLocalInferenceSettingsViewSchema,
+        { modelId },
+      ),
+    setInferenceSettings: (input) =>
+      invoke(
+        IPC_CHANNELS.localAISetInferenceSettings,
+        managedLocalInferenceSettingsSetInputSchema,
+        managedLocalInferenceSettingsViewSchema,
+        input,
       ),
     query: (input) =>
       invoke(

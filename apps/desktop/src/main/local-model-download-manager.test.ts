@@ -44,6 +44,7 @@ async function fixture(input?: {
       sizeBytes: value.byteLength,
       sha256: createHash('sha256').update(value).digest('hex'),
       sourceUrl: `https://huggingface.co/owner/model/resolve/${'a'.repeat(40)}/model-${index + 1}.gguf`,
+      role: 'model',
     })),
   };
   const fetch =
@@ -123,6 +124,140 @@ if (runsWithElectronAbi)
       expect(await readdir(modelPath)).toEqual(['001.gguf', '002.gguf']);
       expect(await readFile(join(modelPath, '001.gguf'))).toEqual(env.bytes[0]);
       env.repository.close();
+    });
+
+    it('clamps a legacy verification-derived default batch to its fallback context', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+      env.manager.saveVerification(installed.modelId, {
+        level: 'loaded',
+        verifiedAt: '2026-08-23T00:00:00.000Z',
+        binding: {
+          hostCapabilityFingerprint: 'b'.repeat(64),
+          modelRepo: 'owner/model',
+          immutableRevision: 'a'.repeat(40),
+          artifactHashes: env.plan.artifacts.map(({ sha256 }) => sha256),
+          quantization: 'Q4_K_M',
+          contextTokens: 256,
+          kvCacheType: 'f16',
+          batchSize: 512,
+          gpuOffloadRatio: 0,
+          sidecarVersion: 'b10516',
+          backend: 'cpu',
+        },
+      });
+
+      expect(env.manager.getLaunchSettings(installed.modelId)).toMatchObject({
+        contextTokens: 256,
+        batchSize: 256,
+      });
+      env.repository.close();
+    });
+
+    it('persists a projector role and rejects an installed mmproj after byte tampering', async () => {
+      const modelBytes = Buffer.from('model weights');
+      const projectorBytes = Buffer.from('projector weights');
+      const env = await fixture({
+        bytes: [modelBytes, projectorBytes],
+        fetch: async (url) => {
+          const body = String(url).includes('mmproj') ? projectorBytes : modelBytes;
+          return new Response(new Uint8Array(body), {
+            status: 200,
+            headers: { 'content-length': String(body.byteLength) },
+          });
+        },
+      });
+      const plan: LocalModelInstallPlan = {
+        ...env.plan,
+        artifacts: [
+          { ...env.plan.artifacts[0]!, filename: 'model-Q4_K_M.gguf', role: 'model' },
+          {
+            ...env.plan.artifacts[1]!,
+            filename: 'mmproj-model-f16.gguf',
+            role: 'mmproj',
+            sha256: createHash('sha256').update(projectorBytes).digest('hex'),
+            sourceUrl: `https://huggingface.co/owner/model/resolve/${'a'.repeat(40)}/mmproj-model-f16.gguf`,
+          },
+        ],
+      };
+      const queued = env.manager.enqueue(plan);
+      const installed = await env.manager.run(queued.id, plan);
+
+      expect(installed.state).toBe('installed');
+      expect(env.manager.artifactExpectations(installed.modelId)).toEqual([
+        expect.objectContaining({ filename: 'model-Q4_K_M.gguf', role: 'model' }),
+        expect.objectContaining({ filename: 'mmproj-model-f16.gguf', role: 'mmproj' }),
+      ]);
+      expect(env.manager.getInferenceSettings(installed.modelId)).toEqual({
+        maxOutputTokens: 512,
+        thinking: false,
+      });
+      const projectorPath = join(env.store.rootPath, 'models', installed.modelId, '002.gguf');
+      await expect(
+        env.manager.assertInstalledIntegrity(installed.modelId),
+      ).resolves.toBeUndefined();
+      await writeFile(projectorPath, Buffer.alloc(projectorBytes.byteLength, 0));
+      await expect(env.manager.assertInstalledIntegrity(installed.modelId)).rejects.toMatchObject({
+        code: 'hash_mismatch',
+      });
+      env.repository.close();
+    });
+
+    it('persists Managed Local inference settings per installed model in the existing settings table', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+
+      expect(env.manager.getInferenceSettings(installed.modelId)).toEqual({
+        maxOutputTokens: 512,
+        thinking: false,
+      });
+      expect(
+        env.manager.setInferenceSettings(installed.modelId, {
+          maxOutputTokens: 4_096,
+          thinking: true,
+        }),
+      ).toEqual({ maxOutputTokens: 4_096, thinking: true });
+      env.repository.close();
+
+      const reopened = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      expect(reopened.getInferenceSettings(installed.modelId)).toEqual({
+        maxOutputTokens: 4_096,
+        thinking: true,
+      });
+      reopened.close();
+    });
+
+    it('persists typed Managed Local launch settings per installed model in the existing settings table', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+
+      expect(env.manager.getLaunchSettings(installed.modelId)).toEqual({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      });
+      expect(
+        env.manager.setLaunchSettings(installed.modelId, {
+          backend: 'cpu',
+          gpuLayers: 0,
+          contextTokens: 4_096,
+          batchSize: 256,
+        }),
+      ).toEqual({ backend: 'cpu', gpuLayers: 0, contextTokens: 4_096, batchSize: 256 });
+      env.repository.close();
+
+      const reopened = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      expect(reopened.getLaunchSettings(installed.modelId)).toEqual({
+        backend: 'cpu',
+        gpuLayers: 0,
+        contextTokens: 4_096,
+        batchSize: 256,
+      });
+      reopened.close();
     });
 
     it('never publishes a hash mismatch or a missing shard as installed', async () => {

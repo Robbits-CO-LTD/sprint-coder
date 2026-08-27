@@ -17,6 +17,14 @@ import {
 import { basename, extname, join } from 'node:path';
 import Database from 'better-sqlite3';
 import {
+  MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+  MANAGED_LOCAL_DEFAULT_BATCH_SIZE,
+  MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS,
+  MANAGED_LOCAL_DEFAULT_GPU_LAYERS,
+  managedLocalLaunchSettingsMapSchema,
+  managedLocalLaunchSettingsSchema,
+  managedLocalInferenceSettingsMapSchema,
+  managedLocalInferenceSettingsSchema,
   localDownloadJobSchema,
   installedLocalModelSchema,
   localVerificationRecordSchema,
@@ -24,6 +32,8 @@ import {
   type LocalDownloadFailureCode,
   type LocalDownloadJob,
   type LocalDownloadJobState,
+  type ManagedLocalInferenceSettings,
+  type ManagedLocalLaunchSettings,
   type LocalVerificationRecord,
 } from '@sprint-coder/contracts';
 
@@ -33,12 +43,29 @@ const MAX_ARTIFACTS = 256;
 const DISK_RESERVE_BYTES = 64 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
 const MARKER = '.sprint-coder-local-models-v1';
+const INFERENCE_SETTINGS_KEY = 'managed-local.inference-settings';
+const DEFAULT_INFERENCE_SETTINGS: ManagedLocalInferenceSettings = Object.freeze({
+  maxOutputTokens: MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
+  thinking: false,
+});
+const MAX_INFERENCE_SETTINGS_BYTES = 32 * 1024;
+const LAUNCH_SETTINGS_KEY = 'managed-local.launch-settings';
+const DEFAULT_LAUNCH_SETTINGS: ManagedLocalLaunchSettings = Object.freeze({
+  backend: 'auto',
+  gpuLayers: MANAGED_LOCAL_DEFAULT_GPU_LAYERS,
+  contextTokens: MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS,
+  batchSize: MANAGED_LOCAL_DEFAULT_BATCH_SIZE,
+});
+const MAX_LAUNCH_SETTINGS_BYTES = 32 * 1024;
+
+export type LocalModelArtifactRole = 'model' | 'mmproj';
 
 export type LocalModelInstallArtifact = Readonly<{
   filename: string;
   sizeBytes: number;
   sha256: string;
   sourceUrl: string;
+  role: LocalModelArtifactRole;
 }>;
 
 /** Main-internal input assembled from a catalog detail; never exposed as an IPC request. */
@@ -58,6 +85,7 @@ type ArtifactRow = Readonly<{
   byte_length: number;
   etag: string | null;
   downloaded_bytes: number;
+  role: LocalModelArtifactRole;
   state: 'pending' | 'downloaded' | 'installed';
 }>;
 
@@ -106,9 +134,12 @@ export class LocalModelDownloadRepository {
     const exists = this.db
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'local_models'")
       .get();
-    if (exists === undefined) {
+    const hasArtifactRole = (
+      this.db.prepare("PRAGMA table_info('local_model_artifacts')").all() as { name: string }[]
+    ).some(({ name }) => name === 'role');
+    if (exists === undefined || !hasArtifactRole) {
       this.db.close();
-      throw new Error('Managed Local schema migration v75 has not been applied');
+      throw new Error('Managed Local schema migration v77 has not been applied');
     }
   }
 
@@ -136,8 +167,8 @@ export class LocalModelDownloadRepository {
         );
       const insertArtifact = this.db.prepare(
         `INSERT INTO local_model_artifacts(
-          model_id, ordinal, filename, sha256, byte_length, state
-        ) VALUES (?, ?, ?, ?, ?, 'pending')`,
+            model_id, ordinal, filename, sha256, byte_length, role, state
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
       );
       plan.artifacts.forEach((artifact, index) =>
         insertArtifact.run(
@@ -146,6 +177,7 @@ export class LocalModelDownloadRepository {
           safeStoredFilename(artifact.filename, index + 1),
           artifact.sha256,
           artifact.sizeBytes,
+          artifact.role,
         ),
       );
       this.db
@@ -253,11 +285,13 @@ export class LocalModelDownloadRepository {
     filename: string;
     sizeBytes: number;
     sha256: string;
+    role: LocalModelArtifactRole;
   }>[] {
     return this.artifacts(modelId).map((artifact) => ({
       filename: artifact.filename.replace(/^\d{3}-/u, ''),
       sizeBytes: artifact.byte_length,
       sha256: artifact.sha256,
+      role: artifact.role,
     }));
   }
 
@@ -288,6 +322,130 @@ export class LocalModelDownloadRepository {
       )
       .run(modelId, record.level, record.verifiedAt, JSON.stringify(record.binding));
     return this.verification(modelId)!;
+  }
+
+  getInferenceSettings(modelId: string): ManagedLocalInferenceSettings {
+    this.assertInstalledInferenceModel(modelId);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(INFERENCE_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_INFERENCE_SETTINGS_BYTES)
+      return { ...DEFAULT_INFERENCE_SETTINGS };
+    try {
+      const map = managedLocalInferenceSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      return map[modelId] === undefined ? { ...DEFAULT_INFERENCE_SETTINGS } : { ...map[modelId] };
+    } catch {
+      // A malformed optional settings blob must not prevent a downloaded model from running.
+      return { ...DEFAULT_INFERENCE_SETTINGS };
+    }
+  }
+
+  setInferenceSettings(
+    modelId: string,
+    input: ManagedLocalInferenceSettings,
+  ): ManagedLocalInferenceSettings {
+    this.assertInstalledInferenceModel(modelId);
+    const settings = managedLocalInferenceSettingsSchema.parse(input);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(INFERENCE_SETTINGS_KEY) as { value: string } | undefined;
+    let current: Record<string, ManagedLocalInferenceSettings> = {};
+    if (row !== undefined && Buffer.byteLength(row.value, 'utf8') <= MAX_INFERENCE_SETTINGS_BYTES) {
+      try {
+        current = managedLocalInferenceSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      } catch {
+        // Replace only the malformed optional blob; the model itself remains intact.
+      }
+    }
+    current[modelId] = settings;
+    const serialized = JSON.stringify(managedLocalInferenceSettingsMapSchema.parse(current));
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_INFERENCE_SETTINGS_BYTES)
+      throw new Error('Managed Local inference settings are too large');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(INFERENCE_SETTINGS_KEY, serialized, new Date().toISOString());
+    return { ...settings };
+  }
+
+  getLaunchSettings(modelId: string): ManagedLocalLaunchSettings {
+    this.assertInstalledLaunchModel(modelId);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(LAUNCH_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_LAUNCH_SETTINGS_BYTES)
+      return this.defaultLaunchSettings(modelId);
+    try {
+      const map = managedLocalLaunchSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      return map[modelId] === undefined ? this.defaultLaunchSettings(modelId) : { ...map[modelId] };
+    } catch {
+      // A malformed optional settings blob must not prevent an installed model from running.
+      return this.defaultLaunchSettings(modelId);
+    }
+  }
+
+  setLaunchSettings(
+    modelId: string,
+    input: ManagedLocalLaunchSettings,
+  ): ManagedLocalLaunchSettings {
+    this.assertInstalledLaunchModel(modelId);
+    const settings = managedLocalLaunchSettingsSchema.parse(input);
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(LAUNCH_SETTINGS_KEY) as { value: string } | undefined;
+    let current: Record<string, ManagedLocalLaunchSettings> = {};
+    if (row !== undefined && Buffer.byteLength(row.value, 'utf8') <= MAX_LAUNCH_SETTINGS_BYTES) {
+      try {
+        current = managedLocalLaunchSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+      } catch {
+        // Replace only the malformed optional blob; the model itself remains intact.
+      }
+    }
+    current[modelId] = settings;
+    const serialized = JSON.stringify(managedLocalLaunchSettingsMapSchema.parse(current));
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_LAUNCH_SETTINGS_BYTES)
+      throw new Error('Managed Local launch settings are too large');
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(LAUNCH_SETTINGS_KEY, serialized, new Date().toISOString());
+    return { ...settings };
+  }
+
+  private assertInstalledInferenceModel(modelId: string): void {
+    if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
+    const row = this.db.prepare('SELECT state FROM local_models WHERE id = ?').get(modelId) as
+      { state: string } | undefined;
+    const artifacts = row?.state === 'installed' ? this.artifacts(modelId) : [];
+    if (
+      artifacts.filter(({ role }) => role === 'model').length !== 1 ||
+      artifacts.filter(({ role }) => role === 'mmproj').length > 1
+    )
+      throw new Error('Managed Local model is not available for inference settings');
+  }
+
+  private assertInstalledLaunchModel(modelId: string): void {
+    if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
+    const row = this.db
+      .prepare('SELECT state, artifact_count FROM local_models WHERE id = ?')
+      .get(modelId) as { state: string; artifact_count: number } | undefined;
+    if (row?.state !== 'installed' || row.artifact_count < 1)
+      throw new Error('Managed Local model is not available for launch settings');
+  }
+
+  private defaultLaunchSettings(modelId: string): ManagedLocalLaunchSettings {
+    const contextTokens =
+      this.verification(modelId)?.binding.contextTokens ?? MANAGED_LOCAL_DEFAULT_CONTEXT_TOKENS;
+    return {
+      ...DEFAULT_LAUNCH_SETTINGS,
+      // Preserve the pre-settings behavior for models whose verified fit selected a lower context.
+      contextTokens,
+      batchSize: Math.min(MANAGED_LOCAL_DEFAULT_BATCH_SIZE, contextTokens),
+    };
   }
 
   private parseJob(row: JobRow): LocalDownloadJob {
@@ -503,6 +661,13 @@ export class LocalModelStore {
     );
   }
 
+  installedPath(modelId: string, ordinal: number): string {
+    assertModelId(modelId);
+    if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > MAX_ARTIFACTS)
+      throw new LocalModelDownloadError('unsafe_store', 'Invalid artifact ordinal');
+    return join(this.rootPath, 'models', modelId, `${String(ordinal).padStart(3, '0')}.gguf`);
+  }
+
   async publish(modelId: string, artifacts: readonly ArtifactRow[]): Promise<void> {
     assertModelId(modelId);
     if (artifacts.length === 0 || artifacts.some((item) => item.state !== 'downloaded'))
@@ -602,12 +767,72 @@ export class LocalModelDownloadManager {
     return this.repository.artifactExpectations(modelId);
   }
 
+  /**
+   * Re-checks the immutable bytes before a runtime consumes an installed bundle. The download
+   * hash check protects the network-to-store transition; this second check protects the later
+   * runtime boundary from an on-disk replacement, symlink, or hardlink.
+   */
+  async assertInstalledIntegrity(modelId: string): Promise<void> {
+    assertModelId(modelId);
+    const rows = this.repository.artifacts(modelId);
+    if (rows.length === 0 || rows.some((row) => row.state !== 'installed'))
+      throw new LocalModelDownloadError(
+        'missing_shard',
+        'Installed model artifacts are incomplete',
+      );
+    for (const row of rows) {
+      const path = this.store.installedPath(modelId, row.ordinal);
+      let info: Awaited<ReturnType<typeof lstat>>;
+      try {
+        info = await lstat(path);
+      } catch (error: unknown) {
+        if (isNodeError(error, 'ENOENT'))
+          throw new LocalModelDownloadError('missing_shard', 'Installed model artifact is missing');
+        throw error;
+      }
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'Installed model artifact is not a private regular file',
+        );
+      if (info.size !== row.byte_length)
+        throw new LocalModelDownloadError('size_changed', 'Installed model artifact size changed');
+      if ((await sha256File(path)) !== row.sha256)
+        throw new LocalModelDownloadError(
+          'hash_mismatch',
+          'Installed model artifact hash mismatch',
+        );
+    }
+  }
+
   verification(modelId: string): LocalVerificationRecord | null {
     return this.repository.verification(modelId);
   }
 
   saveVerification(modelId: string, record: LocalVerificationRecord): LocalVerificationRecord {
     return this.repository.saveVerification(modelId, record);
+  }
+
+  getInferenceSettings(modelId: string): ManagedLocalInferenceSettings {
+    return this.repository.getInferenceSettings(modelId);
+  }
+
+  setInferenceSettings(
+    modelId: string,
+    settings: ManagedLocalInferenceSettings,
+  ): ManagedLocalInferenceSettings {
+    return this.repository.setInferenceSettings(modelId, settings);
+  }
+
+  getLaunchSettings(modelId: string): ManagedLocalLaunchSettings {
+    return this.repository.getLaunchSettings(modelId);
+  }
+
+  setLaunchSettings(
+    modelId: string,
+    settings: ManagedLocalLaunchSettings,
+  ): ManagedLocalLaunchSettings {
+    return this.repository.setLaunchSettings(modelId, settings);
   }
 
   enqueue(input: LocalModelInstallPlan): LocalDownloadJob {
@@ -769,6 +994,13 @@ function validatePlan(input: LocalModelInstallPlan): LocalModelInstallPlan {
   const artifacts = input.artifacts.map((artifact) => {
     if (artifact.filename.length < 1 || artifact.filename.length > 512)
       throw new Error('Invalid artifact filename');
+    if (!['model', 'mmproj'].includes(artifact.role)) throw new Error('Invalid artifact role');
+    if (!artifact.filename.toLowerCase().endsWith('.gguf'))
+      throw new Error('Managed Local artifacts must be GGUF files');
+    if (artifact.role === 'mmproj' && !isMmprojFilename(artifact.filename))
+      throw new Error('mmproj artifact filename is not recognized');
+    if (artifact.role === 'model' && isMmprojFilename(artifact.filename))
+      throw new Error('mmproj artifact must be classified explicitly');
     if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 1)
       throw new LocalModelDownloadError('size_unknown', 'Artifact size is required');
     if (!DIGEST.test(artifact.sha256)) throw new Error('Artifact SHA-256 is required');
@@ -777,6 +1009,10 @@ function validatePlan(input: LocalModelInstallPlan): LocalModelInstallPlan {
       ? { ...artifact, sourceUrl: pinGallerySourceUrl(artifact.sourceUrl, input.immutableRevision) }
       : artifact;
   });
+  const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
+  const projectorArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
+  if (modelArtifacts.length === 0) throw new Error('A model artifact is required');
+  if (projectorArtifacts.length > 1) throw new Error('Only one mmproj artifact is supported');
   const totalBytes = artifacts.reduce((sum, artifact) => sum + artifact.sizeBytes, 0);
   if (!Number.isSafeInteger(totalBytes)) throw new Error('Model download size exceeds safe bounds');
   return { ...input, artifacts };
@@ -790,11 +1026,18 @@ function modelIdFor(plan: LocalModelInstallPlan): string {
         sourceId: plan.sourceId,
         revision: plan.immutableRevision,
         quantization: plan.quantization,
-        artifacts: plan.artifacts.map(({ filename, sizeBytes, sha256 }) => ({
-          filename,
-          sizeBytes,
-          sha256,
-        })),
+        artifacts: plan.artifacts.some(({ role }) => role === 'mmproj')
+          ? plan.artifacts.map(({ filename, sizeBytes, sha256, role }) => ({
+              filename,
+              sizeBytes,
+              sha256,
+              role,
+            }))
+          : plan.artifacts.map(({ filename, sizeBytes, sha256 }) => ({
+              filename,
+              sizeBytes,
+              sha256,
+            })),
       }),
     )
     .digest('hex');
@@ -854,6 +1097,10 @@ function safeStoredFilename(input: string, ordinal: number): string {
   const leaf = input.split(/[\\/]/u).at(-1)?.replace(/[:\0]/gu, '_') ?? 'artifact.gguf';
   const safeLeaf = leaf === '' || leaf === '.' || leaf === '..' ? 'artifact.gguf' : leaf;
   return `${String(ordinal).padStart(3, '0')}-${safeLeaf}`.slice(0, 512);
+}
+
+function isMmprojFilename(input: string): boolean {
+  return /(?:^|[-_.])mmproj(?:[-_.]|$)/iu.test(input.split(/[\\/]/u).at(-1) ?? '');
 }
 
 async function fetchValidated(

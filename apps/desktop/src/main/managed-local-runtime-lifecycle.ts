@@ -20,6 +20,7 @@ import type {
 } from './managed-local-sidecar-bundle';
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_IDLE_RELEASE_MS = 60_000;
 const CRITICAL_MEMORY_FLOOR_BYTES = 512 * 1024 * 1024;
 const CRITICAL_MEMORY_RATIO = 0.05;
 
@@ -27,6 +28,8 @@ export type ManagedLocalModelDescriptor = Readonly<{
   id: string;
   modelRoot: string;
   modelPath: string;
+  /** Optional for mixed-version callers; Main supplies this only for image-capable bundles. */
+  mmprojPath?: string | null;
   scratchRoot: string;
   backend: ManagedLocalBackend;
   gpuLayers: number;
@@ -75,6 +78,7 @@ type LifecycleDependencies = Readonly<{
   now?: () => Date;
   nowMs?: () => number;
   drainTimeoutMs?: number;
+  idleReleaseMs?: number;
   onDrainRequested?: (
     modelId: string,
     activeLeases: number,
@@ -92,6 +96,7 @@ export class ManagedLocalRuntimeLifecycle {
   private readonly now: () => Date;
   private readonly nowMs: () => number;
   private readonly drainTimeoutMs: number;
+  private readonly idleReleaseMs: number;
   private readonly onDrainRequested: NonNullable<LifecycleDependencies['onDrainRequested']>;
   private readonly memory: () =>
     | Readonly<{ availableBytes: number; totalBytes: number }>
@@ -100,6 +105,7 @@ export class ManagedLocalRuntimeLifecycle {
   private phase: 'open' | 'draining' | 'disposed' = 'open';
   private tail: Promise<void> = Promise.resolve();
   private readonly changed = new Set<() => void>();
+  private idleReleaseGeneration = 0;
   private lastFailure: Readonly<{
     code: Exclude<ManagedLocalRuntimeSnapshot['failureCode'], null>;
     fit: LocalFitAssessment | null;
@@ -121,6 +127,7 @@ export class ManagedLocalRuntimeLifecycle {
     this.now = dependencies.now ?? (() => new Date());
     this.nowMs = dependencies.nowMs ?? Date.now;
     this.drainTimeoutMs = boundedTimeout(dependencies.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS);
+    this.idleReleaseMs = boundedIdleRelease(dependencies.idleReleaseMs ?? DEFAULT_IDLE_RELEASE_MS);
     this.onDrainRequested = dependencies.onDrainRequested ?? (() => undefined);
     this.memory =
       dependencies.memory ??
@@ -147,9 +154,12 @@ export class ManagedLocalRuntimeLifecycle {
     return managedLocalRuntimeSnapshotSchema.parse({
       state: crashed ? 'crashed' : this.phase === 'draining' ? 'stopping' : runtime.state,
       target: this.bundle.target,
-      runtimeVersion: this.bundle.manifest.runtimeVersion,
+      runtimeVersion: runtime.runtimeVersion,
       modelId: current.descriptor.id,
-      backend: current.descriptor.backend,
+      backend: runtime.backend,
+      gpuLayers: runtime.gpuLayers,
+      contextTokens: runtime.contextTokens,
+      batchSize: runtime.batchSize,
       activeLeaseCount: current.leases.size,
       fit: current.fit,
       failureCode: failure?.code ?? null,
@@ -163,7 +173,7 @@ export class ManagedLocalRuntimeLifecycle {
     automaticRelease: boolean,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<ManagedLocalModelLease> {
-    validateDescriptor(descriptor);
+    validateDescriptor(descriptor, this.bundle.manifest.candidateBackends);
     for (;;) {
       if (signal.aborted) throw canceled();
       const result = await this.exclusive(async () => {
@@ -190,8 +200,12 @@ export class ManagedLocalRuntimeLifecycle {
             kind: 'model',
             modelRoot: descriptor.modelRoot,
             modelPath: descriptor.modelPath,
+            ...(descriptor.mmprojPath === undefined || descriptor.mmprojPath === null
+              ? {}
+              : { mmprojPath: descriptor.mmprojPath }),
             modelAlias: descriptor.id,
             scratchRoot: descriptor.scratchRoot,
+            backend: descriptor.backend,
             contextTokens: descriptor.contextTokens,
             batchSize: descriptor.batchSize,
             gpuLayers: descriptor.gpuLayers,
@@ -334,6 +348,8 @@ export class ManagedLocalRuntimeLifecycle {
   }
 
   private createLease(current: CurrentModel, automaticRelease: boolean): ManagedLocalModelLease {
+    this.cancelIdleRelease();
+    current.pendingStop = false;
     const id = Symbol(current.descriptor.id);
     current.leases.set(id, automaticRelease);
     this.notifyChanged();
@@ -359,8 +375,10 @@ export class ManagedLocalRuntimeLifecycle {
           current.pendingStop ||= current.leases.get(id) === true;
           current.leases.delete(id);
           this.notifyChanged();
-          if (current.leases.size === 0 && current.pendingStop && this.phase === 'open')
-            await this.stopCurrent();
+          if (current.leases.size === 0 && current.pendingStop && this.phase === 'open') {
+            if (this.idleReleaseMs === 0) await this.stopCurrent();
+            else this.scheduleIdleRelease(current);
+          }
         });
       },
     });
@@ -381,6 +399,7 @@ export class ManagedLocalRuntimeLifecycle {
   }
 
   private async stopCurrent(): Promise<void> {
+    this.cancelIdleRelease();
     const current = this.current;
     if (current === null) return;
     this.current = null;
@@ -390,6 +409,7 @@ export class ManagedLocalRuntimeLifecycle {
 
   private reconcileCrash(): void {
     if (this.current?.session.snapshot().state !== 'crashed') return;
+    this.cancelIdleRelease();
     this.current = null;
     this.notifyChanged();
   }
@@ -401,6 +421,9 @@ export class ManagedLocalRuntimeLifecycle {
       runtimeVersion: this.bundle.manifest.runtimeVersion,
       modelId: null,
       backend: null,
+      gpuLayers: null,
+      contextTokens: null,
+      batchSize: null,
       activeLeaseCount: 0,
       fit: this.lastFailure?.fit ?? null,
       failureCode: this.lastFailure?.code ?? null,
@@ -442,18 +465,47 @@ export class ManagedLocalRuntimeLifecycle {
   private notifyChanged(): void {
     for (const changed of [...this.changed]) changed();
   }
+
+  private scheduleIdleRelease(current: CurrentModel): void {
+    const generation = ++this.idleReleaseGeneration;
+    const timer = setTimeout(() => {
+      void this.exclusive(async () => {
+        if (
+          generation !== this.idleReleaseGeneration ||
+          this.current !== current ||
+          current.leases.size !== 0 ||
+          !current.pendingStop ||
+          this.phase !== 'open'
+        )
+          return;
+        await this.stopCurrent();
+      }).catch(() => undefined);
+    }, this.idleReleaseMs);
+    timer.unref();
+  }
+
+  private cancelIdleRelease(): void {
+    this.idleReleaseGeneration += 1;
+  }
 }
 
-function validateDescriptor(descriptor: ManagedLocalModelDescriptor): void {
+function validateDescriptor(
+  descriptor: ManagedLocalModelDescriptor,
+  candidateBackends: readonly ManagedLocalBackend[],
+): void {
   if (
     !/^[a-f0-9]{64}$/u.test(descriptor.id) ||
-    !['cpu', 'metal', 'cuda', 'vulkan'].includes(descriptor.backend) ||
+    !candidateBackends.includes(descriptor.backend) ||
     !Number.isInteger(descriptor.gpuLayers) ||
     descriptor.gpuLayers < 0 ||
+    descriptor.gpuLayers > 4_096 ||
     !Number.isInteger(descriptor.contextTokens) ||
     descriptor.contextTokens < 256 ||
+    descriptor.contextTokens > 1_048_576 ||
     !Number.isInteger(descriptor.batchSize) ||
     descriptor.batchSize < 1 ||
+    descriptor.batchSize > 4_096 ||
+    descriptor.batchSize > descriptor.contextTokens ||
     descriptor.fit.contextTokens !== descriptor.contextTokens ||
     (descriptor.backend === 'cpu' &&
       (descriptor.gpuLayers !== 0 || descriptor.fit.gpuOffloadRatio !== 0)) ||
@@ -483,6 +535,12 @@ function recovery(
 function boundedTimeout(value: number): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > 60_000)
     throw new RangeError('Managed Local drain timeout is invalid');
+  return value;
+}
+
+function boundedIdleRelease(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10 * 60_000)
+    throw new RangeError('Managed Local idle release timeout is invalid');
   return value;
 }
 

@@ -98,6 +98,10 @@ class FakeSession {
     target: 'darwin-arm64',
     runtimeVersion: 'b10516',
     baseUrl: 'http://127.0.0.1:43210/v1',
+    backend: 'metal',
+    gpuLayers: 99,
+    contextTokens: 4096,
+    batchSize: 512,
     startedAt: '2026-08-24T00:00:00.000Z',
     stoppedAt: null,
     exitCode: null,
@@ -177,6 +181,7 @@ function lifecycle(
     supervisor?: FakeSupervisor;
     hardware?: LocalHardwareSnapshot;
     drainTimeoutMs?: number;
+    idleReleaseMs?: number;
     onDrainRequested?: (
       modelId: string,
       active: number,
@@ -191,6 +196,7 @@ function lifecycle(
     supervisor,
     collectHardware: async () => input.hardware ?? hardware(),
     ...(input.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: input.drainTimeoutMs }),
+    idleReleaseMs: input.idleReleaseMs ?? 0,
     ...(input.onDrainRequested === undefined ? {} : { onDrainRequested: input.onDrainRequested }),
     ...(input.memory === undefined ? {} : { memory: input.memory }),
   });
@@ -206,12 +212,104 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     const second = await subject.acquire(model, false);
 
     expect(supervisor.starts).toHaveLength(1);
+    expect(supervisor.starts[0]).toMatchObject({
+      backend: 'metal',
+      gpuLayers: 99,
+      contextTokens: 4096,
+      batchSize: 512,
+    });
+    expect(subject.snapshot()).toMatchObject({
+      state: 'running',
+      backend: 'metal',
+      gpuLayers: 99,
+      contextTokens: 4096,
+      batchSize: 512,
+      runtimeVersion: 'b10516',
+    });
     expect(subject.activeLeaseCount(model.id)).toBe(2);
     await first.release();
     expect(supervisor.sessions[0]?.stopCount).toBe(0);
     await second.release();
     expect(supervisor.sessions[0]?.stopCount).toBe(1);
     expect(subject.snapshot()).toMatchObject({ state: 'stopped', activeLeaseCount: 0 });
+  });
+
+  it('keeps an automatically released model warm briefly and cancels the stop for a new lease', async () => {
+    vi.useFakeTimers();
+    try {
+      const model = await descriptor('7');
+      const { subject, supervisor } = lifecycle({ idleReleaseMs: 1_000 });
+      const first = await subject.acquire(model, true);
+      await first.release();
+      expect(supervisor.sessions[0]?.stopCount).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(500);
+      const reuse = await subject.acquire(model, false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(supervisor.starts).toHaveLength(1);
+      expect(supervisor.sessions[0]?.stopCount).toBe(0);
+      await reuse.release();
+
+      const automatic = await subject.acquire(model, true);
+      await automatic.release();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(supervisor.sessions[0]?.stopCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the loaded session settings when a same-model lease requests a different context', async () => {
+    const model = await descriptor('2');
+    const { subject, supervisor } = lifecycle();
+    const first = await subject.acquire(model, false);
+    const second = await subject.acquire(
+      {
+        ...model,
+        contextTokens: 8_192,
+        fit: { ...model.fit, contextTokens: 8_192 },
+      },
+      false,
+    );
+
+    expect(supervisor.starts).toHaveLength(1);
+    expect(subject.snapshot()).toMatchObject({ contextTokens: 4_096 });
+    await first.release();
+    await second.release();
+  });
+
+  it('accepts a bounded verification fallback when batch is reduced with context', async () => {
+    const model = await descriptor('3', {
+      contextTokens: 256,
+      batchSize: 256,
+      fit: {
+        weightsBytes: 2 * 1024 ** 3,
+        contextTokens: 256,
+        kvBytesPerToken: 128 * 1024,
+        scratchBytes: 256 * 1024 ** 2,
+        runtimeReserveBytes: 512 * 1024 ** 2,
+        safetyFactor: 1.2,
+        gpuOffloadRatio: 0.75,
+        runtimeCompatibility: 'supported',
+      },
+    });
+    const { subject, supervisor } = lifecycle();
+    const lease = await subject.acquire(model, false);
+
+    expect(supervisor.starts[0]).toMatchObject({ contextTokens: 256, batchSize: 256 });
+    await lease.release();
+  });
+
+  it('forwards an image projector to the supervisor without exposing arbitrary arguments', async () => {
+    const model = await descriptor('a');
+    const mmprojPath = join(model.modelRoot, 'mmproj-model-f16.gguf');
+    await writeFile(mmprojPath, 'projector');
+    const { subject, supervisor } = lifecycle();
+
+    const lease = await subject.acquire({ ...model, mmprojPath }, false);
+
+    expect(supervisor.starts[0]).toMatchObject({ kind: 'model', mmprojPath });
+    await lease.release();
   });
 
   it('drains the active model before switching and never overlaps two sessions', async () => {
@@ -263,6 +361,16 @@ describe('ManagedLocalRuntimeLifecycle', () => {
       code: 'memory_unknown',
     });
     expect(unknown.supervisor.starts).toHaveLength(0);
+  });
+
+  it('rejects a descriptor whose backend is absent from the verified bundle', async () => {
+    const { subject, supervisor } = lifecycle();
+    const model = await descriptor('8', { backend: 'cuda' });
+
+    await expect(subject.acquire(model, false)).rejects.toMatchObject({
+      code: 'backend_unavailable',
+    });
+    expect(supervisor.starts).toHaveLength(0);
   });
 
   it('keeps active and loaded models undeletable', async () => {

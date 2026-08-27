@@ -172,6 +172,126 @@ describe('ManagedLocalRuntimeSupervisor', () => {
     expect(env.child.kills).toEqual(['SIGTERM']);
   });
 
+  it('binds validated model settings to llama.cpp argv and the secret-free runtime snapshot', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    const session = await env.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4096,
+      batchSize: 1024,
+      gpuLayers: 0,
+    });
+
+    expect(env.spawnArgs()).toEqual(
+      expect.arrayContaining([
+        '--model',
+        modelPath,
+        '--ctx-size',
+        '4096',
+        '--batch-size',
+        '1024',
+        '--ubatch-size',
+        '512',
+        '--n-gpu-layers',
+        '0',
+        '--jinja',
+      ]),
+    );
+    expect(session.snapshot()).toMatchObject({
+      state: 'running',
+      runtimeVersion: 'b10516',
+      backend: 'cpu',
+      gpuLayers: 0,
+      contextTokens: 4096,
+      batchSize: 1024,
+    });
+    await session.stop();
+  });
+
+  it.each([
+    { batchSize: 511, microBatchSize: '511' },
+    { batchSize: 512, microBatchSize: '512' },
+    { batchSize: 1_024, microBatchSize: '512' },
+  ])('derives --ubatch-size from batch $batchSize', async ({ batchSize, microBatchSize }) => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    const session = await env.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      modelAlias: 'b'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4_096,
+      batchSize,
+      gpuLayers: 0,
+    });
+
+    const args = env.spawnArgs();
+    expect(args[args.indexOf('--ubatch-size') + 1]).toBe(microBatchSize);
+    await session.stop();
+  });
+
+  it('rejects a model backend that is not declared by the verified sidecar', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    await expect(
+      env.supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath,
+        modelAlias: 'a'.repeat(64),
+        backend: 'metal',
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 99,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(env.spawnArgs()).toEqual([]);
+  });
+
+  it('rejects out-of-range and inconsistent model settings before spawning', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+    const base = {
+      kind: 'model' as const,
+      ...paths,
+      modelPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu' as const,
+      contextTokens: 4096,
+      batchSize: 512,
+      gpuLayers: 0,
+    };
+
+    for (const invalid of [
+      { contextTokens: 255 },
+      { batchSize: 0 },
+      { batchSize: 4_097 },
+      { contextTokens: 256, batchSize: 512 },
+      { gpuLayers: 1 },
+    ]) {
+      await expect(env.supervisor.start({ ...base, ...invalid })).rejects.toMatchObject({
+        code: 'invalid_input',
+      });
+    }
+    expect(env.spawnArgs()).toEqual([]);
+  });
+
   it('rejects a server that does not enforce authentication and owns cleanup', async () => {
     const paths = await directories();
     const env = harness({
@@ -230,6 +350,47 @@ describe('ManagedLocalRuntimeSupervisor', () => {
         ...paths,
         modelPath: outside,
         modelAlias: 'a'.repeat(64),
+        backend: 'cpu',
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    const mmprojPath = join(paths.modelRoot, 'mmproj-model-f16.gguf');
+    await writeFile(modelPath, 'model');
+    await writeFile(mmprojPath, 'projector');
+    const imageEnv = harness();
+    const imageSession = await imageEnv.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      mmprojPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4096,
+      batchSize: 512,
+      gpuLayers: 0,
+    });
+    expect(imageEnv.spawnArgs()).toEqual(
+      expect.arrayContaining(['--model', modelPath, '--mmproj', mmprojPath]),
+    );
+    imageEnv.child.stderr.write(`projector=${mmprojPath}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(imageSession.diagnostics()).not.toContain(mmprojPath);
+    await imageSession.stop();
+
+    const outsideProjector = join(dirname(paths.modelRoot), 'outside-mmproj.gguf');
+    await writeFile(outsideProjector, 'outside projector');
+    await expect(
+      harness().supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath,
+        mmprojPath: outsideProjector,
+        modelAlias: 'a'.repeat(64),
+        backend: 'cpu',
         contextTokens: 4096,
         batchSize: 512,
         gpuLayers: 0,

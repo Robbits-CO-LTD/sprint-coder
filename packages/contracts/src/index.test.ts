@@ -10,6 +10,17 @@ import {
   localFitAssessmentSchema,
   localHardwareSnapshotSchema,
   localVerificationRecordSchema,
+  managedLocalEffectiveLaunchSettingsSchema,
+  managedLocalLaunchSettingsMapSchema,
+  managedLocalLaunchSettingsSchema,
+  managedLocalLaunchSettingsSetInputSchema,
+  managedLocalLaunchSettingsViewSchema,
+  managedLocalMicroBatchSize,
+  managedLocalInferenceSettingsSchema,
+  managedLocalInferenceSettingsSetInputSchema,
+  managedLocalInferenceSettingsViewSchema,
+  managedLocalInferenceSettingsMapSchema,
+  MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
   providerProfileConnectionCreateInputSchema,
   providerProfileSchema,
   permissionSettingsSchema,
@@ -1725,6 +1736,20 @@ describe('retired external Skill import surface', () => {
 });
 
 describe('Managed Local download contracts', () => {
+  it('defaults legacy GGUF artifacts to the model role at the contract boundary', () => {
+    const artifact = contracts.publicModelArtifactSchema.parse({
+      id: 'artifact-legacy',
+      filename: 'model-Q4_K_M.gguf',
+      format: 'gguf',
+      quantization: 'Q4_K_M',
+      sizeBytes: 1024,
+      sha256: 'a'.repeat(64),
+      sourceUrl: 'https://huggingface.co/acme/model/blob/' + 'b'.repeat(40) + '/model.gguf',
+      installability: { state: 'installable', reason: 'Ready' },
+    });
+    expect(artifact.role).toBe('model');
+  });
+
   it('accepts bounded public progress and rejects impossible completion counts', () => {
     const job = {
       id: '11111111-1111-4111-8111-111111111111',
@@ -1764,6 +1789,163 @@ describe('Managed Local download contracts', () => {
   });
 });
 
+describe('Managed Local inference settings contracts', () => {
+  it('keeps request controls bounded and identifies the unsupported effort field', () => {
+    const modelId = 'a'.repeat(64);
+    expect(
+      managedLocalInferenceSettingsSchema.parse({ maxOutputTokens: 2_048, thinking: true }),
+    ).toEqual({
+      maxOutputTokens: 2_048,
+      thinking: true,
+    });
+    expect(() =>
+      managedLocalInferenceSettingsSchema.parse({ maxOutputTokens: 0, thinking: false }),
+    ).toThrow();
+    expect(() =>
+      managedLocalInferenceSettingsSchema.parse({ maxOutputTokens: 131_073, thinking: false }),
+    ).toThrow();
+    expect(
+      managedLocalInferenceSettingsMapSchema.parse({
+        [modelId]: { maxOutputTokens: 512, thinking: false },
+      }),
+    ).toEqual({
+      [modelId]: { maxOutputTokens: 512, thinking: false },
+    });
+    expect(
+      managedLocalInferenceSettingsSetInputSchema.parse({
+        modelId,
+        maxOutputTokens: 1_024,
+        thinking: false,
+      }),
+    ).toEqual({ modelId, maxOutputTokens: 1_024, thinking: false });
+    expect(
+      managedLocalInferenceSettingsViewSchema.parse({
+        modelId,
+        configured: { maxOutputTokens: 2_048, thinking: true },
+        effective: { maxOutputTokens: 2_048, thinking: true, reasoningEffort: null },
+        toolCall: {
+          maxOutputTokens: MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+          thinking: false,
+          reasoningEffort: 'none',
+        },
+      }).effective.reasoningEffort,
+    ).toBeNull();
+  });
+});
+
+describe('Managed Local launch settings contracts', () => {
+  it('derives the physical micro batch from the effective logical batch', () => {
+    expect(managedLocalMicroBatchSize(511)).toBe(511);
+    expect(managedLocalMicroBatchSize(512)).toBe(512);
+    expect(managedLocalMicroBatchSize(513)).toBe(512);
+    expect(managedLocalMicroBatchSize(4_096)).toBe(512);
+  });
+
+  it('keeps per-model llama.cpp launch controls typed and bounded', () => {
+    const modelId = 'a'.repeat(64);
+    expect(
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toEqual({ backend: 'auto', gpuLayers: 999, contextTokens: 8_192, batchSize: 512 });
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'cuda',
+        gpuLayers: 0,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'cpu',
+        gpuLayers: 1,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'auto',
+        gpuLayers: 4_097,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 4_096,
+        batchSize: 4_097,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSchema.parse({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 256,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(
+      managedLocalLaunchSettingsMapSchema.parse({
+        [modelId]: { backend: 'cpu', gpuLayers: 0, contextTokens: 4_096, batchSize: 512 },
+      }),
+    ).toEqual({
+      [modelId]: { backend: 'cpu', gpuLayers: 0, contextTokens: 4_096, batchSize: 512 },
+    });
+    expect(
+      managedLocalLaunchSettingsSetInputSchema.parse({
+        modelId,
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toMatchObject({ modelId, backend: 'auto' });
+    expect(
+      managedLocalLaunchSettingsViewSchema.parse({
+        modelId,
+        configured: { backend: 'auto', gpuLayers: 999, contextTokens: 8_192, batchSize: 512 },
+        effective: {
+          backend: 'cpu',
+          gpuLayers: 0,
+          contextTokens: 8_192,
+          batchSize: 512,
+          runtimeVersion: 'b10516',
+        },
+        multimodal: false,
+      }).effective,
+    ).toEqual({
+      backend: 'cpu',
+      gpuLayers: 0,
+      contextTokens: 8_192,
+      batchSize: 512,
+      runtimeVersion: 'b10516',
+    });
+    expect(() =>
+      managedLocalLaunchSettingsViewSchema.parse({
+        modelId,
+        configured: { backend: 'cpu', gpuLayers: 0, contextTokens: 8_192, batchSize: 512 },
+        effective: null,
+      }),
+    ).toThrow();
+    expect(
+      managedLocalEffectiveLaunchSettingsSchema.parse({
+        backend: 'metal',
+        gpuLayers: 99,
+        contextTokens: 4_096,
+        batchSize: 256,
+        runtimeVersion: 'b10516',
+      }).backend,
+    ).toBe('metal');
+  });
+});
+
 describe('Managed Local runtime contracts', () => {
   it('publishes bounded lifecycle facts without endpoint, token, or filesystem paths', () => {
     const snapshot = contracts.managedLocalRuntimeSnapshotSchema.parse({
@@ -1772,6 +1954,9 @@ describe('Managed Local runtime contracts', () => {
       runtimeVersion: 'b10516',
       modelId: 'a'.repeat(64),
       backend: 'metal',
+      gpuLayers: 99,
+      contextTokens: 4096,
+      batchSize: 512,
       activeLeaseCount: 1,
       fit: {
         state: 'estimated_comfortable',
@@ -1804,6 +1989,9 @@ describe('Managed Local runtime contracts', () => {
       runtimeVersion: 'b10516',
       modelId: null,
       backend: null,
+      gpuLayers: null,
+      contextTokens: null,
+      batchSize: null,
       activeLeaseCount: 0,
       fit: null,
       failureCode: null,
@@ -1818,6 +2006,28 @@ describe('Managed Local runtime contracts', () => {
       contracts.managedLocalRuntimeSnapshotSchema.parse({
         ...stopped,
         failureCode: 'memory_insufficient',
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.managedLocalRuntimeSnapshotSchema.parse({
+        ...stopped,
+        backend: 'cpu',
+        gpuLayers: 0,
+        contextTokens: 4096,
+        batchSize: null,
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.managedLocalRuntimeSnapshotSchema.parse({
+        ...stopped,
+        state: 'running',
+        target: 'darwin-arm64',
+        runtimeVersion: 'b10516',
+        modelId: 'a'.repeat(64),
+        backend: 'cpu',
+        gpuLayers: 1,
+        contextTokens: 4096,
+        batchSize: 512,
       }),
     ).toThrow();
   });

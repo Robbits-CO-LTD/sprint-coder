@@ -1,9 +1,49 @@
 import { describe, expect, it } from 'vitest';
-import type { PublicModelCatalogDetail } from '@sprint-coder/contracts';
-import { installPlan } from './managed-local-controller';
+import type {
+  LocalHardwareSnapshot,
+  ManagedLocalLaunchSettings,
+  PublicModelCatalogDetail,
+} from '@sprint-coder/contracts';
+import {
+  installPlan,
+  managedLocalGpuOffloadRatio,
+  managedLocalLaunchSettingsEditAction,
+  managedLocalMultimodal,
+  ManagedLocalModelOperationQueue,
+  managedLocalProbeBatchSize,
+  managedLocalReusesLoadedModel,
+  resolveManagedLocalLaunchSettings,
+} from './managed-local-controller';
+import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
 
 const REVISION = 'b'.repeat(40);
 const HASH = 'a'.repeat(64);
+
+function bundle(): VerifiedManagedLocalSidecarBundle {
+  return {
+    target: 'darwin-arm64',
+    rootPath: '/fixture/managed-local',
+    manifest: {
+      schemaVersion: 1,
+      runtime: 'llama.cpp',
+      runtimeVersion: 'b10516',
+      upstreamRepository: 'https://github.com/ggml-org/llama.cpp',
+      upstreamRevision: 'b'.repeat(40),
+      platform: 'darwin',
+      architecture: 'arm64',
+      candidateBackends: ['cpu', 'metal'],
+      artifacts: [],
+    },
+    manifestSha256: 'c'.repeat(64),
+    serverPath: '/fixture/managed-local/bin/llama-server',
+    licensePath: '/fixture/managed-local/licenses/LICENSE',
+    artifactPaths: {},
+  };
+}
+
+function hardware(backends: LocalHardwareSnapshot['backends']): LocalHardwareSnapshot {
+  return { backends } as LocalHardwareSnapshot;
+}
 
 function detail(overrides: Partial<PublicModelCatalogDetail> = {}): PublicModelCatalogDetail {
   return {
@@ -38,6 +78,8 @@ function detail(overrides: Partial<PublicModelCatalogDetail> = {}): PublicModelC
         id: 'artifact-q4',
         filename: 'weights/model-Q4_K_M.gguf',
         format: 'gguf',
+        role: 'model',
+        multimodalCompatibilityKey: 'model',
         quantization: 'Q4_K_M',
         sizeBytes: 1_234,
         sha256: HASH,
@@ -58,6 +100,7 @@ describe('installPlan', () => {
       quantization: 'Q4_K_M',
       artifacts: [
         {
+          role: 'model',
           filename: 'weights/model-Q4_K_M.gguf',
           sizeBytes: 1_234,
           sha256: HASH,
@@ -65,6 +108,103 @@ describe('installPlan', () => {
         },
       ],
     });
+  });
+
+  it('pins one compatible mmproj after the model even when selection order is reversed', () => {
+    const projector = {
+      id: 'artifact-mmproj',
+      filename: 'mmproj-model-f16.gguf',
+      format: 'gguf' as const,
+      role: 'mmproj' as const,
+      multimodalCompatibilityKey: 'model',
+      quantization: 'F16',
+      sizeBytes: 567,
+      sha256: 'c'.repeat(64),
+      sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+      installability: { state: 'installable' as const, reason: 'Ready' },
+    };
+    const plan = installPlan(
+      detail({ artifacts: [detail().artifacts[0]!, projector] }),
+      ['artifact-mmproj', 'artifact-q4'],
+      'Q4_K_M',
+    );
+
+    expect(plan.artifacts).toEqual([
+      {
+        role: 'model',
+        filename: 'weights/model-Q4_K_M.gguf',
+        sizeBytes: 1_234,
+        sha256: HASH,
+        sourceUrl: `https://huggingface.co/acme/model/resolve/${REVISION}/weights/model-Q4_K_M.gguf`,
+      },
+      {
+        role: 'mmproj',
+        filename: 'mmproj-model-f16.gguf',
+        sizeBytes: 567,
+        sha256: 'c'.repeat(64),
+        sourceUrl: `https://huggingface.co/acme/model/resolve/${REVISION}/mmproj-model-f16.gguf`,
+      },
+    ]);
+  });
+
+  it('rejects an unclassified projector, a second projector, and a projector from another repo', () => {
+    const projector = {
+      id: 'artifact-mmproj',
+      filename: 'mmproj-model-f16.gguf',
+      format: 'gguf' as const,
+      role: 'mmproj' as const,
+      multimodalCompatibilityKey: 'model',
+      quantization: 'F16',
+      sizeBytes: 567,
+      sha256: 'c'.repeat(64),
+      sourceUrl: `https://huggingface.co/acme/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+      installability: { state: 'installable' as const, reason: 'Ready' },
+    };
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [{ ...projector, filename: 'vision-f16.gguf' }],
+        }),
+        ['artifact-mmproj'],
+        'Q4_K_M',
+      ),
+    ).toThrow('not installable');
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [detail().artifacts[0]!, projector, { ...projector, id: 'artifact-mmproj-2' }],
+        }),
+        ['artifact-q4', 'artifact-mmproj', 'artifact-mmproj-2'],
+        'Q4_K_M',
+      ),
+    ).toThrow('Only one mmproj');
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [
+            detail().artifacts[0]!,
+            {
+              ...projector,
+              sourceUrl: `https://huggingface.co/other/model/blob/${REVISION}/mmproj-model-f16.gguf`,
+            },
+          ],
+        }),
+        ['artifact-q4', 'artifact-mmproj'],
+        'Q4_K_M',
+      ),
+    ).toThrow('identity changed');
+    expect(() =>
+      installPlan(
+        detail({
+          artifacts: [
+            detail().artifacts[0]!,
+            { ...projector, multimodalCompatibilityKey: 'different-family' },
+          ],
+        }),
+        ['artifact-q4', 'artifact-mmproj'],
+        'Q4_K_M',
+      ),
+    ).toThrow('not compatible');
   });
 
   it('rejects mutable, browse-only, mismatched, and non-Hugging-Face artifacts', () => {
@@ -114,5 +254,153 @@ describe('installPlan', () => {
         'Q4_K_M',
       ),
     ).toThrow('identity changed');
+  });
+});
+
+describe('resolveManagedLocalLaunchSettings', () => {
+  const configured: ManagedLocalLaunchSettings = {
+    backend: 'auto',
+    gpuLayers: 999,
+    contextTokens: 8_192,
+    batchSize: 512,
+  };
+
+  it('selects an available allowlisted accelerator for auto and keeps configured values', () => {
+    expect(
+      resolveManagedLocalLaunchSettings(
+        configured,
+        hardware([
+          { kind: 'cpu', status: 'available' },
+          { kind: 'metal', status: 'available' },
+        ]),
+        bundle(),
+      ),
+    ).toEqual({
+      backend: 'metal',
+      gpuLayers: 999,
+      contextTokens: 8_192,
+      batchSize: 512,
+      runtimeVersion: 'b10516',
+    });
+  });
+
+  it('falls back to zero GPU layers for auto CPU execution and rejects unavailable backends', () => {
+    expect(
+      resolveManagedLocalLaunchSettings(
+        configured,
+        hardware([{ kind: 'cpu', status: 'available' }]),
+        bundle(),
+      ),
+    ).toMatchObject({ backend: 'cpu', gpuLayers: 0 });
+    expect(
+      resolveManagedLocalLaunchSettings(
+        { ...configured, gpuLayers: 0 },
+        hardware([
+          { kind: 'cpu', status: 'available' },
+          { kind: 'metal', status: 'available' },
+        ]),
+        bundle(),
+      ),
+    ).toMatchObject({ backend: 'cpu', gpuLayers: 0 });
+    expect(
+      resolveManagedLocalLaunchSettings(
+        { ...configured, backend: 'metal' },
+        hardware([{ kind: 'cpu', status: 'available' }]),
+        bundle(),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('managedLocalReusesLoadedModel', () => {
+  const modelId = 'e'.repeat(64);
+
+  it('skips another full artifact hash only for the already loaded model', () => {
+    expect(managedLocalReusesLoadedModel({ state: 'running', modelId }, modelId)).toBe(true);
+    expect(managedLocalReusesLoadedModel({ state: 'starting', modelId }, modelId)).toBe(true);
+    expect(managedLocalReusesLoadedModel({ state: 'stopped', modelId: null }, modelId)).toBe(false);
+    expect(
+      managedLocalReusesLoadedModel({ state: 'running', modelId: 'f'.repeat(64) }, modelId),
+    ).toBe(false);
+  });
+});
+
+describe('managedLocalProbeBatchSize', () => {
+  it('reduces only a verification probe batch that exceeds the fallback context', () => {
+    expect(managedLocalProbeBatchSize(512, 8_192)).toBe(512);
+    expect(managedLocalProbeBatchSize(512, 256)).toBe(256);
+  });
+});
+
+describe('managedLocalGpuOffloadRatio', () => {
+  it('distinguishes partial from full layer offload and clamps all-layer sentinels', () => {
+    expect(managedLocalGpuOffloadRatio(1, 40)).toBe(0.025);
+    expect(managedLocalGpuOffloadRatio(20, 40)).toBe(0.5);
+    expect(managedLocalGpuOffloadRatio(40, 40)).toBe(1);
+    expect(managedLocalGpuOffloadRatio(999, 40)).toBe(1);
+  });
+});
+
+describe('managedLocalMultimodal', () => {
+  it('reports exactly one projector artifact', () => {
+    expect(managedLocalMultimodal([{ role: 'model' }])).toBe(false);
+    expect(managedLocalMultimodal([{ role: 'model' }, { role: 'mmproj' }])).toBe(true);
+    expect(
+      managedLocalMultimodal([{ role: 'model' }, { role: 'mmproj' }, { role: 'mmproj' }]),
+    ).toBe(false);
+  });
+});
+
+describe('ManagedLocalModelOperationQueue', () => {
+  it('serializes settings and startup for the same model without blocking another model', async () => {
+    const queue = new ManagedLocalModelOperationQueue();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = queue.run('model-a', async () => {
+      events.push('a:first:start');
+      await firstGate;
+      events.push('a:first:end');
+    });
+    await Promise.resolve();
+    const second = queue.run('model-a', async () => {
+      events.push('a:second');
+    });
+    const other = queue.run('model-b', async () => {
+      events.push('b:first');
+    });
+    await other;
+    expect(events).toEqual(['a:first:start', 'b:first']);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(['a:first:start', 'b:first', 'a:first:end', 'a:second']);
+  });
+});
+
+describe('managedLocalLaunchSettingsEditAction', () => {
+  const modelId = '9'.repeat(64);
+
+  it('stops an idle loaded model but rejects edits while a lease is active', () => {
+    expect(
+      managedLocalLaunchSettingsEditAction(
+        { state: 'running', modelId, activeLeaseCount: 0 },
+        modelId,
+      ),
+    ).toBe('stop');
+    expect(
+      managedLocalLaunchSettingsEditAction(
+        { state: 'running', modelId, activeLeaseCount: 1 },
+        modelId,
+      ),
+    ).toBe('reject');
+    expect(
+      managedLocalLaunchSettingsEditAction(
+        { state: 'running', modelId: '8'.repeat(64), activeLeaseCount: 1 },
+        modelId,
+      ),
+    ).toBe('allow');
   });
 });

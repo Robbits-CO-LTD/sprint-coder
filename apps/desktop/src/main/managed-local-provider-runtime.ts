@@ -1,5 +1,7 @@
 import {
+  MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
   canonicalProviderEventSchema,
+  MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
   providerExecutionRequestSchema,
   type CanonicalProviderEvent,
   type ProviderConnection,
@@ -104,6 +106,13 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
       throw new Error('Managed Local execution Connection changed');
     const active = this.sessions.get(parsed.modelId);
     if (active === undefined) throw new Error('Managed Local execution has no active model lease');
+    const inferenceSettingsView =
+      typeof this.controller.getInferenceSettings === 'function'
+        ? await this.controller.getInferenceSettings(parsed.modelId)
+        : null;
+    const inferenceSettings =
+      inferenceSettingsView?.configured ??
+      ({ maxOutputTokens: MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS, thinking: false } as const);
     const controller = new AbortController();
     const abort = (): void => controller.abort(signal.reason);
     if (signal.aborted) abort();
@@ -121,6 +130,7 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
               tools: parsed.tools?.filter(({ name }) => name === forcedToolName),
             },
         MANAGED_LOCAL_PROVIDER_ID,
+        inferenceSettings,
       );
       const body =
         forcedToolName === undefined
@@ -129,7 +139,9 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
               ...compatibleRequest,
               stream: false,
               stream_options: undefined,
-              max_tokens: 1024,
+              max_tokens: MANAGED_LOCAL_TOOL_MAX_OUTPUT_TOKENS,
+              reasoning_effort: 'none',
+              chat_template_kwargs: { enable_thinking: false },
             };
       let response = await active.session.authenticatedFetch('/v1/chat/completions', {
         method: 'POST',

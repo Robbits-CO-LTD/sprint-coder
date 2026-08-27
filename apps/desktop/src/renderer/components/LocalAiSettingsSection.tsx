@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { MANAGED_LOCAL_MAX_OUTPUT_TOKENS } from '@sprint-coder/contracts';
 import type {
   InstalledLocalModel,
   LocalDownloadJob,
   LocalHardwareSnapshot,
   LocalFitAssessment,
+  ManagedLocalInferenceSettingsView,
   ManagedLocalRuntimeSnapshot,
   PublicModelArtifact,
   PublicModelCatalogDetail,
@@ -12,6 +14,7 @@ import type {
   PublicModelCatalogQuery,
 } from '@sprint-coder/contracts';
 import { ArrowLeft, Pause, Play, Search, Trash } from './icons';
+import { ManagedLocalLaunchSettingsCard } from './ManagedLocalLaunchSettingsCard';
 
 type LocalAiApi = NonNullable<Window['sprintCoder']>['localAI'];
 const ROW_HEIGHT = 58;
@@ -159,6 +162,7 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
           />
           <InstalledModelList
             models={installed}
+            runtime={runtime}
             verifyingId={verifyingId}
             fitByModel={fitByModel}
             onVerify={(id) => void verifyModel(id)}
@@ -229,6 +233,18 @@ function RuntimeCard({ runtime }: { runtime: ManagedLocalRuntimeSnapshot | null 
         <div>
           <dt>Backend</dt>
           <dd>{runtime?.backend ?? '未選択'}</dd>
+        </div>
+        <div>
+          <dt>GPU layers</dt>
+          <dd>{runtime?.gpuLayers ?? '未起動'}</dd>
+        </div>
+        <div>
+          <dt>Context</dt>
+          <dd>{runtime?.contextTokens?.toLocaleString() ?? '未起動'} tokens</dd>
+        </div>
+        <div>
+          <dt>Batch</dt>
+          <dd>{runtime?.batchSize?.toLocaleString() ?? '未起動'}</dd>
         </div>
         <div>
           <dt>使用中</dt>
@@ -349,12 +365,14 @@ function LocalDownloadList({
 
 function InstalledModelList({
   models,
+  runtime,
   verifyingId,
   fitByModel,
   onVerify,
   onDelete,
 }: {
   models: readonly InstalledLocalModel[];
+  runtime: ManagedLocalRuntimeSnapshot | null;
   verifyingId: string | null;
   fitByModel: Readonly<Record<string, LocalFitAssessment>>;
   onVerify: (id: string) => void;
@@ -422,11 +440,184 @@ function InstalledModelList({
                   </button>
                 )}
               </div>
+              {model.state === 'installed' && (
+                <ManagedLocalInferenceSettingsCard modelId={model.id} />
+              )}
+              {model.state === 'installed' && (
+                <ManagedLocalLaunchSettingsCard modelId={model.id} runtime={runtime} />
+              )}
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
+  const [view, setView] = useState<ManagedLocalInferenceSettingsView | null>(null);
+  const [maxOutputTokens, setMaxOutputTokens] = useState('');
+  const [thinking, setThinking] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+
+  useEffect(() => {
+    let disposed = false;
+    const api = localAiApi();
+    if (api === null || typeof api.inferenceSettings !== 'function') {
+      queueMicrotask(() => {
+        if (disposed) return;
+        setLoading(false);
+        setError('この環境ではManaged Localの推論設定を確認できません。');
+      });
+      return () => {
+        disposed = true;
+      };
+    }
+    queueMicrotask(() => {
+      if (disposed) return;
+      setLoading(true);
+      setError(null);
+    });
+    void api
+      .inferenceSettings(modelId)
+      .then((result) => {
+        if (disposed) return;
+        setView(result);
+        setMaxOutputTokens(String(result.configured.maxOutputTokens));
+        setThinking(result.configured.thinking);
+      })
+      .catch(() => {
+        if (!disposed) setError('Managed Localの推論設定を取得できませんでした。');
+      })
+      .finally(() => {
+        if (!disposed) setLoading(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [modelId]);
+
+  async function save(): Promise<void> {
+    const api = localAiApi();
+    if (api === null || typeof api.setInferenceSettings !== 'function') return;
+    const parsed = Number(maxOutputTokens);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MANAGED_LOCAL_MAX_OUTPUT_TOKENS) {
+      setError(
+        `最大出力トークンは1〜${MANAGED_LOCAL_MAX_OUTPUT_TOKENS.toLocaleString()}の整数で指定してください。`,
+      );
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setStatus('');
+    try {
+      const result = await api.setInferenceSettings({
+        modelId,
+        maxOutputTokens: parsed,
+        thinking,
+      });
+      setView(result);
+      setMaxOutputTokens(String(result.configured.maxOutputTokens));
+      setThinking(result.configured.thinking);
+      setStatus('推論設定を保存しました。');
+    } catch {
+      setError('Managed Localの推論設定を保存できませんでした。変更内容を確認してください。');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const dirty =
+    view !== null &&
+    (maxOutputTokens !== String(view.configured.maxOutputTokens) ||
+      thinking !== view.configured.thinking);
+
+  return (
+    <article className="local-ai-inference-card" data-testid={`local-ai-inference-${modelId}`}>
+      <div className="local-ai-inference-heading">
+        <strong>Managed Localの推論設定</strong>
+        <small>このモデル専用</small>
+      </div>
+      {loading ? (
+        <p className="settings-hint">推論設定を読み込んでいます。</p>
+      ) : view === null ? null : (
+        <>
+          <div className="local-ai-inference-controls">
+            <label className="settings-field" htmlFor={`local-ai-max-output-${modelId}`}>
+              <span className="settings-field-label">最大出力トークン</span>
+              <input
+                id={`local-ai-max-output-${modelId}`}
+                data-testid={`local-ai-max-output-${modelId}`}
+                className="settings-text-input"
+                type="number"
+                min={1}
+                max={MANAGED_LOCAL_MAX_OUTPUT_TOKENS}
+                step={1}
+                value={maxOutputTokens}
+                onChange={(event) => setMaxOutputTokens(event.target.value)}
+              />
+            </label>
+            <label className="local-ai-checkbox">
+              <input
+                type="checkbox"
+                data-testid={`local-ai-thinking-${modelId}`}
+                checked={thinking}
+                onChange={(event) => setThinking(event.target.checked)}
+              />
+              Thinking（思考）を有効にする
+            </label>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              data-testid={`local-ai-inference-save-${modelId}`}
+              disabled={saving || !dirty}
+              onClick={() => void save()}
+            >
+              {saving ? '保存中…' : '推論設定を保存'}
+            </button>
+          </div>
+          <p className="settings-hint" data-testid={`local-ai-effort-note-${modelId}`}>
+            CLIのReasoning effortはManaged Localには適用されません。Thinkingはllama.cppの
+            <code>chat_template_kwargs.enable_thinking</code>へ反映します。
+          </p>
+          <div
+            className="local-ai-effective-settings"
+            data-testid={`local-ai-effective-${modelId}`}
+          >
+            <strong>次回リクエストの実効値</strong>
+            <dl>
+              <div>
+                <dt>max_tokens</dt>
+                <dd>{view.effective.maxOutputTokens.toLocaleString()}</dd>
+              </div>
+              <div>
+                <dt>enable_thinking</dt>
+                <dd>{view.effective.thinking ? 'true' : 'false'}</dd>
+              </div>
+              <div>
+                <dt>reasoning_effort</dt>
+                <dd>{view.effective.reasoningEffort ?? '送信しない'}</dd>
+              </div>
+              <div>
+                <dt>ツール呼出時</dt>
+                <dd>max_tokens {view.toolCall.maxOutputTokens.toLocaleString()} · Thinking off</dd>
+              </div>
+            </dl>
+          </div>
+        </>
+      )}
+      {error !== null && (
+        <p className="settings-provider-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </article>
   );
 }
 
@@ -445,6 +636,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
   const [selected, setSelected] = useState<PublicModelCatalogItem | null>(null);
   const [detail, setDetail] = useState<PublicModelCatalogDetail | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<PublicModelArtifact | null>(null);
+  const [selectedMmproj, setSelectedMmproj] = useState<PublicModelArtifact | null>(null);
   const [selectedFit, setSelectedFit] = useState<LocalFitAssessment | null>(null);
   const [fitLoading, setFitLoading] = useState(false);
   const [licenseAccepted, setLicenseAccepted] = useState(false);
@@ -481,6 +673,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     setSelected(item);
     setDetail(null);
     setSelectedArtifact(null);
+    setSelectedMmproj(null);
     setSelectedFit(null);
     setLicenseAccepted(false);
     setConfirming(false);
@@ -513,7 +706,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
       await localAiApi()!.install({
         source: detail.item.source,
         sourceId: detail.item.sourceId,
-        artifactIds: [selectedArtifact.id],
+        artifactIds: [selectedArtifact.id, ...(selectedMmproj === null ? [] : [selectedMmproj.id])],
         quantization: selectedArtifact.quantization,
         confirmed: true,
       });
@@ -526,9 +719,11 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     }
   }
 
-  async function chooseArtifact(artifact: PublicModelArtifact): Promise<void> {
+  async function assessFit(
+    artifact: PublicModelArtifact,
+    mmproj: PublicModelArtifact | null,
+  ): Promise<void> {
     if (detail === null) return;
-    setSelectedArtifact(artifact);
     setSelectedFit(null);
     setFitLoading(true);
     try {
@@ -537,6 +732,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
           source: detail.item.source,
           sourceId: detail.item.sourceId,
           artifactId: artifact.id,
+          ...(mmproj === null ? {} : { mmprojArtifactId: mmproj.id }),
           contextTokens: 8_192,
         }),
       );
@@ -545,6 +741,23 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     } finally {
       setFitLoading(false);
     }
+  }
+
+  async function chooseArtifact(artifact: PublicModelArtifact): Promise<void> {
+    const compatibleProjector =
+      selectedMmproj?.multimodalCompatibilityKey !== undefined &&
+      selectedMmproj.multimodalCompatibilityKey !== null &&
+      selectedMmproj.multimodalCompatibilityKey === artifact.multimodalCompatibilityKey
+        ? selectedMmproj
+        : null;
+    setSelectedArtifact(artifact);
+    setSelectedMmproj(compatibleProjector);
+    await assessFit(artifact, compatibleProjector);
+  }
+
+  async function chooseMmproj(artifact: PublicModelArtifact | null): Promise<void> {
+    setSelectedMmproj(artifact);
+    if (selectedArtifact !== null) await assessFit(selectedArtifact, artifact);
   }
 
   const items = page?.items ?? [];
@@ -717,9 +930,11 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
             <ModelDetail
               detail={detail}
               selectedArtifact={selectedArtifact}
+              selectedMmproj={selectedMmproj}
               selectedFit={selectedFit}
               fitLoading={fitLoading}
               onArtifact={(artifact) => void chooseArtifact(artifact)}
+              onMmproj={(artifact) => void chooseMmproj(artifact)}
               licenseAccepted={licenseAccepted}
               onLicense={setLicenseAccepted}
               confirming={confirming}
@@ -747,9 +962,11 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
 function ModelDetail({
   detail,
   selectedArtifact,
+  selectedMmproj,
   selectedFit,
   fitLoading,
   onArtifact,
+  onMmproj,
   licenseAccepted,
   onLicense,
   confirming,
@@ -759,9 +976,11 @@ function ModelDetail({
 }: {
   detail: PublicModelCatalogDetail;
   selectedArtifact: PublicModelArtifact | null;
+  selectedMmproj: PublicModelArtifact | null;
   selectedFit: LocalFitAssessment | null;
   fitLoading: boolean;
   onArtifact: (artifact: PublicModelArtifact) => void;
+  onMmproj: (artifact: PublicModelArtifact | null) => void;
   licenseAccepted: boolean;
   onLicense: (value: boolean) => void;
   confirming: boolean;
@@ -770,7 +989,15 @@ function ModelDetail({
   busy: boolean;
 }) {
   const installable = detail.artifacts.filter(
-    ({ installability }) => installability.state === 'installable',
+    ({ installability, role }) => installability.state === 'installable' && role === 'model',
+  );
+  const projectors = detail.artifacts.filter(
+    ({ installability, role, multimodalCompatibilityKey }) =>
+      installability.state === 'installable' &&
+      role === 'mmproj' &&
+      selectedArtifact?.multimodalCompatibilityKey !== undefined &&
+      selectedArtifact.multimodalCompatibilityKey !== null &&
+      selectedArtifact.multimodalCompatibilityKey === multimodalCompatibilityKey,
   );
   return (
     <article className="local-ai-model-detail">
@@ -825,6 +1052,42 @@ function ModelDetail({
           ))}
         </fieldset>
       )}
+      {selectedArtifact !== null && projectors.length > 0 && (
+        <fieldset className="local-ai-artifacts">
+          <legend>画像 projector（任意）</legend>
+          <label>
+            <input
+              type="radio"
+              name="local-ai-mmproj"
+              checked={selectedMmproj === null}
+              onChange={() => onMmproj(null)}
+            />
+            <span>
+              <strong>使用しない</strong>
+              <small>テキスト入力のみ</small>
+            </span>
+          </label>
+          {projectors.map((artifact) => (
+            <label key={artifact.id}>
+              <input
+                type="radio"
+                name="local-ai-mmproj"
+                checked={selectedMmproj?.id === artifact.id}
+                onChange={() => onMmproj(artifact)}
+              />
+              <span>
+                <strong>{artifact.filename}</strong>
+                <small>{formatLocalBytes(artifact.sizeBytes)} · SHA-256確認済み</small>
+              </span>
+            </label>
+          ))}
+          <small className="settings-hint">
+            同じrepository・immutable
+            revisionで公開され、ファイル名の互換キーが一致する検証済みmmprojだけを選択できます。GGUF内部のvision
+            architecture照合は行いません。
+          </small>
+        </fieldset>
+      )}
       {fitLoading && <p className="settings-hint">このPCでの実行見込みを計算中…</p>}
       {selectedFit !== null && <LocalFitSummary fit={selectedFit} />}
       {selectedArtifact !== null &&
@@ -832,7 +1095,11 @@ function ModelDetail({
           <div className="local-ai-install-confirm">
             <strong>端末へダウンロードします</strong>
             <p>
-              {formatLocalBytes(selectedArtifact.sizeBytes)}
+              {formatLocalBytes(
+                selectedArtifact.sizeBytes === null
+                  ? null
+                  : selectedArtifact.sizeBytes + (selectedMmproj?.sizeBytes ?? 0),
+              )}
               を使用します。取得後にサイズとSHA-256を検証します。
             </p>
             <label>

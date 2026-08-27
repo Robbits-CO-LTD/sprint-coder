@@ -42,6 +42,10 @@ describe('ManagedLocalProviderRuntime', () => {
         tools: [{ type: 'function', function: { name: 'create_file' } }],
       });
       expect(payload).not.toHaveProperty('stream_options');
+      expect(payload).toMatchObject({
+        reasoning_effort: 'none',
+        chat_template_kwargs: { enable_thinking: false },
+      });
       return new Response(
         JSON.stringify({
           choices: [
@@ -63,6 +67,12 @@ describe('ManagedLocalProviderRuntime', () => {
       );
     });
     const controller = {
+      getInferenceSettings: vi.fn(async () => ({
+        modelId: 'b'.repeat(64),
+        configured: { maxOutputTokens: 4_096, thinking: true },
+        effective: { maxOutputTokens: 4_096, thinking: true, reasoningEffort: null },
+        toolCall: { maxOutputTokens: 1_024, thinking: false, reasoningEffort: 'none' },
+      })),
       acquireRuntime: vi.fn(async () => ({
         modelId: 'b'.repeat(64),
         session: { authenticatedFetch },
@@ -174,11 +184,23 @@ describe('ManagedLocalProviderRuntime', () => {
     const authenticatedFetch = vi.fn(async (path: string, init?: RequestInit) => {
       expect(path).toBe('/v1/chat/completions');
       const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      expect(payload).toMatchObject({ model: 'a'.repeat(64), stream: true });
+      expect(payload).toMatchObject({
+        model: 'a'.repeat(64),
+        stream: true,
+        max_tokens: 2_048,
+        chat_template_kwargs: { enable_thinking: true },
+      });
+      expect(payload).not.toHaveProperty('reasoning_effort');
       return new Response(stream(), { status: 200 });
     });
     const controller = {
       listProviderModels: vi.fn(() => []),
+      getInferenceSettings: vi.fn(async () => ({
+        modelId: 'a'.repeat(64),
+        configured: { maxOutputTokens: 2_048, thinking: true },
+        effective: { maxOutputTokens: 2_048, thinking: true, reasoningEffort: null },
+        toolCall: { maxOutputTokens: 1_024, thinking: false, reasoningEffort: 'none' },
+      })),
       acquireRuntime: vi.fn(async () => ({
         modelId: 'a'.repeat(64),
         session: {
@@ -199,6 +221,12 @@ describe('ManagedLocalProviderRuntime', () => {
       'a'.repeat(64),
       new AbortController().signal,
     );
+    expect(connection.automaticModelRelease).toBe(true);
+    expect(controller.acquireRuntime).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      true,
+      expect.any(AbortSignal),
+    );
 
     const events = [];
     for await (const event of runtime.execute(
@@ -215,6 +243,7 @@ describe('ManagedLocalProviderRuntime', () => {
 
     expect(events).toContainEqual({ type: 'output_delta', text: 'local reply' });
     expect(events).toContainEqual({ type: 'completed', stopReason: 'stop' });
+    expect(controller.getInferenceSettings).toHaveBeenCalledWith('a'.repeat(64));
     expect(JSON.stringify(events)).not.toContain('49152');
     expect(MANAGED_LOCAL_PROVIDER_ID).toBe('sprint-managed-local');
     await lease.release();
