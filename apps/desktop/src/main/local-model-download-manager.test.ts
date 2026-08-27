@@ -126,6 +126,35 @@ if (runsWithElectronAbi)
       env.repository.close();
     });
 
+    it('clamps a legacy verification-derived default batch to its fallback context', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+      env.manager.saveVerification(installed.modelId, {
+        level: 'loaded',
+        verifiedAt: '2026-08-23T00:00:00.000Z',
+        binding: {
+          hostCapabilityFingerprint: 'b'.repeat(64),
+          modelRepo: 'owner/model',
+          immutableRevision: 'a'.repeat(40),
+          artifactHashes: env.plan.artifacts.map(({ sha256 }) => sha256),
+          quantization: 'Q4_K_M',
+          contextTokens: 256,
+          kvCacheType: 'f16',
+          batchSize: 512,
+          gpuOffloadRatio: 0,
+          sidecarVersion: 'b10516',
+          backend: 'cpu',
+        },
+      });
+
+      expect(env.manager.getLaunchSettings(installed.modelId)).toMatchObject({
+        contextTokens: 256,
+        batchSize: 256,
+      });
+      env.repository.close();
+    });
+
     it('persists a projector role and rejects an installed mmproj after byte tampering', async () => {
       const modelBytes = Buffer.from('model weights');
       const projectorBytes = Buffer.from('projector weights');
@@ -165,6 +194,9 @@ if (runsWithElectronAbi)
         thinking: false,
       });
       const projectorPath = join(env.store.rootPath, 'models', installed.modelId, '002.gguf');
+      await expect(
+        env.manager.assertInstalledIntegrity(installed.modelId),
+      ).resolves.toBeUndefined();
       await writeFile(projectorPath, Buffer.alloc(projectorBytes.byteLength, 0));
       await expect(env.manager.assertInstalledIntegrity(installed.modelId)).rejects.toMatchObject({
         code: 'hash_mismatch',
