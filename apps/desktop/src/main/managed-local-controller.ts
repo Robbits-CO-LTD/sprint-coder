@@ -206,7 +206,7 @@ export class ManagedLocalController {
   ): Promise<ManagedLocalLaunchSettingsView> {
     const settings = managedLocalLaunchSettingsSchema.parse(input);
     return this.modelOperations.run(modelId, async () => {
-      this.assertLaunchSettingsEditable(modelId);
+      await this.prepareLaunchSettingsEdit(modelId);
       const hardware = await this.collectHardware();
       const effective = resolveManagedLocalLaunchSettings(settings, hardware, this.bundle);
       if (effective === null)
@@ -468,10 +468,13 @@ export class ManagedLocalController {
     return available.has(backend) ? backend : null;
   }
 
-  private assertLaunchSettingsEditable(modelId: string): void {
+  private async prepareLaunchSettingsEdit(modelId: string): Promise<void> {
     const runtime = this.lifecycle?.snapshot();
-    if (runtime?.modelId === modelId && ['starting', 'running', 'stopping'].includes(runtime.state))
+    if (runtime === undefined) return;
+    const action = managedLocalLaunchSettingsEditAction(runtime, modelId);
+    if (action === 'reject')
       throw new Error('Managed Local launch settings apply after the model is stopped');
+    if (action === 'stop') await this.lifecycle!.stopModel(modelId);
   }
 
   private verificationBinding(
@@ -708,6 +711,15 @@ export function managedLocalReusesLoadedModel(
 
 export function managedLocalProbeBatchSize(batchSize: number, contextTokens: number): number {
   return Math.min(batchSize, contextTokens);
+}
+
+export function managedLocalLaunchSettingsEditAction(
+  snapshot: Pick<ManagedLocalRuntimeSnapshot, 'state' | 'modelId' | 'activeLeaseCount'>,
+  modelId: string,
+): 'allow' | 'stop' | 'reject' {
+  if (snapshot.modelId !== modelId) return 'allow';
+  if (snapshot.state === 'running' && snapshot.activeLeaseCount === 0) return 'stop';
+  return ['starting', 'running', 'stopping'].includes(snapshot.state) ? 'reject' : 'allow';
 }
 
 function managedLocalInferenceSettingsView(

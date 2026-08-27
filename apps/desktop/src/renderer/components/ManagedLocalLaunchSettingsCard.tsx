@@ -29,18 +29,29 @@ function localAiApi(): LocalAiApi | null {
   return typeof api?.launchSettings === 'function' ? api : null;
 }
 
-function activeRuntimeForModel(
+function loadedRuntimeForModel(
   runtime: ManagedLocalRuntimeSnapshot | null,
   modelId: string,
 ): boolean {
   return runtime?.modelId === modelId && ACTIVE_RUNTIME_STATES.includes(runtime.state);
 }
 
+function busyRuntimeForModel(
+  runtime: ManagedLocalRuntimeSnapshot | null,
+  modelId: string,
+): boolean {
+  return (
+    runtime?.modelId === modelId &&
+    (runtime.state !== 'running' || runtime.activeLeaseCount > 0) &&
+    ACTIVE_RUNTIME_STATES.includes(runtime.state)
+  );
+}
+
 function runtimeEffectiveSettings(
   runtime: ManagedLocalRuntimeSnapshot | null,
   modelId: string,
 ): ManagedLocalEffectiveLaunchSettings | null {
-  if (runtime === null || !activeRuntimeForModel(runtime, modelId)) return null;
+  if (runtime === null || !loadedRuntimeForModel(runtime, modelId)) return null;
   if (
     runtime.backend === null ||
     runtime.gpuLayers === null ||
@@ -109,7 +120,8 @@ export function ManagedLocalLaunchSettingsCard({
     };
   }, [modelId]);
 
-  const active = activeRuntimeForModel(runtime, modelId);
+  const loaded = loadedRuntimeForModel(runtime, modelId);
+  const busy = busyRuntimeForModel(runtime, modelId);
   const activeEffective = runtimeEffectiveSettings(runtime, modelId);
   const effective = activeEffective ?? view?.effective ?? null;
   const dirty =
@@ -121,7 +133,7 @@ export function ManagedLocalLaunchSettingsCard({
 
   async function save(): Promise<void> {
     const api = localAiApi();
-    if (api === null || typeof api.setLaunchSettings !== 'function' || active) return;
+    if (api === null || typeof api.setLaunchSettings !== 'function' || busy) return;
     const parsedGpuLayers = Number(gpuLayers);
     const parsedContextTokens = Number(contextTokens);
     const parsedBatchSize = Number(batchSize);
@@ -185,7 +197,7 @@ export function ManagedLocalLaunchSettingsCard({
                 data-testid={`local-ai-launch-backend-${modelId}`}
                 className="settings-text-input"
                 value={backend}
-                disabled={active || saving}
+                disabled={busy || saving}
                 onChange={(event) => {
                   const next = event.target.value as ManagedLocalLaunchBackend;
                   setBackend(next);
@@ -210,7 +222,7 @@ export function ManagedLocalLaunchSettingsCard({
                 max={GPU_LAYERS_MAX}
                 step={1}
                 value={gpuLayers}
-                disabled={active || saving}
+                disabled={busy || saving}
                 onChange={(event) => setGpuLayers(event.target.value)}
               />
             </label>
@@ -225,7 +237,7 @@ export function ManagedLocalLaunchSettingsCard({
                 max={CONTEXT_TOKENS_MAX}
                 step={1}
                 value={contextTokens}
-                disabled={active || saving}
+                disabled={busy || saving}
                 onChange={(event) => setContextTokens(event.target.value)}
               />
             </label>
@@ -240,7 +252,7 @@ export function ManagedLocalLaunchSettingsCard({
                 max={BATCH_SIZE_MAX}
                 step={1}
                 value={batchSize}
-                disabled={active || saving}
+                disabled={busy || saving}
                 onChange={(event) => setBatchSize(event.target.value)}
               />
             </label>
@@ -248,7 +260,7 @@ export function ManagedLocalLaunchSettingsCard({
               type="button"
               className="settings-secondary-button"
               data-testid={`local-ai-launch-save-${modelId}`}
-              disabled={active || saving || !dirty}
+              disabled={busy || saving || !dirty}
               onClick={() => void save()}
             >
               {saving ? '保存中…' : '起動設定を保存'}
@@ -256,13 +268,14 @@ export function ManagedLocalLaunchSettingsCard({
           </div>
           <p className="settings-hint" data-testid={`local-ai-launch-note-${modelId}`}>
             設定は次回のモデル起動時に反映します。任意のllama.cpp raw引数は受け付けません。
-            {active && ' このモデルは実行中のため変更できません。'}
+            {busy && ' このモデルは実行中のため変更できません。'}
+            {loaded && !busy && ' 保存時に待機中のモデルを停止します。'}
           </p>
           <div
             className="local-ai-launch-effective"
             data-testid={`local-ai-launch-effective-${modelId}`}
           >
-            <strong>{active ? '現在の実効値' : '次回起動時の実効値'}</strong>
+            <strong>{loaded ? '現在の実効値' : '次回起動時の実効値'}</strong>
             {effective === null ? (
               <p>この端末で利用可能なbackendを解決できません。</p>
             ) : (

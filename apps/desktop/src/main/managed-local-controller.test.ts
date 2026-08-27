@@ -6,6 +6,7 @@ import type {
 } from '@sprint-coder/contracts';
 import {
   installPlan,
+  managedLocalLaunchSettingsEditAction,
   ManagedLocalModelOperationQueue,
   managedLocalProbeBatchSize,
   managedLocalReusesLoadedModel,
@@ -355,5 +356,30 @@ describe('ManagedLocalModelOperationQueue', () => {
     releaseFirst();
     await Promise.all([first, second]);
     expect(events).toEqual(['a:first:start', 'b:first', 'a:first:end', 'a:second']);
+  });
+});
+
+describe('managedLocalLaunchSettingsEditAction', () => {
+  const modelId = '9'.repeat(64);
+
+  it('stops an idle loaded model but rejects edits while a lease is active', () => {
+    expect(
+      managedLocalLaunchSettingsEditAction(
+        { state: 'running', modelId, activeLeaseCount: 0 },
+        modelId,
+      ),
+    ).toBe('stop');
+    expect(
+      managedLocalLaunchSettingsEditAction(
+        { state: 'running', modelId, activeLeaseCount: 1 },
+        modelId,
+      ),
+    ).toBe('reject');
+    expect(
+      managedLocalLaunchSettingsEditAction(
+        { state: 'running', modelId: '8'.repeat(64), activeLeaseCount: 1 },
+        modelId,
+      ),
+    ).toBe('allow');
   });
 });

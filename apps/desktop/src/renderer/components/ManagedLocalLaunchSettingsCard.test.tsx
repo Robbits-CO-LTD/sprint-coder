@@ -184,4 +184,27 @@ describe('ManagedLocalLaunchSettingsCard', () => {
     ).toContain('999');
     await act(async () => root.unmount());
   });
+
+  it('allows an idle loaded model to be edited and explains that saving stops it', async () => {
+    const idleRuntime = { ...activeRuntime, activeLeaseCount: 0 };
+    installApi(idleRuntime);
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(<ManagedLocalLaunchSettingsCard modelId={MODEL_ID} runtime={idleRuntime} />),
+    );
+    await flush();
+
+    expect(
+      (
+        container.querySelector(
+          `[data-testid="local-ai-launch-backend-${MODEL_ID}"]`,
+        ) as HTMLSelectElement
+      ).disabled,
+    ).toBe(false);
+    expect(container.textContent).toContain('保存時に待機中のモデルを停止します');
+    expect(container.textContent).toContain('現在の実効値');
+    await act(async () => root.unmount());
+  });
 });
