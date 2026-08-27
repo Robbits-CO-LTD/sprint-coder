@@ -213,6 +213,7 @@ jobs:
             printf 'MACOS_API_KEY_PATH=%s\n' "${signing_temp_dir}/AuthKey.p8"
             printf 'MACOS_NOTARIZATION_ARCHIVE=%s\n' "${signing_temp_dir}/notarization.zip"
             printf 'MACOS_NOTARIZATION_RESULT=%s\n' "${signing_temp_dir}/notarization-result.json"
+            printf 'MACOS_DMG_NOTARIZATION_RESULT=%s\n' "${signing_temp_dir}/dmg-notarization-result.json"
           } >> "${GITHUB_ENV}"
 
       - name: Setup Node.js
@@ -346,8 +347,37 @@ jobs:
           xcrun stapler staple "${app_path}"
           xcrun stapler validate "${app_path}"
           /usr/bin/codesign --verify --deep --strict --verbose=2 "${app_path}"
+          /usr/sbin/spctl --assess --type execute --verbose=2 "${app_path}"
 
           npx electron-forge make --skip-package
+
+          dmg_paths=()
+          while IFS= read -r -d '' dmg_path; do
+            dmg_paths+=("${dmg_path}")
+          done < <(find out/make -type f -name '*.dmg' -print0)
+          if (( ${#dmg_paths[@]} != 1 )); then
+            echo "::error::Expected one macOS DMG, found ${#dmg_paths[@]}."
+            exit 1
+          fi
+          dmg_path="${dmg_paths[0]}"
+
+          xcrun notarytool submit "${dmg_path}" \
+            --key "${MACOS_API_KEY_PATH}" \
+            --key-id "${APPLE_API_KEY_ID}" \
+            --issuer "${APPLE_API_ISSUER_ID}" \
+            --wait \
+            --output-format json > "${MACOS_DMG_NOTARIZATION_RESULT}"
+
+          dmg_notarization_status="$('/usr/bin/plutil' -extract status raw -o - "${MACOS_DMG_NOTARIZATION_RESULT}")"
+          if [[ "${dmg_notarization_status}" != 'Accepted' ]]; then
+            echo "::error::Apple DMG notarization was not accepted (status: ${dmg_notarization_status})."
+            exit 1
+          fi
+          echo 'Apple DMG notarization status: Accepted'
+
+          xcrun stapler staple "${dmg_path}"
+          xcrun stapler validate "${dmg_path}"
+          /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "${dmg_path}"
 
       - name: Make Linux release artifacts
         if: runner.os == 'Linux'
@@ -388,7 +418,8 @@ jobs:
             "${MACOS_CERTIFICATE_PATH}" \
             "${MACOS_API_KEY_PATH}" \
             "${MACOS_NOTARIZATION_ARCHIVE}" \
-            "${MACOS_NOTARIZATION_RESULT}"; do
+            "${MACOS_NOTARIZATION_RESULT}" \
+            "${MACOS_DMG_NOTARIZATION_RESULT}"; do
             if [[ -e "${temporary_file}" ]]; then
               rm -f -- "${temporary_file}" || cleanup_status=1
             fi
