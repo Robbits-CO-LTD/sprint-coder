@@ -178,7 +178,7 @@ export function resolveE2EMode(): E2EMode {
 }
 
 /**
- * Fails fast when the desktop app's native prerequisites have not been built for Electron.
+ * Reports native prerequisites that were never built for Electron, before the suite starts.
  *
  * `npm run prepare:desktop` (electron-rebuild + native-safe-fs + sandbox-runner) is wired into
  * `package`/`make`, but nothing in the `start`/dev path builds these — so a fresh clone or a new
@@ -187,9 +187,13 @@ export function resolveE2EMode(): E2EMode {
  * a better-sqlite3 ABI mismatch aborts main-process init so no window is ever created and every
  * spec dies on `firstWindow` timeout; a missing native-safe-fs addon makes the manual editor
  * report 保存できませんでした; a missing sandbox-runner stops run_command approvals from appearing.
- * Naming the one command that fixes all three is much cheaper than re-debugging that each time.
+ *
+ * This warns rather than throwing, because "built" is not the same bar for every run: Windows CI
+ * deliberately builds no sandbox-runner (no Rust toolchain) and runs a spec list that never
+ * executes a command, so a hard gate here would fail a configuration that is entirely correct.
+ * Let the spec that actually needs an artifact be the one that fails, and make its cause legible.
  */
-export function assertDevNativePrerequisitesBuilt(): void {
+export function warnAboutUnbuiltDevNativePrerequisites(): void {
   const missing: string[] = [];
 
   const addon = join(
@@ -199,38 +203,44 @@ export function assertDevNativePrerequisitesBuilt(): void {
     'Release',
     'sprint_coder_native_safe_fs.node',
   );
-  if (!existsSync(addon)) missing.push(`native-safe-fs addon (${relative(REPO_ROOT, addon)})`);
+  if (!existsSync(addon))
+    missing.push(
+      `native-safe-fs addon (${relative(REPO_ROOT, addon)}) — the manual file editor cannot save`,
+    );
 
   const runnerName =
     process.platform === 'win32'
       ? 'sprint-coder-sandbox-runner.exe'
       : 'sprint-coder-sandbox-runner';
   const runner = join(DESKTOP_ROOT, 'sandbox-runner', 'build', 'Release', runnerName);
-  if (!existsSync(runner)) missing.push(`sandbox-runner binary (${relative(REPO_ROOT, runner)})`);
+  if (!existsSync(runner))
+    missing.push(
+      `sandbox-runner binary (${relative(REPO_ROOT, runner)}) — run_command approvals never appear`,
+    );
 
   // better-sqlite3 must be built against Electron's ABI, not the ambient Node's. node-gyp records
   // what it targeted in config.gypi, so this compares intent rather than guessing from mtimes.
+  // Its absence proves nothing (a prebuilt binary leaves no gypi), so only a mismatch is reported.
   const gypi = join(REPO_ROOT, 'node_modules', 'better-sqlite3', 'build', 'config.gypi');
   const electronPackage = join(REPO_ROOT, 'node_modules', 'electron', 'package.json');
-  if (!existsSync(gypi)) {
-    missing.push('better-sqlite3 native build (node_modules/better-sqlite3/build)');
-  } else if (existsSync(electronPackage)) {
+  if (existsSync(gypi) && existsSync(electronPackage)) {
     const target = /"target"\s*:\s*"([^"]+)"/.exec(readFileSync(gypi, 'utf8'))?.[1];
     const electronVersion = (
       JSON.parse(readFileSync(electronPackage, 'utf8')) as { version?: string }
     ).version;
     if (target !== undefined && electronVersion !== undefined && target !== electronVersion) {
       missing.push(
-        `better-sqlite3 is built for target ${target}, but Electron is ${electronVersion} ` +
-          '(main-process init will abort and no window will open)',
+        `better-sqlite3 is built for target ${target}, but Electron is ${electronVersion} — ` +
+          'main-process init will abort and every spec will time out in firstWindow',
       );
     }
   }
 
   if (missing.length === 0) return;
-  throw new Error(
-    `Dev-mode E2E prerequisites are not built:\n  - ${missing.join('\n  - ')}\n\n` +
-      'Run `npm run prepare:desktop --workspace @sprint-coder/desktop` once, then re-run the suite.',
+  console.warn(
+    `[e2e globalSetup] Native prerequisites not built for Electron:\n  - ${missing.join('\n  - ')}\n` +
+      '[e2e globalSetup] Specs that need them will fail. Fix with: ' +
+      '`npm run prepare:desktop --workspace @sprint-coder/desktop`',
   );
 }
 
