@@ -615,7 +615,7 @@ Next Steps: #307のrenderer-only PRでWindows fast laneを実証する。
 - [x] version契約、lint、typecheck、関連release test、formatを通す
 - [ ] release PRを作成し、ReviewBOTと全CIを通してmainへ反映する
 - [ ] v0.6.1タグをmerge commitへpushし、Release workflowを完了する
-- [ ] 生成された全assetと署名・公証証拠を確認してGitHub prereleaseを公開する
+- [ ] 生成された全assetと署名・公証証拠を確認し、workflowが作る通常扱いのDraft Releaseを`gh release edit --prerelease --draft=false`でGitHub prereleaseとして公開する
 
 ### Next Steps
 
