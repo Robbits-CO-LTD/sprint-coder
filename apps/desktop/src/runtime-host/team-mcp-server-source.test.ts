@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { afterEach, describe, expect, it } from 'vitest';
+import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { TEAM_HIRE_WORKER_TOOL } from '../main/team-tools';
 import { WORKER_TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
@@ -231,6 +232,9 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     ).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual([...TEAM_MCP_TOOL_NAMES].sort());
     for (const tool of tools) expect(tool).toHaveProperty('inputSchema');
+    expect(tools.find(({ name }) => name === 'skill_draft_create')?.inputSchema).toEqual(
+      SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
+    );
     const hireSchema = tools.find(({ name }) => name === 'team_hire_worker')?.inputSchema;
     const hireProperties = hireSchema?.['properties'] as Record<string, unknown>;
     expect(hireProperties['agentKind']).toMatchObject({

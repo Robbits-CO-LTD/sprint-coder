@@ -514,6 +514,7 @@ Next Steps: PR #323をマージし、完了根拠を記録してIssue #321をliv
 - 信頼済み`cmd.exe`のUnix形式スイッチは`/d /s /c`へ正規化し、承認外のCommand Processor AutoRunを無効化する。
 - 非System32実行ファイルの仮想`api-ms-*` / `ext-ms-*` importは物理DLLを要求せず、その他の非ローカルDLLは引き続き実在するSystem32ファイルだけを許可する。
 - Grok 4.6の再レビューを反映し、信頼済み`cmd.exe`の全形式へ`/d`を強制する。API-setは信頼済みOS schemaに実在する契約だけを許可し、Workspace内の同名DLLによる偽装を拒否する。
+
 ## Issue #307 v0.5.1 installed Ollama regression (2026-08-23)
 
 ### 計画
@@ -545,3 +546,26 @@ Windows fast laneを再検証し、PR・CI・マージ後、v0.5.1プレリリ�
 - [ ] renderer-only PR #334で同ジョブの成功を確認する
 
 Next Steps: #307のrenderer-only PRでWindows fast laneを実証する。
+
+## Issue #352 Skill Draft schema / validation errors (2026-08-27)
+
+### 計画
+
+- [x] 公開計画をcontract-version 1へ再計画し、PLAN_BINDINGをPASSさせる
+- [x] Providerの空schemaとBlueprint詳細消失を修正前テストで再現し、RCAを確定する
+- [x] contractsを単一正典としてProvider/Team MCPのtool schemaを統一する
+- [x] Blueprint/Input Zodエラーをpath付き・500文字以内・allowlist方式で公開する
+- [x] 内蔵skill-creatorと利用者文書へ具体的な入力契約を追加する
+- [x] focused test、変更パッケージのtypecheck、lint、formatを完了する
+- [ ] 候補commitを固定し、計画へ結び付けた高リスクレビューを完了する
+- [ ] PRの全CIとReviewBOTを確認し、マージ承認後にIssue closeoutを行う
+
+### Next Steps
+
+差分を自己レビューして候補commitを固定し、計画・base・headへ結び付けた高リスクレビューを行う。
+
+### 検証
+
+- PASS: contracts/domain/desktopのtypecheck、対象test、lint、format
+- PASS: Node 22.23.2でProvider workspace tools 25件、Skill Draft契約8件、Team MCP Bridge 40件
+- LOCAL ENV: desktop全体は2,975件PASS、120件FAIL。失敗はローカルNode 22.14.0、OS root fixture、ユーザーのClaude環境、NativeSafeFsの既存Windows境界に集中し、変更対象testの失敗は0件。固定Node版のPR CIを最終判定に使う。

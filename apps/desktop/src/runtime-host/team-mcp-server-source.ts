@@ -15,6 +15,7 @@
 //    TEAM_BRIDGE_SOCKET, authenticating with TEAM_BRIDGE_TOKEN. It never talks to
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
+import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
 export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
@@ -41,33 +42,7 @@ const TOOLS = [
     name: 'skill_draft_create',
     description:
       'Create a validated, managed Skill Draft for user review. This never installs the Skill. Include SKILL.md and optional official package files; Team Skills must include team/blueprint.json.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        kind: { type: 'string', enum: ['chat', 'team'] },
-        skillId: {
-          type: 'string',
-          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
-          maxLength: 128,
-        },
-        files: {
-          type: 'array',
-          minItems: 1,
-          maxItems: 256,
-          items: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', minLength: 1, maxLength: 500 },
-              content: { type: 'string', maxLength: 1048576 },
-            },
-            required: ['path', 'content'],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ['kind', 'skillId', 'files'],
-      additionalProperties: false,
-    },
+    inputSchema: ${JSON.stringify(SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA)},
   },
   {
     name: 'team_list_models',

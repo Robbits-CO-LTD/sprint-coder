@@ -57,6 +57,7 @@ import {
   turnSnapshotSchema,
   workerCompletionSchema,
   workerSummarySchema,
+  SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
   skillDraftCreateInputSchema,
 } from './index';
 
@@ -511,6 +512,74 @@ describe('public contracts', () => {
         ],
       }),
     ).toThrow(/循環/);
+  });
+
+  it('reports Team Blueprint graph errors at the invalid role fields', () => {
+    const result = teamBlueprintSchema.safeParse({
+      version: 1,
+      kind: 'team',
+      policy: teamPolicy,
+      leaderInstructions: 'Lead the team',
+      roles: [
+        {
+          key: 'reviewer',
+          title: 'Reviewer',
+          parentKey: 'missing-parent',
+          responsibility: 'Review',
+          scope: [],
+          nonGoals: [],
+          doneCriteria: ['Reviewed'],
+          required: true,
+          canDelegate: false,
+        },
+      ],
+    });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error('Expected invalid Team Blueprint');
+    expect(result.error.issues).toContainEqual(
+      expect.objectContaining({
+        path: ['roles', 0, 'parentKey'],
+        message: expect.stringContaining('親Roleが存在しません'),
+      }),
+    );
+  });
+
+  it('keeps the published Skill Draft JSON Schema aligned with the Zod limits', () => {
+    expect(SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA).toEqual({
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['chat', 'team'] },
+        skillId: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+        },
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          items: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', minLength: 1, maxLength: 500 },
+              content: { type: 'string', maxLength: 1_048_576 },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['kind', 'skillId', 'files'],
+      additionalProperties: false,
+    });
+    expect(
+      skillDraftCreateInputSchema.parse({
+        kind: 'chat',
+        skillId: 'review.helper',
+        files: [{ path: 'a/b/c/d/e/f/g/h/SKILL.md', content: '' }],
+      }),
+    ).toBeDefined();
   });
 
   it('rejects Skill Draft paths that escape the managed package', () => {

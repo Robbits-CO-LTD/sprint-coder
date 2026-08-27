@@ -2,9 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
+import {
+  SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
+  type EffectiveWorkspaceSet,
+} from '@sprint-coder/contracts';
 import {
   PROVIDER_WORKSPACE_GUIDANCE,
+  SKILL_DRAFT_TOOL,
   providerWorkspaceGuidance,
   ProviderWorkspaceTools,
   providerDisclosureAuthorizationFacts,
@@ -26,6 +30,16 @@ describe('provider command output', () => {
     expect(commandToolTruncated(true, false)).toBe(true);
     expect(commandToolTruncated(false, true)).toBe(true);
     expect(commandToolTruncated(false, false)).toBe(false);
+  });
+});
+
+describe('Skill Draft Provider tool contract', () => {
+  it('publishes the shared required input schema', () => {
+    expect(SKILL_DRAFT_TOOL.inputSchema).toEqual(SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA);
+    expect(SKILL_DRAFT_TOOL.inputSchema).toMatchObject({
+      required: ['kind', 'skillId', 'files'],
+      properties: { files: expect.any(Object) },
+    });
   });
 });
 

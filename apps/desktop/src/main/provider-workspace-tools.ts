@@ -2,7 +2,11 @@ import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import type { EffectiveWorkspaceSet, ProviderTool } from '@sprint-coder/contracts';
+import {
+  SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
+  type EffectiveWorkspaceSet,
+  type ProviderTool,
+} from '@sprint-coder/contracts';
 import {
   ToolRegistry,
   createToolDefinition,
@@ -256,7 +260,7 @@ export const SKILL_DRAFT_TOOL = auxiliaryTool(
   'skill-draft-create',
   'skill_draft_create',
   'Create one validated Skill Draft for user review without installing it.',
-  { type: 'object' },
+  SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
 );
 export const SKILL_ACTIVATE_TOOL = createToolDefinition({
   toolId: createToolId({

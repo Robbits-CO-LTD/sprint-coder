@@ -274,10 +274,12 @@ import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
 import { openWorkspaceFileForEdit, recoverWorkspaceFileForEdit } from './workspace-edit';
 import { executeUserFileSave } from './user-file-save-saga';
 import {
+  createSkillDraftWithPublicError,
   SkillSettingsError,
   SkillSettingsService,
   skillSettingsPublicError,
 } from './skill-settings-service';
+import { clipPublicMessage } from './zod-issue-message';
 
 /** sha256 of nothing, used when a refusal has no file to hash. */
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
@@ -1200,9 +1202,7 @@ export class IpcRouter {
       undefined,
       (query) => this.listTeamModelCandidates(query),
       async (input, context) => {
-        const draft = await this.skillSettings
-          .createDraft(skillDraftCreateInputSchema.parse(input))
-          .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+        const draft = await createSkillDraftWithPublicError(this.skillSettings, input);
         this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
         return draft;
       },
@@ -1302,9 +1302,7 @@ export class IpcRouter {
       },
       auxiliary: {
         createSkillDraft: async (input, context) => {
-          const draft = await this.skillSettings
-            .createDraft(skillDraftCreateInputSchema.parse(input))
-            .catch((error) => Promise.reject(skillSettingsPublicError(error)));
+          const draft = await createSkillDraftWithPublicError(this.skillSettings, input);
           this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
           return draft;
         },
@@ -7742,7 +7740,7 @@ export function toPublicError(error: unknown): PublicError {
           : error.code === 'NOT_FOUND'
             ? 'NOT_FOUND'
             : 'INVALID_REQUEST',
-      userMessage: error.message,
+      userMessage: clipPublicMessage(error.message),
       retryable: error.code === 'PREVIEW_EXPIRED' || error.code === 'SOURCE_CHANGED',
     };
   if (error instanceof z.ZodError)

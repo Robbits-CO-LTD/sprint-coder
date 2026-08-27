@@ -223,6 +223,26 @@ describe('Tool Registry domain', () => {
       expect(() => definition({ inputSchema })).toThrow();
   });
 
+  it('accepts bounded string metadata without treating it as the execution authority', () => {
+    const schema = {
+      type: 'string',
+      pattern: '^[a-z][a-z0-9.-]*$',
+      minLength: 1,
+      maxLength: 128,
+    } as const;
+    expect(() => definition({ inputSchema: schema })).not.toThrow();
+    expect(toolValueMatchesSchema(schema, 'valid-id')).toBe(true);
+    expect(toolValueMatchesSchema(schema, '-server-validates-this')).toBe(true);
+    for (const inputSchema of [
+      { type: 'number', minLength: 1 },
+      { type: 'string', minLength: -1 },
+      { type: 'string', minLength: 2, maxLength: 1 },
+      { type: 'string', pattern: '[' },
+      { type: 'string', format: 'email' },
+    ])
+      expect(() => definition({ inputSchema })).toThrow();
+  });
+
   it('validates discriminated contracts with conditional and numeric schema keywords', () => {
     const schema = {
       type: 'object',

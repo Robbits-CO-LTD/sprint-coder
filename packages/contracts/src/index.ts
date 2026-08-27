@@ -324,22 +324,31 @@ export const teamBlueprintSchema = z
   .strict()
   .superRefine((blueprint, context) => {
     const keys = new Set<string>();
-    for (const role of blueprint.roles) {
+    blueprint.roles.forEach((role, index) => {
       if (keys.has(role.key))
-        context.addIssue({ code: 'custom', message: `Role keyが重複しています: ${role.key}` });
+        context.addIssue({
+          code: 'custom',
+          message: `Role keyが重複しています: ${role.key}`,
+          path: ['roles', index, 'key'],
+        });
       keys.add(role.key);
-    }
-    for (const role of blueprint.roles) {
+    });
+    blueprint.roles.forEach((role, index) => {
       if (role.parentKey !== 'leader' && !keys.has(role.parentKey))
         context.addIssue({
           code: 'custom',
           message: `親Roleが存在しません: ${role.parentKey}`,
+          path: ['roles', index, 'parentKey'],
         });
       if (role.parentKey === role.key)
-        context.addIssue({ code: 'custom', message: `Roleは自身を親にできません: ${role.key}` });
-    }
+        context.addIssue({
+          code: 'custom',
+          message: `Roleは自身を親にできません: ${role.key}`,
+          path: ['roles', index, 'parentKey'],
+        });
+    });
     const parents = new Map(blueprint.roles.map((role) => [role.key, role.parentKey]));
-    for (const role of blueprint.roles) {
+    blueprint.roles.forEach((role, index) => {
       const visited = new Set<string>([role.key]);
       let current = role.parentKey;
       while (current !== 'leader' && parents.has(current)) {
@@ -347,13 +356,14 @@ export const teamBlueprintSchema = z
           context.addIssue({
             code: 'custom',
             message: `Roleの親子関係が循環しています: ${role.key}`,
+            path: ['roles', index, 'parentKey'],
           });
           break;
         }
         visited.add(current);
         current = parents.get(current)!;
       }
-    }
+    });
   });
 export type TeamBlueprint = z.infer<typeof teamBlueprintSchema>;
 export const teamPolicyUpdateInputSchema = z
@@ -1215,6 +1225,41 @@ export const skillDraftCreateInputSchema = z
     files: z.array(skillDraftFileSchema).min(1).max(256),
   })
   .strict();
+/**
+ * LLM-facing subset of skillDraftCreateInputSchema.
+ *
+ * Keep this JSON Schema no stricter than the Zod contract above. Safe path
+ * traversal checks remain server-side because this supported schema subset
+ * cannot express isSafeSkillDraftPath.
+ */
+export const SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['chat', 'team'] },
+    skillId: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 128,
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$',
+    },
+    files: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 256,
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', minLength: 1, maxLength: 500 },
+          content: { type: 'string', maxLength: 1024 * 1024 },
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['kind', 'skillId', 'files'],
+  additionalProperties: false,
+} as const;
 export const skillDraftInstallInputSchema = z
   .object({
     draftId: idSchema,
