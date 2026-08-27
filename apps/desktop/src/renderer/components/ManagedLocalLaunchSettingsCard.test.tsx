@@ -165,6 +165,36 @@ describe('ManagedLocalLaunchSettingsCard', () => {
     await act(async () => root.unmount());
   });
 
+  it('explains when batch size exceeds context before sending settings', async () => {
+    const api = installApi();
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(<ManagedLocalLaunchSettingsCard modelId={MODEL_ID} runtime={stoppedRuntime} />),
+    );
+    await flush();
+
+    const context = container.querySelector(
+      `[data-testid="local-ai-launch-context-${MODEL_ID}"]`,
+    ) as HTMLInputElement;
+    const batch = container.querySelector(
+      `[data-testid="local-ai-launch-batch-${MODEL_ID}"]`,
+    ) as HTMLInputElement;
+    await act(async () => {
+      setInputValue(context, '256');
+      setInputValue(batch, '512');
+    });
+    const save = container.querySelector(
+      `[data-testid="local-ai-launch-save-${MODEL_ID}"]`,
+    ) as HTMLButtonElement;
+    await act(async () => save.click());
+
+    expect(api.setLaunchSettings).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Batch sizeはContext tokens以下');
+    await act(async () => root.unmount());
+  });
+
   it('locks edits while this model is running and shows active effective values', async () => {
     installApi(activeRuntime);
     const container = document.createElement('div');

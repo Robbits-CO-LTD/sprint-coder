@@ -2480,6 +2480,34 @@ export const managedLocalEffectiveLaunchBackendSchema = z.enum(['cpu', 'metal', 
 export type ManagedLocalEffectiveLaunchBackend = z.infer<
   typeof managedLocalEffectiveLaunchBackendSchema
 >;
+function validateManagedLocalLaunchSettings(
+  settings: {
+    backend: ManagedLocalLaunchBackend;
+    gpuLayers: number;
+    contextTokens: number;
+    batchSize: number;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (settings.backend === 'cpu' && settings.gpuLayers !== 0)
+    context.addIssue({
+      code: 'custom',
+      path: ['gpuLayers'],
+      message: 'CPU Managed Local launch must use zero GPU layers',
+    });
+  if (settings.backend !== 'auto' && settings.backend !== 'cpu' && settings.gpuLayers === 0)
+    context.addIssue({
+      code: 'custom',
+      path: ['gpuLayers'],
+      message: 'Accelerated Managed Local launch must use GPU layers',
+    });
+  if (settings.batchSize > settings.contextTokens)
+    context.addIssue({
+      code: 'custom',
+      path: ['batchSize'],
+      message: 'Managed Local batch size cannot exceed context tokens',
+    });
+}
 export const managedLocalLaunchSettingsSchema = z
   .object({
     backend: managedLocalLaunchBackendSchema,
@@ -2488,26 +2516,7 @@ export const managedLocalLaunchSettingsSchema = z
     batchSize: z.number().int().positive().max(MANAGED_LOCAL_MAX_BATCH_SIZE),
   })
   .strict()
-  .superRefine((settings, context) => {
-    if (settings.backend === 'cpu' && settings.gpuLayers !== 0)
-      context.addIssue({
-        code: 'custom',
-        path: ['gpuLayers'],
-        message: 'CPU Managed Local launch must use zero GPU layers',
-      });
-    if (settings.backend !== 'auto' && settings.backend !== 'cpu' && settings.gpuLayers === 0)
-      context.addIssue({
-        code: 'custom',
-        path: ['gpuLayers'],
-        message: 'Accelerated Managed Local launch must use GPU layers',
-      });
-    if (settings.batchSize > settings.contextTokens)
-      context.addIssue({
-        code: 'custom',
-        path: ['batchSize'],
-        message: 'Managed Local batch size cannot exceed context tokens',
-      });
-  });
+  .superRefine(validateManagedLocalLaunchSettings);
 export type ManagedLocalLaunchSettings = z.infer<typeof managedLocalLaunchSettingsSchema>;
 export const managedLocalLaunchSettingsMapSchema = z
   .record(z.string().regex(/^[a-f0-9]{64}$/u), managedLocalLaunchSettingsSchema)
@@ -2521,7 +2530,8 @@ export const managedLocalLaunchSettingsGetInputSchema = z
   .strict();
 export const managedLocalLaunchSettingsSetInputSchema = managedLocalLaunchSettingsGetInputSchema
   .extend(managedLocalLaunchSettingsSchema.shape)
-  .strict();
+  .strict()
+  .superRefine(validateManagedLocalLaunchSettings);
 export type ManagedLocalLaunchSettingsSetInput = z.infer<
   typeof managedLocalLaunchSettingsSetInputSchema
 >;

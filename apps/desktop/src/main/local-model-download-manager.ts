@@ -592,7 +592,56 @@ export class LocalModelDownloadRepository {
   }
 
   removeModel(modelId: string): void {
-    this.db.prepare('DELETE FROM local_models WHERE id = ?').run(modelId);
+    this.db.transaction(() => {
+      this.removeInferenceSettings(modelId);
+      this.removeLaunchSettings(modelId);
+      this.db.prepare('DELETE FROM local_models WHERE id = ?').run(modelId);
+    })();
+  }
+
+  private removeInferenceSettings(modelId: string): void {
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(INFERENCE_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_INFERENCE_SETTINGS_BYTES)
+      return;
+    let current: Record<string, ManagedLocalInferenceSettings>;
+    try {
+      current = managedLocalInferenceSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+    } catch {
+      // Malformed optional settings are replaced by the next successful settings write.
+      return;
+    }
+    if (!(modelId in current)) return;
+    delete current[modelId];
+    this.writeSettingsMap(INFERENCE_SETTINGS_KEY, current);
+  }
+
+  private removeLaunchSettings(modelId: string): void {
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(LAUNCH_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_LAUNCH_SETTINGS_BYTES)
+      return;
+    let current: Record<string, ManagedLocalLaunchSettings>;
+    try {
+      current = managedLocalLaunchSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+    } catch {
+      // Malformed optional settings are replaced by the next successful settings write.
+      return;
+    }
+    if (!(modelId in current)) return;
+    delete current[modelId];
+    this.writeSettingsMap(LAUNCH_SETTINGS_KEY, current);
+  }
+
+  private writeSettingsMap(key: string, value: unknown): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(key, JSON.stringify(value), new Date().toISOString());
   }
 
   markDeleteFailed(modelId: string, now: string): void {

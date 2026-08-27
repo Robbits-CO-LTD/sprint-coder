@@ -260,6 +260,38 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('removes per-model inference and launch settings when the model is deleted', async () => {
+      const env = await fixture({ bytes: [Buffer.from('one model')] });
+      const queued = env.manager.enqueue(env.plan);
+      const installed = await env.manager.run(queued.id, env.plan);
+      env.manager.setInferenceSettings(installed.modelId, {
+        maxOutputTokens: 4_096,
+        thinking: true,
+      });
+      env.manager.setLaunchSettings(installed.modelId, {
+        backend: 'cpu',
+        gpuLayers: 0,
+        contextTokens: 4_096,
+        batchSize: 256,
+      });
+
+      await env.manager.deleteInstalled(installed.modelId);
+      const requeued = env.manager.enqueue(env.plan);
+      const reinstalled = await env.manager.run(requeued.id, env.plan);
+
+      expect(env.manager.getInferenceSettings(reinstalled.modelId)).toEqual({
+        maxOutputTokens: 512,
+        thinking: false,
+      });
+      expect(env.manager.getLaunchSettings(reinstalled.modelId)).toEqual({
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 8_192,
+        batchSize: 512,
+      });
+      env.repository.close();
+    });
+
     it('never publishes a hash mismatch or a missing shard as installed', async () => {
       const wrong = Buffer.from('tampered bytes');
       const env = await fixture({

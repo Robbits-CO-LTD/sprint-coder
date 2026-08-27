@@ -1907,6 +1907,24 @@ describe('Managed Local launch settings contracts', () => {
         batchSize: 512,
       }),
     ).toMatchObject({ modelId, backend: 'auto' });
+    expect(() =>
+      managedLocalLaunchSettingsSetInputSchema.parse({
+        modelId,
+        backend: 'cpu',
+        gpuLayers: 1,
+        contextTokens: 8_192,
+        batchSize: 512,
+      }),
+    ).toThrow();
+    expect(() =>
+      managedLocalLaunchSettingsSetInputSchema.parse({
+        modelId,
+        backend: 'auto',
+        gpuLayers: 999,
+        contextTokens: 256,
+        batchSize: 512,
+      }),
+    ).toThrow();
     expect(
       managedLocalLaunchSettingsViewSchema.parse({
         modelId,
