@@ -147,11 +147,21 @@ export function ManagedLocalLaunchSettingsCard({
       parsedContextTokens > CONTEXT_TOKENS_MAX ||
       !Number.isSafeInteger(parsedBatchSize) ||
       parsedBatchSize < 1 ||
-      parsedBatchSize > BATCH_SIZE_MAX ||
-      (backend === 'cpu' && parsedGpuLayers !== 0) ||
-      (backend !== 'auto' && backend !== 'cpu' && parsedGpuLayers === 0)
+      parsedBatchSize > BATCH_SIZE_MAX
     ) {
       setError('GPU layers、context、batchは許可された整数範囲で指定してください。');
+      return;
+    }
+    if (parsedBatchSize > parsedContextTokens) {
+      setError('Batch sizeはContext tokens以下にしてください。');
+      return;
+    }
+    if (backend === 'cpu' && parsedGpuLayers !== 0) {
+      setError('CPU backendではGPU layersを0にしてください。');
+      return;
+    }
+    if (backend !== 'auto' && backend !== 'cpu' && parsedGpuLayers === 0) {
+      setError('GPU backendではGPU layersを1以上にしてください。');
       return;
     }
     setSaving(true);
