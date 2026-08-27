@@ -122,6 +122,7 @@ import {
   providerMessagesFromContext,
   providerMessagesForEgressPolicy,
   providerEventsWithSafeFailure,
+  providerWorkspaceToolFailure,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
@@ -156,6 +157,46 @@ describe('file edit tracking identity', () => {
     expect(fileEditTrackingKey('turn', 'root', 'Src/App.ts', 'win32')).toBe(
       fileEditTrackingKey('turn', 'root', 'src/app.ts', 'win32'),
     );
+  });
+});
+
+describe('Provider Skill Draft failures', () => {
+  it('preserves bounded public Skill validation details for the model', () => {
+    expect(
+      JSON.parse(
+        providerWorkspaceToolFailure(
+          new SkillSettingsError('INVALID_SKILL', 'skillId: Invalid input'),
+        ),
+      ),
+    ).toEqual({
+      ok: false,
+      error: { code: 'INVALID_SKILL', message: 'skillId: Invalid input' },
+    });
+
+    const bounded = JSON.parse(
+      providerWorkspaceToolFailure(new SkillSettingsError('INVALID_SKILL', 'x'.repeat(600))),
+    ) as { error: { message: string } };
+    expect(bounded.error.message.length).toBeLessThanOrEqual(500);
+    expect(bounded.error.message.endsWith('…')).toBe(true);
+
+    const redacted = providerWorkspaceToolFailure(
+      new SkillSettingsError('INVALID_SKILL', 'token=FAKE_PRIVATE_CANARY'),
+    );
+    expect(redacted).not.toContain('FAKE_PRIVATE_CANARY');
+  });
+
+  it('keeps unexpected validation failures generic', () => {
+    const log = vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined);
+    try {
+      const content = providerWorkspaceToolFailure(
+        new Error('C:\\Users\\example\\private\\secret.txt token=FAKE_PRIVATE_CANARY'),
+      );
+      expect(content).toContain('Workspace tool execution failed');
+      expect(content).not.toContain('secret.txt');
+      expect(content).not.toContain('FAKE_PRIVATE_CANARY');
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 

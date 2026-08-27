@@ -7333,7 +7333,7 @@ export function shouldRetryProviderWithoutTools(input: {
   );
 }
 
-function providerWorkspaceToolFailure(error: unknown): string {
+export function providerWorkspaceToolFailure(error: unknown): string {
   if (error instanceof ToolAuthorizationDeniedError)
     return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
   if (error instanceof WorkspaceToolRejection)
@@ -7342,6 +7342,8 @@ function providerWorkspaceToolFailure(error: unknown): string {
     return providerToolErrorContent('PATCH_REJECTED', error.message);
   if (error instanceof CommandRunnerError)
     return providerToolErrorContent(error.code, error.message);
+  if (error instanceof SkillSettingsError)
+    return providerToolErrorContent(error.code, clipPublicMessage(error.message));
   secureLogger.error('Provider workspace tool execution failed', { error });
   return providerToolErrorContent('TOOL_EXECUTION_FAILED', 'Workspace tool execution failed');
 }
