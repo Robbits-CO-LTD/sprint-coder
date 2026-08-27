@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderModel } from '@sprint-coder/contracts';
+import { toolValueMatchesSchema } from '@sprint-coder/domain';
 import { ModelCatalogService } from './model-catalog-service';
+import { TEAM_LIST_MODELS_TOOL } from './team-tools';
 
 const unknown = { value: null, source: 'unknown' as const };
 
@@ -206,6 +208,37 @@ describe('ModelCatalogService', () => {
     expect(query('grok').items).toHaveLength(1);
     expect(query('xAI').items).toHaveLength(1);
     expect(query('本番ゲートウェイ').items).toHaveLength(1);
+  });
+
+  it('returns JSON-safe Team candidates when an external provider has no known author', () => {
+    const service = new ModelCatalogService();
+    service.replaceCatalog([
+      {
+        ...model(2),
+        connectionId: 'localai:windows',
+        connectionDisplayName: 'Qwen3.8-27B',
+        providerId: 'localai',
+        providerDisplayName: 'localai',
+        modelAuthor: undefined,
+        modelId: 'Local-Qwen3.8',
+      },
+    ]);
+
+    const result = service.query({
+      taskId: 'task-1',
+      text: 'Local-Qwen3.8',
+      connectionIds: ['localai:windows'],
+      providerIds: ['localai'],
+      accessTypes: [],
+      capabilities: [],
+      availableOnly: true,
+      cursor: null,
+      limit: 10,
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(Object.hasOwn(result.items[0]!, 'modelAuthor')).toBe(false);
+    expect(toolValueMatchesSchema(TEAM_LIST_MODELS_TOOL.outputSchema, result)).toBe(true);
   });
 
   it('applies a Team model allowlist before pagination and total calculation', () => {

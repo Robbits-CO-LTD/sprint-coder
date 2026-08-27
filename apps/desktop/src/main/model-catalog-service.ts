@@ -38,7 +38,9 @@ export class ModelCatalogService {
   ): void {
     const unique = new Map<string, ProviderModel>();
     for (const candidate of models) {
-      const model = providerModelSchema.parse(candidate);
+      // ToolBroker accepts plain JSON only. Zod preserves explicitly-undefined optional fields,
+      // so normalize provider results once when they enter the catalog.
+      const model = providerModelSchema.parse(JSON.parse(JSON.stringify(candidate)) as unknown);
       unique.set(`${model.connectionId}\0${model.modelId}`, model);
     }
     const normalized = [...unique.values()].sort((left, right) =>
