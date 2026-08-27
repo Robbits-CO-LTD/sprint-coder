@@ -605,3 +605,32 @@ Next Steps: #307のrenderer-only PRでWindows fast laneを実証する。
 - PASS: contracts/domain/desktopのtypecheck、対象test、lint、format
 - PASS: Node 22.23.2でProvider workspace tools 25件、Skill Draft契約8件、Team MCP Bridge 40件
 - LOCAL ENV: desktop全体は2,975件PASS、120件FAIL。失敗はローカルNode 22.14.0、OS root fixture、ユーザーのClaude環境、NativeSafeFsの既存Windows境界に集中し、変更対象testの失敗は0件。固定Node版のPR CIを最終判定に使う。
+
+## Sprint Coder v0.6.1 prerelease (2026-08-27)
+
+### 計画
+
+- [x] 最新main、公開release、remote tag、release workflow、署名方針を再確認する
+- [x] ユーザー指定どおりdesktopとlockfileのversionを0.6.1へ揃える
+- [x] version契約、lint、typecheck、関連release test、formatを通す
+- [ ] release PRを作成し、ReviewBOTと全CIを通してmainへ反映する
+- [ ] v0.6.1タグをmerge commitへpushし、Release workflowを完了する
+- [ ] 生成された全assetと署名・公証証拠を確認してGitHub prereleaseを公開する
+
+### Next Steps
+
+release PRを作成し、ReviewBOTと全CIを確認する。Windowsは現行仕様どおり未署名とし、macOSは正式署名・Apple公証の成功を必須とする。
+
+### 進捗
+
+- PASS: version・lockfile・埋め込みclient versionの一致
+- PASS: lint（既存warning 2、error 0）
+- PASS: typecheck
+- PASS: release workflow / Forge関連テスト28件
+- PASS: format、diff check
+
+### Next Tasks
+
+- Release PRのレビューと全CIを完了する
+- merge commitへv0.6.1タグを作成し、生成されたDraft Releaseと成果物を検証する
+- GitHub ReleaseをPre-releaseとして公開する
