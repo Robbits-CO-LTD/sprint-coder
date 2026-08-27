@@ -79,18 +79,33 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('security delete-keychain');
     expect(workflow).toContain('"${MACOS_CERTIFICATE_PATH}"');
     expect(workflow).toContain('"${MACOS_API_KEY_PATH}"');
+    expect(workflow).toContain('"${MACOS_DMG_NOTARIZATION_RESULT}"');
   });
 
-  it('requires Accepted notarization and staples the app before creating DMG and ZIP files', () => {
-    const submit = workflow.indexOf('xcrun notarytool submit');
-    const accepted = workflow.indexOf("!= 'Accepted'");
-    const staple = workflow.indexOf('xcrun stapler staple');
+  it('requires Accepted notarization, staple, and Gatekeeper checks for both the app and DMG', () => {
+    const appSubmit = workflow.indexOf('xcrun notarytool submit "${MACOS_NOTARIZATION_ARCHIVE}"');
+    const appAccepted = workflow.indexOf('if [[ "${notarization_status}" != \'Accepted\' ]]');
+    const appStaple = workflow.indexOf('xcrun stapler staple "${app_path}"');
+    const appGatekeeper = workflow.indexOf(
+      '/usr/sbin/spctl --assess --type execute --verbose=2 "${app_path}"',
+    );
     const make = workflow.indexOf('npx electron-forge make --skip-package');
+    const dmgSubmit = workflow.indexOf('xcrun notarytool submit "${dmg_path}"');
+    const dmgAccepted = workflow.indexOf('if [[ "${dmg_notarization_status}" != \'Accepted\' ]]');
+    const dmgStaple = workflow.indexOf('xcrun stapler staple "${dmg_path}"');
+    const dmgGatekeeper = workflow.indexOf(
+      '/usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "${dmg_path}"',
+    );
 
-    expect(submit).toBeGreaterThan(-1);
-    expect(accepted).toBeGreaterThan(submit);
-    expect(staple).toBeGreaterThan(accepted);
-    expect(make).toBeGreaterThan(staple);
+    expect(appSubmit).toBeGreaterThan(-1);
+    expect(appAccepted).toBeGreaterThan(appSubmit);
+    expect(appStaple).toBeGreaterThan(appAccepted);
+    expect(appGatekeeper).toBeGreaterThan(appStaple);
+    expect(make).toBeGreaterThan(appGatekeeper);
+    expect(dmgSubmit).toBeGreaterThan(make);
+    expect(dmgAccepted).toBeGreaterThan(dmgSubmit);
+    expect(dmgStaple).toBeGreaterThan(dmgAccepted);
+    expect(dmgGatekeeper).toBeGreaterThan(dmgStaple);
   });
 
   it('builds unsigned Windows update assets intentionally and labels them in release notes', () => {

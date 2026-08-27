@@ -613,8 +613,8 @@ Next Steps: #307のrenderer-only PRでWindows fast laneを実証する。
 - [x] 最新main、公開release、remote tag、release workflow、署名方針を再確認する
 - [x] ユーザー指定どおりdesktopとlockfileのversionを0.6.1へ揃える
 - [x] version契約、lint、typecheck、関連release test、formatを通す
-- [ ] release PRを作成し、ReviewBOTと全CIを通してmainへ反映する
-- [ ] v0.6.1タグをmerge commitへpushし、Release workflowを完了する
+- [x] release PRを作成し、ReviewBOTと全CIを通してmainへ反映する
+- [x] v0.6.1タグをmerge commitへpushし、Release workflowを完了する
 - [ ] 生成された全assetと署名・公証証拠を確認し、workflowが作る通常扱いのDraft Releaseを`gh release edit --prerelease --draft=false`でGitHub prereleaseとして公開する
 
 ### Next Steps
@@ -634,3 +634,14 @@ release PRを作成し、ReviewBOTと全CIを確認する。Windowsは現行仕�
 - Release PRのレビューと全CIを完了する
 - merge commitへv0.6.1タグを作成し、生成されたDraft Releaseと成果物を検証する
 - GitHub ReleaseをPre-releaseとして公開する
+
+### 公開前検証ホールド
+
+- [x] Draft Releaseの8成果物とsha256を確認する
+- [x] macOSアプリ本体のDeveloper ID署名、Apple公証Accepted、staple、codesign検証を確認する
+- [x] 現行workflowにDMG公証・stapleとapp/DMGのGatekeeper評価がないことを特定する
+- [x] release workflowへ不足するfail-closed検証と回帰テストを追加する
+- [ ] 修正PRのレビュー・全CIを通し、v0.6.1成果物を再生成する
+- [ ] DMGを含む全必須検証の成功後にGitHub Pre-releaseを公開する
+
+公開済み成果物はまだない。必須のmacOS配布検証が揃うまでDraftのまま維持する。
