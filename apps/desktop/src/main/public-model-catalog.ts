@@ -828,8 +828,16 @@ function bindGenericMmprojArtifacts<
   );
   if (modelKeys.size !== 1) return [...artifacts];
   const [onlyModelKey] = modelKeys;
+  const genericProjectorKeys = new Set([
+    null,
+    'model',
+    'vision-model',
+    'projector',
+    'vision',
+    'clip',
+  ]);
   return artifacts.map((artifact) =>
-    artifact.role === 'mmproj' && artifact.multimodalCompatibilityKey === null
+    artifact.role === 'mmproj' && genericProjectorKeys.has(artifact.multimodalCompatibilityKey)
       ? { ...artifact, multimodalCompatibilityKey: onlyModelKey! }
       : artifact,
   );

@@ -204,8 +204,11 @@ describe('PublicModelCatalogService', () => {
       response(
         hfModel('acme/vision', {
           siblings: [
-            { rfilename: 'vision/mmproj-F16.gguf', lfs: { size: 567, sha256: HASH } },
-            { rfilename: 'model-Q4_K_M.gguf', lfs: { size: 1234, sha256: HASH } },
+            { rfilename: 'vision/mmproj-model-F16.gguf', lfs: { size: 567, sha256: HASH } },
+            {
+              rfilename: 'Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf',
+              lfs: { size: 1234, sha256: HASH },
+            },
           ],
         }),
       ),
@@ -216,14 +219,14 @@ describe('PublicModelCatalogService', () => {
     expect(detail.artifacts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          filename: 'vision/mmproj-F16.gguf',
+          filename: 'vision/mmproj-model-F16.gguf',
           role: 'mmproj',
-          multimodalCompatibilityKey: 'model',
+          multimodalCompatibilityKey: 'qwen2-5-vl-7b-instruct',
         }),
         expect.objectContaining({
-          filename: 'model-Q4_K_M.gguf',
+          filename: 'Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf',
           role: 'model',
-          multimodalCompatibilityKey: 'model',
+          multimodalCompatibilityKey: 'qwen2-5-vl-7b-instruct',
         }),
       ]),
     );
