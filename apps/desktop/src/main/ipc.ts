@@ -221,6 +221,12 @@ import {
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
 } from './image-attachment-store';
+import {
+  assertVerifiedToolImageDispatch,
+  ToolImageBridge,
+  toolImageEgressDenialCause,
+  type ToolImageAuditInput,
+} from './tool-image-bridge';
 import { AttachmentCustodyStore, type AttachmentCustodyLease } from './attachment-custody-store';
 import { windowsNoReparseImageReaderAvailable } from './native-file-publication';
 import {
@@ -295,6 +301,7 @@ const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
 type ProviderImageAttachmentDispatch = Readonly<{
   binding: ProviderImageAttachmentCapabilityBinding;
   inlineImages: ProviderInlineImage[];
+  auditImages: readonly ToolImageAuditInput[];
   manifestDigest: string;
   byteCount: number;
 }>;
@@ -4677,11 +4684,19 @@ export class IpcRouter {
       sha256,
     }));
     const byteCount = attachments.reduce((sum, attachment) => sum + attachment.byteLength, 0);
+    const inlineImages = attachments.map(({ mimeType, bytes }) => ({
+      mimeType,
+      base64: bytes.toString('base64'),
+    }));
     return Object.freeze({
       binding,
-      inlineImages: attachments.map(({ mimeType, bytes }) => ({
+      inlineImages,
+      auditImages: attachments.map(({ id, mimeType, byteLength, sha256 }, ordinal) => ({
+        id,
         mimeType,
-        base64: bytes.toString('base64'),
+        byteLength,
+        sha256,
+        base64: inlineImages[ordinal]!.base64,
       })),
       manifestDigest: digestCanonical(manifest),
       byteCount,
@@ -4706,6 +4721,39 @@ export class IpcRouter {
         nowMs: Date.now(),
       })
     );
+  }
+
+  private async providerToolImageStillValid(
+    started: StartedTurn,
+    connection: ProviderConnection,
+    binding: ProviderImageAttachmentCapabilityBinding,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (
+      connection.id !== MANAGED_LOCAL_CONNECTION_ID ||
+      connection.providerId !== MANAGED_LOCAL_PROVIDER_ID ||
+      connection.runtimeKind !== 'openai_compatible' ||
+      connection.secretReference !== null ||
+      this.providerEgressTrustForConnection(connection) !== 'trusted-local'
+    )
+      return false;
+    const selection = this.persistence.getImageAttachmentAcceptanceSelection(started.event.taskId);
+    const current = await this.captureProviderImageAttachmentCapability(selection, signal);
+    try {
+      assertVerifiedToolImageDispatch({
+        connection: { managedLocal: true, localEndpointTrusted: true },
+        acceptedCapability: binding.snapshot,
+        currentCapability: current,
+      });
+    } catch {
+      return false;
+    }
+    return validateProviderImageAttachmentCurrent({
+      selection,
+      binding,
+      current,
+      nowMs: Date.now(),
+    });
   }
 
   private async releaseTurnAttachmentCustody(turnId: string): Promise<void> {
@@ -5818,6 +5866,8 @@ export class IpcRouter {
       });
       runtime = this.providerRegistry.resolve(connection);
       const providerImageDispatch = this.prepareProviderTurnImageAttachments(started, connection);
+      const toolImageBridge = new ToolImageBridge();
+      let pendingToolImageBinding: ProviderImageAttachmentCapabilityBinding | undefined;
       const messages = providerMessagesFromContext(
         context.fragments,
         userMessageId,
@@ -5893,9 +5943,18 @@ export class IpcRouter {
           toolChoice === undefined
             ? messages
             : managedLocalForcedRoundMessages(messages, started.text);
+        const toolImageDispatch = toolImageBridge.consumeForNextDispatch({
+          baseMessages: roundMessages,
+          directImages: providerImageDispatch?.auditImages ?? [],
+        });
+        const toolImageBinding =
+          toolImageDispatch.toolImage === undefined ? undefined : pendingToolImageBinding;
+        pendingToolImageBinding = undefined;
+        if (toolImageDispatch.toolImage !== undefined && toolImageBinding === undefined)
+          throw new ProviderImageAttachmentError();
         const roundPayloadBytes = Buffer.from(
           JSON.stringify({
-            messages: roundMessages,
+            messages: toolImageDispatch.messages,
             tools: toolsForRound,
             ...(toolChoice === undefined ? {} : { toolChoice }),
           }),
@@ -5929,17 +5988,24 @@ export class IpcRouter {
             endpointTrust: this.providerEgressTrustForConnection(connection),
             round: ordinal,
             toolCatalogDigest: digestCanonical(roundTools),
-            ...(providerImageDispatch === undefined
+            ...(providerImageDispatch === undefined && toolImageDispatch.toolImage === undefined
               ? {}
               : {
-                  attachmentManifestDigest: providerImageDispatch.manifestDigest,
-                  attachmentByteCount: providerImageDispatch.byteCount,
+                  attachmentManifestDigest:
+                    toolImageDispatch.toolImage === undefined
+                      ? providerImageDispatch!.manifestDigest
+                      : toolImageDispatch.audit.manifestDigest,
+                  attachmentByteCount:
+                    toolImageDispatch.toolImage === undefined
+                      ? providerImageDispatch!.byteCount
+                      : toolImageDispatch.audit.byteCount,
                 }),
           },
           connection.providerId,
           this.providerEgressTrustForConnection(connection),
         );
-        if (!egress.allowed) throw new Error('Provider egress was denied by policy');
+        if (!egress.allowed)
+          throw new ProviderTurnFailureError(toolImageEgressDenialCause(modelLease !== undefined));
         if (
           providerImageDispatch !== undefined &&
           !(await this.providerImageAttachmentStillValid(
@@ -5962,6 +6028,16 @@ export class IpcRouter {
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
+        if (
+          toolImageBinding !== undefined &&
+          !(await this.providerToolImageStillValid(
+            started,
+            connection,
+            toolImageBinding,
+            controller.signal,
+          ))
+        )
+          throw new ProviderImageAttachmentError();
         for await (const providerEvent of providerEventsWithSafeFailure(
           providerEventsWithDeadline(
             runtime.execute(
@@ -6137,7 +6213,44 @@ export class IpcRouter {
               },
               controller.signal,
             );
-            content = redactSecrets(JSON.stringify({ ok: true, result }));
+            if (toolCall.name === 'view_image') {
+              const accepted = await toolImageBridge.acceptToolResult({
+                toolCallId: toolCall.callId,
+                toolName: toolCall.name,
+                result,
+              });
+              content = accepted.toolMessage.content;
+              if (accepted.image !== undefined) {
+                const selection = this.persistence.getImageAttachmentAcceptanceSelection(taskId);
+                const snapshot = await this.captureProviderImageAttachmentCapability(
+                  selection,
+                  controller.signal,
+                );
+                const capability = toPublicProviderImageAttachmentCapability(
+                  selection,
+                  snapshot,
+                  Date.now(),
+                );
+                if (
+                  connection.id === MANAGED_LOCAL_CONNECTION_ID &&
+                  connection.providerId === MANAGED_LOCAL_PROVIDER_ID &&
+                  connection.runtimeKind === 'openai_compatible' &&
+                  connection.secretReference === null &&
+                  this.providerEgressTrustForConnection(connection) === 'trusted-local' &&
+                  capability.status === 'supported' &&
+                  capability.selectionIdentity !== null
+                )
+                  pendingToolImageBinding = Object.freeze({
+                    kind: 'provider_inline',
+                    snapshot,
+                    selectionIdentity: capability.selectionIdentity,
+                  });
+                else {
+                  toolImageBridge.discardPending();
+                  throw new ProviderImageAttachmentError();
+                }
+              }
+            } else content = redactSecrets(JSON.stringify({ ok: true, result }));
             succeeded = true;
           } catch (error) {
             if (controller.signal.aborted) throw error;

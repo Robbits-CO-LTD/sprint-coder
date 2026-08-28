@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import sharp from 'sharp';
 import {
   SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
   type EffectiveWorkspaceSet,
@@ -556,10 +558,64 @@ describe('Provider workspace read tools', () => {
     });
   });
 
-  it('views a bounded image by magic bytes through a guarded handle', async () => {
+  it('canonicalizes a supported image before returning it through a guarded handle', async () => {
     const { root, tools, context } = await harness();
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
-    await writeFile(join(root, 'pixel.bin'), png);
+    const metadataSentinel = 'VIEW_IMAGE_METADATA_SENTINEL';
+    const trailingSentinel = Buffer.from('VIEW_IMAGE_TRAILING_SENTINEL');
+    const encoded = await sharp({
+      create: {
+        width: 900,
+        height: 700,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png({ compressionLevel: 0 })
+      .withMetadata({ exif: { IFD0: { ImageDescription: metadataSentinel } } })
+      .toBuffer();
+    const source = Buffer.concat([encoded, trailingSentinel]);
+    await writeFile(join(root, 'pixel.png'), source);
+
+    const result = await tools.broker.dispatch({
+      ...context,
+      callId: 'view-image',
+      providerName: 'view_image',
+      input: { path: 'pixel.png' },
+    });
+    const image = result as {
+      path: string;
+      mimeType: string;
+      byteLength: number;
+      sha256: string;
+      dataUrl: string;
+    };
+    const canonical = Buffer.from(image.dataUrl.replace(/^data:image\/png;base64,/u, ''), 'base64');
+
+    expect(image).toMatchObject({
+      path: 'pixel.png',
+      mimeType: 'image/png',
+      byteLength: canonical.byteLength,
+      sha256: createHash('sha256').update(canonical).digest('hex'),
+      dataUrl: `data:image/png;base64,${canonical.toString('base64')}`,
+    });
+    expect(canonical.equals(source)).toBe(false);
+    expect(canonical.includes(Buffer.from(metadataSentinel))).toBe(false);
+    expect(canonical.includes(trailingSentinel)).toBe(false);
+    const metadata = await sharp(canonical).metadata();
+    expect(metadata).toMatchObject({
+      format: 'png',
+      width: 900,
+      height: 700,
+    });
+    expect(metadata.exif).toBeUndefined();
+  });
+
+  it('rejects a magic-byte lookalike instead of treating it as an image', async () => {
+    const { root, tools, context } = await harness();
+    await writeFile(
+      join(root, 'pixel.bin'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]),
+    );
     await expect(
       tools.broker.dispatch({
         ...context,
@@ -567,12 +623,7 @@ describe('Provider workspace read tools', () => {
         providerName: 'view_image',
         input: { path: 'pixel.bin' },
       }),
-    ).resolves.toMatchObject({
-      path: 'pixel.bin',
-      mimeType: 'image/png',
-      byteLength: png.length,
-      dataUrl: `data:image/png;base64,${png.toString('base64')}`,
-    });
+    ).rejects.toMatchObject({ code: 'IMAGE_FORMAT_UNSUPPORTED' });
   });
 
   it('searches bounded UTF-8 files without following symlinks or disclosing secrets', async () => {

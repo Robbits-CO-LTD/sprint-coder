@@ -21,7 +21,6 @@ import type {
 } from './provider-runtime';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { secureLogger } from './secure-logger';
-import { redactSecrets } from './secret-redactor';
 
 export const MANAGED_LOCAL_CONNECTION_ID = 'managed-local:runtime';
 export const MANAGED_LOCAL_PROVIDER_ID = 'sprint-managed-local';
@@ -181,10 +180,9 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
       const responseBody = response.body;
       if (!response.ok || (forcedToolName === undefined && responseBody === null)) {
         if (!response.ok) {
-          const detail = await response.text().catch(() => '');
+          if (response.body !== null) void response.body.cancel().catch(() => undefined);
           secureLogger.warn('Managed Local runtime rejected a Provider request', {
             status: response.status,
-            detail: redactSecrets(detail.slice(0, 500)),
           });
         }
         yield {
@@ -222,8 +220,10 @@ export class ManagedLocalProviderRuntime implements ProviderRuntime {
               body: JSON.stringify(body),
               signal: controller.signal,
             });
-            if (!response.ok)
+            if (!response.ok) {
+              if (response.body !== null) void response.body.cancel().catch(() => undefined);
               throw new ManagedLocalProtocolError('Managed Local forced tool retry was rejected');
+            }
           }
         }
         throw new ManagedLocalProtocolError('Managed Local forced tool call is missing');

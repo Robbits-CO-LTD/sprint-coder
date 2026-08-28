@@ -305,13 +305,17 @@ function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
   );
 }
 
-type CanonicalImage = Readonly<{
+export type CanonicalImage = Readonly<{
   bytes: Buffer;
   mimeType: ImageAttachmentMimeType;
   sha256: string;
 }>;
 
-async function canonicalizeImage(input: Buffer): Promise<CanonicalImage> {
+/**
+ * The only image-byte boundary shared by attachments and trusted workspace-image tools.
+ * Callers may retain or transmit only the returned deterministic re-encoding.
+ */
+export async function canonicalizeImage(input: Buffer): Promise<CanonicalImage> {
   try {
     rejectAnimatedPng(input);
     const decoder = sharp(input, {
