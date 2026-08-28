@@ -155,6 +155,10 @@ import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failu
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
+import {
+  MANAGED_LOCAL_CONNECTION_ID,
+  MANAGED_LOCAL_PROVIDER_ID,
+} from './managed-local-provider-runtime';
 
 describe('file edit tracking identity', () => {
   it('deduplicates Windows relative paths that differ only by casing', () => {
@@ -973,6 +977,73 @@ describe('Main image attachment dispatch boundary', () => {
     expect(() => providerMessagesFromContext([], 'message-current', prepared.inlineImages)).toThrow(
       'Provider image attachment binding is stale',
     );
+  });
+
+  it('rejects a tool image binding captured for a different model than the started turn', async () => {
+    const taskId = 'task-tool-image-model-drift';
+    const startedSelection = {
+      connectionId: MANAGED_LOCAL_CONNECTION_ID,
+      requestedProvider: MANAGED_LOCAL_PROVIDER_ID,
+      requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+    };
+    const driftedSelection = {
+      taskId,
+      runtimeKind: 'codex' as const,
+      model: 'gpt-5',
+      modelSelection: {
+        ...startedSelection,
+        requestedModel: 'different-vision-model',
+      },
+    };
+    const driftedSnapshot = {
+      runtimeKind: 'provider' as const,
+      connectionId: MANAGED_LOCAL_CONNECTION_ID,
+      providerId: MANAGED_LOCAL_PROVIDER_ID,
+      modelId: 'different-vision-model',
+      value: true,
+      revision: 'drifted-capability-revision',
+      capturedAtMs: Date.now(),
+    };
+    const binding = {
+      kind: 'provider_inline' as const,
+      snapshot: driftedSnapshot,
+      selectionIdentity: imageAttachmentSelectionIdentityDigest(
+        buildProviderImageAttachmentSelectionIdentity(driftedSelection, driftedSnapshot)!,
+      ),
+    };
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      persistence: {
+        getImageAttachmentAcceptanceSelection: vi.fn().mockReturnValue(driftedSelection),
+      },
+      captureProviderImageAttachmentCapability: vi.fn().mockResolvedValue(driftedSnapshot),
+      providerEgressTrustForConnection: vi.fn().mockReturnValue('trusted-local'),
+    });
+    const probe = router as unknown as {
+      providerToolImageStillValid(
+        started: unknown,
+        connection: unknown,
+        binding: unknown,
+        signal: AbortSignal,
+      ): Promise<boolean>;
+    };
+
+    await expect(
+      probe.providerToolImageStillValid(
+        {
+          event: { taskId },
+          modelSelection: startedSelection,
+        },
+        {
+          id: MANAGED_LOCAL_CONNECTION_ID,
+          providerId: MANAGED_LOCAL_PROVIDER_ID,
+          runtimeKind: 'openai_compatible',
+          secretReference: null,
+        },
+        binding,
+        new AbortController().signal,
+      ),
+    ).resolves.toBe(false);
   });
 
   it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {

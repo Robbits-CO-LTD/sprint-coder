@@ -315,7 +315,10 @@ export type CanonicalImage = Readonly<{
  * The only image-byte boundary shared by attachments and trusted workspace-image tools.
  * Callers may retain or transmit only the returned deterministic re-encoding.
  */
-export async function canonicalizeImage(input: Buffer): Promise<CanonicalImage> {
+export async function canonicalizeImage(
+  input: Buffer,
+  options: Readonly<{ lossless?: boolean }> = {},
+): Promise<CanonicalImage> {
   try {
     rejectAnimatedPng(input);
     const decoder = sharp(input, {
@@ -327,11 +330,15 @@ export async function canonicalizeImage(input: Buffer): Promise<CanonicalImage> 
     const metadata = await decoder.metadata();
     assertSupportedMetadata(metadata);
     const pipeline = decoder.rotate();
-    const output = await encodeCanonical(pipeline, metadata.format!);
-    assertOutputInfo(output.info, metadata.format!);
+    const outputFormat = options.lossless && metadata.format !== 'png' ? 'webp' : metadata.format;
+    const output =
+      options.lossless && metadata.format !== 'png'
+        ? await pipeline.webp({ lossless: true }).toBuffer({ resolveWithObject: true })
+        : await encodeCanonical(pipeline, metadata.format!);
+    assertOutputInfo(output.info, outputFormat);
     if (output.data.byteLength < 1 || output.data.byteLength > IMAGE_ATTACHMENT_MAX_BYTES)
       throw new ImageAttachmentValidationError('file_too_large');
-    const mimeType = mimeTypeForFormat(metadata.format!);
+    const mimeType = mimeTypeForFormat(outputFormat);
     return {
       bytes: output.data,
       mimeType,

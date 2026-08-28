@@ -7,6 +7,7 @@ import {
   parseSuccessfulToolImageResult,
   toolImageEgressDenialCause,
 } from './tool-image-bridge';
+import { canonicalizeImage } from './image-attachment-store';
 
 type ImageResult = {
   path: string;
@@ -49,6 +50,39 @@ describe('tool image bridge', () => {
       base64: canonical.toString('base64'),
     });
   });
+
+  it.each(['jpeg', 'webp'] as const)(
+    'accepts a %s workspace image after lossless tool canonicalization',
+    async (format) => {
+      const width = 128;
+      const height = 96;
+      const raw = Buffer.alloc(width * height * 3);
+      for (let offset = 0; offset < raw.length; offset += 1) raw[offset] = (offset * 37) % 256;
+      const sourcePipeline = sharp(raw, { raw: { width, height, channels: 3 } });
+      const source =
+        format === 'jpeg'
+          ? await sourcePipeline.jpeg({ quality: 83 }).toBuffer()
+          : await sourcePipeline.webp({ quality: 83 }).toBuffer();
+      const canonical = await canonicalizeImage(source, { lossless: true });
+      const bridge = new ToolImageBridge();
+      const accepted = await bridge.acceptToolResult({
+        toolCallId: `call-${format}`,
+        toolName: 'view_image',
+        result: imageResult(canonical.bytes, canonical.mimeType),
+      });
+      const dispatched = bridge.consumeForNextDispatch({
+        baseMessages: [accepted.toolMessage],
+        directImages: [],
+      });
+
+      expect(canonical.mimeType).toBe('image/webp');
+      expect(accepted.toolMessage.content).not.toContain(canonical.bytes.toString('base64'));
+      expect(dispatched.messages.at(-1)).toMatchObject({
+        role: 'user',
+        inlineImages: [{ mimeType: 'image/webp', base64: canonical.bytes.toString('base64') }],
+      });
+    },
+  );
 
   it('rejects malformed and noncanonical results without retaining their Base64', async () => {
     const canonical = await canonicalPng(30);

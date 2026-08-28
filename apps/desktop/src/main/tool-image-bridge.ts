@@ -107,7 +107,7 @@ export async function parseSuccessfulToolImageResult(
   )
     return null;
   try {
-    const canonical = await canonicalizeImage(bytes);
+    const canonical = await canonicalizeImage(bytes, { lossless: true });
     if (
       canonical.mimeType !== mimeType ||
       canonical.sha256 !== sha256 ||

@@ -4739,6 +4739,14 @@ export class IpcRouter {
       return false;
     const selection = this.persistence.getImageAttachmentAcceptanceSelection(started.event.taskId);
     const current = await this.captureProviderImageAttachmentCapability(selection, signal);
+    if (
+      connection.id !== current.connectionId ||
+      connection.providerId !== current.providerId ||
+      started.modelSelection.connectionId !== current.connectionId ||
+      started.modelSelection.requestedProvider !== current.providerId ||
+      started.modelSelection.requestedModel !== current.modelId
+    )
+      return false;
     try {
       assertVerifiedToolImageDispatch({
         connection: { managedLocal: true, localEndpointTrusted: true },
@@ -6237,6 +6245,11 @@ export class IpcRouter {
                   connection.runtimeKind === 'openai_compatible' &&
                   connection.secretReference === null &&
                   this.providerEgressTrustForConnection(connection) === 'trusted-local' &&
+                  connection.id === snapshot.connectionId &&
+                  connection.providerId === snapshot.providerId &&
+                  started.modelSelection.connectionId === snapshot.connectionId &&
+                  started.modelSelection.requestedProvider === snapshot.providerId &&
+                  started.modelSelection.requestedModel === snapshot.modelId &&
                   capability.status === 'supported' &&
                   capability.selectionIdentity !== null
                 )

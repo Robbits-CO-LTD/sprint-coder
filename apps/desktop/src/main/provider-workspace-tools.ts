@@ -1247,7 +1247,7 @@ async function viewWorkspaceImage(input: PreparedWorkspaceInput): Promise<{
     const bytes = await handle.readFile();
     let canonical: Awaited<ReturnType<typeof canonicalizeImage>>;
     try {
-      canonical = await canonicalizeImage(bytes);
+      canonical = await canonicalizeImage(bytes, { lossless: true });
     } catch {
       throw new WorkspaceToolRejection(
         'IMAGE_FORMAT_UNSUPPORTED',
