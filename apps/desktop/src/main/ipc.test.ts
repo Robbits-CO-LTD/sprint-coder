@@ -1214,6 +1214,43 @@ describe('Main image attachment dispatch boundary', () => {
     logger.mockRestore();
   });
 
+  it('propagates cancellation while a provider image tool is executing', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('turn canceled');
+    const brokerDispatch = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(cancellation), { once: true });
+        }),
+    );
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const pending = probe.dispatchManagedRuntimeTool(
+      'task-provider-image-cancel',
+      'turn-provider-image-cancel',
+      { callId: 'call-cancel', toolName: 'view_image', arguments: { path: 'image.png' } },
+      controller.signal,
+      new ToolImageBridge(),
+    );
+    controller.abort();
+
+    await expect(pending).rejects.toBe(cancellation);
+    expect(brokerDispatch).toHaveBeenCalledOnce();
+  });
+
   it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {
     const callId = 'uR9mF3xP8qT2vW7kL4nB6cD1sH5jA0zE';
     const messages = [

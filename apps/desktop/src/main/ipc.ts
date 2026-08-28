@@ -3815,7 +3815,8 @@ export class IpcRouter {
           result,
         });
         return Object.freeze({ kind: 'provider_image_tool', ...accepted });
-      } catch {
+      } catch (error) {
+        if (signal.aborted) throw error;
         const rejected = await providerImageBridge!.acceptToolResult({
           toolCallId: request.callId,
           toolName: request.toolName,
