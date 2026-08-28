@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { providerEventsWithDeadline } from './provider-stream-deadline';
+import {
+  OLLAMA_IMAGE_FIRST_EVENT_TIMEOUT_MS,
+  PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+  providerEventsWithDeadline,
+  providerFirstEventTimeoutMs,
+} from './provider-stream-deadline';
 
 function neverYields(): AsyncIterable<string> {
   return {
@@ -15,6 +20,18 @@ async function* yieldsOnceThenWaits(): AsyncIterable<string> {
 }
 
 describe('providerEventsWithDeadline', () => {
+  it('allows bounded extra first-token time only for Ollama image requests', () => {
+    expect(providerFirstEventTimeoutMs({ providerId: 'ollama', hasInlineImages: true })).toBe(
+      OLLAMA_IMAGE_FIRST_EVENT_TIMEOUT_MS,
+    );
+    expect(providerFirstEventTimeoutMs({ providerId: 'ollama', hasInlineImages: false })).toBe(
+      PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+    );
+    expect(providerFirstEventTimeoutMs({ providerId: 'openrouter', hasInlineImages: true })).toBe(
+      PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+    );
+  });
+
   it('fails when the provider does not emit its first event', async () => {
     vi.useFakeTimers();
     try {

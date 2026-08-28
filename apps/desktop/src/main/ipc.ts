@@ -560,10 +560,10 @@ import {
 } from './provider-runtime';
 import type { ProviderModelLease } from './ollama-model-lifecycle';
 import {
-  PROVIDER_FIRST_EVENT_TIMEOUT_MS,
   PROVIDER_IDLE_TIMEOUT_MS,
   ProviderStreamTimeoutError,
   providerEventsWithDeadline,
+  providerFirstEventTimeoutMs,
 } from './provider-stream-deadline';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
 import {
@@ -5983,7 +5983,12 @@ export class IpcRouter {
             ),
             {
               executionId,
-              firstEventTimeoutMs: PROVIDER_FIRST_EVENT_TIMEOUT_MS,
+              firstEventTimeoutMs: providerFirstEventTimeoutMs({
+                providerId: connection.providerId,
+                hasInlineImages: dispatchRound.messages.some(
+                  (message) => (message.inlineImages?.length ?? 0) > 0,
+                ),
+              }),
               idleTimeoutMs: PROVIDER_IDLE_TIMEOUT_MS,
             },
           ),
