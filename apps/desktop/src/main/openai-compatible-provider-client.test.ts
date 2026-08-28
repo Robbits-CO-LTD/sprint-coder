@@ -12,7 +12,10 @@ import {
   resolveOllamaNativeGenerateEndpoint,
   resolveOllamaNativeShowEndpoint,
 } from './openai-compatible-provider-client';
-import { ProviderEndpointPolicy } from './provider-endpoint-policy';
+import {
+  ProviderEndpointPolicy,
+  fetchWithProviderEndpointPolicy,
+} from './provider-endpoint-policy';
 import { providerEventsWithDeadline } from './provider-stream-deadline';
 
 const profile: ProviderProfile = {
@@ -1006,4 +1009,81 @@ describe('openAICompatibleChatCompletionRequest', () => {
       ],
     });
   });
+});
+it('re-resolves and pins the real chat request before exposing its image body', async () => {
+  const localProfile: ProviderProfile = {
+    ...profile,
+    id: 'local-vision',
+    baseUrl: 'http://localhost:11434/v1',
+    baseUrlConfigurable: true,
+    requiredCredentialFields: [],
+  };
+  const profiles = new MainProviderProfileRegistry();
+  profiles.register(localProfile);
+  const localConnection: ProviderConnection = {
+    ...connection,
+    id: 'local-vision:connection',
+    providerId: localProfile.id,
+  };
+  const credential = approvedCredential(localProfile);
+  const deniedTransport = vi.fn();
+  const deniedPolicy = new ProviderEndpointPolicy(async () => [
+    { address: '192.168.1.20', family: 4 },
+  ]);
+  const deniedClient = new OpenAICompatibleProviderClient(
+    profiles,
+    () => credential,
+    (input, init) => fetchWithProviderEndpointPolicy(deniedPolicy, input, init, deniedTransport),
+  );
+  const request = {
+    executionId: 'execution-request-time-dns',
+    connectionId: localConnection.id,
+    modelId: 'vision-model',
+    messages: [
+      {
+        role: 'user' as const,
+        content: 'inspect',
+        inlineImages: [{ mimeType: 'image/png' as const, base64: 'aW1hZ2U=' }],
+      },
+    ],
+  };
+
+  await expect(
+    collect(deniedClient.execute(localConnection, request, new AbortController().signal)),
+  ).resolves.toContainEqual(
+    expect.objectContaining({
+      type: 'error',
+      error: expect.objectContaining({ category: 'network' }),
+    }),
+  );
+  expect(deniedTransport).not.toHaveBeenCalled();
+
+  const allowedTransport = vi.fn(
+    async (_prepared: unknown, _init: RequestInit) =>
+      new Response(
+        sse([
+          { choices: [{ delta: { content: 'ok' }, finish_reason: null }] },
+          { choices: [{ delta: {}, finish_reason: 'stop' }] },
+        ]),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+  );
+  const allowedPolicy = new ProviderEndpointPolicy(async () => [
+    { address: '127.0.0.1', family: 4 },
+  ]);
+  const allowedClient = new OpenAICompatibleProviderClient(
+    profiles,
+    () => credential,
+    (input, init) => fetchWithProviderEndpointPolicy(allowedPolicy, input, init, allowedTransport),
+  );
+
+  const allowedEvents = await collect(
+    allowedClient.execute(localConnection, request, new AbortController().signal),
+  );
+  expect(allowedTransport).toHaveBeenCalledOnce();
+  expect(allowedTransport.mock.calls[0]?.[0]).toMatchObject({
+    trust: 'trusted-local',
+    addresses: [{ address: '127.0.0.1', family: 4 }],
+  });
+  expect(allowedEvents).toContainEqual({ type: 'output_delta', text: 'ok' });
 });

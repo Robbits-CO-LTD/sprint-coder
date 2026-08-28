@@ -311,13 +311,18 @@ export type CanonicalImage = Readonly<{
   sha256: string;
 }>;
 
-/**
- * The only image-byte boundary shared by attachments and trusted workspace-image tools.
- * Callers may retain or transmit only the returned deterministic re-encoding.
- */
-export async function canonicalizeImage(
+async function canonicalizeImage(input: Buffer): Promise<CanonicalImage> {
+  return canonicalizeDecodedImage(input, null);
+}
+
+/** Canonical byte boundary used only by trusted workspace-image tools. */
+export async function canonicalizeProviderToolImage(input: Buffer): Promise<CanonicalImage> {
+  return canonicalizeDecodedImage(input, 'png');
+}
+
+async function canonicalizeDecodedImage(
   input: Buffer,
-  options: Readonly<{ lossless?: boolean }> = {},
+  forcedFormat: 'png' | null,
 ): Promise<CanonicalImage> {
   try {
     rejectAnimatedPng(input);
@@ -330,10 +335,12 @@ export async function canonicalizeImage(
     const metadata = await decoder.metadata();
     assertSupportedMetadata(metadata);
     const pipeline = decoder.rotate();
-    const outputFormat = options.lossless && metadata.format !== 'png' ? 'webp' : metadata.format;
+    const outputFormat = forcedFormat ?? metadata.format;
     const output =
-      options.lossless && metadata.format !== 'png'
-        ? await pipeline.webp({ lossless: true }).toBuffer({ resolveWithObject: true })
+      forcedFormat === 'png'
+        ? await pipeline
+            .png({ compressionLevel: 9, adaptiveFiltering: false, palette: false })
+            .toBuffer({ resolveWithObject: true })
         : await encodeCanonical(pipeline, metadata.format!);
     assertOutputInfo(output.info, outputFormat);
     if (output.data.byteLength < 1 || output.data.byteLength > IMAGE_ATTACHMENT_MAX_BYTES)

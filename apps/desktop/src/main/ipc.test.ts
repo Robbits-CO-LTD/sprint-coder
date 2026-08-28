@@ -155,10 +155,8 @@ import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failu
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
-import {
-  MANAGED_LOCAL_CONNECTION_ID,
-  MANAGED_LOCAL_PROVIDER_ID,
-} from './managed-local-provider-runtime';
+import { ToolImageBridge } from './tool-image-bridge';
+import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 
 describe('file edit tracking identity', () => {
   it('deduplicates Windows relative paths that differ only by casing', () => {
@@ -873,6 +871,12 @@ describe('Main image attachment dispatch boundary', () => {
           mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
           base64: string;
         }>;
+        auditImages: Array<{
+          id?: string;
+          mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+          byteLength: number;
+          sha256: string;
+        }>;
         manifestDigest: string;
         byteCount: number;
       };
@@ -898,6 +902,11 @@ describe('Main image attachment dispatch boundary', () => {
     ]);
     expect(prepared.manifestDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(prepared.byteCount).toBe(6);
+    expect(prepared.auditImages).toEqual([
+      { id: 'image-a', mimeType: 'image/png', byteLength: 3, sha256: 'a'.repeat(64) },
+      { id: 'image-b', mimeType: 'image/webp', byteLength: 3, sha256: 'b'.repeat(64) },
+    ]);
+    expect(JSON.stringify(prepared.auditImages)).not.toContain('b25l');
     await expect(
       probe.providerImageAttachmentStillValid(
         started,
@@ -979,71 +988,230 @@ describe('Main image attachment dispatch boundary', () => {
     );
   });
 
-  it('rejects a tool image binding captured for a different model than the started turn', async () => {
+  it('rejects an initially non-OpenAI-compatible tool image connection', () => {
     const taskId = 'task-tool-image-model-drift';
     const startedSelection = {
-      connectionId: MANAGED_LOCAL_CONNECTION_ID,
-      requestedProvider: MANAGED_LOCAL_PROVIDER_ID,
+      connectionId: 'connection-official',
+      requestedProvider: 'openai',
       requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
-    };
-    const driftedSelection = {
-      taskId,
-      runtimeKind: 'codex' as const,
-      model: 'gpt-5',
-      modelSelection: {
-        ...startedSelection,
-        requestedModel: 'different-vision-model',
-      },
-    };
-    const driftedSnapshot = {
-      runtimeKind: 'provider' as const,
-      connectionId: MANAGED_LOCAL_CONNECTION_ID,
-      providerId: MANAGED_LOCAL_PROVIDER_ID,
-      modelId: 'different-vision-model',
-      value: true,
-      revision: 'drifted-capability-revision',
-      capturedAtMs: Date.now(),
-    };
-    const binding = {
-      kind: 'provider_inline' as const,
-      snapshot: driftedSnapshot,
-      selectionIdentity: imageAttachmentSelectionIdentityDigest(
-        buildProviderImageAttachmentSelectionIdentity(driftedSelection, driftedSnapshot)!,
-      ),
     };
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
       persistence: {
-        getImageAttachmentAcceptanceSelection: vi.fn().mockReturnValue(driftedSelection),
+        getProviderConnection: vi.fn().mockReturnValue({
+          id: startedSelection.connectionId,
+          providerId: startedSelection.requestedProvider,
+          runtimeKind: 'official_api',
+          displayName: 'Official API',
+          enabled: true,
+          secretReference: null,
+          verification: {
+            status: 'verified',
+            verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            message: null,
+          },
+          rateLimit: {
+            mode: 'auto',
+            maxConcurrentRequests: null,
+            requestsPerMinute: null,
+            tokensPerMinute: null,
+            lastObservedRateLimitHeaders: null,
+          },
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+        }),
+        getTaskModelSelection: vi.fn().mockReturnValue(startedSelection),
       },
-      captureProviderImageAttachmentCapability: vi.fn().mockResolvedValue(driftedSnapshot),
-      providerEgressTrustForConnection: vi.fn().mockReturnValue('trusted-local'),
     });
     const probe = router as unknown as {
-      providerToolImageStillValid(
-        started: unknown,
-        connection: unknown,
-        binding: unknown,
-        signal: AbortSignal,
-      ): Promise<boolean>;
+      readProviderToolImageState(started: unknown, connectionId: string, modelId: string): unknown;
     };
 
-    await expect(
-      probe.providerToolImageStillValid(
-        {
-          event: { taskId },
-          modelSelection: startedSelection,
-        },
-        {
-          id: MANAGED_LOCAL_CONNECTION_ID,
-          providerId: MANAGED_LOCAL_PROVIDER_ID,
-          runtimeKind: 'openai_compatible',
-          secretReference: null,
-        },
-        binding,
-        new AbortController().signal,
+    expect(
+      probe.readProviderToolImageState(
+        { event: { taskId }, modelSelection: startedSelection },
+        startedSelection.connectionId,
+        startedSelection.requestedModel,
       ),
-    ).resolves.toBe(false);
+    ).toBeNull();
+  });
+
+  it('binds a verified loopback chat-completions profile with an empty API credential', () => {
+    const taskId = 'task-tool-image-loopback';
+    const baseUrl = 'http://127.0.0.1:11434/v1';
+    const endpointPolicy = new ProviderEndpointPolicy();
+    const endpointDigest = endpointPolicy.digestForBaseUrl(baseUrl);
+    const selection = {
+      connectionId: 'ollama:loopback',
+      requestedProvider: 'ollama',
+      requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+    };
+    const connection = {
+      id: selection.connectionId,
+      providerId: selection.requestedProvider,
+      runtimeKind: 'openai_compatible' as const,
+      displayName: 'Ollama loopback',
+      enabled: true,
+      secretReference: 'provider-secret:00000000-0000-4000-8000-000000000000',
+      verification: {
+        status: 'verified' as const,
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto' as const,
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const profile = {
+      id: 'ollama',
+      displayName: 'Ollama',
+      baseUrl,
+      baseUrlConfigurable: true,
+      computeLocation: 'local' as const,
+      nativeModelLifecycle: 'ollama' as const,
+      protocol: 'chat_completions' as const,
+      modelsPath: '/models',
+      curatedModels: [],
+      verificationModel: null,
+      authentication: { headerName: 'Authorization', scheme: 'Bearer' },
+      requiredCredentialFields: [],
+      errorOverrides: [],
+      sourceReference: 'https://ollama.com/',
+      reviewedAt: new Date(0).toISOString(),
+    };
+    const compatibleRuntime = {};
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      persistence: {
+        getProviderConnection: vi.fn().mockReturnValue(connection),
+        getTaskModelSelection: vi.fn().mockReturnValue(selection),
+      },
+      providerRegistry: { resolve: vi.fn().mockReturnValue(compatibleRuntime) },
+      compatibleRuntime,
+      providerProfiles: { get: vi.fn().mockReturnValue(profile) },
+      providerSecrets: {
+        get: vi
+          .fn()
+          .mockReturnValue(
+            JSON.stringify({ baseUrl, endpointDigest, localConsentDigest: endpointDigest }),
+          ),
+      },
+      providerEndpointPolicy: endpointPolicy,
+      modelCatalog: {
+        revision: 7,
+        find: vi.fn().mockReturnValue({
+          connectionId: selection.connectionId,
+          providerId: selection.requestedProvider,
+          modelId: selection.requestedModel,
+        }),
+      },
+    });
+    const probe = router as unknown as {
+      readProviderToolImageState(started: unknown, connectionId: string, modelId: string): unknown;
+    };
+
+    const state = probe.readProviderToolImageState(
+      { event: { taskId }, modelSelection: selection },
+      selection.connectionId,
+      selection.requestedModel,
+    );
+
+    expect(state).toMatchObject({
+      binding: {
+        connectionId: selection.connectionId,
+        providerId: selection.requestedProvider,
+        modelId: selection.requestedModel,
+        requestUrl: `${baseUrl}/chat/completions`,
+        modelCatalogRevision: 7,
+      },
+    });
+    expect(JSON.stringify(state)).not.toContain('apiKey');
+  });
+
+  it('denies generic view_image callbacks before broker execution', async () => {
+    const brokerDispatch = vi.fn();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, { managedCodingHarness: { broker: { dispatch: brokerDispatch } } });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+    };
+
+    const result = await probe.dispatchManagedRuntimeTool(
+      'task-generic-image',
+      'turn-generic-image',
+      { callId: 'call-generic', toolName: 'view_image', arguments: { path: 'image.png' } },
+      new AbortController().signal,
+    );
+
+    expect(brokerDispatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      kind: 'provider_image_tool',
+      accepted: false,
+      toolMessage: {
+        toolCallId: 'call-generic',
+        content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('data:image/');
+  });
+
+  it('contains hostile broker thenable failures inside the provider image bridge', async () => {
+    const leak = 'data:image/png;base64,HOSTILE_THENABLE_LEAK';
+    const thenable = Object.defineProperty({}, 'then', {
+      get: () => {
+        throw new Error(leak);
+      },
+    });
+    const brokerDispatch = vi.fn(() => thenable);
+    const logger = vi.spyOn(secureLogger, 'error');
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const result = await probe.dispatchManagedRuntimeTool(
+      'task-provider-image',
+      'turn-provider-image',
+      { callId: 'call-hostile', toolName: 'view_image', arguments: { path: 'image.png' } },
+      new AbortController().signal,
+      new ToolImageBridge(),
+    );
+
+    expect(brokerDispatch).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      kind: 'provider_image_tool',
+      accepted: false,
+      toolMessage: {
+        toolCallId: 'call-hostile',
+        content: expect.stringContaining('INVALID_TOOL_RESULT'),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(leak);
+    expect(logger.mock.calls.flat().join('\n')).not.toContain(leak);
+    logger.mockRestore();
   });
 
   it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {

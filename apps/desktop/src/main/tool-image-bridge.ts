@@ -1,14 +1,16 @@
 import { createHash } from 'node:crypto';
 import type { ImageAttachmentMimeType, ProviderExecutionRequest } from '@sprint-coder/contracts';
 import { digestCanonical } from './context-compiler';
-import { canonicalizeImage } from './image-attachment-store';
+import { canonicalizeProviderToolImage } from './image-attachment-store';
 import type { ProviderSafeFailureCause } from './provider-failure-diagnostic';
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_DATA_URL_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 64;
 const DATA_URL = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]+={0,2})$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 
-export type VerifiedToolImage = Readonly<{
+type VerifiedToolImage = Readonly<{
+  toolCallId: string;
   mimeType: ImageAttachmentMimeType;
   byteLength: number;
   sha256: string;
@@ -20,17 +22,12 @@ export type ToolImageAuditInput = Readonly<{
   mimeType: ImageAttachmentMimeType;
   byteLength: number;
   sha256: string;
-  base64: string;
 }>;
 
 type ToolImageAcceptance = Readonly<{
   toolMessage: ProviderExecutionRequest['messages'][number];
-  image?: VerifiedToolImage;
+  accepted: boolean;
 }>;
-
-function supportedMimeType(value: string): value is ImageAttachmentMimeType {
-  return value === 'image/png' || value === 'image/jpeg' || value === 'image/webp';
-}
 
 function imageMetadataMessage(
   toolCallId: string,
@@ -52,26 +49,46 @@ function imageMetadataMessage(
   };
 }
 
-function invalidImageMessage(
+function fixedToolFailure(
   toolCallId: string,
   toolName: string,
+  code: 'INVALID_TOOL_RESULT' | 'VIEW_IMAGE_NOT_PERMITTED',
+  message: string,
 ): ProviderExecutionRequest['messages'][number] {
   return {
     role: 'tool',
     toolCallId,
     toolName,
-    content: JSON.stringify({
-      ok: false,
-      error: {
-        code: 'INVALID_TOOL_RESULT',
-        message: 'view_image returned an invalid image result',
-      },
-    }),
+    content: JSON.stringify({ ok: false, error: { code, message } }),
   };
 }
 
-/** Validates raw view_image output before any result serialization can retain the data URL. */
-export async function parseSuccessfulToolImageResult(
+export function toolImageNotPermittedMessage(
+  toolCallId: string,
+  toolName = 'view_image',
+): ProviderExecutionRequest['messages'][number] {
+  return fixedToolFailure(
+    toolCallId,
+    toolName,
+    'VIEW_IMAGE_NOT_PERMITTED',
+    '画像の利用は許可されていません。',
+  );
+}
+
+function invalidImageMessage(
+  toolCallId: string,
+  toolName: string,
+): ProviderExecutionRequest['messages'][number] {
+  return fixedToolFailure(
+    toolCallId,
+    toolName,
+    'INVALID_TOOL_RESULT',
+    'view_image returned an invalid image result',
+  );
+}
+
+async function parseSuccessfulToolImageResult(
+  toolCallId: string,
   result: unknown,
 ): Promise<VerifiedToolImage | null> {
   if (result === null || typeof result !== 'object' || Array.isArray(result)) return null;
@@ -82,7 +99,7 @@ export async function parseSuccessfulToolImageResult(
   const dataUrl = record['dataUrl'];
   if (
     typeof mimeType !== 'string' ||
-    !supportedMimeType(mimeType) ||
+    mimeType !== 'image/png' ||
     typeof byteLength !== 'number' ||
     !Number.isSafeInteger(byteLength) ||
     typeof sha256 !== 'string' ||
@@ -93,7 +110,7 @@ export async function parseSuccessfulToolImageResult(
     byteLength < 1 ||
     byteLength > MAX_IMAGE_BYTES ||
     !SHA256.test(sha256) ||
-    dataUrl.length > MAX_IMAGE_BYTES * 2
+    dataUrl.length > MAX_DATA_URL_CHARS
   )
     return null;
   const match = DATA_URL.exec(dataUrl);
@@ -107,7 +124,7 @@ export async function parseSuccessfulToolImageResult(
   )
     return null;
   try {
-    const canonical = await canonicalizeImage(bytes, { lossless: true });
+    const canonical = await canonicalizeProviderToolImage(bytes);
     if (
       canonical.mimeType !== mimeType ||
       canonical.sha256 !== sha256 ||
@@ -118,7 +135,7 @@ export async function parseSuccessfulToolImageResult(
   } catch {
     return null;
   }
-  return Object.freeze({ mimeType, byteLength, sha256, base64 });
+  return Object.freeze({ toolCallId, mimeType, byteLength, sha256, base64 });
 }
 
 export class ToolImageBridge {
@@ -130,24 +147,28 @@ export class ToolImageBridge {
     result: unknown;
   }): Promise<ToolImageAcceptance> {
     if (input.toolName !== 'view_image')
-      return {
-        toolMessage: {
-          role: 'tool',
-          toolCallId: input.toolCallId,
-          toolName: input.toolName,
-          content: JSON.stringify({ ok: true, result: input.result }),
-        },
-      };
-    const image = await parseSuccessfulToolImageResult(input.result);
-    if (image === null)
       return Object.freeze({
         toolMessage: invalidImageMessage(input.toolCallId, input.toolName),
+        accepted: false,
       });
-    this.pendingImage = image;
-    return Object.freeze({
-      toolMessage: imageMetadataMessage(input.toolCallId, input.toolName, image),
-      image,
-    });
+    try {
+      const image = await parseSuccessfulToolImageResult(input.toolCallId, input.result);
+      if (image === null)
+        return Object.freeze({
+          toolMessage: invalidImageMessage(input.toolCallId, input.toolName),
+          accepted: false,
+        });
+      this.pendingImage = image;
+      return Object.freeze({
+        toolMessage: imageMetadataMessage(input.toolCallId, input.toolName, image),
+        accepted: true,
+      });
+    } catch {
+      return Object.freeze({
+        toolMessage: invalidImageMessage(input.toolCallId, input.toolName),
+        accepted: false,
+      });
+    }
   }
 
   discardPending(): void {
@@ -159,7 +180,7 @@ export class ToolImageBridge {
     directImages: readonly ToolImageAuditInput[];
   }): Readonly<{
     messages: ProviderExecutionRequest['messages'];
-    toolImage?: VerifiedToolImage;
+    hasToolImage: boolean;
     audit: Readonly<{ manifestDigest: string; byteCount: number }>;
   }> {
     const toolImage = this.pendingImage;
@@ -177,23 +198,26 @@ export class ToolImageBridge {
           ];
     const manifest = [
       ...input.directImages.map(({ id, mimeType, byteLength, sha256 }, ordinal) => ({
-        directAttachment: { id: id ?? `ordinal:${ordinal}`, ordinal, mimeType, byteLength, sha256 },
+        id: id ?? `ordinal:${ordinal}`,
+        ordinal,
+        mimeType,
+        byteLength,
+        sha256,
       })),
       ...(toolImage === null
         ? []
         : [
             {
-              toolImage: {
-                mimeType: toolImage.mimeType,
-                byteLength: toolImage.byteLength,
-                sha256: toolImage.sha256,
-              },
+              id: `tool:${toolImage.toolCallId}`,
+              mimeType: toolImage.mimeType,
+              byteLength: toolImage.byteLength,
+              sha256: toolImage.sha256,
             },
           ]),
     ];
     return Object.freeze({
       messages,
-      ...(toolImage === null ? {} : { toolImage }),
+      hasToolImage: toolImage !== null,
       audit: Object.freeze({
         manifestDigest: digestCanonical(manifest),
         byteCount:
@@ -202,41 +226,6 @@ export class ToolImageBridge {
       }),
     });
   }
-}
-
-export class ToolImageDispatchDeniedError extends Error {
-  readonly code = 'TOOL_IMAGE_DISPATCH_DENIED';
-
-  constructor() {
-    super('Verified tool image cannot be dispatched to the current Provider');
-    this.name = 'ToolImageDispatchDeniedError';
-  }
-}
-
-export function assertVerifiedToolImageDispatch(input: {
-  connection: Readonly<{ managedLocal: boolean; localEndpointTrusted: boolean }>;
-  acceptedCapability: Readonly<{ value: boolean | null; revision: string; modelId: string }>;
-  currentCapability: Readonly<{ value: boolean | null; revision: string; modelId: string }>;
-}): void {
-  if (
-    !input.connection.managedLocal ||
-    !input.connection.localEndpointTrusted ||
-    input.acceptedCapability.value !== true ||
-    input.currentCapability.value !== true ||
-    input.acceptedCapability.revision !== input.currentCapability.revision ||
-    input.acceptedCapability.modelId !== input.currentCapability.modelId
-  )
-    throw new ToolImageDispatchDeniedError();
-}
-
-export async function dispatchVerifiedToolImage<T>(input: {
-  connection: Readonly<{ managedLocal: boolean; localEndpointTrusted: boolean }>;
-  acceptedCapability: Readonly<{ value: boolean | null; revision: string; modelId: string }>;
-  currentCapability: Readonly<{ value: boolean | null; revision: string; modelId: string }>;
-  execute: () => Promise<T>;
-}): Promise<T> {
-  assertVerifiedToolImageDispatch(input);
-  return input.execute();
 }
 
 export function toolImageEgressDenialCause(hasModelLease: boolean): ProviderSafeFailureCause {

@@ -60,7 +60,7 @@ import {
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
-import { canonicalizeImage } from './image-attachment-store';
+import { canonicalizeProviderToolImage } from './image-attachment-store';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
@@ -1244,10 +1244,34 @@ async function viewWorkspaceImage(input: PreparedWorkspaceInput): Promise<{
         'IMAGE_SIZE_UNSUPPORTED',
         `view_image accepts files from 1 to ${MAX_IMAGE_BYTES} bytes`,
       );
-    const bytes = await handle.readFile();
-    let canonical: Awaited<ReturnType<typeof canonicalizeImage>>;
+    const candidate = Buffer.allocUnsafe(MAX_IMAGE_BYTES + 1);
+    let offset = 0;
+    while (offset < candidate.byteLength) {
+      const { bytesRead } = await handle.read(
+        candidate,
+        offset,
+        candidate.byteLength - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset < 1 || offset > MAX_IMAGE_BYTES)
+      throw new WorkspaceToolRejection(
+        'IMAGE_SIZE_UNSUPPORTED',
+        `view_image accepts files from 1 to ${MAX_IMAGE_BYTES} bytes`,
+      );
+    const finalStat = await handle.stat();
+    await revalidatePathGuard(input.guard);
+    if (finalStat.size !== stat.size || finalStat.size !== offset)
+      throw new WorkspaceToolRejection(
+        'IMAGE_SIZE_UNSUPPORTED',
+        'view_image file changed while it was being read',
+      );
+    const bytes = candidate.subarray(0, offset);
+    let canonical: Awaited<ReturnType<typeof canonicalizeProviderToolImage>>;
     try {
-      canonical = await canonicalizeImage(bytes, { lossless: true });
+      canonical = await canonicalizeProviderToolImage(bytes);
     } catch {
       throw new WorkspaceToolRejection(
         'IMAGE_FORMAT_UNSUPPORTED',

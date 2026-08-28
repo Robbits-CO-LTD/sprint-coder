@@ -1,13 +1,9 @@
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
-import { describe, expect, it, vi } from 'vitest';
-import {
-  ToolImageBridge,
-  dispatchVerifiedToolImage,
-  parseSuccessfulToolImageResult,
-  toolImageEgressDenialCause,
-} from './tool-image-bridge';
-import { canonicalizeImage } from './image-attachment-store';
+import { describe, expect, it } from 'vitest';
+import { ToolImageBridge, toolImageEgressDenialCause } from './tool-image-bridge';
+import { canonicalizeProviderToolImage } from './image-attachment-store';
+import { digestCanonical } from './context-compiler';
 
 type ImageResult = {
   path: string;
@@ -18,7 +14,7 @@ type ImageResult = {
 };
 
 async function canonicalPng(red: number): Promise<Buffer> {
-  return sharp({
+  const source = await sharp({
     create: {
       width: 900,
       height: 700,
@@ -28,6 +24,7 @@ async function canonicalPng(red: number): Promise<Buffer> {
   })
     .png()
     .toBuffer();
+  return (await canonicalizeProviderToolImage(source)).bytes;
 }
 
 function imageResult(bytes: Buffer, mimeType: ImageResult['mimeType'] = 'image/png'): ImageResult {
@@ -43,12 +40,13 @@ function imageResult(bytes: Buffer, mimeType: ImageResult['mimeType'] = 'image/p
 describe('tool image bridge', () => {
   it('accepts only a fully canonical successful view_image result', async () => {
     const canonical = await canonicalPng(20);
-    await expect(parseSuccessfulToolImageResult(imageResult(canonical))).resolves.toEqual({
-      mimeType: 'image/png',
-      byteLength: canonical.byteLength,
-      sha256: createHash('sha256').update(canonical).digest('hex'),
-      base64: canonical.toString('base64'),
+    const accepted = await new ToolImageBridge().acceptToolResult({
+      toolCallId: 'call-canonical',
+      toolName: 'view_image',
+      result: imageResult(canonical),
     });
+    expect(accepted).toMatchObject({ accepted: true });
+    expect(JSON.stringify(accepted)).not.toContain(canonical.toString('base64'));
   });
 
   it.each(['jpeg', 'webp'] as const)(
@@ -63,7 +61,8 @@ describe('tool image bridge', () => {
         format === 'jpeg'
           ? await sourcePipeline.jpeg({ quality: 83 }).toBuffer()
           : await sourcePipeline.webp({ quality: 83 }).toBuffer();
-      const canonical = await canonicalizeImage(source, { lossless: true });
+      const canonical = await canonicalizeProviderToolImage(source);
+      const second = await canonicalizeProviderToolImage(canonical.bytes);
       const bridge = new ToolImageBridge();
       const accepted = await bridge.acceptToolResult({
         toolCallId: `call-${format}`,
@@ -75,11 +74,12 @@ describe('tool image bridge', () => {
         directImages: [],
       });
 
-      expect(canonical.mimeType).toBe('image/webp');
+      expect(canonical.mimeType).toBe('image/png');
+      expect(second.bytes).toEqual(canonical.bytes);
       expect(accepted.toolMessage.content).not.toContain(canonical.bytes.toString('base64'));
       expect(dispatched.messages.at(-1)).toMatchObject({
         role: 'user',
-        inlineImages: [{ mimeType: 'image/webp', base64: canonical.bytes.toString('base64') }],
+        inlineImages: [{ mimeType: 'image/png', base64: canonical.bytes.toString('base64') }],
       });
     },
   );
@@ -113,8 +113,7 @@ describe('tool image bridge', () => {
       ['non-image bytes', imageResult(Buffer.from('not an image'))],
     ];
 
-    for (const [name, result] of cases) {
-      expect(await parseSuccessfulToolImageResult(result), name).toBeNull();
+    for (const [, result] of cases) {
       const accepted = await new ToolImageBridge().acceptToolResult({
         toolCallId: 'call-invalid-image',
         toolName: 'view_image',
@@ -136,10 +135,10 @@ describe('tool image bridge', () => {
     const lastImage = await canonicalPng(120);
     const directBytes = Buffer.from('direct-image-bytes');
     const directImage = {
+      id: 'direct-1',
       mimeType: 'image/png' as const,
       byteLength: directBytes.byteLength,
       sha256: createHash('sha256').update(directBytes).digest('hex'),
-      base64: directBytes.toString('base64'),
     };
     const bridge = new ToolImageBridge();
     const first = await bridge.acceptToolResult({
@@ -207,8 +206,23 @@ describe('tool image bridge', () => {
     expect(invalidAfterSuccess.toolMessage.content).not.toContain('LEAK_SENTINEL');
     expect(dispatched.audit).toMatchObject({
       byteCount: directImage.byteLength + lastImage.byteLength,
-      manifestDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      manifestDigest: digestCanonical([
+        {
+          id: 'direct-1',
+          ordinal: 0,
+          mimeType: directImage.mimeType,
+          byteLength: directImage.byteLength,
+          sha256: directImage.sha256,
+        },
+        {
+          id: 'tool:call-last',
+          mimeType: 'image/png',
+          byteLength: lastImage.byteLength,
+          sha256: createHash('sha256').update(lastImage).digest('hex'),
+        },
+      ]),
     });
+    expect(dispatched.hasToolImage).toBe(true);
 
     const followingRound = bridge.consumeForNextDispatch({
       baseMessages,
@@ -217,39 +231,7 @@ describe('tool image bridge', () => {
     expect(followingRound.messages).toEqual(baseMessages);
     expect(JSON.stringify(followingRound.messages)).not.toContain(lastImage.toString('base64'));
     expect(followingRound.audit).toMatchObject({ byteCount: directImage.byteLength });
-  });
-
-  it.each([
-    [
-      'a remote connection',
-      {
-        connection: { managedLocal: false, localEndpointTrusted: false },
-        acceptedCapability: { value: true, revision: 'revision-a', modelId: 'model-a' },
-        currentCapability: { value: true, revision: 'revision-a', modelId: 'model-a' },
-      },
-    ],
-    [
-      'a capability that became unknown',
-      {
-        connection: { managedLocal: true, localEndpointTrusted: true },
-        acceptedCapability: { value: true, revision: 'revision-a', modelId: 'model-a' },
-        currentCapability: { value: null, revision: 'revision-a', modelId: 'model-a' },
-      },
-    ],
-    [
-      'a changed capability revision',
-      {
-        connection: { managedLocal: true, localEndpointTrusted: true },
-        acceptedCapability: { value: true, revision: 'revision-a', modelId: 'model-a' },
-        currentCapability: { value: true, revision: 'revision-b', modelId: 'model-a' },
-      },
-    ],
-  ] as const)('denies %s before executing a tool image request', async (_name, input) => {
-    const execute = vi.fn(async () => undefined);
-    await expect(dispatchVerifiedToolImage({ ...input, execute })).rejects.toMatchObject({
-      code: 'TOOL_IMAGE_DISPATCH_DENIED',
-    });
-    expect(execute).not.toHaveBeenCalled();
+    expect(followingRound.hasToolImage).toBe(false);
   });
 
   it.each([

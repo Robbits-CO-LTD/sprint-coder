@@ -222,8 +222,8 @@ import {
   ImageAttachmentValidationError,
 } from './image-attachment-store';
 import {
-  assertVerifiedToolImageDispatch,
   ToolImageBridge,
+  toolImageNotPermittedMessage,
   toolImageEgressDenialCause,
   type ToolImageAuditInput,
 } from './tool-image-bridge';
@@ -306,6 +306,42 @@ type ProviderImageAttachmentDispatch = Readonly<{
   byteCount: number;
 }>;
 
+type ProviderToolImageBinding = Readonly<{
+  connectionId: string;
+  providerId: string;
+  modelId: string;
+  secretReference: string;
+  requestUrl: string;
+  connectionDigest: string;
+  credentialDigest: string;
+  profileDigest: string;
+  modelDigest: string;
+  modelCatalogRevision: number;
+  selectionDigest: string;
+  capability: ProviderImageAttachmentCapabilityBinding;
+}>;
+
+type ProviderToolImageState = Readonly<{
+  binding: Omit<ProviderToolImageBinding, 'capability'>;
+  connection: ProviderConnection;
+}>;
+
+type ProviderImageBridgeDispatchResult = Readonly<{
+  kind: 'provider_image_tool';
+  toolMessage: ProviderExecutionRequest['messages'][number];
+  accepted: boolean;
+}>;
+
+function isProviderImageBridgeDispatchResult(
+  value: unknown,
+): value is ProviderImageBridgeDispatchResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Readonly<{ kind?: unknown }>).kind === 'provider_image_tool'
+  );
+}
+
 class ProviderImageAttachmentError extends Error {
   readonly userMessage =
     '画像入力の準備状況が変わったため、Providerへ画像を送信しませんでした。もう一度添付してください。';
@@ -317,7 +353,10 @@ class ProviderImageAttachmentError extends Error {
 }
 
 class ProviderTurnFailureError extends Error {
-  constructor(readonly cause: ProviderSafeFailureCause) {
+  constructor(
+    readonly cause: ProviderSafeFailureCause,
+    readonly userMessage?: string,
+  ) {
     super(`Provider Turn failed at ${cause.failureStage}`);
     this.name = 'ProviderTurnFailureError';
   }
@@ -610,6 +649,7 @@ import {
 import {
   ProviderEndpointConsentChallenges,
   ProviderEndpointPolicy,
+  type PreparedProviderEndpoint,
 } from './provider-endpoint-policy';
 import {
   MODEL_TASK_TITLE_TIMEOUT_MS,
@@ -796,10 +836,8 @@ export class IpcRouter {
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
-  private readonly providerEndpointPolicy = new ProviderEndpointPolicy();
-  private readonly providerEndpointChallenges = new ProviderEndpointConsentChallenges(
-    this.providerEndpointPolicy,
-  );
+  private readonly providerEndpointPolicy: ProviderEndpointPolicy;
+  private readonly providerEndpointChallenges: ProviderEndpointConsentChallenges;
   private readonly providerSecrets: ProviderSecretStorage;
   private readonly compatibleRuntime: OpenAICompatibleProviderClient;
   private readonly managedLocalProviderRuntime: ManagedLocalProviderRuntime | null;
@@ -834,7 +872,10 @@ export class IpcRouter {
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
     private readonly managedLocal: ManagedLocalController | null = null,
+    providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
   ) {
+    this.providerEndpointPolicy = providerEndpointPolicy;
+    this.providerEndpointChallenges = new ProviderEndpointConsentChallenges(providerEndpointPolicy);
     this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
     this.attachmentCustodyStore = new AttachmentCustodyStore(
       join(app.getPath('userData'), 'attachment-custody'),
@@ -3726,7 +3767,14 @@ export class IpcRouter {
       catalogDigest?: string;
     }>,
     signal: AbortSignal,
+    providerImageBridge?: ToolImageBridge,
   ): Promise<unknown> {
+    if (request.toolName === 'view_image' && providerImageBridge === undefined)
+      return Object.freeze({
+        kind: 'provider_image_tool',
+        toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
+        accepted: false,
+      } satisfies ProviderImageBridgeDispatchResult);
     const worker = this.managedWorkerTurn.get(turnId);
     if (worker !== undefined) {
       if (worker.taskId !== taskId) throw new Error('Managed Worker task binding changed');
@@ -3751,6 +3799,33 @@ export class IpcRouter {
         workspace: worker.workspace,
         mutationBindings: worker.mutationBindings,
       });
+    if (request.toolName === 'view_image') {
+      try {
+        const result = await this.managedCodingHarness.broker.dispatch({
+          taskId,
+          turnId: ownerTurnId,
+          callId: brokerCallId,
+          providerName: request.toolName,
+          input: request.arguments,
+          signal,
+        });
+        const accepted = await providerImageBridge!.acceptToolResult({
+          toolCallId: request.callId,
+          toolName: request.toolName,
+          result,
+        });
+        return Object.freeze({ kind: 'provider_image_tool', ...accepted });
+      } catch {
+        const rejected = await providerImageBridge!.acceptToolResult({
+          toolCallId: request.callId,
+          toolName: request.toolName,
+          result: null,
+        });
+        return Object.freeze({ kind: 'provider_image_tool', ...rejected });
+      } finally {
+        if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
+      }
+    }
     let result: unknown;
     try {
       result = await this.managedCodingHarness.broker.dispatch({
@@ -4691,12 +4766,11 @@ export class IpcRouter {
     return Object.freeze({
       binding,
       inlineImages,
-      auditImages: attachments.map(({ id, mimeType, byteLength, sha256 }, ordinal) => ({
+      auditImages: attachments.map(({ id, mimeType, byteLength, sha256 }) => ({
         id,
         mimeType,
         byteLength,
         sha256,
-        base64: inlineImages[ordinal]!.base64,
       })),
       manifestDigest: digestCanonical(manifest),
       byteCount,
@@ -4723,45 +4797,187 @@ export class IpcRouter {
     );
   }
 
-  private async providerToolImageStillValid(
+  private readProviderToolImageState(
     started: StartedTurn,
-    connection: ProviderConnection,
-    binding: ProviderImageAttachmentCapabilityBinding,
-    signal: AbortSignal,
-  ): Promise<boolean> {
-    if (
-      connection.id !== MANAGED_LOCAL_CONNECTION_ID ||
-      connection.providerId !== MANAGED_LOCAL_PROVIDER_ID ||
-      connection.runtimeKind !== 'openai_compatible' ||
-      connection.secretReference !== null ||
-      this.providerEgressTrustForConnection(connection) !== 'trusted-local'
-    )
-      return false;
-    const selection = this.persistence.getImageAttachmentAcceptanceSelection(started.event.taskId);
-    const current = await this.captureProviderImageAttachmentCapability(selection, signal);
-    if (
-      connection.id !== current.connectionId ||
-      connection.providerId !== current.providerId ||
-      started.modelSelection.connectionId !== current.connectionId ||
-      started.modelSelection.requestedProvider !== current.providerId ||
-      started.modelSelection.requestedModel !== current.modelId
-    )
-      return false;
+    connectionId: string,
+    modelId: string,
+  ): ProviderToolImageState | null {
     try {
-      assertVerifiedToolImageDispatch({
-        connection: { managedLocal: true, localEndpointTrusted: true },
-        acceptedCapability: binding.snapshot,
-        currentCapability: current,
+      const connection = providerConnectionSchema.parse(
+        this.persistence.getProviderConnection(connectionId),
+      );
+      const selection = this.persistence.getTaskModelSelection(started.event.taskId);
+      if (
+        connection.runtimeKind !== 'openai_compatible' ||
+        !connection.enabled ||
+        connection.secretReference === null ||
+        selection === null ||
+        selection.connectionId !== connection.id ||
+        selection.requestedProvider !== connection.providerId ||
+        selection.requestedModel !== modelId ||
+        started.modelSelection.connectionId !== connection.id ||
+        started.modelSelection.requestedProvider !== connection.providerId ||
+        started.modelSelection.requestedModel !== modelId ||
+        this.providerRegistry.resolve(connection) !== this.compatibleRuntime
+      )
+        return null;
+      const verifiedAt = Date.parse(connection.verification.verifiedAt ?? '');
+      const expiresAt = Date.parse(connection.verification.expiresAt ?? '');
+      const now = Date.now();
+      if (
+        connection.verification.status !== 'verified' ||
+        !Number.isFinite(verifiedAt) ||
+        !Number.isFinite(expiresAt) ||
+        verifiedAt > now ||
+        verifiedAt >= expiresAt ||
+        now >= expiresAt
+      )
+        return null;
+      const profile = providerProfileSchema.parse(this.providerProfiles.get(connection.providerId));
+      if (profile.protocol !== 'chat_completions') return null;
+      const credential = parseOpenAICompatibleCredential(
+        this.providerSecrets.get(connection.secretReference),
+      );
+      if (
+        (profile.requiredCredentialFields.includes('api_key') &&
+          (credential.apiKey === undefined || credential.apiKey.trim() === '')) ||
+        (profile.requiredCredentialFields.includes('account_id') &&
+          (credential.accountId === undefined || credential.accountId.trim() === ''))
+      )
+        return null;
+      const baseUrl = resolveProfileBaseUrl(profile, credential);
+      const endpointDigest = this.providerEndpointPolicy.digestForBaseUrl(baseUrl);
+      if (
+        resolvedProfileEndpointTrust(profile, credential) !== 'trusted-local' ||
+        credential.endpointDigest !== endpointDigest ||
+        credential.localConsentDigest !== endpointDigest
+      )
+        return null;
+      const model = this.modelCatalog.find(connection.id, modelId);
+      if (
+        model === undefined ||
+        model.connectionId !== connection.id ||
+        model.providerId !== connection.providerId ||
+        model.modelId !== modelId
+      )
+        return null;
+      return Object.freeze({
+        connection,
+        binding: Object.freeze({
+          connectionId: connection.id,
+          providerId: connection.providerId,
+          modelId,
+          secretReference: connection.secretReference,
+          requestUrl: `${baseUrl}/chat/completions`,
+          connectionDigest: digestCanonical(connection),
+          credentialDigest: digestCanonical(credential),
+          profileDigest: digestCanonical(profile),
+          modelDigest: digestCanonical(model),
+          modelCatalogRevision: this.modelCatalog.revision,
+          selectionDigest: digestCanonical(selection),
+        }),
       });
     } catch {
-      return false;
+      return null;
     }
-    return validateProviderImageAttachmentCurrent({
-      selection,
-      binding,
-      current,
-      nowMs: Date.now(),
-    });
+  }
+
+  private providerToolImageStateMatches(
+    started: StartedTurn,
+    binding: ProviderToolImageBinding,
+  ): ProviderToolImageState | null {
+    const current = this.readProviderToolImageState(started, binding.connectionId, binding.modelId);
+    if (current === null) return null;
+    const expected = {
+      connectionId: binding.connectionId,
+      providerId: binding.providerId,
+      modelId: binding.modelId,
+      secretReference: binding.secretReference,
+      requestUrl: binding.requestUrl,
+      connectionDigest: binding.connectionDigest,
+      credentialDigest: binding.credentialDigest,
+      profileDigest: binding.profileDigest,
+      modelDigest: binding.modelDigest,
+      modelCatalogRevision: binding.modelCatalogRevision,
+      selectionDigest: binding.selectionDigest,
+    };
+    return digestCanonical(current.binding) === digestCanonical(expected) ? current : null;
+  }
+
+  private async captureProviderToolImageBinding(
+    started: StartedTurn,
+    connection: ProviderConnection,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderToolImageBinding | null> {
+    const state = this.readProviderToolImageState(started, connection.id, modelId);
+    if (state === null || state.connection.providerId !== connection.providerId) return null;
+    try {
+      const selection = this.persistence.getImageAttachmentAcceptanceSelection(
+        started.event.taskId,
+      );
+      const snapshot = await this.captureProviderImageAttachmentCapability(selection, signal);
+      const capability = toPublicProviderImageAttachmentCapability(selection, snapshot, Date.now());
+      if (capability.status !== 'supported' || capability.selectionIdentity === null) return null;
+      const prepared = await this.providerEndpointPolicy.prepareRequestUrl(
+        state.binding.requestUrl,
+      );
+      if (prepared.trust !== 'trusted-local') return null;
+      const binding = Object.freeze({
+        ...state.binding,
+        capability: Object.freeze({
+          kind: 'provider_inline',
+          snapshot,
+          selectionIdentity: capability.selectionIdentity,
+        }),
+      });
+      return this.providerToolImageStateMatches(started, binding) === null ? null : binding;
+    } catch {
+      return null;
+    }
+  }
+
+  private async revalidateProviderToolImageBinding(
+    started: StartedTurn,
+    binding: ProviderToolImageBinding,
+    signal: AbortSignal,
+  ): Promise<PreparedProviderEndpoint | null> {
+    try {
+      if (this.providerToolImageStateMatches(started, binding) === null) return null;
+      const selection = this.persistence.getImageAttachmentAcceptanceSelection(
+        started.event.taskId,
+      );
+      const beforeDns = await this.captureProviderImageAttachmentCapability(selection, signal);
+      if (
+        !validateProviderImageAttachmentCurrent({
+          selection,
+          binding: binding.capability,
+          current: beforeDns,
+          nowMs: Date.now(),
+        })
+      )
+        return null;
+      const prepared = await this.providerEndpointPolicy.prepareRequestUrl(binding.requestUrl);
+      if (prepared.trust !== 'trusted-local') return null;
+      const finalCapability = await this.captureProviderImageAttachmentCapability(
+        selection,
+        signal,
+      );
+      if (
+        !validateProviderImageAttachmentCurrent({
+          selection,
+          binding: binding.capability,
+          current: finalCapability,
+          nowMs: Date.now(),
+        }) ||
+        finalCapability.revision !== beforeDns.revision ||
+        this.providerToolImageStateMatches(started, binding) === null
+      )
+        return null;
+      return prepared;
+    } catch {
+      return null;
+    }
   }
 
   private async releaseTurnAttachmentCustody(turnId: string): Promise<void> {
@@ -5875,7 +6091,7 @@ export class IpcRouter {
       runtime = this.providerRegistry.resolve(connection);
       const providerImageDispatch = this.prepareProviderTurnImageAttachments(started, connection);
       const toolImageBridge = new ToolImageBridge();
-      let pendingToolImageBinding: ProviderImageAttachmentCapabilityBinding | undefined;
+      let pendingToolImageBinding: ProviderToolImageBinding | undefined;
       const messages = providerMessagesFromContext(
         context.fragments,
         userMessageId,
@@ -5955,65 +6171,62 @@ export class IpcRouter {
           baseMessages: roundMessages,
           directImages: providerImageDispatch?.auditImages ?? [],
         });
-        const toolImageBinding =
-          toolImageDispatch.toolImage === undefined ? undefined : pendingToolImageBinding;
+        const toolImageBinding = toolImageDispatch.hasToolImage
+          ? pendingToolImageBinding
+          : undefined;
         pendingToolImageBinding = undefined;
-        if (toolImageDispatch.toolImage !== undefined && toolImageBinding === undefined)
+        if (toolImageDispatch.hasToolImage && toolImageBinding === undefined)
           throw new ProviderImageAttachmentError();
-        const roundPayloadBytes = Buffer.from(
+        const initialMessages = toolImageDispatch.hasToolImage
+          ? roundMessages
+          : toolImageDispatch.messages;
+        const initialPayloadBytes = Buffer.from(
           JSON.stringify({
-            messages: toolImageDispatch.messages,
+            messages: initialMessages,
             tools: toolsForRound,
             ...(toolChoice === undefined ? {} : { toolChoice }),
           }),
           'utf8',
         );
-        const roundPayloadDigest = createHash('sha256').update(roundPayloadBytes).digest('hex');
-        const dispatchRound = JSON.parse(Buffer.from(roundPayloadBytes).toString('utf8')) as {
+        const initialPayloadDigest = createHash('sha256').update(initialPayloadBytes).digest('hex');
+        let dispatchRound = JSON.parse(Buffer.from(initialPayloadBytes).toString('utf8')) as {
           messages: ProviderExecutionRequest['messages'];
           tools: ProviderExecutionRequest['tools'];
           toolChoice?: ProviderExecutionRequest['toolChoice'];
         };
-        const policyPayload = JSON.stringify({
+        const initialPolicyPayload = JSON.stringify({
           messages: providerMessagesForEgressPolicy(dispatchRound.messages),
           tools: dispatchRound.tools,
           ...(dispatchRound.toolChoice === undefined
             ? {}
             : { toolChoice: dispatchRound.toolChoice }),
         });
-        const egress = authorizeOfficialApiProviderEgress(
+        const initialEgress = authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
             task: this.persistence.getTask(taskId),
             turnId: started.turnId,
-            prompt: policyPayload,
+            prompt: initialPolicyPayload,
             context,
             now: new Date().toISOString(),
-            payloadDigest: roundPayloadDigest,
+            payloadDigest: initialPayloadDigest,
             adapterVersion: 'provider-registry-v1',
             connectionId,
             modelId,
             endpointTrust: this.providerEgressTrustForConnection(connection),
             round: ordinal,
             toolCatalogDigest: digestCanonical(roundTools),
-            ...(providerImageDispatch === undefined && toolImageDispatch.toolImage === undefined
+            ...(providerImageDispatch === undefined
               ? {}
               : {
-                  attachmentManifestDigest:
-                    toolImageDispatch.toolImage === undefined
-                      ? providerImageDispatch!.manifestDigest
-                      : toolImageDispatch.audit.manifestDigest,
-                  attachmentByteCount:
-                    toolImageDispatch.toolImage === undefined
-                      ? providerImageDispatch!.byteCount
-                      : toolImageDispatch.audit.byteCount,
+                  attachmentManifestDigest: providerImageDispatch.manifestDigest,
+                  attachmentByteCount: providerImageDispatch.byteCount,
                 }),
           },
           connection.providerId,
           this.providerEgressTrustForConnection(connection),
         );
-        if (!egress.allowed)
-          throw new ProviderTurnFailureError(toolImageEgressDenialCause(modelLease !== undefined));
+        if (!initialEgress.allowed) throw new Error('Provider egress was denied by policy');
         if (
           providerImageDispatch !== undefined &&
           !(await this.providerImageAttachmentStillValid(
@@ -6036,16 +6249,60 @@ export class IpcRouter {
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
-        if (
-          toolImageBinding !== undefined &&
-          !(await this.providerToolImageStillValid(
+        let finalToolImageEndpoint: PreparedProviderEndpoint | null = null;
+        if (toolImageBinding !== undefined) {
+          finalToolImageEndpoint = await this.revalidateProviderToolImageBinding(
             started,
-            connection,
             toolImageBinding,
             controller.signal,
-          ))
-        )
-          throw new ProviderImageAttachmentError();
+          );
+          if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
+          const finalPayloadBytes = Buffer.from(
+            JSON.stringify({
+              messages: toolImageDispatch.messages,
+              tools: toolsForRound,
+              ...(toolChoice === undefined ? {} : { toolChoice }),
+            }),
+            'utf8',
+          );
+          dispatchRound = JSON.parse(Buffer.from(finalPayloadBytes).toString('utf8')) as {
+            messages: ProviderExecutionRequest['messages'];
+            tools: ProviderExecutionRequest['tools'];
+            toolChoice?: ProviderExecutionRequest['toolChoice'];
+          };
+          const finalEgress = authorizeOfficialApiProviderEgress(
+            {
+              broker: this.permissionBroker,
+              task: this.persistence.getTask(taskId),
+              turnId: started.turnId,
+              prompt: JSON.stringify({
+                messages: providerMessagesForEgressPolicy(dispatchRound.messages),
+                tools: dispatchRound.tools,
+                ...(dispatchRound.toolChoice === undefined
+                  ? {}
+                  : { toolChoice: dispatchRound.toolChoice }),
+              }),
+              context,
+              now: new Date().toISOString(),
+              payloadDigest: createHash('sha256').update(finalPayloadBytes).digest('hex'),
+              adapterVersion: 'provider-registry-v1',
+              connectionId,
+              modelId,
+              endpointTrust: finalToolImageEndpoint.trust,
+              round: ordinal,
+              toolCatalogDigest: digestCanonical(roundTools),
+              attachmentManifestDigest: toolImageDispatch.audit.manifestDigest,
+              attachmentByteCount: toolImageDispatch.audit.byteCount,
+            },
+            connection.providerId,
+            finalToolImageEndpoint.trust,
+          );
+          if (!finalEgress.allowed)
+            throw new ProviderTurnFailureError(
+              toolImageEgressDenialCause(modelLease !== undefined),
+              '画像を安全に送信できなかったため、Providerへの送信を中止しました。',
+            );
+        }
         for await (const providerEvent of providerEventsWithSafeFailure(
           providerEventsWithDeadline(
             runtime.execute(
@@ -6211,6 +6468,15 @@ export class IpcRouter {
           let content: string;
           let succeeded = false;
           try {
+            const imageBinding =
+              toolCall.name === 'view_image'
+                ? await this.captureProviderToolImageBinding(
+                    started,
+                    connection,
+                    modelId,
+                    controller.signal,
+                  )
+                : null;
             const result = await this.dispatchManagedRuntimeTool(
               taskId,
               started.turnId,
@@ -6220,49 +6486,13 @@ export class IpcRouter {
                 arguments: toolCall.input,
               },
               controller.signal,
+              imageBinding === null ? undefined : toolImageBridge,
             );
             if (toolCall.name === 'view_image') {
-              const accepted = await toolImageBridge.acceptToolResult({
-                toolCallId: toolCall.callId,
-                toolName: toolCall.name,
-                result,
-              });
-              content = accepted.toolMessage.content;
-              if (accepted.image !== undefined) {
-                const selection = this.persistence.getImageAttachmentAcceptanceSelection(taskId);
-                const snapshot = await this.captureProviderImageAttachmentCapability(
-                  selection,
-                  controller.signal,
-                );
-                const capability = toPublicProviderImageAttachmentCapability(
-                  selection,
-                  snapshot,
-                  Date.now(),
-                );
-                if (
-                  connection.id === MANAGED_LOCAL_CONNECTION_ID &&
-                  connection.providerId === MANAGED_LOCAL_PROVIDER_ID &&
-                  connection.runtimeKind === 'openai_compatible' &&
-                  connection.secretReference === null &&
-                  this.providerEgressTrustForConnection(connection) === 'trusted-local' &&
-                  connection.id === snapshot.connectionId &&
-                  connection.providerId === snapshot.providerId &&
-                  started.modelSelection.connectionId === snapshot.connectionId &&
-                  started.modelSelection.requestedProvider === snapshot.providerId &&
-                  started.modelSelection.requestedModel === snapshot.modelId &&
-                  capability.status === 'supported' &&
-                  capability.selectionIdentity !== null
-                )
-                  pendingToolImageBinding = Object.freeze({
-                    kind: 'provider_inline',
-                    snapshot,
-                    selectionIdentity: capability.selectionIdentity,
-                  });
-                else {
-                  toolImageBridge.discardPending();
-                  throw new ProviderImageAttachmentError();
-                }
-              }
+              if (!isProviderImageBridgeDispatchResult(result))
+                throw new Error('Provider image tool result escaped its private bridge');
+              content = result.toolMessage.content;
+              if (result.accepted && imageBinding !== null) pendingToolImageBinding = imageBinding;
             } else content = redactSecrets(JSON.stringify({ ok: true, result }));
             succeeded = true;
           } catch (error) {
@@ -6351,6 +6581,7 @@ export class IpcRouter {
           startedAtMs: providerStartedAtMs,
           provider: diagnosticProvider,
           cause: error.cause,
+          userMessage: error.userMessage,
         });
         return;
       }

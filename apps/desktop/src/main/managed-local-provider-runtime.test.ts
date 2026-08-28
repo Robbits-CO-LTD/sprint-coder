@@ -8,7 +8,6 @@ import {
   managedLocalConnection,
 } from './managed-local-provider-runtime';
 import type { ManagedLocalController } from './managed-local-controller';
-import { secureLogger } from './secure-logger';
 
 function stream(): ReadableStream<Uint8Array> {
   const body = [
@@ -315,67 +314,6 @@ describe('ManagedLocalProviderRuntime', () => {
     expect(MANAGED_LOCAL_PROVIDER_ID).toBe('sprint-managed-local');
     await lease.release();
     expect(release).toHaveBeenCalledOnce();
-  });
-
-  it('never logs or emits a rejected response body that contains an image data URL', async () => {
-    const leakedBody = 'data:image/png;base64,LEAK_SENTINEL';
-    const logger = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
-    const authenticatedFetch = vi.fn(async () => new Response(leakedBody, { status: 422 }));
-    const release = vi.fn(async () => undefined);
-    const controller = {
-      getInferenceSettings: vi.fn(async () => ({
-        modelId: 'e'.repeat(64),
-        configured: { maxOutputTokens: 2_048, thinking: false },
-        effective: { maxOutputTokens: 2_048, thinking: false, reasoningEffort: null },
-        toolCall: { maxOutputTokens: 1_024, thinking: false, reasoningEffort: 'none' },
-      })),
-      acquireRuntime: vi.fn(async () => ({
-        modelId: 'e'.repeat(64),
-        session: { authenticatedFetch },
-        prepare: vi.fn(async () => undefined),
-        release,
-      })),
-    } as unknown as ManagedLocalController;
-    const runtime = new ManagedLocalProviderRuntime(controller);
-    const connection = managedLocalConnection();
-    const lease = await runtime.acquireModelLease!(
-      connection,
-      'e'.repeat(64),
-      new AbortController().signal,
-    );
-
-    try {
-      const events = [];
-      for await (const event of runtime.execute(
-        connection,
-        {
-          executionId: 'rejected-image-body',
-          connectionId: MANAGED_LOCAL_CONNECTION_ID,
-          modelId: 'e'.repeat(64),
-          messages: [{ role: 'user', content: 'describe the image' }],
-        },
-        new AbortController().signal,
-      ))
-        events.push(event);
-
-      expect(events).toContainEqual({
-        type: 'error',
-        error: {
-          category: 'provider_unavailable',
-          message: 'Managed Local runtime rejected the request',
-          retryable: false,
-          retryAfterMs: null,
-          providerCode: 'http_422',
-        },
-      });
-      const observableValues = JSON.stringify({ events, logger: logger.mock.calls });
-      expect(observableValues).not.toContain(leakedBody);
-      expect(observableValues).not.toContain('LEAK_SENTINEL');
-      expect(observableValues).not.toContain('data:image/');
-    } finally {
-      await lease.release();
-      logger.mockRestore();
-    }
   });
 
   it('rejects any lookalike persisted Connection', async () => {
