@@ -1,5 +1,17 @@
 export const PROVIDER_FIRST_EVENT_TIMEOUT_MS = 45_000;
 export const PROVIDER_IDLE_TIMEOUT_MS = 90_000;
+// Local vision inference can spend the ordinary deadline loading its projector and ingesting the
+// first image even after the Ollama model preload has completed. Keep the wider bound image-only.
+export const OLLAMA_IMAGE_FIRST_EVENT_TIMEOUT_MS = 120_000;
+
+export function providerFirstEventTimeoutMs(input: Readonly<{
+  providerId: string;
+  hasInlineImages: boolean;
+}>): number {
+  return input.providerId === 'ollama' && input.hasInlineImages
+    ? OLLAMA_IMAGE_FIRST_EVENT_TIMEOUT_MS
+    : PROVIDER_FIRST_EVENT_TIMEOUT_MS;
+}
 
 export type ProviderStreamTimeoutPhase = 'first_event' | 'idle';
 
