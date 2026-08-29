@@ -219,20 +219,29 @@ test.describe('settings dialog', () => {
       path: testInfo.outputPath('provider-connections-compact.png'),
       fullPage: true,
     });
-    const originalViewport = page.viewportSize();
+    // Electron pages do not always report Playwright's synthetic viewport, so capture the real
+    // renderer dimensions. The finally is what keeps this shared app usable by the next spec even
+    // if a narrow-layout assertion fails midway through this one.
+    const originalViewport = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+    }));
     await page.setViewportSize({ width: 600, height: 760 });
-    await connectionRows.first().scrollIntoViewIfNeeded();
-    await expect(connectionRows.first()).toBeVisible();
-    const hasHorizontalOverflow = await page.getByTestId('settings-dialog').evaluate((dialog) => {
-      const content = dialog.querySelector('.settings-content');
-      return content !== null && content.scrollWidth > content.clientWidth;
-    });
-    expect(hasHorizontalOverflow).toBe(false);
-    await page.screenshot({
-      path: testInfo.outputPath('provider-connections-compact-narrow.png'),
-      fullPage: true,
-    });
-    if (originalViewport !== null) await page.setViewportSize(originalViewport);
+    try {
+      await connectionRows.first().scrollIntoViewIfNeeded();
+      await expect(connectionRows.first()).toBeVisible();
+      const hasHorizontalOverflow = await page.getByTestId('settings-dialog').evaluate((dialog) => {
+        const content = dialog.querySelector('.settings-content');
+        return content !== null && content.scrollWidth > content.clientWidth;
+      });
+      expect(hasHorizontalOverflow).toBe(false);
+      await page.screenshot({
+        path: testInfo.outputPath('provider-connections-compact-narrow.png'),
+        fullPage: true,
+      });
+    } finally {
+      await page.setViewportSize(originalViewport);
+    }
 
     const addToggle = page.getByTestId('settings-provider-add-toggle');
     await expect(addToggle).toBeVisible();
