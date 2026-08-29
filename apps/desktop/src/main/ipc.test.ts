@@ -2367,6 +2367,7 @@ describe('Provider Team completion and model errors', () => {
         getProviderConnection: () => connection,
         getPermissionPolicy: () => ({ policyEpoch: 1 }),
         getActiveTurnId: () => turnId,
+        readTurnWorkspaceSetForTask: () => null,
         changeStage: vi.fn(() => ({ type: 'stage.changed' })),
         appendDelta,
         recordRuntimeFailureDiagnostic,
@@ -2646,6 +2647,7 @@ describe('Provider Team completion and model errors', () => {
         getProviderConnection: () => connection,
         getPermissionPolicy: () => ({ policyEpoch: 1 }),
         getActiveTurnId: () => turnId,
+        readTurnWorkspaceSetForTask: () => null,
         changeStage: vi.fn(() => ({ type: 'stage.changed' })),
         appendDelta: vi.fn(() => ({ type: 'message.delta' })),
       },
@@ -2777,6 +2779,302 @@ describe('Provider Team completion and model errors', () => {
       connection,
     );
     expect(completeProviderTeamTurn).toHaveBeenCalledOnce();
+  });
+
+  it('covers tool-only local and both trusted-remote Provider egress matrix paths', async () => {
+    const canonical = await canonicalizeProviderToolImage(
+      await sharp({
+        create: {
+          width: 32,
+          height: 32,
+          channels: 3,
+          background: { r: 25, g: 125, b: 225 },
+        },
+      })
+        .png()
+        .toBuffer(),
+    );
+    const toolResult = {
+      path: 'fixture.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    const directBytes = Buffer.from('direct-egress-matrix');
+    const directImage = {
+      id: 'direct-egress',
+      mimeType: 'image/png' as const,
+      byteLength: directBytes.byteLength,
+      sha256: createHash('sha256').update(directBytes).digest('hex'),
+    };
+    const directManifest = [{ ...directImage, ordinal: 0 }];
+    const toolManifest = [
+      {
+        id: 'tool:call-egress-image',
+        mimeType: canonical.mimeType,
+        byteLength: canonical.bytes.byteLength,
+        sha256: canonical.sha256,
+      },
+    ];
+    const scenarios = [
+      { name: 'tool-only local', trust: 'trusted-local' as const, direct: false, tool: true },
+      {
+        name: 'direct-only trusted-remote',
+        trust: 'trusted-remote' as const,
+        direct: true,
+        tool: false,
+      },
+      {
+        name: 'trusted-remote direct-plus-denied-tool',
+        trust: 'trusted-remote' as const,
+        direct: true,
+        tool: true,
+      },
+    ];
+
+    for (const [scenarioIndex, scenario] of scenarios.entries()) {
+      const taskId = `task-egress-matrix-${scenarioIndex}`;
+      const turnId = `turn-egress-matrix-${scenarioIndex}`;
+      const userMessageId = `message-egress-matrix-${scenarioIndex}`;
+      const connection = {
+        id: `profile:ollama-egress-${scenarioIndex}`,
+        providerId: 'ollama',
+        runtimeKind: 'openai_compatible',
+        displayName: scenario.name,
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'verified',
+          verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: null,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+      let executeOrdinal = 0;
+      const execute = vi.fn(() => {
+        executeOrdinal += 1;
+        const current = executeOrdinal;
+        return (async function* () {
+          if (scenario.tool && current === 1) {
+            yield {
+              type: 'tool_call' as const,
+              callId: 'call-egress-image',
+              name: 'view_image',
+              input: { path: 'fixture.png' },
+            };
+            yield { type: 'completed' as const, stopReason: 'tool_calls' };
+            return;
+          }
+          yield { type: 'output_delta' as const, text: 'egress matrix complete' };
+          yield { type: 'completed' as const, stopReason: 'stop' };
+        })();
+      });
+      const evaluate = vi.fn((_input: Record<string, unknown>) => ({
+        decision: 'allow',
+        reason: 'test_allow',
+        policyEpoch: 1,
+        evaluationTrace: ['test-allow'],
+        permit: { id: 'test-permit' },
+      }));
+      const brokerDispatch = vi.fn(
+        async (
+          _request: unknown,
+          consume?: (result: unknown) => Promise<unknown>,
+        ): Promise<unknown> => consume?.(toolResult),
+      );
+      const prepareProviderTurnImageAttachments = vi.fn(() =>
+        scenario.direct
+          ? {
+              binding: { kind: 'provider_inline' },
+              inlineImages: [
+                { mimeType: directImage.mimeType, base64: directBytes.toString('base64') },
+              ],
+              auditImages: [directImage],
+              manifestDigest: digestCanonical(directManifest),
+              byteCount: directImage.byteLength,
+            }
+          : undefined,
+      );
+      const completeProviderTeamTurn = vi.fn().mockResolvedValue('completed');
+      const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(fakeRouter, {
+        canceledRuntimeTurns: new Set<string>(),
+        turnRuntimes: new Map([[turnId, 'provider']]),
+        providerAbortByTurn: new Map(),
+        providerExecutionIdByTurn: new Map(),
+        managedWorkerTurn: new Map(),
+        managedWorkerCall: new Map(),
+        providerVerification: {
+          requireVerifiedForExecution: vi.fn().mockResolvedValue(connection),
+        },
+        providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
+        modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: true } })) },
+        permissionBroker: {
+          evaluate,
+          revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+        },
+        persistence: {
+          getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+          getProviderConnection: () => connection,
+          getPermissionPolicy: () => ({ policyEpoch: 1 }),
+          getActiveTurnId: () => turnId,
+          readTurnWorkspaceSetForTask: () => null,
+          changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+          appendDelta: vi.fn(() => ({ type: 'message.delta' })),
+        },
+        mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+        publish: vi.fn(),
+        ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+        prepareContext: vi.fn(() => ({
+          fragments: [
+            {
+              id: 'current',
+              taskId,
+              source: 'history',
+              trust: 'user',
+              tokenEstimate: 1,
+              content: 'describe the workspace image',
+              createdAt: new Date(0).toISOString(),
+              messageId: userMessageId,
+            },
+          ],
+          projectItems: [],
+          projectSnapshotDigest: null,
+        })),
+        prepareProviderTurnImageAttachments,
+        providerImageAttachmentStillValid: vi.fn().mockResolvedValue(true),
+        providerEgressTrustForConnection: () => scenario.trust,
+        managedCodingHarness: {
+          broker: { dispatch: brokerDispatch },
+          startTurn: vi.fn(() => ({
+            digest: 'a'.repeat(64),
+            providerId: 'ollama',
+            entries: [
+              {
+                providerName: 'view_image',
+                inputSchema: {
+                  type: 'object',
+                  properties: { path: { type: 'string' } },
+                  required: ['path'],
+                  additionalProperties: false,
+                },
+              },
+            ],
+          })),
+          finishTurn: vi.fn(),
+        },
+        teamCoordinator: { hasUnfinishedTeamWork: () => false },
+        applyProviderTurnEvent: vi.fn(),
+        captureProviderToolImageBinding: vi
+          .fn()
+          .mockResolvedValue(
+            scenario.trust === 'trusted-local'
+              ? { connectionDigest: digestCanonical(connection) }
+              : null,
+          ),
+        revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+        providerToolImageFinalStateMatches: vi.fn().mockReturnValue(true),
+        beginProviderSynthesis: vi.fn().mockResolvedValue(undefined),
+        completeProviderTeamTurn,
+        cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+      });
+      const started = {
+        turnId,
+        text: 'describe the workspace image',
+        skills: [],
+        event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+        modelSelection: {
+          connectionId: connection.id,
+          requestedProvider: connection.providerId,
+          requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+        },
+        workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+      };
+      const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+        this: typeof fakeRouter,
+        started: unknown,
+        connectionId: string,
+        teamTurn: boolean,
+        autoSkills: readonly unknown[],
+      ) => Promise<void>;
+
+      await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+
+      const requests = (execute.mock.calls as unknown[][]).map(
+        (call) =>
+          call[1] as {
+            messages: Array<{
+              content: string;
+              inlineImages?: Array<{ mimeType: string; base64: string }>;
+              toolCallId?: string;
+            }>;
+          },
+      );
+      const resources = evaluate.mock.calls.map(
+        ([input]) => (input as { request: { resource: Record<string, unknown> } }).request.resource,
+      );
+      if (scenario.name === 'tool-only local') {
+        expect(resources).toHaveLength(3);
+        expect(resources.map((resource) => resource['attachmentByteCount'])).toEqual([
+          0,
+          0,
+          canonical.bytes.byteLength,
+        ]);
+        expect(resources[2]).toMatchObject({
+          providerTrust: 'trusted-local',
+          attachmentManifestDigest: digestCanonical(toolManifest),
+        });
+        expect(requests[1]!.messages.flatMap((message) => message.inlineImages ?? [])).toEqual([
+          { mimeType: canonical.mimeType, base64: canonical.bytes.toString('base64') },
+        ]);
+        expect(brokerDispatch).toHaveBeenCalledOnce();
+      } else if (scenario.name === 'direct-only trusted-remote') {
+        expect(resources).toHaveLength(1);
+        expect(resources[0]).toMatchObject({
+          providerTrust: 'trusted-remote',
+          attachmentByteCount: directImage.byteLength,
+          attachmentManifestDigest: digestCanonical(directManifest),
+        });
+        expect(requests[0]!.messages.flatMap((message) => message.inlineImages ?? [])).toEqual([
+          { mimeType: directImage.mimeType, base64: directBytes.toString('base64') },
+        ]);
+        expect(brokerDispatch).not.toHaveBeenCalled();
+      } else {
+        expect(resources).toHaveLength(2);
+        for (const resource of resources)
+          expect(resource).toMatchObject({
+            providerTrust: 'trusted-remote',
+            attachmentByteCount: directImage.byteLength,
+            attachmentManifestDigest: digestCanonical(directManifest),
+          });
+        expect(brokerDispatch).not.toHaveBeenCalled();
+        expect(requests[1]!.messages.flatMap((message) => message.inlineImages ?? [])).toEqual([
+          { mimeType: directImage.mimeType, base64: directBytes.toString('base64') },
+        ]);
+        const rejection = requests[1]!.messages.find(
+          (message) => message.toolCallId === 'call-egress-image',
+        );
+        expect(JSON.parse(rejection!.content)).toEqual({
+          ok: false,
+          error: {
+            code: 'VIEW_IMAGE_NOT_PERMITTED',
+            message: '画像の利用は許可されていません。',
+          },
+        });
+        expect(JSON.stringify(requests)).not.toContain(canonical.bytes.toString('base64'));
+      }
+      expect(completeProviderTeamTurn, scenario.name).toHaveBeenCalledOnce();
+    }
   });
 
   it('discards the pending image for every model-preparation drift before image-bearing execute', async () => {
@@ -2969,12 +3267,156 @@ describe('Provider Team completion and model errors', () => {
       ],
     ];
 
-    for (const [caseIndex, [name, mutate]] of cases.entries()) {
+    const editCredential = (
+      state: Record<string, unknown>,
+      edit: (credential: Record<string, unknown>) => void,
+    ): void => {
+      const connection = state['connection'] as Record<string, unknown>;
+      const secrets = state['secrets'] as Map<string, string>;
+      const reference = String(connection['secretReference']);
+      const credential = JSON.parse(secrets.get(reference)!) as Record<string, unknown>;
+      edit(credential);
+      secrets.set(reference, JSON.stringify(credential));
+    };
+    const acceptanceNames = new Set([
+      'connection enabled',
+      'connection runtime kind',
+      'connection provider id',
+      'connection verification status',
+      'connection verification expiry',
+      'profile protocol',
+      'capability false',
+      'capability unknown',
+      'capability stale',
+    ]);
+    const acceptanceCases: ReadonlyArray<
+      readonly [string, (state: Record<string, unknown>) => void]
+    > = [
+      ...cases.filter(([name]) => acceptanceNames.has(name)),
+      [
+        'verification not required',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['status'] = 'not_required'),
+      ],
+      [
+        'verification timestamp missing',
+        (state) =>
+          void Reflect.deleteProperty(
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >,
+            'verifiedAt',
+          ),
+      ],
+      [
+        'verification timestamp invalid',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['verifiedAt'] = 'not-a-date'),
+      ],
+      [
+        'verification timestamp future',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['verifiedAt'] = new Date(Date.now() + 60_000).toISOString()),
+      ],
+      [
+        'verification expiry equals verified',
+        (state) => {
+          const verification = (state['connection'] as Record<string, unknown>)[
+            'verification'
+          ] as Record<string, unknown>;
+          verification['expiresAt'] = verification['verifiedAt'];
+        },
+      ],
+      [
+        'credential resolution failure',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          (state['secrets'] as Map<string, string>).delete(String(connection['secretReference']));
+        },
+      ],
+      [
+        'credential endpoint digest missing',
+        (state) => editCredential(state, (credential) => void delete credential['endpointDigest']),
+      ],
+      [
+        'credential endpoint digest mismatch',
+        (state) =>
+          editCredential(
+            state,
+            (credential) => void (credential['endpointDigest'] = '0'.repeat(64)),
+          ),
+      ],
+      [
+        'credential consent digest missing',
+        (state) =>
+          editCredential(state, (credential) => void delete credential['localConsentDigest']),
+      ],
+      [
+        'credential consent digest mismatch',
+        (state) =>
+          editCredential(
+            state,
+            (credential) => void (credential['localConsentDigest'] = '0'.repeat(64)),
+          ),
+      ],
+      [
+        'credential required field missing',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['requiredCredentialFields'] = [
+            'api_key',
+          ]),
+      ],
+      [
+        'credential LAN endpoint',
+        (state) =>
+          editCredential(state, (credential) => {
+            const url = 'https://192.168.1.2/v1';
+            const digest = new ProviderEndpointPolicy().digestForBaseUrl(url);
+            credential['baseUrl'] = url;
+            credential['endpointDigest'] = digest;
+            credential['localConsentDigest'] = digest;
+          }),
+      ],
+      [
+        'credential trusted remote endpoint',
+        (state) =>
+          editCredential(state, (credential) => {
+            const url = 'https://vision.example/v1';
+            const digest = new ProviderEndpointPolicy().digestForBaseUrl(url);
+            credential['baseUrl'] = url;
+            credential['endpointDigest'] = digest;
+            credential['localConsentDigest'] = digest;
+          }),
+      ],
+    ];
+    const allCases: ReadonlyArray<readonly [string, (state: Record<string, unknown>) => void]> = [
+      ...cases,
+      ...acceptanceCases.map(([name, mutate]) => [`acceptance ${name}`, mutate] as const),
+    ];
+
+    for (const [caseIndex, [name, mutate]] of allCases.entries()) {
       const taskId = `task-tool-image-drift-${caseIndex}`;
       const turnId = `turn-tool-image-drift-${caseIndex}`;
       const userMessageId = `message-tool-image-drift-${caseIndex}`;
       const modelId = 'qwen3-vl:4b-instruct-q4_K_M';
-      const mutatesBeforeBrokerAcceptance = name === 'lexical execution connection';
+      const mutatesBeforeBrokerAcceptance =
+        name === 'lexical execution connection' || name.startsWith('acceptance ');
       const mutatesDuringDns = name.startsWith('dns wait ');
       const mutatesDuringFinalCapability = name.startsWith('final capability wait ');
       const baseUrl = mutatesDuringDns ? 'http://localhost:11434/v1' : 'http://127.0.0.1:11434/v1';
@@ -3276,6 +3718,19 @@ describe('Provider Team completion and model errors', () => {
             toolName: 'view_image',
             content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
           }),
+        );
+        const fixedFailure = secondRequest.messages.find(
+          (message) => message.toolCallId === 'call-image-drift',
+        );
+        expect(JSON.parse(fixedFailure!.content), name).toEqual({
+          ok: false,
+          error: {
+            code: 'VIEW_IMAGE_NOT_PERMITTED',
+            message: '画像の利用は許可されていません。',
+          },
+        });
+        expect(JSON.stringify(secondRequest), name).not.toMatch(
+          /data:image\/|127\.0\.0\.1|localhost|vision\.example|192\.168\.1\.2/u,
         );
         expect(completeProviderTeamTurn, name).toHaveBeenCalledOnce();
       } else {
