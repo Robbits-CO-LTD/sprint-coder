@@ -1417,6 +1417,21 @@ describe('the verification badge is not a control', () => {
     expect(block).toContain('border: none');
     expect(block).toContain('background: none');
   });
+
+  it('pins external connection identity to the flexible column at narrow widths', () => {
+    const css = readFileSync(new URL('../index.css', import.meta.url), 'utf8');
+    const narrowStart = css.lastIndexOf('@media (max-width: 620px)');
+    expect(narrowStart).toBeGreaterThan(-1);
+    const narrow = css.slice(narrowStart);
+    const mainStart = narrow.indexOf('.settings-connection-main {');
+    const main = narrow.slice(mainStart, narrow.indexOf('}', mainStart));
+    expect(main).toContain('grid-column: 2');
+    expect(main).toContain('grid-row: 1');
+    const badgeStart = narrow.indexOf('.settings-connection-badge {');
+    const badge = narrow.slice(badgeStart, narrow.indexOf('}', badgeStart));
+    expect(badge).toContain('grid-column: 2');
+    expect(badge).toContain('grid-row: 2');
+  });
 });
 
 describe('error copy', () => {

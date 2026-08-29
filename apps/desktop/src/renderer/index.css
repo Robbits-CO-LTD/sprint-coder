@@ -8302,8 +8302,13 @@ button.composer-permission-chip[aria-expanded='true'] {
     grid-template-columns: 36px minmax(0, 1fr) auto;
     gap: 8px;
   }
+  .settings-connection-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
   .settings-connection-badge {
     grid-column: 2;
+    grid-row: 2;
     justify-self: start;
   }
   .settings-connection-card:not(:has(.settings-connection-expand)) .settings-connection-badge {
