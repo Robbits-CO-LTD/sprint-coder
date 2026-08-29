@@ -136,6 +136,13 @@ describe('describeModel', () => {
 });
 
 describe('provider and author identity', () => {
+  it('keeps configured gateway and local-runtime identities distinct in compact connection rows', () => {
+    expect(modelAuthorBrand('openrouter')).toBe('openrouter');
+    expect(modelAuthorDisplayName('openrouter')).toBe('OpenRouter');
+    expect(modelAuthorBrand('ollama')).toBe('ollama');
+    expect(modelAuthorDisplayName('ollama')).toBe('Ollama');
+  });
+
   it('keeps the stable gateway name separate from the user-editable connection name', () => {
     const openRouter = model({
       connectionId: 'openrouter:one',

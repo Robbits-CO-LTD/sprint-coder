@@ -7340,10 +7340,10 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-connection-group {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 9px;
 }
 .settings-connection-group + .settings-connection-group {
-  margin-top: 4px;
+  margin-top: 8px;
 }
 .settings-connection-group-heading,
 .local-ai-subsection-heading {
@@ -7358,12 +7358,14 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 0;
 }
 .settings-connection-group-heading h4 {
-  font-size: 12.5px;
+  font-size: 13.5px;
+  line-height: 1.35;
 }
 .settings-connection-group-heading p {
-  margin-top: 2px;
+  margin-top: 3px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* ---------- Managed Local AI selector (Issue #122, Slice F) ---------- */
@@ -7904,29 +7906,65 @@ button.composer-permission-chip[aria-expanded='true'] {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 0;
   margin: 0;
   padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-1);
 }
 .settings-connection-card {
+  min-width: 0;
+  border-bottom: 1px solid var(--hairline);
+  background: transparent;
+  font-size: 12.5px;
+}
+.settings-connection-card:last-child {
+  border-bottom: none;
+}
+.settings-connection-card.expanded {
+  background: color-mix(in srgb, var(--bg-elevated) 72%, var(--bg-panel));
+}
+.settings-connection-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 10px 11px;
+  gap: 10px;
+  min-height: 58px;
+  padding: 9px 11px;
+}
+.settings-connection-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
-  background: var(--bg-elevated);
-  font-size: 12.5px;
-  box-shadow: var(--shadow-1);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  box-shadow: inset 0 1px 0 var(--hairline-strong);
 }
 .settings-connection-main {
   display: flex;
   flex-direction: column;
+  gap: 1px;
   min-width: 0;
+}
+.settings-connection-main strong,
+.settings-connection-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-connection-main strong {
+  font-size: 13px;
+  line-height: 1.4;
 }
 .settings-connection-main small {
   color: var(--text-secondary);
+  font-size: 12px;
 }
 /* A fact about the Connection, not a call to act on it — so it carries no border, no fill and no
    radius. The bordered chip it used to be sat in the same visual family as 検証を再実行 right
@@ -7957,6 +7995,97 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
+.settings-connection-expand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 5px 7px 5px 9px;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition:
+    color var(--t-quick) var(--ease-ui),
+    background var(--t-quick) var(--ease-ui);
+}
+.settings-connection-expand:hover,
+.settings-connection-expand[aria-expanded='true'] {
+  color: var(--text-primary);
+  background: var(--neutral-wash);
+}
+.settings-connection-expand .icon {
+  transition: transform var(--t-quick) var(--ease-ui);
+}
+.settings-connection-expand[aria-expanded='true'] .icon {
+  transform: rotate(180deg);
+}
+.settings-connection-details {
+  margin-left: 57px;
+  padding: 13px 11px 14px 0;
+  border-top: 1px solid var(--hairline);
+}
+.settings-connection-details[hidden] {
+  display: none;
+}
+.settings-connection-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.settings-connection-detail-grid > :only-child {
+  grid-column: 1 / -1;
+  max-width: 420px;
+}
+.settings-connection-detail-grid .settings-field-label {
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.settings-provider-model-release {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+  cursor: pointer;
+}
+.settings-provider-model-release input {
+  flex: none;
+  margin: 3px 0 0;
+}
+.settings-provider-model-release > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.settings-provider-model-release strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.settings-provider-model-release small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.settings-connection-detail-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid var(--hairline);
+}
+.settings-connection-detail-actions .settings-secondary-button,
+.settings-heading-actions .settings-secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
 
 /* ----- Adding a Connection -----
    Progressive disclosure inside the settings dialog that is already open: one accent button, and
@@ -7984,7 +8113,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   width: 100%;
   justify-content: center;
   padding: 11px 12px;
-  border-style: dashed;
+  border-color: var(--hairline);
+  background: var(--neutral-wash);
 }
 .settings-add-connection:hover {
   background: var(--accent-wash);
@@ -8159,17 +8289,49 @@ button.composer-permission-chip[aria-expanded='true'] {
   .settings-provider-advanced > summary {
     transition: none;
   }
+  .settings-connection-expand,
+  .settings-connection-expand .icon {
+    transition: none;
+  }
 }
 @media (max-width: 620px) {
   .settings-provider-basic-fields {
     grid-template-columns: 1fr;
   }
-  .settings-connection-card {
-    grid-template-columns: minmax(0, 1fr) auto;
+  .settings-connection-summary {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    gap: 8px;
   }
-  .settings-connection-card > .settings-secondary-button {
-    grid-column: 1 / -1;
-    justify-self: end;
+  .settings-connection-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .settings-connection-badge {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
+  .settings-connection-card:not(:has(.settings-connection-expand)) .settings-connection-badge {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  .settings-connection-expand {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+  .settings-connection-details {
+    margin-left: 0;
+    padding: 13px 11px 14px;
+  }
+  .settings-connection-detail-grid {
+    grid-template-columns: 1fr;
+  }
+  .settings-connection-detail-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .settings-connection-detail-actions .settings-secondary-button {
+    align-self: flex-end;
   }
 }
 

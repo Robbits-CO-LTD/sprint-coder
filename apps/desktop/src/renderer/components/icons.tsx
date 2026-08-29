@@ -207,6 +207,23 @@ export function ArrowDown(props: IconProps) {
   );
 }
 
+export function ChevronDown(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m6 9 6 6 6-6" />
+    </Icon>
+  );
+}
+
+export function RefreshCw(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5" />
+      <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5" />
+    </Icon>
+  );
+}
+
 export function ArrowRightLeft(props: IconProps) {
   return (
     <Icon {...props}>
