@@ -163,6 +163,7 @@ import { ToolImageBridge } from './tool-image-bridge';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
 import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
+import { managedLocalConnection } from './managed-local-provider-runtime';
 import sharp from 'sharp';
 
 describe('file edit tracking identity', () => {
@@ -3438,6 +3439,12 @@ describe('Provider Team completion and model errors', () => {
           void ((state['connection'] as Record<string, unknown>)['id'] = 'profile:ollama-other'),
       ],
       [
+        'persisted connection selection drift',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['connectionId'] =
+            'profile:ollama-other'),
+      ],
+      [
         'persisted provider selection drift',
         (state) =>
           void ((state['selection'] as Record<string, unknown>)['requestedProvider'] = 'ollamI'),
@@ -3475,8 +3482,7 @@ describe('Provider Team completion and model errors', () => {
         'internal managed-local connection',
         (state) => {
           const connection = state['connection'] as Record<string, unknown>;
-          connection['runtimeKind'] = 'managed_local';
-          connection['providerId'] = 'sprint-managed-local';
+          Object.assign(connection, managedLocalConnection(new Date(0)));
         },
       ],
     ];
