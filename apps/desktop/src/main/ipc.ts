@@ -221,6 +221,12 @@ import {
   ImageAttachmentDraftStore,
   ImageAttachmentValidationError,
 } from './image-attachment-store';
+import {
+  ToolImageBridge,
+  toolImageNotPermittedMessage,
+  toolImageEgressDenialCause,
+  type ToolImageAuditInput,
+} from './tool-image-bridge';
 import { AttachmentCustodyStore, type AttachmentCustodyLease } from './attachment-custody-store';
 import { windowsNoReparseImageReaderAvailable } from './native-file-publication';
 import {
@@ -295,9 +301,87 @@ const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
 type ProviderImageAttachmentDispatch = Readonly<{
   binding: ProviderImageAttachmentCapabilityBinding;
   inlineImages: ProviderInlineImage[];
+  auditImages: readonly ToolImageAuditInput[];
   manifestDigest: string;
   byteCount: number;
 }>;
+
+type ProviderToolImageBinding = Readonly<{
+  connectionId: string;
+  providerId: string;
+  modelId: string;
+  secretReference: string;
+  requestUrl: string;
+  connectionDigest: string;
+  credentialDigest: string;
+  profileDigest: string;
+  modelDigest: string;
+  modelCatalogRevision: number;
+  selectionDigest: string;
+  capability: ProviderImageAttachmentCapabilityBinding;
+}>;
+
+type ProviderToolImageState = Readonly<{
+  binding: Omit<ProviderToolImageBinding, 'capability'>;
+  connection: ProviderConnection;
+}>;
+
+type ProviderImageBridgeDispatchResult = Readonly<{
+  kind: 'provider_image_tool';
+  toolMessage: ProviderExecutionRequest['messages'][number];
+  accepted: boolean;
+}>;
+
+type GenericManagedRuntimeToolOwner =
+  'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime';
+
+type GenericManagedRuntimeToolRequest = Readonly<{
+  callId: string;
+  toolName: string;
+  arguments: unknown;
+  catalogDigest?: string;
+}>;
+
+type DirectGenericManagedRuntimeToolHandler = (
+  taskId: string,
+  turnId: string,
+  request: GenericManagedRuntimeToolRequest,
+  signal: AbortSignal,
+) => Promise<unknown>;
+
+type GenericManagedRuntimeToolHandlers = Readonly<{
+  cliTeam: DirectGenericManagedRuntimeToolHandler;
+  providerWorker: (
+    taskId: string,
+    turnId: string,
+    catalogDigest: string,
+    toolName: string,
+    input: unknown,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+  teamMcp: (
+    input: unknown,
+    context: {
+      taskId: string;
+      turnId: string;
+      callId: string;
+      toolName: string;
+      catalogDigest: string;
+    },
+  ) => Promise<unknown>;
+  codexRuntime: DirectGenericManagedRuntimeToolHandler;
+  claudeRuntime: DirectGenericManagedRuntimeToolHandler;
+}>;
+
+function isProviderImageBridgeDispatchResult(
+  value: unknown,
+): value is ProviderImageBridgeDispatchResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as Readonly<{ kind?: unknown }>).kind === 'provider_image_tool'
+  );
+}
 
 class ProviderImageAttachmentError extends Error {
   readonly userMessage =
@@ -310,7 +394,10 @@ class ProviderImageAttachmentError extends Error {
 }
 
 class ProviderTurnFailureError extends Error {
-  constructor(readonly cause: ProviderSafeFailureCause) {
+  constructor(
+    readonly cause: ProviderSafeFailureCause,
+    readonly userMessage?: string,
+  ) {
     super(`Provider Turn failed at ${cause.failureStage}`);
     this.name = 'ProviderTurnFailureError';
   }
@@ -603,6 +690,7 @@ import {
 import {
   ProviderEndpointConsentChallenges,
   ProviderEndpointPolicy,
+  type PreparedProviderEndpoint,
 } from './provider-endpoint-policy';
 import {
   MODEL_TASK_TITLE_TIMEOUT_MS,
@@ -789,10 +877,8 @@ export class IpcRouter {
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
-  private readonly providerEndpointPolicy = new ProviderEndpointPolicy();
-  private readonly providerEndpointChallenges = new ProviderEndpointConsentChallenges(
-    this.providerEndpointPolicy,
-  );
+  private readonly providerEndpointPolicy: ProviderEndpointPolicy;
+  private readonly providerEndpointChallenges: ProviderEndpointConsentChallenges;
   private readonly providerSecrets: ProviderSecretStorage;
   private readonly compatibleRuntime: OpenAICompatibleProviderClient;
   private readonly managedLocalProviderRuntime: ManagedLocalProviderRuntime | null;
@@ -827,7 +913,10 @@ export class IpcRouter {
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
     private readonly managedLocal: ManagedLocalController | null = null,
+    providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
   ) {
+    this.providerEndpointPolicy = providerEndpointPolicy;
+    this.providerEndpointChallenges = new ProviderEndpointConsentChallenges(providerEndpointPolicy);
     this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
     this.attachmentCustodyStore = new AttachmentCustodyStore(
       join(app.getPath('userData'), 'attachment-custody'),
@@ -962,6 +1051,7 @@ export class IpcRouter {
     this.persistence.setAutoSkillProvider?.((runtime) =>
       this.skillSettings.pinnedAutoCandidates(runtime),
     );
+    const genericManagedRuntimeTools = this.createGenericManagedRuntimeToolHandlers();
     this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
@@ -1042,8 +1132,7 @@ export class IpcRouter {
           : this.registerWorkerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog),
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       releaseManagedTurn: (turnId) => this.releaseManagedWorkerTurn(turnId),
-      invokeManagedTool: (taskId, turnId, request, signal) =>
-        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
+      invokeManagedTool: genericManagedRuntimeTools.cliTeam,
       bindTeamMcpProcess: (turnId, identity) =>
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
@@ -1104,15 +1193,12 @@ export class IpcRouter {
         return {
           tools: providerToolsFromSnapshot(snapshot),
           execute: (name: string, input: unknown, signal: AbortSignal) =>
-            this.dispatchManagedRuntimeTool(
+            genericManagedRuntimeTools.providerWorker(
               worker.taskId,
               executionId,
-              {
-                callId: `managed-local:${randomUUID()}`,
-                toolName: name,
-                arguments: input,
-                catalogDigest: snapshot.digest,
-              },
+              snapshot.digest,
+              name,
+              input,
               signal,
             ),
           release: () => this.releaseManagedWorkerTurn(executionId),
@@ -1215,25 +1301,7 @@ export class IpcRouter {
       async (input, context) => this.queueProjectMemoryCandidate(input, context),
       undefined,
       undefined,
-      async (input, context) => {
-        const worker = this.managedWorkerTurn.get(context.turnId);
-        const snapshot =
-          worker?.snapshot ??
-          this.managedCodingHarness.broker.getTurnSnapshot(context.taskId, context.turnId);
-        if (snapshot?.digest !== context.catalogDigest)
-          throw new Error('Managed tool catalog digest changed');
-        return this.dispatchManagedRuntimeTool(
-          context.taskId,
-          context.turnId,
-          {
-            callId: context.callId,
-            toolName: context.toolName,
-            arguments: input,
-            catalogDigest: context.catalogDigest,
-          },
-          new AbortController().signal,
-        );
-      },
+      genericManagedRuntimeTools.teamMcp,
     );
     this.approvalCoordinator = new ApprovalCoordinator({
       persistence,
@@ -1385,8 +1453,7 @@ export class IpcRouter {
       'codex',
       join(app.getPath('userData'), 'codex-isolated'),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
-      (taskId, turnId, request, signal) =>
-        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
+      genericManagedRuntimeTools.codexRuntime,
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1399,8 +1466,7 @@ export class IpcRouter {
       'claude',
       join(app.getPath('userData'), 'codex-isolated'),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
-      (taskId, turnId, request, signal) =>
-        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
+      genericManagedRuntimeTools.claudeRuntime,
     );
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>
@@ -3709,6 +3775,68 @@ export class IpcRouter {
     };
   }
 
+  private createGenericManagedRuntimeToolHandlers(): GenericManagedRuntimeToolHandlers {
+    const direct =
+      (owner: GenericManagedRuntimeToolOwner): DirectGenericManagedRuntimeToolHandler =>
+      (taskId, turnId, request, signal) =>
+        this.dispatchGenericManagedRuntimeTool(owner, taskId, turnId, request, signal);
+    return Object.freeze({
+      cliTeam: direct('cli-team'),
+      providerWorker: (taskId, turnId, catalogDigest, toolName, input, signal) =>
+        this.dispatchGenericManagedRuntimeTool(
+          'provider-worker',
+          taskId,
+          turnId,
+          {
+            callId: `managed-local:${randomUUID()}`,
+            toolName,
+            arguments: input,
+            catalogDigest,
+          },
+          signal,
+        ),
+      teamMcp: (input, context) => {
+        const worker = this.managedWorkerTurn.get(context.turnId);
+        const snapshot =
+          worker?.snapshot ??
+          this.managedCodingHarness.broker.getTurnSnapshot(context.taskId, context.turnId);
+        if (snapshot?.digest !== context.catalogDigest)
+          throw new Error('Managed tool catalog digest changed');
+        return this.dispatchGenericManagedRuntimeTool(
+          'team-mcp',
+          context.taskId,
+          context.turnId,
+          {
+            callId: context.callId,
+            toolName: context.toolName,
+            arguments: input,
+            catalogDigest: context.catalogDigest,
+          },
+          new AbortController().signal,
+        );
+      },
+      codexRuntime: direct('codex-runtime'),
+      claudeRuntime: direct('claude-runtime'),
+    });
+  }
+
+  private async dispatchGenericManagedRuntimeTool(
+    _owner: GenericManagedRuntimeToolOwner,
+    taskId: string,
+    turnId: string,
+    request: GenericManagedRuntimeToolRequest,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    signal.throwIfAborted();
+    if (request.toolName === 'view_image')
+      return Object.freeze({
+        kind: 'provider_image_tool',
+        toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
+        accepted: false,
+      } satisfies ProviderImageBridgeDispatchResult);
+    return this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+  }
+
   private async dispatchManagedRuntimeTool(
     taskId: string,
     turnId: string,
@@ -3719,7 +3847,17 @@ export class IpcRouter {
       catalogDigest?: string;
     }>,
     signal: AbortSignal,
+    providerImageBridge?: ToolImageBridge,
+    publishProviderImageBinding?: () => void,
   ): Promise<unknown> {
+    if (request.toolName === 'view_image' && providerImageBridge === undefined) {
+      signal.throwIfAborted();
+      return Object.freeze({
+        kind: 'provider_image_tool',
+        toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
+        accepted: false,
+      } satisfies ProviderImageBridgeDispatchResult);
+    }
     const worker = this.managedWorkerTurn.get(turnId);
     if (worker !== undefined) {
       if (worker.taskId !== taskId) throw new Error('Managed Worker task binding changed');
@@ -3744,6 +3882,39 @@ export class IpcRouter {
         workspace: worker.workspace,
         mutationBindings: worker.mutationBindings,
       });
+    if (request.toolName === 'view_image') {
+      try {
+        const accepted = (await this.managedCodingHarness.broker.dispatch(
+          {
+            taskId,
+            turnId: ownerTurnId,
+            callId: brokerCallId,
+            providerName: request.toolName,
+            input: request.arguments,
+            signal,
+          },
+          (result) =>
+            providerImageBridge!.stageToolResult({
+              toolCallId: request.callId,
+              toolName: request.toolName,
+              result,
+            }),
+        )) as Awaited<ReturnType<ToolImageBridge['stageToolResult']>>;
+        signal.throwIfAborted();
+        providerImageBridge!.commitStaged();
+        if (accepted.accepted) publishProviderImageBinding?.();
+        return Object.freeze({ kind: 'provider_image_tool', ...accepted });
+      } catch (error) {
+        providerImageBridge!.rollbackStaged();
+        if (signal.aborted) {
+          throw error;
+        }
+        const rejected = providerImageBridge!.invalidToolResult(request.callId, request.toolName);
+        return Object.freeze({ kind: 'provider_image_tool', ...rejected });
+      } finally {
+        if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
+      }
+    }
     let result: unknown;
     try {
       result = await this.managedCodingHarness.broker.dispatch({
@@ -4677,11 +4848,18 @@ export class IpcRouter {
       sha256,
     }));
     const byteCount = attachments.reduce((sum, attachment) => sum + attachment.byteLength, 0);
+    const inlineImages = attachments.map(({ mimeType, bytes }) => ({
+      mimeType,
+      base64: bytes.toString('base64'),
+    }));
     return Object.freeze({
       binding,
-      inlineImages: attachments.map(({ mimeType, bytes }) => ({
+      inlineImages,
+      auditImages: attachments.map(({ id, mimeType, byteLength, sha256 }) => ({
+        id,
         mimeType,
-        base64: bytes.toString('base64'),
+        byteLength,
+        sha256,
       })),
       manifestDigest: digestCanonical(manifest),
       byteCount,
@@ -4706,6 +4884,215 @@ export class IpcRouter {
         nowMs: Date.now(),
       })
     );
+  }
+
+  private readProviderToolImageState(
+    started: StartedTurn,
+    connectionId: string,
+    modelId: string,
+  ): ProviderToolImageState | null {
+    try {
+      const connection = providerConnectionSchema.parse(
+        this.persistence.getProviderConnection(connectionId),
+      );
+      const selection = this.persistence.getTaskModelSelection(started.event.taskId);
+      if (
+        connection.runtimeKind !== 'openai_compatible' ||
+        !connection.enabled ||
+        connection.secretReference === null ||
+        selection === null ||
+        selection.connectionId !== connection.id ||
+        selection.requestedProvider !== connection.providerId ||
+        selection.requestedModel !== modelId ||
+        started.modelSelection.connectionId !== connection.id ||
+        started.modelSelection.requestedProvider !== connection.providerId ||
+        started.modelSelection.requestedModel !== modelId ||
+        this.providerRegistry.resolve(connection) !== this.compatibleRuntime
+      )
+        return null;
+      const verifiedAt = Date.parse(connection.verification.verifiedAt ?? '');
+      const expiresAt = Date.parse(connection.verification.expiresAt ?? '');
+      const now = Date.now();
+      if (
+        connection.verification.status !== 'verified' ||
+        !Number.isFinite(verifiedAt) ||
+        !Number.isFinite(expiresAt) ||
+        verifiedAt > now ||
+        verifiedAt >= expiresAt ||
+        now >= expiresAt
+      )
+        return null;
+      const profile = providerProfileSchema.parse(this.providerProfiles.get(connection.providerId));
+      if (profile.id !== connection.providerId || profile.protocol !== 'chat_completions')
+        return null;
+      const credential = parseOpenAICompatibleCredential(
+        this.providerSecrets.get(connection.secretReference),
+      );
+      if (
+        (profile.requiredCredentialFields.includes('api_key') &&
+          (credential.apiKey === undefined || credential.apiKey.trim() === '')) ||
+        (profile.requiredCredentialFields.includes('account_id') &&
+          (credential.accountId === undefined || credential.accountId.trim() === ''))
+      )
+        return null;
+      const baseUrl = resolveProfileBaseUrl(profile, credential);
+      const endpointDigest = this.providerEndpointPolicy.digestForBaseUrl(baseUrl);
+      if (
+        resolvedProfileEndpointTrust(profile, credential) !== 'trusted-local' ||
+        credential.endpointDigest !== endpointDigest ||
+        credential.localConsentDigest !== endpointDigest
+      )
+        return null;
+      const model = this.modelCatalog.find(connection.id, modelId);
+      if (
+        model === undefined ||
+        model.connectionId !== connection.id ||
+        model.providerId !== connection.providerId ||
+        model.modelId !== modelId
+      )
+        return null;
+      return Object.freeze({
+        connection,
+        binding: Object.freeze({
+          connectionId: connection.id,
+          providerId: connection.providerId,
+          modelId,
+          secretReference: connection.secretReference,
+          requestUrl: `${baseUrl}/chat/completions`,
+          connectionDigest: digestCanonical(connection),
+          credentialDigest: digestCanonical(credential),
+          profileDigest: digestCanonical(profile),
+          modelDigest: digestCanonical(model),
+          modelCatalogRevision: this.modelCatalog.revision,
+          selectionDigest: digestCanonical(selection),
+        }),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private providerToolImageStateMatches(
+    started: StartedTurn,
+    binding: ProviderToolImageBinding,
+  ): ProviderToolImageState | null {
+    const current = this.readProviderToolImageState(started, binding.connectionId, binding.modelId);
+    if (current === null) return null;
+    const expected = {
+      connectionId: binding.connectionId,
+      providerId: binding.providerId,
+      modelId: binding.modelId,
+      secretReference: binding.secretReference,
+      requestUrl: binding.requestUrl,
+      connectionDigest: binding.connectionDigest,
+      credentialDigest: binding.credentialDigest,
+      profileDigest: binding.profileDigest,
+      modelDigest: binding.modelDigest,
+      modelCatalogRevision: binding.modelCatalogRevision,
+      selectionDigest: binding.selectionDigest,
+    };
+    return digestCanonical(current.binding) === digestCanonical(expected) ? current : null;
+  }
+
+  private providerToolImageFinalStateMatches(
+    started: StartedTurn,
+    binding: ProviderToolImageBinding,
+    executionConnection: ProviderConnection,
+  ): boolean {
+    return (
+      digestCanonical(executionConnection) === binding.connectionDigest &&
+      this.providerToolImageStateMatches(started, binding) !== null
+    );
+  }
+
+  private async captureProviderToolImageBinding(
+    started: StartedTurn,
+    connection: ProviderConnection,
+    modelId: string,
+    signal: AbortSignal,
+  ): Promise<ProviderToolImageBinding | null> {
+    signal.throwIfAborted();
+    const state = this.readProviderToolImageState(started, connection.id, modelId);
+    if (
+      state === null ||
+      state.connection.providerId !== connection.providerId ||
+      digestCanonical(state.connection) !== digestCanonical(connection)
+    )
+      return null;
+    try {
+      const selection = this.persistence.getImageAttachmentAcceptanceSelection(
+        started.event.taskId,
+      );
+      const snapshot = await this.captureProviderImageAttachmentCapability(selection, signal);
+      signal.throwIfAborted();
+      const capability = toPublicProviderImageAttachmentCapability(selection, snapshot, Date.now());
+      if (capability.status !== 'supported' || capability.selectionIdentity === null) return null;
+      const prepared = await this.providerEndpointPolicy.prepareRequestUrl(
+        state.binding.requestUrl,
+      );
+      signal.throwIfAborted();
+      if (prepared.trust !== 'trusted-local') return null;
+      const binding = Object.freeze({
+        ...state.binding,
+        capability: Object.freeze({
+          kind: 'provider_inline',
+          snapshot,
+          selectionIdentity: capability.selectionIdentity,
+        }),
+      });
+      return this.providerToolImageStateMatches(started, binding) === null ? null : binding;
+    } catch {
+      signal.throwIfAborted();
+      return null;
+    }
+  }
+
+  private async revalidateProviderToolImageBinding(
+    started: StartedTurn,
+    binding: ProviderToolImageBinding,
+    signal: AbortSignal,
+  ): Promise<PreparedProviderEndpoint | null> {
+    signal.throwIfAborted();
+    try {
+      if (this.providerToolImageStateMatches(started, binding) === null) return null;
+      const selection = this.persistence.getImageAttachmentAcceptanceSelection(
+        started.event.taskId,
+      );
+      const beforeDns = await this.captureProviderImageAttachmentCapability(selection, signal);
+      signal.throwIfAborted();
+      if (
+        !validateProviderImageAttachmentCurrent({
+          selection,
+          binding: binding.capability,
+          current: beforeDns,
+          nowMs: Date.now(),
+        })
+      )
+        return null;
+      const prepared = await this.providerEndpointPolicy.prepareRequestUrl(binding.requestUrl);
+      signal.throwIfAborted();
+      if (prepared.trust !== 'trusted-local') return null;
+      const finalCapability = await this.captureProviderImageAttachmentCapability(
+        selection,
+        signal,
+      );
+      signal.throwIfAborted();
+      if (
+        !validateProviderImageAttachmentCurrent({
+          selection,
+          binding: binding.capability,
+          current: finalCapability,
+          nowMs: Date.now(),
+        }) ||
+        finalCapability.revision !== beforeDns.revision ||
+        this.providerToolImageStateMatches(started, binding) === null
+      )
+        return null;
+      return prepared;
+    } catch {
+      signal.throwIfAborted();
+      return null;
+    }
   }
 
   private async releaseTurnAttachmentCustody(turnId: string): Promise<void> {
@@ -5181,6 +5568,7 @@ export class IpcRouter {
     selection: ImageAttachmentAcceptanceSelection,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<ProviderImageAttachmentCapabilitySnapshot> {
+    signal.throwIfAborted();
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     signal.addEventListener('abort', abort, { once: true });
@@ -5200,6 +5588,7 @@ export class IpcRouter {
         connection.id,
         controller.signal,
       );
+      controller.signal.throwIfAborted();
       if (
         !verified.enabled ||
         verified.providerId !== modelSelection.requestedProvider ||
@@ -5212,6 +5601,7 @@ export class IpcRouter {
         modelSelection.requestedModel,
         controller.signal,
       );
+      controller.signal.throwIfAborted();
       return Object.freeze({
         runtimeKind: 'provider',
         connectionId: verified.id,
@@ -5818,6 +6208,8 @@ export class IpcRouter {
       });
       runtime = this.providerRegistry.resolve(connection);
       const providerImageDispatch = this.prepareProviderTurnImageAttachments(started, connection);
+      const toolImageBridge = new ToolImageBridge();
+      let pendingToolImageBinding: ProviderToolImageBinding | undefined;
       const messages = providerMessagesFromContext(
         context.fragments,
         userMessageId,
@@ -5893,36 +6285,49 @@ export class IpcRouter {
           toolChoice === undefined
             ? messages
             : managedLocalForcedRoundMessages(messages, started.text);
-        const roundPayloadBytes = Buffer.from(
+        const toolImageDispatch = toolImageBridge.consumeForNextDispatch({
+          baseMessages: roundMessages,
+          directImages: providerImageDispatch?.auditImages ?? [],
+        });
+        const toolImageBinding = toolImageDispatch.hasToolImage
+          ? pendingToolImageBinding
+          : undefined;
+        pendingToolImageBinding = undefined;
+        if (toolImageDispatch.hasToolImage && toolImageBinding === undefined)
+          throw new ProviderImageAttachmentError();
+        const initialMessages = toolImageDispatch.hasToolImage
+          ? roundMessages
+          : toolImageDispatch.messages;
+        const initialPayloadBytes = Buffer.from(
           JSON.stringify({
-            messages: roundMessages,
+            messages: initialMessages,
             tools: toolsForRound,
             ...(toolChoice === undefined ? {} : { toolChoice }),
           }),
           'utf8',
         );
-        const roundPayloadDigest = createHash('sha256').update(roundPayloadBytes).digest('hex');
-        const dispatchRound = JSON.parse(Buffer.from(roundPayloadBytes).toString('utf8')) as {
+        const initialPayloadDigest = createHash('sha256').update(initialPayloadBytes).digest('hex');
+        let dispatchRound = JSON.parse(Buffer.from(initialPayloadBytes).toString('utf8')) as {
           messages: ProviderExecutionRequest['messages'];
           tools: ProviderExecutionRequest['tools'];
           toolChoice?: ProviderExecutionRequest['toolChoice'];
         };
-        const policyPayload = JSON.stringify({
+        const initialPolicyPayload = JSON.stringify({
           messages: providerMessagesForEgressPolicy(dispatchRound.messages),
           tools: dispatchRound.tools,
           ...(dispatchRound.toolChoice === undefined
             ? {}
             : { toolChoice: dispatchRound.toolChoice }),
         });
-        const egress = authorizeOfficialApiProviderEgress(
+        const initialEgress = authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
             task: this.persistence.getTask(taskId),
             turnId: started.turnId,
-            prompt: policyPayload,
+            prompt: initialPolicyPayload,
             context,
             now: new Date().toISOString(),
-            payloadDigest: roundPayloadDigest,
+            payloadDigest: initialPayloadDigest,
             adapterVersion: 'provider-registry-v1',
             connectionId,
             modelId,
@@ -5939,7 +6344,7 @@ export class IpcRouter {
           connection.providerId,
           this.providerEgressTrustForConnection(connection),
         );
-        if (!egress.allowed) throw new Error('Provider egress was denied by policy');
+        if (!initialEgress.allowed) throw new Error('Provider egress was denied by policy');
         if (
           providerImageDispatch !== undefined &&
           !(await this.providerImageAttachmentStillValid(
@@ -5962,6 +6367,63 @@ export class IpcRouter {
         const roundOutput: string[] = [];
         let roundError: Extract<CanonicalProviderEvent, { type: 'error' }>['error'] | undefined;
         let roundCompleted = false;
+        let finalToolImageEndpoint: PreparedProviderEndpoint | null = null;
+        if (toolImageBinding !== undefined) {
+          finalToolImageEndpoint = await this.revalidateProviderToolImageBinding(
+            started,
+            toolImageBinding,
+            controller.signal,
+          );
+          controller.signal.throwIfAborted();
+          if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
+          if (!this.providerToolImageFinalStateMatches(started, toolImageBinding, connection))
+            throw new ProviderImageAttachmentError();
+          const finalPayloadBytes = Buffer.from(
+            JSON.stringify({
+              messages: toolImageDispatch.messages,
+              tools: toolsForRound,
+              ...(toolChoice === undefined ? {} : { toolChoice }),
+            }),
+            'utf8',
+          );
+          dispatchRound = JSON.parse(Buffer.from(finalPayloadBytes).toString('utf8')) as {
+            messages: ProviderExecutionRequest['messages'];
+            tools: ProviderExecutionRequest['tools'];
+            toolChoice?: ProviderExecutionRequest['toolChoice'];
+          };
+          const finalEgress = authorizeOfficialApiProviderEgress(
+            {
+              broker: this.permissionBroker,
+              task: this.persistence.getTask(taskId),
+              turnId: started.turnId,
+              prompt: JSON.stringify({
+                messages: providerMessagesForEgressPolicy(dispatchRound.messages),
+                tools: dispatchRound.tools,
+                ...(dispatchRound.toolChoice === undefined
+                  ? {}
+                  : { toolChoice: dispatchRound.toolChoice }),
+              }),
+              context,
+              now: new Date().toISOString(),
+              payloadDigest: createHash('sha256').update(finalPayloadBytes).digest('hex'),
+              adapterVersion: 'provider-registry-v1',
+              connectionId,
+              modelId,
+              endpointTrust: finalToolImageEndpoint.trust,
+              round: ordinal,
+              toolCatalogDigest: digestCanonical(roundTools),
+              attachmentManifestDigest: toolImageDispatch.audit.manifestDigest,
+              attachmentByteCount: toolImageDispatch.audit.byteCount,
+            },
+            connection.providerId,
+            finalToolImageEndpoint.trust,
+          );
+          if (!finalEgress.allowed)
+            throw new ProviderTurnFailureError(
+              toolImageEgressDenialCause(modelLease !== undefined),
+              '画像を安全に送信できなかったため、Providerへの送信を中止しました。',
+            );
+        }
         for await (const providerEvent of providerEventsWithSafeFailure(
           providerEventsWithDeadline(
             runtime.execute(
@@ -6127,6 +6589,15 @@ export class IpcRouter {
           let content: string;
           let succeeded = false;
           try {
+            const imageBinding =
+              toolCall.name === 'view_image'
+                ? await this.captureProviderToolImageBinding(
+                    started,
+                    connection,
+                    modelId,
+                    controller.signal,
+                  )
+                : null;
             const result = await this.dispatchManagedRuntimeTool(
               taskId,
               started.turnId,
@@ -6136,8 +6607,18 @@ export class IpcRouter {
                 arguments: toolCall.input,
               },
               controller.signal,
+              imageBinding === null ? undefined : toolImageBridge,
+              imageBinding === null
+                ? undefined
+                : () => {
+                    pendingToolImageBinding = imageBinding;
+                  },
             );
-            content = redactSecrets(JSON.stringify({ ok: true, result }));
+            if (toolCall.name === 'view_image') {
+              if (!isProviderImageBridgeDispatchResult(result))
+                throw new Error('Provider image tool result escaped its private bridge');
+              content = result.toolMessage.content;
+            } else content = redactSecrets(JSON.stringify({ ok: true, result }));
             succeeded = true;
           } catch (error) {
             if (controller.signal.aborted) throw error;
@@ -6225,6 +6706,7 @@ export class IpcRouter {
           startedAtMs: providerStartedAtMs,
           provider: diagnosticProvider,
           cause: error.cause,
+          userMessage: error.userMessage,
         });
         return;
       }

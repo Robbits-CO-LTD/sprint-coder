@@ -1,7 +1,20 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { renameSync } from 'node:fs';
+import {
+  appendFile,
+  link,
+  mkdir,
+  mkdtemp,
+  open,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import sharp from 'sharp';
 import {
   SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
   type EffectiveWorkspaceSet,
@@ -47,7 +60,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function harness() {
+async function harness(options: { beforeExecute?: (root: string) => boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-workspace-'));
   roots.push(root);
   const workspace: EffectiveWorkspaceSet = {
@@ -72,7 +85,11 @@ async function harness() {
     policyEpochFor: () => 1,
     authorizer: (request) => {
       authorizationGuards.push(workspaceToolAuthorizationGuard(request.input));
-      return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      return {
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => options.beforeExecute?.(root) ?? true,
+      };
     },
   });
   const context = {
@@ -556,10 +573,64 @@ describe('Provider workspace read tools', () => {
     });
   });
 
-  it('views a bounded image by magic bytes through a guarded handle', async () => {
+  it('canonicalizes a supported image before returning it through a guarded handle', async () => {
     const { root, tools, context } = await harness();
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
-    await writeFile(join(root, 'pixel.bin'), png);
+    const metadataSentinel = 'VIEW_IMAGE_METADATA_SENTINEL';
+    const trailingSentinel = Buffer.from('VIEW_IMAGE_TRAILING_SENTINEL');
+    const encoded = await sharp({
+      create: {
+        width: 900,
+        height: 700,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png({ compressionLevel: 0 })
+      .withMetadata({ exif: { IFD0: { ImageDescription: metadataSentinel } } })
+      .toBuffer();
+    const source = Buffer.concat([encoded, trailingSentinel]);
+    await writeFile(join(root, 'pixel.png'), source);
+
+    const result = await tools.broker.dispatch({
+      ...context,
+      callId: 'view-image',
+      providerName: 'view_image',
+      input: { path: 'pixel.png' },
+    });
+    const image = result as {
+      path: string;
+      mimeType: string;
+      byteLength: number;
+      sha256: string;
+      dataUrl: string;
+    };
+    const canonical = Buffer.from(image.dataUrl.replace(/^data:image\/png;base64,/u, ''), 'base64');
+
+    expect(image).toMatchObject({
+      path: 'pixel.png',
+      mimeType: 'image/png',
+      byteLength: canonical.byteLength,
+      sha256: createHash('sha256').update(canonical).digest('hex'),
+      dataUrl: `data:image/png;base64,${canonical.toString('base64')}`,
+    });
+    expect(canonical.equals(source)).toBe(false);
+    expect(canonical.includes(Buffer.from(metadataSentinel))).toBe(false);
+    expect(canonical.includes(trailingSentinel)).toBe(false);
+    const metadata = await sharp(canonical).metadata();
+    expect(metadata).toMatchObject({
+      format: 'png',
+      width: 900,
+      height: 700,
+    });
+    expect(metadata.exif).toBeUndefined();
+  });
+
+  it('rejects a magic-byte lookalike instead of treating it as an image', async () => {
+    const { root, tools, context } = await harness();
+    await writeFile(
+      join(root, 'pixel.bin'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]),
+    );
     await expect(
       tools.broker.dispatch({
         ...context,
@@ -567,12 +638,144 @@ describe('Provider workspace read tools', () => {
         providerName: 'view_image',
         input: { path: 'pixel.bin' },
       }),
-    ).resolves.toMatchObject({
-      path: 'pixel.bin',
-      mimeType: 'image/png',
-      byteLength: png.length,
-      dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+    ).rejects.toMatchObject({ code: 'IMAGE_FORMAT_UNSUPPORTED' });
+  });
+
+  it.each(['jpeg', 'webp'] as const)('canonicalizes a guarded %s source to PNG', async (format) => {
+    const { root, tools, context } = await harness();
+    const pipeline = sharp({
+      create: {
+        width: 96,
+        height: 64,
+        channels: 3,
+        background: { r: 120, g: 40, b: 60 },
+      },
     });
+    const source =
+      format === 'jpeg' ? await pipeline.jpeg().toBuffer() : await pipeline.webp().toBuffer();
+    await writeFile(join(root, `pixel.${format}`), source);
+
+    const result = (await tools.broker.dispatch({
+      ...context,
+      callId: `view-image-${format}`,
+      providerName: 'view_image',
+      input: { path: `pixel.${format}` },
+    })) as { mimeType: string; dataUrl: string };
+
+    expect(result.mimeType).toBe('image/png');
+    expect(result.dataUrl).toMatch(/^data:image\/png;base64,/u);
+    await expect(
+      sharp(
+        Buffer.from(result.dataUrl.replace(/^data:image\/png;base64,/u, ''), 'base64'),
+      ).metadata(),
+    ).resolves.toMatchObject({ format: 'png', width: 96, height: 64 });
+  });
+
+  it.each([
+    { name: 'empty', bytes: Buffer.alloc(0) },
+    { name: 'over-limit', bytes: Buffer.alloc(5 * 1024 * 1024 + 1) },
+  ])('rejects an $name image before decoding', async ({ name, bytes }) => {
+    const { root, tools, context } = await harness();
+    await writeFile(join(root, `${name}.png`), bytes);
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: `view-image-${name}`,
+        providerName: 'view_image',
+        input: { path: `${name}.png` },
+      }),
+    ).rejects.toMatchObject({ code: 'IMAGE_SIZE_UNSUPPORTED' });
+  });
+
+  it('rejects a path replaced after authorization but before the guarded open', async () => {
+    let replace = false;
+    const { root, tools, context } = await harness({
+      beforeExecute: (workspaceRoot) => {
+        if (!replace) return true;
+        renameSync(join(workspaceRoot, 'pixel.png'), join(workspaceRoot, 'original.png'));
+        renameSync(join(workspaceRoot, 'replacement.png'), join(workspaceRoot, 'pixel.png'));
+        return true;
+      },
+    });
+    const original = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const replacement = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 220, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    await writeFile(join(root, 'pixel.png'), original);
+    await writeFile(join(root, 'replacement.png'), replacement);
+    replace = true;
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'view-image-replaced',
+        providerName: 'view_image',
+        input: { path: 'pixel.png' },
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects a real image file that grows while its guarded handle is being read', async () => {
+    const { root, tools, context } = await harness();
+    const path = join(root, 'growing.png');
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    await writeFile(path, source);
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    let grew = false;
+    const readSpy = vi.spyOn(prototype, 'read').mockImplementation(async function (
+      this: typeof probe,
+      ...args
+    ) {
+      const result = await originalRead.apply(this, args);
+      if (!grew) {
+        grew = true;
+        await appendFile(path, Buffer.from('MID_READ_GROWTH'));
+      }
+      return result;
+    });
+
+    try {
+      await expect(
+        tools.broker.dispatch({
+          ...context,
+          callId: 'view-image-growing',
+          providerName: 'view_image',
+          input: { path: 'growing.png' },
+        }),
+      ).rejects.toThrow();
+      expect(grew).toBe(true);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('searches bounded UTF-8 files without following symlinks or disclosing secrets', async () => {
