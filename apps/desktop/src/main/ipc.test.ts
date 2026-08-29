@@ -1440,7 +1440,58 @@ describe('Main image attachment dispatch boundary', () => {
     await canceledLookupStarted;
     cancellation.abort(new Error('canceled during DNS'));
     resolveCanceledLookup([{ address: '127.0.0.1', family: 4 }]);
-    await expect(canceledRevalidation).resolves.toBeNull();
+    await expect(canceledRevalidation).rejects.toThrow('canceled during DNS');
+
+    let resolveCaptureLookup!: (
+      value: readonly Readonly<{ address: string; family: 4 | 6 }>[],
+    ) => void;
+    let markCaptureLookupStarted!: () => void;
+    const captureLookupStarted = new Promise<void>((resolve) => {
+      markCaptureLookupStarted = resolve;
+    });
+    router['providerEndpointPolicy'] = new ProviderEndpointPolicy(
+      () =>
+        new Promise((resolve) => {
+          resolveCaptureLookup = resolve;
+          markCaptureLookupStarted();
+        }),
+    );
+    captureProviderImageAttachmentCapability.mockReset().mockResolvedValue(capabilitySnapshot);
+    const captureCancellation = new AbortController();
+    const canceledCapture = probe.captureProviderToolImageBinding(
+      started,
+      connection,
+      selection.requestedModel,
+      captureCancellation.signal,
+    );
+    await captureLookupStarted;
+    captureCancellation.abort(new Error('canceled during binding DNS'));
+    resolveCaptureLookup([{ address: '127.0.0.1', family: 4 }]);
+    await expect(canceledCapture).rejects.toThrow('canceled during binding DNS');
+
+    let resolveCaptureCapability!: (value: typeof capabilitySnapshot) => void;
+    let markCaptureCapabilityStarted!: () => void;
+    const captureCapabilityStarted = new Promise<void>((resolve) => {
+      markCaptureCapabilityStarted = resolve;
+    });
+    captureProviderImageAttachmentCapability.mockReset().mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCaptureCapability = resolve;
+          markCaptureCapabilityStarted();
+        }),
+    );
+    const capabilityCancellation = new AbortController();
+    const canceledCapabilityCapture = probe.captureProviderToolImageBinding(
+      started,
+      connection,
+      selection.requestedModel,
+      capabilityCancellation.signal,
+    );
+    await captureCapabilityStarted;
+    capabilityCancellation.abort(new Error('canceled during binding capability'));
+    resolveCaptureCapability(capabilitySnapshot);
+    await expect(canceledCapabilityCapture).rejects.toThrow('canceled during binding capability');
 
     for (const finalCapability of [
       { ...capabilitySnapshot, value: false as const },
@@ -1795,6 +1846,18 @@ describe('Main image attachment dispatch boundary', () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain('data:image/');
+
+    const canceled = new AbortController();
+    canceled.abort(new Error('canceled before generic image denial'));
+    await expect(
+      probe.dispatchManagedRuntimeTool(
+        'task-generic-image',
+        'turn-generic-image',
+        { callId: 'call-canceled', toolName: 'view_image', arguments: { path: 'image.png' } },
+        canceled.signal,
+      ),
+    ).rejects.toThrow('canceled before generic image denial');
+    expect(brokerDispatch).not.toHaveBeenCalled();
   });
 
   it('contains hostile broker thenable failures inside the provider image bridge', async () => {

@@ -3770,12 +3770,14 @@ export class IpcRouter {
     providerImageBridge?: ToolImageBridge,
     publishProviderImageBinding?: () => void,
   ): Promise<unknown> {
-    if (request.toolName === 'view_image' && providerImageBridge === undefined)
+    if (request.toolName === 'view_image' && providerImageBridge === undefined) {
+      signal.throwIfAborted();
       return Object.freeze({
         kind: 'provider_image_tool',
         toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
         accepted: false,
       } satisfies ProviderImageBridgeDispatchResult);
+    }
     const worker = this.managedWorkerTurn.get(turnId);
     if (worker !== undefined) {
       if (worker.taskId !== taskId) throw new Error('Managed Worker task binding changed');
@@ -4929,6 +4931,7 @@ export class IpcRouter {
     modelId: string,
     signal: AbortSignal,
   ): Promise<ProviderToolImageBinding | null> {
+    signal.throwIfAborted();
     const state = this.readProviderToolImageState(started, connection.id, modelId);
     if (
       state === null ||
@@ -4941,11 +4944,13 @@ export class IpcRouter {
         started.event.taskId,
       );
       const snapshot = await this.captureProviderImageAttachmentCapability(selection, signal);
+      signal.throwIfAborted();
       const capability = toPublicProviderImageAttachmentCapability(selection, snapshot, Date.now());
       if (capability.status !== 'supported' || capability.selectionIdentity === null) return null;
       const prepared = await this.providerEndpointPolicy.prepareRequestUrl(
         state.binding.requestUrl,
       );
+      signal.throwIfAborted();
       if (prepared.trust !== 'trusted-local') return null;
       const binding = Object.freeze({
         ...state.binding,
@@ -4957,6 +4962,7 @@ export class IpcRouter {
       });
       return this.providerToolImageStateMatches(started, binding) === null ? null : binding;
     } catch {
+      signal.throwIfAborted();
       return null;
     }
   }
@@ -4966,12 +4972,14 @@ export class IpcRouter {
     binding: ProviderToolImageBinding,
     signal: AbortSignal,
   ): Promise<PreparedProviderEndpoint | null> {
+    signal.throwIfAborted();
     try {
       if (this.providerToolImageStateMatches(started, binding) === null) return null;
       const selection = this.persistence.getImageAttachmentAcceptanceSelection(
         started.event.taskId,
       );
       const beforeDns = await this.captureProviderImageAttachmentCapability(selection, signal);
+      signal.throwIfAborted();
       if (
         !validateProviderImageAttachmentCurrent({
           selection,
@@ -5002,6 +5010,7 @@ export class IpcRouter {
         return null;
       return prepared;
     } catch {
+      signal.throwIfAborted();
       return null;
     }
   }
@@ -6285,8 +6294,8 @@ export class IpcRouter {
             toolImageBinding,
             controller.signal,
           );
-          if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
           controller.signal.throwIfAborted();
+          if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
           if (!this.providerToolImageFinalStateMatches(started, toolImageBinding, connection))
             throw new ProviderImageAttachmentError();
           const finalPayloadBytes = Buffer.from(
