@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
-import { describe, expect, it } from 'vitest';
-import { ToolImageBridge, toolImageEgressDenialCause } from './tool-image-bridge';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import * as toolImageBridgeModule from './tool-image-bridge';
+import {
+  ToolImageBridge,
+  toolImageEgressDenialCause,
+  type ToolImageAuditInput,
+} from './tool-image-bridge';
 import { canonicalizeProviderToolImage } from './image-attachment-store';
 import { digestCanonical } from './context-compiler';
 
@@ -38,6 +43,25 @@ function imageResult(bytes: Buffer, mimeType: ImageResult['mimeType'] = 'image/p
 }
 
 describe('tool image bridge', () => {
+  it('exposes metadata-only audit types and keeps raw image internals private', () => {
+    const audit: ToolImageAuditInput = {
+      id: 'tool:call-audit',
+      mimeType: 'image/png',
+      byteLength: 128,
+      sha256: 'a'.repeat(64),
+    };
+    expectTypeOf(audit).not.toHaveProperty('base64');
+    expect(toolImageBridgeModule).not.toHaveProperty('parseSuccessfulToolImageResult');
+    expect(toolImageBridgeModule).not.toHaveProperty('VerifiedToolImage');
+
+    const forbiddenAudit: ToolImageAuditInput = {
+      ...audit,
+      // @ts-expect-error Raw image bytes must never enter the audit boundary.
+      base64: 'private-image-payload',
+    };
+    expect(Object.keys(forbiddenAudit)).toContain('base64');
+  });
+
   it('accepts only a fully canonical successful view_image result', async () => {
     const canonical = await canonicalPng(20);
     const accepted = await new ToolImageBridge().acceptToolResult({

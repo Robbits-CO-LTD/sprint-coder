@@ -1091,7 +1091,7 @@ export class IpcRouter {
       releaseTeamMcp: (turnId) => this.teamMcpBridge.unregister(turnId),
       releaseManagedTurn: (turnId) => this.releaseManagedWorkerTurn(turnId),
       invokeManagedTool: (taskId, turnId, request, signal) =>
-        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
+        this.dispatchGenericManagedRuntimeTool('cli-team', taskId, turnId, request, signal),
       bindTeamMcpProcess: (turnId, identity) =>
         this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       codexIsolationRoot: join(app.getPath('userData'), 'codex-isolated'),
@@ -1152,7 +1152,8 @@ export class IpcRouter {
         return {
           tools: providerToolsFromSnapshot(snapshot),
           execute: (name: string, input: unknown, signal: AbortSignal) =>
-            this.dispatchManagedRuntimeTool(
+            this.dispatchGenericManagedRuntimeTool(
+              'provider-worker',
               worker.taskId,
               executionId,
               {
@@ -1270,7 +1271,8 @@ export class IpcRouter {
           this.managedCodingHarness.broker.getTurnSnapshot(context.taskId, context.turnId);
         if (snapshot?.digest !== context.catalogDigest)
           throw new Error('Managed tool catalog digest changed');
-        return this.dispatchManagedRuntimeTool(
+        return this.dispatchGenericManagedRuntimeTool(
+          'team-mcp',
           context.taskId,
           context.turnId,
           {
@@ -1434,7 +1436,7 @@ export class IpcRouter {
       join(app.getPath('userData'), 'codex-isolated'),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       (taskId, turnId, request, signal) =>
-        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
+        this.dispatchGenericManagedRuntimeTool('codex-runtime', taskId, turnId, request, signal),
     );
     this.claudeRuntime = new RuntimeHostClient(
       (taskId, turnId, runtimeEvent) =>
@@ -1448,7 +1450,7 @@ export class IpcRouter {
       join(app.getPath('userData'), 'codex-isolated'),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       (taskId, turnId, request, signal) =>
-        this.dispatchManagedRuntimeTool(taskId, turnId, request, signal),
+        this.dispatchGenericManagedRuntimeTool('claude-runtime', taskId, turnId, request, signal),
     );
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>
@@ -3757,6 +3759,28 @@ export class IpcRouter {
     };
   }
 
+  private async dispatchGenericManagedRuntimeTool(
+    _owner: 'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime',
+    taskId: string,
+    turnId: string,
+    request: Readonly<{
+      callId: string;
+      toolName: string;
+      arguments: unknown;
+      catalogDigest?: string;
+    }>,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    signal.throwIfAborted();
+    if (request.toolName === 'view_image')
+      return Object.freeze({
+        kind: 'provider_image_tool',
+        toolMessage: toolImageNotPermittedMessage(request.callId, request.toolName),
+        accepted: false,
+      } satisfies ProviderImageBridgeDispatchResult);
+    return this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
+  }
+
   private async dispatchManagedRuntimeTool(
     taskId: string,
     turnId: string,
@@ -4817,6 +4841,7 @@ export class IpcRouter {
       );
       const selection = this.persistence.getTaskModelSelection(started.event.taskId);
       if (
+        connection.providerId !== 'ollama' ||
         connection.runtimeKind !== 'openai_compatible' ||
         !connection.enabled ||
         connection.secretReference === null ||

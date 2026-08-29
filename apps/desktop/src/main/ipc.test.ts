@@ -1686,6 +1686,20 @@ describe('Main image attachment dispatch boundary', () => {
     const cases: ReadonlyArray<
       readonly [string, (harness: ReturnType<typeof createHarness>) => void]
     > = [
+      [
+        'coherent non-Ollama trusted-local profile',
+        ({ connection, model, profile, selection, startedSelection }) => {
+          connection.providerId = 'localai';
+          connection.displayName = 'LocalAI loopback';
+          model.providerId = 'localai';
+          profile.id = 'localai';
+          profile.displayName = 'LocalAI';
+          profile.sourceReference = 'https://localai.io/';
+          Reflect.deleteProperty(profile, 'nativeModelLifecycle');
+          selection.requestedProvider = 'localai';
+          startedSelection.requestedProvider = 'localai';
+        },
+      ],
       ['responses protocol', ({ profile }) => Object.assign(profile, { protocol: 'responses' })],
       ['profile id lookalike', ({ profile }) => Object.assign(profile, { id: 'ollamI' })],
       [
@@ -1816,41 +1830,53 @@ describe('Main image attachment dispatch boundary', () => {
     }
   });
 
-  it('denies generic view_image callbacks before broker execution', async () => {
+  it('denies view_image in every generic callback owner before broker execution', async () => {
     const brokerDispatch = vi.fn();
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, { managedCodingHarness: { broker: { dispatch: brokerDispatch } } });
     const probe = router as unknown as {
-      dispatchManagedRuntimeTool(
+      dispatchGenericManagedRuntimeTool(
+        owner: 'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime',
         taskId: string,
         turnId: string,
         request: unknown,
         signal: AbortSignal,
       ): Promise<unknown>;
     };
+    const owners = [
+      'cli-team',
+      'provider-worker',
+      'team-mcp',
+      'codex-runtime',
+      'claude-runtime',
+    ] as const;
 
-    const result = await probe.dispatchManagedRuntimeTool(
-      'task-generic-image',
-      'turn-generic-image',
-      { callId: 'call-generic', toolName: 'view_image', arguments: { path: 'image.png' } },
-      new AbortController().signal,
-    );
+    for (const owner of owners) {
+      const result = await probe.dispatchGenericManagedRuntimeTool(
+        owner,
+        `task-generic-image-${owner}`,
+        `turn-generic-image-${owner}`,
+        { callId: `call-${owner}`, toolName: 'view_image', arguments: { path: 'image.png' } },
+        new AbortController().signal,
+      );
 
+      expect(result, owner).toMatchObject({
+        kind: 'provider_image_tool',
+        accepted: false,
+        toolMessage: {
+          toolCallId: `call-${owner}`,
+          content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
+        },
+      });
+      expect(JSON.stringify(result), owner).not.toContain('data:image/');
+    }
     expect(brokerDispatch).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      kind: 'provider_image_tool',
-      accepted: false,
-      toolMessage: {
-        toolCallId: 'call-generic',
-        content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
-      },
-    });
-    expect(JSON.stringify(result)).not.toContain('data:image/');
 
     const canceled = new AbortController();
     canceled.abort(new Error('canceled before generic image denial'));
     await expect(
-      probe.dispatchManagedRuntimeTool(
+      probe.dispatchGenericManagedRuntimeTool(
+        'codex-runtime',
         'task-generic-image',
         'turn-generic-image',
         { callId: 'call-canceled', toolName: 'view_image', arguments: { path: 'image.png' } },
@@ -1904,6 +1930,57 @@ describe('Main image attachment dispatch boundary', () => {
     expect(JSON.stringify(result)).not.toContain(leak);
     expect(logger.mock.calls.flat().join('\n')).not.toContain(leak);
     logger.mockRestore();
+  });
+
+  it('contains hostile raw image getters without leaking their payload', async () => {
+    const leak = 'data:image/png;base64,HOSTILE_RAW_RESULT_LEAK';
+    const hostileResult = new Proxy<Record<string, unknown>>(
+      {},
+      {
+        get: () => {
+          throw new Error(leak);
+        },
+      },
+    );
+    const brokerDispatch = vi.fn(
+      async (_request: unknown, consume: (value: unknown) => Promise<unknown>) =>
+        consume(hostileResult),
+    );
+    const errorLogger = vi.spyOn(secureLogger, 'error');
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const result = await probe.dispatchManagedRuntimeTool(
+      'task-provider-hostile-raw',
+      'turn-provider-hostile-raw',
+      { callId: 'call-hostile-raw', toolName: 'view_image', arguments: { path: 'image.png' } },
+      new AbortController().signal,
+      new ToolImageBridge(),
+    );
+
+    expect(result).toMatchObject({
+      kind: 'provider_image_tool',
+      accepted: false,
+      toolMessage: {
+        toolCallId: 'call-hostile-raw',
+        content: expect.stringContaining('INVALID_TOOL_RESULT'),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(leak);
+    expect(errorLogger.mock.calls.flat().join('\n')).not.toContain(leak);
+    errorLogger.mockRestore();
   });
 
   it('propagates cancellation while a provider image tool is executing', async () => {
@@ -2845,6 +2922,235 @@ describe('Provider Team completion and model errors', () => {
     expect(completeProviderTeamTurn).toHaveBeenCalledOnce();
   });
 
+  it('retains image A and stops the Provider Turn when image B is canceled after staging', async () => {
+    const taskId = 'task-tool-image-b-canceled';
+    const turnId = 'turn-tool-image-b-canceled';
+    const userMessageId = 'message-tool-image-b-canceled';
+    const connection = {
+      id: 'profile:ollama-b-canceled',
+      providerId: 'ollama',
+      runtimeKind: 'openai_compatible',
+      displayName: 'Ollama',
+      enabled: true,
+      secretReference: null,
+      verification: {
+        status: 'verified',
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto',
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const canonicalFor = async (red: number) =>
+      canonicalizeProviderToolImage(
+        await sharp({
+          create: {
+            width: 32,
+            height: 32,
+            channels: 3,
+            background: { r: red, g: 50, b: 90 },
+          },
+        })
+          .png()
+          .toBuffer(),
+      );
+    const imageA = await canonicalFor(40);
+    const imageB = await canonicalFor(180);
+    const resultFor = (image: typeof imageA) => ({
+      path: 'fixture.png',
+      mimeType: image.mimeType,
+      byteLength: image.bytes.byteLength,
+      sha256: image.sha256,
+      dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+    });
+    const execute = vi.fn(() =>
+      (async function* () {
+        yield {
+          type: 'tool_call' as const,
+          callId: 'call-image-a',
+          name: 'view_image',
+          input: { path: 'a.png' },
+        };
+        yield {
+          type: 'tool_call' as const,
+          callId: 'call-image-b',
+          name: 'view_image',
+          input: { path: 'b.png' },
+        };
+        yield { type: 'completed' as const, stopReason: 'tool_calls' };
+      })(),
+    );
+    const evaluate = vi.fn((_input: Record<string, unknown>) => ({
+      decision: 'allow',
+      reason: 'test_allow',
+      policyEpoch: 1,
+      evaluationTrace: ['test-allow'],
+      permit: { id: 'test-permit' },
+    }));
+    const cancellation = new Error('image B canceled after staging');
+    const providerAbortByTurn = new Map<string, AbortController>();
+    const brokerDispatch = vi.fn(
+      async (
+        request: { callId: string },
+        consume?: (result: unknown) => Promise<unknown>,
+      ): Promise<unknown> => {
+        const accepted = await consume!(
+          resultFor(request.callId === 'call-image-a' ? imageA : imageB),
+        );
+        if (request.callId === 'call-image-b') {
+          providerAbortByTurn.get(turnId)!.abort(cancellation);
+          throw cancellation;
+        }
+        return accepted;
+      },
+    );
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const finishAndAdvance = vi.fn();
+    const completeProviderTeamTurn = vi.fn().mockResolvedValue('completed');
+    const finishManagedTurn = vi.fn();
+    const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(fakeRouter, {
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([[turnId, 'provider']]),
+      providerAbortByTurn,
+      providerExecutionIdByTurn: new Map(),
+      managedWorkerTurn: new Map(),
+      managedWorkerCall: new Map(),
+      providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
+      providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
+      modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: true } })) },
+      permissionBroker: {
+        evaluate,
+        revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+      },
+      persistence: {
+        getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+        getProviderConnection: () => connection,
+        getPermissionPolicy: () => ({ policyEpoch: 1 }),
+        getActiveTurnId: () => turnId,
+        readTurnWorkspaceSetForTask: () => null,
+        changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+        appendDelta,
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      publish: vi.fn(),
+      finishAndAdvance,
+      ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+      prepareContext: vi.fn(() => ({
+        fragments: [
+          {
+            id: 'current',
+            taskId,
+            source: 'history',
+            trust: 'user',
+            tokenEstimate: 1,
+            content: 'describe the workspace image',
+            createdAt: new Date(0).toISOString(),
+            messageId: userMessageId,
+          },
+        ],
+        projectItems: [],
+        projectSnapshotDigest: null,
+      })),
+      prepareProviderTurnImageAttachments: vi.fn(() => undefined),
+      providerEgressTrustForConnection: () => 'trusted-local',
+      managedCodingHarness: {
+        broker: { dispatch: brokerDispatch },
+        startTurn: vi.fn(() => ({
+          digest: 'a'.repeat(64),
+          providerId: 'ollama',
+          entries: [
+            {
+              providerName: 'view_image',
+              inputSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        })),
+        finishTurn: finishManagedTurn,
+      },
+      teamCoordinator: { hasUnfinishedTeamWork: () => false },
+      applyProviderTurnEvent: vi.fn(),
+      captureProviderToolImageBinding: vi
+        .fn()
+        .mockResolvedValueOnce({ connectionDigest: digestCanonical(connection), image: 'A' })
+        .mockResolvedValueOnce({ connectionDigest: digestCanonical(connection), image: 'B' }),
+      revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+      providerToolImageFinalStateMatches: vi.fn().mockReturnValue(true),
+      beginProviderSynthesis: vi.fn().mockResolvedValue(undefined),
+      completeProviderTeamTurn,
+      cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+    });
+    const started = {
+      turnId,
+      text: 'describe the workspace image',
+      skills: [],
+      event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+      modelSelection: {
+        connectionId: connection.id,
+        requestedProvider: connection.providerId,
+        requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+      },
+      workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+    };
+    const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+      this: typeof fakeRouter,
+      started: unknown,
+      connectionId: string,
+      teamTurn: boolean,
+      autoSkills: readonly unknown[],
+    ) => Promise<void>;
+    const originalStage = ToolImageBridge.prototype.stageToolResult;
+    let observedBridge: ToolImageBridge | undefined;
+    const observeBridge = (bridge: ToolImageBridge): void => {
+      observedBridge = bridge;
+    };
+    const stageSpy = vi
+      .spyOn(ToolImageBridge.prototype, 'stageToolResult')
+      .mockImplementation(function (
+        this: ToolImageBridge,
+        input: Parameters<ToolImageBridge['stageToolResult']>[0],
+      ) {
+        observeBridge(this);
+        return originalStage.call(this, input);
+      });
+
+    try {
+      await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(brokerDispatch).toHaveBeenCalledTimes(2);
+    expect(completeProviderTeamTurn).not.toHaveBeenCalled();
+    expect(finishAndAdvance).not.toHaveBeenCalled();
+    expect(appendDelta).not.toHaveBeenCalled();
+    expect(finishManagedTurn).toHaveBeenCalledOnce();
+    const auditResources = evaluate.mock.calls.map(
+      ([input]) => (input as { request: { resource: Record<string, unknown> } }).request.resource,
+    );
+    expect(auditResources.every((resource) => resource['attachmentByteCount'] === 0)).toBe(true);
+    expect(JSON.stringify(auditResources)).not.toContain(imageB.sha256);
+    const retained = observedBridge!.consumeForNextDispatch({ baseMessages: [], directImages: [] });
+    expect(retained.messages.at(-1)).toMatchObject({
+      inlineImages: [{ base64: imageA.bytes.toString('base64') }],
+    });
+    expect(JSON.stringify(retained.messages)).not.toContain(imageB.bytes.toString('base64'));
+  });
+
   it('covers tool-only local and both trusted-remote Provider egress matrix paths', async () => {
     const canonical = await canonicalizeProviderToolImage(
       await sharp({
@@ -3466,6 +3772,28 @@ describe('Provider Team completion and model errors', () => {
             credential['endpointDigest'] = digest;
             credential['localConsentDigest'] = digest;
           }),
+      ],
+      [
+        'coherent non-Ollama trusted-local profile',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          const executionConnection = state['executionConnection'] as Record<string, unknown>;
+          const model = state['model'] as Record<string, unknown>;
+          const profile = state['profile'] as Record<string, unknown>;
+          const selection = state['selection'] as Record<string, unknown>;
+          const startedSelection = state['startedSelection'] as Record<string, unknown>;
+          connection['providerId'] = 'localai';
+          connection['displayName'] = 'LocalAI loopback';
+          executionConnection['providerId'] = 'localai';
+          executionConnection['displayName'] = 'LocalAI loopback';
+          model['providerId'] = 'localai';
+          profile['id'] = 'localai';
+          profile['displayName'] = 'LocalAI';
+          profile['sourceReference'] = 'https://localai.io/';
+          Reflect.deleteProperty(profile, 'nativeModelLifecycle');
+          selection['requestedProvider'] = 'localai';
+          startedSelection['requestedProvider'] = 'localai';
+        },
       ],
       [
         'profile ID lookalike',
