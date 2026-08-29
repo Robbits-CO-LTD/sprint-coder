@@ -1,6 +1,5 @@
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import {
   SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
@@ -61,6 +60,7 @@ import {
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
+import { canonicalizeProviderToolImage } from './image-attachment-store';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
@@ -1244,42 +1244,52 @@ async function viewWorkspaceImage(input: PreparedWorkspaceInput): Promise<{
         'IMAGE_SIZE_UNSUPPORTED',
         `view_image accepts files from 1 to ${MAX_IMAGE_BYTES} bytes`,
       );
-    const bytes = await handle.readFile();
-    const mimeType = imageMimeType(bytes);
-    if (mimeType === null)
+    const candidate = Buffer.allocUnsafe(MAX_IMAGE_BYTES + 1);
+    let offset = 0;
+    while (offset < candidate.byteLength) {
+      const { bytesRead } = await handle.read(
+        candidate,
+        offset,
+        candidate.byteLength - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset < 1 || offset > MAX_IMAGE_BYTES)
+      throw new WorkspaceToolRejection(
+        'IMAGE_SIZE_UNSUPPORTED',
+        `view_image accepts files from 1 to ${MAX_IMAGE_BYTES} bytes`,
+      );
+    const finalStat = await handle.stat();
+    await revalidatePathGuard(input.guard);
+    if (finalStat.size !== stat.size || finalStat.size !== offset)
+      throw new WorkspaceToolRejection(
+        'IMAGE_SIZE_UNSUPPORTED',
+        'view_image file changed while it was being read',
+      );
+    const bytes = candidate.subarray(0, offset);
+    let canonical: Awaited<ReturnType<typeof canonicalizeProviderToolImage>>;
+    try {
+      canonical = await canonicalizeProviderToolImage(bytes);
+    } catch {
       throw new WorkspaceToolRejection(
         'IMAGE_FORMAT_UNSUPPORTED',
         'view_image accepts PNG, JPEG, or WebP bytes',
       );
+    }
     return {
       rootId: input.rootId,
       rootLabel: input.rootLabel,
       path: input.relativePath,
-      mimeType,
-      byteLength: bytes.length,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-      dataUrl: `data:${mimeType};base64,${bytes.toString('base64')}`,
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
     };
   } finally {
     await handle.close();
   }
-}
-
-function imageMimeType(bytes: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | null {
-  if (
-    bytes.length >= 8 &&
-    bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
-  )
-    return 'image/png';
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
-    return 'image/jpeg';
-  if (
-    bytes.length >= 12 &&
-    bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&
-    bytes.subarray(8, 12).toString('ascii') === 'WEBP'
-  )
-    return 'image/webp';
-  return null;
 }
 
 async function listWorkspace(input: PreparedWorkspaceInput): Promise<{

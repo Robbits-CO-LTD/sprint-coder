@@ -18,6 +18,8 @@ export type ToolDispatchRequest = {
   signal?: AbortSignal;
 };
 
+type ToolDispatchResultConsumer = (result: unknown) => Promise<unknown> | unknown;
+
 export type ToolAuthorizationRequest = Readonly<{
   context: ToolExecutionContext;
   callId: string;
@@ -150,7 +152,10 @@ export class ToolBroker {
     this.turns.clear();
   }
 
-  async dispatch(request: ToolDispatchRequest): Promise<unknown> {
+  async dispatch(
+    request: ToolDispatchRequest,
+    resultConsumer?: ToolDispatchResultConsumer,
+  ): Promise<unknown> {
     if (request.callId.length === 0 || request.callId.length > 128)
       throw new Error('Invalid tool call id');
     const bound = this.turns.get(turnKey(request.taskId, request.turnId));
@@ -159,6 +164,7 @@ export class ToolBroker {
     bound.claimedCallIds.add(request.callId);
     const ordinal = ++bound.nextOrdinal;
     let terminal = false;
+    let resultGateStarted = false;
     const transition = (state: ManagedToolCallState): void => {
       this.lifecycle?.({
         taskId: request.taskId,
@@ -279,10 +285,19 @@ export class ToolBroker {
       } finally {
         release();
       }
+      if (resultConsumer !== undefined) {
+        if (request.signal?.aborted) throw abortError(request.signal);
+        output = await resultConsumer(output);
+      }
       if (!toolValueMatchesSchema(definition.outputSchema, output))
         throw new Error('Tool output does not match the pinned schema');
       if (Buffer.byteLength(JSON.stringify(output), 'utf8') > entry.maxOutputBytes)
         throw new Error('Tool output exceeded the pinned output limit');
+      if (resultConsumer !== undefined) {
+        resultGateStarted = true;
+        await bound.resultGate.complete(ordinal);
+        if (request.signal?.aborted) throw abortError(request.signal);
+      }
       if (
         entry.supportsBackground &&
         typeof output === 'object' &&
@@ -292,11 +307,14 @@ export class ToolBroker {
       )
         transition('backgrounded');
       else transition('succeeded');
-      await bound.resultGate.complete(ordinal);
+      if (!resultGateStarted) {
+        resultGateStarted = true;
+        await bound.resultGate.complete(ordinal);
+      }
       return output;
     } catch (error) {
       if (!terminal) transition(request.signal?.aborted ? 'canceled' : 'failed');
-      await bound.resultGate.complete(ordinal);
+      if (!resultGateStarted) await bound.resultGate.complete(ordinal);
       throw error;
     }
   }

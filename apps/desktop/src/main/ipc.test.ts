@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
@@ -141,7 +142,10 @@ import {
 } from './ipc';
 
 import { ModelCatalogService } from './model-catalog-service';
-import { ImageAttachmentValidationError } from './image-attachment-store';
+import {
+  canonicalizeProviderToolImage,
+  ImageAttachmentValidationError,
+} from './image-attachment-store';
 import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
 import {
   buildImageAttachmentSelectionIdentity,
@@ -155,6 +159,12 @@ import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failu
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
+import { ToolImageBridge } from './tool-image-bridge';
+import { ProviderEndpointPolicy } from './provider-endpoint-policy';
+import { digestCanonical } from './context-compiler';
+import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
+import { managedLocalConnection } from './managed-local-provider-runtime';
+import sharp from 'sharp';
 
 describe('file edit tracking identity', () => {
   it('deduplicates Windows relative paths that differ only by casing', () => {
@@ -869,6 +879,12 @@ describe('Main image attachment dispatch boundary', () => {
           mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
           base64: string;
         }>;
+        auditImages: Array<{
+          id?: string;
+          mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+          byteLength: number;
+          sha256: string;
+        }>;
         manifestDigest: string;
         byteCount: number;
       };
@@ -894,6 +910,11 @@ describe('Main image attachment dispatch boundary', () => {
     ]);
     expect(prepared.manifestDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(prepared.byteCount).toBe(6);
+    expect(prepared.auditImages).toEqual([
+      { id: 'image-a', mimeType: 'image/png', byteLength: 3, sha256: 'a'.repeat(64) },
+      { id: 'image-b', mimeType: 'image/webp', byteLength: 3, sha256: 'b'.repeat(64) },
+    ]);
+    expect(JSON.stringify(prepared.auditImages)).not.toContain('b25l');
     await expect(
       probe.providerImageAttachmentStillValid(
         started,
@@ -973,6 +994,1308 @@ describe('Main image attachment dispatch boundary', () => {
     expect(() => providerMessagesFromContext([], 'message-current', prepared.inlineImages)).toThrow(
       'Provider image attachment binding is stale',
     );
+  });
+
+  it('rejects an initially non-OpenAI-compatible tool image connection', () => {
+    const taskId = 'task-tool-image-model-drift';
+    const startedSelection = {
+      connectionId: 'connection-official',
+      requestedProvider: 'openai',
+      requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+    };
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      persistence: {
+        getProviderConnection: vi.fn().mockReturnValue({
+          id: startedSelection.connectionId,
+          providerId: startedSelection.requestedProvider,
+          runtimeKind: 'official_api',
+          displayName: 'Official API',
+          enabled: true,
+          secretReference: null,
+          verification: {
+            status: 'verified',
+            verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            message: null,
+          },
+          rateLimit: {
+            mode: 'auto',
+            maxConcurrentRequests: null,
+            requestsPerMinute: null,
+            tokensPerMinute: null,
+            lastObservedRateLimitHeaders: null,
+          },
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(0).toISOString(),
+        }),
+        getTaskModelSelection: vi.fn().mockReturnValue(startedSelection),
+      },
+    });
+    const probe = router as unknown as {
+      readProviderToolImageState(started: unknown, connectionId: string, modelId: string): unknown;
+    };
+
+    expect(
+      probe.readProviderToolImageState(
+        { event: { taskId }, modelSelection: startedSelection },
+        startedSelection.connectionId,
+        startedSelection.requestedModel,
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects a pre-aborted Provider image capability probe before touching runtime state', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('turn already canceled'));
+    const getProviderConnection = vi.fn();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, { persistence: { getProviderConnection } });
+    const probe = router as unknown as {
+      captureProviderImageAttachmentCapability(
+        selection: unknown,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+    };
+
+    await expect(
+      probe.captureProviderImageAttachmentCapability(
+        {
+          taskId: 'task-pre-aborted-image-capability',
+          runtimeKind: 'provider',
+          model: 'vision-model',
+          modelSelection: {
+            connectionId: 'ollama:pre-aborted',
+            requestedProvider: 'ollama',
+            requestedModel: 'vision-model',
+          },
+        },
+        controller.signal,
+      ),
+    ).rejects.toThrow('turn already canceled');
+    expect(getProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it('binds only the exact verified loopback connection used by the executing round', async () => {
+    const taskId = 'task-tool-image-loopback';
+    const baseUrl = 'http://127.0.0.1:11434/v1';
+    const endpointPolicy = new ProviderEndpointPolicy();
+    const endpointDigest = endpointPolicy.digestForBaseUrl(baseUrl);
+    const selection = {
+      connectionId: 'ollama:loopback',
+      requestedProvider: 'ollama',
+      requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+    };
+    const connection = {
+      id: selection.connectionId,
+      providerId: selection.requestedProvider,
+      runtimeKind: 'openai_compatible' as const,
+      displayName: 'Ollama loopback',
+      enabled: true,
+      secretReference: 'provider-secret:00000000-0000-4000-8000-000000000000',
+      verification: {
+        status: 'verified' as const,
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto' as const,
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const profile = {
+      id: 'ollama',
+      displayName: 'Ollama',
+      baseUrl,
+      baseUrlConfigurable: true,
+      computeLocation: 'local' as const,
+      nativeModelLifecycle: 'ollama' as const,
+      protocol: 'chat_completions' as const,
+      modelsPath: '/models',
+      curatedModels: [],
+      verificationModel: null,
+      authentication: { headerName: 'Authorization', scheme: 'Bearer' },
+      requiredCredentialFields: [],
+      errorOverrides: [],
+      sourceReference: 'https://ollama.com/',
+      reviewedAt: new Date(0).toISOString(),
+    };
+    const compatibleRuntime = {};
+    const acceptanceSelection = {
+      taskId,
+      runtimeKind: 'provider' as const,
+      model: selection.requestedModel,
+      modelSelection: selection,
+    };
+    const capabilitySnapshot = {
+      runtimeKind: 'provider' as const,
+      connectionId: selection.connectionId,
+      providerId: selection.requestedProvider,
+      modelId: selection.requestedModel,
+      value: true as const,
+      revision: 'vision-revision-loopback',
+      capturedAtMs: Date.now(),
+    };
+    const captureProviderImageAttachmentCapability = vi.fn().mockResolvedValue(capabilitySnapshot);
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      persistence: {
+        getProviderConnection: vi.fn().mockReturnValue(connection),
+        getTaskModelSelection: vi.fn().mockReturnValue(selection),
+        getImageAttachmentAcceptanceSelection: vi.fn().mockReturnValue(acceptanceSelection),
+      },
+      providerRegistry: { resolve: vi.fn().mockReturnValue(compatibleRuntime) },
+      compatibleRuntime,
+      providerProfiles: { get: vi.fn().mockReturnValue(profile) },
+      providerSecrets: {
+        get: vi
+          .fn()
+          .mockReturnValue(
+            JSON.stringify({ baseUrl, endpointDigest, localConsentDigest: endpointDigest }),
+          ),
+      },
+      providerEndpointPolicy: endpointPolicy,
+      modelCatalog: {
+        revision: 7,
+        find: vi.fn().mockReturnValue({
+          connectionId: selection.connectionId,
+          providerId: selection.requestedProvider,
+          modelId: selection.requestedModel,
+        }),
+      },
+      captureProviderImageAttachmentCapability,
+    });
+    const probe = router as unknown as {
+      readProviderToolImageState(started: unknown, connectionId: string, modelId: string): unknown;
+      captureProviderToolImageBinding(
+        started: unknown,
+        connection: unknown,
+        modelId: string,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+      revalidateProviderToolImageBinding(
+        started: unknown,
+        binding: unknown,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+      providerToolImageFinalStateMatches(
+        started: unknown,
+        binding: unknown,
+        executionConnection: unknown,
+      ): boolean;
+    };
+    const started = { event: { taskId }, modelSelection: selection };
+
+    const state = probe.readProviderToolImageState(
+      started,
+      selection.connectionId,
+      selection.requestedModel,
+    );
+
+    expect(state).toMatchObject({
+      binding: {
+        connectionId: selection.connectionId,
+        providerId: selection.requestedProvider,
+        modelId: selection.requestedModel,
+        requestUrl: `${baseUrl}/chat/completions`,
+        modelCatalogRevision: 7,
+      },
+    });
+    expect(JSON.stringify(state)).not.toContain('apiKey');
+    const binding = await probe.captureProviderToolImageBinding(
+      started,
+      connection,
+      selection.requestedModel,
+      new AbortController().signal,
+    );
+    expect(binding).toMatchObject({ connectionDigest: expect.any(String) });
+    expect(probe.providerToolImageFinalStateMatches(started, binding, connection)).toBe(true);
+    expect(
+      probe.providerToolImageFinalStateMatches(started, binding, {
+        ...connection,
+        displayName: 'Same identity, different execution object',
+      }),
+    ).toBe(false);
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toMatchObject({ trust: 'trusted-local' });
+    await expect(
+      probe.captureProviderToolImageBinding(
+        started,
+        {
+          ...connection,
+          secretReference: 'provider-secret:00000000-0000-4000-8000-000000000099',
+          updatedAt: new Date(1).toISOString(),
+        },
+        selection.requestedModel,
+        new AbortController().signal,
+      ),
+    ).resolves.toBeNull();
+    expect(captureProviderImageAttachmentCapability).toHaveBeenCalledTimes(3);
+
+    const originalUpdatedAt = connection.updatedAt;
+    connection.updatedAt = new Date(2).toISOString();
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+    connection.updatedAt = originalUpdatedAt;
+
+    const originalConfigurable = profile.baseUrlConfigurable;
+    profile.baseUrlConfigurable = false;
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+    profile.baseUrlConfigurable = originalConfigurable;
+
+    captureProviderImageAttachmentCapability
+      .mockResolvedValueOnce(capabilitySnapshot)
+      .mockResolvedValueOnce({ ...capabilitySnapshot, revision: 'vision-revision-drifted' });
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+
+    const remotePrepared = await new ProviderEndpointPolicy(async () => [
+      { address: '8.8.8.8', family: 4 },
+    ]).prepareRequestUrl('https://provider.example/v1/chat/completions');
+    const prepareRequestUrl = vi
+      .spyOn(endpointPolicy, 'prepareRequestUrl')
+      .mockResolvedValueOnce(remotePrepared);
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+    expect(prepareRequestUrl).toHaveBeenCalledWith(`${baseUrl}/chat/completions`);
+
+    const localhostBaseUrl = 'http://localhost:11434/v1';
+    profile.baseUrl = localhostBaseUrl;
+    captureProviderImageAttachmentCapability.mockReset().mockResolvedValue(capabilitySnapshot);
+    const providerSecretsGet = (router['providerSecrets'] as { get: ReturnType<typeof vi.fn> }).get;
+    const dnsCases = [
+      {
+        name: 'all-loopback',
+        final: [{ address: '::1', family: 6 }],
+        accepted: true,
+      },
+      {
+        name: 'LAN',
+        final: [{ address: '192.168.1.20', family: 4 }],
+        accepted: false,
+      },
+      {
+        name: 'public IPv6',
+        final: [{ address: '2001:4860:4860::8888', family: 6 }],
+        accepted: false,
+      },
+      {
+        name: 'ULA',
+        final: [{ address: 'fd00::1', family: 6 }],
+        accepted: false,
+      },
+      {
+        name: 'mixed loopback and non-loopback',
+        final: [
+          { address: '127.0.0.1', family: 4 },
+          { address: '8.8.8.8', family: 4 },
+        ],
+        accepted: false,
+      },
+    ] as const;
+    for (const dnsCase of dnsCases) {
+      const lookup = vi
+        .fn()
+        .mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }])
+        .mockResolvedValueOnce(dnsCase.final);
+      const policy = new ProviderEndpointPolicy(lookup);
+      router['providerEndpointPolicy'] = policy;
+      const localhostDigest = policy.digestForBaseUrl(localhostBaseUrl);
+      providerSecretsGet.mockReturnValue(
+        JSON.stringify({
+          baseUrl: localhostBaseUrl,
+          endpointDigest: localhostDigest,
+          localConsentDigest: localhostDigest,
+        }),
+      );
+      const localhostBinding = await probe.captureProviderToolImageBinding(
+        started,
+        connection,
+        selection.requestedModel,
+        new AbortController().signal,
+      );
+      expect(localhostBinding, dnsCase.name).not.toBeNull();
+      const revalidated = await probe.revalidateProviderToolImageBinding(
+        started,
+        localhostBinding,
+        new AbortController().signal,
+      );
+      expect(revalidated !== null, dnsCase.name).toBe(dnsCase.accepted);
+      expect(lookup, dnsCase.name).toHaveBeenCalledTimes(2);
+    }
+
+    const captureLocalBinding = async () => {
+      const policy = new ProviderEndpointPolicy(async () => [{ address: '127.0.0.1', family: 4 }]);
+      router['providerEndpointPolicy'] = policy;
+      const localhostDigest = policy.digestForBaseUrl(localhostBaseUrl);
+      providerSecretsGet.mockReturnValue(
+        JSON.stringify({
+          baseUrl: localhostBaseUrl,
+          endpointDigest: localhostDigest,
+          localConsentDigest: localhostDigest,
+        }),
+      );
+      captureProviderImageAttachmentCapability.mockReset().mockResolvedValue(capabilitySnapshot);
+      const captured = await probe.captureProviderToolImageBinding(
+        started,
+        connection,
+        selection.requestedModel,
+        new AbortController().signal,
+      );
+      expect(captured).not.toBeNull();
+      return captured;
+    };
+    const dnsDriftCases = [
+      {
+        name: 'persisted connection during DNS',
+        mutate: () => {
+          connection.updatedAt = new Date(3).toISOString();
+        },
+        restore: () => {
+          connection.updatedAt = originalUpdatedAt;
+        },
+      },
+      {
+        name: 'registry profile during DNS',
+        mutate: () => {
+          profile.authentication.scheme = 'Token';
+        },
+        restore: () => {
+          profile.authentication.scheme = 'Bearer';
+        },
+      },
+      {
+        name: 'task model during DNS',
+        mutate: () => {
+          selection.requestedModel = 'qwen3-vl:drifted';
+        },
+        restore: () => {
+          selection.requestedModel = 'qwen3-vl:4b-instruct-q4_K_M';
+        },
+      },
+    ];
+    for (const driftCase of dnsDriftCases) {
+      const localhostBinding = await captureLocalBinding();
+      let resolveLookup!: (value: readonly Readonly<{ address: string; family: 4 | 6 }>[]) => void;
+      let markLookupStarted!: () => void;
+      const lookupStarted = new Promise<void>((resolve) => {
+        markLookupStarted = resolve;
+      });
+      const lookupResult = new Promise<readonly Readonly<{ address: string; family: 4 | 6 }>[]>(
+        (resolve) => {
+          resolveLookup = resolve;
+        },
+      );
+      router['providerEndpointPolicy'] = new ProviderEndpointPolicy(() => {
+        markLookupStarted();
+        return lookupResult;
+      });
+      const pending = probe.revalidateProviderToolImageBinding(
+        started,
+        localhostBinding,
+        new AbortController().signal,
+      );
+      await lookupStarted;
+      driftCase.mutate();
+      resolveLookup([{ address: '127.0.0.1', family: 4 }]);
+      await expect(pending, driftCase.name).resolves.toBeNull();
+      driftCase.restore();
+    }
+
+    const cancellationBinding = await captureLocalBinding();
+    let resolveCanceledLookup!: (
+      value: readonly Readonly<{ address: string; family: 4 | 6 }>[],
+    ) => void;
+    let markCanceledLookupStarted!: () => void;
+    const canceledLookupStarted = new Promise<void>((resolve) => {
+      markCanceledLookupStarted = resolve;
+    });
+    const canceledLookup = new Promise<readonly Readonly<{ address: string; family: 4 | 6 }>[]>(
+      (resolve) => {
+        resolveCanceledLookup = resolve;
+      },
+    );
+    router['providerEndpointPolicy'] = new ProviderEndpointPolicy(() => {
+      markCanceledLookupStarted();
+      return canceledLookup;
+    });
+    const cancellation = new AbortController();
+    const canceledRevalidation = probe.revalidateProviderToolImageBinding(
+      started,
+      cancellationBinding,
+      cancellation.signal,
+    );
+    await canceledLookupStarted;
+    cancellation.abort(new Error('canceled during DNS'));
+    resolveCanceledLookup([{ address: '127.0.0.1', family: 4 }]);
+    await expect(canceledRevalidation).rejects.toThrow('canceled during DNS');
+
+    let resolveCaptureLookup!: (
+      value: readonly Readonly<{ address: string; family: 4 | 6 }>[],
+    ) => void;
+    let markCaptureLookupStarted!: () => void;
+    const captureLookupStarted = new Promise<void>((resolve) => {
+      markCaptureLookupStarted = resolve;
+    });
+    router['providerEndpointPolicy'] = new ProviderEndpointPolicy(
+      () =>
+        new Promise((resolve) => {
+          resolveCaptureLookup = resolve;
+          markCaptureLookupStarted();
+        }),
+    );
+    captureProviderImageAttachmentCapability.mockReset().mockResolvedValue(capabilitySnapshot);
+    const captureCancellation = new AbortController();
+    const canceledCapture = probe.captureProviderToolImageBinding(
+      started,
+      connection,
+      selection.requestedModel,
+      captureCancellation.signal,
+    );
+    await captureLookupStarted;
+    captureCancellation.abort(new Error('canceled during binding DNS'));
+    resolveCaptureLookup([{ address: '127.0.0.1', family: 4 }]);
+    await expect(canceledCapture).rejects.toThrow('canceled during binding DNS');
+
+    let resolveCaptureCapability!: (value: typeof capabilitySnapshot) => void;
+    let markCaptureCapabilityStarted!: () => void;
+    const captureCapabilityStarted = new Promise<void>((resolve) => {
+      markCaptureCapabilityStarted = resolve;
+    });
+    captureProviderImageAttachmentCapability.mockReset().mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCaptureCapability = resolve;
+          markCaptureCapabilityStarted();
+        }),
+    );
+    const capabilityCancellation = new AbortController();
+    const canceledCapabilityCapture = probe.captureProviderToolImageBinding(
+      started,
+      connection,
+      selection.requestedModel,
+      capabilityCancellation.signal,
+    );
+    await captureCapabilityStarted;
+    capabilityCancellation.abort(new Error('canceled during binding capability'));
+    resolveCaptureCapability(capabilitySnapshot);
+    await expect(canceledCapabilityCapture).rejects.toThrow('canceled during binding capability');
+
+    for (const finalCapability of [
+      { ...capabilitySnapshot, value: false as const },
+      { ...capabilitySnapshot, value: null },
+      { ...capabilitySnapshot, revision: 'vision-revision-final-drift' },
+      { ...capabilitySnapshot, capturedAtMs: Date.now() - 5_001 },
+    ]) {
+      const localhostBinding = await captureLocalBinding();
+      router['providerEndpointPolicy'] = new ProviderEndpointPolicy(async () => [
+        { address: '127.0.0.1', family: 4 },
+      ]);
+      captureProviderImageAttachmentCapability
+        .mockReset()
+        .mockResolvedValueOnce(capabilitySnapshot)
+        .mockResolvedValueOnce(finalCapability);
+      await expect(
+        probe.revalidateProviderToolImageBinding(
+          started,
+          localhostBinding,
+          new AbortController().signal,
+        ),
+      ).resolves.toBeNull();
+    }
+
+    const finalProbeDrifts = [
+      {
+        name: 'persisted connection during final capability',
+        mutate: () => {
+          connection.updatedAt = new Date(4).toISOString();
+        },
+        restore: () => {
+          connection.updatedAt = originalUpdatedAt;
+        },
+      },
+      {
+        name: 'registry profile during final capability',
+        mutate: () => {
+          profile.baseUrlConfigurable = false;
+        },
+        restore: () => {
+          profile.baseUrlConfigurable = true;
+        },
+      },
+      {
+        name: 'task model during final capability',
+        mutate: () => {
+          selection.requestedModel = 'qwen3-vl:final-drift';
+        },
+        restore: () => {
+          selection.requestedModel = 'qwen3-vl:4b-instruct-q4_K_M';
+        },
+      },
+    ];
+    for (const driftCase of finalProbeDrifts) {
+      const localhostBinding = await captureLocalBinding();
+      router['providerEndpointPolicy'] = new ProviderEndpointPolicy(async () => [
+        { address: '127.0.0.1', family: 4 },
+      ]);
+      let resolveCapability!: (value: typeof capabilitySnapshot) => void;
+      let markCapabilityStarted!: () => void;
+      const capabilityStarted = new Promise<void>((resolve) => {
+        markCapabilityStarted = resolve;
+      });
+      const finalCapability = new Promise<typeof capabilitySnapshot>((resolve) => {
+        resolveCapability = resolve;
+      });
+      captureProviderImageAttachmentCapability
+        .mockReset()
+        .mockResolvedValueOnce(capabilitySnapshot)
+        .mockImplementationOnce(() => {
+          markCapabilityStarted();
+          return finalCapability;
+        });
+      const pending = probe.revalidateProviderToolImageBinding(
+        started,
+        localhostBinding,
+        new AbortController().signal,
+      );
+      await capabilityStarted;
+      driftCase.mutate();
+      resolveCapability(capabilitySnapshot);
+      await expect(pending, driftCase.name).resolves.toBeNull();
+      driftCase.restore();
+    }
+  });
+
+  it('fails closed for every acceptance-time connection, profile, credential, and model drift', () => {
+    const createHarness = () => {
+      const taskId = 'task-tool-image-acceptance-matrix';
+      const modelId = 'qwen3-vl:4b-instruct-q4_K_M';
+      const baseUrl = 'http://127.0.0.1:11434/v1';
+      const endpointPolicy = new ProviderEndpointPolicy();
+      const endpointDigest = endpointPolicy.digestForBaseUrl(baseUrl);
+      const selection = {
+        connectionId: 'ollama:acceptance-matrix',
+        requestedProvider: 'ollama',
+        requestedModel: modelId,
+      };
+      const startedSelection = { ...selection };
+      const connection = {
+        id: selection.connectionId,
+        providerId: selection.requestedProvider,
+        runtimeKind: 'openai_compatible',
+        displayName: 'Ollama loopback',
+        enabled: true,
+        secretReference: 'provider-secret:00000000-0000-4000-8000-000000000010' as string | null,
+        verification: {
+          status: 'verified',
+          verifiedAt: new Date(Date.now() - 60_000).toISOString() as string | null,
+          expiresAt: new Date(Date.now() + 60_000).toISOString() as string | null,
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: null,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+      const profile = {
+        id: 'ollama',
+        displayName: 'Ollama',
+        baseUrl,
+        baseUrlConfigurable: true,
+        computeLocation: 'local',
+        nativeModelLifecycle: 'ollama',
+        protocol: 'chat_completions',
+        modelsPath: '/models',
+        curatedModels: [],
+        verificationModel: null,
+        authentication: { headerName: 'Authorization', scheme: 'Bearer' },
+        requiredCredentialFields: [] as string[],
+        errorOverrides: [],
+        sourceReference: 'https://ollama.com/',
+        reviewedAt: new Date(0).toISOString(),
+      };
+      const credential: Record<string, unknown> = {
+        baseUrl,
+        endpointDigest,
+        localConsentDigest: endpointDigest,
+      };
+      const model = {
+        connectionId: selection.connectionId,
+        providerId: selection.requestedProvider,
+        modelId,
+      };
+      const compatibleRuntime = {};
+      const providerSecretsGet = vi.fn(() => JSON.stringify(credential));
+      const registryResolve = vi.fn(() => compatibleRuntime);
+      const modelFind = vi.fn((): typeof model | undefined => model);
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        persistence: {
+          getProviderConnection: () => connection,
+          getTaskModelSelection: () => selection,
+        },
+        providerRegistry: { resolve: registryResolve },
+        compatibleRuntime,
+        providerProfiles: { get: () => profile },
+        providerSecrets: { get: providerSecretsGet },
+        providerEndpointPolicy: endpointPolicy,
+        modelCatalog: { revision: 7, find: modelFind },
+      });
+      const started = { event: { taskId }, modelSelection: startedSelection };
+      const read = () =>
+        (
+          router as unknown as {
+            readProviderToolImageState(
+              started: unknown,
+              connectionId: string,
+              modelId: string,
+            ): unknown;
+          }
+        ).readProviderToolImageState(started, connection.id, modelId);
+      return {
+        connection,
+        credential,
+        endpointDigest,
+        model,
+        modelFind,
+        profile,
+        providerSecretsGet,
+        read,
+        registryResolve,
+        selection,
+        startedSelection,
+      };
+    };
+    const cases: ReadonlyArray<
+      readonly [string, (harness: ReturnType<typeof createHarness>) => void]
+    > = [
+      ['responses protocol', ({ profile }) => Object.assign(profile, { protocol: 'responses' })],
+      ['profile id lookalike', ({ profile }) => Object.assign(profile, { id: 'ollamI' })],
+      [
+        'required empty api key',
+        ({ credential, profile }) => {
+          profile.requiredCredentialFields = ['api_key'];
+          credential['apiKey'] = ' ';
+        },
+      ],
+      [
+        'required empty account id',
+        ({ credential, profile }) => {
+          profile.requiredCredentialFields = ['account_id'];
+          credential['accountId'] = ' ';
+        },
+      ],
+      [
+        'credential resolution exception',
+        ({ providerSecretsGet }) =>
+          providerSecretsGet.mockImplementation(() => {
+            throw new Error('credential unavailable');
+          }),
+      ],
+      [
+        'missing endpoint digest',
+        ({ credential }) => void Reflect.deleteProperty(credential, 'endpointDigest'),
+      ],
+      [
+        'mismatched endpoint digest',
+        ({ credential }) => void (credential['endpointDigest'] = 'f'.repeat(64)),
+      ],
+      [
+        'missing local consent digest',
+        ({ credential }) => void Reflect.deleteProperty(credential, 'localConsentDigest'),
+      ],
+      [
+        'mismatched local consent digest',
+        ({ credential }) => void (credential['localConsentDigest'] = 'e'.repeat(64)),
+      ],
+      ['missing verifiedAt', ({ connection }) => void (connection.verification.verifiedAt = null)],
+      [
+        'invalid verifiedAt',
+        ({ connection }) => void (connection.verification.verifiedAt = 'not-a-timestamp'),
+      ],
+      [
+        'verifiedAt in future',
+        ({ connection }) =>
+          void (connection.verification.verifiedAt = new Date(Date.now() + 60_000).toISOString()),
+      ],
+      ['missing expiresAt', ({ connection }) => void (connection.verification.expiresAt = null)],
+      [
+        'expiresAt equals verifiedAt',
+        ({ connection }) =>
+          void (connection.verification.expiresAt = connection.verification.verifiedAt),
+      ],
+      [
+        'expiresAt equals now',
+        ({ connection }) =>
+          void (connection.verification.expiresAt = new Date(Date.now()).toISOString()),
+      ],
+      [
+        'expiresAt in past',
+        ({ connection }) =>
+          void (connection.verification.expiresAt = new Date(Date.now() - 1).toISOString()),
+      ],
+      ['disabled connection', ({ connection }) => void (connection.enabled = false)],
+      [
+        'unverified connection',
+        ({ connection }) => void (connection.verification.status = 'unverified'),
+      ],
+      [
+        'not-required connection',
+        ({ connection }) => void (connection.verification.status = 'not_required'),
+      ],
+      ['missing secret reference', ({ connection }) => void (connection.secretReference = null)],
+      [
+        'non-compatible runtime kind',
+        ({ connection }) => void (connection.runtimeKind = 'official_api'),
+      ],
+      [
+        'connection id lookalike selection',
+        ({ selection }) => void (selection.connectionId = 'ollama:acceptance-matrix-lookalike'),
+      ],
+      [
+        'provider selection drift',
+        ({ selection }) => void (selection.requestedProvider = 'ollamI'),
+      ],
+      [
+        'model selection drift',
+        ({ selection }) => void (selection.requestedModel = 'qwen3-vl:other'),
+      ],
+      [
+        'started model drift',
+        ({ startedSelection }) => void (startedSelection.requestedModel = 'qwen3-vl:other'),
+      ],
+      ['runtime registry mismatch', ({ registryResolve }) => registryResolve.mockReturnValue({})],
+      ['missing model', ({ modelFind }) => modelFind.mockReturnValue(undefined)],
+      ['model connection drift', ({ model }) => void (model.connectionId = 'ollama:model-drift')],
+      ['model provider drift', ({ model }) => void (model.providerId = 'ollamI')],
+      ['model identity drift', ({ model }) => void (model.modelId = 'qwen3-vl:other')],
+      [
+        'LAN credential',
+        ({ credential, profile }) => {
+          const lanUrl = 'http://192.168.1.50:11434/v1';
+          profile.baseUrl = lanUrl;
+          credential['baseUrl'] = lanUrl;
+          credential['endpointDigest'] = '0'.repeat(64);
+          credential['localConsentDigest'] = '0'.repeat(64);
+        },
+      ],
+      [
+        'trusted remote credential',
+        ({ credential, profile }) => {
+          const remoteUrl = 'https://provider.example/v1';
+          profile.baseUrl = remoteUrl;
+          credential['baseUrl'] = remoteUrl;
+          credential['endpointDigest'] = '0'.repeat(64);
+          credential['localConsentDigest'] = '0'.repeat(64);
+        },
+      ],
+    ];
+
+    expect(createHarness().read()).not.toBeNull();
+    const compatibleProfile = createHarness();
+    compatibleProfile.connection.providerId = 'localai';
+    compatibleProfile.connection.displayName = 'LocalAI loopback';
+    compatibleProfile.model.providerId = 'localai';
+    compatibleProfile.profile.id = 'localai';
+    compatibleProfile.profile.displayName = 'LocalAI';
+    compatibleProfile.profile.sourceReference = 'https://localai.io/';
+    Reflect.deleteProperty(compatibleProfile.profile, 'nativeModelLifecycle');
+    compatibleProfile.selection.requestedProvider = 'localai';
+    compatibleProfile.startedSelection.requestedProvider = 'localai';
+    expect(compatibleProfile.read()).not.toBeNull();
+    for (const [name, mutate] of cases) {
+      const harness = createHarness();
+      mutate(harness);
+      expect(harness.read(), name).toBeNull();
+    }
+  });
+
+  it('denies view_image through all five wired generic callbacks before broker execution', async () => {
+    const brokerDispatch = vi.fn();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    const catalogDigest = 'a'.repeat(64);
+    const getTurnSnapshot = vi.fn(() => ({ digest: catalogDigest }));
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch, getTurnSnapshot } },
+    });
+    const originalDispatch = Reflect.get(
+      IpcRouter.prototype,
+      'dispatchGenericManagedRuntimeTool',
+    ) as (
+      this: typeof router,
+      owner: string,
+      taskId: string,
+      turnId: string,
+      request: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>;
+    const dispatch = vi.fn(
+      (owner: string, taskId: string, turnId: string, request: unknown, signal: AbortSignal) =>
+        originalDispatch.call(router, owner, taskId, turnId, request, signal),
+    );
+    Object.assign(router, { dispatchGenericManagedRuntimeTool: dispatch });
+    const probe = router as unknown as {
+      createGenericManagedRuntimeToolHandlers(): {
+        cliTeam(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        providerWorker(
+          taskId: string,
+          turnId: string,
+          catalogDigest: string,
+          name: string,
+          input: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        teamMcp(
+          input: unknown,
+          context: {
+            taskId: string;
+            turnId: string;
+            callId: string;
+            toolName: string;
+            catalogDigest: string;
+          },
+        ): Promise<unknown>;
+        codexRuntime(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        claudeRuntime(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+      };
+    };
+    const callbacks = probe.createGenericManagedRuntimeToolHandlers();
+    const signal = new AbortController().signal;
+    const directRequest = (owner: string) => ({
+      callId: `call-${owner}`,
+      toolName: 'view_image',
+      arguments: { path: 'image.png' },
+    });
+    const results = [
+      await callbacks.cliTeam('task-cli', 'turn-cli', directRequest('cli-team'), signal),
+      await callbacks.providerWorker(
+        'task-provider',
+        'turn-provider',
+        catalogDigest,
+        'view_image',
+        { path: 'image.png' },
+        signal,
+      ),
+      await callbacks.teamMcp(
+        { path: 'image.png' },
+        {
+          taskId: 'task-mcp',
+          turnId: 'turn-mcp',
+          callId: 'call-team-mcp',
+          toolName: 'view_image',
+          catalogDigest,
+        },
+      ),
+      await callbacks.codexRuntime(
+        'task-codex',
+        'turn-codex',
+        directRequest('codex-runtime'),
+        signal,
+      ),
+      await callbacks.claudeRuntime(
+        'task-claude',
+        'turn-claude',
+        directRequest('claude-runtime'),
+        signal,
+      ),
+    ];
+    expect(dispatch.mock.calls.map(([owner]) => owner)).toEqual([
+      'cli-team',
+      'provider-worker',
+      'team-mcp',
+      'codex-runtime',
+      'claude-runtime',
+    ]);
+    for (const result of results) {
+      expect(result).toMatchObject({
+        kind: 'provider_image_tool',
+        accepted: false,
+        toolMessage: {
+          content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
+        },
+      });
+      expect(JSON.stringify(result)).not.toContain('data:image/');
+    }
+    expect(brokerDispatch).not.toHaveBeenCalled();
+
+    const canceled = new AbortController();
+    canceled.abort(new Error('canceled before generic image denial'));
+    await expect(
+      callbacks.codexRuntime(
+        'task-canceled',
+        'turn-canceled',
+        { callId: 'call-canceled', toolName: 'view_image', arguments: { path: 'image.png' } },
+        canceled.signal,
+      ),
+    ).rejects.toThrow('canceled before generic image denial');
+    expect(brokerDispatch).not.toHaveBeenCalled();
+  });
+
+  it('contains hostile broker thenable failures inside the provider image bridge', async () => {
+    const leak = 'data:image/png;base64,HOSTILE_THENABLE_LEAK';
+    const thenable = Object.defineProperty({}, 'then', {
+      get: () => {
+        throw new Error(leak);
+      },
+    });
+    const brokerDispatch = vi.fn(() => thenable);
+    const logger = vi.spyOn(secureLogger, 'error');
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const result = await probe.dispatchManagedRuntimeTool(
+      'task-provider-image',
+      'turn-provider-image',
+      { callId: 'call-hostile', toolName: 'view_image', arguments: { path: 'image.png' } },
+      new AbortController().signal,
+      new ToolImageBridge(),
+    );
+
+    expect(brokerDispatch).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      kind: 'provider_image_tool',
+      accepted: false,
+      toolMessage: {
+        toolCallId: 'call-hostile',
+        content: expect.stringContaining('INVALID_TOOL_RESULT'),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(leak);
+    expect(logger.mock.calls.flat().join('\n')).not.toContain(leak);
+    logger.mockRestore();
+  });
+
+  it('contains hostile raw image getters without leaking their payload', async () => {
+    const leak = 'data:image/png;base64,HOSTILE_RAW_RESULT_LEAK';
+    const hostileResult = new Proxy<Record<string, unknown>>(
+      {},
+      {
+        get: () => {
+          throw new Error(leak);
+        },
+      },
+    );
+    const brokerDispatch = vi.fn(
+      async (_request: unknown, consume: (value: unknown) => Promise<unknown>) =>
+        consume(hostileResult),
+    );
+    const errorLogger = vi.spyOn(secureLogger, 'error');
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const result = await probe.dispatchManagedRuntimeTool(
+      'task-provider-hostile-raw',
+      'turn-provider-hostile-raw',
+      { callId: 'call-hostile-raw', toolName: 'view_image', arguments: { path: 'image.png' } },
+      new AbortController().signal,
+      new ToolImageBridge(),
+    );
+
+    expect(result).toMatchObject({
+      kind: 'provider_image_tool',
+      accepted: false,
+      toolMessage: {
+        toolCallId: 'call-hostile-raw',
+        content: expect.stringContaining('INVALID_TOOL_RESULT'),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(leak);
+    expect(errorLogger.mock.calls.flat().join('\n')).not.toContain(leak);
+    errorLogger.mockRestore();
+  });
+
+  it('propagates cancellation while a provider image tool is executing', async () => {
+    const controller = new AbortController();
+    const cancellation = new Error('turn canceled');
+    const brokerDispatch = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(cancellation), { once: true });
+        }),
+    );
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const pending = probe.dispatchManagedRuntimeTool(
+      'task-provider-image-cancel',
+      'turn-provider-image-cancel',
+      { callId: 'call-cancel', toolName: 'view_image', arguments: { path: 'image.png' } },
+      controller.signal,
+      new ToolImageBridge(),
+    );
+    controller.abort();
+
+    await expect(pending).rejects.toBe(cancellation);
+    expect(brokerDispatch).toHaveBeenCalledOnce();
+  });
+
+  it('discards a valid provider image that resolves after cancellation', async () => {
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const canonical = await canonicalizeProviderToolImage(source);
+    const validResult = {
+      path: 'image.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    const controller = new AbortController();
+    const cancellation = new Error('turn canceled after tool completion');
+    const brokerDispatch = vi.fn(
+      async (_request: unknown, consume: (value: unknown) => Promise<unknown>) => {
+        const metadata = await consume(validResult);
+        controller.abort(cancellation);
+        return metadata;
+      },
+    );
+    const bridge = new ToolImageBridge();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const pending = probe.dispatchManagedRuntimeTool(
+      'task-provider-image-late-cancel',
+      'turn-provider-image-late-cancel',
+      { callId: 'call-late-cancel', toolName: 'view_image', arguments: { path: 'image.png' } },
+      controller.signal,
+      bridge,
+    );
+    await expect(pending).rejects.toBe(cancellation);
+    expect(bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] }).hasToolImage).toBe(
+      false,
+    );
+  });
+
+  it('commits provider image bytes and publishes their binding before dispatch resolves', async () => {
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 60, g: 100, b: 140 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const canonical = await canonicalizeProviderToolImage(source);
+    const validResult = {
+      path: 'image.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    const bridge = new ToolImageBridge();
+    const events: string[] = [];
+    const commit = bridge.commitStaged.bind(bridge);
+    vi.spyOn(bridge, 'commitStaged').mockImplementation(() => {
+      commit();
+      events.push('bytes-committed');
+    });
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: {
+        broker: {
+          dispatch: vi.fn(
+            async (_request: unknown, consume: (value: unknown) => Promise<unknown>) =>
+              consume(validResult),
+          ),
+        },
+      },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+        publishBinding: () => void,
+      ): Promise<unknown>;
+    };
+
+    const resolved = probe
+      .dispatchManagedRuntimeTool(
+        'task-provider-image-atomic',
+        'turn-provider-image-atomic',
+        { callId: 'call-atomic', toolName: 'view_image', arguments: { path: 'image.png' } },
+        new AbortController().signal,
+        bridge,
+        () => events.push('binding-published'),
+      )
+      .then((value) => {
+        events.push('dispatch-resolved');
+        return value;
+      });
+
+    await expect(resolved).resolves.toMatchObject({ accepted: true });
+    expect(events).toEqual(['bytes-committed', 'binding-published', 'dispatch-resolved']);
+    expect(bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] }).hasToolImage).toBe(
+      true,
+    );
+  });
+
+  it('rolls back a staged later image when broker post-processing fails', async () => {
+    const firstSource = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 30, g: 50, b: 70 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const laterSource = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 180, g: 90, b: 20 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const first = await canonicalizeProviderToolImage(firstSource);
+    const later = await canonicalizeProviderToolImage(laterSource);
+    const resultFor = (image: typeof first) => ({
+      path: 'image.png',
+      mimeType: image.mimeType,
+      byteLength: image.bytes.byteLength,
+      sha256: image.sha256,
+      dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+    });
+    const bridge = new ToolImageBridge();
+    await bridge.acceptToolResult({
+      toolCallId: 'call-a',
+      toolName: 'view_image',
+      result: resultFor(first),
+    });
+    const brokerDispatch = vi.fn(
+      async (_request: unknown, consume: (value: unknown) => Promise<unknown>) => {
+        await consume(resultFor(later));
+        throw new Error('post-stage lifecycle failed');
+      },
+    );
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    await expect(
+      probe.dispatchManagedRuntimeTool(
+        'task-provider-image-rollback',
+        'turn-provider-image-rollback',
+        { callId: 'call-b', toolName: 'view_image', arguments: { path: 'image.png' } },
+        new AbortController().signal,
+        bridge,
+      ),
+    ).resolves.toMatchObject({ accepted: false });
+    const next = bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] });
+    expect(next.messages.at(-1)).toMatchObject({
+      inlineImages: [{ base64: first.bytes.toString('base64') }],
+    });
+    expect(JSON.stringify(next.messages)).not.toContain(later.bytes.toString('base64'));
   });
 
   it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {
@@ -1108,6 +2431,1945 @@ describe('root-aware file selection', () => {
 });
 
 describe('Provider Team completion and model errors', () => {
+  it('fails the real Provider turn before a second execute when final tool-image egress is denied', async () => {
+    const taskId = 'task-tool-image-final-deny';
+    const turnId = 'turn-tool-image-final-deny';
+    const userMessageId = 'message-tool-image-final-deny';
+    const connection = {
+      id: 'profile:ollama',
+      providerId: 'ollama',
+      runtimeKind: 'openai_compatible',
+      displayName: 'Ollama',
+      enabled: true,
+      secretReference: null,
+      verification: {
+        status: 'verified',
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto',
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 30, g: 80, b: 120 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const canonical = await canonicalizeProviderToolImage(source);
+    const toolResult = {
+      path: 'fixture.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    const execute = vi.fn(() =>
+      (async function* () {
+        yield {
+          type: 'tool_call' as const,
+          callId: 'call-view-image',
+          name: 'view_image',
+          input: { path: 'fixture.png' },
+        };
+        yield { type: 'completed' as const, stopReason: 'tool_calls' };
+      })(),
+    );
+    const runtime = { execute, cancel: vi.fn() };
+    const evaluate = vi.fn((input: Record<string, unknown>) => {
+      const request = input['request'] as {
+        resource: { attachmentByteCount: number; attachmentManifestDigest: string | null };
+      };
+      return request.resource.attachmentByteCount > 0
+        ? {
+            decision: 'deny',
+            reason: 'test_final_tool_image_denial',
+            policyEpoch: 1,
+            evaluationTrace: ['test-final-deny'],
+          }
+        : {
+            decision: 'allow',
+            reason: 'test_initial_allow',
+            policyEpoch: 1,
+            evaluationTrace: ['test-initial-allow'],
+            permit: { id: 'test-permit' },
+          };
+    });
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const recordRuntimeFailureDiagnostic = vi.fn(
+      (_taskId: string, _turnId: string, diagnostic: { diagnosticId: string }) => diagnostic,
+    );
+    const finishAndAdvance = vi.fn();
+    const dispatchManagedRuntimeTool = vi.fn(
+      async (
+        _taskId: string,
+        _turnId: string,
+        request: { callId: string; toolName: string },
+        _signal: AbortSignal,
+        bridge: ToolImageBridge,
+        publishBinding: () => void,
+      ) => {
+        const accepted = await bridge.acceptToolResult({
+          toolCallId: request.callId,
+          toolName: request.toolName,
+          result: toolResult,
+        });
+        if (accepted.accepted) publishBinding();
+        return Object.freeze({ kind: 'provider_image_tool', ...accepted });
+      },
+    );
+    const ensureProviderEndpointConsent = vi.fn().mockResolvedValue(undefined);
+    const requireVerifiedForExecution = vi.fn().mockResolvedValue(connection);
+    const resolveProvider = vi.fn(() => runtime);
+    const prepareContext = vi.fn(() => ({
+      fragments: [
+        {
+          id: 'current',
+          taskId,
+          source: 'history',
+          trust: 'user',
+          tokenEstimate: 1,
+          content: 'describe the workspace image',
+          createdAt: new Date(0).toISOString(),
+          messageId: userMessageId,
+        },
+      ],
+      projectItems: [],
+      projectSnapshotDigest: null,
+    }));
+    const prepareProviderTurnImageAttachments = vi.fn(() => undefined);
+    const modelFind = vi.fn(() => ({ toolCalling: { value: true } }));
+    const startManagedTurn = vi.fn(() => ({
+      digest: 'a'.repeat(64),
+      providerId: 'ollama',
+      entries: [
+        {
+          providerName: 'view_image',
+          inputSchema: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+            additionalProperties: false,
+          },
+        },
+      ],
+    }));
+    const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(fakeRouter, {
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([[turnId, 'provider']]),
+      providerAbortByTurn: new Map(),
+      providerExecutionIdByTurn: new Map(),
+      providerVerification: {
+        requireVerifiedForExecution,
+      },
+      providerRegistry: { resolve: resolveProvider },
+      modelCatalog: { find: modelFind },
+      permissionBroker: {
+        evaluate,
+        revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+      },
+      persistence: {
+        getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+        getProviderConnection: () => connection,
+        getPermissionPolicy: () => ({ policyEpoch: 1 }),
+        getActiveTurnId: () => turnId,
+        readTurnWorkspaceSetForTask: () => null,
+        changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+        appendDelta,
+        recordRuntimeFailureDiagnostic,
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      publish: vi.fn(),
+      finishAndAdvance,
+      ensureProviderEndpointConsent,
+      prepareContext,
+      prepareProviderTurnImageAttachments,
+      providerEgressTrustForConnection: () => 'trusted-local',
+      managedCodingHarness: {
+        startTurn: startManagedTurn,
+        finishTurn: vi.fn(),
+      },
+      teamCoordinator: { hasUnfinishedTeamWork: () => false },
+      applyProviderTurnEvent: vi.fn(),
+      captureProviderToolImageBinding: vi.fn().mockResolvedValue({
+        connectionDigest: digestCanonical(connection),
+      }),
+      revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+      providerToolImageStateMatches: vi.fn().mockReturnValue({ connection }),
+      dispatchManagedRuntimeTool,
+      cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+    });
+    const started = {
+      turnId,
+      text: 'describe the workspace image',
+      skills: [],
+      event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+      modelSelection: {
+        connectionId: connection.id,
+        requestedProvider: connection.providerId,
+        requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+      },
+      workspaceSet: {
+        digest: 'workspace-digest',
+        roots: [{ rootId: 'root-a' }],
+      },
+    };
+    const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+      this: typeof fakeRouter,
+      started: unknown,
+      connectionId: string,
+      teamTurn: boolean,
+      autoSkills: readonly unknown[],
+    ) => Promise<void>;
+
+    await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+
+    expect(
+      execute,
+      JSON.stringify({
+        evaluateCalls: evaluate.mock.calls.length,
+        dispatchCalls: dispatchManagedRuntimeTool.mock.calls.length,
+        diagnosticCalls: recordRuntimeFailureDiagnostic.mock.calls.length,
+        finishCalls: finishAndAdvance.mock.calls,
+        ensureCalls: ensureProviderEndpointConsent.mock.calls.length,
+        verifyCalls: requireVerifiedForExecution.mock.calls.length,
+        prepareContextCalls: prepareContext.mock.calls.length,
+        resolveCalls: resolveProvider.mock.calls.length,
+        prepareImageCalls: prepareProviderTurnImageAttachments.mock.calls.length,
+        modelFindCalls: modelFind.mock.calls.length,
+        managedStartCalls: startManagedTurn.mock.calls.length,
+      }),
+    ).toHaveBeenCalledTimes(1);
+    expect(dispatchManagedRuntimeTool).toHaveBeenCalledTimes(1);
+    const deniedRequest = evaluate.mock.calls
+      .map(([input]) => input['request'] as { resource: Record<string, unknown> })
+      .find(({ resource }) => Number(resource['attachmentByteCount']) > 0);
+    expect(deniedRequest?.resource).toMatchObject({
+      providerTrust: 'trusted-local',
+      dataResidency: 'local-device',
+      attachmentByteCount: canonical.bytes.byteLength,
+      attachmentManifestDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(JSON.stringify(deniedRequest)).not.toContain(canonical.bytes.toString('base64'));
+    expect(appendDelta).toHaveBeenCalledWith(
+      taskId,
+      turnId,
+      expect.any(String),
+      '画像を安全に送信できなかったため、Providerへの送信を中止しました。',
+    );
+    expect(JSON.stringify(appendDelta.mock.calls)).not.toContain('data:image/');
+    expect(recordRuntimeFailureDiagnostic).toHaveBeenCalledTimes(1);
+    expect(recordRuntimeFailureDiagnostic.mock.calls[0]?.[2]).toMatchObject({
+      failureStage: 'provider_error',
+      category: 'invalid_request',
+      providerCode: 'policy_denied',
+      modelPreparation: 'completed',
+    });
+    expect(finishAndAdvance).toHaveBeenCalledWith(taskId, turnId, 'failed');
+  });
+
+  it('sends only the last tool image on request 2 with the direct manifest and never resends it', async () => {
+    const taskId = 'task-tool-image-success';
+    const turnId = 'turn-tool-image-success';
+    const userMessageId = 'message-tool-image-success';
+    const connection = {
+      id: 'profile:ollama-success',
+      providerId: 'ollama',
+      runtimeKind: 'openai_compatible',
+      displayName: 'Ollama',
+      enabled: true,
+      secretReference: null,
+      verification: {
+        status: 'verified',
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto',
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const canonicalFor = async (red: number) =>
+      canonicalizeProviderToolImage(
+        await sharp({
+          create: {
+            width: 32,
+            height: 32,
+            channels: 3,
+            background: { r: red, g: 50, b: 90 },
+          },
+        })
+          .png()
+          .toBuffer(),
+      );
+    const imageA = await canonicalFor(40);
+    const imageB = await canonicalFor(180);
+    const resultFor = (image: typeof imageA) => ({
+      path: 'fixture.png',
+      mimeType: image.mimeType,
+      byteLength: image.bytes.byteLength,
+      sha256: image.sha256,
+      dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+    });
+    const directBytes = Buffer.from('direct-image-fixture');
+    const directImage = {
+      id: 'direct-1',
+      mimeType: 'image/png' as const,
+      byteLength: directBytes.byteLength,
+      sha256: createHash('sha256').update(directBytes).digest('hex'),
+    };
+    const directManifest = [
+      {
+        ...directImage,
+        ordinal: 0,
+      },
+    ];
+    const compositeManifest = [
+      ...directManifest,
+      {
+        id: 'tool:call-image-b',
+        mimeType: imageB.mimeType,
+        byteLength: imageB.bytes.byteLength,
+        sha256: imageB.sha256,
+      },
+    ];
+    let ordinal = 0;
+    const serializedBodies: Array<ReturnType<typeof openAICompatibleChatCompletionRequest>> = [];
+    const execute = vi.fn((_connection: unknown, _request: unknown) => {
+      serializedBodies.push(
+        openAICompatibleChatCompletionRequest(
+          _request as Parameters<typeof openAICompatibleChatCompletionRequest>[0],
+          'ollama',
+        ),
+      );
+      ordinal += 1;
+      const current = ordinal;
+      return (async function* () {
+        if (current === 1) {
+          yield {
+            type: 'tool_call' as const,
+            callId: 'call-image-a',
+            name: 'view_image',
+            input: { path: 'a.png' },
+          };
+          yield {
+            type: 'tool_call' as const,
+            callId: 'call-image-b',
+            name: 'view_image',
+            input: { path: 'b.png' },
+          };
+          yield { type: 'completed' as const, stopReason: 'tool_calls' };
+          return;
+        }
+        if (current === 2) {
+          yield {
+            type: 'tool_call' as const,
+            callId: 'call-read',
+            name: 'read_file',
+            input: { path: 'notes.txt' },
+          };
+          yield { type: 'completed' as const, stopReason: 'tool_calls' };
+          return;
+        }
+        yield { type: 'output_delta' as const, text: 'VISION-731 red circle' };
+        yield { type: 'completed' as const, stopReason: 'stop' };
+      })();
+    });
+    const evaluate = vi.fn((_input: Record<string, unknown>) => ({
+      decision: 'allow',
+      reason: 'test_allow',
+      policyEpoch: 1,
+      evaluationTrace: ['test-allow'],
+      permit: { id: 'test-permit' },
+    }));
+    const brokerDispatch = vi.fn(
+      async (
+        request: { callId: string; providerName: string },
+        consume?: (result: unknown) => Promise<unknown>,
+      ) => {
+        if (request.providerName !== 'view_image') return { path: 'notes.txt', content: 'ok' };
+        return consume!(request.callId === 'call-image-a' ? resultFor(imageA) : resultFor(imageB));
+      },
+    );
+    const prepareContext = vi.fn(() => ({
+      fragments: [
+        {
+          id: 'current',
+          taskId,
+          source: 'history',
+          trust: 'user',
+          tokenEstimate: 1,
+          content: 'describe the workspace image',
+          createdAt: new Date(0).toISOString(),
+          messageId: userMessageId,
+        },
+      ],
+      projectItems: [],
+      projectSnapshotDigest: null,
+    }));
+    const prepareProviderTurnImageAttachments = vi.fn(() => ({
+      binding: { kind: 'provider_inline' },
+      inlineImages: [{ mimeType: directImage.mimeType, base64: directBytes.toString('base64') }],
+      auditImages: [directImage],
+      manifestDigest: digestCanonical(directManifest),
+      byteCount: directImage.byteLength,
+    }));
+    const beginProviderSynthesis = vi.fn().mockResolvedValue(undefined);
+    const completeProviderTeamTurn = vi.fn().mockResolvedValue('completed');
+    const captureProviderToolImageBinding = vi
+      .fn()
+      .mockResolvedValueOnce({
+        connectionDigest: digestCanonical(connection),
+        image: 'A',
+      })
+      .mockResolvedValueOnce({
+        connectionDigest: digestCanonical(connection),
+        image: 'B',
+      });
+    const providerToolImageFinalStateMatches = vi.fn().mockReturnValue(true);
+    const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(fakeRouter, {
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([[turnId, 'provider']]),
+      providerAbortByTurn: new Map(),
+      providerExecutionIdByTurn: new Map(),
+      managedWorkerTurn: new Map(),
+      managedWorkerCall: new Map(),
+      providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
+      providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
+      modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: true } })) },
+      permissionBroker: {
+        evaluate,
+        revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+      },
+      persistence: {
+        getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+        getProviderConnection: () => connection,
+        getPermissionPolicy: () => ({ policyEpoch: 1 }),
+        getActiveTurnId: () => turnId,
+        readTurnWorkspaceSetForTask: () => null,
+        changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+        appendDelta: vi.fn(() => ({ type: 'message.delta' })),
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      publish: vi.fn(),
+      ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+      prepareContext,
+      prepareProviderTurnImageAttachments,
+      providerImageAttachmentStillValid: vi.fn().mockResolvedValue(true),
+      providerEgressTrustForConnection: () => 'trusted-local',
+      managedCodingHarness: {
+        broker: { dispatch: brokerDispatch },
+        startTurn: vi.fn(() => ({
+          digest: 'a'.repeat(64),
+          providerId: 'ollama',
+          entries: [
+            {
+              providerName: 'view_image',
+              inputSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+            {
+              providerName: 'read_file',
+              inputSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        })),
+        finishTurn: vi.fn(),
+      },
+      teamCoordinator: { hasUnfinishedTeamWork: () => false },
+      applyProviderTurnEvent: vi.fn(),
+      captureProviderToolImageBinding,
+      revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+      providerToolImageFinalStateMatches,
+      beginProviderSynthesis,
+      completeProviderTeamTurn,
+      cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+    });
+    const started = {
+      turnId,
+      text: 'describe the workspace image',
+      skills: [],
+      event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+      modelSelection: {
+        connectionId: connection.id,
+        requestedProvider: connection.providerId,
+        requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+      },
+      workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+    };
+    const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+      this: typeof fakeRouter,
+      started: unknown,
+      connectionId: string,
+      teamTurn: boolean,
+      autoSkills: readonly unknown[],
+    ) => Promise<void>;
+
+    await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+
+    expect(execute).toHaveBeenCalledTimes(3);
+    const request2 = execute.mock.calls[1]?.[1] as {
+      messages: Array<{ content: string; inlineImages?: Array<{ base64: string }> }>;
+    };
+    const request3 = execute.mock.calls[2]?.[1] as typeof request2;
+    const request2Images = request2.messages.flatMap((message) => message.inlineImages ?? []);
+    const request3Images = request3.messages.flatMap((message) => message.inlineImages ?? []);
+    expect(request2Images.map(({ base64 }) => base64)).toEqual([
+      directBytes.toString('base64'),
+      imageB.bytes.toString('base64'),
+    ]);
+    expect(JSON.stringify(request2)).not.toContain(imageA.bytes.toString('base64'));
+    expect(request3Images.map(({ base64 }) => base64)).toEqual([directBytes.toString('base64')]);
+    expect(JSON.stringify(request3)).not.toContain(imageB.bytes.toString('base64'));
+    const imageUrlsFor = (body: unknown) =>
+      ((body as { messages?: Array<{ content?: unknown }> } | undefined)?.messages ?? []).flatMap(
+        (message) =>
+          Array.isArray(message.content)
+            ? (
+                message.content as Array<{
+                  type?: string;
+                  image_url?: { url?: string };
+                }>
+              ).flatMap((part) =>
+                part.type === 'image_url' && typeof part.image_url?.url === 'string'
+                  ? [part.image_url.url]
+                  : [],
+              )
+            : [],
+      );
+    expect(imageUrlsFor(serializedBodies[1])).toEqual([
+      `data:${directImage.mimeType};base64,${directBytes.toString('base64')}`,
+      `data:${imageB.mimeType};base64,${imageB.bytes.toString('base64')}`,
+    ]);
+    expect(imageUrlsFor(serializedBodies[2])).toEqual([
+      `data:${directImage.mimeType};base64,${directBytes.toString('base64')}`,
+    ]);
+    const resources = evaluate.mock.calls.map(
+      ([input]) => (input as { request: { resource: Record<string, unknown> } }).request.resource,
+    );
+    expect(resources.map((resource) => resource['attachmentByteCount'])).toEqual([
+      directImage.byteLength,
+      directImage.byteLength,
+      directImage.byteLength + imageB.bytes.byteLength,
+      directImage.byteLength,
+    ]);
+    expect(resources[2]).toMatchObject({
+      providerTrust: 'trusted-local',
+      attachmentManifestDigest: digestCanonical(compositeManifest),
+    });
+    for (const index of [0, 1, 3])
+      expect(resources[index]).toMatchObject({
+        providerTrust: 'trusted-local',
+        attachmentManifestDigest: digestCanonical(directManifest),
+      });
+    expect(brokerDispatch).toHaveBeenCalledTimes(3);
+    expect(providerToolImageFinalStateMatches).toHaveBeenCalledWith(
+      started,
+      expect.objectContaining({ image: 'B' }),
+      connection,
+    );
+    expect(completeProviderTeamTurn).toHaveBeenCalledOnce();
+  });
+
+  it('retains image A and stops the Provider Turn when image B is canceled after staging', async () => {
+    const taskId = 'task-tool-image-b-canceled';
+    const turnId = 'turn-tool-image-b-canceled';
+    const userMessageId = 'message-tool-image-b-canceled';
+    const connection = {
+      id: 'profile:ollama-b-canceled',
+      providerId: 'ollama',
+      runtimeKind: 'openai_compatible',
+      displayName: 'Ollama',
+      enabled: true,
+      secretReference: null,
+      verification: {
+        status: 'verified',
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto',
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const canonicalFor = async (red: number) =>
+      canonicalizeProviderToolImage(
+        await sharp({
+          create: {
+            width: 32,
+            height: 32,
+            channels: 3,
+            background: { r: red, g: 50, b: 90 },
+          },
+        })
+          .png()
+          .toBuffer(),
+      );
+    const imageA = await canonicalFor(40);
+    const imageB = await canonicalFor(180);
+    const resultFor = (image: typeof imageA) => ({
+      path: 'fixture.png',
+      mimeType: image.mimeType,
+      byteLength: image.bytes.byteLength,
+      sha256: image.sha256,
+      dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+    });
+    const execute = vi.fn(() =>
+      (async function* () {
+        yield {
+          type: 'tool_call' as const,
+          callId: 'call-image-a',
+          name: 'view_image',
+          input: { path: 'a.png' },
+        };
+        yield {
+          type: 'tool_call' as const,
+          callId: 'call-image-b',
+          name: 'view_image',
+          input: { path: 'b.png' },
+        };
+        yield { type: 'completed' as const, stopReason: 'tool_calls' };
+      })(),
+    );
+    const evaluate = vi.fn((_input: Record<string, unknown>) => ({
+      decision: 'allow',
+      reason: 'test_allow',
+      policyEpoch: 1,
+      evaluationTrace: ['test-allow'],
+      permit: { id: 'test-permit' },
+    }));
+    const cancellation = new Error('image B canceled after staging');
+    const providerAbortByTurn = new Map<string, AbortController>();
+    const brokerDispatch = vi.fn(
+      async (
+        request: { callId: string },
+        consume?: (result: unknown) => Promise<unknown>,
+      ): Promise<unknown> => {
+        const accepted = await consume!(
+          resultFor(request.callId === 'call-image-a' ? imageA : imageB),
+        );
+        if (request.callId === 'call-image-b') {
+          providerAbortByTurn.get(turnId)!.abort(cancellation);
+          throw cancellation;
+        }
+        return accepted;
+      },
+    );
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const finishAndAdvance = vi.fn();
+    const completeProviderTeamTurn = vi.fn().mockResolvedValue('completed');
+    const finishManagedTurn = vi.fn();
+    const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(fakeRouter, {
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([[turnId, 'provider']]),
+      providerAbortByTurn,
+      providerExecutionIdByTurn: new Map(),
+      managedWorkerTurn: new Map(),
+      managedWorkerCall: new Map(),
+      providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
+      providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
+      modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: true } })) },
+      permissionBroker: {
+        evaluate,
+        revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+      },
+      persistence: {
+        getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+        getProviderConnection: () => connection,
+        getPermissionPolicy: () => ({ policyEpoch: 1 }),
+        getActiveTurnId: () => turnId,
+        readTurnWorkspaceSetForTask: () => null,
+        changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+        appendDelta,
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      publish: vi.fn(),
+      finishAndAdvance,
+      ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+      prepareContext: vi.fn(() => ({
+        fragments: [
+          {
+            id: 'current',
+            taskId,
+            source: 'history',
+            trust: 'user',
+            tokenEstimate: 1,
+            content: 'describe the workspace image',
+            createdAt: new Date(0).toISOString(),
+            messageId: userMessageId,
+          },
+        ],
+        projectItems: [],
+        projectSnapshotDigest: null,
+      })),
+      prepareProviderTurnImageAttachments: vi.fn(() => undefined),
+      providerEgressTrustForConnection: () => 'trusted-local',
+      managedCodingHarness: {
+        broker: { dispatch: brokerDispatch },
+        startTurn: vi.fn(() => ({
+          digest: 'a'.repeat(64),
+          providerId: 'ollama',
+          entries: [
+            {
+              providerName: 'view_image',
+              inputSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        })),
+        finishTurn: finishManagedTurn,
+      },
+      teamCoordinator: { hasUnfinishedTeamWork: () => false },
+      applyProviderTurnEvent: vi.fn(),
+      captureProviderToolImageBinding: vi
+        .fn()
+        .mockResolvedValueOnce({ connectionDigest: digestCanonical(connection), image: 'A' })
+        .mockResolvedValueOnce({ connectionDigest: digestCanonical(connection), image: 'B' }),
+      revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+      providerToolImageFinalStateMatches: vi.fn().mockReturnValue(true),
+      beginProviderSynthesis: vi.fn().mockResolvedValue(undefined),
+      completeProviderTeamTurn,
+      cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+    });
+    const started = {
+      turnId,
+      text: 'describe the workspace image',
+      skills: [],
+      event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+      modelSelection: {
+        connectionId: connection.id,
+        requestedProvider: connection.providerId,
+        requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+      },
+      workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+    };
+    const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+      this: typeof fakeRouter,
+      started: unknown,
+      connectionId: string,
+      teamTurn: boolean,
+      autoSkills: readonly unknown[],
+    ) => Promise<void>;
+    const originalStage = ToolImageBridge.prototype.stageToolResult;
+    let observedBridge: ToolImageBridge | undefined;
+    const observeBridge = (bridge: ToolImageBridge): void => {
+      observedBridge = bridge;
+    };
+    const stageSpy = vi
+      .spyOn(ToolImageBridge.prototype, 'stageToolResult')
+      .mockImplementation(function (
+        this: ToolImageBridge,
+        input: Parameters<ToolImageBridge['stageToolResult']>[0],
+      ) {
+        observeBridge(this);
+        return originalStage.call(this, input);
+      });
+
+    try {
+      await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+    } finally {
+      stageSpy.mockRestore();
+    }
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(brokerDispatch).toHaveBeenCalledTimes(2);
+    expect(completeProviderTeamTurn).not.toHaveBeenCalled();
+    expect(finishAndAdvance).not.toHaveBeenCalled();
+    expect(appendDelta).not.toHaveBeenCalled();
+    expect(finishManagedTurn).toHaveBeenCalledOnce();
+    const auditResources = evaluate.mock.calls.map(
+      ([input]) => (input as { request: { resource: Record<string, unknown> } }).request.resource,
+    );
+    expect(auditResources.every((resource) => resource['attachmentByteCount'] === 0)).toBe(true);
+    expect(JSON.stringify(auditResources)).not.toContain(imageB.sha256);
+    const retained = observedBridge!.consumeForNextDispatch({ baseMessages: [], directImages: [] });
+    expect(retained.messages.at(-1)).toMatchObject({
+      inlineImages: [{ base64: imageA.bytes.toString('base64') }],
+    });
+    expect(JSON.stringify(retained.messages)).not.toContain(imageB.bytes.toString('base64'));
+  });
+
+  it('covers tool-only local and both trusted-remote Provider egress matrix paths', async () => {
+    const canonical = await canonicalizeProviderToolImage(
+      await sharp({
+        create: {
+          width: 32,
+          height: 32,
+          channels: 3,
+          background: { r: 25, g: 125, b: 225 },
+        },
+      })
+        .png()
+        .toBuffer(),
+    );
+    const toolResult = {
+      path: 'fixture.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    const directBytes = Buffer.from('direct-egress-matrix');
+    const directImage = {
+      id: 'direct-egress',
+      mimeType: 'image/png' as const,
+      byteLength: directBytes.byteLength,
+      sha256: createHash('sha256').update(directBytes).digest('hex'),
+    };
+    const directManifest = [{ ...directImage, ordinal: 0 }];
+    const toolManifest = [
+      {
+        id: 'tool:call-egress-image',
+        mimeType: canonical.mimeType,
+        byteLength: canonical.bytes.byteLength,
+        sha256: canonical.sha256,
+      },
+    ];
+    const scenarios = [
+      { name: 'tool-only local', trust: 'trusted-local' as const, direct: false, tool: true },
+      {
+        name: 'direct-only trusted-remote',
+        trust: 'trusted-remote' as const,
+        direct: true,
+        tool: false,
+      },
+      {
+        name: 'trusted-remote direct-plus-denied-tool',
+        trust: 'trusted-remote' as const,
+        direct: true,
+        tool: true,
+      },
+    ];
+
+    for (const [scenarioIndex, scenario] of scenarios.entries()) {
+      const taskId = `task-egress-matrix-${scenarioIndex}`;
+      const turnId = `turn-egress-matrix-${scenarioIndex}`;
+      const userMessageId = `message-egress-matrix-${scenarioIndex}`;
+      const connection = {
+        id: `profile:ollama-egress-${scenarioIndex}`,
+        providerId: 'ollama',
+        runtimeKind: 'openai_compatible',
+        displayName: scenario.name,
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'verified',
+          verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: null,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+      let executeOrdinal = 0;
+      const execute = vi.fn(() => {
+        executeOrdinal += 1;
+        const current = executeOrdinal;
+        return (async function* () {
+          if (scenario.tool && current === 1) {
+            yield {
+              type: 'tool_call' as const,
+              callId: 'call-egress-image',
+              name: 'view_image',
+              input: { path: 'fixture.png' },
+            };
+            yield { type: 'completed' as const, stopReason: 'tool_calls' };
+            return;
+          }
+          yield { type: 'output_delta' as const, text: 'egress matrix complete' };
+          yield { type: 'completed' as const, stopReason: 'stop' };
+        })();
+      });
+      const evaluate = vi.fn((_input: Record<string, unknown>) => ({
+        decision: 'allow',
+        reason: 'test_allow',
+        policyEpoch: 1,
+        evaluationTrace: ['test-allow'],
+        permit: { id: 'test-permit' },
+      }));
+      const brokerDispatch = vi.fn(
+        async (
+          _request: unknown,
+          consume?: (result: unknown) => Promise<unknown>,
+        ): Promise<unknown> => consume?.(toolResult),
+      );
+      const prepareProviderTurnImageAttachments = vi.fn(() =>
+        scenario.direct
+          ? {
+              binding: { kind: 'provider_inline' },
+              inlineImages: [
+                { mimeType: directImage.mimeType, base64: directBytes.toString('base64') },
+              ],
+              auditImages: [directImage],
+              manifestDigest: digestCanonical(directManifest),
+              byteCount: directImage.byteLength,
+            }
+          : undefined,
+      );
+      const completeProviderTeamTurn = vi.fn().mockResolvedValue('completed');
+      const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(fakeRouter, {
+        canceledRuntimeTurns: new Set<string>(),
+        turnRuntimes: new Map([[turnId, 'provider']]),
+        providerAbortByTurn: new Map(),
+        providerExecutionIdByTurn: new Map(),
+        managedWorkerTurn: new Map(),
+        managedWorkerCall: new Map(),
+        providerVerification: {
+          requireVerifiedForExecution: vi.fn().mockResolvedValue(connection),
+        },
+        providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
+        modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: true } })) },
+        permissionBroker: {
+          evaluate,
+          revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+        },
+        persistence: {
+          getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+          getProviderConnection: () => connection,
+          getPermissionPolicy: () => ({ policyEpoch: 1 }),
+          getActiveTurnId: () => turnId,
+          readTurnWorkspaceSetForTask: () => null,
+          changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+          appendDelta: vi.fn(() => ({ type: 'message.delta' })),
+        },
+        mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+        publish: vi.fn(),
+        ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+        prepareContext: vi.fn(() => ({
+          fragments: [
+            {
+              id: 'current',
+              taskId,
+              source: 'history',
+              trust: 'user',
+              tokenEstimate: 1,
+              content: 'describe the workspace image',
+              createdAt: new Date(0).toISOString(),
+              messageId: userMessageId,
+            },
+          ],
+          projectItems: [],
+          projectSnapshotDigest: null,
+        })),
+        prepareProviderTurnImageAttachments,
+        providerImageAttachmentStillValid: vi.fn().mockResolvedValue(true),
+        providerEgressTrustForConnection: () => scenario.trust,
+        managedCodingHarness: {
+          broker: { dispatch: brokerDispatch },
+          startTurn: vi.fn(() => ({
+            digest: 'a'.repeat(64),
+            providerId: 'ollama',
+            entries: [
+              {
+                providerName: 'view_image',
+                inputSchema: {
+                  type: 'object',
+                  properties: { path: { type: 'string' } },
+                  required: ['path'],
+                  additionalProperties: false,
+                },
+              },
+            ],
+          })),
+          finishTurn: vi.fn(),
+        },
+        teamCoordinator: { hasUnfinishedTeamWork: () => false },
+        applyProviderTurnEvent: vi.fn(),
+        captureProviderToolImageBinding: vi
+          .fn()
+          .mockResolvedValue(
+            scenario.trust === 'trusted-local'
+              ? { connectionDigest: digestCanonical(connection) }
+              : null,
+          ),
+        revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+        providerToolImageFinalStateMatches: vi.fn().mockReturnValue(true),
+        beginProviderSynthesis: vi.fn().mockResolvedValue(undefined),
+        completeProviderTeamTurn,
+        cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+      });
+      const started = {
+        turnId,
+        text: 'describe the workspace image',
+        skills: [],
+        event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+        modelSelection: {
+          connectionId: connection.id,
+          requestedProvider: connection.providerId,
+          requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+        },
+        workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+      };
+      const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+        this: typeof fakeRouter,
+        started: unknown,
+        connectionId: string,
+        teamTurn: boolean,
+        autoSkills: readonly unknown[],
+      ) => Promise<void>;
+      await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+
+      const requests = (execute.mock.calls as unknown[][]).map(
+        (call) =>
+          call[1] as {
+            messages: Array<{
+              content: string;
+              inlineImages?: Array<{ mimeType: string; base64: string }>;
+              toolCallId?: string;
+            }>;
+          },
+      );
+      const resources = evaluate.mock.calls.map(
+        ([input]) => (input as { request: { resource: Record<string, unknown> } }).request.resource,
+      );
+      if (scenario.name === 'tool-only local') {
+        expect(resources).toHaveLength(3);
+        expect(resources.map((resource) => resource['attachmentByteCount'])).toEqual([
+          0,
+          0,
+          canonical.bytes.byteLength,
+        ]);
+        expect(resources[2]).toMatchObject({
+          providerTrust: 'trusted-local',
+          attachmentManifestDigest: digestCanonical(toolManifest),
+        });
+        expect(requests[1]!.messages.flatMap((message) => message.inlineImages ?? [])).toEqual([
+          { mimeType: canonical.mimeType, base64: canonical.bytes.toString('base64') },
+        ]);
+        expect(brokerDispatch).toHaveBeenCalledOnce();
+      } else if (scenario.name === 'direct-only trusted-remote') {
+        expect(resources).toHaveLength(1);
+        expect(resources[0]).toMatchObject({
+          providerTrust: 'trusted-remote',
+          attachmentByteCount: directImage.byteLength,
+          attachmentManifestDigest: digestCanonical(directManifest),
+        });
+        expect(requests[0]!.messages.flatMap((message) => message.inlineImages ?? [])).toEqual([
+          { mimeType: directImage.mimeType, base64: directBytes.toString('base64') },
+        ]);
+        expect(brokerDispatch).not.toHaveBeenCalled();
+      } else {
+        expect(resources).toHaveLength(2);
+        for (const resource of resources)
+          expect(resource).toMatchObject({
+            providerTrust: 'trusted-remote',
+            attachmentByteCount: directImage.byteLength,
+            attachmentManifestDigest: digestCanonical(directManifest),
+          });
+        expect(brokerDispatch).not.toHaveBeenCalled();
+        expect(requests[1]!.messages.flatMap((message) => message.inlineImages ?? [])).toEqual([
+          { mimeType: directImage.mimeType, base64: directBytes.toString('base64') },
+        ]);
+        const rejection = requests[1]!.messages.find(
+          (message) => message.toolCallId === 'call-egress-image',
+        );
+        expect(JSON.parse(rejection!.content)).toEqual({
+          ok: false,
+          error: {
+            code: 'VIEW_IMAGE_NOT_PERMITTED',
+            message: '画像の利用は許可されていません。',
+          },
+        });
+        expect(JSON.stringify(requests)).not.toContain(canonical.bytes.toString('base64'));
+      }
+      expect(completeProviderTeamTurn, scenario.name).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('accepts coherent trusted-local profiles and discards every model-preparation drift', async () => {
+    const cases: ReadonlyArray<readonly [string, (state: Record<string, unknown>) => void]> = [
+      [
+        'connection enabled',
+        (state) => void ((state['connection'] as Record<string, unknown>)['enabled'] = false),
+      ],
+      [
+        'connection runtime kind',
+        (state) =>
+          void ((state['connection'] as Record<string, unknown>)['runtimeKind'] = 'official_api'),
+      ],
+      [
+        'connection provider id',
+        (state) => void ((state['connection'] as Record<string, unknown>)['providerId'] = 'ollamI'),
+      ],
+      [
+        'connection secret reference',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          const secrets = state['secrets'] as Map<string, string>;
+          const newReference = 'provider-secret:00000000-0000-4000-8000-000000000022';
+          const newBaseUrl = 'http://127.0.0.1:11435/v1';
+          const newEndpointDigest = new ProviderEndpointPolicy().digestForBaseUrl(newBaseUrl);
+          secrets.set(
+            newReference,
+            JSON.stringify({
+              baseUrl: newBaseUrl,
+              endpointDigest: newEndpointDigest,
+              localConsentDigest: newEndpointDigest,
+            }),
+          );
+          connection['secretReference'] = newReference;
+        },
+      ],
+      [
+        'connection verification status',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['status'] = 'unverified'),
+      ],
+      [
+        'connection verification expiry',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['expiresAt'] = new Date(Date.now() - 1).toISOString()),
+      ],
+      [
+        'connection updatedAt',
+        (state) =>
+          void ((state['connection'] as Record<string, unknown>)['updatedAt'] = new Date(
+            9,
+          ).toISOString()),
+      ],
+      [
+        'task model selection',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedModel'] = 'vision-drift'),
+      ],
+      [
+        'model catalog revision',
+        (state) => void ((state['modelCatalog'] as Record<string, unknown>)['revision'] = 8),
+      ],
+      [
+        'model identity',
+        (state) => void ((state['model'] as Record<string, unknown>)['modelId'] = 'vision-drift'),
+      ],
+      [
+        'profile protocol',
+        (state) => void ((state['profile'] as Record<string, unknown>)['protocol'] = 'responses'),
+      ],
+      [
+        'profile base URL',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['baseUrl'] =
+            'http://127.0.0.1:11435/v1'),
+      ],
+      [
+        'profile configurable flag',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['baseUrlConfigurable'] = false),
+      ],
+      [
+        'profile authentication',
+        (state) =>
+          void ((
+            (state['profile'] as Record<string, unknown>)['authentication'] as Record<
+              string,
+              unknown
+            >
+          )['scheme'] = 'Token'),
+      ],
+      [
+        'profile required credentials',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['requiredCredentialFields'] = [
+            'api_key',
+          ]),
+      ],
+      [
+        'profile native lifecycle',
+        (state) =>
+          void Reflect.deleteProperty(
+            state['profile'] as Record<string, unknown>,
+            'nativeModelLifecycle',
+          ),
+      ],
+      [
+        'capability false',
+        (state) => void ((state['capability'] as Record<string, unknown>)['value'] = false),
+      ],
+      [
+        'capability unknown',
+        (state) => void ((state['capability'] as Record<string, unknown>)['value'] = null),
+      ],
+      [
+        'capability revision',
+        (state) =>
+          void ((state['capability'] as Record<string, unknown>)['revision'] = 'vision-drift'),
+      ],
+      [
+        'capability stale',
+        (state) =>
+          void ((state['capability'] as Record<string, unknown>)['capturedAtMs'] =
+            Date.now() - 5_001),
+      ],
+      [
+        'lexical execution connection',
+        (state) => {
+          const executionConnection = state['executionConnection'] as Record<string, unknown>;
+          const secrets = state['secrets'] as Map<string, string>;
+          const remoteReference = 'provider-secret:00000000-0000-4000-8000-000000000023';
+          const remoteBaseUrl = 'https://vision.example/v1';
+          const remoteEndpointDigest = new ProviderEndpointPolicy().digestForBaseUrl(remoteBaseUrl);
+          executionConnection['displayName'] = 'Lexical trusted-remote A';
+          executionConnection['secretReference'] = remoteReference;
+          secrets.set(
+            remoteReference,
+            JSON.stringify({
+              baseUrl: remoteBaseUrl,
+              endpointDigest: remoteEndpointDigest,
+              localConsentDigest: remoteEndpointDigest,
+            }),
+          );
+        },
+      ],
+      [
+        'dns wait connection',
+        (state) => void ((state['connection'] as Record<string, unknown>)['enabled'] = false),
+      ],
+      [
+        'dns wait registry profile',
+        (state) => void ((state['profile'] as Record<string, unknown>)['protocol'] = 'responses'),
+      ],
+      [
+        'dns wait capability false',
+        (state) => void ((state['capability'] as Record<string, unknown>)['value'] = false),
+      ],
+      [
+        'dns wait capability unknown',
+        (state) => void ((state['capability'] as Record<string, unknown>)['value'] = null),
+      ],
+      [
+        'dns wait capability revision',
+        (state) =>
+          void ((state['capability'] as Record<string, unknown>)['revision'] = 'dns-drift'),
+      ],
+      [
+        'final capability wait connection',
+        (state) => void ((state['connection'] as Record<string, unknown>)['enabled'] = false),
+      ],
+      [
+        'final capability wait task selection',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedModel'] = 'vision-drift'),
+      ],
+      [
+        'final capability wait registry profile',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['baseUrlConfigurable'] = false),
+      ],
+    ];
+
+    const editCredential = (
+      state: Record<string, unknown>,
+      edit: (credential: Record<string, unknown>) => void,
+    ): void => {
+      const connection = state['connection'] as Record<string, unknown>;
+      const secrets = state['secrets'] as Map<string, string>;
+      const reference = String(connection['secretReference']);
+      const credential = JSON.parse(secrets.get(reference)!) as Record<string, unknown>;
+      edit(credential);
+      secrets.set(reference, JSON.stringify(credential));
+    };
+    const acceptanceNames = new Set([
+      'connection enabled',
+      'connection runtime kind',
+      'connection provider id',
+      'connection verification status',
+      'connection verification expiry',
+      'profile protocol',
+      'capability false',
+      'capability unknown',
+      'capability stale',
+    ]);
+    const acceptanceCases: ReadonlyArray<
+      readonly [string, (state: Record<string, unknown>) => void]
+    > = [
+      ...cases.filter(([name]) => acceptanceNames.has(name)),
+      [
+        'verification not required',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['status'] = 'not_required'),
+      ],
+      [
+        'verification timestamp missing',
+        (state) =>
+          void Reflect.deleteProperty(
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >,
+            'verifiedAt',
+          ),
+      ],
+      [
+        'verification timestamp invalid',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['verifiedAt'] = 'not-a-date'),
+      ],
+      [
+        'verification timestamp future',
+        (state) =>
+          void ((
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >
+          )['verifiedAt'] = new Date(Date.now() + 60_000).toISOString()),
+      ],
+      [
+        'verification expiry equals verified',
+        (state) => {
+          const verification = (state['connection'] as Record<string, unknown>)[
+            'verification'
+          ] as Record<string, unknown>;
+          verification['expiresAt'] = verification['verifiedAt'];
+        },
+      ],
+      [
+        'credential resolution failure',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          (state['secrets'] as Map<string, string>).delete(String(connection['secretReference']));
+        },
+      ],
+      [
+        'credential endpoint digest missing',
+        (state) => editCredential(state, (credential) => void delete credential['endpointDigest']),
+      ],
+      [
+        'credential endpoint digest mismatch',
+        (state) =>
+          editCredential(
+            state,
+            (credential) => void (credential['endpointDigest'] = '0'.repeat(64)),
+          ),
+      ],
+      [
+        'credential consent digest missing',
+        (state) =>
+          editCredential(state, (credential) => void delete credential['localConsentDigest']),
+      ],
+      [
+        'credential consent digest mismatch',
+        (state) =>
+          editCredential(
+            state,
+            (credential) => void (credential['localConsentDigest'] = '0'.repeat(64)),
+          ),
+      ],
+      [
+        'credential required field missing',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['requiredCredentialFields'] = [
+            'api_key',
+          ]),
+      ],
+      [
+        'credential LAN endpoint',
+        (state) =>
+          editCredential(state, (credential) => {
+            const url = 'https://192.168.1.2/v1';
+            const digest = new ProviderEndpointPolicy().digestForBaseUrl(url);
+            credential['baseUrl'] = url;
+            credential['endpointDigest'] = digest;
+            credential['localConsentDigest'] = digest;
+          }),
+      ],
+      [
+        'credential trusted remote endpoint',
+        (state) =>
+          editCredential(state, (credential) => {
+            const url = 'https://vision.example/v1';
+            const digest = new ProviderEndpointPolicy().digestForBaseUrl(url);
+            credential['baseUrl'] = url;
+            credential['endpointDigest'] = digest;
+            credential['localConsentDigest'] = digest;
+          }),
+      ],
+      [
+        'coherent non-Ollama trusted-local profile',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          const executionConnection = state['executionConnection'] as Record<string, unknown>;
+          const model = state['model'] as Record<string, unknown>;
+          const profile = state['profile'] as Record<string, unknown>;
+          const selection = state['selection'] as Record<string, unknown>;
+          const startedSelection = state['startedSelection'] as Record<string, unknown>;
+          connection['providerId'] = 'localai';
+          connection['displayName'] = 'LocalAI loopback';
+          executionConnection['providerId'] = 'localai';
+          executionConnection['displayName'] = 'LocalAI loopback';
+          model['providerId'] = 'localai';
+          profile['id'] = 'localai';
+          profile['displayName'] = 'LocalAI';
+          profile['sourceReference'] = 'https://localai.io/';
+          Reflect.deleteProperty(profile, 'nativeModelLifecycle');
+          selection['requestedProvider'] = 'localai';
+          startedSelection['requestedProvider'] = 'localai';
+        },
+      ],
+      [
+        'profile ID lookalike',
+        (state) => void ((state['profile'] as Record<string, unknown>)['id'] = 'ollamI'),
+      ],
+      [
+        'required account ID empty',
+        (state) => {
+          (state['profile'] as Record<string, unknown>)['requiredCredentialFields'] = [
+            'account_id',
+          ];
+          editCredential(state, (credential) => void (credential['accountId'] = ''));
+        },
+      ],
+      [
+        'verification expiry missing',
+        (state) =>
+          void Reflect.deleteProperty(
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >,
+            'expiresAt',
+          ),
+      ],
+      [
+        'secret reference missing',
+        (state) =>
+          void ((state['connection'] as Record<string, unknown>)['secretReference'] = null),
+      ],
+      [
+        'connection ID drift',
+        (state) =>
+          void ((state['connection'] as Record<string, unknown>)['id'] = 'profile:ollama-other'),
+      ],
+      [
+        'persisted connection selection drift',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['connectionId'] =
+            'profile:ollama-other'),
+      ],
+      [
+        'persisted provider selection drift',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedProvider'] = 'ollamI'),
+      ],
+      [
+        'persisted model selection drift',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedModel'] = 'vision-other'),
+      ],
+      [
+        'started model selection drift',
+        (state) =>
+          void ((state['startedSelection'] as Record<string, unknown>)['requestedModel'] =
+            'vision-other'),
+      ],
+      ['runtime registry mismatch', (state) => void (state['registryMismatch'] = true)],
+      ['model missing', (state) => void (state['modelMissing'] = true)],
+      [
+        'model connection drift',
+        (state) =>
+          void ((state['model'] as Record<string, unknown>)['connectionId'] =
+            'profile:ollama-other'),
+      ],
+      [
+        'model provider drift',
+        (state) => void ((state['model'] as Record<string, unknown>)['providerId'] = 'ollamI'),
+      ],
+      [
+        'model identity drift',
+        (state) => void ((state['model'] as Record<string, unknown>)['modelId'] = 'vision-other'),
+      ],
+      ['capability missing', (state) => void (state['capabilityMissing'] = true)],
+      ['capability probe exception', (state) => void (state['capabilityProbeThrows'] = true)],
+      [
+        'internal managed-local connection',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          Object.assign(connection, managedLocalConnection(new Date(0)));
+        },
+      ],
+    ];
+    const allCases: ReadonlyArray<readonly [string, (state: Record<string, unknown>) => void]> = [
+      ...cases,
+      ...acceptanceCases.map(([name, mutate]) => [`acceptance ${name}`, mutate] as const),
+    ];
+
+    for (const [caseIndex, [name, mutate]] of allCases.entries()) {
+      const taskId = `task-tool-image-drift-${caseIndex}`;
+      const turnId = `turn-tool-image-drift-${caseIndex}`;
+      const userMessageId = `message-tool-image-drift-${caseIndex}`;
+      const modelId = 'qwen3-vl:4b-instruct-q4_K_M';
+      const mutatesBeforeBrokerAcceptance =
+        name === 'lexical execution connection' || name.startsWith('acceptance ');
+      const acceptsCoherentLocalProfile =
+        name === 'acceptance coherent non-Ollama trusted-local profile';
+      const mutatesDuringDns = name.startsWith('dns wait ');
+      const mutatesDuringFinalCapability = name.startsWith('final capability wait ');
+      const baseUrl = mutatesDuringDns ? 'http://localhost:11434/v1' : 'http://127.0.0.1:11434/v1';
+      const stateRef: { current: Record<string, unknown> | undefined } = { current: undefined };
+      let dnsLookupCount = 0;
+      const endpointPolicy = new ProviderEndpointPolicy(async () => {
+        dnsLookupCount += 1;
+        if (mutatesDuringDns && dnsLookupCount === 2) mutate(stateRef.current!);
+        return [
+          { address: '127.0.0.1', family: 4 },
+          { address: '::1', family: 6 },
+        ];
+      });
+      const endpointDigest = endpointPolicy.digestForBaseUrl(baseUrl);
+      const connection = {
+        id: `profile:ollama-drift-${caseIndex}`,
+        providerId: 'ollama',
+        runtimeKind: 'openai_compatible',
+        displayName: 'Ollama',
+        enabled: true,
+        secretReference: 'provider-secret:00000000-0000-4000-8000-000000000021',
+        verification: {
+          status: 'verified',
+          verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: null,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+      const acceptedConnectionId = connection.id;
+      const executionConnection = structuredClone(connection);
+      const selection = {
+        connectionId: connection.id,
+        requestedProvider: connection.providerId,
+        requestedModel: modelId,
+      };
+      const startedSelection = structuredClone(selection);
+      const profile = {
+        id: 'ollama',
+        displayName: 'Ollama',
+        baseUrl,
+        baseUrlConfigurable: true,
+        computeLocation: 'local',
+        nativeModelLifecycle: 'ollama',
+        protocol: 'chat_completions',
+        modelsPath: '/models',
+        curatedModels: [],
+        verificationModel: null,
+        authentication: { headerName: 'Authorization', scheme: 'Bearer' },
+        requiredCredentialFields: [],
+        errorOverrides: [],
+        sourceReference: 'https://ollama.com/',
+        reviewedAt: new Date(0).toISOString(),
+      };
+      const secrets = new Map([
+        [
+          connection.secretReference,
+          JSON.stringify({ baseUrl, endpointDigest, localConsentDigest: endpointDigest }),
+        ],
+      ]);
+      const model = {
+        connectionId: connection.id,
+        providerId: connection.providerId,
+        modelId,
+        toolCalling: { value: true },
+      };
+      let modelFindCalls = 0;
+      const modelCatalog = {
+        revision: 7,
+        find: vi.fn(() => {
+          modelFindCalls += 1;
+          return stateRef.current?.['modelMissing'] === true && modelFindCalls > 1
+            ? undefined
+            : model;
+        }),
+      };
+      const capability = {
+        value: true as boolean | null,
+        revision: 'vision-stable',
+        capturedAtMs: Date.now(),
+      };
+      const source = await sharp({
+        create: {
+          width: 32,
+          height: 32,
+          channels: 3,
+          background: { r: 90, g: 100, b: 110 },
+        },
+      })
+        .png()
+        .toBuffer();
+      const canonical = await canonicalizeProviderToolImage(source);
+      const toolResult = {
+        path: 'fixture.png',
+        mimeType: canonical.mimeType,
+        byteLength: canonical.bytes.byteLength,
+        sha256: canonical.sha256,
+        dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+      };
+      let executeOrdinal = 0;
+      const execute = vi.fn(() => {
+        executeOrdinal += 1;
+        return (async function* () {
+          if (executeOrdinal === 1) {
+            yield {
+              type: 'tool_call' as const,
+              callId: 'call-image-drift',
+              name: 'view_image',
+              input: { path: 'fixture.png' },
+            };
+            yield { type: 'completed' as const, stopReason: 'tool_calls' };
+            return;
+          }
+          yield { type: 'output_delta' as const, text: 'unexpected image dispatch' };
+          yield { type: 'completed' as const, stopReason: 'stop' };
+        })();
+      });
+      const state: Record<string, unknown> = {
+        capability,
+        connection,
+        executionConnection,
+        model,
+        modelCatalog,
+        profile,
+        secrets,
+        selection,
+        startedSelection,
+      };
+      stateRef.current = state;
+      if (mutatesBeforeBrokerAcceptance) mutate(state);
+      const lease = {
+        prepare: vi.fn(async () => {
+          if (!mutatesBeforeBrokerAcceptance && !mutatesDuringDns && !mutatesDuringFinalCapability)
+            mutate(state);
+        }),
+        release: vi.fn().mockResolvedValue(undefined),
+      };
+      let capabilityCaptureCount = 0;
+      const runtime = {
+        execute,
+        cancel: vi.fn().mockResolvedValue(undefined),
+        acquireModelLease: vi.fn().mockResolvedValue(lease),
+        captureImageInputCapability: vi.fn(async () => {
+          capabilityCaptureCount += 1;
+          if (mutatesDuringFinalCapability && capabilityCaptureCount === 3) mutate(state);
+          if (state['capabilityProbeThrows'] === true)
+            throw new Error('PROBE_EXCEPTION_SECRET data:image/png;base64,PRIVATE');
+          if (state['capabilityMissing'] === true) return undefined;
+          return { ...capability };
+        }),
+      };
+      let verificationCalls = 0;
+      const requireVerifiedForExecution = vi.fn(async () => {
+        verificationCalls += 1;
+        return verificationCalls === 1 ? executionConnection : connection;
+      });
+      const brokerDispatch = vi.fn(
+        async (_request: unknown, consume: (value: unknown) => Promise<unknown>) =>
+          consume(toolResult),
+      );
+      const evaluate = vi.fn((_input: Record<string, unknown>) => ({
+        decision: 'allow',
+        reason: 'test_allow',
+        policyEpoch: 1,
+        evaluationTrace: ['test-allow'],
+        permit: { id: 'test-permit' },
+      }));
+      const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+      const finishAndAdvance = vi.fn();
+      const completeProviderTeamTurn = vi.fn();
+      const genericRecord = vi.fn();
+      const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(fakeRouter, {
+        canceledRuntimeTurns: new Set<string>(),
+        turnRuntimes: new Map([[turnId, 'provider']]),
+        providerAbortByTurn: new Map(),
+        providerExecutionIdByTurn: new Map(),
+        managedWorkerTurn: new Map(),
+        providerVerification: { requireVerifiedForExecution },
+        providerRegistry: {
+          resolve: vi.fn((candidate: unknown) =>
+            candidate !== executionConnection && state['registryMismatch'] === true
+              ? { execute: vi.fn(), cancel: vi.fn() }
+              : runtime,
+          ),
+        },
+        compatibleRuntime: runtime,
+        providerProfiles: { get: () => profile },
+        providerSecrets: { get: (reference: string) => secrets.get(reference) },
+        providerEndpointPolicy: endpointPolicy,
+        modelCatalog,
+        permissionBroker: {
+          evaluate,
+          revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+        },
+        persistence: {
+          getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+          getProviderConnection: () => connection,
+          getTaskModelSelection: () => selection,
+          getImageAttachmentAcceptanceSelection: () => ({
+            taskId,
+            runtimeKind: 'provider',
+            model: selection.requestedModel,
+            modelSelection: selection,
+          }),
+          getPermissionPolicy: () => ({ policyEpoch: 1 }),
+          getActiveTurnId: () => turnId,
+          changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+          appendDelta,
+        },
+        mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+        publish: vi.fn(),
+        finishAndAdvance,
+        ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+        prepareContext: vi.fn(() => ({
+          fragments: [
+            {
+              id: 'current',
+              taskId,
+              source: 'history',
+              trust: 'user',
+              tokenEstimate: 1,
+              content: 'describe the workspace image',
+              createdAt: new Date(0).toISOString(),
+              messageId: userMessageId,
+            },
+          ],
+          projectItems: [],
+          projectSnapshotDigest: null,
+        })),
+        prepareProviderTurnImageAttachments: vi.fn(() => undefined),
+        providerEgressTrustForConnection: (candidate: { secretReference: string | null }) =>
+          candidate.secretReference === 'provider-secret:00000000-0000-4000-8000-000000000023'
+            ? 'trusted-remote'
+            : 'trusted-local',
+        managedCodingHarness: {
+          broker: { dispatch: brokerDispatch },
+          startTurn: vi.fn(() => ({
+            digest: 'a'.repeat(64),
+            providerId: 'ollama',
+            entries: [
+              {
+                providerName: 'view_image',
+                inputSchema: {
+                  type: 'object',
+                  properties: { path: { type: 'string' } },
+                  required: ['path'],
+                  additionalProperties: false,
+                },
+              },
+            ],
+          })),
+          finishTurn: vi.fn(),
+        },
+        cliTeamWorkerRuntime: { recordManagedToolResult: genericRecord },
+        teamCoordinator: { hasUnfinishedTeamWork: () => false },
+        applyProviderTurnEvent: vi.fn(),
+        completeProviderTeamTurn,
+        cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+      });
+      const started = {
+        turnId,
+        text: 'describe the workspace image',
+        skills: [],
+        event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+        modelSelection: structuredClone(startedSelection),
+        workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
+      };
+      const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+        this: typeof fakeRouter,
+        started: unknown,
+        connectionId: string,
+        teamTurn: boolean,
+        autoSkills: readonly unknown[],
+      ) => Promise<void>;
+
+      const errorLog = mutatesBeforeBrokerAcceptance
+        ? vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined)
+        : null;
+      const warnLog = mutatesBeforeBrokerAcceptance
+        ? vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined)
+        : null;
+
+      await startProviderTurn.call(fakeRouter, started, acceptedConnectionId, false, []);
+
+      expect(execute, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 2 : 1);
+      expect(brokerDispatch, name).toHaveBeenCalledTimes(
+        acceptsCoherentLocalProfile ? 1 : mutatesBeforeBrokerAcceptance ? 0 : 1,
+      );
+      expect(
+        evaluate.mock.calls.some(
+          ([input]) =>
+            Number(
+              (input as { request: { resource: Record<string, unknown> } }).request.resource[
+                'attachmentByteCount'
+              ],
+            ) > 0,
+        ),
+        name,
+      ).toBe(acceptsCoherentLocalProfile);
+      if (acceptsCoherentLocalProfile)
+        expect(JSON.stringify(execute.mock.calls), name).toContain(
+          canonical.bytes.toString('base64'),
+        );
+      else
+        expect(JSON.stringify(execute.mock.calls), name).not.toContain(
+          canonical.bytes.toString('base64'),
+        );
+      expect(JSON.stringify(appendDelta.mock.calls), name).not.toContain('data:image/');
+      if (mutatesDuringDns) {
+        expect(dnsLookupCount, name).toBe(2);
+        expect(capabilityCaptureCount, name).toBe(name === 'dns wait connection' ? 2 : 3);
+      }
+      if (mutatesDuringFinalCapability) expect(capabilityCaptureCount, name).toBe(3);
+      if (acceptsCoherentLocalProfile) {
+        const secondRequest = (execute.mock.calls as unknown[][])[1]?.[1] as {
+          messages: Array<{ role: string; content: string; inlineImages?: unknown[] }>;
+        };
+        expect(secondRequest.messages).toContainEqual(
+          expect.objectContaining({ role: 'user', inlineImages: [expect.any(Object)] }),
+        );
+        expect(genericRecord, name).not.toHaveBeenCalled();
+        expect(errorLog?.mock.calls ?? [], name).toEqual([]);
+        expect(warnLog?.mock.calls ?? [], name).toEqual([]);
+        expect(completeProviderTeamTurn, name).toHaveBeenCalledOnce();
+      } else if (mutatesBeforeBrokerAcceptance) {
+        const secondRequest = (execute.mock.calls as unknown[][])[1]?.[1] as {
+          messages: Array<{
+            role: string;
+            content: string;
+            toolCallId?: string;
+            toolName?: string;
+          }>;
+        };
+        expect(secondRequest.messages).toContainEqual(
+          expect.objectContaining({
+            role: 'tool',
+            toolCallId: 'call-image-drift',
+            toolName: 'view_image',
+            content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
+          }),
+        );
+        const fixedFailure = secondRequest.messages.find(
+          (message) => message.toolCallId === 'call-image-drift',
+        );
+        expect(JSON.parse(fixedFailure!.content), name).toEqual({
+          ok: false,
+          error: {
+            code: 'VIEW_IMAGE_NOT_PERMITTED',
+            message: '画像の利用は許可されていません。',
+          },
+        });
+        expect(JSON.stringify(secondRequest), name).not.toMatch(
+          /data:image\/|127\.0\.0\.1|localhost|vision\.example|192\.168\.1\.2/u,
+        );
+        expect(genericRecord, name).not.toHaveBeenCalled();
+        expect(errorLog?.mock.calls ?? [], name).toEqual([]);
+        expect(warnLog?.mock.calls ?? [], name).toEqual([]);
+        expect(
+          JSON.stringify([
+            execute.mock.calls,
+            appendDelta.mock.calls,
+            evaluate.mock.calls,
+            errorLog?.mock.calls,
+            warnLog?.mock.calls,
+          ]),
+          name,
+        ).not.toMatch(/PROBE_EXCEPTION_SECRET|data:image\//u);
+        expect(completeProviderTeamTurn, name).toHaveBeenCalledOnce();
+      } else {
+        expect(appendDelta, name).toHaveBeenCalledWith(
+          taskId,
+          turnId,
+          expect.any(String),
+          '画像入力の準備状況が変わったため、Providerへ画像を送信しませんでした。もう一度添付してください。',
+        );
+        expect(finishAndAdvance, name).toHaveBeenCalledWith(taskId, turnId, 'failed');
+        expect(completeProviderTeamTurn, name).not.toHaveBeenCalled();
+      }
+      if (name === 'connection secret reference') {
+        expect(secrets.has('provider-secret:00000000-0000-4000-8000-000000000021')).toBe(true);
+        expect(
+          JSON.parse(secrets.get('provider-secret:00000000-0000-4000-8000-000000000021')!),
+        ).toEqual({ baseUrl, endpointDigest, localConsentDigest: endpointDigest });
+        expect(
+          JSON.parse(secrets.get('provider-secret:00000000-0000-4000-8000-000000000022')!),
+        ).not.toEqual({ baseUrl, endpointDigest, localConsentDigest: endpointDigest });
+      }
+      errorLog?.mockRestore();
+      warnLog?.mockRestore();
+    }
+  });
+
   it('replaces an unknown Provider stream throw with a fixed safe cause', async () => {
     async function* unsafeStream(seed: readonly never[] = []): AsyncIterable<never> {
       yield* seed;

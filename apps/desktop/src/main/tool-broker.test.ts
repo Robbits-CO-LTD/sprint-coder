@@ -773,4 +773,181 @@ describe('Main ToolBroker', () => {
       'succeeded',
     ]);
   });
+
+  it('replaces a hostile raw result before generic schema and size inspection', async () => {
+    const { registry, echo } = createRegistry();
+    const raw = Object.defineProperties(
+      {},
+      {
+        text: {
+          enumerable: true,
+          get: () => {
+            throw new Error('raw text getter must stay private');
+          },
+        },
+        toJSON: {
+          get: () => {
+            throw new Error('raw JSON serialization must stay private');
+          },
+        },
+      },
+    );
+    const broker = new ToolBroker(registry, () => 3, authorizePure);
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: () => raw,
+    });
+    broker.startTurn(context, 'mock');
+
+    await expect(
+      broker.dispatch(
+        {
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: 'private-result',
+          providerName: 'mock_echo',
+          input: { text: 'go' },
+        },
+        (result) => {
+          expect(result).toBe(raw);
+          return { text: 'metadata only' };
+        },
+      ),
+    ).resolves.toEqual({ text: 'metadata only' });
+  });
+
+  it('validates consumer metadata and keeps ordinary dispatch ordering unchanged', async () => {
+    const { registry, echo } = createRegistry();
+    const states: string[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizePure,
+      ({ callId, state }) => states.push(`${callId}:${state}`),
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => {
+        if ((input as { text: string }).text === 'first') await firstBlocked;
+        return input;
+      },
+      resourceClaims: () => [{ key: 'parallel', mode: 'read' }],
+    });
+    broker.startTurn(context, 'mock');
+    const first = broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'ordinary-first',
+      providerName: 'mock_echo',
+      input: { text: 'first' },
+    });
+    const second = broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'ordinary-second',
+      providerName: 'mock_echo',
+      input: { text: 'second' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(states).toContain('ordinary-second:succeeded');
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    await expect(
+      broker.dispatch(
+        {
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: 'invalid-consumer-metadata',
+          providerName: 'mock_echo',
+          input: { text: 'raw' },
+        },
+        () => ({ wrong: true }),
+      ),
+    ).rejects.toThrow('pinned schema');
+    await expect(
+      broker.dispatch(
+        {
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: 'large-consumer-metadata',
+          providerName: 'mock_echo',
+          input: { text: 'raw' },
+        },
+        () => ({ text: 'x'.repeat(1024 * 1024) }),
+      ),
+    ).rejects.toThrow('pinned output limit');
+  });
+
+  it('cancels after ordered consumer completion without a success or double completion', async () => {
+    const { registry, echo } = createRegistry();
+    const states: string[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizePure,
+      ({ callId, state }) => states.push(`${callId}:${state}`),
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => {
+        if ((input as { text: string }).text === 'first') await firstBlocked;
+        return input;
+      },
+      resourceClaims: () => [{ key: 'parallel', mode: 'read' }],
+    });
+    broker.startTurn(context, 'mock');
+    const first = broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'gate-first',
+      providerName: 'mock_echo',
+      input: { text: 'first' },
+    });
+    const controller = new AbortController();
+    const consumed: string[] = [];
+    const second = broker.dispatch(
+      {
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'gate-second',
+        providerName: 'mock_echo',
+        input: { text: 'second' },
+        signal: controller.signal,
+      },
+      (result) => {
+        consumed.push((result as { text: string }).text);
+        return result;
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(consumed).toEqual(['second']);
+    controller.abort(new Error('canceled at ordered result gate'));
+    releaseFirst();
+    await first;
+    await expect(second).rejects.toThrow('canceled at ordered result gate');
+    expect(states).toContain('gate-second:canceled');
+    expect(states).not.toContain('gate-second:succeeded');
+
+    await expect(
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'gate-third',
+        providerName: 'mock_echo',
+        input: { text: 'third' },
+      }),
+    ).resolves.toEqual({ text: 'third' });
+  });
 });
