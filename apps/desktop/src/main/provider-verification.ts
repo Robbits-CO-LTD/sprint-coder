@@ -61,7 +61,8 @@ export class ProviderVerificationService {
     const runtime = this.registry.resolve(connection);
     const controller = new AbortController();
     const abort = (): void => controller.abort();
-    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abort, { once: true });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
@@ -74,6 +75,7 @@ export class ProviderVerificationService {
       }, this.preflightTimeoutMs);
     });
     try {
+      controller.signal.throwIfAborted();
       const result = await Promise.race([runtime.verify(connection, controller.signal), timeout]);
       const verifiedAt = this.now();
       const verification: ProviderConnection['verification'] =

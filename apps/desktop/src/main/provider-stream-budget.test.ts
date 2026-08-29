@@ -8,6 +8,60 @@ import {
 } from './provider-stream-budget';
 
 describe('ProviderStreamBudget', () => {
+  it.each([
+    ['empty stream', ''],
+    [
+      'EOF before a terminal frame',
+      'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n',
+    ],
+    ['error-only stream', 'data: {"error":{"type":"server_error"}}\n\n'],
+  ])('does not complete a Chat Completions %s', async (_name, wire) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (wire !== '') controller.enqueue(new TextEncoder().encode(wire));
+        controller.close();
+      },
+    });
+    const events = [];
+
+    for await (const event of normalizeOpenAIChatCompletionsStream(body, 'test', 'model'))
+      events.push(event);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ category: 'provider_unavailable', retryable: true }),
+      }),
+    );
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'completed' }));
+  });
+
+  it.each([
+    [
+      'DONE marker',
+      'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n',
+      'completed',
+    ],
+    [
+      'finish reason',
+      'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+      'stop',
+    ],
+  ])('completes a Chat Completions stream with an explicit %s', async (_name, wire, stopReason) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(wire));
+        controller.close();
+      },
+    });
+    const events = [];
+
+    for await (const event of normalizeOpenAIChatCompletionsStream(body, 'test', 'model'))
+      events.push(event);
+
+    expect(events.at(-1)).toEqual({ type: 'completed', stopReason });
+  });
+
   it('fails closed and cancels an oversized unfinished SSE frame', async () => {
     const cancel = vi.fn();
     const stream = new ReadableStream<Uint8Array>({

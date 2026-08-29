@@ -268,9 +268,11 @@ export class OpenAICompatibleProviderClient implements ProviderRuntime {
     const profile = this.profiles.get(connection.providerId);
     const controller = new AbortController();
     const abort = (): void => controller.abort();
-    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abort, { once: true });
     this.executions.set(parsed.executionId, controller);
     try {
+      controller.signal.throwIfAborted();
       const path = profile.protocol === 'responses' ? '/responses' : '/chat/completions';
       const body =
         profile.protocol === 'responses'

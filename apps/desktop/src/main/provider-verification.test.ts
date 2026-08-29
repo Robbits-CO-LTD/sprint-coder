@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProviderConnection } from '@sprint-coder/contracts';
 import {
   DeterministicMockProviderRuntime,
@@ -34,6 +34,49 @@ function externalConnection(): ProviderConnection {
 }
 
 describe('ProviderVerificationService', () => {
+  it('does not run or persist a pre-aborted verification', async () => {
+    let connection = externalConnection();
+    const updateProviderConnectionVerification = vi.fn(
+      (_connectionId: string, verification: ProviderConnection['verification']) =>
+        (connection = { ...connection, verification }),
+    );
+    const verify = vi.fn(async () => ({
+      status: 'verified' as const,
+      verifiedAt: '2026-07-28T00:00:00.000Z',
+      expiresAt: '2026-07-29T00:00:00.000Z',
+      message: null,
+    }));
+    const registry = new MainProviderRegistry();
+    registry.register({
+      runtimeKind: 'official_api',
+      providerId: null,
+      runtime: {
+        verify,
+        listModels: async () => [],
+        execute: async function* () {
+          yield { type: 'completed' as const, stopReason: null };
+        },
+        cancel: async () => undefined,
+      },
+    });
+    const service = new ProviderVerificationService(
+      {
+        getProviderConnection: () => connection,
+        updateProviderConnectionVerification,
+      },
+      registry,
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(service.verify(connection, controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(verify).not.toHaveBeenCalled();
+    expect(updateProviderConnectionVerification).not.toHaveBeenCalled();
+    expect(connection.verification.status).toBe('unverified');
+  });
+
   it('verifies before execution and expires the result after 24 hours', async () => {
     let connection = externalConnection();
     let now = new Date('2026-07-28T00:00:00.000Z');

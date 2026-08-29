@@ -140,6 +140,7 @@ export class ProviderStreamBudget {
 export async function* readBoundedServerSentJson(
   body: ReadableStream<Uint8Array>,
   budget: ProviderStreamBudget,
+  onDone?: () => void,
 ): AsyncIterable<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -163,7 +164,8 @@ export async function* readBoundedServerSentJson(
           .filter((line) => line.startsWith('data:'))
           .map((line) => line.slice(5).trimStart())
           .join('\n');
-        if (data !== '' && data !== '[DONE]') {
+        if (data === '[DONE]') onDone?.();
+        else if (data !== '') {
           try {
             yield JSON.parse(data) as unknown;
           } catch {

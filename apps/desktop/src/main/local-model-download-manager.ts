@@ -981,29 +981,48 @@ export class LocalModelDownloadManager {
         response.status !== 206 ||
         contentRangeStart(response.headers.get('content-range')) !== offset
       )
-        throw new LocalModelDownloadError(
-          'source_changed',
-          'Remote artifact cannot be resumed safely',
+        await rejectArtifactResponse(
+          response,
+          new LocalModelDownloadError('source_changed', 'Remote artifact cannot be resumed safely'),
         );
       const etag = response.headers.get('etag');
       if (row.etag !== null && etag !== null && row.etag !== etag)
-        throw new LocalModelDownloadError('source_changed', 'Remote artifact identity changed');
+        await rejectArtifactResponse(
+          response,
+          new LocalModelDownloadError('source_changed', 'Remote artifact identity changed'),
+        );
     }
-    if (!response.ok || response.body === null)
+    if (response.body === null)
       throw new LocalModelDownloadError('network', 'Model artifact request failed');
+    const responseBody = response.body;
+    if (!response.ok)
+      await rejectArtifactResponse(
+        response,
+        new LocalModelDownloadError('network', 'Model artifact request failed'),
+      );
     const contentLength = positiveHeaderInteger(response.headers.get('content-length'));
     const expectedResponseBytes = artifact.sizeBytes - offset;
     if (contentLength === null)
-      throw new LocalModelDownloadError('size_unknown', 'Remote artifact size is unknown');
+      await rejectArtifactResponse(
+        response,
+        new LocalModelDownloadError('size_unknown', 'Remote artifact size is unknown'),
+      );
     if (contentLength !== expectedResponseBytes)
-      throw new LocalModelDownloadError('size_changed', 'Remote artifact size changed');
+      await rejectArtifactResponse(
+        response,
+        new LocalModelDownloadError('size_changed', 'Remote artifact size changed'),
+      );
     const handle = await openPartial(partial, offset > 0);
+    const reader = responseBody.getReader();
+    let completed = false;
     try {
-      const reader = response.body.getReader();
       let written = offset;
       for (;;) {
         const chunk = await reader.read();
-        if (chunk.done) break;
+        if (chunk.done) {
+          completed = true;
+          break;
+        }
         if (written + chunk.value.byteLength > artifact.sizeBytes)
           throw new LocalModelDownloadError(
             'size_changed',
@@ -1020,6 +1039,13 @@ export class LocalModelDownloadManager {
           'Remote artifact ended before declared size',
         );
     } finally {
+      if (!completed)
+        try {
+          await reader.cancel();
+        } catch {
+          // Preserve the download, pause, or cancellation failure.
+        }
+      reader.releaseLock();
       await handle.close();
     }
     if ((await sha256File(partial)) !== artifact.sha256) {
@@ -1028,6 +1054,15 @@ export class LocalModelDownloadManager {
       throw new LocalModelDownloadError('hash_mismatch', 'Model artifact hash mismatch');
     }
   }
+}
+
+async function rejectArtifactResponse(response: Response, error: Error): Promise<never> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Preserve the artifact validation error.
+  }
+  throw error;
 }
 
 function validatePlan(input: LocalModelInstallPlan): LocalModelInstallPlan {

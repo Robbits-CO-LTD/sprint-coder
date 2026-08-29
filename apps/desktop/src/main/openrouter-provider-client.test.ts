@@ -27,6 +27,34 @@ const connection: ProviderConnection = {
 };
 
 describe('OpenRouterCatalogClient', () => {
+  it('does not start a request for a pre-aborted execution', async () => {
+    const providerFetch = vi.fn();
+    const client = new OpenRouterCatalogClient(() => ({ apiKey: 'openrouter-key' }), providerFetch);
+    const controller = new AbortController();
+    controller.abort();
+    const events = [];
+
+    for await (const event of client.execute(
+      connection,
+      {
+        executionId: 'execution-pre-aborted',
+        connectionId: connection.id,
+        modelId: 'openai/gpt-5.2',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      controller.signal,
+    ))
+      events.push(event);
+
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ category: 'canceled' }),
+      }),
+    );
+  });
+
   it('maps a 1000+ gateway catalog without inventing the upstream provider', async () => {
     const providerFetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       const headers = new Headers(init?.headers);

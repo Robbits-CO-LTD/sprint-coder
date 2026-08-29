@@ -24,6 +24,43 @@ function response(body: unknown, init: ResponseInit = {}): Response {
 }
 
 describe('PublicModelCatalogService', () => {
+  it.each([
+    ['declared Content-Length', true],
+    ['streamed bytes', false],
+  ])('cancels a catalog body that exceeds the %s limit', async (_name, declared) => {
+    const cancel = vi.fn();
+    const chunk = new Uint8Array(5 * 1024 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (!declared) {
+          controller.enqueue(chunk);
+          controller.enqueue(chunk);
+        }
+      },
+      cancel,
+    });
+    const service = new PublicModelCatalogService(
+      async () =>
+        new Response(body, {
+          headers: declared ? { 'content-length': String(9 * 1024 * 1024) } : {},
+        }),
+    );
+
+    const page = await service.query({
+      text: '',
+      source: 'hugging_face',
+      purpose: 'all',
+      compatibility: 'all',
+      sort: 'downloads',
+      direction: 'descending',
+      cursor: null,
+      limit: 10,
+    });
+
+    expect(page.errors[0]?.code).toBe('invalid_response');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it('keeps the Hugging Face Link cursor inside Main and binds the opaque cursor to the query', async () => {
     const seen: string[] = [];
     const fetch: PublicCatalogFetch = vi.fn(async (url) => {

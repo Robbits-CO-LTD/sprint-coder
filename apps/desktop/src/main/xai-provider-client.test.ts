@@ -27,6 +27,34 @@ const connection: ProviderConnection = {
 };
 
 describe('XAIProviderClient', () => {
+  it('does not start a request for a pre-aborted execution', async () => {
+    const providerFetch = vi.fn();
+    const client = new XAIProviderClient(() => ({ apiKey: 'xai-key' }), providerFetch);
+    const controller = new AbortController();
+    controller.abort();
+    const events = [];
+
+    for await (const event of client.execute(
+      connection,
+      {
+        executionId: 'execution-pre-aborted',
+        connectionId: connection.id,
+        modelId: 'grok-4.5',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      controller.signal,
+    ))
+      events.push(event);
+
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ category: 'canceled' }),
+      }),
+    );
+  });
+
   it('merges xAI model identity, modalities, context, and exact price units', async () => {
     const providerFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer xai-key');
