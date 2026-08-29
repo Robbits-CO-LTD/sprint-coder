@@ -162,6 +162,7 @@ import { SkillSettingsError } from './skill-settings-service';
 import { ToolImageBridge } from './tool-image-bridge';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
+import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
 import sharp from 'sharp';
 
 describe('file edit tracking identity', () => {
@@ -2532,7 +2533,14 @@ describe('Provider Team completion and model errors', () => {
       },
     ];
     let ordinal = 0;
+    const serializedBodies: Array<ReturnType<typeof openAICompatibleChatCompletionRequest>> = [];
     const execute = vi.fn((_connection: unknown, _request: unknown) => {
+      serializedBodies.push(
+        openAICompatibleChatCompletionRequest(
+          _request as Parameters<typeof openAICompatibleChatCompletionRequest>[0],
+          'ollama',
+        ),
+      );
       ordinal += 1;
       const current = ordinal;
       return (async function* () {
@@ -2573,23 +2581,13 @@ describe('Provider Team completion and model errors', () => {
       evaluationTrace: ['test-allow'],
       permit: { id: 'test-permit' },
     }));
-    const dispatchManagedRuntimeTool = vi.fn(
+    const brokerDispatch = vi.fn(
       async (
-        _taskId: string,
-        _turnId: string,
-        request: { callId: string; toolName: string },
-        _signal: AbortSignal,
-        bridge?: ToolImageBridge,
-        publishBinding?: () => void,
+        request: { callId: string; providerName: string },
+        consume?: (result: unknown) => Promise<unknown>,
       ) => {
-        if (request.toolName !== 'view_image') return { path: 'notes.txt', content: 'ok' };
-        const accepted = await bridge!.acceptToolResult({
-          toolCallId: request.callId,
-          toolName: request.toolName,
-          result: request.callId === 'call-image-a' ? resultFor(imageA) : resultFor(imageB),
-        });
-        if (accepted.accepted) publishBinding?.();
-        return Object.freeze({ kind: 'provider_image_tool', ...accepted });
+        if (request.providerName !== 'view_image') return { path: 'notes.txt', content: 'ok' };
+        return consume!(request.callId === 'call-image-a' ? resultFor(imageA) : resultFor(imageB));
       },
     );
     const prepareContext = vi.fn(() => ({
@@ -2617,12 +2615,25 @@ describe('Provider Team completion and model errors', () => {
     }));
     const beginProviderSynthesis = vi.fn().mockResolvedValue(undefined);
     const completeProviderTeamTurn = vi.fn().mockResolvedValue('completed');
+    const captureProviderToolImageBinding = vi
+      .fn()
+      .mockResolvedValueOnce({
+        connectionDigest: digestCanonical(connection),
+        image: 'A',
+      })
+      .mockResolvedValueOnce({
+        connectionDigest: digestCanonical(connection),
+        image: 'B',
+      });
+    const providerToolImageFinalStateMatches = vi.fn().mockReturnValue(true);
     const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(fakeRouter, {
       canceledRuntimeTurns: new Set<string>(),
       turnRuntimes: new Map([[turnId, 'provider']]),
       providerAbortByTurn: new Map(),
       providerExecutionIdByTurn: new Map(),
+      managedWorkerTurn: new Map(),
+      managedWorkerCall: new Map(),
       providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
       providerRegistry: { resolve: vi.fn(() => ({ execute, cancel: vi.fn() })) },
       modelCatalog: { find: vi.fn(() => ({ toolCalling: { value: true } })) },
@@ -2646,6 +2657,7 @@ describe('Provider Team completion and model errors', () => {
       providerImageAttachmentStillValid: vi.fn().mockResolvedValue(true),
       providerEgressTrustForConnection: () => 'trusted-local',
       managedCodingHarness: {
+        broker: { dispatch: brokerDispatch },
         startTurn: vi.fn(() => ({
           digest: 'a'.repeat(64),
           providerId: 'ollama',
@@ -2674,12 +2686,9 @@ describe('Provider Team completion and model errors', () => {
       },
       teamCoordinator: { hasUnfinishedTeamWork: () => false },
       applyProviderTurnEvent: vi.fn(),
-      captureProviderToolImageBinding: vi.fn().mockResolvedValue({
-        connectionDigest: digestCanonical(connection),
-      }),
+      captureProviderToolImageBinding,
       revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
-      providerToolImageFinalStateMatches: vi.fn().mockReturnValue(true),
-      dispatchManagedRuntimeTool,
+      providerToolImageFinalStateMatches,
       beginProviderSynthesis,
       completeProviderTeamTurn,
       cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
@@ -2720,6 +2729,29 @@ describe('Provider Team completion and model errors', () => {
     expect(JSON.stringify(request2)).not.toContain(imageA.bytes.toString('base64'));
     expect(request3Images.map(({ base64 }) => base64)).toEqual([directBytes.toString('base64')]);
     expect(JSON.stringify(request3)).not.toContain(imageB.bytes.toString('base64'));
+    const imageUrlsFor = (body: unknown) =>
+      ((body as { messages?: Array<{ content?: unknown }> } | undefined)?.messages ?? []).flatMap(
+        (message) =>
+          Array.isArray(message.content)
+            ? (
+                message.content as Array<{
+                  type?: string;
+                  image_url?: { url?: string };
+                }>
+              ).flatMap((part) =>
+                part.type === 'image_url' && typeof part.image_url?.url === 'string'
+                  ? [part.image_url.url]
+                  : [],
+              )
+            : [],
+      );
+    expect(imageUrlsFor(serializedBodies[1])).toEqual([
+      `data:${directImage.mimeType};base64,${directBytes.toString('base64')}`,
+      `data:${imageB.mimeType};base64,${imageB.bytes.toString('base64')}`,
+    ]);
+    expect(imageUrlsFor(serializedBodies[2])).toEqual([
+      `data:${directImage.mimeType};base64,${directBytes.toString('base64')}`,
+    ]);
     const resources = evaluate.mock.calls.map(
       ([input]) => (input as { request: { resource: Record<string, unknown> } }).request.resource,
     );
@@ -2733,6 +2765,17 @@ describe('Provider Team completion and model errors', () => {
       providerTrust: 'trusted-local',
       attachmentManifestDigest: digestCanonical(compositeManifest),
     });
+    for (const index of [0, 1, 3])
+      expect(resources[index]).toMatchObject({
+        providerTrust: 'trusted-local',
+        attachmentManifestDigest: digestCanonical(directManifest),
+      });
+    expect(brokerDispatch).toHaveBeenCalledTimes(3);
+    expect(providerToolImageFinalStateMatches).toHaveBeenCalledWith(
+      started,
+      expect.objectContaining({ image: 'B' }),
+      connection,
+    );
     expect(completeProviderTeamTurn).toHaveBeenCalledOnce();
   });
 
@@ -2757,7 +2800,16 @@ describe('Provider Team completion and model errors', () => {
           const connection = state['connection'] as Record<string, unknown>;
           const secrets = state['secrets'] as Map<string, string>;
           const newReference = 'provider-secret:00000000-0000-4000-8000-000000000022';
-          secrets.set(newReference, secrets.get(String(connection['secretReference']))!);
+          const newBaseUrl = 'http://127.0.0.1:11435/v1';
+          const newEndpointDigest = new ProviderEndpointPolicy().digestForBaseUrl(newBaseUrl);
+          secrets.set(
+            newReference,
+            JSON.stringify({
+              baseUrl: newBaseUrl,
+              endpointDigest: newEndpointDigest,
+              localConsentDigest: newEndpointDigest,
+            }),
+          );
           connection['secretReference'] = newReference;
         },
       ],
@@ -2862,9 +2914,58 @@ describe('Provider Team completion and model errors', () => {
       ],
       [
         'lexical execution connection',
+        (state) => {
+          const executionConnection = state['executionConnection'] as Record<string, unknown>;
+          const secrets = state['secrets'] as Map<string, string>;
+          const remoteReference = 'provider-secret:00000000-0000-4000-8000-000000000023';
+          const remoteBaseUrl = 'https://vision.example/v1';
+          const remoteEndpointDigest = new ProviderEndpointPolicy().digestForBaseUrl(remoteBaseUrl);
+          executionConnection['displayName'] = 'Lexical trusted-remote A';
+          executionConnection['secretReference'] = remoteReference;
+          secrets.set(
+            remoteReference,
+            JSON.stringify({
+              baseUrl: remoteBaseUrl,
+              endpointDigest: remoteEndpointDigest,
+              localConsentDigest: remoteEndpointDigest,
+            }),
+          );
+        },
+      ],
+      [
+        'dns wait connection',
+        (state) => void ((state['connection'] as Record<string, unknown>)['enabled'] = false),
+      ],
+      [
+        'dns wait registry profile',
+        (state) => void ((state['profile'] as Record<string, unknown>)['protocol'] = 'responses'),
+      ],
+      [
+        'dns wait capability false',
+        (state) => void ((state['capability'] as Record<string, unknown>)['value'] = false),
+      ],
+      [
+        'dns wait capability unknown',
+        (state) => void ((state['capability'] as Record<string, unknown>)['value'] = null),
+      ],
+      [
+        'dns wait capability revision',
         (state) =>
-          void ((state['executionConnection'] as Record<string, unknown>)['displayName'] =
-            'Lexical remote A'),
+          void ((state['capability'] as Record<string, unknown>)['revision'] = 'dns-drift'),
+      ],
+      [
+        'final capability wait connection',
+        (state) => void ((state['connection'] as Record<string, unknown>)['enabled'] = false),
+      ],
+      [
+        'final capability wait task selection',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedModel'] = 'vision-drift'),
+      ],
+      [
+        'final capability wait registry profile',
+        (state) =>
+          void ((state['profile'] as Record<string, unknown>)['baseUrlConfigurable'] = false),
       ],
     ];
 
@@ -2873,8 +2974,20 @@ describe('Provider Team completion and model errors', () => {
       const turnId = `turn-tool-image-drift-${caseIndex}`;
       const userMessageId = `message-tool-image-drift-${caseIndex}`;
       const modelId = 'qwen3-vl:4b-instruct-q4_K_M';
-      const baseUrl = 'http://127.0.0.1:11434/v1';
-      const endpointPolicy = new ProviderEndpointPolicy();
+      const mutatesBeforeBrokerAcceptance = name === 'lexical execution connection';
+      const mutatesDuringDns = name.startsWith('dns wait ');
+      const mutatesDuringFinalCapability = name.startsWith('final capability wait ');
+      const baseUrl = mutatesDuringDns ? 'http://localhost:11434/v1' : 'http://127.0.0.1:11434/v1';
+      const stateRef: { current: Record<string, unknown> | undefined } = { current: undefined };
+      let dnsLookupCount = 0;
+      const endpointPolicy = new ProviderEndpointPolicy(async () => {
+        dnsLookupCount += 1;
+        if (mutatesDuringDns && dnsLookupCount === 2) mutate(stateRef.current!);
+        return [
+          { address: '127.0.0.1', family: 4 },
+          { address: '::1', family: 6 },
+        ];
+      });
       const endpointDigest = endpointPolicy.digestForBaseUrl(baseUrl);
       const connection = {
         id: `profile:ollama-drift-${caseIndex}`,
@@ -2986,15 +3099,25 @@ describe('Provider Team completion and model errors', () => {
         secrets,
         selection,
       };
+      stateRef.current = state;
+      if (mutatesBeforeBrokerAcceptance) mutate(state);
       const lease = {
-        prepare: vi.fn(async () => mutate(state)),
+        prepare: vi.fn(async () => {
+          if (!mutatesBeforeBrokerAcceptance && !mutatesDuringDns && !mutatesDuringFinalCapability)
+            mutate(state);
+        }),
         release: vi.fn().mockResolvedValue(undefined),
       };
+      let capabilityCaptureCount = 0;
       const runtime = {
         execute,
         cancel: vi.fn().mockResolvedValue(undefined),
         acquireModelLease: vi.fn().mockResolvedValue(lease),
-        captureImageInputCapability: vi.fn(async () => ({ ...capability })),
+        captureImageInputCapability: vi.fn(async () => {
+          capabilityCaptureCount += 1;
+          if (mutatesDuringFinalCapability && capabilityCaptureCount === 3) mutate(state);
+          return { ...capability };
+        }),
       };
       let verificationCalls = 0;
       const requireVerifiedForExecution = vi.fn(async () => {
@@ -3069,7 +3192,10 @@ describe('Provider Team completion and model errors', () => {
           projectSnapshotDigest: null,
         })),
         prepareProviderTurnImageAttachments: vi.fn(() => undefined),
-        providerEgressTrustForConnection: () => 'trusted-local',
+        providerEgressTrustForConnection: (candidate: { secretReference: string | null }) =>
+          candidate.secretReference === 'provider-secret:00000000-0000-4000-8000-000000000023'
+            ? 'trusted-remote'
+            : 'trusted-local',
         managedCodingHarness: {
           broker: { dispatch: brokerDispatch },
           startTurn: vi.fn(() => ({
@@ -3112,8 +3238,8 @@ describe('Provider Team completion and model errors', () => {
 
       await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
 
-      expect(execute, name).toHaveBeenCalledTimes(1);
-      expect(brokerDispatch, name).toHaveBeenCalledOnce();
+      expect(execute, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 2 : 1);
+      expect(brokerDispatch, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 0 : 1);
       expect(
         evaluate.mock.calls.some(
           ([input]) =>
@@ -3129,16 +3255,48 @@ describe('Provider Team completion and model errors', () => {
         canonical.bytes.toString('base64'),
       );
       expect(JSON.stringify(appendDelta.mock.calls), name).not.toContain('data:image/');
-      expect(appendDelta, name).toHaveBeenCalledWith(
-        taskId,
-        turnId,
-        expect.any(String),
-        '画像入力の準備状況が変わったため、Providerへ画像を送信しませんでした。もう一度添付してください。',
-      );
-      expect(finishAndAdvance, name).toHaveBeenCalledWith(taskId, turnId, 'failed');
-      expect(completeProviderTeamTurn, name).not.toHaveBeenCalled();
-      if (name === 'connection secret reference')
+      if (mutatesDuringDns) {
+        expect(dnsLookupCount, name).toBe(2);
+        expect(capabilityCaptureCount, name).toBe(name === 'dns wait connection' ? 2 : 3);
+      }
+      if (mutatesDuringFinalCapability) expect(capabilityCaptureCount, name).toBe(3);
+      if (mutatesBeforeBrokerAcceptance) {
+        const secondRequest = (execute.mock.calls as unknown[][])[1]?.[1] as {
+          messages: Array<{
+            role: string;
+            content: string;
+            toolCallId?: string;
+            toolName?: string;
+          }>;
+        };
+        expect(secondRequest.messages).toContainEqual(
+          expect.objectContaining({
+            role: 'tool',
+            toolCallId: 'call-image-drift',
+            toolName: 'view_image',
+            content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
+          }),
+        );
+        expect(completeProviderTeamTurn, name).toHaveBeenCalledOnce();
+      } else {
+        expect(appendDelta, name).toHaveBeenCalledWith(
+          taskId,
+          turnId,
+          expect.any(String),
+          '画像入力の準備状況が変わったため、Providerへ画像を送信しませんでした。もう一度添付してください。',
+        );
+        expect(finishAndAdvance, name).toHaveBeenCalledWith(taskId, turnId, 'failed');
+        expect(completeProviderTeamTurn, name).not.toHaveBeenCalled();
+      }
+      if (name === 'connection secret reference') {
         expect(secrets.has('provider-secret:00000000-0000-4000-8000-000000000021')).toBe(true);
+        expect(
+          JSON.parse(secrets.get('provider-secret:00000000-0000-4000-8000-000000000021')!),
+        ).toEqual({ baseUrl, endpointDigest, localConsentDigest: endpointDigest });
+        expect(
+          JSON.parse(secrets.get('provider-secret:00000000-0000-4000-8000-000000000022')!),
+        ).not.toEqual({ baseUrl, endpointDigest, localConsentDigest: endpointDigest });
+      }
     }
   });
 
