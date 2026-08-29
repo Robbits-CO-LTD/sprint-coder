@@ -1359,15 +1359,15 @@ describe('Main image attachment dispatch boundary', () => {
       sha256: canonical.sha256,
       dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
     };
-    let resolveDispatch!: (value: unknown) => void;
-    const brokerDispatch = vi.fn(
-      () =>
-        new Promise<unknown>((resolve) => {
-          resolveDispatch = resolve;
-        }),
-    );
     const controller = new AbortController();
     const cancellation = new Error('turn canceled after tool completion');
+    const brokerDispatch = vi.fn(
+      async (_request: unknown, consume: (value: unknown) => Promise<unknown>) => {
+        const metadata = await consume(validResult);
+        controller.abort(cancellation);
+        return metadata;
+      },
+    );
     const bridge = new ToolImageBridge();
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
@@ -1391,13 +1391,83 @@ describe('Main image attachment dispatch boundary', () => {
       controller.signal,
       bridge,
     );
-    controller.abort(cancellation);
-    resolveDispatch(validResult);
-
     await expect(pending).rejects.toBe(cancellation);
     expect(bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] }).hasToolImage).toBe(
       false,
     );
+  });
+
+  it('rolls back a staged later image when broker post-processing fails', async () => {
+    const firstSource = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 30, g: 50, b: 70 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const laterSource = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 180, g: 90, b: 20 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const first = await canonicalizeProviderToolImage(firstSource);
+    const later = await canonicalizeProviderToolImage(laterSource);
+    const resultFor = (image: typeof first) => ({
+      path: 'image.png',
+      mimeType: image.mimeType,
+      byteLength: image.bytes.byteLength,
+      sha256: image.sha256,
+      dataUrl: `data:${image.mimeType};base64,${image.bytes.toString('base64')}`,
+    });
+    const bridge = new ToolImageBridge();
+    await bridge.acceptToolResult({
+      toolCallId: 'call-a',
+      toolName: 'view_image',
+      result: resultFor(first),
+    });
+    const brokerDispatch = vi.fn(
+      async (_request: unknown, consume: (value: unknown) => Promise<unknown>) => {
+        await consume(resultFor(later));
+        throw new Error('post-stage lifecycle failed');
+      },
+    );
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    await expect(
+      probe.dispatchManagedRuntimeTool(
+        'task-provider-image-rollback',
+        'turn-provider-image-rollback',
+        { callId: 'call-b', toolName: 'view_image', arguments: { path: 'image.png' } },
+        new AbortController().signal,
+        bridge,
+      ),
+    ).resolves.toMatchObject({ accepted: false });
+    const next = bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] });
+    expect(next.messages.at(-1)).toMatchObject({
+      inlineImages: [{ base64: first.bytes.toString('base64') }],
+    });
+    expect(JSON.stringify(next.messages)).not.toContain(later.bytes.toString('base64'));
   });
 
   it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {
@@ -1533,6 +1603,250 @@ describe('root-aware file selection', () => {
 });
 
 describe('Provider Team completion and model errors', () => {
+  it('fails the real Provider turn before a second execute when final tool-image egress is denied', async () => {
+    const taskId = 'task-tool-image-final-deny';
+    const turnId = 'turn-tool-image-final-deny';
+    const userMessageId = 'message-tool-image-final-deny';
+    const connection = {
+      id: 'profile:ollama',
+      providerId: 'ollama',
+      runtimeKind: 'openai_compatible',
+      displayName: 'Ollama',
+      enabled: true,
+      secretReference: null,
+      verification: {
+        status: 'verified',
+        verifiedAt: new Date(Date.now() - 1_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        message: null,
+      },
+      rateLimit: {
+        mode: 'auto',
+        maxConcurrentRequests: null,
+        requestsPerMinute: null,
+        tokensPerMinute: null,
+        lastObservedRateLimitHeaders: null,
+      },
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 30, g: 80, b: 120 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const canonical = await canonicalizeProviderToolImage(source);
+    const toolResult = {
+      path: 'fixture.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    const execute = vi.fn(() =>
+      (async function* () {
+        yield {
+          type: 'tool_call' as const,
+          callId: 'call-view-image',
+          name: 'view_image',
+          input: { path: 'fixture.png' },
+        };
+        yield { type: 'completed' as const, stopReason: 'tool_calls' };
+      })(),
+    );
+    const runtime = { execute, cancel: vi.fn() };
+    const evaluate = vi.fn((input: Record<string, unknown>) => {
+      const request = input['request'] as {
+        resource: { attachmentByteCount: number; attachmentManifestDigest: string | null };
+      };
+      return request.resource.attachmentByteCount > 0
+        ? {
+            decision: 'deny',
+            reason: 'test_final_tool_image_denial',
+            policyEpoch: 1,
+            evaluationTrace: ['test-final-deny'],
+          }
+        : {
+            decision: 'allow',
+            reason: 'test_initial_allow',
+            policyEpoch: 1,
+            evaluationTrace: ['test-initial-allow'],
+            permit: { id: 'test-permit' },
+          };
+    });
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const recordRuntimeFailureDiagnostic = vi.fn(
+      (_taskId: string, _turnId: string, diagnostic: { diagnosticId: string }) => diagnostic,
+    );
+    const finishAndAdvance = vi.fn();
+    const dispatchManagedRuntimeTool = vi.fn(
+      async (
+        _taskId: string,
+        _turnId: string,
+        request: { callId: string; toolName: string },
+        _signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ) => {
+        const accepted = await bridge.acceptToolResult({
+          toolCallId: request.callId,
+          toolName: request.toolName,
+          result: toolResult,
+        });
+        return Object.freeze({ kind: 'provider_image_tool', ...accepted });
+      },
+    );
+    const ensureProviderEndpointConsent = vi.fn().mockResolvedValue(undefined);
+    const requireVerifiedForExecution = vi.fn().mockResolvedValue(connection);
+    const resolveProvider = vi.fn(() => runtime);
+    const prepareContext = vi.fn(() => ({
+      fragments: [
+        {
+          id: 'current',
+          taskId,
+          source: 'history',
+          trust: 'user',
+          tokenEstimate: 1,
+          content: 'describe the workspace image',
+          createdAt: new Date(0).toISOString(),
+          messageId: userMessageId,
+        },
+      ],
+      projectItems: [],
+      projectSnapshotDigest: null,
+    }));
+    const prepareProviderTurnImageAttachments = vi.fn(() => undefined);
+    const modelFind = vi.fn(() => ({ toolCalling: { value: true } }));
+    const startManagedTurn = vi.fn(() => ({
+      digest: 'a'.repeat(64),
+      providerId: 'ollama',
+      entries: [
+        {
+          providerName: 'view_image',
+          inputSchema: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+            additionalProperties: false,
+          },
+        },
+      ],
+    }));
+    const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(fakeRouter, {
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([[turnId, 'provider']]),
+      providerAbortByTurn: new Map(),
+      providerExecutionIdByTurn: new Map(),
+      providerVerification: {
+        requireVerifiedForExecution,
+      },
+      providerRegistry: { resolve: resolveProvider },
+      modelCatalog: { find: modelFind },
+      permissionBroker: {
+        evaluate,
+        revalidate: vi.fn(() => ({ valid: true, reason: 'test_valid' })),
+      },
+      persistence: {
+        getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+        getProviderConnection: () => connection,
+        getPermissionPolicy: () => ({ policyEpoch: 1 }),
+        getActiveTurnId: () => turnId,
+        changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+        appendDelta,
+        recordRuntimeFailureDiagnostic,
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      publish: vi.fn(),
+      finishAndAdvance,
+      ensureProviderEndpointConsent,
+      prepareContext,
+      prepareProviderTurnImageAttachments,
+      providerEgressTrustForConnection: () => 'trusted-local',
+      managedCodingHarness: {
+        startTurn: startManagedTurn,
+        finishTurn: vi.fn(),
+      },
+      teamCoordinator: { hasUnfinishedTeamWork: () => false },
+      applyProviderTurnEvent: vi.fn(),
+      captureProviderToolImageBinding: vi.fn().mockResolvedValue({ binding: 'image' }),
+      revalidateProviderToolImageBinding: vi.fn().mockResolvedValue({ trust: 'trusted-local' }),
+      dispatchManagedRuntimeTool,
+      cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+    });
+    const started = {
+      turnId,
+      text: 'describe the workspace image',
+      skills: [],
+      event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
+      modelSelection: {
+        connectionId: connection.id,
+        requestedProvider: connection.providerId,
+        requestedModel: 'qwen3-vl:4b-instruct-q4_K_M',
+      },
+      workspaceSet: {
+        digest: 'workspace-digest',
+        roots: [{ rootId: 'root-a' }],
+      },
+    };
+    const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+      this: typeof fakeRouter,
+      started: unknown,
+      connectionId: string,
+      teamTurn: boolean,
+      autoSkills: readonly unknown[],
+    ) => Promise<void>;
+
+    await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+
+    expect(
+      execute,
+      JSON.stringify({
+        evaluateCalls: evaluate.mock.calls.length,
+        dispatchCalls: dispatchManagedRuntimeTool.mock.calls.length,
+        diagnosticCalls: recordRuntimeFailureDiagnostic.mock.calls.length,
+        finishCalls: finishAndAdvance.mock.calls,
+        ensureCalls: ensureProviderEndpointConsent.mock.calls.length,
+        verifyCalls: requireVerifiedForExecution.mock.calls.length,
+        prepareContextCalls: prepareContext.mock.calls.length,
+        resolveCalls: resolveProvider.mock.calls.length,
+        prepareImageCalls: prepareProviderTurnImageAttachments.mock.calls.length,
+        modelFindCalls: modelFind.mock.calls.length,
+        managedStartCalls: startManagedTurn.mock.calls.length,
+      }),
+    ).toHaveBeenCalledTimes(1);
+    expect(dispatchManagedRuntimeTool).toHaveBeenCalledTimes(1);
+    const deniedRequest = evaluate.mock.calls
+      .map(([input]) => input['request'] as { resource: Record<string, unknown> })
+      .find(({ resource }) => Number(resource['attachmentByteCount']) > 0);
+    expect(deniedRequest?.resource).toMatchObject({
+      providerTrust: 'trusted-local',
+      dataResidency: 'local-device',
+      attachmentByteCount: canonical.bytes.byteLength,
+      attachmentManifestDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(JSON.stringify(deniedRequest)).not.toContain(canonical.bytes.toString('base64'));
+    expect(appendDelta).toHaveBeenCalledWith(
+      taskId,
+      turnId,
+      expect.any(String),
+      '画像を安全に送信できなかったため、Providerへの送信を中止しました。',
+    );
+    expect(JSON.stringify(appendDelta.mock.calls)).not.toContain('data:image/');
+    expect(recordRuntimeFailureDiagnostic).toHaveBeenCalledTimes(1);
+    expect(recordRuntimeFailureDiagnostic.mock.calls[0]?.[2]).toMatchObject({
+      failureStage: 'provider_error',
+      category: 'invalid_request',
+      providerCode: 'policy_denied',
+      modelPreparation: 'completed',
+    });
+    expect(finishAndAdvance).toHaveBeenCalledWith(taskId, turnId, 'failed');
+  });
+
   it('replaces an unknown Provider stream throw with a fixed safe cause', async () => {
     async function* unsafeStream(seed: readonly never[] = []): AsyncIterable<never> {
       yield* seed;

@@ -1,7 +1,17 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renameSync } from 'node:fs';
-import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  link,
+  mkdir,
+  mkdtemp,
+  open,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
@@ -720,6 +730,52 @@ describe('Provider workspace read tools', () => {
         input: { path: 'pixel.png' },
       }),
     ).rejects.toThrow();
+  });
+
+  it('rejects a real image file that grows while its guarded handle is being read', async () => {
+    const { root, tools, context } = await harness();
+    const path = join(root, 'growing.png');
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    await writeFile(path, source);
+    const probe = await open(path, 'r');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    const originalRead = prototype.read;
+    await probe.close();
+    let grew = false;
+    const readSpy = vi.spyOn(prototype, 'read').mockImplementation(async function (
+      this: typeof probe,
+      ...args
+    ) {
+      const result = await originalRead.apply(this, args);
+      if (!grew) {
+        grew = true;
+        await appendFile(path, Buffer.from('MID_READ_GROWTH'));
+      }
+      return result;
+    });
+
+    try {
+      await expect(
+        tools.broker.dispatch({
+          ...context,
+          callId: 'view-image-growing',
+          providerName: 'view_image',
+          input: { path: 'growing.png' },
+        }),
+      ).rejects.toThrow();
+      expect(grew).toBe(true);
+    } finally {
+      readSpy.mockRestore();
+    }
   });
 
   it('searches bounded UTF-8 files without following symlinks or disclosing secrets', async () => {

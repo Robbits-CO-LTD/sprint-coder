@@ -234,6 +234,44 @@ describe('tool image bridge', () => {
     expect(followingRound.hasToolImage).toBe(false);
   });
 
+  it('keeps the committed image until a staged replacement commits', async () => {
+    const firstImage = await canonicalPng(90);
+    const laterImage = await canonicalPng(160);
+    const bridge = new ToolImageBridge();
+    await bridge.acceptToolResult({
+      toolCallId: 'call-a',
+      toolName: 'view_image',
+      result: imageResult(firstImage),
+    });
+    await bridge.stageToolResult({
+      toolCallId: 'call-b',
+      toolName: 'view_image',
+      result: imageResult(laterImage),
+    });
+    bridge.rollbackStaged();
+
+    const afterRollback = bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] });
+    expect(afterRollback.messages.at(-1)).toMatchObject({
+      inlineImages: [{ base64: firstImage.toString('base64') }],
+    });
+
+    await bridge.acceptToolResult({
+      toolCallId: 'call-a-again',
+      toolName: 'view_image',
+      result: imageResult(firstImage),
+    });
+    await bridge.stageToolResult({
+      toolCallId: 'call-b-commit',
+      toolName: 'view_image',
+      result: imageResult(laterImage),
+    });
+    bridge.commitStaged();
+    const afterCommit = bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] });
+    expect(afterCommit.messages.at(-1)).toMatchObject({
+      inlineImages: [{ base64: laterImage.toString('base64') }],
+    });
+  });
+
   it.each([
     [false, 'not_required'],
     [true, 'completed'],

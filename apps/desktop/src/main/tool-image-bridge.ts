@@ -139,13 +139,15 @@ async function parseSuccessfulToolImageResult(
 }
 
 export class ToolImageBridge {
-  private pendingImage: VerifiedToolImage | null = null;
+  private committedImage: VerifiedToolImage | null = null;
+  private stagedImage: VerifiedToolImage | null = null;
 
-  async acceptToolResult(input: {
+  async stageToolResult(input: {
     toolCallId: string;
     toolName: string;
     result: unknown;
   }): Promise<ToolImageAcceptance> {
+    this.stagedImage = null;
     if (input.toolName !== 'view_image')
       return Object.freeze({
         toolMessage: invalidImageMessage(input.toolCallId, input.toolName),
@@ -158,7 +160,7 @@ export class ToolImageBridge {
           toolMessage: invalidImageMessage(input.toolCallId, input.toolName),
           accepted: false,
         });
-      this.pendingImage = image;
+      this.stagedImage = image;
       return Object.freeze({
         toolMessage: imageMetadataMessage(input.toolCallId, input.toolName, image),
         accepted: true,
@@ -171,8 +173,36 @@ export class ToolImageBridge {
     }
   }
 
+  async acceptToolResult(input: {
+    toolCallId: string;
+    toolName: string;
+    result: unknown;
+  }): Promise<ToolImageAcceptance> {
+    const accepted = await this.stageToolResult(input);
+    if (accepted.accepted) this.commitStaged();
+    else this.rollbackStaged();
+    return accepted;
+  }
+
+  commitStaged(): void {
+    if (this.stagedImage !== null) this.committedImage = this.stagedImage;
+    this.stagedImage = null;
+  }
+
+  rollbackStaged(): void {
+    this.stagedImage = null;
+  }
+
+  invalidToolResult(toolCallId: string, toolName: string): ToolImageAcceptance {
+    return Object.freeze({
+      toolMessage: invalidImageMessage(toolCallId, toolName),
+      accepted: false,
+    });
+  }
+
   discardPending(): void {
-    this.pendingImage = null;
+    this.stagedImage = null;
+    this.committedImage = null;
   }
 
   consumeForNextDispatch(input: {
@@ -183,8 +213,8 @@ export class ToolImageBridge {
     hasToolImage: boolean;
     audit: Readonly<{ manifestDigest: string; byteCount: number }>;
   }> {
-    const toolImage = this.pendingImage;
-    this.pendingImage = null;
+    const toolImage = this.committedImage;
+    this.committedImage = null;
     const messages =
       toolImage === null
         ? input.baseMessages

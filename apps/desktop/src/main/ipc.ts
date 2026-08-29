@@ -3801,35 +3801,31 @@ export class IpcRouter {
       });
     if (request.toolName === 'view_image') {
       try {
-        const result = await this.managedCodingHarness.broker.dispatch({
-          taskId,
-          turnId: ownerTurnId,
-          callId: brokerCallId,
-          providerName: request.toolName,
-          input: request.arguments,
-          signal,
-        });
+        const accepted = (await this.managedCodingHarness.broker.dispatch(
+          {
+            taskId,
+            turnId: ownerTurnId,
+            callId: brokerCallId,
+            providerName: request.toolName,
+            input: request.arguments,
+            signal,
+          },
+          (result) =>
+            providerImageBridge!.stageToolResult({
+              toolCallId: request.callId,
+              toolName: request.toolName,
+              result,
+            }),
+        )) as Awaited<ReturnType<ToolImageBridge['stageToolResult']>>;
         signal.throwIfAborted();
-        const accepted = await providerImageBridge!.acceptToolResult({
-          toolCallId: request.callId,
-          toolName: request.toolName,
-          result,
-        });
-        if (signal.aborted) {
-          providerImageBridge!.discardPending();
-          signal.throwIfAborted();
-        }
+        providerImageBridge!.commitStaged();
         return Object.freeze({ kind: 'provider_image_tool', ...accepted });
       } catch (error) {
+        providerImageBridge!.rollbackStaged();
         if (signal.aborted) {
-          providerImageBridge!.discardPending();
           throw error;
         }
-        const rejected = await providerImageBridge!.acceptToolResult({
-          toolCallId: request.callId,
-          toolName: request.toolName,
-          result: null,
-        });
+        const rejected = providerImageBridge!.invalidToolResult(request.callId, request.toolName);
         return Object.freeze({ kind: 'provider_image_tool', ...rejected });
       } finally {
         if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
