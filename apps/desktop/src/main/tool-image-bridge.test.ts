@@ -7,6 +7,8 @@ import {
   toolImageEgressDenialCause,
   type ToolImageAuditInput,
 } from './tool-image-bridge';
+// @ts-expect-error VerifiedToolImage must remain module-private.
+import type { VerifiedToolImage } from './tool-image-bridge';
 import { canonicalizeProviderToolImage } from './image-attachment-store';
 import { digestCanonical } from './context-compiler';
 
@@ -53,6 +55,8 @@ describe('tool image bridge', () => {
     expectTypeOf(audit).not.toHaveProperty('base64');
     expect(toolImageBridgeModule).not.toHaveProperty('parseSuccessfulToolImageResult');
     expect(toolImageBridgeModule).not.toHaveProperty('VerifiedToolImage');
+    type ForbiddenVerifiedToolImage = VerifiedToolImage;
+    void (0 as unknown as ForbiddenVerifiedToolImage);
 
     const forbiddenAudit: ToolImageAuditInput = {
       ...audit,

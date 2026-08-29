@@ -1686,20 +1686,6 @@ describe('Main image attachment dispatch boundary', () => {
     const cases: ReadonlyArray<
       readonly [string, (harness: ReturnType<typeof createHarness>) => void]
     > = [
-      [
-        'coherent non-Ollama trusted-local profile',
-        ({ connection, model, profile, selection, startedSelection }) => {
-          connection.providerId = 'localai';
-          connection.displayName = 'LocalAI loopback';
-          model.providerId = 'localai';
-          profile.id = 'localai';
-          profile.displayName = 'LocalAI';
-          profile.sourceReference = 'https://localai.io/';
-          Reflect.deleteProperty(profile, 'nativeModelLifecycle');
-          selection.requestedProvider = 'localai';
-          startedSelection.requestedProvider = 'localai';
-        },
-      ],
       ['responses protocol', ({ profile }) => Object.assign(profile, { protocol: 'responses' })],
       ['profile id lookalike', ({ profile }) => Object.assign(profile, { id: 'ollamI' })],
       [
@@ -1823,6 +1809,17 @@ describe('Main image attachment dispatch boundary', () => {
     ];
 
     expect(createHarness().read()).not.toBeNull();
+    const compatibleProfile = createHarness();
+    compatibleProfile.connection.providerId = 'localai';
+    compatibleProfile.connection.displayName = 'LocalAI loopback';
+    compatibleProfile.model.providerId = 'localai';
+    compatibleProfile.profile.id = 'localai';
+    compatibleProfile.profile.displayName = 'LocalAI';
+    compatibleProfile.profile.sourceReference = 'https://localai.io/';
+    Reflect.deleteProperty(compatibleProfile.profile, 'nativeModelLifecycle');
+    compatibleProfile.selection.requestedProvider = 'localai';
+    compatibleProfile.startedSelection.requestedProvider = 'localai';
+    expect(compatibleProfile.read()).not.toBeNull();
     for (const [name, mutate] of cases) {
       const harness = createHarness();
       mutate(harness);
@@ -1830,55 +1827,136 @@ describe('Main image attachment dispatch boundary', () => {
     }
   });
 
-  it('denies view_image in every generic callback owner before broker execution', async () => {
+  it('denies view_image through all five wired generic callbacks before broker execution', async () => {
     const brokerDispatch = vi.fn();
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
-    Object.assign(router, { managedCodingHarness: { broker: { dispatch: brokerDispatch } } });
+    const catalogDigest = 'a'.repeat(64);
+    const getTurnSnapshot = vi.fn(() => ({ digest: catalogDigest }));
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch, getTurnSnapshot } },
+    });
+    const originalDispatch = Reflect.get(
+      IpcRouter.prototype,
+      'dispatchGenericManagedRuntimeTool',
+    ) as (
+      this: typeof router,
+      owner: string,
+      taskId: string,
+      turnId: string,
+      request: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>;
+    const dispatch = vi.fn(
+      (owner: string, taskId: string, turnId: string, request: unknown, signal: AbortSignal) =>
+        originalDispatch.call(router, owner, taskId, turnId, request, signal),
+    );
+    Object.assign(router, { dispatchGenericManagedRuntimeTool: dispatch });
     const probe = router as unknown as {
-      dispatchGenericManagedRuntimeTool(
-        owner: 'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime',
-        taskId: string,
-        turnId: string,
-        request: unknown,
-        signal: AbortSignal,
-      ): Promise<unknown>;
+      createGenericManagedRuntimeToolHandlers(): {
+        cliTeam(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        providerWorker(
+          taskId: string,
+          turnId: string,
+          catalogDigest: string,
+          name: string,
+          input: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        teamMcp(
+          input: unknown,
+          context: {
+            taskId: string;
+            turnId: string;
+            callId: string;
+            toolName: string;
+            catalogDigest: string;
+          },
+        ): Promise<unknown>;
+        codexRuntime(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        claudeRuntime(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+      };
     };
-    const owners = [
+    const callbacks = probe.createGenericManagedRuntimeToolHandlers();
+    const signal = new AbortController().signal;
+    const directRequest = (owner: string) => ({
+      callId: `call-${owner}`,
+      toolName: 'view_image',
+      arguments: { path: 'image.png' },
+    });
+    const results = [
+      await callbacks.cliTeam('task-cli', 'turn-cli', directRequest('cli-team'), signal),
+      await callbacks.providerWorker(
+        'task-provider',
+        'turn-provider',
+        catalogDigest,
+        'view_image',
+        { path: 'image.png' },
+        signal,
+      ),
+      await callbacks.teamMcp(
+        { path: 'image.png' },
+        {
+          taskId: 'task-mcp',
+          turnId: 'turn-mcp',
+          callId: 'call-team-mcp',
+          toolName: 'view_image',
+          catalogDigest,
+        },
+      ),
+      await callbacks.codexRuntime(
+        'task-codex',
+        'turn-codex',
+        directRequest('codex-runtime'),
+        signal,
+      ),
+      await callbacks.claudeRuntime(
+        'task-claude',
+        'turn-claude',
+        directRequest('claude-runtime'),
+        signal,
+      ),
+    ];
+    expect(dispatch.mock.calls.map(([owner]) => owner)).toEqual([
       'cli-team',
       'provider-worker',
       'team-mcp',
       'codex-runtime',
       'claude-runtime',
-    ] as const;
-
-    for (const owner of owners) {
-      const result = await probe.dispatchGenericManagedRuntimeTool(
-        owner,
-        `task-generic-image-${owner}`,
-        `turn-generic-image-${owner}`,
-        { callId: `call-${owner}`, toolName: 'view_image', arguments: { path: 'image.png' } },
-        new AbortController().signal,
-      );
-
-      expect(result, owner).toMatchObject({
+    ]);
+    for (const result of results) {
+      expect(result).toMatchObject({
         kind: 'provider_image_tool',
         accepted: false,
         toolMessage: {
-          toolCallId: `call-${owner}`,
           content: expect.stringContaining('VIEW_IMAGE_NOT_PERMITTED'),
         },
       });
-      expect(JSON.stringify(result), owner).not.toContain('data:image/');
+      expect(JSON.stringify(result)).not.toContain('data:image/');
     }
     expect(brokerDispatch).not.toHaveBeenCalled();
 
     const canceled = new AbortController();
     canceled.abort(new Error('canceled before generic image denial'));
     await expect(
-      probe.dispatchGenericManagedRuntimeTool(
-        'codex-runtime',
-        'task-generic-image',
-        'turn-generic-image',
+      callbacks.codexRuntime(
+        'task-canceled',
+        'turn-canceled',
         { callId: 'call-canceled', toolName: 'view_image', arguments: { path: 'image.png' } },
         canceled.signal,
       ),
@@ -3446,7 +3524,7 @@ describe('Provider Team completion and model errors', () => {
     }
   });
 
-  it('discards the pending image for every model-preparation drift before image-bearing execute', async () => {
+  it('accepts coherent trusted-local profiles and discards every model-preparation drift', async () => {
     const cases: ReadonlyArray<readonly [string, (state: Record<string, unknown>) => void]> = [
       [
         'connection enabled',
@@ -3889,6 +3967,8 @@ describe('Provider Team completion and model errors', () => {
       const modelId = 'qwen3-vl:4b-instruct-q4_K_M';
       const mutatesBeforeBrokerAcceptance =
         name === 'lexical execution connection' || name.startsWith('acceptance ');
+      const acceptsCoherentLocalProfile =
+        name === 'acceptance coherent non-Ollama trusted-local profile';
       const mutatesDuringDns = name.startsWith('dns wait ');
       const mutatesDuringFinalCapability = name.startsWith('final capability wait ');
       const baseUrl = mutatesDuringDns ? 'http://localhost:11434/v1' : 'http://127.0.0.1:11434/v1';
@@ -4183,7 +4263,9 @@ describe('Provider Team completion and model errors', () => {
       await startProviderTurn.call(fakeRouter, started, acceptedConnectionId, false, []);
 
       expect(execute, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 2 : 1);
-      expect(brokerDispatch, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 0 : 1);
+      expect(brokerDispatch, name).toHaveBeenCalledTimes(
+        acceptsCoherentLocalProfile ? 1 : mutatesBeforeBrokerAcceptance ? 0 : 1,
+      );
       expect(
         evaluate.mock.calls.some(
           ([input]) =>
@@ -4194,17 +4276,33 @@ describe('Provider Team completion and model errors', () => {
             ) > 0,
         ),
         name,
-      ).toBe(false);
-      expect(JSON.stringify(execute.mock.calls), name).not.toContain(
-        canonical.bytes.toString('base64'),
-      );
+      ).toBe(acceptsCoherentLocalProfile);
+      if (acceptsCoherentLocalProfile)
+        expect(JSON.stringify(execute.mock.calls), name).toContain(
+          canonical.bytes.toString('base64'),
+        );
+      else
+        expect(JSON.stringify(execute.mock.calls), name).not.toContain(
+          canonical.bytes.toString('base64'),
+        );
       expect(JSON.stringify(appendDelta.mock.calls), name).not.toContain('data:image/');
       if (mutatesDuringDns) {
         expect(dnsLookupCount, name).toBe(2);
         expect(capabilityCaptureCount, name).toBe(name === 'dns wait connection' ? 2 : 3);
       }
       if (mutatesDuringFinalCapability) expect(capabilityCaptureCount, name).toBe(3);
-      if (mutatesBeforeBrokerAcceptance) {
+      if (acceptsCoherentLocalProfile) {
+        const secondRequest = (execute.mock.calls as unknown[][])[1]?.[1] as {
+          messages: Array<{ role: string; content: string; inlineImages?: unknown[] }>;
+        };
+        expect(secondRequest.messages).toContainEqual(
+          expect.objectContaining({ role: 'user', inlineImages: [expect.any(Object)] }),
+        );
+        expect(genericRecord, name).not.toHaveBeenCalled();
+        expect(errorLog?.mock.calls ?? [], name).toEqual([]);
+        expect(warnLog?.mock.calls ?? [], name).toEqual([]);
+        expect(completeProviderTeamTurn, name).toHaveBeenCalledOnce();
+      } else if (mutatesBeforeBrokerAcceptance) {
         const secondRequest = (execute.mock.calls as unknown[][])[1]?.[1] as {
           messages: Array<{
             role: string;
