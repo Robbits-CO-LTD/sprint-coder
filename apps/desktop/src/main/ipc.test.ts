@@ -3007,7 +3007,6 @@ describe('Provider Team completion and model errors', () => {
         teamTurn: boolean,
         autoSkills: readonly unknown[],
       ) => Promise<void>;
-
       await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
 
       const requests = (execute.mock.calls as unknown[][]).map(
@@ -3404,6 +3403,82 @@ describe('Provider Team completion and model errors', () => {
             credential['localConsentDigest'] = digest;
           }),
       ],
+      [
+        'profile ID lookalike',
+        (state) => void ((state['profile'] as Record<string, unknown>)['id'] = 'ollamI'),
+      ],
+      [
+        'required account ID empty',
+        (state) => {
+          (state['profile'] as Record<string, unknown>)['requiredCredentialFields'] = [
+            'account_id',
+          ];
+          editCredential(state, (credential) => void (credential['accountId'] = ''));
+        },
+      ],
+      [
+        'verification expiry missing',
+        (state) =>
+          void Reflect.deleteProperty(
+            (state['connection'] as Record<string, unknown>)['verification'] as Record<
+              string,
+              unknown
+            >,
+            'expiresAt',
+          ),
+      ],
+      [
+        'secret reference missing',
+        (state) =>
+          void ((state['connection'] as Record<string, unknown>)['secretReference'] = null),
+      ],
+      [
+        'connection ID drift',
+        (state) =>
+          void ((state['connection'] as Record<string, unknown>)['id'] = 'profile:ollama-other'),
+      ],
+      [
+        'persisted provider selection drift',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedProvider'] = 'ollamI'),
+      ],
+      [
+        'persisted model selection drift',
+        (state) =>
+          void ((state['selection'] as Record<string, unknown>)['requestedModel'] = 'vision-other'),
+      ],
+      [
+        'started model selection drift',
+        (state) =>
+          void ((state['startedSelection'] as Record<string, unknown>)['requestedModel'] =
+            'vision-other'),
+      ],
+      ['runtime registry mismatch', (state) => void (state['registryMismatch'] = true)],
+      ['model missing', (state) => void (state['modelMissing'] = true)],
+      [
+        'model connection drift',
+        (state) =>
+          void ((state['model'] as Record<string, unknown>)['connectionId'] =
+            'profile:ollama-other'),
+      ],
+      [
+        'model provider drift',
+        (state) => void ((state['model'] as Record<string, unknown>)['providerId'] = 'ollamI'),
+      ],
+      [
+        'model identity drift',
+        (state) => void ((state['model'] as Record<string, unknown>)['modelId'] = 'vision-other'),
+      ],
+      ['capability missing', (state) => void (state['capabilityMissing'] = true)],
+      ['capability probe exception', (state) => void (state['capabilityProbeThrows'] = true)],
+      [
+        'internal managed-local connection',
+        (state) => {
+          const connection = state['connection'] as Record<string, unknown>;
+          connection['runtimeKind'] = 'managed_local';
+          connection['providerId'] = 'sprint-managed-local';
+        },
+      ],
     ];
     const allCases: ReadonlyArray<readonly [string, (state: Record<string, unknown>) => void]> = [
       ...cases,
@@ -3454,12 +3529,14 @@ describe('Provider Team completion and model errors', () => {
         createdAt: new Date(0).toISOString(),
         updatedAt: new Date(0).toISOString(),
       };
+      const acceptedConnectionId = connection.id;
       const executionConnection = structuredClone(connection);
       const selection = {
         connectionId: connection.id,
         requestedProvider: connection.providerId,
         requestedModel: modelId,
       };
+      const startedSelection = structuredClone(selection);
       const profile = {
         id: 'ollama',
         displayName: 'Ollama',
@@ -3489,7 +3566,16 @@ describe('Provider Team completion and model errors', () => {
         modelId,
         toolCalling: { value: true },
       };
-      const modelCatalog = { revision: 7, find: vi.fn(() => model) };
+      let modelFindCalls = 0;
+      const modelCatalog = {
+        revision: 7,
+        find: vi.fn(() => {
+          modelFindCalls += 1;
+          return stateRef.current?.['modelMissing'] === true && modelFindCalls > 1
+            ? undefined
+            : model;
+        }),
+      };
       const capability = {
         value: true as boolean | null,
         revision: 'vision-stable',
@@ -3540,6 +3626,7 @@ describe('Provider Team completion and model errors', () => {
         profile,
         secrets,
         selection,
+        startedSelection,
       };
       stateRef.current = state;
       if (mutatesBeforeBrokerAcceptance) mutate(state);
@@ -3558,6 +3645,9 @@ describe('Provider Team completion and model errors', () => {
         captureImageInputCapability: vi.fn(async () => {
           capabilityCaptureCount += 1;
           if (mutatesDuringFinalCapability && capabilityCaptureCount === 3) mutate(state);
+          if (state['capabilityProbeThrows'] === true)
+            throw new Error('PROBE_EXCEPTION_SECRET data:image/png;base64,PRIVATE');
+          if (state['capabilityMissing'] === true) return undefined;
           return { ...capability };
         }),
       };
@@ -3580,6 +3670,7 @@ describe('Provider Team completion and model errors', () => {
       const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
       const finishAndAdvance = vi.fn();
       const completeProviderTeamTurn = vi.fn();
+      const genericRecord = vi.fn();
       const fakeRouter = Object.create(IpcRouter.prototype) as Record<string, unknown>;
       Object.assign(fakeRouter, {
         canceledRuntimeTurns: new Set<string>(),
@@ -3588,7 +3679,13 @@ describe('Provider Team completion and model errors', () => {
         providerExecutionIdByTurn: new Map(),
         managedWorkerTurn: new Map(),
         providerVerification: { requireVerifiedForExecution },
-        providerRegistry: { resolve: vi.fn(() => runtime) },
+        providerRegistry: {
+          resolve: vi.fn((candidate: unknown) =>
+            candidate !== executionConnection && state['registryMismatch'] === true
+              ? { execute: vi.fn(), cancel: vi.fn() }
+              : runtime,
+          ),
+        },
         compatibleRuntime: runtime,
         providerProfiles: { get: () => profile },
         providerSecrets: { get: (reference: string) => secrets.get(reference) },
@@ -3657,6 +3754,7 @@ describe('Provider Team completion and model errors', () => {
           })),
           finishTurn: vi.fn(),
         },
+        cliTeamWorkerRuntime: { recordManagedToolResult: genericRecord },
         teamCoordinator: { hasUnfinishedTeamWork: () => false },
         applyProviderTurnEvent: vi.fn(),
         completeProviderTeamTurn,
@@ -3667,7 +3765,7 @@ describe('Provider Team completion and model errors', () => {
         text: 'describe the workspace image',
         skills: [],
         event: { type: 'turn.accepted', taskId, userMessage: { id: userMessageId } },
-        modelSelection: structuredClone(selection),
+        modelSelection: structuredClone(startedSelection),
         workspaceSet: { digest: 'workspace-digest', roots: [{ rootId: 'root-a' }] },
       };
       const startProviderTurn = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
@@ -3678,7 +3776,14 @@ describe('Provider Team completion and model errors', () => {
         autoSkills: readonly unknown[],
       ) => Promise<void>;
 
-      await startProviderTurn.call(fakeRouter, started, connection.id, false, []);
+      const errorLog = mutatesBeforeBrokerAcceptance
+        ? vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined)
+        : null;
+      const warnLog = mutatesBeforeBrokerAcceptance
+        ? vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined)
+        : null;
+
+      await startProviderTurn.call(fakeRouter, started, acceptedConnectionId, false, []);
 
       expect(execute, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 2 : 1);
       expect(brokerDispatch, name).toHaveBeenCalledTimes(mutatesBeforeBrokerAcceptance ? 0 : 1);
@@ -3732,6 +3837,19 @@ describe('Provider Team completion and model errors', () => {
         expect(JSON.stringify(secondRequest), name).not.toMatch(
           /data:image\/|127\.0\.0\.1|localhost|vision\.example|192\.168\.1\.2/u,
         );
+        expect(genericRecord, name).not.toHaveBeenCalled();
+        expect(errorLog?.mock.calls ?? [], name).toEqual([]);
+        expect(warnLog?.mock.calls ?? [], name).toEqual([]);
+        expect(
+          JSON.stringify([
+            execute.mock.calls,
+            appendDelta.mock.calls,
+            evaluate.mock.calls,
+            errorLog?.mock.calls,
+            warnLog?.mock.calls,
+          ]),
+          name,
+        ).not.toMatch(/PROBE_EXCEPTION_SECRET|data:image\//u);
         expect(completeProviderTeamTurn, name).toHaveBeenCalledOnce();
       } else {
         expect(appendDelta, name).toHaveBeenCalledWith(
@@ -3752,6 +3870,8 @@ describe('Provider Team completion and model errors', () => {
           JSON.parse(secrets.get('provider-secret:00000000-0000-4000-8000-000000000022')!),
         ).not.toEqual({ baseUrl, endpointDigest, localConsentDigest: endpointDigest });
       }
+      errorLog?.mockRestore();
+      warnLog?.mockRestore();
     }
   });
 
