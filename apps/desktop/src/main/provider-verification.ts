@@ -77,6 +77,7 @@ export class ProviderVerificationService {
     try {
       controller.signal.throwIfAborted();
       const result = await Promise.race([runtime.verify(connection, controller.signal), timeout]);
+      controller.signal.throwIfAborted();
       const verifiedAt = this.now();
       const verification: ProviderConnection['verification'] =
         result.status === 'verified'
