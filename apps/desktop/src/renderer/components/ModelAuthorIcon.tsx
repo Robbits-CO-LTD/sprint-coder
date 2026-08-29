@@ -15,7 +15,9 @@ type Brand =
   | 'kimi'
   | 'minimax'
   | 'zai'
+  | 'openrouter'
   | 'orcarouter'
+  | 'ollama'
   | 'unknown';
 
 const ALIASES: Readonly<Record<string, Brand>> = {
@@ -45,7 +47,9 @@ const ALIASES: Readonly<Record<string, Brand>> = {
   zai: 'zai',
   zhipu: 'zai',
   zhipuai: 'zai',
+  openrouter: 'openrouter',
   orcarouter: 'orcarouter',
+  ollama: 'ollama',
 };
 
 const DISPLAY_NAMES: Readonly<Record<Brand, string>> = {
@@ -60,7 +64,9 @@ const DISPLAY_NAMES: Readonly<Record<Brand, string>> = {
   kimi: 'Kimi',
   minimax: 'MiniMax',
   zai: 'Z.ai',
+  openrouter: 'OpenRouter',
   orcarouter: 'OrcaRouter',
+  ollama: 'Ollama',
   unknown: '不明',
 };
 
@@ -129,8 +135,12 @@ export function ModelAuthorIcon({
       return <Monogram {...common}>M</Monogram>;
     case 'zai':
       return <Monogram {...common}>Z</Monogram>;
+    case 'openrouter':
+      return <Monogram {...common}>R</Monogram>;
     case 'orcarouter':
       return <Monogram {...common}>O</Monogram>;
+    case 'ollama':
+      return <Monogram {...common}>L</Monogram>;
     case 'unknown':
       return (
         <svg {...common} fill="none" stroke="currentColor" strokeWidth="1.7">

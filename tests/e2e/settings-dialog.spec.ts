@@ -192,6 +192,8 @@ test.describe('settings dialog', () => {
     await page.keyboard.press('Escape');
   });
 
+  // Playwright requires an object pattern for fixtures; this Electron test uses only testInfo.
+  // eslint-disable-next-line no-empty-pattern
   test('progressively reveals the add form, keeps optional fields folded, and clears the draft on cancel', async ({}, testInfo) => {
     const page: Page = await firstWindow(app!);
     const runtimeErrors: string[] = [];
@@ -203,6 +205,34 @@ test.describe('settings dialog', () => {
     await page.getByTestId('sidebar-settings-button').click();
     await expect(page.getByTestId('settings-dialog')).toBeVisible();
     await page.getByTestId('settings-nav-models').click();
+
+    const connectionRows = page.locator('.settings-connection-summary');
+    await expect(connectionRows.first()).toBeVisible();
+    const rowHeights = await connectionRows.evaluateAll((rows) =>
+      rows.map((row) => Math.round(row.getBoundingClientRect().height)),
+    );
+    expect(rowHeights.every((height) => height <= 64)).toBe(true);
+    // A fresh profile contains only built-in CLI connections. They remain compact status rows and
+    // do not grow an empty disclosure merely to look consistent with configurable APIs.
+    await expect(page.locator('[data-testid^="settings-connection-details-"]')).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath('provider-connections-compact.png'),
+      fullPage: true,
+    });
+    const originalViewport = page.viewportSize();
+    await page.setViewportSize({ width: 600, height: 760 });
+    await connectionRows.first().scrollIntoViewIfNeeded();
+    await expect(connectionRows.first()).toBeVisible();
+    const hasHorizontalOverflow = await page.getByTestId('settings-dialog').evaluate((dialog) => {
+      const content = dialog.querySelector('.settings-content');
+      return content !== null && content.scrollWidth > content.clientWidth;
+    });
+    expect(hasHorizontalOverflow).toBe(false);
+    await page.screenshot({
+      path: testInfo.outputPath('provider-connections-compact-narrow.png'),
+      fullPage: true,
+    });
+    if (originalViewport !== null) await page.setViewportSize(originalViewport);
 
     const addToggle = page.getByTestId('settings-provider-add-toggle');
     await expect(addToggle).toBeVisible();
@@ -270,6 +300,7 @@ test.describe('settings dialog', () => {
     await page.keyboard.press('Escape');
   });
 
+  // eslint-disable-next-line no-empty-pattern
   test('sets Team permission by Provider or by models inside an expanded Provider', async ({}, testInfo) => {
     const page: Page = await firstWindow(app!);
     await page.getByTestId('sidebar-settings-button').click();

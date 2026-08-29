@@ -6,7 +6,8 @@ import type {
   ProviderProfile,
   ProviderVerificationStatus,
 } from '@sprint-coder/contracts';
-import { Eye, EyeOff, Plus, X } from './icons';
+import { ChevronDown, Eye, EyeOff, Plus, RefreshCw, X } from './icons';
+import { ModelAuthorIcon } from './ModelAuthorIcon';
 
 // Plaintext credentials remain here only until Main accepts them into Secret Storage.
 // Raw provider errors and secret references are never rendered.
@@ -587,93 +588,132 @@ export function ProviderConnectionCard({
   const savingLimit = limitControl?.saving === true;
   const limitInputId = `settings-connection-limit-${connection.id}`;
   const limitHintId = `${limitInputId}-hint`;
+  const detailsId = `settings-connection-details-${connection.id}`;
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = isExternalConnection(connection);
   return (
-    <li className="settings-connection-card" data-testid={`settings-connection-${connection.id}`}>
-      <span className="settings-connection-main">
-        <strong>{connection.displayName}</strong>
-        <small>
-          {connectionKindLabel(connection)}
-          {connection.enabled ? '' : ' · 無効'}
-        </small>
-        {limitControl !== null && (
-          <span className="settings-field">
-            <label className="settings-field-label" htmlFor={limitInputId}>
-              {CONCURRENCY_LABEL}
-            </label>
-            <span className="settings-key-row">
-              <input
-                id={limitInputId}
-                data-testid={limitInputId}
-                type="number"
-                className="settings-text-input"
-                inputMode="numeric"
-                min={1}
-                // Bounded by the ceiling in force — the built-in default while none has been
-                // observed — so the spinner cannot reach a value the save button would refuse.
-                max={effectiveConcurrencyLimit(currentLimit)}
-                step={1}
-                aria-describedby={limitHintId}
-                disabled={disabled || savingLimit}
-                value={limitInput}
-                onChange={(e) => setLimitDraft({ source: currentLimit, value: e.target.value })}
-              />
-              <button
-                type="button"
-                className="settings-secondary-button"
-                data-testid={`${limitInputId}-save`}
-                aria-label={`${connection.displayName}の${CONCURRENCY_LABEL}を保存`}
-                disabled={
-                  !canLowerConcurrencyLimit({
-                    current: currentLimit,
-                    input: limitInput,
-                    busy: disabled || savingLimit,
-                  })
-                }
-                onClick={() => limitControl.onSave(connection, limitInput)}
-              >
-                {savingLimit ? '保存中' : '保存'}
-              </button>
-            </span>
-            <span className="settings-hint" id={limitHintId}>
-              {concurrencyLimitHint(currentLimit)}
-            </span>
-          </span>
-        )}
-        {connection.providerId === 'ollama' &&
-          connection.runtimeKind === 'openai_compatible' &&
-          modelRelease !== undefined && (
-            <label className="settings-field settings-provider-model-release">
-              <span className="settings-field-label">モデルを使用後に自動解放</span>
-              <input
-                type="checkbox"
-                data-testid={`settings-connection-model-release-${connection.id}`}
-                checked={connection.automaticModelRelease !== false}
-                disabled={disabled || modelRelease.saving}
-                onChange={(event) => modelRelease.onChange(connection, event.target.checked)}
-              />
-              <span className="settings-hint">ローカルOllama接続だけに適用されます。</span>
-            </label>
-          )}
-      </span>
-      {/* A fact about the Connection, not a control. Deliberately a plain <span> with no border,
-          no fill and no role: 「確認不要」is not something anyone can press, and dressing it as a
-          chip put it in the same visual family as 検証を再実行 right beside it. */}
-      <span
-        className={`settings-connection-badge tone-${VERIFICATION_TONE[status]}`}
-        data-testid={`settings-connection-badge-${connection.id}`}
-      >
-        {verifying ? '検証中' : VERIFICATION_LABEL[status]}
-      </span>
-      {isExternalConnection(connection) && (
-        <button
-          type="button"
-          className="settings-secondary-button"
-          aria-label={`${connection.displayName}の検証を再実行`}
-          disabled={disabled || verifying}
-          onClick={() => onRetry(connection)}
+    <li
+      className={`settings-connection-card${expanded ? ' expanded' : ''}`}
+      data-testid={`settings-connection-${connection.id}`}
+    >
+      <div className="settings-connection-summary">
+        <span className="settings-connection-icon" aria-hidden="true">
+          <ModelAuthorIcon author={connection.providerId} width={18} height={18} />
+        </span>
+        <span className="settings-connection-main">
+          <strong>{connection.displayName}</strong>
+          <small>
+            {connectionKindLabel(connection)}
+            {connection.enabled ? '' : ' · 無効'}
+          </small>
+        </span>
+        {/* A fact about the Connection, not a control. It stays separate from the disclosure so
+            status is visible without opening low-frequency settings. */}
+        <span
+          className={`settings-connection-badge tone-${VERIFICATION_TONE[status]}`}
+          data-testid={`settings-connection-badge-${connection.id}`}
         >
-          検証を再実行
-        </button>
+          {verifying ? '検証中' : VERIFICATION_LABEL[status]}
+        </span>
+        {hasDetails && (
+          <button
+            type="button"
+            className="settings-connection-expand"
+            data-testid={`settings-connection-expand-${connection.id}`}
+            aria-expanded={expanded}
+            aria-controls={detailsId}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            <span>{expanded ? '閉じる' : '詳細'}</span>
+            <ChevronDown size={14} />
+          </button>
+        )}
+      </div>
+
+      {hasDetails && (
+        <div
+          id={detailsId}
+          className="settings-connection-details"
+          data-testid={detailsId}
+          hidden={!expanded}
+        >
+          <div className="settings-connection-detail-grid">
+            {limitControl !== null && (
+              <span className="settings-field">
+                <label className="settings-field-label" htmlFor={limitInputId}>
+                  {CONCURRENCY_LABEL}
+                </label>
+                <span className="settings-key-row">
+                  <input
+                    id={limitInputId}
+                    data-testid={limitInputId}
+                    type="number"
+                    className="settings-text-input"
+                    inputMode="numeric"
+                    min={1}
+                    // Bounded by the ceiling in force — the built-in default while none has been
+                    // observed — so the spinner cannot reach a value the save button would refuse.
+                    max={effectiveConcurrencyLimit(currentLimit)}
+                    step={1}
+                    aria-describedby={limitHintId}
+                    disabled={disabled || savingLimit}
+                    value={limitInput}
+                    onChange={(e) => setLimitDraft({ source: currentLimit, value: e.target.value })}
+                  />
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    data-testid={`${limitInputId}-save`}
+                    aria-label={`${connection.displayName}の${CONCURRENCY_LABEL}を保存`}
+                    disabled={
+                      !canLowerConcurrencyLimit({
+                        current: currentLimit,
+                        input: limitInput,
+                        busy: disabled || savingLimit,
+                      })
+                    }
+                    onClick={() => limitControl.onSave(connection, limitInput)}
+                  >
+                    {savingLimit ? '保存中' : '保存'}
+                  </button>
+                </span>
+                <span className="settings-hint" id={limitHintId}>
+                  {concurrencyLimitHint(currentLimit)}
+                </span>
+              </span>
+            )}
+            {connection.providerId === 'ollama' &&
+              connection.runtimeKind === 'openai_compatible' &&
+              modelRelease !== undefined && (
+                <label className="settings-provider-model-release">
+                  <input
+                    type="checkbox"
+                    data-testid={`settings-connection-model-release-${connection.id}`}
+                    checked={connection.automaticModelRelease !== false}
+                    disabled={disabled || modelRelease.saving}
+                    onChange={(event) => modelRelease.onChange(connection, event.target.checked)}
+                  />
+                  <span>
+                    <strong>モデルを使用後に自動解放</strong>
+                    <small>ローカルOllama接続だけに適用されます。</small>
+                  </span>
+                </label>
+              )}
+          </div>
+          <div className="settings-connection-detail-actions">
+            <p className="settings-hint">保存済みの認証情報で接続状態を確認します。</p>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              aria-label={`${connection.displayName}の検証を再実行`}
+              disabled={disabled || verifying}
+              onClick={() => onRetry(connection)}
+            >
+              <RefreshCw size={13} />
+              {verifying ? '検証中' : '接続を再検証'}
+            </button>
+          </div>
+        </div>
       )}
     </li>
   );
@@ -1260,13 +1300,13 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
           <p>{SECTION_DESCRIPTION}</p>
         </div>
         <div className="settings-heading-actions">
-          {connections !== null && <span className="settings-count-badge">{listed.length}件</span>}
           <button
             type="button"
             className="settings-secondary-button"
             onClick={() => void refresh()}
             disabled={busy || !supported}
           >
+            <RefreshCw size={13} />
             再読み込み
           </button>
         </div>
