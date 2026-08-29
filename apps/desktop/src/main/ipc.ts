@@ -3809,14 +3809,22 @@ export class IpcRouter {
           input: request.arguments,
           signal,
         });
+        signal.throwIfAborted();
         const accepted = await providerImageBridge!.acceptToolResult({
           toolCallId: request.callId,
           toolName: request.toolName,
           result,
         });
+        if (signal.aborted) {
+          providerImageBridge!.discardPending();
+          signal.throwIfAborted();
+        }
         return Object.freeze({ kind: 'provider_image_tool', ...accepted });
       } catch (error) {
-        if (signal.aborted) throw error;
+        if (signal.aborted) {
+          providerImageBridge!.discardPending();
+          throw error;
+        }
         const rejected = await providerImageBridge!.acceptToolResult({
           toolCallId: request.callId,
           toolName: request.toolName,
@@ -4912,7 +4920,12 @@ export class IpcRouter {
     signal: AbortSignal,
   ): Promise<ProviderToolImageBinding | null> {
     const state = this.readProviderToolImageState(started, connection.id, modelId);
-    if (state === null || state.connection.providerId !== connection.providerId) return null;
+    if (
+      state === null ||
+      state.connection.providerId !== connection.providerId ||
+      digestCanonical(state.connection) !== digestCanonical(connection)
+    )
+      return null;
     try {
       const selection = this.persistence.getImageAttachmentAcceptanceSelection(
         started.event.taskId,

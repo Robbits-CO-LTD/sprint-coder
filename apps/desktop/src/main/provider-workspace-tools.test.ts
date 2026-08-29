@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { renameSync } from 'node:fs';
 import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,7 +50,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function harness() {
+async function harness(options: { beforeExecute?: (root: string) => boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-workspace-'));
   roots.push(root);
   const workspace: EffectiveWorkspaceSet = {
@@ -74,7 +75,11 @@ async function harness() {
     policyEpochFor: () => 1,
     authorizer: (request) => {
       authorizationGuards.push(workspaceToolAuthorizationGuard(request.input));
-      return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      return {
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => options.beforeExecute?.(root) ?? true,
+      };
     },
   });
   const context = {
@@ -624,6 +629,97 @@ describe('Provider workspace read tools', () => {
         input: { path: 'pixel.bin' },
       }),
     ).rejects.toMatchObject({ code: 'IMAGE_FORMAT_UNSUPPORTED' });
+  });
+
+  it.each(['jpeg', 'webp'] as const)('canonicalizes a guarded %s source to PNG', async (format) => {
+    const { root, tools, context } = await harness();
+    const pipeline = sharp({
+      create: {
+        width: 96,
+        height: 64,
+        channels: 3,
+        background: { r: 120, g: 40, b: 60 },
+      },
+    });
+    const source =
+      format === 'jpeg' ? await pipeline.jpeg().toBuffer() : await pipeline.webp().toBuffer();
+    await writeFile(join(root, `pixel.${format}`), source);
+
+    const result = (await tools.broker.dispatch({
+      ...context,
+      callId: `view-image-${format}`,
+      providerName: 'view_image',
+      input: { path: `pixel.${format}` },
+    })) as { mimeType: string; dataUrl: string };
+
+    expect(result.mimeType).toBe('image/png');
+    expect(result.dataUrl).toMatch(/^data:image\/png;base64,/u);
+    await expect(
+      sharp(
+        Buffer.from(result.dataUrl.replace(/^data:image\/png;base64,/u, ''), 'base64'),
+      ).metadata(),
+    ).resolves.toMatchObject({ format: 'png', width: 96, height: 64 });
+  });
+
+  it.each([
+    { name: 'empty', bytes: Buffer.alloc(0) },
+    { name: 'over-limit', bytes: Buffer.alloc(5 * 1024 * 1024 + 1) },
+  ])('rejects an $name image before decoding', async ({ name, bytes }) => {
+    const { root, tools, context } = await harness();
+    await writeFile(join(root, `${name}.png`), bytes);
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: `view-image-${name}`,
+        providerName: 'view_image',
+        input: { path: `${name}.png` },
+      }),
+    ).rejects.toMatchObject({ code: 'IMAGE_SIZE_UNSUPPORTED' });
+  });
+
+  it('rejects a path replaced after authorization but before the guarded open', async () => {
+    let replace = false;
+    const { root, tools, context } = await harness({
+      beforeExecute: (workspaceRoot) => {
+        if (!replace) return true;
+        renameSync(join(workspaceRoot, 'pixel.png'), join(workspaceRoot, 'original.png'));
+        renameSync(join(workspaceRoot, 'replacement.png'), join(workspaceRoot, 'pixel.png'));
+        return true;
+      },
+    });
+    const original = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const replacement = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 220, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    await writeFile(join(root, 'pixel.png'), original);
+    await writeFile(join(root, 'replacement.png'), replacement);
+    replace = true;
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'view-image-replaced',
+        providerName: 'view_image',
+        input: { path: 'pixel.png' },
+      }),
+    ).rejects.toThrow();
   });
 
   it('searches bounded UTF-8 files without following symlinks or disclosing secrets', async () => {

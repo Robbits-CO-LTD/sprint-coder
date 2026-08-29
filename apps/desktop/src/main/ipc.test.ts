@@ -141,7 +141,10 @@ import {
 } from './ipc';
 
 import { ModelCatalogService } from './model-catalog-service';
-import { ImageAttachmentValidationError } from './image-attachment-store';
+import {
+  canonicalizeProviderToolImage,
+  ImageAttachmentValidationError,
+} from './image-attachment-store';
 import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
 import {
   buildImageAttachmentSelectionIdentity,
@@ -157,6 +160,7 @@ import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
 import { ToolImageBridge } from './tool-image-bridge';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
+import sharp from 'sharp';
 
 describe('file edit tracking identity', () => {
   it('deduplicates Windows relative paths that differ only by casing', () => {
@@ -1037,7 +1041,7 @@ describe('Main image attachment dispatch boundary', () => {
     ).toBeNull();
   });
 
-  it('binds a verified loopback chat-completions profile with an empty API credential', () => {
+  it('binds only the exact verified loopback connection used by the executing round', async () => {
     const taskId = 'task-tool-image-loopback';
     const baseUrl = 'http://127.0.0.1:11434/v1';
     const endpointPolicy = new ProviderEndpointPolicy();
@@ -1088,11 +1092,28 @@ describe('Main image attachment dispatch boundary', () => {
       reviewedAt: new Date(0).toISOString(),
     };
     const compatibleRuntime = {};
+    const acceptanceSelection = {
+      taskId,
+      runtimeKind: 'provider' as const,
+      model: selection.requestedModel,
+      modelSelection: selection,
+    };
+    const capabilitySnapshot = {
+      runtimeKind: 'provider' as const,
+      connectionId: selection.connectionId,
+      providerId: selection.requestedProvider,
+      modelId: selection.requestedModel,
+      value: true as const,
+      revision: 'vision-revision-loopback',
+      capturedAtMs: Date.now(),
+    };
+    const captureProviderImageAttachmentCapability = vi.fn().mockResolvedValue(capabilitySnapshot);
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
       persistence: {
         getProviderConnection: vi.fn().mockReturnValue(connection),
         getTaskModelSelection: vi.fn().mockReturnValue(selection),
+        getImageAttachmentAcceptanceSelection: vi.fn().mockReturnValue(acceptanceSelection),
       },
       providerRegistry: { resolve: vi.fn().mockReturnValue(compatibleRuntime) },
       compatibleRuntime,
@@ -1113,13 +1134,26 @@ describe('Main image attachment dispatch boundary', () => {
           modelId: selection.requestedModel,
         }),
       },
+      captureProviderImageAttachmentCapability,
     });
     const probe = router as unknown as {
       readProviderToolImageState(started: unknown, connectionId: string, modelId: string): unknown;
+      captureProviderToolImageBinding(
+        started: unknown,
+        connection: unknown,
+        modelId: string,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+      revalidateProviderToolImageBinding(
+        started: unknown,
+        binding: unknown,
+        signal: AbortSignal,
+      ): Promise<unknown>;
     };
+    const started = { event: { taskId }, modelSelection: selection };
 
     const state = probe.readProviderToolImageState(
-      { event: { taskId }, modelSelection: selection },
+      started,
       selection.connectionId,
       selection.requestedModel,
     );
@@ -1134,6 +1168,61 @@ describe('Main image attachment dispatch boundary', () => {
       },
     });
     expect(JSON.stringify(state)).not.toContain('apiKey');
+    const binding = await probe.captureProviderToolImageBinding(
+      started,
+      connection,
+      selection.requestedModel,
+      new AbortController().signal,
+    );
+    expect(binding).toMatchObject({ connectionDigest: expect.any(String) });
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toMatchObject({ trust: 'trusted-local' });
+    await expect(
+      probe.captureProviderToolImageBinding(
+        started,
+        {
+          ...connection,
+          secretReference: 'provider-secret:00000000-0000-4000-8000-000000000099',
+          updatedAt: new Date(1).toISOString(),
+        },
+        selection.requestedModel,
+        new AbortController().signal,
+      ),
+    ).resolves.toBeNull();
+    expect(captureProviderImageAttachmentCapability).toHaveBeenCalledTimes(3);
+
+    const originalUpdatedAt = connection.updatedAt;
+    connection.updatedAt = new Date(2).toISOString();
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+    connection.updatedAt = originalUpdatedAt;
+
+    const originalConfigurable = profile.baseUrlConfigurable;
+    profile.baseUrlConfigurable = false;
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+    profile.baseUrlConfigurable = originalConfigurable;
+
+    captureProviderImageAttachmentCapability
+      .mockResolvedValueOnce(capabilitySnapshot)
+      .mockResolvedValueOnce({ ...capabilitySnapshot, revision: 'vision-revision-drifted' });
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+
+    const remotePrepared = await new ProviderEndpointPolicy(async () => [
+      { address: '8.8.8.8', family: 4 },
+    ]).prepareRequestUrl('https://provider.example/v1/chat/completions');
+    const prepareRequestUrl = vi
+      .spyOn(endpointPolicy, 'prepareRequestUrl')
+      .mockResolvedValueOnce(remotePrepared);
+    await expect(
+      probe.revalidateProviderToolImageBinding(started, binding, new AbortController().signal),
+    ).resolves.toBeNull();
+    expect(prepareRequestUrl).toHaveBeenCalledWith(`${baseUrl}/chat/completions`);
   });
 
   it('denies generic view_image callbacks before broker execution', async () => {
@@ -1249,6 +1338,66 @@ describe('Main image attachment dispatch boundary', () => {
 
     await expect(pending).rejects.toBe(cancellation);
     expect(brokerDispatch).toHaveBeenCalledOnce();
+  });
+
+  it('discards a valid provider image that resolves after cancellation', async () => {
+    const source = await sharp({
+      create: {
+        width: 32,
+        height: 32,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const canonical = await canonicalizeProviderToolImage(source);
+    const validResult = {
+      path: 'image.png',
+      mimeType: canonical.mimeType,
+      byteLength: canonical.bytes.byteLength,
+      sha256: canonical.sha256,
+      dataUrl: `data:${canonical.mimeType};base64,${canonical.bytes.toString('base64')}`,
+    };
+    let resolveDispatch!: (value: unknown) => void;
+    const brokerDispatch = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const cancellation = new Error('turn canceled after tool completion');
+    const bridge = new ToolImageBridge();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map(),
+      managedCodingHarness: { broker: { dispatch: brokerDispatch } },
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+        bridge: ToolImageBridge,
+      ): Promise<unknown>;
+    };
+
+    const pending = probe.dispatchManagedRuntimeTool(
+      'task-provider-image-late-cancel',
+      'turn-provider-image-late-cancel',
+      { callId: 'call-late-cancel', toolName: 'view_image', arguments: { path: 'image.png' } },
+      controller.signal,
+      bridge,
+    );
+    controller.abort(cancellation);
+    resolveDispatch(validResult);
+
+    await expect(pending).rejects.toBe(cancellation);
+    expect(bridge.consumeForNextDispatch({ baseMessages: [], directImages: [] }).hasToolImage).toBe(
+      false,
+    );
   });
 
   it('normalizes Provider-owned tool call ids only in the egress policy projection', () => {
