@@ -3768,6 +3768,7 @@ export class IpcRouter {
     }>,
     signal: AbortSignal,
     providerImageBridge?: ToolImageBridge,
+    publishProviderImageBinding?: () => void,
   ): Promise<unknown> {
     if (request.toolName === 'view_image' && providerImageBridge === undefined)
       return Object.freeze({
@@ -3819,6 +3820,7 @@ export class IpcRouter {
         )) as Awaited<ReturnType<ToolImageBridge['stageToolResult']>>;
         signal.throwIfAborted();
         providerImageBridge!.commitStaged();
+        if (accepted.accepted) publishProviderImageBinding?.();
         return Object.freeze({ kind: 'provider_image_tool', ...accepted });
       } catch (error) {
         providerImageBridge!.rollbackStaged();
@@ -4839,7 +4841,8 @@ export class IpcRouter {
       )
         return null;
       const profile = providerProfileSchema.parse(this.providerProfiles.get(connection.providerId));
-      if (profile.protocol !== 'chat_completions') return null;
+      if (profile.id !== connection.providerId || profile.protocol !== 'chat_completions')
+        return null;
       const credential = parseOpenAICompatibleCredential(
         this.providerSecrets.get(connection.secretReference),
       );
@@ -4909,6 +4912,17 @@ export class IpcRouter {
     return digestCanonical(current.binding) === digestCanonical(expected) ? current : null;
   }
 
+  private providerToolImageFinalStateMatches(
+    started: StartedTurn,
+    binding: ProviderToolImageBinding,
+    executionConnection: ProviderConnection,
+  ): boolean {
+    return (
+      digestCanonical(executionConnection) === binding.connectionDigest &&
+      this.providerToolImageStateMatches(started, binding) !== null
+    );
+  }
+
   private async captureProviderToolImageBinding(
     started: StartedTurn,
     connection: ProviderConnection,
@@ -4968,11 +4982,13 @@ export class IpcRouter {
       )
         return null;
       const prepared = await this.providerEndpointPolicy.prepareRequestUrl(binding.requestUrl);
+      signal.throwIfAborted();
       if (prepared.trust !== 'trusted-local') return null;
       const finalCapability = await this.captureProviderImageAttachmentCapability(
         selection,
         signal,
       );
+      signal.throwIfAborted();
       if (
         !validateProviderImageAttachmentCurrent({
           selection,
@@ -5463,6 +5479,7 @@ export class IpcRouter {
     selection: ImageAttachmentAcceptanceSelection,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<ProviderImageAttachmentCapabilitySnapshot> {
+    signal.throwIfAborted();
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     signal.addEventListener('abort', abort, { once: true });
@@ -5482,6 +5499,7 @@ export class IpcRouter {
         connection.id,
         controller.signal,
       );
+      controller.signal.throwIfAborted();
       if (
         !verified.enabled ||
         verified.providerId !== modelSelection.requestedProvider ||
@@ -5494,6 +5512,7 @@ export class IpcRouter {
         modelSelection.requestedModel,
         controller.signal,
       );
+      controller.signal.throwIfAborted();
       return Object.freeze({
         runtimeKind: 'provider',
         connectionId: verified.id,
@@ -6267,6 +6286,9 @@ export class IpcRouter {
             controller.signal,
           );
           if (finalToolImageEndpoint === null) throw new ProviderImageAttachmentError();
+          controller.signal.throwIfAborted();
+          if (!this.providerToolImageFinalStateMatches(started, toolImageBinding, connection))
+            throw new ProviderImageAttachmentError();
           const finalPayloadBytes = Buffer.from(
             JSON.stringify({
               messages: toolImageDispatch.messages,
@@ -6497,12 +6519,16 @@ export class IpcRouter {
               },
               controller.signal,
               imageBinding === null ? undefined : toolImageBridge,
+              imageBinding === null
+                ? undefined
+                : () => {
+                    pendingToolImageBinding = imageBinding;
+                  },
             );
             if (toolCall.name === 'view_image') {
               if (!isProviderImageBridgeDispatchResult(result))
                 throw new Error('Provider image tool result escaped its private bridge');
               content = result.toolMessage.content;
-              if (result.accepted && imageBinding !== null) pendingToolImageBinding = imageBinding;
             } else content = redactSecrets(JSON.stringify({ ok: true, result }));
             succeeded = true;
           } catch (error) {
