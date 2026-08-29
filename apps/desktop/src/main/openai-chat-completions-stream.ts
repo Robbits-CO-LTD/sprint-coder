@@ -16,11 +16,28 @@ export async function* normalizeOpenAIChatCompletionsStream(
   let resolvedModel = requestedModel;
   let stopReason = 'completed';
   let usage: Record<string, unknown> | null = null;
+  let terminalFrameSeen = false;
   const tools = new Map<number, ToolAccumulator>();
 
-  for await (const value of readBoundedServerSentJson(body, budget)) {
+  for await (const value of readBoundedServerSentJson(body, budget, () => {
+    terminalFrameSeen = true;
+  })) {
     const event = asRecord(value);
     if (event === null) continue;
+    const streamError = asRecord(event.error);
+    if (streamError !== null) {
+      yield {
+        type: 'error',
+        error: {
+          category: 'provider_unavailable',
+          message: 'Chat Completions stream failed',
+          retryable: true,
+          retryAfterMs: null,
+          providerCode: boundedProviderCode(streamError.code ?? streamError.type),
+        },
+      };
+      return;
+    }
     if (typeof event.model === 'string') resolvedModel = event.model;
     const eventUsage = asRecord(event.usage);
     if (eventUsage !== null) usage = eventUsage;
@@ -28,7 +45,10 @@ export async function* normalizeOpenAIChatCompletionsStream(
     for (const rawChoice of choices) {
       const choice = asRecord(rawChoice);
       if (choice === null) continue;
-      if (typeof choice.finish_reason === 'string') stopReason = choice.finish_reason;
+      if (typeof choice.finish_reason === 'string') {
+        stopReason = choice.finish_reason;
+        terminalFrameSeen = true;
+      }
       const delta = asRecord(choice.delta);
       if (delta === null) continue;
       for (const reasoning of reasoningTextsFromDelta(delta)) {
@@ -55,6 +75,20 @@ export async function* normalizeOpenAIChatCompletionsStream(
         tools.set(index, current);
       }
     }
+  }
+
+  if (!terminalFrameSeen) {
+    yield {
+      type: 'error',
+      error: {
+        category: 'provider_unavailable',
+        message: 'Chat Completions stream ended before completion',
+        retryable: true,
+        retryAfterMs: null,
+        providerCode: null,
+      },
+    };
+    return;
   }
 
   for (const tool of [...tools.entries()].sort(([a], [b]) => a - b).map(([, value]) => value)) {
@@ -120,4 +154,8 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function integerOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function boundedProviderCode(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value.slice(0, 128) : null;
 }

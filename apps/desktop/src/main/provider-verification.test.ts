@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProviderConnection } from '@sprint-coder/contracts';
 import {
   DeterministicMockProviderRuntime,
@@ -34,6 +34,115 @@ function externalConnection(): ProviderConnection {
 }
 
 describe('ProviderVerificationService', () => {
+  it('does not run or persist a pre-aborted verification', async () => {
+    let connection = externalConnection();
+    const updateProviderConnectionVerification = vi.fn(
+      (_connectionId: string, verification: ProviderConnection['verification']) =>
+        (connection = { ...connection, verification }),
+    );
+    const verify = vi.fn(async () => ({
+      status: 'verified' as const,
+      verifiedAt: '2026-07-28T00:00:00.000Z',
+      expiresAt: '2026-07-29T00:00:00.000Z',
+      message: null,
+    }));
+    const registry = new MainProviderRegistry();
+    registry.register({
+      runtimeKind: 'official_api',
+      providerId: null,
+      runtime: {
+        verify,
+        listModels: async () => [],
+        execute: async function* () {
+          yield { type: 'completed' as const, stopReason: null };
+        },
+        cancel: async () => undefined,
+      },
+    });
+    const service = new ProviderVerificationService(
+      {
+        getProviderConnection: () => connection,
+        updateProviderConnectionVerification,
+      },
+      registry,
+    );
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(service.verify(connection, controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(verify).not.toHaveBeenCalled();
+    expect(updateProviderConnectionVerification).not.toHaveBeenCalled();
+    expect(connection.verification.status).toBe('unverified');
+  });
+
+  it('does not persist a result that wins a race with caller cancellation', async () => {
+    let connection = externalConnection();
+    const updateProviderConnectionVerification = vi.fn(
+      (_connectionId: string, verification: ProviderConnection['verification']) =>
+        (connection = { ...connection, verification }),
+    );
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    let resolveVerification:
+      | ((result: {
+          status: 'verified';
+          verifiedAt: string;
+          expiresAt: string;
+          message: null;
+        }) => void)
+      | undefined;
+    const verificationResult = new Promise<{
+      status: 'verified';
+      verifiedAt: string;
+      expiresAt: string;
+      message: null;
+    }>((resolve) => {
+      resolveVerification = resolve;
+    });
+    const registry = new MainProviderRegistry();
+    registry.register({
+      runtimeKind: 'official_api',
+      providerId: null,
+      runtime: {
+        verify: () => {
+          notifyStarted?.();
+          return verificationResult;
+        },
+        listModels: async () => [],
+        execute: async function* () {
+          yield { type: 'completed' as const, stopReason: null };
+        },
+        cancel: async () => undefined,
+      },
+    });
+    const service = new ProviderVerificationService(
+      {
+        getProviderConnection: () => connection,
+        updateProviderConnectionVerification,
+      },
+      registry,
+    );
+    const controller = new AbortController();
+
+    const verification = service.verify(connection, controller.signal);
+    await started;
+    controller.abort();
+    resolveVerification?.({
+      status: 'verified',
+      verifiedAt: '2026-07-28T00:00:00.000Z',
+      expiresAt: '2026-07-29T00:00:00.000Z',
+      message: null,
+    });
+
+    await expect(verification).rejects.toMatchObject({ name: 'AbortError' });
+    expect(updateProviderConnectionVerification).not.toHaveBeenCalled();
+    expect(connection.verification.status).toBe('unverified');
+  });
+
   it('verifies before execution and expires the result after 24 hours', async () => {
     let connection = externalConnection();
     let now = new Date('2026-07-28T00:00:00.000Z');

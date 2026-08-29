@@ -127,9 +127,11 @@ export class AnthropicProviderClient implements ProviderRuntime {
       throw new Error('Execution Connection does not match the Anthropic API Connection');
     const controller = new AbortController();
     const abort = (): void => controller.abort();
-    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abort, { once: true });
     this.executions.set(parsed.executionId, controller);
     try {
+      controller.signal.throwIfAborted();
       const response = await this.authenticatedFetch(connection, '/messages', controller.signal, {
         method: 'POST',
         headers: {

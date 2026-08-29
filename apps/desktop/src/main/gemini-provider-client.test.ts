@@ -27,6 +27,34 @@ const connection: ProviderConnection = {
 };
 
 describe('GeminiProviderClient', () => {
+  it('does not start a request for a pre-aborted execution', async () => {
+    const providerFetch = vi.fn();
+    const client = new GeminiProviderClient(() => ({ apiKey: 'gemini-key' }), providerFetch);
+    const controller = new AbortController();
+    controller.abort();
+    const events = [];
+
+    for await (const event of client.execute(
+      connection,
+      {
+        executionId: 'execution-pre-aborted',
+        connectionId: connection.id,
+        modelId: 'gemini-3.6-pro',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      controller.signal,
+    ))
+      events.push(event);
+
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ category: 'canceled' }),
+      }),
+    );
+  });
+
   it('uses x-goog-api-key and maps the official model list without inferred capabilities', async () => {
     const providerFetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get('x-goog-api-key')).toBe('gemini-key');

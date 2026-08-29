@@ -433,24 +433,44 @@ function assertHuggingFaceListUrl(input: string): void {
 
 async function readBoundedText(response: Response): Promise<string> {
   const declaredLength = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES)
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    await cancelBody(response.body);
     throw new Error('Catalog response exceeds the size limit');
+  }
   if (response.body === null) return '';
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let bytes = 0;
   let text = '';
+  let completed = false;
   try {
     for (;;) {
       const { value, done } = await reader.read();
-      if (done) break;
+      if (done) {
+        completed = true;
+        break;
+      }
       bytes += value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) throw new Error('Catalog response exceeds the size limit');
       text += decoder.decode(value, { stream: true });
     }
     return text + decoder.decode();
   } finally {
+    if (!completed)
+      try {
+        await reader.cancel();
+      } catch {
+        // Preserve the catalog validation or stream error.
+      }
     reader.releaseLock();
+  }
+}
+
+async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
+  try {
+    await body?.cancel();
+  } catch {
+    // Preserve the catalog validation error.
   }
 }
 

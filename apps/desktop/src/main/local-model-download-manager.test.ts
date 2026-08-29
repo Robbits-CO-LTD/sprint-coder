@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SqlitePersistenceClient } from './persistence';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import {
@@ -308,6 +308,34 @@ if (runsWithElectronAbi)
 
       expect(failed).toMatchObject({ state: 'failed', failureCode: 'hash_mismatch' });
       expect(await readdir(join(env.store.rootPath, 'models'))).toEqual([]);
+      env.repository.close();
+    });
+
+    it.each([
+      ['header rejection', '11', false],
+      ['stream byte overflow', '10', true],
+    ])('cancels the artifact body after %s', async (_name, contentLength, enqueueBytes) => {
+      const expected = Buffer.alloc(10, 1);
+      const cancel = vi.fn();
+      const env = await fixture({
+        bytes: [expected],
+        fetch: async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                if (enqueueBytes) controller.enqueue(new Uint8Array(11));
+              },
+              cancel,
+            }),
+            { status: 200, headers: { 'content-length': contentLength } },
+          ),
+      });
+      const queued = env.manager.enqueue(env.plan);
+
+      const failed = await env.manager.run(queued.id, env.plan);
+
+      expect(failed).toMatchObject({ state: 'failed', failureCode: 'size_changed' });
+      expect(cancel).toHaveBeenCalledOnce();
       env.repository.close();
     });
 

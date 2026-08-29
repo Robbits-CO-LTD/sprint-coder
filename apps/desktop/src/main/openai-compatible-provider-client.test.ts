@@ -96,6 +96,37 @@ async function collect(
 }
 
 describe('OpenAICompatibleProviderClient', () => {
+  it('does not start a request for a pre-aborted execution', async () => {
+    const providerFetch = vi.fn();
+    const client = new OpenAICompatibleProviderClient(
+      registry(),
+      () => approvedCredential(profile, 'test-key'),
+      providerFetch,
+    );
+    const controller = new AbortController();
+    controller.abort();
+    const events = await collect(
+      client.execute(
+        connection,
+        {
+          executionId: 'execution-pre-aborted',
+          connectionId: connection.id,
+          modelId: 'model-a',
+          messages: [{ role: 'user', content: 'hello' }],
+        },
+        controller.signal,
+      ),
+    );
+
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'error',
+        error: expect.objectContaining({ category: 'canceled' }),
+      }),
+    );
+  });
+
   it.each([
     ['http://localhost:11434/v1', 'http://127.0.0.1:11434/api/generate'],
     ['http://127.9.8.7:11434/v1/', 'http://127.9.8.7:11434/api/generate'],

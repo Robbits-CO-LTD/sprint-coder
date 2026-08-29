@@ -140,9 +140,11 @@ export class OpenAIProviderClient implements ProviderRuntime {
       throw new Error('Execution Connection does not match the OpenAI API Connection');
     const controller = new AbortController();
     const abort = (): void => controller.abort();
-    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', abort, { once: true });
     this.executions.set(parsed.executionId, controller);
     try {
+      controller.signal.throwIfAborted();
       const response = await this.authenticatedFetch(connection, '/responses', controller.signal, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
