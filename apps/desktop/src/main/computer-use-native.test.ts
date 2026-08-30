@@ -333,6 +333,10 @@ describe('Windows native helper compile boundary', () => {
       join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
       'utf8',
     );
+    expect(source.indexOf('#include <ole2.h>')).toBeGreaterThanOrEqual(0);
+    expect(source.indexOf('#include <ole2.h>')).toBeLessThan(
+      source.indexOf('#include <UIAutomation.h>'),
+    );
     expect(source).toContain('static_assert(sizeof(void *) == 8');
     expect(source).toContain('SPRINT_CODER_SOURCE_COMMIT');
     expect(source).toContain('sourceCommit');

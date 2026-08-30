@@ -8,6 +8,7 @@
 
 #include <windows.h>
 
+#include <ole2.h>
 #include <UIAutomation.h>
 #include <VersionHelpers.h>
 #include <bcrypt.h>
