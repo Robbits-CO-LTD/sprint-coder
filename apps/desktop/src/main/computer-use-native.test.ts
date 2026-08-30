@@ -749,6 +749,26 @@ describe('Windows native helper compile boundary', () => {
     ).toEqual({ SystemRoot: 'C:\\Windows', TEMP: 'C:\\Temp' });
   });
 
+  it('loads Authenticode commands from the fixed system PowerShell module path', () => {
+    const modulePath = '$PSHOME\\\\Modules\\\\Microsoft.PowerShell.Security';
+    const qualifiedCommand = 'Microsoft.PowerShell.Security\\\\Get-AuthenticodeSignature';
+    for (const sourcePath of [
+      '../../../../apps/desktop/forge.config.ts',
+      'computer-use-native.ts',
+      'computer-use-native-windows.ts',
+    ]) {
+      const source = readFileSync(join(__dirname, sourcePath), 'utf8');
+      expect(source).toContain(modulePath);
+      expect(source).toContain(qualifiedCommand);
+      expect(source).not.toContain(
+        '$env:SystemRoot\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\Modules\\\\Microsoft.PowerShell.Security',
+      );
+      expect(source.match(/Get-AuthenticodeSignature/gu)).toHaveLength(
+        source.match(/Microsoft\.PowerShell\.Security\\\\Get-AuthenticodeSignature/gu)?.length ?? 0,
+      );
+    }
+  });
+
   it('binds helper responses to request session, expected kind, and binary lane', () => {
     const requestId = newComputerUseNativeFrameId();
     const sessionId = newComputerUseNativeFrameId();

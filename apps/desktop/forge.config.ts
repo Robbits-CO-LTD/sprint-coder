@@ -453,7 +453,7 @@ export function refreshPackagedComputerUseWindowsSignerDigest(
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      '$signature = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; [pscustomobject]@{Status=$signature.Status.ToString();Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
+      'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; [pscustomobject]@{Status=$signature.Status.ToString();Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
     ],
     {
       encoding: 'utf8',
@@ -594,7 +594,7 @@ export function verifyBundledNodeResources(): void {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `Import-Module "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_NODE; [pscustomobject]@{Status=$signature.Status.ToString();Subject=$signature.SignerCertificate.Subject;Issuer=$signature.SignerCertificate.Issuer;Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress`,
+      `Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_NODE; [pscustomobject]@{Status=$signature.Status.ToString();Subject=$signature.SignerCertificate.Subject;Issuer=$signature.SignerCertificate.Issuer;Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress`,
     ],
     {
       encoding: 'utf8',

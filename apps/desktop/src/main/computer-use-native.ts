@@ -380,7 +380,7 @@ export function verifyComputerUseNativeSignature(
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      '$helper = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; $app = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_APP_EXE; [pscustomobject]@{HelperStatus=$helper.Status.ToString();AppStatus=$app.Status.ToString();HelperThumbprint=$helper.SignerCertificate.Thumbprint;AppThumbprint=$app.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
+      'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $helper = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; $app = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_APP_EXE; [pscustomobject]@{HelperStatus=$helper.Status.ToString();AppStatus=$app.Status.ToString();HelperThumbprint=$helper.SignerCertificate.Thumbprint;AppThumbprint=$app.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
     ],
     {
       encoding: 'utf8',

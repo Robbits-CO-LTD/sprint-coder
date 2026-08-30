@@ -419,6 +419,7 @@ function attestSpawnedWindowsComputerUseHelper(pid: number): WindowsComputerUseH
       '-Command',
       [
         "$ErrorActionPreference = 'Stop'",
+        'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"',
         '$process = Get-Process -Id ([int]$env:SPRINT_CODER_COMPUTER_USE_HELPER_PID) -ErrorAction Stop',
         'try {',
         '  $imagePath = $process.MainModule.FileName',
@@ -426,7 +427,7 @@ function attestSpawnedWindowsComputerUseHelper(pid: number): WindowsComputerUseH
         '  try {',
         '    $sha = [System.Security.Cryptography.SHA256]::Create()',
         "    try { $binaryDigest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }",
-        '    $signature = Get-AuthenticodeSignature -LiteralPath $imagePath',
+        '    $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $imagePath',
         '    [pscustomobject]@{imagePath=$imagePath;binaryDigest=$binaryDigest;signatureStatus=$signature.Status.ToString();signerThumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
         '  } finally { $stream.Dispose() }',
         '} finally { $process.Dispose() }',
