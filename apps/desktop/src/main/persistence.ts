@@ -207,6 +207,11 @@ import {
   type PersistedFailureDiagnostic,
 } from './provider-failure-diagnostic';
 import { pathComparisonKey, pathsEquivalent } from '../path-comparison';
+import { displayWorkspaceRootLabel } from './workspace-root-resolution';
+import {
+  formatWorkspaceDisplayPath,
+  normalizeWorkspaceDisplayRelativePath,
+} from '../workspace-display-path';
 import {
   legacyMutationWorkspaceKey,
   MutationClockRollbackError,
@@ -14081,6 +14086,51 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return aggregateTurnDiff(sagas.map((saga) => saga.diff));
   }
 
+  private getDisplayTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[] {
+    const turn = this.getTurn(taskId, turnId);
+    if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
+    const workspace = this.readTurnWorkspaceSetForTask(taskId, turnId);
+    if (workspace === null) return this.getTurnDiff(taskId, turnId);
+    const sagas = (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ?
+           ORDER BY created_at, id`,
+        )
+        .all(taskId, turnId) as EditSagaRow[]
+    ).map(toEditSaga);
+    const rootsBySaga = sagas.map((saga) => {
+      const rootId = saga.rootId ?? workspace.primaryRootId;
+      return {
+        saga,
+        root: workspace.roots.find((candidate) => candidate.rootId === rootId),
+      };
+    });
+    const grouped = new Map<string, (readonly TurnDiffEntry[])[]>();
+    for (const { saga, root } of rootsBySaga) {
+      const key = root?.rootId ?? `unbound:${saga.id}`;
+      const label = root === undefined ? undefined : displayWorkspaceRootLabel(workspace, root);
+      const diff =
+        root === undefined || label === undefined
+          ? saga.diff
+          : saga.diff.map((entry) => ({
+              ...entry,
+              path: displayTurnDiffPath(root, label, entry.path),
+              destination:
+                entry.destination === null
+                  ? null
+                  : displayTurnDiffPath(root, label, entry.destination),
+            }));
+      grouped.set(key, [...(grouped.get(key) ?? []), diff]);
+    }
+    return Object.freeze(
+      [...grouped.values()]
+        .flatMap((diffs) => aggregateTurnDiff(diffs))
+        .map((entry, index) => Object.freeze({ ...entry, ordinal: index + 1 })),
+    );
+  }
+
   getAcceptanceContract(taskId: string, turnId: string): AcceptanceContract {
     const turn = this.getTurn(taskId, turnId);
     if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
@@ -14219,16 +14269,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
           .filter(({ kind }) => kind === 'verification_passed')
           .map(({ criterionId }) => criterionId),
       );
+      const workspace = this.readTurnWorkspaceSetForTask(input.taskId, input.turnId);
+      if (workspace === null)
+        throw new OperationConflictError('Verification command has no sealed Workspace');
+      const commandRoots = workspace.roots.filter(({ path }) => {
+        const relation = relative(path, command.cwd);
+        return (
+          relation === '' ||
+          (!isAbsolute(relation) && relation !== '..' && !relation.startsWith(`..${sep}`))
+        );
+      });
+      if (commandRoots.length !== 1)
+        throw new OperationConflictError('Verification command Workspace root is ambiguous');
+      const sagaRootId = workspace.source === 'project' ? commandRoots[0]!.rootId : null;
       // `verification: true` is an explicit Turn-level claim. The command observes the complete
-      // workspace at process start, so it can close every earlier committed Saga still awaiting
-      // evidence. A Saga committed after that fence remains open for a later verification.
+      // selected root at process start, so it can close every earlier committed Saga in that root
+      // still awaiting evidence. Other roots and Sagas committed after that fence remain open.
       const sagas = this.db
         .prepare(
           `SELECT id FROM edit_sagas
-           WHERE task_id = ? AND turn_id = ? AND state = 'committed' AND updated_at <= ?
+           WHERE task_id = ? AND turn_id = ? AND root_id IS ?
+             AND state = 'committed' AND updated_at < ?
            ORDER BY created_at, id`,
         )
-        .all(input.taskId, input.turnId, command.startedAt) as { id: string }[];
+        .all(input.taskId, input.turnId, sagaRootId, command.startedAt) as { id: string }[];
       let latest: AssuranceRound | null = null;
       for (const saga of sagas) {
         if (verified.has(`verification:${saga.id}`)) continue;
@@ -15366,7 +15430,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           ? null
           : {
               turnId: latestCompletedTurn.id,
-              entries: this.getTurnDiff(taskId, latestCompletedTurn.id),
+              entries: this.getDisplayTurnDiff(taskId, latestCompletedTurn.id),
             },
     });
   }
@@ -15857,15 +15921,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * stream already is the durable record. Keeping it there means a reopened Task replays the edits
    * in the order they happened for free, and there is no second store to keep consistent with it.
    *
-   * Paths are expected to be workspace-relative and already validated by the caller — this is the
-   * persistence boundary, not the place that decides what is inside the Workspace.
+   * Paths are expected to be workspace-relative and already validated by the caller. Root labels
+   * are re-projected from the complete sealed Turn Workspace here so every producer uses the same
+   * stable display identity, even when only a subset of roots reports changes.
    */
   recordFileChanges(input: {
     taskId: string;
     turnId: string;
     changes: FileChange[];
   }): TurnEvent | null {
-    const changes = input.changes.slice(0, 200);
+    const workspace = this.readTurnWorkspaceSetForTask(input.taskId, input.turnId);
+    const changes = input.changes.slice(0, 200).map((change) => {
+      const root = workspace?.roots.find(({ rootId }) => rootId === change.rootId);
+      return root === undefined
+        ? change
+        : { ...change, rootLabel: displayWorkspaceRootLabel(workspace!, root) };
+    });
     if (changes.length === 0) return null;
     return this.appendEvent({
       type: 'files.changed',
@@ -17120,7 +17191,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ? undefined
         : (this.db.prepare('SELECT * FROM messages WHERE id = ?').get(turn.assistant_message_id) as
             MessageRow | undefined);
-    const diff = this.getTurnDiff(taskId, turnId);
+    const diff = this.getDisplayTurnDiff(taskId, turnId);
     return this.appendEvent(
       row === undefined
         ? { type: 'turn.completed', taskId, turnId, state, diff: [...diff] }
@@ -17702,6 +17773,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (row === undefined) throw new NotFoundError('Turn not found');
     return row;
   }
+}
+
+function displayTurnDiffPath(
+  root: EffectiveWorkspaceSet['roots'][number],
+  label: string,
+  value: string,
+): string {
+  const candidate = isAbsolute(value) ? relative(root.path, value) : value;
+  if (
+    candidate.length === 0 ||
+    isAbsolute(candidate) ||
+    candidate === '..' ||
+    candidate.startsWith(`..${sep}`)
+  )
+    return value;
+  const relativePath = normalizeWorkspaceDisplayRelativePath(candidate, process.platform);
+  return relativePath === null ? value : formatWorkspaceDisplayPath(label, relativePath);
 }
 
 export class NotFoundError extends Error {}

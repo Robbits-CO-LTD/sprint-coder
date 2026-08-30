@@ -493,12 +493,15 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
 }
 
 function workspacePathSuffixMatches(persisted: string, runtime: string): boolean {
-  const normalizedPersisted = persisted.replaceAll('\\', '/');
-  const normalizedRuntime = runtime.replaceAll('\\', '/');
+  if (persisted === runtime) return true;
+  const windowsAbsolute = /^[A-Za-z]:[\\/]/u.test(persisted) || /^\\\\[^\\]/u.test(persisted);
+  const normalizedPersisted = windowsAbsolute ? persisted.replaceAll('\\', '/') : persisted;
+  const normalizedRuntime = windowsAbsolute ? runtime.replaceAll('\\', '/') : runtime;
   if (normalizedPersisted === normalizedRuntime) return true;
   const delimiter = ' › ';
   const delimiterIndex = normalizedRuntime.lastIndexOf(delimiter);
   if (delimiterIndex < 0) return false;
+  const rootLabel = normalizedRuntime.slice(0, delimiterIndex);
   const relative = normalizedRuntime.slice(delimiterIndex + delimiter.length);
   if (
     relative.length === 0 ||
@@ -508,7 +511,14 @@ function workspacePathSuffixMatches(persisted: string, runtime: string): boolean
     /^[A-Za-z]:\//u.test(relative)
   )
     return false;
-  return normalizedPersisted === relative || normalizedPersisted.endsWith(`/${relative}`);
+  const persistedIsAbsolute =
+    normalizedPersisted.startsWith('/') || /^[A-Za-z]:\//u.test(normalizedPersisted);
+  if (!persistedIsAbsolute) return false;
+  const suffix = `/${relative}`;
+  if (!normalizedPersisted.endsWith(suffix)) return false;
+  const persistedRoot = normalizedPersisted.slice(0, -suffix.length);
+  const persistedRootName = persistedRoot.split('/').filter(Boolean).at(-1);
+  return persistedRootName === rootLabel;
 }
 
 function workerStateLabel(state: string): string {

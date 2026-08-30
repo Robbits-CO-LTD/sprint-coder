@@ -39,6 +39,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         registry.register(definition);
       const commandRows = new Map<string, { state: string; outputBytes: number }>();
       const backgroundTransitions: string[] = [];
+      let backgroundCreated = 0;
       const boundary = {
         persistence: {
           readTurnWorkspaceSet: () => ({
@@ -89,7 +90,10 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
             return { command: {} as never, event: {} as never };
           },
           getCommand: (id: string) => ({ id, ...commandRows.get(id)! }) as never,
-          createBackgroundActivity: () => ({}) as never,
+          createBackgroundActivity: () => {
+            backgroundCreated += 1;
+            return {} as never;
+          },
           transitionBackgroundActivity: (_id: string, state: string) => {
             backgroundTransitions.push(state);
             return {} as never;
@@ -125,6 +129,33 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         policyEpoch: 1,
       };
       broker.startTurn(owner, 'codex');
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'background-verification-denied',
+          providerName: 'exec_command',
+          input: {
+            executable: '/bin/sh',
+            argv: ['-c', 'exit 0'],
+            purpose: 'must not verify while edits can continue',
+            background: true,
+            verification: true,
+          },
+        }),
+      ).rejects.toThrow('Verification commands cannot run in the background');
+      const verification = (await broker.dispatch({
+        ...owner,
+        callId: 'foreground-verification',
+        providerName: 'exec_command',
+        input: {
+          executable: '/bin/sh',
+          argv: ['-c', 'sleep 0.05; exit 0'],
+          purpose: 'must remain foreground until verification completes',
+          verification: true,
+        },
+      })) as { exitCode: number };
+      expect(verification.exitCode).toBe(0);
+      expect(backgroundCreated).toBe(0);
       const started = (await broker.dispatch({
         ...owner,
         callId: 'exec-1',

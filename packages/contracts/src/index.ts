@@ -1528,12 +1528,13 @@ export const generatedImageBytesSchema = z
   .strict();
 export const generatedImageRefSchema = z.object({ imageId: digestSchema }).strict();
 
+export const TURN_DIFF_DISPLAY_PATH_MAX_LENGTH = 8_704;
 export const turnDiffEntrySchema = z
   .object({
     ordinal: z.number().int().positive(),
     kind: z.enum(['add', 'mkdir', 'update', 'delete', 'rename']),
-    path: z.string().min(1).max(4_096),
-    destination: z.string().min(1).max(4_096).nullable(),
+    path: z.string().min(1).max(TURN_DIFF_DISPLAY_PATH_MAX_LENGTH),
+    destination: z.string().min(1).max(TURN_DIFF_DISPLAY_PATH_MAX_LENGTH).nullable(),
     preHash: digestSchema.nullable(),
     postHash: digestSchema.nullable(),
     provenance: z.literal('agent_edit'),

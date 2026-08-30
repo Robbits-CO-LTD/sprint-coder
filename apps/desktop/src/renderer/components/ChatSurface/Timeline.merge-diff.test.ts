@@ -41,7 +41,6 @@ describe('mergeWorkspaceDiffs', () => {
     expect(result?.entries.map(({ path }) => path)).toEqual([
       'left › src/index.ts',
       'right › src/index.ts',
-      persisted.path,
     ]);
   });
 
@@ -50,11 +49,34 @@ describe('mergeWorkspaceDiffs', () => {
     const right = entry('/private/tmp/right/src/index.ts', { ordinal: 2 });
     const result = mergeWorkspaceDiffs(diff(left, right), diff(entry('left › src/index.ts')));
 
-    expect(result?.entries.map(({ path }) => path)).toEqual([
-      'left › src/index.ts',
-      left.path,
-      right.path,
-    ]);
+    expect(result?.entries.map(({ path }) => path)).toEqual(['left › src/index.ts', right.path]);
+  });
+
+  it('keeps a one-to-one suffix match when the Runtime root label names another root', () => {
+    const result = mergeWorkspaceDiffs(
+      diff(entry('/private/tmp/right/src/index.ts')),
+      diff(entry('left › src/index.ts')),
+    );
+
+    expect(result?.entries).toHaveLength(2);
+  });
+
+  it('does not treat a legal POSIX backslash as a path separator', () => {
+    const result = mergeWorkspaceDiffs(
+      diff(entry('/private/tmp/project/foo\\bar')),
+      diff(entry('project › foo/bar')),
+    );
+
+    expect(result?.entries).toHaveLength(2);
+  });
+
+  it('normalizes separators for a legacy absolute Windows drive path', () => {
+    const result = mergeWorkspaceDiffs(
+      diff(entry('C:\\private\\tmp\\project\\src\\index.ts')),
+      diff(entry('project › src/index.ts')),
+    );
+
+    expect(result?.entries).toEqual([entry('project › src/index.ts')]);
   });
 
   it('does not hide persisted external drift behind a Runtime applied row', () => {
