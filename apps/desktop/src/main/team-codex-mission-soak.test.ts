@@ -434,7 +434,7 @@ suite('real Codex Mission durability soak', () => {
           delayStep(readWorker.id, 'read'),
           {
             workerId: writeWorker.id,
-            objective: `Call exec_command once with executable ${JSON.stringify(SOAK_SHELL_EXECUTABLE)}, argv ["-c", "printf 'codex workspace write verified\\n' > soak-output.txt"], purpose "Create the soak output fixture", verification true. Require exitCode 0.`,
+            objective: `Call exec_command once with executable ${JSON.stringify(SOAK_SHELL_EXECUTABLE)}, argv ["-c", "printf 'codex workspace write verified\\n' > soak-output.txt"], purpose "Create the soak output fixture". Require exitCode 0.`,
             doneCriteria: ['soak-output.txt has the expected content'],
             access: 'workspace-write',
           },
@@ -449,7 +449,7 @@ suite('real Codex Mission durability soak', () => {
           },
           {
             workerId: writeWorker.id,
-            objective: `Call exec_command once with executable ${JSON.stringify(SOAK_SHELL_EXECUTABLE)}, argv ["-c", ${JSON.stringify(verificationCommand)}], purpose "Verify soak artifacts and git diff", verification true. Require exitCode 0.`,
+            objective: `Call exec_command once with executable ${JSON.stringify(SOAK_SHELL_EXECUTABLE)}, argv ["-c", ${JSON.stringify(verificationCommand)}], purpose "Verify soak artifacts and git diff". Require exitCode 0.`,
             doneCriteria: ['both files and git diff are verified'],
             access: 'workspace-write',
           },

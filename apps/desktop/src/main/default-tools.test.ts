@@ -7,8 +7,10 @@ describe('managed exec command guidance', () => {
     expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('Set-Content');
     expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('--test-isolation=none');
     expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('must not repeat executable');
-    expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('verification: true');
-    expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('later edits stay open');
-    expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('selected Workspace root');
+    expect(MANAGED_EXEC_COMMAND_TOOL.description).toContain('never creates Edit Saga assurance');
+    expect(
+      (MANAGED_EXEC_COMMAND_TOOL.inputSchema as { properties?: Record<string, unknown> })
+        .properties,
+    ).not.toHaveProperty('verification');
   });
 });

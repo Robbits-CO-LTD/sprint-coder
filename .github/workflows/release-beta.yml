@@ -557,7 +557,6 @@ jobs:
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_P12_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_P12_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           EXPECTED_WINDOWS_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_RELEASE_SIGNER_THUMBPRINT }}
           EXPECTED_WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_RELEASE_SIGNER_SUBJECT }}
         run: |
@@ -565,11 +564,10 @@ jobs:
           Set-StrictMode -Version Latest
           if (
             [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_P12_BASE64) -or
-            [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD) -or
             $env:EXPECTED_WINDOWS_SIGNER_THUMBPRINT -notmatch '^[0-9A-Fa-f]{40}$' -or
             [string]::IsNullOrWhiteSpace($env:EXPECTED_WINDOWS_SIGNER_SUBJECT)
           ) {
-            throw 'Protected Windows signing certificate, password, or expected signer variables are unavailable.'
+            throw 'Protected Windows signing certificate or expected signer variables are unavailable.'
           }
           $certificatePath = Join-Path $env:RUNNER_TEMP 'sprint-coder-windows-signing.pfx'
           [IO.File]::WriteAllBytes(
@@ -577,7 +575,6 @@ jobs:
             [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_P12_BASE64)
           )
           "SPRINT_CODER_WINDOWS_CERTIFICATE_FILE=$certificatePath" >> $env:GITHUB_ENV
-          "SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD=$($env:WINDOWS_CERTIFICATE_PASSWORD)" >> $env:GITHUB_ENV
 
       - name: Make signed Windows gate artifacts
         working-directory: apps/desktop
@@ -585,8 +582,12 @@ jobs:
         env:
           CI: 'true'
           SPRINT_CODER_RELEASE: '1'
+          SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw 'Protected Windows signing certificate password is unavailable.'
+          }
           powershell -ExecutionPolicy Bypass -File scripts/ensure-inno-setup.ps1
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup verification failed.' }
           npm run make:windows

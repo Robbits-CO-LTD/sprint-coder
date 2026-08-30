@@ -245,6 +245,128 @@ function fail(message) {
   throw new Error(`Computer Use final gate evidence is invalid: ${message}`);
 }
 
+function assertNoDuplicateJsonObjectKeys(text) {
+  let index = 0;
+
+  const malformed = () => {
+    throw new Error('raw JSON is malformed');
+  };
+  const skipWhitespace = () => {
+    while (index < text.length && /[\t\n\r ]/u.test(text[index])) index += 1;
+  };
+  const parseString = () => {
+    if (text[index] !== '"') malformed();
+    const start = index;
+    index += 1;
+    while (index < text.length) {
+      const character = text[index];
+      if (character === '"') {
+        index += 1;
+        try {
+          return JSON.parse(text.slice(start, index));
+        } catch {
+          malformed();
+        }
+      }
+      if (character === '\\') {
+        index += 1;
+        const escape = text[index];
+        if (escape === undefined) malformed();
+        if (escape === 'u') {
+          if (!/^[0-9a-fA-F]{4}$/u.test(text.slice(index + 1, index + 5))) malformed();
+          index += 5;
+          continue;
+        }
+        if (!['"', '\\', '/', 'b', 'f', 'n', 'r', 't'].includes(escape)) malformed();
+        index += 1;
+        continue;
+      }
+      if (character.charCodeAt(0) <= 0x1f) malformed();
+      index += 1;
+    }
+    malformed();
+  };
+  const parseNumber = () => {
+    const match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(text.slice(index));
+    if (match === null) malformed();
+    index += match[0].length;
+  };
+  const parseValue = () => {
+    skipWhitespace();
+    const character = text[index];
+    if (character === '{') {
+      index += 1;
+      skipWhitespace();
+      const keys = new Set();
+      if (text[index] === '}') {
+        index += 1;
+        return;
+      }
+      while (index < text.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) throw new Error('duplicate JSON object key');
+        keys.add(key);
+        skipWhitespace();
+        if (text[index] !== ':') malformed();
+        index += 1;
+        parseValue();
+        skipWhitespace();
+        if (text[index] === '}') {
+          index += 1;
+          return;
+        }
+        if (text[index] !== ',') malformed();
+        index += 1;
+      }
+      malformed();
+    }
+    if (character === '[') {
+      index += 1;
+      skipWhitespace();
+      if (text[index] === ']') {
+        index += 1;
+        return;
+      }
+      while (index < text.length) {
+        parseValue();
+        skipWhitespace();
+        if (text[index] === ']') {
+          index += 1;
+          return;
+        }
+        if (text[index] !== ',') malformed();
+        index += 1;
+      }
+      malformed();
+    }
+    if (character === '"') {
+      parseString();
+      return;
+    }
+    for (const literal of ['true', 'false', 'null']) {
+      if (text.startsWith(literal, index)) {
+        index += literal.length;
+        return;
+      }
+    }
+    parseNumber();
+  };
+
+  parseValue();
+  skipWhitespace();
+  if (index !== text.length) malformed();
+}
+
+export function parseJsonRejectingDuplicateKeys(text) {
+  assertNoDuplicateJsonObjectKeys(text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('raw JSON is malformed');
+  }
+}
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -1035,7 +1157,13 @@ function main() {
     fail('completed evidence requires external GitHub artifact attestation verification');
   const bytes = readFileSync(options.evidence);
   if (bytes.length > MAX_EVIDENCE_BYTES) fail(`evidence exceeds ${MAX_EVIDENCE_BYTES} bytes`);
-  const candidate = JSON.parse(bytes.toString('utf8'));
+  const text = bytes.toString('utf8');
+  let candidate;
+  try {
+    candidate = parseJsonRejectingDuplicateKeys(text);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : 'raw JSON is malformed');
+  }
   if (options['allow-incomplete'] === true) {
     if (VERIFIER_VALUE_OPTIONS.some((key) => key !== 'evidence' && options[key] !== undefined))
       fail('--allow-incomplete accepts only the canonical all-pending template');

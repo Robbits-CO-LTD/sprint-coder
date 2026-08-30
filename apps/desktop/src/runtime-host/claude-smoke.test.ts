@@ -247,7 +247,7 @@ describe.skipIf(!enabled)('Claude runtime adapter (REAL CLI smoke)', () => {
         const adapter = new ClaudeRuntimeAdapter();
         adapter.start(
           turnId,
-          'Use create_file to write result.txt with exactly managed-ok. Then call exec_command with executable node, argv ["--version"], and verification true. Finally call read_file for result.txt and report success.',
+          'Use create_file to write result.txt with exactly managed-ok. Then call exec_command with executable node and argv ["--version"]. Finally call read_file for result.txt and report success.',
           [],
           () => undefined,
           workspace,

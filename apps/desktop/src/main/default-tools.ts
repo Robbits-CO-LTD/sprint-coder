@@ -82,7 +82,7 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
   }),
   providerName: 'exec_command',
   description:
-    'Execute one sealed executable and argv in the managed OS sandbox. argv must contain arguments only and must not repeat executable. Set verification: true only when this foreground command deterministically verifies every committed edit in the selected Workspace root that is visible when the command starts; success closes those earlier unverified Edit Sagas in the Turn, while other roots and later edits stay open. Long-running work may continue as an owned background session. On Windows, launch developer executables directly with an absolute .exe path: cmd.exe or PowerShell cannot start PATH child programs inside the AppContainer. When native write tools are unavailable, call Windows PowerShell directly and use Set-Content only for files inside the Workspace. Run Node tests with node.exe --test --test-isolation=none because the default test isolation launches a blocked child process.',
+    'Execute one sealed executable and argv in the managed OS sandbox. argv must contain arguments only and must not repeat executable. Command success is process evidence only and never creates Edit Saga assurance evidence; use trusted workspace reads for that. Long-running work may continue as an owned background session. On Windows, launch developer executables directly with an absolute .exe path: cmd.exe or PowerShell cannot start PATH child programs inside the AppContainer. When native write tools are unavailable, call Windows PowerShell directly and use Set-Content only for files inside the Workspace. Run Node tests with node.exe --test --test-isolation=none because the default test isolation launches a blocked child process.',
   parallelism: 'serial',
   maxOutputBytes: 2 * 1024 * 1024,
   supportsCancellation: true,
@@ -96,7 +96,6 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
       cwd: { type: 'string' },
       purpose: { type: 'string' },
       background: { type: 'boolean' },
-      verification: { type: 'boolean' },
     },
     required: ['executable', 'argv', 'purpose'],
     additionalProperties: false,
@@ -277,7 +276,6 @@ export type CommandToolBoundary = Readonly<{
     | 'createBackgroundActivity'
     | 'transitionBackgroundActivity'
     | 'completeBackgroundActivity'
-    | 'recordCommandVerification'
   >;
   publish(event: TurnEvent): void;
 }>;
@@ -370,7 +368,6 @@ export function registerCommandRunnerTool(
   const commandIds = new WeakMap<object, string>();
   const resourceKeys = new WeakMap<object, string>();
   const backgroundSpecs = new WeakSet<object>();
-  const verificationSpecs = new WeakSet<object>();
   broker.registerImplementation({
     toolId: definition.toolId,
     implementationKind: 'command-runner',
@@ -390,10 +387,7 @@ export function registerCommandRunnerTool(
         cwd?: string;
         purpose: string;
         background?: boolean;
-        verification?: boolean;
       };
-      if (request.verification === true && request.background === true)
-        throw new Error('Verification commands cannot run in the background');
       const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
       if (workspace === null)
         throw new Error('CommandRunner requires a sealed Turn Workspace snapshot');
@@ -426,7 +420,6 @@ export function registerCommandRunnerTool(
       commandIds.set(spec, persisted.id);
       resourceKeys.set(spec, `workspace:${workspace.digest}`);
       if (request.background === true) backgroundSpecs.add(spec);
-      if (request.verification === true) verificationSpecs.add(spec);
       return spec;
     },
     resourceClaims: (input) => [
@@ -528,14 +521,6 @@ export function registerCommandRunnerTool(
                 })
               : completePersistedCommand(command.persistence, commandId, snapshot.result);
           command.publish(persisted.event);
-          if (verificationSpecs.has(spec) && snapshot.result?.exitCode === 0)
-            command.persistence.recordCommandVerification({
-              taskId: owner.taskId,
-              turnId: owner.turnId,
-              commandId,
-              exitCode: 0,
-              createdAt: new Date().toISOString(),
-            });
           if (snapshot.state === 'canceled')
             command.persistence.transitionBackgroundActivity(
               sessionId,
@@ -561,9 +546,11 @@ export function registerCommandRunnerTool(
           void sessions.wait(started.sessionId, owner).then(finalize);
           return started;
         }
-        const completed = verificationSpecs.has(spec)
-          ? await sessions.wait(started.sessionId, owner)
-          : await sessions.waitFor(started.sessionId, owner, foregroundToBackgroundMs);
+        const completed = await sessions.waitFor(
+          started.sessionId,
+          owner,
+          foregroundToBackgroundMs,
+        );
         if (completed === null) {
           persistBackground();
           void sessions.wait(started.sessionId, owner).then(finalize);
@@ -584,14 +571,6 @@ export function registerCommandRunnerTool(
         command.publish(persisted.event);
         if (completed.result === null)
           throw new Error(completed.error ?? 'Managed command failed before completion');
-        if (verificationSpecs.has(spec) && completed.result.exitCode === 0)
-          command.persistence.recordCommandVerification({
-            taskId: owner.taskId,
-            turnId: owner.turnId,
-            commandId,
-            exitCode: 0,
-            createdAt: new Date().toISOString(),
-          });
         return {
           ...completed.result,
           ...toolOutput,
@@ -602,14 +581,6 @@ export function registerCommandRunnerTool(
         const result = await commandRunner.run(spec, hooks);
         const persisted = completePersistedCommand(command.persistence, commandId, result);
         command.publish(persisted.event);
-        if (verificationSpecs.has(spec) && result.exitCode === 0)
-          command.persistence.recordCommandVerification({
-            taskId: _context.taskId,
-            turnId: _context.turnId,
-            commandId,
-            exitCode: 0,
-            createdAt: new Date().toISOString(),
-          });
         return {
           ...result,
           ...toolOutput,

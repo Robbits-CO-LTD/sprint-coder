@@ -2702,6 +2702,34 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('canonicalizes Windows FileChange separators without changing a POSIX backslash', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      bindMutationWorkspace(persistence, task.id, dirname(path), 'd'.repeat(64));
+      const turn = persistence.startTurn(task.id, 'record one platform-native file change');
+      const workspace = persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId);
+      const root = workspace?.roots[0];
+      expect(root).toBeDefined();
+
+      persistence.recordFileChanges({
+        taskId: task.id,
+        turnId: turn.turnId,
+        changes: [
+          {
+            rootId: root!.rootId,
+            rootLabel: root!.label,
+            path: 'src\\nested\\file.ts',
+            kind: 'update',
+          },
+        ],
+      });
+
+      expect(persistence.listFileChanges(task.id)[0]?.changes[0]?.path).toBe(
+        process.platform === 'win32' ? 'src/nested/file.ts' : 'src\\nested\\file.ts',
+      );
+      persistence.close();
+    });
+
     artifactIt('uses a verified descendant file read to verify an earlier mkdir Saga', async () => {
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
@@ -2981,292 +3009,34 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    artifactIt(
-      'records one successful verification command for every unverified committed saga in the Turn',
-      async () => {
-        const { persistence, path } = createPersistence();
-        const task = persistence.createTask();
-        const workspacePath = dirname(path);
-        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
-        const turn = persistence.startTurn(task.id, 'create a directory and then a file');
-        const workspaceFile = join(dirname(path), 'multi-saga.txt');
-        const artifactRoot = join(dirname(path), 'multi-saga-artifacts');
-        writeFileSync(workspaceFile, 'before');
-        const artifacts = await EditArtifactStore.open({
-          rootPath: artifactRoot,
-          quotaBytes: 4096,
-        });
-        const store = new PersistenceEditSagaStore(persistence);
-
-        for (const [id, before, after, createdAt] of [
-          ['first-saga', 'before', 'middle', '2026-07-23T00:00:00.000Z'],
-          ['second-saga', 'middle', 'after', '2026-07-23T00:00:01.000Z'],
-        ] as const)
-          await new EditSagaExecutor(
-            store,
-            fileBoundary(workspaceFile, artifacts, before, after),
-            artifacts,
-            undefined,
-            new SqliteEditSagaLeaseGuard(persistence, `${id}-lease`),
-          ).apply({
-            id,
-            taskId: task.id,
-            turnId: turn.turnId,
-            operationId: `${id}-operation`,
-            plan: persistedEditPlan(before, after),
-            createdAt,
-          });
-
-        expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
-        expect(
-          persistence.recordWorkspaceReadVerification({
-            taskId: task.id,
-            turnId: turn.turnId,
-            rootId: 'legacy-primary',
-            path: 'src/a.ts',
-            content: 'after',
-            createdAt: '2099-07-23T00:00:01.500Z',
-          }),
-        ).toMatchObject({ sagaId: 'second-saga', decision: 'complete' });
-        expect(
-          persistence
-            .listEvidenceRecords(task.id, turn.turnId)
-            .filter(({ kind }) => kind === 'verification_passed')
-            .map(({ criterionId }) => criterionId),
-        ).toEqual(['verification:second-saga']);
-
-        const verificationSpec = createExecutionSpec({
-          absoluteExecutable: process.execPath,
-          executionIdentityDigest: 'd'.repeat(64),
-          argv: ['--version'],
-          cwdIdentity: { canonicalPath: workspacePath, identityDigest: 'e'.repeat(64) },
-          envDelta: {},
-          stdinMode: 'closed',
-          shell: 'none',
-        });
-        persistence.prepareCommand({
-          id: 'multi-saga-verification-command',
-          taskId: task.id,
-          turnId: turn.turnId,
-          callId: 'multi-saga-verification-call',
-          spec: verificationSpec,
-          purpose: 'verify every committed edit in this Turn',
-          risk: 'high',
-          createdAt: '2099-07-23T00:00:02.000Z',
-        });
-        persistence.beginCommand('multi-saga-verification-command');
-        persistence.startCommand({
-          commandId: 'multi-saga-verification-command',
-          pid: 123,
-          processStartTime: 'multi-saga-verification-process',
-          startedAt: '2099-07-23T00:00:02.100Z',
-        });
-        persistence.completeCommand({
-          commandId: 'multi-saga-verification-command',
-          state: 'exited',
-          exitCode: 0,
-          signal: null,
-          outputBytes: 0,
-          truncated: false,
-          finishedAt: '2099-07-23T00:00:02.200Z',
-        });
-        expect(
-          persistence.recordCommandVerification({
-            taskId: task.id,
-            turnId: turn.turnId,
-            commandId: 'multi-saga-verification-command',
-            exitCode: 0,
-            createdAt: '2099-07-23T00:00:02.300Z',
-          }),
-        ).toMatchObject({ sagaId: 'first-saga', decision: 'complete' });
-
-        expect(
-          persistence
-            .listEvidenceRecords(task.id, turn.turnId)
-            .filter(({ kind }) => kind === 'verification_passed')
-            .map(({ criterionId }) => criterionId)
-            .sort(),
-        ).toEqual(['verification:first-saga', 'verification:second-saga']);
-        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
-          persistence.changeStage(task.id, turn.turnId, stage);
-        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).not.toThrow();
-        persistence.close();
-      },
-    );
-
-    artifactIt('limits command verification to the sealed Workspace root of its cwd', async () => {
-      const { persistence, path } = createPersistence();
-      const rootAId = randomUUID();
-      const rootBId = randomUUID();
-      const rootAPath = join(dirname(path), 'verification-root-a');
-      const rootBPath = join(dirname(path), 'verification-root-b');
-      const rootADigest = 'a'.repeat(64);
-      const rootBDigest = 'b'.repeat(64);
-      const rootAKey = mutationWorkspaceKey(rootAPath, rootADigest);
-      const rootBKey = mutationWorkspaceKey(rootBPath, rootBDigest);
-      const fileA = join(rootAPath, 'a.txt');
-      const fileB = join(rootBPath, 'b.txt');
-      mkdirSync(rootAPath, { recursive: true });
-      mkdirSync(rootBPath, { recursive: true });
-      writeFileSync(fileA, 'before');
-      writeFileSync(fileB, 'before');
-      const project = persistence.createProject({
-        name: 'two verification roots',
-        folders: [
-          {
-            id: rootAId,
-            path: rootAPath,
-            canonicalPath: rootAPath,
-            label: 'same-root-label',
-            role: 'primary',
-            workspaceKey: rootAKey,
-            rootIdentityDigest: rootADigest,
-          },
-          {
-            id: rootBId,
-            path: rootBPath,
-            canonicalPath: rootBPath,
-            label: 'same-root-label',
-            role: 'secondary',
-            workspaceKey: rootBKey,
-            rootIdentityDigest: rootBDigest,
-          },
-        ],
-      });
-      const task = persistence.createTask('verify one root', false, project.id);
-      const turn = persistence.startTurn(task.id, 'edit both roots and verify only root A');
-      const artifacts = await EditArtifactStore.open({
-        rootPath: join(dirname(path), 'multi-root-verification-artifacts'),
-        quotaBytes: 8192,
-      });
-
-      for (const [id, rootId, workspacePath, workspaceKey, rootIdentityDigest, file] of [
-        ['root-a-saga', rootAId, rootAPath, rootAKey, rootADigest, fileA],
-        ['root-b-saga', rootBId, rootBPath, rootBKey, rootBDigest, fileB],
-      ] as const)
-        await new EditSagaExecutor(
-          new PersistenceEditSagaStore(persistence),
-          fileBoundary(file, artifacts),
-          artifacts,
-          undefined,
-          new SqliteEditSagaLeaseGuard(persistence, `${id}-lease`),
-        ).apply({
-          id,
-          taskId: task.id,
-          turnId: turn.turnId,
-          operationId: `${id}-operation`,
-          plan: persistedEditPlan('before', 'after', file, file),
-          mutationBinding: { rootId, workspacePath, workspaceKey, rootIdentityDigest },
-          createdAt: '2026-07-23T00:00:00.000Z',
-        });
-
-      persistence.recordFileChanges({
-        taskId: task.id,
-        turnId: turn.turnId,
-        changes: [{ rootId: rootAId, rootLabel: 'same-root-label', path: 'a.txt', kind: 'update' }],
-      });
-      expect(persistence.listFileChanges(task.id)).toMatchObject([
-        {
-          turnId: turn.turnId,
-          changes: [{ rootId: rootAId, rootLabel: 'same-root-label [01]' }],
-        },
-      ]);
-
-      const verificationSpec = createExecutionSpec({
-        absoluteExecutable: process.execPath,
-        executionIdentityDigest: 'd'.repeat(64),
-        argv: ['--version'],
-        cwdIdentity: { canonicalPath: rootAPath, identityDigest: 'e'.repeat(64) },
-        envDelta: {},
-        stdinMode: 'closed',
-        shell: 'none',
-      });
-      persistence.prepareCommand({
-        id: 'root-a-verification-command',
-        taskId: task.id,
-        turnId: turn.turnId,
-        callId: 'root-a-verification-call',
-        spec: verificationSpec,
-        purpose: 'verify only root A',
-        risk: 'high',
-        createdAt: '2099-07-23T00:00:01.000Z',
-      });
-      persistence.beginCommand('root-a-verification-command');
-      persistence.startCommand({
-        commandId: 'root-a-verification-command',
-        pid: 123,
-        processStartTime: 'root-a-verification-process',
-        startedAt: '2099-07-23T00:00:01.100Z',
-      });
-      persistence.completeCommand({
-        commandId: 'root-a-verification-command',
-        state: 'exited',
-        exitCode: 0,
-        signal: null,
-        outputBytes: 0,
-        truncated: false,
-        finishedAt: '2099-07-23T00:00:01.200Z',
-      });
-      persistence.recordCommandVerification({
-        taskId: task.id,
-        turnId: turn.turnId,
-        commandId: 'root-a-verification-command',
-        exitCode: 0,
-        createdAt: '2099-07-23T00:00:01.300Z',
-      });
-
-      expect(
-        persistence
-          .listEvidenceRecords(task.id, turn.turnId)
-          .filter(({ kind }) => kind === 'verification_passed')
-          .map(({ criterionId }) => criterionId),
-      ).toEqual(['verification:root-a-saga']);
-      expect(
-        persistence.recordWorkspaceReadVerification({
-          taskId: task.id,
-          turnId: turn.turnId,
-          rootId: rootBId,
-          path: fileB,
-          content: 'after',
-          createdAt: '2099-07-23T00:00:01.400Z',
-        }),
-      ).toMatchObject({ sagaId: 'root-b-saga', decision: 'complete' });
-      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
-        persistence.changeStage(task.id, turn.turnId, stage);
-      persistence.completeTurn(task.id, turn.turnId, 'completed');
-      expect(persistence.snapshot(task.id).latestTurnDiff?.entries.map(({ path }) => path)).toEqual(
-        ['same-root-label [01] › a.txt', 'same-root-label [02] › b.txt'],
-      );
-      persistence.close();
-    });
-
-    artifactIt('requires a Saga commit timestamp to precede command start strictly', async () => {
+    artifactIt('does not treat an exit-zero command as Edit Saga assurance evidence', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
       const workspacePath = dirname(path);
       bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
-      const turn = persistence.startTurn(task.id, 'do not infer order from equal timestamps');
-      const workspaceFile = join(dirname(path), 'equal-time-saga.txt');
+      const turn = persistence.startTurn(task.id, 'keep command success as process evidence');
+      const workspaceFile = join(workspacePath, 'command-is-not-assurance.txt');
+      writeFileSync(workspaceFile, 'before');
       const artifacts = await EditArtifactStore.open({
-        rootPath: join(dirname(path), 'equal-time-saga-artifacts'),
+        rootPath: join(workspacePath, 'command-is-not-assurance-artifacts'),
         quotaBytes: 4096,
       });
-      writeFileSync(workspaceFile, 'before');
-      const saga = await new EditSagaExecutor(
+      await new EditSagaExecutor(
         new PersistenceEditSagaStore(persistence),
         fileBoundary(workspaceFile, artifacts),
         artifacts,
         undefined,
-        new SqliteEditSagaLeaseGuard(persistence, 'equal-time-saga-lease'),
+        new SqliteEditSagaLeaseGuard(persistence, 'command-is-not-assurance-lease'),
       ).apply({
-        id: 'equal-time-saga',
+        id: 'command-is-not-assurance-saga',
         taskId: task.id,
         turnId: turn.turnId,
-        operationId: 'equal-time-saga-operation',
-        plan: persistedEditPlan(),
+        operationId: 'command-is-not-assurance-operation',
+        plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
         createdAt: '2026-07-23T00:00:00.000Z',
       });
-      const verificationSpec = createExecutionSpec({
+
+      const commandSpec = createExecutionSpec({
         absoluteExecutable: process.execPath,
         executionIdentityDigest: 'd'.repeat(64),
         argv: ['--version'],
@@ -3276,46 +3046,40 @@ if (runsWithElectronAbi)
         shell: 'none',
       });
       persistence.prepareCommand({
-        id: 'equal-time-verification-command',
+        id: 'ordinary-exit-zero-command',
         taskId: task.id,
         turnId: turn.turnId,
-        callId: 'equal-time-verification-call',
-        spec: verificationSpec,
-        purpose: 'equal timestamps are not an ordering proof',
+        callId: 'ordinary-exit-zero-call',
+        spec: commandSpec,
+        purpose: 'record process success without creating assurance authority',
         risk: 'high',
-        createdAt: saga.updatedAt,
+        createdAt: '2099-07-23T00:00:01.000Z',
       });
-      persistence.beginCommand('equal-time-verification-command');
+      persistence.beginCommand('ordinary-exit-zero-command');
       persistence.startCommand({
-        commandId: 'equal-time-verification-command',
+        commandId: 'ordinary-exit-zero-command',
         pid: 123,
-        processStartTime: 'equal-time-verification-process',
-        startedAt: saga.updatedAt,
+        processStartTime: 'ordinary-exit-zero-process',
+        startedAt: '2099-07-23T00:00:01.100Z',
       });
       persistence.completeCommand({
-        commandId: 'equal-time-verification-command',
+        commandId: 'ordinary-exit-zero-command',
         state: 'exited',
         exitCode: 0,
         signal: null,
         outputBytes: 0,
         truncated: false,
-        finishedAt: '2099-01-01T00:00:00.200Z',
+        finishedAt: '2099-07-23T00:00:01.200Z',
       });
 
       expect(
-        persistence.recordCommandVerification({
-          taskId: task.id,
-          turnId: turn.turnId,
-          commandId: 'equal-time-verification-command',
-          exitCode: 0,
-          createdAt: '2099-01-01T00:00:00.300Z',
-        }),
-      ).toBeNull();
-      expect(
         persistence
           .listEvidenceRecords(task.id, turn.turnId)
-          .some(({ criterionId }) => criterionId === 'verification:equal-time-saga'),
+          .some(({ kind }) => kind === 'verification_passed'),
       ).toBe(false);
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+        AcceptanceEvidenceMissingError,
+      );
       persistence.close();
     });
 
@@ -3537,47 +3301,13 @@ if (runsWithElectronAbi)
           createdAt: '2026-07-23T00:00:04.000Z',
         }),
       ).toMatchObject({ decision: 'repair', repairRoundsUsed: 1 });
-      const verificationSpec = createExecutionSpec({
-        absoluteExecutable: process.execPath,
-        executionIdentityDigest: 'd'.repeat(64),
-        argv: ['--version'],
-        cwdIdentity: { canonicalPath: workspacePath, identityDigest: 'e'.repeat(64) },
-        envDelta: {},
-        stdinMode: 'closed',
-        shell: 'none',
-      });
-      persistence.prepareCommand({
-        id: 'verification-command',
-        taskId: task.id,
-        turnId: turn.turnId,
-        callId: 'verification-call',
-        spec: verificationSpec,
-        purpose: 'targeted verification',
-        risk: 'high',
-        createdAt: '2099-07-23T00:00:05.000Z',
-      });
-      persistence.beginCommand('verification-command');
-      persistence.startCommand({
-        commandId: 'verification-command',
-        pid: 123,
-        processStartTime: 'verification-process',
-        startedAt: '2099-07-23T00:00:05.100Z',
-      });
-      persistence.completeCommand({
-        commandId: 'verification-command',
-        state: 'exited',
-        exitCode: 0,
-        signal: null,
-        outputBytes: 0,
-        truncated: false,
-        finishedAt: '2099-07-23T00:00:05.200Z',
-      });
       expect(
-        persistence.recordCommandVerification({
+        persistence.recordAssuranceVerification({
           taskId: task.id,
           turnId: turn.turnId,
-          commandId: 'verification-command',
-          exitCode: 0,
+          sagaId: 'cleanup-saga',
+          outcome: 'passed',
+          failureClass: null,
           createdAt: '2099-07-23T00:00:05.300Z',
         }),
       ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });

@@ -462,9 +462,8 @@ export function mergeWorkspaceDiffs(
     const rootedMatches = runtimeEntries.filter((candidate) =>
       sameRootedWorkspaceEntry(entry, candidate),
     );
-    // Main's Edit Saga preserves the approved input spelling, which may be absolute, while a
-    // Runtime `files.changed` report is always `root label › relative/path`. Collapse them only
-    // when that suffix identifies exactly one Runtime row; ambiguity across roots stays visible.
+    // Main now projects both durable Saga diffs and Runtime reports through the same sealed root
+    // identity. Legacy absolute paths have no trustworthy root binding and therefore stay visible.
     const reverseMatches =
       rootedMatches.length === 1
         ? persisted.entries.filter((candidate) =>
@@ -484,41 +483,9 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
   return (
     persisted.kind === runtime.kind &&
     persisted.status === runtime.status &&
-    workspacePathSuffixMatches(persisted.path, runtime.path) &&
-    ((persisted.destination === null && runtime.destination === null) ||
-      (persisted.destination !== null &&
-        runtime.destination !== null &&
-        workspacePathSuffixMatches(persisted.destination, runtime.destination)))
+    persisted.path === runtime.path &&
+    persisted.destination === runtime.destination
   );
-}
-
-function workspacePathSuffixMatches(persisted: string, runtime: string): boolean {
-  if (persisted === runtime) return true;
-  const windowsAbsolute = /^[A-Za-z]:[\\/]/u.test(persisted) || /^\\\\[^\\]/u.test(persisted);
-  const normalizedPersisted = windowsAbsolute ? persisted.replaceAll('\\', '/') : persisted;
-  const normalizedRuntime = windowsAbsolute ? runtime.replaceAll('\\', '/') : runtime;
-  if (normalizedPersisted === normalizedRuntime) return true;
-  const delimiter = ' › ';
-  const delimiterIndex = normalizedRuntime.lastIndexOf(delimiter);
-  if (delimiterIndex < 0) return false;
-  const rootLabel = normalizedRuntime.slice(0, delimiterIndex);
-  const relative = normalizedRuntime.slice(delimiterIndex + delimiter.length);
-  if (
-    relative.length === 0 ||
-    relative.startsWith('/') ||
-    relative === '..' ||
-    relative.startsWith('../') ||
-    /^[A-Za-z]:\//u.test(relative)
-  )
-    return false;
-  const persistedIsAbsolute =
-    normalizedPersisted.startsWith('/') || /^[A-Za-z]:\//u.test(normalizedPersisted);
-  if (!persistedIsAbsolute) return false;
-  const suffix = `/${relative}`;
-  if (!normalizedPersisted.endsWith(suffix)) return false;
-  const persistedRoot = normalizedPersisted.slice(0, -suffix.length);
-  const persistedRootName = persistedRoot.split('/').filter(Boolean).at(-1);
-  return persistedRootName === rootLabel;
 }
 
 function workerStateLabel(state: string): string {

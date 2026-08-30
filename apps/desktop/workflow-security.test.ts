@@ -14,6 +14,10 @@ const workflows = Object.fromEntries(
   workflowFiles.map((file) => [file, readFileSync(resolve(repositoryRoot, file), 'utf8')]),
 ) as Record<(typeof workflowFiles)[number], string>;
 
+const desktopPackage = JSON.parse(
+  readFileSync(resolve(repositoryRoot, 'apps/desktop/package.json'), 'utf8'),
+) as { scripts: Record<string, string> };
+
 const reviewedActionCommits: Record<string, string> = {
   'actions/checkout': '9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0',
   'actions/setup-node': '820762786026740c76f36085b0efc47a31fe5020',
@@ -38,6 +42,14 @@ function allJobBlocks(workflow: string): string[] {
     (match) => match.index!,
   );
   return starts.map((start, index) => workflow.slice(start, starts[index + 1]));
+}
+
+function stepBlock(job: string, name: string): string {
+  const header = `\n      - name: ${name}`;
+  const start = job.indexOf(header);
+  expect(start, `step ${name} must exist`).toBeGreaterThanOrEqual(0);
+  const next = job.indexOf('\n      - name:', start + header.length);
+  return job.slice(start, next === -1 ? job.length : next);
 }
 
 describe('workflow security boundaries', () => {
@@ -94,10 +106,10 @@ describe('workflow security boundaries', () => {
       '[[ "${package_path}" == \'.github/workflows/release-beta.yml\' ]]',
     );
     expect(finalGate).toContain('[[ "${package_event}" == \'push\' ]]');
-    expect(finalGate).toContain("package_branch=\"$(jq -r '.head_branch' <<< \"${metadata}\")\"");
+    expect(finalGate).toContain('package_branch="$(jq -r \'.head_branch\' <<< "${metadata}")"');
     expect(finalGate).toMatch(/package_branch.*\^v\[0-9\]/u);
     expect(finalGate).toContain(
-      "evidence_branch=\"$(jq -r '.head_branch' <<< \"${evidence_metadata}\")\"",
+      'evidence_branch="$(jq -r \'.head_branch\' <<< "${evidence_metadata}")"',
     );
     expect(finalGate).not.toContain("jq -r '.ref'");
     expect(finalGate).toContain('[[ "${package_repository}" == "${GITHUB_REPOSITORY}" ]]');
@@ -114,14 +126,14 @@ describe('workflow security boundaries', () => {
     );
     expect(evidenceHarness).toContain('[[ "${package_event}" == \'push\' ]]');
     expect(evidenceHarness).toContain(
-      "package_branch=\"$(jq -r '.head_branch' <<< \"${metadata}\")\"",
+      'package_branch="$(jq -r \'.head_branch\' <<< "${metadata}")"',
     );
     expect(evidenceHarness).toMatch(/package_branch.*\^v\[0-9\]/u);
     expect(evidenceHarness).not.toContain("jq -r '.ref'");
     expect(evidenceHarness).toContain('ref: ${{ github.sha }}');
   });
 
-  it('checks the expected release signer and the actual Windows PE machine type before probing', () => {
+  it('checks the expected release signer and the actual Windows PE machine type without executing packages', () => {
     const finalGate = workflows['.github/workflows/computer-use-final-gate.yml'];
     expect(finalGate).toContain('EXPECTED_WINDOWS_SIGNER_THUMBPRINT');
     expect(finalGate).toContain('EXPECTED_WINDOWS_SIGNER_SUBJECT');
@@ -129,13 +141,11 @@ describe('workflow security boundaries', () => {
     expect(finalGate).toContain('SignerCertificate.Subject');
     expect(finalGate).toContain('function Assert-PeAmd64');
     expect(finalGate).toContain('0x8664');
-    expect(finalGate).toContain(
-      'foreach ($pePath in @($app[0].FullName, $helper[0].FullName))',
-    );
+    expect(finalGate).toContain('foreach ($pePath in @($app[0].FullName, $helper[0].FullName))');
     expect(finalGate).not.toContain(
       'foreach ($pePath in @($installer[0].FullName) + $portableExecutables)',
     );
-    expect(finalGate.indexOf('Assert-PeAmd64')).toBeLessThan(finalGate.indexOf('--probe-json'));
+    expect(finalGate).not.toContain('--probe-json');
 
     const release = workflows['.github/workflows/release-beta.yml'];
     const makeStart = release.indexOf('\n  make:');
@@ -176,6 +186,35 @@ describe('workflow security boundaries', () => {
     expect(attestation).toContain('subject-path:');
   });
 
+  it('builds the Computer Use native host through the canonical signed-Windows make chain', () => {
+    const release = workflows['.github/workflows/release-beta.yml'];
+    const signedWindows = jobBlock(release, 'make-windows-signed');
+    const make = stepBlock(signedWindows, 'Make signed Windows gate artifacts');
+
+    expect(make).toContain('working-directory: apps/desktop');
+    expect(make).toContain('npm run make:windows');
+    expect(desktopPackage.scripts['make:windows']).toContain('npm run prepare:desktop');
+    expect(desktopPackage.scripts['prepare:desktop']).toContain(
+      'node ../../build-computer-use-native.mjs',
+    );
+  });
+
+  it('keeps the Windows certificate password out of cross-step environment files', () => {
+    const release = workflows['.github/workflows/release-beta.yml'];
+    const signedWindows = jobBlock(release, 'make-windows-signed');
+    const materialize = stepBlock(
+      signedWindows,
+      'Materialize temporary Windows signing certificate',
+    );
+    const make = stepBlock(signedWindows, 'Make signed Windows gate artifacts');
+
+    expect(materialize).not.toContain('WINDOWS_CERTIFICATE_PASSWORD');
+    expect(signedWindows).not.toMatch(/SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD=.*GITHUB_ENV/u);
+    expect(make).toContain(
+      'SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}',
+    );
+  });
+
   it('verifies package attestations before any final-gate package parsing or execution', () => {
     const finalGate = workflows['.github/workflows/computer-use-final-gate.yml'];
     for (const [job, firstUse] of [
@@ -191,5 +230,31 @@ describe('workflow security boundaries', () => {
       expect(block).toContain('--deny-self-hosted-runners');
       expect(block.indexOf('gh attestation verify')).toBeLessThan(block.indexOf(firstUse));
     }
+
+    const windows = jobBlock(finalGate, 'verify-windows-package');
+    const windowsAttestation = stepBlock(
+      windows,
+      'Verify Windows package attestations before parsing',
+    );
+    const windowsPackage = stepBlock(
+      windows,
+      'Verify Authenticode, native manifest, and package digest',
+    );
+    expect(windowsAttestation).toContain('GH_TOKEN: ${{ github.token }}');
+    expect(windowsAttestation).toContain('gh attestation verify');
+    expect(windowsPackage).not.toContain('GH_TOKEN');
+    expect(windowsPackage).not.toContain('gh attestation verify');
+    expect(windowsPackage).not.toContain('--probe-json');
+
+    const macos = jobBlock(finalGate, 'verify-macos-package');
+    const macosAttestation = stepBlock(macos, 'Verify macOS package attestation before parsing');
+    const macosPackage = stepBlock(
+      macos,
+      'Verify notarization, signatures, native manifest, and package digest',
+    );
+    expect(macosAttestation).toContain('GH_TOKEN: ${{ github.token }}');
+    expect(macosAttestation).toContain('gh attestation verify');
+    expect(macosPackage).not.toContain('GH_TOKEN');
+    expect(macosPackage).not.toContain('gh attestation verify');
   });
 });

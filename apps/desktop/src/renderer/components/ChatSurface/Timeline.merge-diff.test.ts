@@ -22,13 +22,18 @@ function diff(...entries: TurnDiffEntry[]): TurnDiff {
 }
 
 describe('mergeWorkspaceDiffs', () => {
-  it('deduplicates one Edit Saga absolute path against its unique rooted Runtime path', () => {
+  it('keeps an ambiguous legacy absolute path beside a rooted Runtime path', () => {
     const result = mergeWorkspaceDiffs(
-      diff(entry('/private/tmp/project/smoke/codex.txt')),
+      diff(entry('/a/project/smoke/codex.txt')),
       diff(entry('project › smoke/codex.txt')),
     );
 
-    expect(result?.entries).toEqual([entry('project › smoke/codex.txt')]);
+    expect(result?.entries).toHaveLength(2);
+  });
+
+  it('deduplicates the exact canonical Main and Runtime display path', () => {
+    const rooted = entry('project › smoke/codex.txt');
+    expect(mergeWorkspaceDiffs(diff(rooted), diff(rooted))?.entries).toEqual([rooted]);
   });
 
   it('keeps an absolute entry when two Runtime roots share the same relative path', () => {
@@ -41,6 +46,7 @@ describe('mergeWorkspaceDiffs', () => {
     expect(result?.entries.map(({ path }) => path)).toEqual([
       'left › src/index.ts',
       'right › src/index.ts',
+      persisted.path,
     ]);
   });
 
@@ -49,7 +55,11 @@ describe('mergeWorkspaceDiffs', () => {
     const right = entry('/private/tmp/right/src/index.ts', { ordinal: 2 });
     const result = mergeWorkspaceDiffs(diff(left, right), diff(entry('left › src/index.ts')));
 
-    expect(result?.entries.map(({ path }) => path)).toEqual(['left › src/index.ts', right.path]);
+    expect(result?.entries.map(({ path }) => path)).toEqual([
+      'left › src/index.ts',
+      left.path,
+      right.path,
+    ]);
   });
 
   it('keeps a one-to-one suffix match when the Runtime root label names another root', () => {
@@ -70,13 +80,13 @@ describe('mergeWorkspaceDiffs', () => {
     expect(result?.entries).toHaveLength(2);
   });
 
-  it('normalizes separators for a legacy absolute Windows drive path', () => {
+  it('keeps an ambiguous legacy absolute Windows drive path visible', () => {
     const result = mergeWorkspaceDiffs(
       diff(entry('C:\\private\\tmp\\project\\src\\index.ts')),
       diff(entry('project › src/index.ts')),
     );
 
-    expect(result?.entries).toEqual([entry('project › src/index.ts')]);
+    expect(result?.entries).toHaveLength(2);
   });
 
   it('does not hide persisted external drift behind a Runtime applied row', () => {

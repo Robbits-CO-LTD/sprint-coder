@@ -64,7 +64,6 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
       | 'createBackgroundActivity'
       | 'transitionBackgroundActivity'
       | 'completeBackgroundActivity'
-      | 'recordCommandVerification'
       | 'getTeamByTask'
       | 'recordFileChanges'
     >
@@ -126,7 +125,6 @@ export class MockRuntimeAdapter {
             | 'createBackgroundActivity'
             | 'transitionBackgroundActivity'
             | 'completeBackgroundActivity'
-            | 'recordCommandVerification'
           >,
           publish: this.publish,
         },

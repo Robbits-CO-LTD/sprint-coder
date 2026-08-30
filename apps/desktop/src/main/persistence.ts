@@ -209,6 +209,7 @@ import {
 import { pathComparisonKey, pathsEquivalent } from '../path-comparison';
 import { displayWorkspaceRootLabel } from './workspace-root-resolution';
 import {
+  canonicalizeWorkspaceFileChangePath,
   formatWorkspaceDisplayPath,
   normalizeWorkspaceDisplayRelativePath,
 } from '../workspace-display-path';
@@ -5022,13 +5023,6 @@ export interface PersistenceClient {
     rootId: string;
     path: string;
     content: string;
-    createdAt: string;
-  }): AssuranceRound | null;
-  recordCommandVerification(input: {
-    taskId: string;
-    turnId: string;
-    commandId: string;
-    exitCode: number;
     createdAt: string;
   }): AssuranceRound | null;
   updateEditSaga(
@@ -14247,68 +14241,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  recordCommandVerification(input: {
-    taskId: string;
-    turnId: string;
-    commandId: string;
-    exitCode: number;
-    createdAt: string;
-  }): AssuranceRound | null {
-    return this.db.transaction(() => {
-      if (input.exitCode !== 0) return null;
-      const command = this.getCommand(input.commandId);
-      if (
-        command.taskId !== input.taskId ||
-        command.turnId !== input.turnId ||
-        command.state !== 'exited' ||
-        command.startedAt === null
-      )
-        throw new OperationConflictError('Verification command is not a successful Turn command');
-      const verified = new Set(
-        this.listEvidenceRecords(input.taskId, input.turnId)
-          .filter(({ kind }) => kind === 'verification_passed')
-          .map(({ criterionId }) => criterionId),
-      );
-      const workspace = this.readTurnWorkspaceSetForTask(input.taskId, input.turnId);
-      if (workspace === null)
-        throw new OperationConflictError('Verification command has no sealed Workspace');
-      const commandRoots = workspace.roots.filter(({ path }) => {
-        const relation = relative(path, command.cwd);
-        return (
-          relation === '' ||
-          (!isAbsolute(relation) && relation !== '..' && !relation.startsWith(`..${sep}`))
-        );
-      });
-      if (commandRoots.length !== 1)
-        throw new OperationConflictError('Verification command Workspace root is ambiguous');
-      const sagaRootId = workspace.source === 'project' ? commandRoots[0]!.rootId : null;
-      // `verification: true` is an explicit Turn-level claim. The command observes the complete
-      // selected root at process start, so it can close every earlier committed Saga in that root
-      // still awaiting evidence. Other roots and Sagas committed after that fence remain open.
-      const sagas = this.db
-        .prepare(
-          `SELECT id FROM edit_sagas
-           WHERE task_id = ? AND turn_id = ? AND root_id IS ?
-             AND state = 'committed' AND updated_at < ?
-           ORDER BY created_at, id`,
-        )
-        .all(input.taskId, input.turnId, sagaRootId, command.startedAt) as { id: string }[];
-      let latest: AssuranceRound | null = null;
-      for (const saga of sagas) {
-        if (verified.has(`verification:${saga.id}`)) continue;
-        latest = this.recordAssuranceVerification({
-          taskId: input.taskId,
-          turnId: input.turnId,
-          sagaId: saga.id,
-          outcome: 'passed',
-          failureClass: null,
-          createdAt: input.createdAt,
-        });
-      }
-      return latest;
-    })();
-  }
-
   recordWorkspaceReadVerification(input: {
     taskId: string;
     turnId: string;
@@ -15968,9 +15900,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const workspace = this.readTurnWorkspaceSetForTask(input.taskId, input.turnId);
     const changes = input.changes.slice(0, 200).map((change) => {
       const root = workspace?.roots.find(({ rootId }) => rootId === change.rootId);
+      const path = canonicalizeWorkspaceFileChangePath(change.path, process.platform);
       return root === undefined
-        ? change
-        : { ...change, rootLabel: displayWorkspaceRootLabel(workspace!, root) };
+        ? { ...change, path }
+        : { ...change, path, rootLabel: displayWorkspaceRootLabel(workspace!, root) };
     });
     if (changes.length === 0) return null;
     return this.appendEvent({

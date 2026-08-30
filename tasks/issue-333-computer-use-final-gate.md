@@ -135,7 +135,8 @@ have completed on the exact packages being submitted. The dispatch requires:
 
 1. A successful trusted release-tag run of `.github/workflows/release-beta.yml` containing:
    - one Authenticode-signed Windows portable ZIP and installer artifact; and
-   - one Developer ID-signed, Apple-notarized, stapled macOS DMG artifact.
+   - one Developer ID-signed, Apple-notarized, stapled macOS DMG artifact whose embedded app
+     was separately Developer ID-signed, notarized, and stapled by `release-beta.yml`.
 2. A successful run of `.github/workflows/computer-use-evidence-harness.yml` at the same commit and
    its artifact containing **only** the attested `computer-use-final-gate.json`.
 3. Explicit confirmation that the schema-v3 machine transcript came from those exact package bytes
@@ -154,12 +155,13 @@ artifact and do not enable Computer Use; publication remains held until its prot
 is configured. When the opt-in signed job runs, a separate GitHub-hosted job attests the Windows
 portable ZIP, installer, and notarized DMG; the final Gate verifies those package attestations
 against the exact `release-beta.yml` workflow and source digest before extraction, mounting, or
-helper probing.
+package parsing. The attestation steps alone receive `GH_TOKEN`; subsequent package verification
+steps do not inherit it, and no downloaded executable is launched during package verification.
 
 The workflow runs package checks on dedicated self-hosted runners labelled
 `computer-use-final-gate`. It verifies Windows installer/app/helper Authenticode identities,
 macOS notarization/stapling/app/module signatures, native manifest version and digest bindings,
-the source commit embedded in the signed Windows helper and signed macOS app manifest, and separate
+the source commit embedded in the signed Windows and macOS native manifests, and separate
 SHA-256 values for the Windows portable ZIP, Windows installer, and macOS DMG. The evidence
 validator binds each Windows filename/hash to the same source commit, package run, and artifact;
 matching Authenticode signers alone cannot substitute a stale installer.

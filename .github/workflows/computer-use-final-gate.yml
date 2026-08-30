@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       notarized_macos_artifact:
-        description: Artifact name containing one notarized and stapled macOS DMG
+        description: Artifact with one Developer ID-signed, notarized, and stapled macOS DMG whose embedded app was separately notarized and stapled
         required: true
         type: string
       evidence_run_id:
@@ -202,11 +202,38 @@ jobs:
           run-id: ${{ inputs.package_run_id }}
           github-token: ${{ github.token }}
 
+      - name: Verify Windows package attestations before parsing
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_ROOT: ${{ runner.temp }}/computer-use-windows-input
+          SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $links = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -Force | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+          })
+          if ($links.Count -ne 0) { throw 'Windows package artifact must not contain reparse points.' }
+          $portable = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-win32-x64-*.zip')
+          $installer = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-Installer.exe')
+          if ($portable.Count -ne 1) { throw "Expected one signed portable ZIP, found $($portable.Count)." }
+          if ($installer.Count -ne 1) { throw "Expected one signed installer, found $($installer.Count)." }
+          foreach ($path in @($portable[0].FullName, $installer[0].FullName)) {
+            & gh attestation verify $path `
+              --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "github.com/$env:GITHUB_REPOSITORY/.github/workflows/release-beta.yml" `
+              --source-digest $env:SOURCE_COMMIT `
+              --deny-self-hosted-runners
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows package artifact attestation verification failed: $path"
+            }
+          }
+
       - name: Verify Authenticode, native manifest, and package digest
         id: verify
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
           INPUT_ROOT: ${{ runner.temp }}/computer-use-windows-input
           EXTRACT_ROOT: ${{ runner.temp }}/computer-use-windows-package
           SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
@@ -257,17 +284,6 @@ jobs:
           if ($portable.Count -ne 1) { throw "Expected one signed portable ZIP, found $($portable.Count)." }
           if ($installer.Count -ne 1) { throw "Expected one signed installer, found $($installer.Count)." }
 
-          foreach ($path in @($portable[0].FullName, $installer[0].FullName)) {
-            & gh attestation verify $path `
-              --repo $env:GITHUB_REPOSITORY `
-              --signer-workflow "github.com/$env:GITHUB_REPOSITORY/.github/workflows/release-beta.yml" `
-              --source-digest $env:SOURCE_COMMIT `
-              --deny-self-hosted-runners
-            if ($LASTEXITCODE -ne 0) {
-              throw "Windows package artifact attestation verification failed: $path"
-            }
-          }
-
           $installerSignature = Get-AuthenticodeSignature -LiteralPath $installer[0].FullName
           if ($installerSignature.Status -ne 'Valid') { throw 'Windows installer Authenticode signature is invalid.' }
 
@@ -315,10 +331,6 @@ jobs:
             Assert-PeAmd64 $pePath
           }
 
-          $helperProbeText = @(& $helper[0].FullName --probe-json)
-          if ($LASTEXITCODE -ne 0) { throw 'Signed Windows Computer Use helper probe failed.' }
-          $helperProbe = ($helperProbeText -join "`n") | ConvertFrom-Json
-
           $nativeManifest = Get-Content -Raw -LiteralPath $manifest[0].FullName | ConvertFrom-Json
           $helperDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $helper[0].FullName).Hash.ToLowerInvariant()
           $signerBytes = [Text.Encoding]::UTF8.GetBytes($helperThumbprint)
@@ -342,7 +354,6 @@ jobs:
             $nativeManifest.protocolVersion -ne 1 -or
             $nativeManifest.apiVersion -ne 1 -or
             $nativeManifest.sourceCommit -ne $env:SOURCE_COMMIT -or
-            $helperProbe.sourceCommit -ne $env:SOURCE_COMMIT -or
             -not ($nativeManifest.nativeVersion -is [string]) -or
             $nativeManifest.nativeVersion.Length -lt 1 -or
             $nativeManifest.nativeVersion.Length -gt 64 -or
@@ -407,6 +418,27 @@ jobs:
           run-id: ${{ inputs.package_run_id }}
           github-token: ${{ github.token }}
 
+      - name: Verify macOS package attestation before parsing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_ROOT: ${{ runner.temp }}/computer-use-macos-input
+          SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          if find "${INPUT_ROOT}" -type l -print -quit | grep -q .; then
+            echo '::error::macOS package artifact must not contain symlinks.'
+            exit 1
+          fi
+          packages=()
+          while IFS= read -r -d '' path; do packages+=("${path}"); done < <(find "${INPUT_ROOT}" -type f -name '*.dmg' -print0)
+          (( ${#packages[@]} == 1 )) || { echo "::error::Expected one DMG, found ${#packages[@]}."; exit 1; }
+          gh attestation verify "${packages[0]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/release-beta.yml" \
+            --source-digest "${SOURCE_COMMIT}" \
+            --deny-self-hosted-runners
+
       - name: Setup Node.js for strict manifest validation
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -416,7 +448,6 @@ jobs:
         id: verify
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           INPUT_ROOT: ${{ runner.temp }}/computer-use-macos-input
           MOUNT_ROOT: ${{ runner.temp }}/computer-use-macos-mount
           SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
@@ -435,12 +466,6 @@ jobs:
             echo '::error::macOS package artifact must not contain symlinks.'
             exit 1
           fi
-
-          gh attestation verify "${dmg}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/release-beta.yml" \
-            --source-digest "${SOURCE_COMMIT}" \
-            --deny-self-hosted-runners
 
           /usr/bin/codesign --verify --strict --verbose=2 "${dmg}"
           /usr/bin/xcrun stapler validate "${dmg}"

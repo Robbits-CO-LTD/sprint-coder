@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TURN_DIFF_DISPLAY_PATH_MAX_LENGTH, turnDiffEntrySchema } from '@sprint-coder/contracts';
 import {
+  canonicalizeWorkspaceFileChangePath,
   formatWorkspaceDisplayPath,
   normalizeWorkspaceDisplayRelativePath,
 } from './workspace-display-path';
@@ -19,6 +20,15 @@ describe('formatWorkspaceDisplayPath', () => {
     expect(normalizeWorkspaceDisplayRelativePath('foo\\bar', 'darwin')).toBe('foo\\bar');
     expect(normalizeWorkspaceDisplayRelativePath('foo/bar', 'darwin')).toBe('foo/bar');
     expect(normalizeWorkspaceDisplayRelativePath('foo\\bar', 'win32')).toBe('foo/bar');
+  });
+
+  it('canonicalizes persisted FileChange paths for the Main platform', () => {
+    expect(canonicalizeWorkspaceFileChangePath('src\\nested\\file.ts', 'win32')).toBe(
+      'src/nested/file.ts',
+    );
+    expect(canonicalizeWorkspaceFileChangePath('src\\literal.ts', 'darwin')).toBe(
+      'src\\literal.ts',
+    );
   });
 
   it('preserves the maximum raw label and path within the bounded display contract', () => {

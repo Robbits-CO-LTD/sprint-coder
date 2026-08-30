@@ -242,6 +242,22 @@ function validateFixture(
   attestationVerified = true,
   includeDefaultBindings = true,
 ) {
+  return validateRawFixture(
+    `${JSON.stringify(candidate)}\n`,
+    candidate,
+    extraArguments,
+    attestationVerified,
+    includeDefaultBindings,
+  );
+}
+
+function validateRawFixture(
+  rawEvidence: string,
+  candidate: EvidenceTemplate,
+  extraArguments: string[] = [],
+  attestationVerified = true,
+  includeDefaultBindings = true,
+) {
   const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-final-gate-'));
   const path = resolve(root, 'computer-use-final-gate.json');
   try {
@@ -257,7 +273,7 @@ function validateFixture(
         }
       }
     }
-    writeFileSync(path, `${JSON.stringify(candidate)}\n`, { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(path, rawEvidence, { encoding: 'utf8', mode: 0o600 });
     return spawnSync(
       process.execPath,
       [
@@ -418,6 +434,56 @@ describe('Computer Use external final gate', () => {
     const corePassResult = validateFixture(corePass, ['--allow-incomplete'], false);
     expect(corePassResult.status).not.toBe(0);
     expect(corePassResult.stderr).toContain('canonical all-pending template');
+  });
+
+  it('rejects duplicate JSON object keys before parsing completed or incomplete evidence', () => {
+    const complete = passingEvidence();
+    const duplicatePrivacyFact = JSON.stringify(complete).replace(
+      '"providerRawOutputAbsent":true',
+      '"providerRawOutputAbsent":false,"providerRawOutputAbsent":true',
+    );
+    const completedResult = validateRawFixture(duplicatePrivacyFact, complete);
+    expect(completedResult.status).not.toBe(0);
+    expect(completedResult.stderr).toContain('duplicate JSON object key');
+
+    const pendingBytes = templateBytes.toString('utf8');
+    const duplicateEscapedPrivacy = pendingBytes.replace(
+      '"privacy":',
+      '"priv\\u0061cy":{"providerRawOutputAbsent":false},"privacy":',
+    );
+    const pendingResult = validateRawFixture(
+      duplicateEscapedPrivacy,
+      template,
+      ['--allow-incomplete'],
+      false,
+    );
+    expect(pendingResult.status).not.toBe(0);
+    expect(pendingResult.stderr).toContain('duplicate JSON object key');
+  });
+
+  it('rejects duplicate raw capture keys before the machine transcript can be uploaded', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-duplicate-capture-'));
+    const capturePath = resolve(root, 'computer-use-machine-transcript.json');
+    try {
+      const rawCapture = JSON.stringify(incompleteCaptureFromTemplate()).replace(
+        '"privacy":',
+        '"priv\\u0061cy":{"rawTypedText":"PRIVATE_CAPTURE_CANARY"},"privacy":',
+      );
+      writeFileSync(capturePath, rawCapture, { encoding: 'utf8', mode: 0o600 });
+      const result = spawnSync(
+        process.execPath,
+        [generatorPath, '--capture', capturePath, '--validate-capture-only'],
+        { encoding: 'utf8' },
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('duplicate JSON object key');
+      expect(evidenceWorkflow.indexOf('--validate-capture-only')).toBeLessThan(
+        evidenceWorkflow.indexOf('Upload bounded machine transcript for trusted sealing'),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects unknown verifier and generator options', () => {
@@ -599,7 +665,8 @@ describe('Computer Use external final gate', () => {
     expect(workflow).toContain('has unexpected keys');
     expect(workflow).toContain('nativeVersion is invalid');
     expect(workflow).toContain('App and native module TeamIdentifier differ.');
-    expect(workflow).toContain('$helperProbe.sourceCommit -ne $env:SOURCE_COMMIT');
+    expect(workflow).not.toContain('--probe-json');
+    expect(workflow).toContain('$nativeManifest.sourceCommit -ne $env:SOURCE_COMMIT');
     expect(workflow).toContain(
       'Signed macOS Computer Use source commit does not match the package run.',
     );
@@ -609,6 +676,23 @@ describe('Computer Use external final gate', () => {
     expect(workflow).toContain('--windows-portable-sha256 "${WINDOWS_PORTABLE_SHA256}"');
     expect(workflow).toContain('--windows-installer-sha256 "${WINDOWS_INSTALLER_SHA256}"');
     expect(workflow).toContain('--macos-sha256 "${MACOS_SHA256}"');
+  });
+
+  it('requires the release workflow signed DMG and its separately stapled app', () => {
+    expect(workflow).toContain(
+      'Developer ID-signed, notarized, and stapled macOS DMG whose embedded app was separately notarized and stapled',
+    );
+    const dmgSignature = workflow.indexOf(
+      '/usr/bin/codesign --verify --strict --verbose=2 "${dmg}"',
+    );
+    const dmgTicket = workflow.indexOf('/usr/bin/xcrun stapler validate "${dmg}"');
+    const mount = workflow.indexOf('/usr/bin/hdiutil attach "${dmg}"');
+    const appTicket = workflow.indexOf('/usr/bin/xcrun stapler validate "${app}"');
+
+    expect(dmgSignature).toBeGreaterThan(-1);
+    expect(dmgTicket).toBeGreaterThan(dmgSignature);
+    expect(mount).toBeGreaterThan(dmgTicket);
+    expect(appTicket).toBeGreaterThan(mount);
   });
 
   it('does not receive Provider credentials or upload raw acceptance output', () => {

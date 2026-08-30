@@ -10,6 +10,7 @@ import {
   computerUseEventSequenceSha256,
   computerUsePackageBindingSha256,
   computerUseTranscriptSha256,
+  parseJsonRejectingDuplicateKeys,
   validateComputerUseFinalGateEvidence,
 } from './verify-computer-use-final-gate.mjs';
 
@@ -78,7 +79,12 @@ function main() {
   const capturePath = required(options, 'capture');
   const captureBytes = readFileSync(capturePath);
   if (captureBytes.length > MAX_CAPTURE_BYTES) fail(`capture exceeds ${MAX_CAPTURE_BYTES} bytes`);
-  const capture = JSON.parse(captureBytes.toString('utf8'));
+  let capture;
+  try {
+    capture = parseJsonRejectingDuplicateKeys(captureBytes.toString('utf8'));
+  } catch (error) {
+    fail(error instanceof Error ? error.message : 'raw JSON is malformed');
+  }
   exactKeys(
     capture,
     ['schemaVersion', 'completedAt', 'providerBinding', 'privacy', 'journeys'],

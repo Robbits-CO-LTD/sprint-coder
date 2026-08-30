@@ -21,6 +21,15 @@ export function normalizeWorkspaceDisplayRelativePath(
   return segments.join('/');
 }
 
+export function canonicalizeWorkspaceFileChangePath(
+  value: string,
+  platform: NodeJS.Platform,
+): string {
+  const normalized = normalizeWorkspaceDisplayRelativePath(value, platform);
+  if (normalized === null) throw new Error('Workspace FileChange path is invalid');
+  return normalized;
+}
+
 export function formatWorkspaceDisplayPath(rootLabel: string, relativePath: string): string {
   const value = `${escapeWorkspaceDisplayComponent(rootLabel)}${WORKSPACE_DISPLAY_SEPARATOR}${escapeWorkspaceDisplayComponent(relativePath)}`;
   if (value.length > TURN_DIFF_DISPLAY_PATH_MAX_LENGTH)
