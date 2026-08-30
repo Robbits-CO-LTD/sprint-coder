@@ -14317,40 +14317,75 @@ export class SqlitePersistenceClient implements PersistenceClient {
     content: string;
     createdAt: string;
   }): AssuranceRound | null {
-    const contentHash = createHash('sha256').update(input.content).digest('hex');
-    const boundRootId = input.rootId === 'legacy-primary' ? null : input.rootId;
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM edit_sagas
-         WHERE task_id = ? AND turn_id = ? AND root_id IS ? AND state = 'committed'
-         ORDER BY updated_at DESC, id DESC`,
-      )
-      .all(input.taskId, input.turnId, boundRootId) as EditSagaRow[];
-    const saga = rows
-      .map(toEditSaga)
-      .find((candidate) =>
-        candidate.steps.some(
+    return this.db.transaction(() => {
+      const contentHash = createHash('sha256').update(input.content).digest('hex');
+      const boundRootId = input.rootId === 'legacy-primary' ? null : input.rootId;
+      const sagas = (
+        this.db
+          .prepare(
+            `SELECT * FROM edit_sagas
+             WHERE task_id = ? AND turn_id = ? AND root_id IS ? AND state = 'committed'
+             ORDER BY updated_at DESC, id DESC`,
+          )
+          .all(input.taskId, input.turnId, boundRootId) as EditSagaRow[]
+      ).map(toEditSaga);
+      let verifiedFile: { saga: EditSagaSnapshot; canonicalPath: string } | undefined = undefined;
+      for (const candidate of sagas) {
+        const step = candidate.steps.find(
           ({ operation }) =>
             operation.destination === null &&
             operation.path === input.path &&
             operation.postHash === contentHash,
-        ),
+        );
+        if (step !== undefined) {
+          verifiedFile = { saga: candidate, canonicalPath: step.operation.canonicalPath };
+          break;
+        }
+      }
+      if (verifiedFile === undefined) return null;
+      const verifiedFileSaga = verifiedFile.saga;
+      const verified = new Set(
+        this.listEvidenceRecords(input.taskId, input.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId }) => criterionId),
       );
-    if (saga === undefined) return null;
-    if (
-      this.listEvidenceRecords(input.taskId, input.turnId).some(
-        ({ criterionId }) => criterionId === `verification:${saga.id}`,
-      )
-    )
-      return null;
-    return this.recordAssuranceVerification({
-      taskId: input.taskId,
-      turnId: input.turnId,
-      sagaId: saga.id,
-      outcome: 'passed',
-      failureClass: null,
-      createdAt: input.createdAt,
-    });
+      let latest: AssuranceRound | null = null;
+      // A successful read of a file written by a later committed Saga also proves that every
+      // earlier mkdir-only Saga on its strict ancestor chain still exists. Restricting this to the
+      // same sealed root, a later Saga, and Main-observed directory post-images prevents an
+      // unrelated file read from satisfying directory evidence.
+      for (const candidate of sagas) {
+        if (
+          candidate.id === verifiedFileSaga.id ||
+          verified.has(`verification:${candidate.id}`) ||
+          !mkdirSagaVerifiedByDescendantRead(
+            candidate,
+            verifiedFileSaga,
+            verifiedFile.canonicalPath,
+          )
+        )
+          continue;
+        latest = this.recordAssuranceVerification({
+          taskId: input.taskId,
+          turnId: input.turnId,
+          sagaId: candidate.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: input.createdAt,
+        });
+        verified.add(`verification:${candidate.id}`);
+      }
+      if (!verified.has(`verification:${verifiedFileSaga.id}`))
+        latest = this.recordAssuranceVerification({
+          taskId: input.taskId,
+          turnId: input.turnId,
+          sagaId: verifiedFileSaga.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: input.createdAt,
+        });
+      return latest;
+    })();
   }
 
   private insertAcceptanceContract(contract: AcceptanceContract): void {
@@ -17790,6 +17825,29 @@ function displayTurnDiffPath(
     return value;
   const relativePath = normalizeWorkspaceDisplayRelativePath(candidate, process.platform);
   return relativePath === null ? value : formatWorkspaceDisplayPath(label, relativePath);
+}
+
+function mkdirSagaVerifiedByDescendantRead(
+  candidate: EditSagaSnapshot,
+  verifiedFileSaga: EditSagaSnapshot,
+  readCanonicalPath: string,
+): boolean {
+  if (Date.parse(candidate.updatedAt) >= Date.parse(verifiedFileSaga.createdAt)) return false;
+  return (
+    candidate.steps.length > 0 &&
+    candidate.steps.every(({ operation, postObservation }) => {
+      if (operation.kind !== 'mkdir' || postObservation?.source.state !== 'present') return false;
+      const revision = postObservation.source.revision;
+      if (!('entryKind' in revision) || revision.entryKind !== 'directory') return false;
+      const relation = relative(operation.canonicalPath, readCanonicalPath);
+      return (
+        relation.length > 0 &&
+        !isAbsolute(relation) &&
+        relation !== '..' &&
+        !relation.startsWith(`..${sep}`)
+      );
+    })
+  );
 }
 
 export class NotFoundError extends Error {}

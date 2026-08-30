@@ -2702,6 +2702,203 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    artifactIt('uses a verified descendant file read to verify an earlier mkdir Saga', async () => {
+      const { persistence, path } = createPersistence();
+      const rootId = randomUUID();
+      const rootIdentityDigest = 'a'.repeat(64);
+      const workspacePath = join(dirname(path), 'mkdir-read-root');
+      const directoryPath = join(workspacePath, 'smoke-final');
+      const unrelatedDirectoryPath = join(workspacePath, 'unrelated');
+      const workspaceFile = join(directoryPath, 'codex.txt');
+      mkdirSync(workspacePath, { recursive: true });
+      const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
+      const project = persistence.createProject({
+        name: 'mkdir read verification',
+        folders: [
+          {
+            id: rootId,
+            path: workspacePath,
+            canonicalPath: workspacePath,
+            label: 'mkdir-read-root',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('mkdir then verify child', false, project.id);
+      const turn = persistence.startTurn(task.id, 'create a directory and a verified child file');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(dirname(path), 'mkdir-read-artifacts'),
+        quotaBytes: 4096,
+      });
+      const store = new PersistenceEditSagaStore(persistence);
+      const binding = { rootId, workspacePath, workspaceKey, rootIdentityDigest };
+
+      const directorySaga = await new EditSagaExecutor(
+        store,
+        directoryBoundary(directoryPath),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-read-directory-lease'),
+      ).apply({
+        id: 'mkdir-read-directory-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-read-directory-operation',
+        plan: persistedMkdirPlan(directoryPath),
+        mutationBinding: binding,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      const unrelatedDirectorySaga = await new EditSagaExecutor(
+        store,
+        directoryBoundary(unrelatedDirectoryPath),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-read-unrelated-lease'),
+      ).apply({
+        id: 'mkdir-read-unrelated-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-read-unrelated-operation',
+        plan: persistedMkdirPlan(unrelatedDirectoryPath),
+        mutationBinding: binding,
+        createdAt: new Date(Date.parse(directorySaga.updatedAt) + 1_000).toISOString(),
+      });
+      writeFileSync(workspaceFile, 'before');
+      const fileSaga = await new EditSagaExecutor(
+        store,
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-read-file-lease'),
+      ).apply({
+        id: 'mkdir-read-file-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-read-file-operation',
+        plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+        mutationBinding: binding,
+        createdAt: new Date(Date.parse(unrelatedDirectorySaga.updatedAt) + 1_000).toISOString(),
+      });
+
+      expect(
+        persistence.recordWorkspaceReadVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          rootId,
+          path: workspaceFile,
+          content: 'after',
+          createdAt: new Date(Date.parse(fileSaga.updatedAt) + 1_000).toISOString(),
+        }),
+      ).toMatchObject({ sagaId: 'mkdir-read-file-saga', decision: 'complete' });
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId }) => criterionId)
+          .sort(),
+      ).toEqual(['verification:mkdir-read-directory-saga', 'verification:mkdir-read-file-saga']);
+      expect(
+        persistence.recordAssuranceVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: unrelatedDirectorySaga.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: new Date(Date.parse(fileSaga.updatedAt) + 2_000).toISOString(),
+        }),
+      ).toMatchObject({ decision: 'complete' });
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).not.toThrow();
+      persistence.close();
+    });
+
+    artifactIt('does not infer mkdir ancestry from unsealed original path spellings', async () => {
+      const { persistence, path } = createPersistence();
+      const rootId = randomUUID();
+      const rootIdentityDigest = 'a'.repeat(64);
+      const workspacePath = join(dirname(path), 'mkdir-spelling-root');
+      const directoryPath = join(workspacePath, 'actual-parent');
+      const siblingPath = join(workspacePath, 'actual-sibling');
+      const workspaceFile = join(siblingPath, 'file.txt');
+      mkdirSync(workspacePath, { recursive: true });
+      const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
+      const project = persistence.createProject({
+        name: 'mkdir spelling verification',
+        folders: [
+          {
+            id: rootId,
+            path: workspacePath,
+            canonicalPath: workspacePath,
+            label: 'mkdir-spelling-root',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('do not trust path spelling', false, project.id);
+      const turn = persistence.startTurn(task.id, 'verify only canonical descendants');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(dirname(path), 'mkdir-spelling-artifacts'),
+        quotaBytes: 4096,
+      });
+      const store = new PersistenceEditSagaStore(persistence);
+      const binding = { rootId, workspacePath, workspaceKey, rootIdentityDigest };
+      const directorySaga = await new EditSagaExecutor(
+        store,
+        directoryBoundary(directoryPath),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-spelling-directory-lease'),
+      ).apply({
+        id: 'mkdir-spelling-directory-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-spelling-directory-operation',
+        plan: persistedMkdirPlan('virtual/parent', directoryPath),
+        mutationBinding: binding,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      mkdirSync(siblingPath);
+      writeFileSync(workspaceFile, 'before');
+      const fileSaga = await new EditSagaExecutor(
+        store,
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-spelling-file-lease'),
+      ).apply({
+        id: 'mkdir-spelling-file-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-spelling-file-operation',
+        plan: persistedEditPlan('before', 'after', 'virtual/parent/file.txt', workspaceFile),
+        mutationBinding: binding,
+        createdAt: new Date(Date.parse(directorySaga.updatedAt) + 1_000).toISOString(),
+      });
+
+      expect(
+        persistence.recordWorkspaceReadVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          rootId,
+          path: 'virtual/parent/file.txt',
+          content: 'after',
+          createdAt: new Date(Date.parse(fileSaga.updatedAt) + 1_000).toISOString(),
+        }),
+      ).toMatchObject({ sagaId: fileSaga.id, decision: 'complete' });
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId }) => criterionId),
+      ).toEqual(['verification:mkdir-spelling-file-saga']);
+      persistence.close();
+    });
+
     it('persists the Acceptance Contract and refuses completion before edit evidence exists', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -7952,6 +8149,29 @@ function persistedEditPlanForKind(kind: 'add' | 'delete' | 'rename'): PreparedSt
   return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
 }
 
+function persistedMkdirPlan(path: string, canonicalPath = path): PreparedStructuredPatch {
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      Object.freeze({
+        kind: 'mkdir' as const,
+        path,
+        canonicalPath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: null,
+        preRevision: null,
+        preImage: null,
+        postImage: null,
+        preHash: null,
+        postHash: null,
+      }),
+    ]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
 function editHash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -8173,6 +8393,34 @@ function fileBoundary(
       const value = (await artifacts.read(reference)).toString('utf8');
       writeFileSync(filePath, value);
       return observeValue(value);
+    },
+  };
+}
+
+function directoryBoundary(directoryPath: string): EditEffectBoundary {
+  const observation = (): OperationObservation =>
+    existsSync(directoryPath)
+      ? {
+          source: {
+            state: 'present',
+            revision: { entryKind: 'directory', identityDigest: editHash(directoryPath) },
+          },
+          destination: { state: 'absent' },
+        }
+      : { source: { state: 'absent' }, destination: { state: 'absent' } };
+  return {
+    async apply() {
+      mkdirSync(directoryPath);
+      return observation();
+    },
+    async observe() {
+      return existsSync(directoryPath)
+        ? { state: 'post' as const, observation: observation() }
+        : { state: 'pre' as const, observation: observation() };
+    },
+    async restore() {
+      rmSync(directoryPath, { recursive: true, force: true });
+      return observation();
     },
   };
 }
