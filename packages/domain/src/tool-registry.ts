@@ -9,7 +9,9 @@ export const toolKinds = [
   'network',
   'backgroundTask',
   'agentControl',
+  'computer',
 ] as const;
+export const computerUseToolKind = 'computer' as const;
 const toolSideEffects = ['none', 'read', 'write', 'process', 'network', 'control'] as const;
 const toolRisks = ['low', 'medium', 'high'] as const;
 const toolExecutionTargets = ['main', 'utility', 'command-runner', 'mcp-gateway'] as const;
@@ -19,6 +21,14 @@ export type ToolSideEffect = (typeof toolSideEffects)[number];
 export type ToolRisk = (typeof toolRisks)[number];
 export type ToolExecutionTarget = (typeof toolExecutionTargets)[number];
 export type ToolImplementationKind = (typeof toolImplementationKinds)[number];
+export const toolRegistryAudiences = [
+  'chat',
+  'managed-coding',
+  'team',
+  'background',
+  'computer-controller',
+] as const;
+export type ToolRegistryAudience = (typeof toolRegistryAudiences)[number];
 export type WorkspaceBinding =
   | Readonly<{ kind: 'none' }>
   | Readonly<{ kind: 'any' }>
@@ -150,6 +160,10 @@ const TOOL_ID_COMPONENT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const TOOL_VERSION = /^[0-9][a-zA-Z0-9._-]{0,31}$/;
 const PROVIDER_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
+
+export function isComputerUseToolKind(kind: ToolKind): boolean {
+  return kind === computerUseToolKind;
+}
 
 export function createToolId(parts: ToolIdParts): ToolId {
   validateToolIdParts(parts);
@@ -343,9 +357,20 @@ export class ToolRegistry {
   }
 
   getByKind(kind: ToolKind): readonly ToolDefinition[] {
+    return this.getByKindForAudience(kind, 'chat');
+  }
+
+  protected getByKindForAudience(
+    kind: ToolKind,
+    audience: ToolRegistryAudience,
+  ): readonly ToolDefinition[] {
     return Object.freeze(
       [...this.definitions.values()]
-        .filter((definition) => definition.kind === kind)
+        .filter(
+          (definition) =>
+            definition.kind === kind &&
+            (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)),
+        )
         .sort((left, right) => left.toolId.localeCompare(right.toolId)),
     );
   }
@@ -355,11 +380,23 @@ export class ToolRegistry {
     workspaceId: string | null;
     availableToolIds?: readonly ToolId[];
   }): ToolCatalogSnapshot {
+    return this.createSnapshotForAudience(input, 'chat');
+  }
+
+  protected createSnapshotForAudience(
+    input: {
+      providerId: string;
+      workspaceId: string | null;
+      availableToolIds?: readonly ToolId[];
+    },
+    audience: ToolRegistryAudience,
+  ): ToolCatalogSnapshot {
     if (!TOOL_ID_COMPONENT.test(input.providerId)) throw new Error('Invalid provider id');
     const available =
       input.availableToolIds === undefined ? null : new Set<ToolId>(input.availableToolIds);
     const eligible = [...this.definitions.values()].filter(
       (definition) =>
+        (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)) &&
         (available === null || available.has(definition.toolId)) &&
         (definition.providerCompatibility.includes('*') ||
           definition.providerCompatibility.includes(input.providerId)) &&
@@ -395,6 +432,27 @@ export class ToolRegistry {
     return deepFreeze({ ...snapshotFacts, digest: digestToolCatalogValue(snapshotFacts) });
   }
 }
+
+/**
+ * The only registry surface that can advertise Computer Use.  Keeping this as a separate type
+ * makes the renderer/runtime call site explicit and prevents a regular Chat or Team snapshot from
+ * accidentally opting into the controller audience.
+ */
+export class ComputerUseToolRegistry extends ToolRegistry {
+  override createSnapshot(input: {
+    providerId: string;
+    workspaceId: string | null;
+    availableToolIds?: readonly ToolId[];
+  }): ToolCatalogSnapshot {
+    return this.createSnapshotForAudience(input, 'computer-controller');
+  }
+
+  override getByKind(kind: ToolKind): readonly ToolDefinition[] {
+    return this.getByKindForAudience(kind, 'computer-controller');
+  }
+}
+
+export const ControllerToolRegistry = ComputerUseToolRegistry;
 
 export function verifyToolCatalogSnapshot(snapshot: ToolCatalogSnapshot): boolean {
   try {
@@ -531,7 +589,10 @@ function validateAuthorityMetadata(
                   (required.has('workspace.read') || required.has('filesystem.external.read')))
               : input.kind === 'backgroundTask' || input.kind === 'agentControl'
                 ? input.sideEffect === 'control' && input.requiredCapabilities.length > 0
-                : false;
+                : input.kind === 'computer'
+                  ? input.sideEffect === 'control' &&
+                    (required.has('computer.observe') || required.has('computer.control'))
+                  : false;
   if (!matchesKind) throw new Error('ToolKind, side effect, and capability are inconsistent');
 }
 

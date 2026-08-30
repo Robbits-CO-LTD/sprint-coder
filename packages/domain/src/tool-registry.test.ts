@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ToolRegistry,
+  ComputerUseToolRegistry,
   createToolDefinition,
   createToolId,
   parseToolId,
@@ -337,5 +338,61 @@ describe('Tool Registry domain', () => {
     expect(changed.createSnapshot({ providerId: 'mock', workspaceId: null }).digest).not.toBe(
       left.createSnapshot({ providerId: 'mock', workspaceId: null }).digest,
     );
+  });
+});
+
+describe('Computer Use controller registry', () => {
+  it('never advertises the controller tool to a regular Chat snapshot', () => {
+    const computer = definition({
+      toolId: createToolId({
+        provider: 'builtin',
+        namespace: 'computer',
+        name: 'control',
+        version: '1',
+      }),
+      providerName: 'computer_control',
+      kind: 'computer',
+      sideEffect: 'control',
+      risk: 'high',
+      requiredCapabilities: ['computer.control'],
+      executionTarget: 'main',
+      implementationKind: 'built-in',
+    });
+    const registry = new ToolRegistry();
+    registry.register(computer);
+    expect(registry.createSnapshot({ providerId: 'mock', workspaceId: null }).entries).toEqual([]);
+    expect(registry.getByKind('computer')).toEqual([]);
+  });
+
+  it('exposes Computer Use only through the dedicated controller registry', () => {
+    const registry = new ComputerUseToolRegistry();
+    registry.register(
+      definition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'computer',
+          name: 'observe',
+          version: '1',
+        }),
+        providerName: 'computer_observe',
+        kind: 'computer',
+        sideEffect: 'control',
+        requiredCapabilities: ['computer.observe'],
+      }),
+    );
+    expect(registry.getByKind('computer')).toHaveLength(1);
+    expect(registry.createSnapshot({ providerId: 'mock', workspaceId: null }).entries).toHaveLength(
+      1,
+    );
+  });
+
+  it('requires a Computer capability for a controller tool', () => {
+    expect(() =>
+      definition({
+        kind: 'computer',
+        sideEffect: 'control',
+        requiredCapabilities: ['workspace.read'],
+      }),
+    ).toThrow('ToolKind, side effect, and capability are inconsistent');
   });
 });

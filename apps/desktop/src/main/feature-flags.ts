@@ -17,3 +17,11 @@ export function settingsWorkspaceV2Enabled(env: FeatureFlagEnvironment = process
 export function projectMultiFolderUxEnabled(env: FeatureFlagEnvironment = process.env): boolean {
   return env['SPRINT_CODER_PROJECT_MULTI_FOLDER_UX'] !== '0';
 }
+
+/**
+ * Desktop Computer Use is a privileged preview, not a rollout switch.  Only an exact opt-in may
+ * make Main probe the separately signed native boundary; every other value stays fail-closed.
+ */
+export function computerUseDesktopV1Enabled(env: FeatureFlagEnvironment = process.env): boolean {
+  return env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] === '1';
+}

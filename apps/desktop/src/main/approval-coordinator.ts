@@ -459,6 +459,8 @@ function operationFor(capability: Capability): PermissionOperation {
   if (capability === 'shell.execute') return 'execute';
   if (capability === 'secret.use') return 'use';
   if (capability === 'provider.egress') return 'egress';
+  if (capability === 'computer.observe') return 'observe';
+  if (capability === 'computer.control') return 'control';
   return capability.endsWith('.write') ? 'write' : 'read';
 }
 
@@ -628,7 +630,6 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
   }
   return stableStringify(request.input);
 }
-
 function digest(value: unknown): string {
   return createHash('sha256').update(stableStringify(value)).digest('hex');
 }

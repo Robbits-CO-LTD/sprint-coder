@@ -18376,7 +18376,17 @@ function parsePermissionGrantRow(row: PermissionGrantRow): SessionGrant {
 
 function parsePermissionOperations(json: string): PermissionOperation[] {
   const value = JSON.parse(json) as unknown;
-  const valid = ['read', 'write', 'execute', 'fetch', 'open', 'use', 'egress'] as const;
+  const valid = [
+    'read',
+    'write',
+    'execute',
+    'fetch',
+    'open',
+    'use',
+    'egress',
+    'observe',
+    'control',
+  ] as const;
   if (!Array.isArray(value) || !value.every((item) => valid.includes(item as PermissionOperation)))
     throw new Error('Invalid stored permission operations');
   return value as PermissionOperation[];

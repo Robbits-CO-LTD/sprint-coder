@@ -26,6 +26,10 @@ export const toolKindSchema = z.enum([
   'network',
   'backgroundTask',
   'agentControl',
+  // Computer Use is a controller-only tool.  Keeping it in the shared catalog lets Main and
+  // the native host agree on the protocol while the domain registry still filters it from Chat,
+  // Team, and Managed Coding Harness snapshots.
+  'computer',
 ]);
 export const toolSideEffectSchema = z.enum([
   'none',
@@ -46,6 +50,8 @@ export const toolCapabilitySchema = z.enum([
   'external.open',
   'secret.use',
   'provider.egress',
+  'computer.observe',
+  'computer.control',
 ]);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const toolCatalogEntrySchema = z
@@ -4067,6 +4073,7 @@ export const appInfoSchema = z
     projectMultiFolderUx: z.boolean().optional(),
   })
   .strict();
+export type AppInfo = z.infer<typeof appInfoSchema>;
 
 /**
  * Liveness of the Runtime process, for the SurfaceFooter's connection indicator (issue #9).
@@ -4118,8 +4125,941 @@ export const turnStartResultSchema = z
   .strict();
 export const voidResultSchema = z.undefined();
 
+/*
+ * Computer Use contracts (Issue #333)
+ *
+ * These DTOs deliberately describe identity and bounded observations rather than OS handles.
+ * Process ids, window handles, executable paths, raw provider responses, and active grants never
+ * cross the renderer boundary.  Main may use the richer native identity internally, while the
+ * profile and picker contracts below expose only stable, non-authoritative fingerprints.
+ */
+
+export const computerUseModeSchema = z.enum(['observe_only', 'supervised', 'full_access_app']);
+export type ComputerUseMode = z.infer<typeof computerUseModeSchema>;
+const COMPUTER_USE_MODE_RANK: Readonly<Record<ComputerUseMode, number>> = Object.freeze({
+  observe_only: 0,
+  supervised: 1,
+  full_access_app: 2,
+});
+
+/** Returns the least-privileged mode attested by every supplied boundary. */
+export function bindComputerUseMaximumMode(...modes: readonly ComputerUseMode[]): ComputerUseMode {
+  if (modes.length === 0) return 'observe_only';
+  return modes.reduce((least, mode) =>
+    COMPUTER_USE_MODE_RANK[mode] < COMPUTER_USE_MODE_RANK[least] ? mode : least,
+  );
+}
+
+export function computerUseModeIsWithinMaximum(
+  mode: ComputerUseMode,
+  maximumMode: ComputerUseMode,
+): boolean {
+  return COMPUTER_USE_MODE_RANK[mode] <= COMPUTER_USE_MODE_RANK[maximumMode];
+}
+/**
+ * Language for which the target application's native UI was attested. `unknown` is a negative
+ * capability fact: it can be observed or supervised, but it never authorizes full-access input.
+ */
+export const computerUsePolicyLanguageSchema = z.enum(['en', 'ja', 'unknown']);
+export type ComputerUsePolicyLanguage = z.infer<typeof computerUsePolicyLanguageSchema>;
+
+export function computerUsePolicyLanguageIsSupported(
+  language: ComputerUsePolicyLanguage,
+): language is Exclude<ComputerUsePolicyLanguage, 'unknown'> {
+  return language === 'en' || language === 'ja';
+}
+
+/** Returns the common supported attestation, or `unknown` for missing/mixed evidence. */
+export function bindComputerUsePolicyLanguage(
+  ...languages: readonly ComputerUsePolicyLanguage[]
+): ComputerUsePolicyLanguage {
+  const first = languages[0];
+  return first !== undefined &&
+    computerUsePolicyLanguageIsSupported(first) &&
+    languages.every((language) => language === first)
+    ? first
+    : 'unknown';
+}
+
+/** Runtime availability can be reported on every desktop; only these two platforms attach. */
+export const computerUseRuntimePlatformSchema = z.enum(['darwin', 'win32', 'linux', 'other']);
+export type ComputerUseRuntimePlatform = z.infer<typeof computerUseRuntimePlatformSchema>;
+/** Identity and native input contracts are deliberately narrower than runtime availability. */
+export const computerUsePlatformSchema = z.enum(['darwin', 'win32']);
+export type ComputerUsePlatform = z.infer<typeof computerUsePlatformSchema>;
+export const computerUsePickerKindSchema = z.enum(['menu', 'dialog', 'shortcut', 'explicit']);
+export type ComputerUsePickerKind = z.infer<typeof computerUsePickerKindSchema>;
+
+export const computerUseResultSchema = z.enum([
+  'completed',
+  'rejected',
+  'paused',
+  'canceled',
+  'unknown_effect',
+]);
+export type ComputerUseResult = z.infer<typeof computerUseResultSchema>;
+
+export const computerUseActionKindSchema = z.enum([
+  'invoke',
+  'set_text',
+  'select',
+  'toggle',
+  'expand_collapse',
+  'scroll',
+  'click',
+  'type',
+  'key',
+  'wait',
+  'finish',
+]);
+export type ComputerUseActionKind = z.infer<typeof computerUseActionKindSchema>;
+
+export const computerUseKeySchema = z.enum([
+  'Enter',
+  'Tab',
+  'Escape',
+  'Backspace',
+  'Delete',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+]);
+export type ComputerUseKey = z.infer<typeof computerUseKeySchema>;
+
+const computerUseIdSchema = z.string().min(1).max(128);
+const computerUseDigestSchema = digestSchema;
+const computerUseLabelSchema = z.string().trim().min(1).max(256);
+const computerUseConnectionIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+const computerUseModelIdSchema = z.string().trim().min(1).max(256);
+const computerUseProviderEgressConsentBindingSchema = z
+  .object({ connectionId: computerUseConnectionIdSchema, modelId: computerUseModelIdSchema })
+  .strict();
+export type ComputerUseProviderEgressConsentBinding = z.infer<
+  typeof computerUseProviderEgressConsentBindingSchema
+>;
+const computerUseUtf8TextSchema = z
+  .string()
+  .refine(
+    (value) => new TextEncoder().encode(value).byteLength <= 4_096,
+    'Text action exceeds the 4096-byte UTF-8 limit',
+  );
+const computerUsePreviewSchema = z.string().max(256, 'Approval preview exceeds 256 characters');
+
+/** Native-side identity. It is never accepted from a renderer registration request. */
+export const computerWindowsAppIdentitySchema = z
+  .object({
+    platform: z.literal('win32'),
+    identityDigest: computerUseDigestSchema,
+    executablePath: z.string().min(1).max(4_096),
+    executableDigest: computerUseDigestSchema,
+    signerDigest: computerUseDigestSchema.nullable(),
+    packageFamilyName: z.string().min(1).max(256).nullable(),
+    appUserModelId: z.string().min(1).max(256).nullable(),
+    displayName: computerUseLabelSchema,
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    maximumMode: computerUseModeSchema.default('observe_only'),
+  })
+  .strict();
+export type ComputerWindowsAppIdentity = z.infer<typeof computerWindowsAppIdentitySchema>;
+
+/** Native-side identity. It is never accepted from a renderer registration request. */
+export const computerMacosAppIdentitySchema = z
+  .object({
+    platform: z.literal('darwin'),
+    identityDigest: computerUseDigestSchema,
+    bundleId: z.string().min(1).max(256),
+    executablePath: z.string().min(1).max(4_096),
+    executableDigest: computerUseDigestSchema,
+    teamId: z.string().min(1).max(64).nullable(),
+    signingIdentifier: z.string().min(1).max(256).nullable(),
+    cdHash: computerUseDigestSchema.nullable(),
+    displayName: computerUseLabelSchema,
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    maximumMode: computerUseModeSchema.default('observe_only'),
+  })
+  .strict();
+export type ComputerMacosAppIdentity = z.infer<typeof computerMacosAppIdentitySchema>;
+
+export const computerAppIdentitySchema = z.discriminatedUnion('platform', [
+  computerWindowsAppIdentitySchema,
+  computerMacosAppIdentitySchema,
+]);
+export type ComputerAppIdentity = z.infer<typeof computerAppIdentitySchema>;
+export const computerUseAppIdentitySchema = computerAppIdentitySchema;
+
+/**
+ * Stable identity facts that may be sent by a picker.  In particular this schema has no `path`,
+ * `pid`, `processId`, `windowHandle`, or HWND field; Main obtains and verifies those facts itself.
+ */
+export const computerAppIdentityRefSchema = z
+  .object({
+    platform: computerUsePlatformSchema,
+    identityDigest: computerUseDigestSchema,
+    displayName: computerUseLabelSchema,
+    bundleId: z.string().min(1).max(256).nullable().optional(),
+    packageFamilyName: z.string().min(1).max(256).nullable().optional(),
+    signerDigest: computerUseDigestSchema.nullable().optional(),
+    teamId: z.string().min(1).max(64).nullable().optional(),
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    maximumMode: computerUseModeSchema.default('observe_only'),
+  })
+  .strict();
+export type ComputerAppIdentityRef = z.infer<typeof computerAppIdentityRefSchema>;
+
+const computerUseBoundsSchema = z
+  .object({
+    x: z.number().finite(),
+    y: z.number().finite(),
+    width: z.number().finite().positive().max(32_768),
+    height: z.number().finite().positive().max(32_768),
+  })
+  .strict();
+
+export const computerUseWindowCandidateSchema = z
+  .object({
+    windowId: computerUseIdSchema,
+    platform: computerUsePlatformSchema.optional(),
+    appIdentityDigest: computerUseDigestSchema,
+    windowIdentityDigest: computerUseDigestSchema,
+    title: computerUseLabelSchema,
+    bounds: computerUseBoundsSchema,
+    focused: z.boolean(),
+    eligible: z.boolean(),
+    ownerKind: z.enum(['application', 'dialog', 'unknown']),
+    modal: z.boolean(),
+    revision: z.number().int().nonnegative(),
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    maximumMode: computerUseModeSchema.default('observe_only'),
+  })
+  .strict();
+export type ComputerUseWindowCandidate = z.infer<typeof computerUseWindowCandidateSchema>;
+export const computerUseWindowSchema = computerUseWindowCandidateSchema;
+
+export const computerUseAvailabilityStateSchema = z.enum([
+  'ready',
+  'feature_disabled',
+  'unsupported_platform',
+  'unsigned_package',
+  'native_unavailable',
+  'handshake_failed',
+]);
+export type ComputerUseAvailabilityState = z.infer<typeof computerUseAvailabilityStateSchema>;
+
+export const computerUseAvailabilitySchema = z
+  .object({
+    platform: computerUseRuntimePlatformSchema,
+    state: computerUseAvailabilityStateSchema,
+    featureEnabled: z.boolean(),
+    packageReady: z.boolean(),
+    handshakeReady: z.boolean(),
+    observe: z.boolean(),
+    control: z.boolean(),
+    available: z.boolean(),
+    reasonCode: z
+      .string()
+      .regex(/^[a-z][a-z0-9._-]{0,63}$/)
+      .nullable(),
+    manifestDigest: computerUseDigestSchema.nullable(),
+  })
+  .strict()
+  .superRefine((availability, context) => {
+    const nativeBoundaryReady =
+      availability.featureEnabled && availability.packageReady && availability.handshakeReady;
+    if (availability.available !== (nativeBoundaryReady && availability.observe))
+      context.addIssue({ code: 'custom', message: 'Availability does not match its gates' });
+    if (availability.control && !availability.available)
+      context.addIssue({
+        code: 'custom',
+        message: 'Control cannot be available when observe is not',
+      });
+    if (
+      availability.state === 'ready' &&
+      (!nativeBoundaryReady || !availability.observe || !availability.available)
+    )
+      context.addIssue({ code: 'custom', message: 'Ready availability requires all gates' });
+    if (availability.state !== 'ready' && nativeBoundaryReady && availability.observe)
+      context.addIssue({ code: 'custom', message: 'A failed state cannot have all gates ready' });
+  });
+export type ComputerUseAvailability = z.infer<typeof computerUseAvailabilitySchema>;
+export const computerUseAvailabilityResultSchema = computerUseAvailabilitySchema;
+
+export const computerUseProfileRegisterInputSchema = z
+  // Main consumes a recent trusted input and opens the OS picker. No identity fact is accepted
+  // from Renderer; provider/mode preferences are selected on the second onboarding screen.
+  .object({ taskId: computerUseIdSchema })
+  .strict();
+export type ComputerUseProfileRegisterInput = z.infer<typeof computerUseProfileRegisterInputSchema>;
+
+export const computerAppProfileSchema = z
+  .object({
+    id: computerUseIdSchema,
+    label: computerUseLabelSchema,
+    identity: computerAppIdentityRefSchema,
+    mode: computerUseModeSchema,
+    connectionId: computerUseConnectionIdSchema,
+    modelId: computerUseModelIdSchema,
+    providerEgressConsent: z.boolean(),
+    remember: z.boolean().default(true),
+    profileRevision: z.number().int().nonnegative().default(0),
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    maximumMode: computerUseModeSchema.default('observe_only'),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+  })
+  .strict()
+  .superRefine((profile, context) => {
+    if (profile.policyLanguage !== profile.identity.policyLanguage)
+      context.addIssue({
+        code: 'custom',
+        message: 'Profile policy language must match its native identity attestation',
+      });
+    if (profile.maximumMode !== profile.identity.maximumMode)
+      context.addIssue({
+        code: 'custom',
+        message: 'Profile maximum mode must match its native identity attestation',
+      });
+    if (!computerUseModeIsWithinMaximum(profile.mode, profile.maximumMode))
+      context.addIssue({
+        code: 'custom',
+        message: 'Profile mode exceeds its native maximum mode',
+      });
+  });
+export type ComputerAppProfile = z.infer<typeof computerAppProfileSchema>;
+export const computerUseProfileSchema = computerAppProfileSchema;
+export const computerUseAppProfileSchema = computerAppProfileSchema;
+
+export const computerUseProfilePreferenceSetInputSchema = z
+  .object({
+    profileId: computerUseIdSchema,
+    expectedProfileRevision: z.number().int().nonnegative(),
+    label: computerUseLabelSchema.optional(),
+    mode: computerUseModeSchema.optional(),
+    connectionId: computerUseConnectionIdSchema.optional(),
+    modelId: computerUseModelIdSchema.optional(),
+    providerEgressConsent: z.boolean().optional(),
+    remember: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    ({ label, mode, connectionId, modelId, providerEgressConsent, remember }) =>
+      label !== undefined ||
+      mode !== undefined ||
+      connectionId !== undefined ||
+      modelId !== undefined ||
+      providerEgressConsent !== undefined ||
+      remember !== undefined,
+    'Profile preference update cannot be empty',
+  );
+export type ComputerUseProfilePreferenceSetInput = z.infer<
+  typeof computerUseProfilePreferenceSetInputSchema
+>;
+export const computerUseProfileUpdateInputSchema = computerUseProfilePreferenceSetInputSchema;
+
+export const computerUseProfileListInputSchema = z
+  .object({ taskId: computerUseIdSchema.optional() })
+  .strict();
+export type ComputerUseProfileListInput = z.infer<typeof computerUseProfileListInputSchema>;
+export const computerUseProfileListResultSchema = z
+  .object({ profiles: z.array(computerAppProfileSchema).max(64) })
+  .strict();
+export type ComputerUseProfileListResult = z.infer<typeof computerUseProfileListResultSchema>;
+export const computerUseWindowCandidatesInputSchema = z
+  .object({ taskId: computerUseIdSchema, profileId: computerUseIdSchema })
+  .strict();
+export type ComputerUseWindowCandidatesInput = z.infer<
+  typeof computerUseWindowCandidatesInputSchema
+>;
+export const computerUseWindowCandidatesResultSchema = z
+  .object({
+    profileId: computerUseIdSchema,
+    candidates: z.array(computerUseWindowCandidateSchema).max(64),
+  })
+  .strict();
+export type ComputerUseWindowCandidatesResult = z.infer<
+  typeof computerUseWindowCandidatesResultSchema
+>;
+
+export const computerUseStartInputSchema = z
+  .object({
+    taskId: computerUseIdSchema,
+    /** Reuses the start consent lane to resume the exact paused ephemeral session. */
+    resumeSessionId: computerUseIdSchema.optional(),
+    profileId: computerUseIdSchema,
+    windowId: computerUseIdSchema,
+    mode: computerUseModeSchema.default('full_access_app'),
+    connectionId: computerUseConnectionIdSchema,
+    modelId: computerUseModelIdSchema,
+    providerEgressConsent: z.boolean(),
+    providerEgressConsentBinding: computerUseProviderEgressConsentBindingSchema,
+    remember: z.boolean().default(false),
+    expectedPolicyEpoch: z.number().int().nonnegative(),
+    expectedWindowRevision: z.number().int().positive(),
+    expectedProfileRevision: z.number().int().positive(),
+  })
+  .strict();
+export type ComputerUseStartInput = z.infer<typeof computerUseStartInputSchema>;
+
+export const computerUseStopReasonSchema = z.enum([
+  'user_stop',
+  'emergency_stop',
+  'task_changed',
+  'turn_started',
+  'policy_changed',
+  'window_closed',
+  'app_closed',
+  'focus_lost',
+  'stale_observation',
+  'file_picker',
+  'os_prompt',
+  'user_takeover',
+  'renderer_reloaded',
+  'limit_reached',
+  'native_unavailable',
+  'error',
+]);
+export type ComputerUseStopReason = z.infer<typeof computerUseStopReasonSchema>;
+
+export const computerUseSessionStateSchema = z.enum([
+  'starting',
+  'observing',
+  'planning',
+  'acting',
+  'awaiting_approval',
+  'paused',
+  'stopping',
+  'stopped',
+  'failed',
+]);
+export type ComputerUseSessionState = z.infer<typeof computerUseSessionStateSchema>;
+
+export const computerUseSessionStatusSchema = z
+  .object({
+    sessionId: computerUseIdSchema,
+    taskId: computerUseIdSchema,
+    profileId: computerUseIdSchema,
+    windowId: computerUseIdSchema,
+    connectionId: computerUseConnectionIdSchema,
+    modelId: computerUseModelIdSchema,
+    appIdentityDigest: computerUseDigestSchema,
+    windowIdentityDigest: computerUseDigestSchema,
+    profileRevision: z.number().int().nonnegative().default(0),
+    mode: computerUseModeSchema,
+    maximumMode: computerUseModeSchema.default('observe_only'),
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    state: computerUseSessionStateSchema,
+    statusRevision: z.number().int().nonnegative().default(0),
+    policyEpoch: z.number().int().nonnegative(),
+    observationRevision: z.number().int().nonnegative(),
+    round: z.number().int().nonnegative().max(25),
+    maxRounds: z.literal(25),
+    startedAt: timestampSchema,
+    expiresAt: timestampSchema,
+    lastObservationAt: timestampSchema.nullable(),
+    stopReason: computerUseStopReasonSchema.nullable(),
+    /** Ephemeral card for the current action; Main must never persist its preview. */
+    pendingApproval: z
+      .lazy(() => computerUseApprovalSchema)
+      .nullable()
+      .default(null),
+  })
+  .strict()
+  .superRefine((status, context) => {
+    const startedAt = Date.parse(status.startedAt);
+    const expiresAt = Date.parse(status.expiresAt);
+    if (expiresAt <= startedAt)
+      context.addIssue({ code: 'custom', message: 'Session expiry must be after start' });
+    if (expiresAt - startedAt > 8 * 60 * 60 * 1_000)
+      context.addIssue({ code: 'custom', message: 'Session exceeds the eight-hour limit' });
+    if (status.state === 'stopped' && status.stopReason === null)
+      context.addIssue({ code: 'custom', message: 'Stopped session requires a stop reason' });
+    if (status.state !== 'stopped' && status.stopReason !== null)
+      context.addIssue({ code: 'custom', message: 'Only stopped sessions have a stop reason' });
+    if (
+      status.mode === 'full_access_app' &&
+      !computerUsePolicyLanguageIsSupported(status.policyLanguage)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Full access requires a supported target policy language attestation',
+      });
+    if (!computerUseModeIsWithinMaximum(status.mode, status.maximumMode))
+      context.addIssue({ code: 'custom', message: 'Session mode exceeds its native maximum mode' });
+  });
+export type ComputerUseSessionStatus = z.infer<typeof computerUseSessionStatusSchema>;
+export const computerUseSessionSchema = computerUseSessionStatusSchema;
+export const computerUseStatusSchema = computerUseSessionStatusSchema;
+export type ComputerUseSession = ComputerUseSessionStatus;
+export const computerUseSessionStatusInputSchema = z
+  .object({ sessionId: computerUseIdSchema })
+  .strict();
+export type ComputerUseSessionStatusInput = z.infer<typeof computerUseSessionStatusInputSchema>;
+export const computerUseStopInputSchema = z
+  .object({ sessionId: computerUseIdSchema, reason: computerUseStopReasonSchema })
+  .strict();
+export type ComputerUseStopInput = z.infer<typeof computerUseStopInputSchema>;
+
+const normalizedCoordinateSchema = z.number().finite().min(0).max(1);
+const semanticTargetSchema = z.string().min(1).max(128);
+const semanticArgumentsSchema = z
+  .record(z.string(), z.json())
+  .refine((value) => Object.keys(value).length <= 64, 'Too many semantic action arguments');
+
+const computerInvokeActionSchema = z
+  .object({
+    type: z.literal('invoke'),
+    targetId: semanticTargetSchema,
+    name: z.string().regex(/^[a-z][a-z0-9._-]{0,63}$/),
+    arguments: semanticArgumentsSchema.default({}),
+  })
+  .strict();
+const computerSetTextActionSchema = z
+  .object({
+    type: z.literal('set_text'),
+    targetId: semanticTargetSchema,
+    text: computerUseUtf8TextSchema,
+  })
+  .strict();
+const computerSelectActionSchema = z
+  .object({
+    type: z.literal('select'),
+    targetId: semanticTargetSchema,
+    value: computerUseUtf8TextSchema,
+  })
+  .strict();
+const computerToggleActionSchema = z
+  .object({ type: z.literal('toggle'), targetId: semanticTargetSchema, value: z.boolean() })
+  .strict();
+const computerExpandCollapseActionSchema = z
+  .object({
+    type: z.literal('expand_collapse'),
+    targetId: semanticTargetSchema,
+    expanded: z.boolean(),
+  })
+  .strict();
+const computerScrollActionSchema = z
+  .object({
+    type: z.literal('scroll'),
+    x: normalizedCoordinateSchema,
+    y: normalizedCoordinateSchema,
+    deltaX: z.number().finite().int().min(-10_000).max(10_000).default(0),
+    deltaY: z.number().finite().int().min(-10_000).max(10_000),
+  })
+  .strict()
+  .refine(({ deltaX, deltaY }) => deltaX !== 0 || deltaY !== 0, 'Scroll delta cannot be zero');
+const computerClickActionSchema = z
+  .object({
+    type: z.literal('click'),
+    x: normalizedCoordinateSchema,
+    y: normalizedCoordinateSchema,
+    button: z.literal('left').default('left'),
+  })
+  .strict();
+const computerTypeActionSchema = z
+  .object({ type: z.literal('type'), text: computerUseUtf8TextSchema })
+  .strict();
+const computerKeyActionSchema = z
+  .object({ type: z.literal('key'), key: computerUseKeySchema })
+  .strict();
+const computerWaitActionSchema = z
+  .object({ type: z.literal('wait'), milliseconds: z.number().int().min(0).max(5_000) })
+  .strict();
+const computerFinishActionSchema = z
+  .object({
+    type: z.literal('finish'),
+    reason: z.string().trim().min(1).max(256).optional(),
+  })
+  .strict();
+
+export const computerUseNormalizedCoordinateSchema = normalizedCoordinateSchema;
+export const computerUseTextActionSchema = computerUseUtf8TextSchema;
+
+const computerUseActionUnionSchema = z.discriminatedUnion('type', [
+  computerInvokeActionSchema,
+  computerSetTextActionSchema,
+  computerSelectActionSchema,
+  computerToggleActionSchema,
+  computerExpandCollapseActionSchema,
+  computerScrollActionSchema,
+  computerClickActionSchema,
+  computerTypeActionSchema,
+  computerKeyActionSchema,
+  computerWaitActionSchema,
+  computerFinishActionSchema,
+]);
+
+/** V1 deliberately accepts one discriminator and rejects aliases or unknown fields. */
+export const computerUseActionSchema = computerUseActionUnionSchema;
+export type ComputerUseAction = z.infer<typeof computerUseActionSchema>;
+
+export const computerUseActionResultSchema = z
+  .object({
+    actionId: computerUseIdSchema,
+    sessionId: computerUseIdSchema,
+    observationRevision: z.number().int().nonnegative(),
+    result: computerUseResultSchema,
+    reasonCode: z
+      .string()
+      .regex(/^[a-z][a-z0-9._-]{0,63}$/)
+      .nullable(),
+  })
+  .strict();
+export type ComputerUseActionResult = z.infer<typeof computerUseActionResultSchema>;
+
+export const computerUseImageSchema = z
+  .object({
+    mimeType: z.enum(['image/png', 'image/jpeg']),
+    digest: computerUseDigestSchema,
+    byteLength: z
+      .number()
+      .int()
+      .positive()
+      .max(8 * 1024 * 1024),
+    width: z.number().int().positive().max(2_560),
+    height: z.number().int().positive().max(1_600),
+    /** Ephemeral transport only; Main never persists this field. */
+    base64: z.string().max(12_000_000).optional(),
+  })
+  .strict();
+export type ComputerUseImage = z.infer<typeof computerUseImageSchema>;
+
+export const computerUseObservationSchema = z
+  .object({
+    sessionId: computerUseIdSchema,
+    appIdentityDigest: computerUseDigestSchema,
+    windowIdentityDigest: computerUseDigestSchema,
+    profileRevision: z.number().int().nonnegative().default(0),
+    policyLanguage: computerUsePolicyLanguageSchema.default('unknown'),
+    maximumMode: computerUseModeSchema.default('observe_only'),
+    screenBounds: computerUseBoundsSchema,
+    revision: z.number().int().nonnegative(),
+    observedAt: timestampSchema,
+    expiresAt: timestampSchema,
+    clientWidth: z.number().int().positive().max(2_560),
+    clientHeight: z.number().int().positive().max(1_600),
+    images: z.array(computerUseImageSchema).min(1).max(2),
+    treeDigest: computerUseDigestSchema.nullable(),
+    treeByteLength: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(512 * 1024),
+    treeDepth: z.number().int().nonnegative().max(16),
+    treeNodeCount: z.number().int().nonnegative().max(5_000),
+    /** Main/native-only fields. They are bounded and are never included in durable status/events. */
+    accessibilityTree: z.string().optional(),
+    targetSignatures: z.record(z.string(), z.string().max(256)).optional(),
+    targetMetadata: z
+      .record(
+        z.string().min(1).max(128),
+        z.object({ secure: z.boolean().optional(), highImpact: z.boolean().optional() }).strict(),
+      )
+      .optional(),
+    /** Digest of the currently focused native control; never contains control text. */
+    focusedElementSignature: computerUseDigestSchema.nullable().optional(),
+    focusedElementSecure: z.boolean().optional(),
+    focusedElementHighImpact: z.boolean().optional(),
+    /** Native-only binding for the selected window plus its current same-owner dialog set. */
+    dialogSetRevision: z.number().int().nonnegative().optional(),
+    dialogSetDigest: computerUseDigestSchema.nullable().optional(),
+    activeWindowIdentityDigest: computerUseDigestSchema.nullable().optional(),
+    activeWindowKind: z.enum(['application', 'dialog']).optional(),
+  })
+  .strict()
+  .superRefine((observation, context) => {
+    const observedAt = Date.parse(observation.observedAt);
+    const expiresAt = Date.parse(observation.expiresAt);
+    if (expiresAt <= observedAt)
+      context.addIssue({
+        code: 'custom',
+        message: 'Observation expiry must be after observation time',
+      });
+    if (expiresAt - observedAt > 30_000)
+      context.addIssue({ code: 'custom', message: 'Observation exceeds the 30-second TTL' });
+    const totalBytes = observation.images.reduce((sum, image) => sum + image.byteLength, 0);
+    if (totalBytes > 16 * 1024 * 1024)
+      context.addIssue({
+        code: 'custom',
+        message: 'Observation image bytes exceed the 16MiB limit',
+      });
+    if (observation.treeDigest === null && observation.treeByteLength !== 0)
+      context.addIssue({ code: 'custom', message: 'Tree byte count requires a tree digest' });
+    if (
+      observation.treeDigest === null &&
+      (observation.treeDepth !== 0 || observation.treeNodeCount !== 0)
+    )
+      context.addIssue({ code: 'custom', message: 'Tree shape requires a tree digest' });
+    if (observation.treeDigest !== null && observation.treeByteLength === 0)
+      context.addIssue({ code: 'custom', message: 'Tree digest requires a non-empty tree' });
+    if (
+      observation.accessibilityTree !== undefined &&
+      new TextEncoder().encode(observation.accessibilityTree).byteLength > 512 * 1024
+    )
+      context.addIssue({ code: 'custom', message: 'Accessibility tree exceeds the 512KiB limit' });
+    if (
+      observation.targetSignatures !== undefined &&
+      Object.keys(observation.targetSignatures).length > 5_000
+    )
+      context.addIssue({ code: 'custom', message: 'Too many accessibility target signatures' });
+    if (
+      observation.targetMetadata !== undefined &&
+      Object.keys(observation.targetMetadata).length > 5_000
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Too many accessibility target metadata entries',
+      });
+  });
+export type ComputerUseObservation = z.infer<typeof computerUseObservationSchema>;
+
+export const computerUseAccessibilityTreeSchema = z
+  .object({
+    digest: computerUseDigestSchema,
+    byteLength: z
+      .number()
+      .int()
+      .positive()
+      .max(512 * 1024),
+    depth: z.number().int().nonnegative().max(16),
+    nodeCount: z.number().int().positive().max(5_000),
+    /** Ephemeral transport only; Main never persists this field. */
+    serialized: z.string().optional(),
+  })
+  .strict()
+  .superRefine((tree, context) => {
+    if (
+      tree.serialized !== undefined &&
+      new TextEncoder().encode(tree.serialized).byteLength > 512 * 1024
+    )
+      context.addIssue({ code: 'custom', message: 'Accessibility tree exceeds the 512KiB limit' });
+  });
+export type ComputerUseAccessibilityTree = z.infer<typeof computerUseAccessibilityTreeSchema>;
+
+export const computerUseProviderResponseSchema = z
+  .string()
+  .refine(
+    (value) => new TextEncoder().encode(value).byteLength <= 64 * 1024,
+    'Provider response exceeds the 64KiB limit',
+  );
+
+export const computerUseApprovalDecisionSchema = z.enum(['allow_once', 'allow_plan', 'deny']);
+export type ComputerUseApprovalDecision = z.infer<typeof computerUseApprovalDecisionSchema>;
+export const computerUsePlanEligibleActionKinds = [
+  'invoke',
+  'set_text',
+  'select',
+  'toggle',
+  'expand_collapse',
+] as const satisfies readonly ComputerUseActionKind[];
+export function computerUseActionKindIsPlanEligible(kind: ComputerUseActionKind): boolean {
+  return (computerUsePlanEligibleActionKinds as readonly ComputerUseActionKind[]).includes(kind);
+}
+export const computerUseApprovalSchema = z
+  .object({
+    id: computerUseIdSchema,
+    sessionId: computerUseIdSchema,
+    taskId: computerUseIdSchema,
+    turnId: computerUseIdSchema.optional(),
+    callId: computerUseIdSchema.optional(),
+    actionType: computerUseActionKindSchema,
+    actionDigest: computerUseDigestSchema,
+    targetLabel: computerUseLabelSchema,
+    preview: computerUsePreviewSchema,
+    risk: toolRiskSchema,
+    policyEpoch: z.number().int().nonnegative(),
+    observationRevision: z.number().int().nonnegative(),
+    eligibleForPlan: z.boolean(),
+    allowedDecisions: z.array(computerUseApprovalDecisionSchema).min(2).max(3),
+    state: z.enum(['pending', 'resolved', 'canceled', 'stale', 'expired']),
+    decision: computerUseApprovalDecisionSchema.nullable(),
+    revision: z.number().int().nonnegative(),
+    challenge: z.string().min(8).max(256),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+    decidedAt: timestampSchema.optional(),
+  })
+  .strict()
+  .superRefine((approval, context) => {
+    if (new Set(approval.allowedDecisions).size !== approval.allowedDecisions.length)
+      context.addIssue({ code: 'custom', message: 'Approval decisions must be unique' });
+    if (!approval.allowedDecisions.includes('allow_once'))
+      context.addIssue({ code: 'custom', message: 'Approval must offer allow_once' });
+    if (!approval.allowedDecisions.includes('deny'))
+      context.addIssue({ code: 'custom', message: 'Approval must offer deny' });
+    const onlyOnce = !computerUseActionKindIsPlanEligible(approval.actionType);
+    if (onlyOnce && approval.eligibleForPlan)
+      context.addIssue({
+        code: 'custom',
+        message: 'Only the exact semantic action set can allow a plan',
+      });
+    if (onlyOnce && approval.allowedDecisions.includes('allow_plan'))
+      context.addIssue({
+        code: 'custom',
+        message: 'Non-plan Computer Use approvals are allow_once only',
+      });
+    if (!approval.eligibleForPlan && approval.allowedDecisions.includes('allow_plan'))
+      context.addIssue({
+        code: 'custom',
+        message: 'Non-eligible Computer Use actions are allow_once only',
+      });
+    if (approval.eligibleForPlan && !approval.allowedDecisions.includes('allow_plan'))
+      context.addIssue({ code: 'custom', message: 'Plan-eligible approval must offer allow_plan' });
+    if (approval.state === 'resolved') {
+      if (approval.decision === null || approval.decidedAt === undefined)
+        context.addIssue({
+          code: 'custom',
+          message: 'Resolved Computer Use approval needs a decision',
+        });
+    } else if (approval.decision !== null || approval.decidedAt !== undefined) {
+      context.addIssue({ code: 'custom', message: 'Only resolved approvals may carry a decision' });
+    }
+  });
+export type ComputerUseApproval = z.infer<typeof computerUseApprovalSchema>;
+/** Resolving a card returns fresh session status; the transient card itself is not a durable DTO. */
+export const computerUseApprovalResolutionSchema = computerUseSessionStatusSchema;
+export type ComputerUseApprovalResolution = ComputerUseSessionStatus;
+export const computerUseApprovalResolveInputSchema = z
+  .object({
+    approvalId: computerUseIdSchema,
+    expectedRevision: z.number().int().nonnegative(),
+    decision: computerUseApprovalDecisionSchema,
+    challenge: z.string().min(8).max(256),
+  })
+  .strict();
+export type ComputerUseApprovalResolveInput = z.infer<typeof computerUseApprovalResolveInputSchema>;
+
+export const computerUseNativeCapabilitySchema = z.enum([
+  'observe',
+  'capture',
+  'accessibility',
+  'input',
+]);
+export const computerUseNativeManifestSchema = z
+  .object({
+    version: z.literal(1),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40}$/),
+    platform: computerUsePlatformSchema,
+    architecture: z.enum(['x64', 'arm64']),
+    protocolVersion: z.number().int().positive(),
+    apiVersion: z.number().int().positive(),
+    nativeVersion: z.string().min(1).max(64),
+    moduleDigest: computerUseDigestSchema,
+    binaryDigest: computerUseDigestSchema,
+    signerDigest: computerUseDigestSchema.nullable(),
+    capabilities: z.array(computerUseNativeCapabilitySchema).min(1).max(4),
+  })
+  .strict()
+  .superRefine((manifest, context) => {
+    if (new Set(manifest.capabilities).size !== manifest.capabilities.length)
+      context.addIssue({ code: 'custom', message: 'Native capabilities must be unique' });
+    if (manifest.platform === 'win32' && manifest.architecture !== 'x64')
+      context.addIssue({ code: 'custom', message: 'Windows Computer Use is x64-only' });
+  });
+export type ComputerUseNativeManifest = z.infer<typeof computerUseNativeManifestSchema>;
+export const nativeComputerUseManifestSchema = computerUseNativeManifestSchema;
+
+export const computerUseProtocolMessageKindSchema = z.enum([
+  'handshake',
+  'request',
+  'response',
+  'event',
+  'cancel',
+]);
+export const computerUseProtocolHeaderSchema = z
+  .object({
+    version: z.literal(1),
+    kind: computerUseProtocolMessageKindSchema,
+    requestId: computerUseIdSchema,
+    sessionId: computerUseIdSchema,
+    cancelId: computerUseIdSchema.nullable(),
+    payloadLength: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(16 * 1024 * 1024),
+    payloadDigest: computerUseDigestSchema,
+  })
+  .strict()
+  .superRefine((header, context) => {
+    if (header.kind === 'cancel' && header.cancelId === null)
+      context.addIssue({ code: 'custom', message: 'Cancel messages require cancelId' });
+    if (header.kind !== 'cancel' && header.cancelId !== null)
+      context.addIssue({ code: 'custom', message: 'Only cancel messages carry cancelId' });
+  });
+export type ComputerUseProtocolHeader = z.infer<typeof computerUseProtocolHeaderSchema>;
+export const computerUseNativeProtocolHeaderSchema = computerUseProtocolHeaderSchema;
+
+export const computerUseHandshakeSchema = z
+  .object({
+    protocolVersion: z.number().int().positive(),
+    apiVersion: z.number().int().positive(),
+    platform: computerUsePlatformSchema,
+    architecture: z.enum(['x64', 'arm64']),
+    manifestDigest: computerUseDigestSchema,
+    moduleDigest: computerUseDigestSchema,
+    capabilities: z.array(computerUseNativeCapabilitySchema).max(4),
+    accepted: z.boolean(),
+    reasonCode: z
+      .string()
+      .regex(/^[a-z][a-z0-9._-]{0,63}$/)
+      .nullable(),
+  })
+  .strict()
+  .superRefine((handshake, context) => {
+    if (handshake.accepted && handshake.reasonCode !== null)
+      context.addIssue({ code: 'custom', message: 'Accepted handshakes have no failure reason' });
+    if (!handshake.accepted && handshake.reasonCode === null)
+      context.addIssue({ code: 'custom', message: 'Rejected handshakes require a reason' });
+  });
+export type ComputerUseHandshake = z.infer<typeof computerUseHandshakeSchema>;
+
+export const COMPUTER_USE_LIMITS = Object.freeze({
+  maxConcurrentSessions: 1,
+  maxRounds: 25,
+  maxSessionHours: 8,
+  observationTtlSeconds: 30,
+  maxImagesPerObservation: 2,
+  maxImageBytes: 8 * 1024 * 1024,
+  maxObservationImageBytes: 16 * 1024 * 1024,
+  maxImageWidth: 2_560,
+  maxImageHeight: 1_600,
+  maxTreeDepth: 16,
+  maxTreeNodes: 5_000,
+  maxTreeBytes: 512 * 1024,
+  maxProviderResponseBytes: 64 * 1024,
+  maxTextActionBytes: 4_096,
+  maxApprovalPreviewBytes: 256,
+  maxWaitMs: 5_000,
+} as const);
+
+export type ComputerUseApi = {
+  availability(): Promise<ComputerUseAvailability>;
+  registerProfile(input: ComputerUseProfileRegisterInput): Promise<ComputerAppProfile | null>;
+  listProfiles(input?: ComputerUseProfileListInput): Promise<ComputerUseProfileListResult>;
+  listWindowCandidates(
+    input: ComputerUseWindowCandidatesInput,
+  ): Promise<ComputerUseWindowCandidatesResult>;
+  start(input: ComputerUseStartInput): Promise<ComputerUseSessionStatus>;
+  getStatus(input: ComputerUseSessionStatusInput): Promise<ComputerUseSessionStatus | null>;
+  stop(input: ComputerUseStopInput): Promise<void>;
+  resolveApproval(input: ComputerUseApprovalResolveInput): Promise<ComputerUseSessionStatus>;
+  subscribeStatus(
+    sessionId: string,
+    listener: (status: ComputerUseSessionStatus) => void,
+  ): () => void;
+};
+
 export interface SprintCoderApi {
-  app: { getInfo(): Promise<{ version: string; platform: string }> };
+  /** Optional until the gated Computer Use capability is exposed by Main/Preload. */
+  computerUse?: ComputerUseApi;
+  app: { getInfo(): Promise<AppInfo> };
   windowControls: {
     platform: string;
     minimize(): void;
@@ -4571,6 +5511,18 @@ export const IPC_CHANNELS = {
   approvalsListPending: 'sprint-coder:approvals:list-pending',
   approvalsListRecent: 'sprint-coder:approvals:list-recent',
   approvalsResolve: 'sprint-coder:approvals:resolve',
+  computerUseAvailability: 'sprint-coder:computer-use:availability',
+  computerUseProfilesList: 'sprint-coder:computer-use:profiles:list',
+  computerUseProfileRegister: 'sprint-coder:computer-use:profiles:register',
+  computerUseWindowCandidates: 'sprint-coder:computer-use:windows:list',
+  computerUseStart: 'sprint-coder:computer-use:start',
+  computerUseStatusGet: 'sprint-coder:computer-use:status:get',
+  computerUseStop: 'sprint-coder:computer-use:stop',
+  computerUseApprovalResolve: 'sprint-coder:computer-use:approval:resolve',
+  /** One-way trusted Renderer activation intent, bound by Main before privileged invokes. */
+  computerUseActivationIntent: 'sprint-coder:computer-use:activation-intent',
+  /** Push Computer Use status; callers replay the latest transient snapshot after subscribing. */
+  computerUseStatusEvent: 'sprint-coder:computer-use:status',
   commandsList: 'sprint-coder:commands:list',
   commandsOutputPage: 'sprint-coder:commands:output-page',
   commandsOutputTail: 'sprint-coder:commands:output-tail',
