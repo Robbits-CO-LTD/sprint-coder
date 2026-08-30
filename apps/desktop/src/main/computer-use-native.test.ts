@@ -337,6 +337,10 @@ describe('Windows native helper compile boundary', () => {
     expect(source.indexOf('#include <ole2.h>')).toBeLessThan(
       source.indexOf('#include <UIAutomation.h>'),
     );
+    expect(source.indexOf('#include <winrt/Windows.Foundation.h>')).toBeGreaterThanOrEqual(0);
+    expect(source.indexOf('#include <winrt/Windows.Foundation.h>')).toBeLessThan(
+      source.indexOf('#include <winrt/Windows.Graphics.Capture.h>'),
+    );
     expect(source).toContain('static_assert(sizeof(void *) == 8');
     expect(source).toContain('SPRINT_CODER_SOURCE_COMMIT');
     expect(source).toContain('sourceCommit');
