@@ -970,6 +970,145 @@ type ApprovalRow = {
   resolved_at: string | null;
   decision_operation_id: string | null;
 };
+export type ComputerAppProfileKind = 'win32-executable' | 'windows-package' | 'macos-bundle';
+export type ComputerAppProfilePlatform = 'win32' | 'darwin';
+export const COMPUTER_USE_MAX_PROFILES = 64;
+export type ComputerAppProfileRecord = Readonly<{
+  id: string;
+  platform: ComputerAppProfilePlatform;
+  kind: ComputerAppProfileKind;
+  label: string;
+  canonicalPath: string;
+  appUrl: string | null;
+  identity: Readonly<Record<string, unknown>>;
+  identityDigest: string;
+  version: string | null;
+  executableDigest: string | null;
+  mode: 'observe_only' | 'supervised' | 'full_access_app';
+  connectionId: string;
+  modelId: string;
+  providerEgressConsent: boolean;
+  remember: boolean;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type ComputerAppProfileInput = Omit<
+  ComputerAppProfileRecord,
+  'revision' | 'createdAt' | 'updatedAt'
+> & {
+  revision?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+export type ComputerActionKind =
+  | 'invoke'
+  | 'set_text'
+  | 'select'
+  | 'toggle'
+  | 'expand_collapse'
+  | 'scroll'
+  | 'click'
+  | 'type'
+  | 'key'
+  | 'wait'
+  | 'finish';
+export type ComputerActionAuditState =
+  'pending' | 'applied' | 'rejected' | 'unknown_effect' | 'canceled';
+export type ComputerActionAuditRecord = Readonly<{
+  id: string;
+  taskId: string;
+  /** SHA-256 binding digest; the live synthetic Turn id is never persisted. */
+  turnId: string;
+  /** SHA-256 binding digest; the live session id is never persisted. */
+  sessionId: string;
+  profileId: string;
+  profileRevision: number;
+  appIdentityDigest: string;
+  windowIdentityDigest: string;
+  observationRevision: number;
+  observationDigest: string;
+  clientWidth: number;
+  clientHeight: number;
+  actionDigest: string;
+  actionKind: ComputerActionKind;
+  route: 'semantic' | 'visual' | 'none';
+  state: ComputerActionAuditState;
+  reasonCode: string | null;
+  /** SHA-256 binding digest; the native request id remains ephemeral. */
+  nativeRequestId: string;
+  policyEpoch: number;
+  createdAt: string;
+  updatedAt: string;
+}>;
+export type ComputerActionAuditInput = Readonly<{
+  id?: string;
+  taskId: string;
+  /** SHA-256 binding digest. */
+  turnId: string;
+  /** SHA-256 binding digest. */
+  sessionId: string;
+  profileId: string;
+  profileRevision: number;
+  appIdentityDigest: string;
+  windowIdentityDigest: string;
+  observationRevision: number;
+  observationDigest: string;
+  clientWidth: number;
+  clientHeight: number;
+  actionDigest: string;
+  actionKind: ComputerActionKind;
+  route: 'semantic' | 'visual' | 'none';
+  state?: ComputerActionAuditState;
+  reasonCode?: string | null;
+  /** SHA-256 binding digest. */
+  nativeRequestId: string;
+  policyEpoch: number;
+  createdAt?: string;
+}>;
+type ComputerAppProfileRow = {
+  id: string;
+  platform: ComputerAppProfilePlatform;
+  app_kind: ComputerAppProfileKind;
+  display_name: string;
+  canonical_path: string;
+  app_url: string | null;
+  identity_json: string;
+  identity_digest: string;
+  version: string | null;
+  executable_digest: string | null;
+  mode: 'observe_only' | 'supervised' | 'full_access_app';
+  connection_id: string;
+  model_id: string;
+  provider_egress_consent: number;
+  remember: number;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+type ComputerActionAuditRow = {
+  id: string;
+  task_id: string;
+  turn_id: string;
+  session_id: string;
+  profile_id: string;
+  profile_revision: number;
+  app_identity_digest: string;
+  window_identity_digest: string;
+  observation_revision: number;
+  observation_digest: string;
+  client_width: number;
+  client_height: number;
+  action_digest: string;
+  action_kind: ComputerActionKind;
+  route: 'semantic' | 'visual' | 'none';
+  state: ComputerActionAuditState;
+  reason_code: string | null;
+  native_request_id: string;
+  policy_epoch: number;
+  created_at: string;
+  updated_at: string;
+};
 type CommandRow = {
   id: string;
   task_id: string;
@@ -3504,6 +3643,109 @@ const migrations = [
         CHECK (role IN ('model', 'mmproj'));
     `,
   },
+  {
+    version: 78,
+    checksum: 'computer-use-v78-app-profiles',
+    sql: `
+      CREATE TABLE computer_app_profiles (
+        id TEXT PRIMARY KEY,
+        platform TEXT NOT NULL CHECK (platform IN ('win32', 'darwin')),
+        app_kind TEXT NOT NULL CHECK (app_kind IN (
+          'win32-executable', 'windows-package', 'macos-bundle'
+        )),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 256),
+        canonical_path TEXT NOT NULL CHECK (
+          length(canonical_path) BETWEEN 1 AND 4096 AND instr(canonical_path, char(0)) = 0
+        ),
+        app_url TEXT CHECK (app_url IS NULL OR length(app_url) <= 4096),
+        identity_json TEXT NOT NULL CHECK (
+          json_valid(identity_json) AND length(CAST(identity_json AS BLOB)) <= 16384
+        ),
+        identity_digest TEXT NOT NULL CHECK (
+          length(identity_digest) = 64 AND identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        version TEXT CHECK (version IS NULL OR length(version) <= 256),
+        executable_digest TEXT CHECK (
+          executable_digest IS NULL OR (
+            length(executable_digest) = 64 AND executable_digest NOT GLOB '*[^0-9a-f]*'
+          )
+        ),
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(platform, identity_digest)
+      );
+      CREATE INDEX computer_app_profiles_platform_idx
+        ON computer_app_profiles(platform, updated_at, id);
+    `,
+  },
+  {
+    version: 80,
+    checksum: 'computer-use-v80-action-audit',
+    sql: `
+      CREATE TABLE computer_action_audits (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL CHECK (
+          length(turn_id) = 64 AND turn_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        session_id TEXT NOT NULL CHECK (
+          length(session_id) = 64 AND session_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        profile_id TEXT NOT NULL REFERENCES computer_app_profiles(id) ON DELETE RESTRICT,
+        profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),
+        app_identity_digest TEXT NOT NULL CHECK (
+          length(app_identity_digest) = 64 AND app_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        window_identity_digest TEXT NOT NULL CHECK (
+          length(window_identity_digest) = 64 AND window_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        observation_revision INTEGER NOT NULL CHECK (observation_revision >= 1),
+        observation_digest TEXT NOT NULL CHECK (
+          length(observation_digest) = 64 AND observation_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        client_width INTEGER NOT NULL CHECK (client_width > 0 AND client_width <= 2560),
+        client_height INTEGER NOT NULL CHECK (client_height > 0 AND client_height <= 1600),
+        action_digest TEXT NOT NULL CHECK (
+          length(action_digest) = 64 AND action_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        action_kind TEXT NOT NULL CHECK (action_kind IN (
+          'invoke', 'set_text', 'select', 'toggle', 'expand_collapse',
+          'scroll', 'click', 'type', 'key', 'wait', 'finish'
+        )),
+        route TEXT NOT NULL CHECK (route IN ('semantic', 'visual', 'none')),
+        state TEXT NOT NULL CHECK (
+          state IN ('pending', 'applied', 'rejected', 'unknown_effect', 'canceled')
+        ),
+        reason_code TEXT CHECK (reason_code IS NULL OR length(reason_code) <= 128),
+        native_request_id TEXT NOT NULL CHECK (
+          length(native_request_id) = 64 AND native_request_id NOT GLOB '*[^0-9a-f]*'
+        ),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(session_id, native_request_id)
+      );
+      CREATE INDEX computer_action_audits_task_created_idx
+        ON computer_action_audits(task_id, created_at, id);
+      CREATE INDEX computer_action_audits_session_idx
+        ON computer_action_audits(session_id, created_at, id);
+    `,
+  },
+  {
+    version: 81,
+    checksum: 'computer-use-v81-profile-selection',
+    sql: `
+      ALTER TABLE computer_app_profiles ADD COLUMN mode TEXT NOT NULL DEFAULT 'full_access_app'
+        CHECK (mode IN ('observe_only', 'supervised', 'full_access_app'));
+      ALTER TABLE computer_app_profiles ADD COLUMN connection_id TEXT NOT NULL DEFAULT 'unselected';
+      ALTER TABLE computer_app_profiles ADD COLUMN model_id TEXT NOT NULL DEFAULT 'unselected';
+      ALTER TABLE computer_app_profiles ADD COLUMN provider_egress_consent INTEGER NOT NULL DEFAULT 0
+        CHECK (provider_egress_consent IN (0, 1));
+      ALTER TABLE computer_app_profiles ADD COLUMN remember INTEGER NOT NULL DEFAULT 1
+        CHECK (remember IN (0, 1));
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4563,6 +4805,24 @@ export interface PersistenceClient {
   setTeamModelSelectionGuidance(guidance: string): void;
   getSprintCoderPrePrompt(): string;
   setSprintCoderPrePrompt(prompt: string): void;
+  listComputerAppProfiles(): ComputerAppProfileRecord[];
+  getComputerAppProfile(profileId: string): ComputerAppProfileRecord;
+  createComputerAppProfile(input: ComputerAppProfileInput): ComputerAppProfileRecord;
+  updateComputerAppProfile(
+    profileId: string,
+    expectedRevision: number,
+    input: ComputerAppProfileInput,
+  ): ComputerAppProfileRecord;
+  removeComputerAppProfile(profileId: string, expectedRevision: number): void;
+  recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord;
+  completeComputerActionAudit(input: {
+    auditId: string;
+    state: Exclude<ComputerActionAuditState, 'pending'>;
+    reasonCode?: string | null;
+    updatedAt: string;
+  }): ComputerActionAuditRecord;
+  listComputerActionAudits(taskId: string, limit?: number): ComputerActionAuditRecord[];
+  quarantinePendingComputerActionAudits(updatedAt: string): number;
   getTeamModelRestriction(): TeamModelRestriction;
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
@@ -5521,6 +5781,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.backfillLegacyEditSagaRootBindings();
       this.backfillAcceptanceContracts();
       this.interruptActiveCommands();
+      this.quarantinePendingComputerActionAudits(new Date().toISOString());
       this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
         this.liveStateForReminder(taskId, turnId),
       );
@@ -11390,6 +11651,274 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .run(normalized, new Date().toISOString());
   }
 
+  listComputerAppProfiles(): ComputerAppProfileRecord[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM computer_app_profiles ORDER BY display_name, id')
+        .all() as ComputerAppProfileRow[]
+    ).map(toComputerAppProfile);
+  }
+
+  getComputerAppProfile(profileId: string): ComputerAppProfileRecord {
+    const row = this.db
+      .prepare('SELECT * FROM computer_app_profiles WHERE id = ?')
+      .get(profileId) as ComputerAppProfileRow | undefined;
+    if (row === undefined) throw new NotFoundError('Computer Use app profile not found');
+    return toComputerAppProfile(row);
+  }
+
+  createComputerAppProfile(input: ComputerAppProfileInput): ComputerAppProfileRecord {
+    const validated = validateComputerAppProfileInput(input);
+    const now = new Date().toISOString();
+    const revision = input.revision ?? 1;
+    const createdAt = input.createdAt === undefined ? now : canonicalTimestamp(input.createdAt);
+    const updatedAt = input.updatedAt === undefined ? now : canonicalTimestamp(input.updatedAt);
+    const profileCount = this.db
+      .prepare('SELECT COUNT(*) AS count FROM computer_app_profiles')
+      .get() as { count: number };
+    if (profileCount.count >= COMPUTER_USE_MAX_PROFILES)
+      throw new Error('Computer Use app profile limit reached');
+    this.db
+      .prepare(
+        `INSERT INTO computer_app_profiles(
+           id, platform, app_kind, display_name, canonical_path, app_url,
+           identity_json, identity_digest, version, executable_digest,
+           mode, connection_id, model_id, provider_egress_consent, remember,
+           revision, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        validated.id,
+        validated.platform,
+        validated.kind,
+        validated.label,
+        validated.canonicalPath,
+        validated.appUrl,
+        JSON.stringify(validated.identity),
+        validated.identityDigest,
+        validated.version,
+        validated.executableDigest,
+        validated.mode,
+        validated.connectionId,
+        validated.modelId,
+        validated.providerEgressConsent ? 1 : 0,
+        validated.remember ? 1 : 0,
+        revision,
+        createdAt,
+        updatedAt,
+      );
+    return this.getComputerAppProfile(validated.id);
+  }
+
+  updateComputerAppProfile(
+    profileId: string,
+    expectedRevision: number,
+    input: ComputerAppProfileInput,
+  ): ComputerAppProfileRecord {
+    const validated = validateComputerAppProfileInput({ ...input, id: profileId });
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+      throw new Error('Invalid Computer Use profile revision');
+    const current = this.getComputerAppProfile(profileId);
+    if (current.revision !== expectedRevision) throw new OperationConflictError();
+    const updatedAt = new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE computer_app_profiles
+         SET platform = ?, app_kind = ?, display_name = ?, canonical_path = ?, app_url = ?,
+             identity_json = ?, identity_digest = ?, version = ?, executable_digest = ?,
+             mode = ?, connection_id = ?, model_id = ?, provider_egress_consent = ?, remember = ?,
+             revision = revision + 1, updated_at = ?
+         WHERE id = ? AND revision = ?`,
+      )
+      .run(
+        validated.platform,
+        validated.kind,
+        validated.label,
+        validated.canonicalPath,
+        validated.appUrl,
+        JSON.stringify(validated.identity),
+        validated.identityDigest,
+        validated.version,
+        validated.executableDigest,
+        validated.mode,
+        validated.connectionId,
+        validated.modelId,
+        validated.providerEgressConsent ? 1 : 0,
+        validated.remember ? 1 : 0,
+        updatedAt,
+        profileId,
+        expectedRevision,
+      );
+    if (result.changes !== 1) throw new OperationConflictError();
+    return this.getComputerAppProfile(profileId);
+  }
+
+  removeComputerAppProfile(profileId: string, expectedRevision: number): void {
+    const current = this.getComputerAppProfile(profileId);
+    if (!Number.isSafeInteger(expectedRevision) || current.revision !== expectedRevision)
+      throw new OperationConflictError();
+    try {
+      const result = this.db
+        .prepare('DELETE FROM computer_app_profiles WHERE id = ? AND revision = ?')
+        .run(profileId, expectedRevision);
+      if (result.changes !== 1) throw new OperationConflictError();
+    } catch (error) {
+      if (error instanceof OperationConflictError) throw error;
+      throw new Error('Computer Use app profile is referenced by an action audit', {
+        cause: error,
+      });
+    }
+  }
+
+  recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord {
+    const validated = validateComputerActionAuditInput(input);
+    const createdAt = canonicalTimestamp(input.createdAt ?? new Date().toISOString());
+    const id = input.id ?? randomUUID();
+    const state = input.state ?? 'pending';
+    const existing = this.db
+      .prepare(
+        'SELECT * FROM computer_action_audits WHERE session_id = ? AND native_request_id = ?',
+      )
+      .get(validated.sessionId, validated.nativeRequestId) as ComputerActionAuditRow | undefined;
+    if (existing !== undefined) {
+      const prior = toComputerActionAudit(existing);
+      if (
+        prior.taskId !== validated.taskId ||
+        prior.turnId !== validated.turnId ||
+        prior.profileId !== validated.profileId ||
+        prior.profileRevision !== validated.profileRevision ||
+        prior.appIdentityDigest !== validated.appIdentityDigest ||
+        prior.windowIdentityDigest !== validated.windowIdentityDigest ||
+        prior.observationRevision !== validated.observationRevision ||
+        prior.observationDigest !== validated.observationDigest ||
+        prior.clientWidth !== validated.clientWidth ||
+        prior.clientHeight !== validated.clientHeight ||
+        prior.actionDigest !== validated.actionDigest ||
+        prior.actionKind !== validated.actionKind ||
+        prior.route !== validated.route ||
+        prior.policyEpoch !== validated.policyEpoch
+      )
+        throw new OperationConflictError('Computer Use request id was reused');
+      if (prior.state === 'pending') {
+        const at = new Date().toISOString();
+        this.db
+          .prepare(
+            `UPDATE computer_action_audits
+             SET state = 'unknown_effect', reason_code = 'duplicate_pending', updated_at = ?
+             WHERE id = ? AND state = 'pending'`,
+          )
+          .run(at, prior.id);
+        return toComputerActionAudit(
+          this.db
+            .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
+            .get(prior.id) as ComputerActionAuditRow,
+        );
+      }
+      return prior;
+    }
+    this.assertTask(validated.taskId);
+    // A Computer Use session may be started from an idle Task. In that case its synthetic
+    // controller turn has no row in `turns`; the audit still remains Task-bound and privacy-safe.
+    this.getComputerAppProfile(validated.profileId);
+    this.db
+      .prepare(
+        `INSERT INTO computer_action_audits(
+           id, task_id, turn_id, session_id, profile_id, profile_revision,
+           app_identity_digest, window_identity_digest, observation_revision,
+           observation_digest, client_width, client_height, action_digest, action_kind,
+           route, state, reason_code, native_request_id, policy_epoch, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        validated.taskId,
+        validated.turnId,
+        validated.sessionId,
+        validated.profileId,
+        validated.profileRevision,
+        validated.appIdentityDigest,
+        validated.windowIdentityDigest,
+        validated.observationRevision,
+        validated.observationDigest,
+        validated.clientWidth,
+        validated.clientHeight,
+        validated.actionDigest,
+        validated.actionKind,
+        validated.route,
+        state,
+        validated.reasonCode,
+        validated.nativeRequestId,
+        validated.policyEpoch,
+        createdAt,
+        createdAt,
+      );
+    return toComputerActionAudit(
+      this.db
+        .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
+        .get(id) as ComputerActionAuditRow,
+    );
+  }
+
+  completeComputerActionAudit(input: {
+    auditId: string;
+    state: Exclude<ComputerActionAuditState, 'pending'>;
+    reasonCode?: string | null;
+    updatedAt: string;
+  }): ComputerActionAuditRecord {
+    const updatedAt = canonicalTimestamp(input.updatedAt);
+    const row = this.db
+      .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
+      .get(input.auditId) as ComputerActionAuditRow | undefined;
+    if (row === undefined) throw new NotFoundError('Computer Use action audit not found');
+    const current = toComputerActionAudit(row);
+    if (current.state !== 'pending') {
+      if (
+        current.state === input.state &&
+        (input.reasonCode === undefined || current.reasonCode === input.reasonCode)
+      )
+        return current;
+      throw new OperationConflictError('Computer Use action audit is already terminal');
+    }
+    const reasonCode = normalizeComputerReasonCode(input.reasonCode);
+    const result = this.db
+      .prepare(
+        `UPDATE computer_action_audits
+         SET state = ?, reason_code = ?, updated_at = ?
+         WHERE id = ? AND state = 'pending'`,
+      )
+      .run(input.state, reasonCode, updatedAt, input.auditId);
+    if (result.changes !== 1) throw new OperationConflictError();
+    return toComputerActionAudit(
+      this.db
+        .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
+        .get(input.auditId) as ComputerActionAuditRow,
+    );
+  }
+
+  listComputerActionAudits(taskId: string, limit = 200): ComputerActionAuditRecord[] {
+    this.assertTask(taskId);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new Error('Invalid Computer Use action audit limit');
+    return (
+      this.db
+        .prepare(
+          'SELECT * FROM computer_action_audits WHERE task_id = ? ORDER BY created_at DESC, id DESC LIMIT ?',
+        )
+        .all(taskId, limit) as ComputerActionAuditRow[]
+    ).map(toComputerActionAudit);
+  }
+
+  quarantinePendingComputerActionAudits(updatedAt: string): number {
+    const at = canonicalTimestamp(updatedAt);
+    return this.db
+      .prepare(
+        `UPDATE computer_action_audits
+         SET state = 'unknown_effect', reason_code = 'application_restart', updated_at = ?
+         WHERE state = 'pending'`,
+      )
+      .run(at).changes;
+  }
+
   getTeamModelRestriction(): TeamModelRestriction {
     const row = this.db
       .prepare("SELECT value FROM settings WHERE key = 'team.model-restriction'")
@@ -11770,6 +12299,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db.transaction(() => {
       this.assertTask(taskId);
       const validated = createSessionGrant(grant);
+      if ((validated.capability as string).startsWith('computer.'))
+        throw new Error('Computer Use control grants are session-scoped and cannot be persisted');
       if (validated.policyEpoch !== this.getPermissionPolicy(taskId).policyEpoch)
         throw new Error('Grant policy epoch must match the current Task policy epoch');
       this.db
@@ -18144,6 +18675,252 @@ function approvalRowRequestDigest(row: ApprovalRow): string {
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function canonicalTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) throw new Error('Invalid timestamp');
+  return timestamp.toISOString();
+}
+
+function validateComputerAppProfileInput(
+  input: ComputerAppProfileInput,
+): Omit<ComputerAppProfileRecord, 'revision' | 'createdAt' | 'updatedAt'> {
+  if (
+    typeof input.id !== 'string' ||
+    input.id.length < 1 ||
+    input.id.length > 128 ||
+    (input.platform !== 'win32' && input.platform !== 'darwin') ||
+    !['win32-executable', 'windows-package', 'macos-bundle'].includes(input.kind) ||
+    (input.platform === 'win32' && input.kind === 'macos-bundle') ||
+    (input.platform === 'darwin' && input.kind !== 'macos-bundle') ||
+    typeof input.label !== 'string' ||
+    input.label.trim().length === 0 ||
+    input.label.length > 256 ||
+    typeof input.canonicalPath !== 'string' ||
+    input.canonicalPath.length === 0 ||
+    input.canonicalPath.length > 4096 ||
+    input.canonicalPath.includes('\0') ||
+    (input.platform === 'darwin' && !input.canonicalPath.startsWith('/')) ||
+    (input.platform === 'win32' && !/^(?:[A-Za-z]:[\\/]|\\\\)/.test(input.canonicalPath)) ||
+    (input.appUrl !== null &&
+      (typeof input.appUrl !== 'string' ||
+        input.appUrl.length > 4096 ||
+        input.appUrl.includes('\0'))) ||
+    typeof input.identity !== 'object' ||
+    input.identity === null ||
+    Array.isArray(input.identity) ||
+    !isPlainComputerRecord(input.identity) ||
+    Buffer.byteLength(JSON.stringify(input.identity), 'utf8') > 16_384 ||
+    !/^[a-f0-9]{64}$/.test(input.identityDigest) ||
+    (input.version !== null && (typeof input.version !== 'string' || input.version.length > 256)) ||
+    (input.executableDigest !== null && !/^[a-f0-9]{64}$/.test(input.executableDigest)) ||
+    !['observe_only', 'supervised', 'full_access_app'].includes(input.mode) ||
+    typeof input.connectionId !== 'string' ||
+    input.connectionId.length < 1 ||
+    input.connectionId.length > 128 ||
+    typeof input.modelId !== 'string' ||
+    input.modelId.length < 1 ||
+    input.modelId.length > 256 ||
+    typeof input.providerEgressConsent !== 'boolean' ||
+    typeof input.remember !== 'boolean'
+  )
+    throw new Error('Invalid Computer Use app profile');
+  return {
+    id: input.id,
+    platform: input.platform,
+    kind: input.kind,
+    label: input.label.trim(),
+    canonicalPath: input.canonicalPath,
+    appUrl: input.appUrl,
+    identity: structuredClone(input.identity),
+    identityDigest: input.identityDigest,
+    version: input.version,
+    executableDigest: input.executableDigest,
+    mode: input.mode,
+    connectionId: input.connectionId,
+    modelId: input.modelId,
+    providerEgressConsent: input.providerEgressConsent,
+    remember: input.remember,
+  };
+}
+
+function isPlainComputerRecord(value: object): value is Record<string, unknown> {
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const seen = new Set<object>();
+  const visit = (candidate: unknown, depth: number): boolean => {
+    if (depth > 32) return false;
+    if (
+      candidate === null ||
+      typeof candidate === 'string' ||
+      typeof candidate === 'boolean' ||
+      (typeof candidate === 'number' && Number.isFinite(candidate))
+    )
+      return true;
+    if (typeof candidate !== 'object') return false;
+    if (seen.has(candidate)) return false;
+    seen.add(candidate);
+    if (Array.isArray(candidate)) return candidate.every((nested) => visit(nested, depth + 1));
+    const nestedPrototype = Object.getPrototypeOf(candidate);
+    return (
+      (nestedPrototype === Object.prototype || nestedPrototype === null) &&
+      Object.values(candidate).every((nested) => visit(nested, depth + 1))
+    );
+  };
+  return visit(value, 0);
+}
+
+function toComputerAppProfile(row: ComputerAppProfileRow): ComputerAppProfileRecord {
+  let identity: unknown;
+  try {
+    identity = JSON.parse(row.identity_json);
+  } catch {
+    throw new Error('Invalid persisted Computer Use app profile identity');
+  }
+  const parsed = validateComputerAppProfileInput({
+    id: row.id,
+    platform: row.platform,
+    kind: row.app_kind,
+    label: row.display_name,
+    canonicalPath: row.canonical_path,
+    appUrl: row.app_url,
+    identity: identity as Record<string, unknown>,
+    identityDigest: row.identity_digest,
+    version: row.version,
+    executableDigest: row.executable_digest,
+    mode: row.mode,
+    connectionId: row.connection_id,
+    modelId: row.model_id,
+    providerEgressConsent: row.provider_egress_consent === 1,
+    remember: row.remember === 1,
+  });
+  if (
+    !Number.isSafeInteger(row.revision) ||
+    row.revision < 1 ||
+    !Number.isFinite(Date.parse(row.created_at)) ||
+    !Number.isFinite(Date.parse(row.updated_at))
+  )
+    throw new Error('Invalid persisted Computer Use app profile metadata');
+  return Object.freeze({
+    ...parsed,
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+function normalizeComputerReasonCode(reasonCode: string | null | undefined): string | null {
+  if (reasonCode === undefined || reasonCode === null) return null;
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(reasonCode))
+    throw new Error('Invalid Computer Use reason code');
+  return reasonCode;
+}
+
+function validateComputerActionAuditInput(
+  input: ComputerActionAuditInput,
+): ComputerActionAuditInput {
+  if (
+    typeof input.taskId !== 'string' ||
+    input.taskId.length === 0 ||
+    input.taskId.length > 128 ||
+    !/^[a-f0-9]{64}$/.test(input.turnId) ||
+    !/^[a-f0-9]{64}$/.test(input.sessionId) ||
+    typeof input.profileId !== 'string' ||
+    input.profileId.length === 0 ||
+    input.profileId.length > 128 ||
+    !Number.isSafeInteger(input.profileRevision) ||
+    input.profileRevision < 1 ||
+    !/^[a-f0-9]{64}$/.test(input.appIdentityDigest) ||
+    !/^[a-f0-9]{64}$/.test(input.windowIdentityDigest) ||
+    !Number.isSafeInteger(input.observationRevision) ||
+    input.observationRevision < 1 ||
+    !/^[a-f0-9]{64}$/.test(input.observationDigest) ||
+    !Number.isSafeInteger(input.clientWidth) ||
+    input.clientWidth < 1 ||
+    input.clientWidth > 2_560 ||
+    !Number.isSafeInteger(input.clientHeight) ||
+    input.clientHeight < 1 ||
+    input.clientHeight > 1_600 ||
+    !/^[a-f0-9]{64}$/.test(input.actionDigest) ||
+    ![
+      'invoke',
+      'set_text',
+      'select',
+      'toggle',
+      'expand_collapse',
+      'scroll',
+      'click',
+      'type',
+      'key',
+      'wait',
+      'finish',
+    ].includes(input.actionKind) ||
+    !['semantic', 'visual', 'none'].includes(input.route) ||
+    (input.state !== undefined &&
+      !['pending', 'applied', 'rejected', 'unknown_effect', 'canceled'].includes(input.state)) ||
+    (input.reasonCode !== undefined &&
+      input.reasonCode !== null &&
+      !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(input.reasonCode)) ||
+    !/^[a-f0-9]{64}$/.test(input.nativeRequestId) ||
+    !Number.isSafeInteger(input.policyEpoch) ||
+    input.policyEpoch < 0
+  )
+    throw new Error('Invalid Computer Use action audit');
+  return {
+    ...input,
+    state: input.state ?? 'pending',
+    reasonCode: normalizeComputerReasonCode(input.reasonCode),
+  };
+}
+
+function toComputerActionAudit(row: ComputerActionAuditRow): ComputerActionAuditRecord {
+  const parsed = validateComputerActionAuditInput({
+    id: row.id,
+    taskId: row.task_id,
+    turnId: row.turn_id,
+    sessionId: row.session_id,
+    profileId: row.profile_id,
+    profileRevision: row.profile_revision,
+    appIdentityDigest: row.app_identity_digest,
+    windowIdentityDigest: row.window_identity_digest,
+    observationRevision: row.observation_revision,
+    observationDigest: row.observation_digest,
+    clientWidth: row.client_width,
+    clientHeight: row.client_height,
+    actionDigest: row.action_digest,
+    actionKind: row.action_kind,
+    route: row.route,
+    state: row.state,
+    reasonCode: row.reason_code,
+    nativeRequestId: row.native_request_id,
+    policyEpoch: row.policy_epoch,
+  });
+  if (!Number.isFinite(Date.parse(row.created_at)) || !Number.isFinite(Date.parse(row.updated_at)))
+    throw new Error('Invalid persisted Computer Use action audit timestamps');
+  return Object.freeze({
+    id: row.id,
+    taskId: parsed.taskId,
+    turnId: parsed.turnId,
+    sessionId: parsed.sessionId,
+    profileId: parsed.profileId,
+    profileRevision: parsed.profileRevision,
+    appIdentityDigest: parsed.appIdentityDigest,
+    windowIdentityDigest: parsed.windowIdentityDigest,
+    observationRevision: parsed.observationRevision,
+    observationDigest: parsed.observationDigest,
+    clientWidth: parsed.clientWidth,
+    clientHeight: parsed.clientHeight,
+    actionDigest: parsed.actionDigest,
+    actionKind: parsed.actionKind,
+    route: parsed.route,
+    state: parsed.state!,
+    reasonCode: parsed.reasonCode ?? null,
+    nativeRequestId: parsed.nativeRequestId,
+    policyEpoch: parsed.policyEpoch,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
 }
 
 function sprintCoderPrePromptContent(prompt: string): string {

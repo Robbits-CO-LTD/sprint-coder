@@ -7046,6 +7046,9 @@ if (runsWithElectronAbi)
         { version: 75 },
         { version: 76 },
         { version: 77 },
+        { version: 78 },
+        { version: 80 },
+        { version: 81 },
       ]);
       for (const [table, columns] of [
         [
@@ -7798,3 +7801,168 @@ function createLegacyV1Database(path: string): void {
   `);
   db.close();
 }
+
+if (runsWithElectronAbi)
+  describe('Computer Use profile and action persistence', () => {
+    it('persists only stable profile identity and privacy-safe action audit metadata', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('computer use persistence');
+      const profile = fixture.persistence.createComputerAppProfile({
+        id: 'computer-profile-1',
+        platform: 'darwin',
+        kind: 'macos-bundle',
+        label: 'Fixture App',
+        canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        appUrl: null,
+        identity: {
+          platform: 'darwin',
+          identityDigest: 'a'.repeat(64),
+          executablePath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+          executableDigest: 'b'.repeat(64),
+          teamId: 'TEAMID',
+        },
+        identityDigest: 'a'.repeat(64),
+        version: null,
+        executableDigest: 'b'.repeat(64),
+        mode: 'full_access_app',
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: true,
+        remember: true,
+      });
+      expect(profile.revision).toBe(1);
+      expect(fixture.persistence.listComputerAppProfiles()).toEqual([profile]);
+      const audit = fixture.persistence.recordComputerActionAudit({
+        taskId: task.id,
+        turnId: '1'.repeat(64),
+        sessionId: '2'.repeat(64),
+        profileId: profile.id,
+        profileRevision: profile.revision,
+        appIdentityDigest: 'a'.repeat(64),
+        windowIdentityDigest: 'c'.repeat(64),
+        observationRevision: 1,
+        observationDigest: 'e'.repeat(64),
+        clientWidth: 800,
+        clientHeight: 600,
+        actionDigest: 'd'.repeat(64),
+        actionKind: 'set_text',
+        route: 'semantic',
+        nativeRequestId: '3'.repeat(64),
+        policyEpoch: 0,
+      });
+      expect(
+        fixture.persistence.completeComputerActionAudit({
+          auditId: audit.id,
+          state: 'unknown_effect',
+          reasonCode: 'native_ack_unknown',
+          updatedAt: '2026-08-29T00:00:01.000Z',
+        }),
+      ).toMatchObject({ state: 'unknown_effect', reasonCode: 'native_ack_unknown' });
+      fixture.persistence.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
+        id: profile.id,
+        identityDigest: 'a'.repeat(64),
+        revision: 1,
+      });
+      expect(reopened.listComputerActionAudits(task.id)).toMatchObject([
+        expect.objectContaining({
+          state: 'unknown_effect',
+          actionKind: 'set_text',
+          appIdentityDigest: 'a'.repeat(64),
+          observationDigest: 'e'.repeat(64),
+          clientWidth: 800,
+          clientHeight: 600,
+        }),
+      ]);
+      reopened.close();
+      const db = new Database(fixture.path, { readonly: true });
+      const serialized = JSON.stringify(db.prepare('SELECT * FROM computer_action_audits').all());
+      expect(serialized).not.toContain('SUPER_SECRET_SOURCE');
+      db.close();
+    });
+
+    it('migrates a v78 profile with valid selection sentinels through v81', () => {
+      const fixture = createPersistence();
+      fixture.persistence.close();
+      const legacy = new Database(fixture.path);
+      legacy.exec('DROP TABLE computer_action_audits; DROP TABLE computer_app_profiles;');
+      legacy.exec(`
+        CREATE TABLE computer_app_profiles (
+          id TEXT PRIMARY KEY,
+          platform TEXT NOT NULL CHECK (platform IN ('win32', 'darwin')),
+          app_kind TEXT NOT NULL CHECK (app_kind IN ('win32-executable', 'windows-package', 'macos-bundle')),
+          display_name TEXT NOT NULL,
+          canonical_path TEXT NOT NULL,
+          app_url TEXT,
+          identity_json TEXT NOT NULL,
+          identity_digest TEXT NOT NULL,
+          version TEXT,
+          executable_digest TEXT,
+          revision INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(platform, identity_digest)
+        );
+        INSERT INTO computer_app_profiles(
+          id, platform, app_kind, display_name, canonical_path, app_url,
+          identity_json, identity_digest, version, executable_digest,
+          revision, created_at, updated_at
+        ) VALUES (
+          'legacy-computer-profile', 'darwin', 'macos-bundle', 'Legacy Fixture',
+          '/Applications/Legacy.app/Contents/MacOS/Legacy', NULL,
+          '{"platform":"darwin","identityDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', NULL,
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1,
+          '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z'
+        );
+        DELETE FROM schema_migrations WHERE version IN (80, 81);
+      `);
+      legacy.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
+        id: 'legacy-computer-profile',
+        connectionId: 'unselected',
+        modelId: 'unselected',
+      });
+      reopened.close();
+    });
+
+    it('enforces the bounded profile count before insert', () => {
+      const fixture = createPersistence();
+      const profile = {
+        platform: 'darwin' as const,
+        kind: 'macos-bundle' as const,
+        label: 'Fixture',
+        canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        appUrl: null,
+        identity: { platform: 'darwin', identityDigest: 'a'.repeat(64) },
+        version: null,
+        executableDigest: 'b'.repeat(64),
+        mode: 'full_access_app' as const,
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: false,
+        remember: false,
+      };
+      for (let index = 0; index < 64; index += 1)
+        fixture.persistence.createComputerAppProfile({
+          ...profile,
+          id: `computer-profile-${index}`,
+          label: `Fixture ${index}`,
+          identity: { ...profile.identity, identityDigest: index.toString(16).padStart(64, '0') },
+          identityDigest: index.toString(16).padStart(64, '0'),
+        });
+      expect(() =>
+        fixture.persistence.createComputerAppProfile({
+          ...profile,
+          id: 'computer-profile-over-limit',
+          identity: { ...profile.identity, identityDigest: 'f'.repeat(64) },
+          identityDigest: 'f'.repeat(64),
+        }),
+      ).toThrow('profile limit');
+      fixture.persistence.close();
+    });
+  });
