@@ -118,11 +118,11 @@ describe('native package target', () => {
     const resources = config.packagerConfig?.extraResource ?? [];
     if (process.platform === 'darwin')
       expect(resources).toContain(
-        `${COMPUTER_USE_NATIVE_RESOURCE_ROOT}/sprint_coder_computer_use_native.node`,
+        join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint_coder_computer_use_native.node'),
       );
     else if (process.platform === 'win32')
       expect(resources).toContain(
-        `${COMPUTER_USE_NATIVE_RESOURCE_ROOT}/sprint-coder-computer-use-host.exe`,
+        join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe'),
       );
     else expect(resources).not.toContain(COMPUTER_USE_NATIVE_MANIFEST_PATH);
     expect(config.packagerConfig?.extendInfo).toMatchObject({
