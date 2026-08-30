@@ -28,6 +28,7 @@ import type { TeamViewPreference } from './lib/team-view-preference';
 import { readSetupComplete, shouldShowSetupWizard } from './lib/setup-preference';
 import { SetupWizard } from './components/SetupWizard';
 import { unlockSoundEffects } from './lib/ui-sound';
+import { useComputerUse } from './hooks/useComputerUse';
 
 export default function App() {
   const sprintCoderAvailable = useAppStore((s) => s.sprintCoderAvailable);
@@ -178,6 +179,12 @@ export default function App() {
   }, []);
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null;
+  const computerUse = useComputerUse(selectedTaskId);
+  const computerUseActive = computerUse.active;
+  const stopComputerUse = computerUse.stop;
+  useEffect(() => {
+    if (teamViewOpen && computerUseActive) stopComputerUse();
+  }, [computerUseActive, stopComputerUse, teamViewOpen]);
   // List mode (Slice 6.1 item 4) is a plain "chat layout + a team panel" — it never touches
   // `surfaceMode`/the Canvas FLIP, so only 'canvas' preference ever drives the morph below.
   const teamCanvasActive = teamViewOpen && teamViewPreference === 'canvas' && selectedTask !== null;
@@ -337,10 +344,17 @@ export default function App() {
                 <TaskHeader
                   task={selectedTask}
                   onToggleTeam={requestEnterTeam}
+                  {...(computerUse.enabled
+                    ? {
+                        onOpenComputerUse: computerUse.open,
+                        computerUseActive: computerUse.active,
+                      }
+                    : {})}
                   inert={chromeInert}
                   onToggleSidebar={toggleSidebar}
                   sidebarCollapsed={sidebarCollapsed}
                 />
+                {computerUse.surface}
                 {/* SurfaceLayer portals the shared ChatSurface instance in here when `surfaceMode`
                 is 'main' — this anchor only reserves the slot, see the morph orchestration
                 above and SurfaceLayer.tsx. This is also where the Chat lives in List mode: List

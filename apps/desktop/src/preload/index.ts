@@ -17,6 +17,18 @@ import {
   commandOutputTailInputSchema,
   commandEnvelopeSchema,
   commandResultSchema,
+  computerAppProfileSchema,
+  computerUseApprovalResolveInputSchema,
+  computerUseAvailabilitySchema,
+  computerUseProfileListInputSchema,
+  computerUseProfileListResultSchema,
+  computerUseProfileRegisterInputSchema,
+  computerUseSessionStatusInputSchema,
+  computerUseSessionStatusSchema,
+  computerUseStartInputSchema,
+  computerUseStopInputSchema,
+  computerUseWindowCandidatesInputSchema,
+  computerUseWindowCandidatesResultSchema,
   emptyPayloadSchema,
   permissionSetInputSchema,
   permissionSettingsSchema,
@@ -175,6 +187,7 @@ import {
 import { createTeamSubscriptionBuffer } from './team-subscription-buffer';
 import { WINDOW_CONTROL_CHANNELS } from '../window-controls';
 import { clipboardCarriesImage, createTrustedImagePasteGate } from '../clipboard-image-paste';
+import { createTrustedComputerUseUiActivationGate } from '../computer-use-activation';
 
 async function invoke<TInput, TOutput>(
   channel: string,
@@ -229,6 +242,7 @@ function getTaskId(value: unknown): string | undefined {
 }
 
 const trustedImagePaste = createTrustedImagePasteGate(() => Date.now());
+const trustedComputerUseActivation = createTrustedComputerUseUiActivationGate(() => Date.now());
 // Capture phase: this runs before any listener the page installed, and `isTrusted` is false for
 // every event the page can dispatch itself.
 window.addEventListener(
@@ -238,9 +252,91 @@ window.addEventListener(
   },
   true,
 );
+function observeTrustedComputerUseActivation(event: Event): void {
+  trustedComputerUseActivation.observe(event, (kind, intent) => {
+    ipcRenderer.send(IPC_CHANNELS.computerUseActivationIntent, { kind, intent });
+  });
+}
+
+window.addEventListener('pointerdown', observeTrustedComputerUseActivation, true);
+window.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key === 'Enter' || event.key === ' ') observeTrustedComputerUseActivation(event);
+  },
+  true,
+);
 
 const api: SprintCoderApi = {
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
+  computerUse: {
+    availability: () =>
+      invoke(
+        IPC_CHANNELS.computerUseAvailability,
+        emptyPayloadSchema,
+        computerUseAvailabilitySchema,
+        {},
+      ),
+    registerProfile: (input) =>
+      trustedComputerUseActivation.consume('application')
+        ? invoke(
+            IPC_CHANNELS.computerUseProfileRegister,
+            computerUseProfileRegisterInputSchema,
+            computerAppProfileSchema.nullable(),
+            input,
+          )
+        : Promise.reject(new Error('Computer Use app registration requires a trusted click')),
+    listProfiles: (input = {}) =>
+      invoke(
+        IPC_CHANNELS.computerUseProfilesList,
+        computerUseProfileListInputSchema,
+        computerUseProfileListResultSchema,
+        input,
+      ),
+    listWindowCandidates: (input) =>
+      invoke(
+        IPC_CHANNELS.computerUseWindowCandidates,
+        computerUseWindowCandidatesInputSchema,
+        computerUseWindowCandidatesResultSchema,
+        input,
+      ),
+    // Main is authoritative for the fresh start gesture and its deferred Quick Start latch.
+    // A preload-local two-second check here would expire while native window enumeration is still
+    // running and reject a valid one-click resume before Main can consume its bound latch.
+    start: (input) =>
+      invoke(
+        IPC_CHANNELS.computerUseStart,
+        computerUseStartInputSchema,
+        computerUseSessionStatusSchema,
+        input,
+      ),
+    getStatus: (input) =>
+      invoke(
+        IPC_CHANNELS.computerUseStatusGet,
+        computerUseSessionStatusInputSchema,
+        computerUseSessionStatusSchema.nullable(),
+        input,
+      ),
+    stop: (input) =>
+      invoke(IPC_CHANNELS.computerUseStop, computerUseStopInputSchema, z.undefined(), input),
+    resolveApproval: (input) =>
+      trustedComputerUseActivation.consume('approval')
+        ? invoke(
+            IPC_CHANNELS.computerUseApprovalResolve,
+            computerUseApprovalResolveInputSchema,
+            computerUseSessionStatusSchema,
+            input,
+          )
+        : Promise.reject(new Error('Computer Use approval requires a trusted click')),
+    subscribeStatus: (sessionId, listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+        const status = computerUseSessionStatusSchema.safeParse(value);
+        if (status.success && status.data.sessionId === sessionId) listener(status.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.computerUseStatusEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.computerUseStatusEvent, handler);
+    },
+  },
   windowControls: {
     platform: process.platform,
     minimize: () => ipcRenderer.send(WINDOW_CONTROL_CHANNELS.action, 'minimize'),

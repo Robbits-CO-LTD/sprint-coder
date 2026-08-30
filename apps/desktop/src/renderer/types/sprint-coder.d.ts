@@ -854,6 +854,7 @@ export type CanvasViewSaveInput = {
 export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
+  computerUse?: import('@sprint-coder/contracts').ComputerUseApi;
   app: {
     getInfo(): Promise<{
       version: string;

@@ -5,6 +5,7 @@ import {
   ipcMain,
   MessageChannelMain,
   type BrowserWindow,
+  type IpcMainEvent,
   type IpcMainInvokeEvent,
   type MessagePortMain,
 } from 'electron';
@@ -22,6 +23,11 @@ import {
 import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
 import { CommandRunnerError } from './command-runner';
 import { pathComparisonKey } from '../path-comparison';
+import {
+  approvalActivationIntent,
+  quickStartActivationIntent,
+  startActivationIntent,
+} from '../computer-use-activation-intent';
 import { TeamSubscriptionRegistry } from './team-subscription-registry';
 import { z } from 'zod';
 import {
@@ -35,11 +41,25 @@ import {
   canvasViewSaveInputSchema,
   canvasViewSaveResultSchema,
   chatMessageSchema,
+  computerAppProfileSchema,
+  computerUseApprovalSchema,
   commandSummarySchema,
   commandOutputPageInputSchema,
   commandOutputPageSchema,
   commandOutputTailInputSchema,
   commandEnvelopeSchema,
+  computerUseApprovalResolveInputSchema,
+  computerUseAvailabilitySchema,
+  computerUseProfileListInputSchema,
+  computerUseProfileListResultSchema,
+  computerUseProfileRegisterInputSchema,
+  computerUseSessionStatusInputSchema,
+  computerUseSessionStatusSchema,
+  computerUseStartInputSchema,
+  computerUseStopInputSchema,
+  computerUseWindowCandidatesInputSchema,
+  computerUseWindowCandidatesResultSchema,
+  type ComputerUseStartInput,
   emptyPayloadSchema,
   fileChangeRecordSchema,
   filePathPayloadSchema,
@@ -206,6 +226,9 @@ import {
   type ProviderMessageToolCall,
   type ProviderModel,
   type PublicError,
+  type ComputerUseApproval,
+  type ComputerUseSessionStatus,
+  type ComputerUseWindowCandidate,
   type ProjectFolderInput,
   type ProjectFolder,
   type ProjectReference,
@@ -271,6 +294,22 @@ import {
   TurnActiveError,
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
+import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
+import { ComputerUseEmergencyStop } from './computer-use-emergency-stop';
+import {
+  ComputerUseUserActivationGate,
+  type ComputerUseActivationPermit,
+} from './computer-use-user-activation';
+import {
+  COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+  ProviderComputerUsePlanner,
+  computerUseProviderEndpointRevision,
+  preflightComputerUseProvider,
+} from './computer-use-planner';
+import {
+  ComputerUseNativeUnavailableError,
+  createUnavailableComputerUseNativeHost,
+} from './computer-use-native-host';
 import type { ManagedLocalController } from './managed-local-controller';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
@@ -297,6 +336,7 @@ import { clipPublicMessage } from './zod-issue-message';
 const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
+const COMPUTER_USE_QUICK_START_LATCH_TTL_MS = 2_000;
 
 type ProviderImageAttachmentDispatch = Readonly<{
   binding: ProviderImageAttachmentCapabilityBinding;
@@ -531,6 +571,8 @@ import {
   sessionGrantMatchesPermissionRequest,
   toolValueMatchesSchema,
   type Capability,
+  type PermissionRequest,
+  type ResourceSet,
   type ToolCatalogSnapshot,
 } from '@sprint-coder/domain';
 import { AutoReviewer, autoReviewerInputDigest } from './auto-reviewer';
@@ -631,6 +673,7 @@ import {
 } from './connection-identity';
 import {
   multiProviderModelPickerV2Enabled,
+  computerUseDesktopV1Enabled,
   projectMultiFolderUxEnabled,
   settingsWorkspaceV2Enabled,
 } from './feature-flags';
@@ -755,6 +798,22 @@ type CliTaskTitleJob = {
   resolve: (title: string | null) => void;
 };
 
+type ComputerUseQuickStartLatch = Readonly<{
+  taskId: string;
+  profileId: string;
+  windowId: string;
+  expectedWindowRevision: number;
+  expectedProfileRevision: number;
+  activationExpectedProfileRevision: number;
+  senderId: number;
+  frameProcessId: number;
+  frameRoutingId: number;
+  browserWindowId: number;
+  activationGeneration: number;
+  activationIntent: string;
+  expiresAtMs: number;
+}>;
+
 export function authorizationTurnIsActive(
   activeTurnId: string | null,
   taskId: string,
@@ -765,6 +824,28 @@ export function authorizationTurnIsActive(
   for (const worker of managedWorkerTurns)
     if (worker.taskId === taskId && worker.parentTurnId === turnId) return true;
   return false;
+}
+
+/**
+ * The renderer's filtered model list is display-only. Main must independently require a current,
+ * available catalog entry for this exact Connection/Provider/Model. An unknown multimodal fact is
+ * intentionally allowed through to the fixed-image preflight; a catalog false is a hard deny.
+ */
+export function computerUseProviderModelIsEligible(input: {
+  connectionId: string;
+  providerId: string;
+  modelId: string;
+  model: ProviderModel | undefined;
+}): boolean {
+  const model = input.model;
+  return (
+    model !== undefined &&
+    model.connectionId === input.connectionId &&
+    model.providerId === input.providerId &&
+    model.modelId === input.modelId &&
+    model.available === true &&
+    model.multimodalInput.value !== false
+  );
 }
 
 export class IpcRouter {
@@ -778,6 +859,30 @@ export class IpcRouter {
   private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
   private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
   private disposed = false;
+  private readonly computerUseController: ComputerUseController;
+  private readonly computerUseNative: ComputerUseNativeHost;
+  private readonly computerUseActivationGate: ComputerUseUserActivationGate;
+  private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
+  private readonly computerUseStatusBySession = new Map<string, ComputerUseSessionStatus>();
+  private readonly computerUsePendingApprovalBySession = new Map<string, ComputerUseApproval>();
+  private readonly computerUseApprovalSessionById = new Map<string, string>();
+  private readonly computerUseSessionByTask = new Map<string, string>();
+  private readonly computerUseQuickStartLatches = new Map<string, ComputerUseQuickStartLatch>();
+  private computerUseEmergencySessionId: string | null = null;
+  private readonly handleComputerUseRendererNavigation = (
+    _event: Electron.Event,
+    _url: string,
+    _isInPlace: boolean,
+    isMainFrame: boolean,
+  ): void => {
+    if (!isMainFrame) return;
+    this.computerUseQuickStartLatches.clear();
+    void this.computerUseController.rendererInvalidated();
+  };
+  private readonly handleComputerUseRendererGone = (): void => {
+    this.computerUseQuickStartLatches.clear();
+    void this.computerUseController.rendererInvalidated();
+  };
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
   private readonly managedWorkerTurn = new Map<
@@ -914,6 +1019,8 @@ export class IpcRouter {
     workspaceEdit?: WorkspacePatchDeps,
     private readonly managedLocal: ManagedLocalController | null = null,
     providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
+    computerUseNative: ComputerUseNativeHost = createUnavailableComputerUseNativeHost(),
+    computerUseActivationGate?: ComputerUseUserActivationGate,
   ) {
     this.providerEndpointPolicy = providerEndpointPolicy;
     this.providerEndpointChallenges = new ProviderEndpointConsentChallenges(providerEndpointPolicy);
@@ -1327,6 +1434,7 @@ export class IpcRouter {
     this.permissionBroker = new PermissionBroker(persistence, {
       policyEpochChanged: (taskId, policyEpoch) => {
         this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
+        this.computerUseController.policyEpochChanged(taskId);
         void this.managedCodingHarness.policyEpochChanged(taskId);
         this.persistence.quarantineBackgroundForPolicyEpoch(
           taskId,
@@ -1468,6 +1576,140 @@ export class IpcRouter {
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       genericManagedRuntimeTools.claudeRuntime,
     );
+    // Computer Use is constructed only after the Main-owned Provider and Permission services
+    // above exist. Its native host is injected by index.ts after the signed package gate runs;
+    // callers without a binding receive a permanently unavailable fail-closed host.
+    this.computerUseActivationGate =
+      computerUseActivationGate ??
+      new ComputerUseUserActivationGate(this.window.webContents, this.window.id);
+    this.computerUseNative = computerUseNative;
+    this.computerUseEmergencyStop = new ComputerUseEmergencyStop({
+      onStop: () => {
+        const sessionId = this.computerUseEmergencySessionId;
+        if (sessionId === null) return;
+        return this.computerUseController.stop(sessionId, 'emergency_stop');
+      },
+    });
+    this.computerUseController = new ComputerUseController({
+      persistence: this.persistence,
+      native: computerUseNative,
+      featureEnabled: () => computerUseDesktopV1Enabled(),
+      currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
+      canStartSession: (taskId) =>
+        this.persistence.getActiveTurnId(taskId) === null &&
+        !this.teamCoordinator.hasBusyWorkers(taskId),
+      plannerFactory: async ({
+        taskId,
+        turnId,
+        sessionId,
+        connectionId,
+        modelId,
+        mode,
+        policyEpoch,
+        signal,
+      }) => {
+        const selected = this.persistence.getProviderConnection(connectionId);
+        const connection = await this.ensureProviderEndpointConsent(selected, false);
+        const verified = await this.providerVerification.requireVerifiedForExecution(
+          connection.id,
+          signal,
+        );
+        if (
+          !verified.enabled ||
+          verified.id !== connectionId ||
+          verified.providerId !== selected.providerId
+        )
+          throw new Error('Computer Use provider selection changed');
+        const selectedModel = this.modelCatalog.find(connectionId, modelId);
+        if (
+          !computerUseProviderModelIsEligible({
+            connectionId,
+            providerId: verified.providerId,
+            modelId,
+            model: selectedModel,
+          })
+        )
+          throw new InvalidModelError('provider');
+        const endpointTrust = this.providerEgressTrustForConnection(verified);
+        const catalogRevision = this.modelCatalog.revision;
+        const plannerBaseDeps = {
+          runtime: this.providerRegistry.resolve(verified),
+          connection: verified,
+          modelId,
+          mode,
+          task: this.persistence.getTask(taskId),
+          turnId,
+          permissionBroker: this.permissionBroker,
+          endpointTrust,
+          structuredOutputSupported: selectedModel?.structuredOutput.value === true,
+        } as const;
+        const permit = await preflightComputerUseProvider(
+          { ...plannerBaseDeps, sessionId, catalogRevision, policyEpoch },
+          signal,
+        );
+        if (
+          permit.sessionId !== sessionId ||
+          permit.connectionId !== connectionId ||
+          permit.modelId !== modelId ||
+          Date.parse(permit.expiresAt) <= Date.now()
+        )
+          throw new Error('Computer Use provider preflight binding changed');
+        return new ProviderComputerUsePlanner({
+          ...plannerBaseDeps,
+          compatibilityPermit: permit,
+          currentCompatibilityBinding: async (currentSignal) => {
+            const persisted = this.persistence.getProviderConnection(connectionId);
+            const current = await this.providerVerification.requireVerifiedForExecution(
+              persisted.id,
+              currentSignal,
+            );
+            const currentEndpointTrust = this.providerEgressTrustForConnection(current);
+            return {
+              endpointRevision: computerUseProviderEndpointRevision(
+                current,
+                modelId,
+                currentEndpointTrust,
+              ),
+              catalogRevision: this.modelCatalog.revision,
+              policyEpoch: this.permissionBroker.getPolicy(taskId).policyEpoch,
+              adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+            };
+          },
+        });
+      },
+      authorize: (request) =>
+        this.evaluateToolPermission(
+          {
+            context: request.context,
+            callId: request.callId,
+            entry: request.entry,
+            input: request.input,
+          },
+          request.capability,
+        ),
+      publishApproval: (approval) => this.publishComputerUseApproval(approval),
+      publishStatus: (status) => this.publishComputerUseStatus(status),
+      armEmergencyStop: (sessionId, targetBounds) => {
+        this.computerUseEmergencySessionId = sessionId;
+        return this.computerUseEmergencyStop.arm(targetBounds);
+      },
+      disarmEmergencyStop: (sessionId) => {
+        if (this.computerUseEmergencySessionId === sessionId)
+          this.computerUseEmergencySessionId = null;
+        this.computerUseEmergencyStop.disarm();
+      },
+      repositionEmergencyStop: (sessionId, screenBounds) =>
+        this.computerUseEmergencySessionId === sessionId &&
+        this.computerUseEmergencyStop.reposition(screenBounds),
+      visualActionBlocked: (sessionId, action) =>
+        this.computerUseEmergencySessionId === sessionId &&
+        this.computerUseEmergencyStop.blocksTargetAction(action),
+      // Computer Use owns a synthetic, non-persisted Turn. Its ToolBroker lifecycle is transient;
+      // durable evidence is stored in computer_action_audits instead of managed_tool_calls.
+      lifecycle: () => undefined,
+    });
+    this.window.webContents.on?.('did-start-navigation', this.handleComputerUseRendererNavigation);
+    this.window.webContents.on?.('render-process-gone', this.handleComputerUseRendererGone);
     this.taskTitleRuntimes = new TaskTitleRuntimePool(
       (kind) =>
         new RuntimeHostClient(
@@ -1482,6 +1724,7 @@ export class IpcRouter {
   }
 
   register(): void {
+    ipcMain.on(IPC_CHANNELS.computerUseActivationIntent, this.handleComputerUseActivationIntent);
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
       platform: process.platform,
@@ -1493,6 +1736,145 @@ export class IpcRouter {
       updateHealth: this.persistence.getUpdateHealth(),
       commandSandbox: this.commandSandboxCapability,
     }));
+    this.handle(
+      IPC_CHANNELS.computerUseAvailability,
+      emptyPayloadSchema,
+      computerUseAvailabilitySchema,
+      () => this.computerUseController.availability(),
+    );
+    this.handle(
+      IPC_CHANNELS.computerUseProfilesList,
+      computerUseProfileListInputSchema,
+      computerUseProfileListResultSchema,
+      () => {
+        const availability = this.computerUseController.availability();
+        if (!availability.available)
+          throw new ComputerUseNativeUnavailableError(
+            availability.reasonCode ?? availability.state,
+          );
+        return { profiles: this.computerUseController.listProfiles() };
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.computerUseProfileRegister,
+      computerUseProfileRegisterInputSchema,
+      computerAppProfileSchema.nullable(),
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'application');
+        if (activation === null) throw new SecurityError();
+        const availability = this.computerUseController.availability();
+        if (!availability.available)
+          throw new ComputerUseNativeUnavailableError(
+            availability.reasonCode ?? availability.state,
+          );
+        const identity = await this.computerUseNative.pickApplication({
+          activationToken: activation.token,
+          pickerKind: 'application',
+        });
+        if (identity === null) return null;
+        return this.computerUseController.registerProfile({
+          ...this.computerUseRegistrationPreferences(input.taskId),
+          label: identity.displayName,
+          identity,
+        });
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.computerUseWindowCandidates,
+      computerUseWindowCandidatesInputSchema,
+      computerUseWindowCandidatesResultSchema,
+      async (input, event) => {
+        // A Quick Start click is opportunistically consumed here before native enumeration. The
+        // resulting Main-only latch is bound to this Task/profile/frame and the exact single
+        // returned window; ordinary window listing has no activation requirement.
+        const activation = this.computerUseActivationGate.consume(event, 'start');
+        this.persistence.getTask(input.taskId);
+        const activationExpectedProfileRevision =
+          activation === null
+            ? null
+            : this.persistence.getComputerAppProfile(input.profileId).revision;
+        const availability = this.computerUseController.availability();
+        if (!availability.available)
+          throw new ComputerUseNativeUnavailableError(
+            availability.reasonCode ?? availability.state,
+          );
+        const candidates = await this.computerUseController.listWindows(input.profileId);
+        if (activation !== null && activationExpectedProfileRevision !== null)
+          this.latchComputerUseQuickStart(
+            event,
+            activation,
+            input,
+            candidates,
+            activationExpectedProfileRevision,
+          );
+        return {
+          profileId: input.profileId,
+          candidates,
+        };
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.computerUseStart,
+      computerUseStartInputSchema,
+      computerUseSessionStatusSchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'start');
+        const expectedIntent = startActivationIntent(input);
+        const directActivationMatches = activation?.intent === expectedIntent;
+        if (
+          !directActivationMatches &&
+          (input.resumeSessionId !== undefined ||
+            this.consumeComputerUseQuickStartLatch(event, input) === null)
+        )
+          throw new SecurityError();
+        if (directActivationMatches)
+          this.clearComputerUseQuickStartLatchesForActor(event, input.taskId, input.profileId);
+        const availability = this.computerUseController.availability();
+        if (!availability.available)
+          throw new ComputerUseNativeUnavailableError(
+            availability.reasonCode ?? availability.state,
+          );
+        if (this.persistence.getActiveTurnId(input.taskId) !== null) throw new TurnActiveError();
+        if (this.teamCoordinator.hasBusyWorkers(input.taskId)) throw new TurnActiveError();
+        return this.computerUseController.start(input);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.computerUseStatusGet,
+      computerUseSessionStatusInputSchema,
+      computerUseSessionStatusSchema.nullable(),
+      (input) =>
+        this.computerUseController.getStatus(input.sessionId) ??
+        this.computerUseStatusBySession.get(input.sessionId) ??
+        null,
+    );
+    this.handle(
+      IPC_CHANNELS.computerUseStop,
+      computerUseStopInputSchema,
+      z.undefined(),
+      async (input) => {
+        await this.computerUseController.stop(input.sessionId, input.reason);
+        return undefined;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.computerUseApprovalResolve,
+      computerUseApprovalResolveInputSchema,
+      computerUseSessionStatusSchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'approval');
+        if (activation?.intent !== approvalActivationIntent(input)) throw new SecurityError();
+        const sessionId = this.computerUseApprovalSessionById.get(input.approvalId);
+        if (sessionId === undefined) throw new NotFoundError('Computer Use approval not found');
+        await this.computerUseController.resolveApproval(input);
+        const status =
+          this.computerUseController.getStatus(sessionId) ??
+          this.computerUseStatusBySession.get(sessionId);
+        if (status === undefined || status === null)
+          throw new NotFoundError('Computer Use session not found');
+        return status;
+      },
+    );
     this.handle(
       IPC_CHANNELS.runtimeFailureDiagnosticGet,
       runtimeFailureDiagnosticQuerySchema,
@@ -2581,7 +2963,10 @@ export class IpcRouter {
       IPC_CHANNELS.tasksMessages,
       taskIdPayloadSchema,
       z.array(chatMessageSchema),
-      (input) => this.persistence.listMessages(input.taskId),
+      async (input) => {
+        await this.stopComputerUseOutsideTask(input.taskId);
+        return this.persistence.listMessages(input.taskId);
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.tasksRename,
@@ -3066,25 +3451,37 @@ export class IpcRouter {
       IPC_CHANNELS.teamsHireWorker,
       teamHireWorkerInputSchema,
       workerSummarySchema,
-      (input) => this.teamCoordinator.hireWorker(input),
+      async (input) => {
+        await this.stopComputerUseForTask(input.taskId, 'turn_started');
+        return this.teamCoordinator.hireWorker(input);
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.teamsResumeMission,
       teamResumeMissionInputSchema,
       teamMissionSummarySchema,
-      (input) => this.teamCoordinator.resumeMission(input.taskId, input.missionId),
+      async (input) => {
+        await this.stopComputerUseForTask(input.taskId, 'turn_started');
+        return this.teamCoordinator.resumeMission(input.taskId, input.missionId);
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.teamsResumeExecutionIntegration,
       teamResumeExecutionIntegrationInputSchema,
       teamDetailSchema,
-      (input) => this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId),
+      async (input) => {
+        await this.stopComputerUseForTask(input.taskId, 'turn_started');
+        return this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId);
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.teamsSend,
       teamSendMessageInputSchema,
       teamMessageSummarySchema,
-      (input) => this.teamCoordinator.sendToWorker(input),
+      async (input) => {
+        await this.stopComputerUseForTask(input.taskId, 'turn_started');
+        return this.teamCoordinator.sendToWorker(input);
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.teamsStopWorker,
@@ -3518,7 +3915,12 @@ export class IpcRouter {
         return undefined;
       },
     );
-    this.window.webContents.once('destroyed', () => this.closeAllPorts());
+    this.window.webContents.once('destroyed', () => {
+      this.closeAllPorts();
+      void this.computerUseController.dispose();
+      this.computerUseActivationGate.dispose();
+      this.computerUseEmergencyStop.dispose();
+    });
   }
 
   async initialize(): Promise<void> {
@@ -3608,10 +4010,224 @@ export class IpcRouter {
     }
   }
 
+  private computerUseRegistrationPreferences(taskId: string): {
+    label: string;
+    mode: 'full_access_app';
+    connectionId: string;
+    modelId: string;
+    providerEgressConsent: false;
+    remember: false;
+  } {
+    const taskSelection = this.persistence.getTaskModelSelection(taskId);
+    const fallback =
+      taskSelection ??
+      modelSelectionForRuntime(this.persistence.getRuntime(), this.persistence.getModel());
+    return {
+      // The native picker owns the actual display name/identity. This label is only a temporary
+      // Main-side preference until the picker result is persisted by the controller.
+      label: 'Computer Use target',
+      mode: 'full_access_app',
+      connectionId: fallback.connectionId ?? 'unselected',
+      modelId: fallback.requestedModel ?? 'unselected',
+      providerEgressConsent: false,
+      remember: false,
+    };
+  }
+
+  private async stopComputerUseForTask(
+    taskId: string,
+    reason: 'task_changed' | 'turn_started',
+  ): Promise<void> {
+    await this.computerUseController.stopForTask(taskId, reason);
+  }
+
+  private async stopComputerUseOutsideTask(selectedTaskId: string): Promise<void> {
+    for (const [key, latch] of this.computerUseQuickStartLatches)
+      if (latch.taskId !== selectedTaskId) this.computerUseQuickStartLatches.delete(key);
+    await this.computerUseController.stopOutsideTask(selectedTaskId);
+  }
+
+  private publishComputerUseApproval(rawApproval: unknown): void {
+    const parsed = computerUseApprovalSchema.safeParse(rawApproval);
+    if (!parsed.success) return;
+    const approval = parsed.data;
+    this.computerUseApprovalSessionById.set(approval.id, approval.sessionId);
+    if (approval.state === 'pending')
+      this.computerUsePendingApprovalBySession.set(approval.sessionId, approval);
+    else this.computerUsePendingApprovalBySession.delete(approval.sessionId);
+    const status =
+      this.computerUseStatusBySession.get(approval.sessionId) ??
+      this.computerUseController.getStatus(approval.sessionId);
+    if (status !== null && status !== undefined) this.publishComputerUseStatus(status);
+  }
+
+  private readonly handleComputerUseActivationIntent = (
+    event: IpcMainEvent,
+    raw: unknown,
+  ): void => {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return;
+    const rawKind = (raw as Record<string, unknown>)['kind'];
+    const rawIntent = (raw as Record<string, unknown>)['intent'];
+    if (rawKind !== 'application' && rawKind !== 'start' && rawKind !== 'approval') return;
+    if (rawIntent !== null && typeof rawIntent !== 'string') return;
+    this.computerUseActivationGate.bindIntent(event, rawKind, rawIntent);
+  };
+
+  private pruneComputerUseQuickStartLatches(now = Date.now()): void {
+    const generation = this.computerUseActivationGate.generation();
+    for (const [key, latch] of this.computerUseQuickStartLatches) {
+      if (latch.expiresAtMs <= now || latch.activationGeneration !== generation)
+        this.computerUseQuickStartLatches.delete(key);
+    }
+  }
+
+  private clearComputerUseQuickStartLatchesForActor(
+    event: IpcMainInvokeEvent,
+    taskId: string,
+    profileId: string,
+  ): void {
+    const frame = event.senderFrame;
+    if (frame === null) return;
+    for (const [key, latch] of this.computerUseQuickStartLatches)
+      if (
+        latch.taskId === taskId &&
+        latch.profileId === profileId &&
+        latch.senderId === event.sender.id &&
+        latch.frameProcessId === frame.processId &&
+        latch.frameRoutingId === frame.routingId &&
+        latch.browserWindowId === this.window.id
+      )
+        this.computerUseQuickStartLatches.delete(key);
+  }
+
+  private latchComputerUseQuickStart(
+    event: IpcMainInvokeEvent,
+    activation: ComputerUseActivationPermit,
+    input: { taskId: string; profileId: string },
+    candidates: readonly ComputerUseWindowCandidate[],
+    activationExpectedProfileRevision: number,
+  ): void {
+    const frame = event.senderFrame;
+    const eligible = candidates.filter((candidate) => candidate.eligible);
+    if (frame === null || eligible.length !== 1 || activation.intent === null) return;
+    const candidate = eligible[0]!;
+    const profile = this.persistence.getComputerAppProfile(input.profileId);
+    // The trusted click named the pre-enumeration revision. Native enumeration may perform the
+    // one permitted same-signer digest refresh, so bind that old consent separately from the
+    // exact post-refresh revision required by start(). No unrelated revision jump inherits it.
+    if (
+      profile.revision !== activationExpectedProfileRevision &&
+      profile.revision !== activationExpectedProfileRevision + 1
+    )
+      return;
+    this.clearComputerUseQuickStartLatchesForActor(event, input.taskId, input.profileId);
+    this.computerUseQuickStartLatches.set(
+      randomUUID(),
+      Object.freeze({
+        taskId: input.taskId,
+        profileId: input.profileId,
+        windowId: candidate.windowId,
+        expectedWindowRevision: candidate.revision,
+        expectedProfileRevision: profile.revision,
+        activationExpectedProfileRevision,
+        senderId: event.sender.id,
+        frameProcessId: frame.processId,
+        frameRoutingId: frame.routingId,
+        browserWindowId: this.window.id,
+        activationGeneration: activation.generation,
+        activationIntent: activation.intent,
+        expiresAtMs: Date.now() + COMPUTER_USE_QUICK_START_LATCH_TTL_MS,
+      }),
+    );
+  }
+
+  private consumeComputerUseQuickStartLatch(
+    event: IpcMainInvokeEvent,
+    input: ComputerUseStartInput,
+  ): ComputerUseQuickStartLatch | null {
+    const frame = event.senderFrame;
+    const now = Date.now();
+    this.pruneComputerUseQuickStartLatches(now);
+    if (frame === null) return null;
+    for (const [key, latch] of this.computerUseQuickStartLatches) {
+      const sameActor =
+        latch.taskId === input.taskId &&
+        latch.profileId === input.profileId &&
+        latch.senderId === event.sender.id &&
+        latch.frameProcessId === frame.processId &&
+        latch.frameRoutingId === frame.routingId &&
+        latch.browserWindowId === this.window.id;
+      if (!sameActor) continue;
+      this.computerUseQuickStartLatches.delete(key);
+      const expectedIntent = quickStartActivationIntent({
+        taskId: input.taskId,
+        profileId: input.profileId,
+        mode: input.mode,
+        connectionId: input.connectionId,
+        modelId: input.modelId,
+        providerEgressConsent: input.providerEgressConsent,
+        remember: input.remember,
+        expectedPolicyEpoch: input.expectedPolicyEpoch,
+        expectedProfileRevision: latch.activationExpectedProfileRevision,
+      });
+      return latch.activationIntent === expectedIntent &&
+        latch.windowId === input.windowId &&
+        latch.expectedWindowRevision === input.expectedWindowRevision &&
+        latch.expectedProfileRevision === input.expectedProfileRevision
+        ? latch
+        : null;
+    }
+    return null;
+  }
+
+  private publishComputerUseStatus(status: ComputerUseSessionStatus): void {
+    const pendingApproval = this.computerUsePendingApprovalBySession.get(status.sessionId) ?? null;
+    const published = computerUseSessionStatusSchema.parse({ ...status, pendingApproval });
+    this.computerUseStatusBySession.set(published.sessionId, published);
+    if (published.state === 'stopped') {
+      if (this.computerUseSessionByTask.get(published.taskId) === published.sessionId)
+        this.computerUseSessionByTask.delete(published.taskId);
+      this.computerUsePendingApprovalBySession.delete(published.sessionId);
+      for (const [approvalId, sessionId] of this.computerUseApprovalSessionById)
+        if (sessionId === published.sessionId)
+          this.computerUseApprovalSessionById.delete(approvalId);
+    } else this.computerUseSessionByTask.set(published.taskId, published.sessionId);
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
+    // Approval requires the user to act in Sprint Coder. A paused session can instead represent
+    // an explicit user-takeover boundary (secure field, payment, file picker, or OS prompt), in
+    // which case the controlled application must remain foreground for the user to continue there.
+    if (published.state === 'awaiting_approval') {
+      this.window.show();
+      this.window.focus();
+    }
+    this.window.webContents.send(IPC_CHANNELS.computerUseStatusEvent, published);
+  }
+
   async dispose(): Promise<void> {
     this.disposed = true;
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
+    await this.computerUseController.dispose();
+    this.window.webContents.removeListener?.(
+      'did-start-navigation',
+      this.handleComputerUseRendererNavigation,
+    );
+    this.window.webContents.removeListener?.(
+      'render-process-gone',
+      this.handleComputerUseRendererGone,
+    );
+    this.computerUseActivationGate.dispose();
+    this.computerUseEmergencyStop.dispose();
+    this.computerUseEmergencySessionId = null;
+    this.computerUseSessionByTask.clear();
+    this.computerUsePendingApprovalBySession.clear();
+    this.computerUseApprovalSessionById.clear();
+    this.computerUseStatusBySession.clear();
+    this.computerUseQuickStartLatches.clear();
+    ipcMain.removeListener(
+      IPC_CHANNELS.computerUseActivationIntent,
+      this.handleComputerUseActivationIntent,
+    );
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamSubscriptions.clear();
@@ -4045,9 +4661,168 @@ export class IpcRouter {
       void this.generateAndApplyTaskTitle(pendingTaskTitle);
   }
 
+  /**
+   * Computer Use has a synthetic controller Turn rather than a persisted chat Turn. Do not route
+   * it through the generic approval fact builder: that builder quite correctly treats unknown
+   * tools as external resources, while the Computer Use policy must bind to the Main-owned app,
+   * window, session, and observation revision. This still evaluates and commits through the
+   * PermissionBroker; it only supplies the exact resource facts that the native controller owns.
+   */
+  private async evaluateComputerUsePermission(
+    request: ToolAuthorizationRequest,
+    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
+  ) {
+    const input =
+      typeof request.input === 'object' && request.input !== null && !Array.isArray(request.input)
+        ? (request.input as Record<string, unknown>)
+        : null;
+    const sessionId = input?.['sessionId'];
+    if (typeof sessionId !== 'string')
+      return { decision: 'deny' as const, reason: 'computer_session_missing' };
+    const status = this.computerUseController.getStatus(sessionId);
+    if (status === null || status.taskId !== request.context.taskId)
+      return { decision: 'deny' as const, reason: 'computer_session_missing' };
+    const profile = this.persistence.getComputerAppProfile(status.profileId);
+    const observationRevision = status.observationRevision;
+    const operation =
+      capability === 'computer.observe' ? ('observe' as const) : ('control' as const);
+    const resource =
+      capability === 'computer.observe'
+        ? ({
+            kind: 'computer-session' as const,
+            platform: profile.platform,
+            appIdentityDigest: status.appIdentityDigest,
+            windowIdentityDigest: status.windowIdentityDigest,
+            sessionId,
+            taskId: status.taskId,
+          } satisfies Extract<PermissionRequest['resource'], { kind: 'computer-session' }>)
+        : ({
+            kind: 'computer-revision' as const,
+            platform: profile.platform,
+            appIdentityDigest: status.appIdentityDigest,
+            windowIdentityDigest: status.windowIdentityDigest,
+            sessionId,
+            revision: observationRevision,
+          } satisfies Extract<PermissionRequest['resource'], { kind: 'computer-revision' }>);
+    const resourceSet =
+      capability === 'computer.observe'
+        ? ({
+            kind: 'computer-session-exact' as const,
+            platform: profile.platform,
+            appIdentityDigest: status.appIdentityDigest,
+            windowIdentityDigest: status.windowIdentityDigest,
+            sessionId,
+          } satisfies ResourceSet)
+        : ({
+            kind: 'computer-revision-exact' as const,
+            platform: profile.platform,
+            appIdentityDigest: status.appIdentityDigest,
+            windowIdentityDigest: status.windowIdentityDigest,
+            sessionId,
+            revision: observationRevision,
+          } satisfies ResourceSet);
+    const policyEpoch = this.permissionBroker.getPolicy(status.taskId).policyEpoch;
+    if (policyEpoch !== request.context.policyEpoch)
+      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
+    const sandboxProfile = 'read-only' as const;
+    const executionSpecDigest = digestCanonical({
+      schemaVersion: 1,
+      capability,
+      sessionId,
+      profileId: status.profileId,
+      profileRevision: status.profileRevision,
+      windowIdentityDigest: status.windowIdentityDigest,
+      observationRevision,
+      input,
+    });
+    const baseRequest = {
+      taskId: status.taskId,
+      subjectId: `computer-use:${sessionId}:${capability}`,
+      capability,
+      resource,
+      operation,
+      providerEgress: 'none' as const,
+      sandboxProfile,
+      executionSpecDigest,
+      risk: request.entry.risk,
+    };
+    const toolFacts = {
+      kind: request.entry.kind,
+      sideEffect: request.entry.sideEffect,
+      risk: request.entry.risk,
+    } as const;
+    const permissionRequest = {
+      ...baseRequest,
+      reviewerInputDigest: autoReviewerInputDigest({
+        request: baseRequest,
+        tool: toolFacts,
+        policyEpoch,
+      }),
+    } satisfies PermissionRequest;
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+    const ceilingEntry = {
+      capability,
+      resourceSet,
+      operations: [operation],
+      expiresAt,
+      providerEgress: ['none' as const],
+      sandboxProfiles: [sandboxProfile],
+    };
+    const evaluationInput = {
+      taskId: status.taskId,
+      turnId: request.context.turnId,
+      request: permissionRequest,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        sandbox: { feasible: true, profile: sandboxProfile },
+        allowRules:
+          capability === 'computer.observe' || status.mode === 'full_access_app'
+            ? [
+                {
+                  capability,
+                  resourceSet,
+                  operations: [operation],
+                  auditReason:
+                    capability === 'computer.observe'
+                      ? 'computer_observe_session'
+                      : 'computer_full_access_app',
+                },
+              ]
+            : [],
+      },
+      now: new Date().toISOString(),
+    } satisfies Parameters<PermissionBroker['preview']>[0];
+    // The Computer Use lane is deliberately non-persistent. It still evaluates the current
+    // PermissionBroker policy and revalidates the returned permit immediately before execution,
+    // but it never creates a generic permission audit/token/grant containing a live session id.
+    // Supervised mode also never delegates the user decision to AutoReviewer.
+    const evaluation = this.permissionBroker.preview(evaluationInput);
+    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
+      return { decision: evaluation.decision, reason: evaluation.reason };
+    if (evaluation.permit === undefined)
+      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
+    const permit = evaluation.permit;
+    return {
+      decision: 'allow' as const,
+      reason: evaluation.reason,
+      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
+      beforeExecute: () =>
+        this.permissionBroker.revalidateEphemeral({
+          ...evaluationInput,
+          permit,
+          now: new Date().toISOString(),
+        }).valid,
+    };
+  }
+
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
+    if (capability === 'computer.observe' || capability === 'computer.control')
+      return this.evaluateComputerUsePermission(request, capability);
     const rawFacts = approvalFactsForTool(request, capability);
     const pathGuard = workspaceToolAuthorizationGuard(
       request.input,
@@ -4279,6 +5054,12 @@ export class IpcRouter {
   }
 
   private dispatchStarted(started: StartedTurn): void {
+    void this.stopComputerUseForTask(started.event.taskId, 'turn_started').catch((error) =>
+      secureLogger.warn('Computer Use was not stopped before a new Turn started', {
+        taskId: started.event.taskId,
+        error,
+      }),
+    );
     this.turnLogCategoryByTurn.set(started.turnId, started.teamTurn ? 'team' : 'chat');
     this.turnLogStartedAtByTurn.set(started.turnId, Date.now());
     this.turnLogRuntimeByTurn.set(started.turnId, {
@@ -4295,6 +5076,13 @@ export class IpcRouter {
 
   private dispatchQueueTransition(transition: QueueTransition): void {
     if (transition === null) return;
+    void this.stopComputerUseForTask(transition.started.event.taskId, 'turn_started').catch(
+      (error) =>
+        secureLogger.warn('Computer Use was not stopped before a queued Turn started', {
+          taskId: transition.started.event.taskId,
+          error,
+        }),
+    );
     this.turnLogCategoryByTurn.set(
       transition.started.turnId,
       transition.started.teamTurn ? 'team' : 'chat',
@@ -8257,6 +9045,12 @@ export function toPublicError(error: unknown): PublicError {
     return {
       code: 'INVALID_REQUEST',
       userMessage: 'Canvasの配置に不正な値が含まれています。',
+      retryable: false,
+    };
+  if (error instanceof ComputerUseNativeUnavailableError)
+    return {
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage: 'Computer Useのネイティブ機能を利用できません。',
       retryable: false,
     };
   if (error instanceof SecurityError)
