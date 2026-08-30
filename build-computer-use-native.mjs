@@ -64,32 +64,66 @@ function run(command, arguments_, environment = process.env) {
 }
 
 export function sanitizedNativeBuildEnvironment(environment) {
-  const blocked =
-    /(?:^|_)(?:API_?KEY|ACCESS_?KEY|TOKEN|SECRET|PASSWORD|PASS|PRIVATE_?KEY|CREDENTIALS?|AUTH|COOKIE|SESSION|CERTIFICATE)(?:_|$)/iu;
   const allowed =
-    /^(?:PATH|HOME|HOMEDRIVE|HOMEPATH|USER|USERNAME|LOGNAME|SHELL|COMSPEC|PATHEXT|PWD|INIT_CWD|TMPDIR|TEMP|TMP|TERM|LANG|LC_ALL|LC_CTYPE|NODE|PYTHON|CC|CXX|SDKROOT|DEVELOPER_DIR|MACOSX_DEPLOYMENT_TARGET|SYSTEMROOT|WINDIR|OS|PROCESSOR_[A-Z0-9_]+|NUMBER_OF_PROCESSORS|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|COMMONPROGRAMFILES(?:\(X86\))?|DRIVERDATA|COMMANDPROMPTTYPE|PLATFORM|PLATFORMTARGET|PREFERREDTOOLARCHITECTURE|VSINSTALLDIR|VISUALSTUDIOVERSION|DEVENVDIR|VCINSTALLDIR|VCTOOLSINSTALLDIR|VCTOOLSREDISTDIR|WINDOWSSDKDIR|WINDOWSSDKVERSION|UCRTVERSION|UNIVERSALCRTSDKDIR|EXTENSIONSDKDIR|FRAMEWORKDIR|FRAMEWORKDIR32|FRAMEWORKVERSION|FRAMEWORKVERSION32|FRAMEWORK40VERSION|NETFXSDKDIR|VSCMD_[A-Z0-9_]+|__VSCMD_PREINIT_PATH|npm_config_[A-Z0-9_]+)$/iu;
+    /^(?:PATH|HOME|HOMEDRIVE|HOMEPATH|USER|USERNAME|LOGNAME|SHELL|COMSPEC|PATHEXT|PWD|INIT_CWD|TMPDIR|TEMP|TMP|TERM|LANG|LC_ALL|LC_CTYPE|NODE|PYTHON|CC|CXX|SDKROOT|DEVELOPER_DIR|MACOSX_DEPLOYMENT_TARGET|SYSTEMROOT|WINDIR|OS|PROCESSOR_[A-Z0-9_]+|NUMBER_OF_PROCESSORS|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|COMMONPROGRAMFILES(?:\(X86\))?|DRIVERDATA|COMMANDPROMPTTYPE|PLATFORM|PLATFORMTARGET|PREFERREDTOOLARCHITECTURE|INCLUDE|EXTERNAL_INCLUDE|LIB|LIBPATH|IFCPATH|VSINSTALLDIR|VISUALSTUDIOVERSION|DEVENVDIR|VCINSTALLDIR|VCTOOLSINSTALLDIR|VCTOOLSREDISTDIR|WINDOWSLIBPATH|WINDOWSSDKDIR|WINDOWSSDKVERSION|WINDOWSSDKLIBVERSION|WINDOWSSDKVERBINPATH|UCRTVERSION|UNIVERSALCRTSDKDIR|EXTENSIONSDKDIR|FRAMEWORKDIR|FRAMEWORKDIR32|FRAMEWORKVERSION|FRAMEWORKVERSION32|FRAMEWORK40VERSION|NETFXSDKDIR|VSCMD_[A-Z0-9_]+|__VSCMD_PREINIT_PATH)$/iu;
   return {
     ...Object.fromEntries(
       Object.entries(environment).filter(
-        ([key, value]) => value !== undefined && allowed.test(key) && !blocked.test(key),
+        ([key, value]) =>
+          value !== undefined && allowed.test(key) && !isSecretLikeEnvironmentKey(key),
       ),
     ),
     npm_config_loglevel: 'error',
   };
 }
 
+function isSecretLikeEnvironmentKey(key) {
+  const canonical = key.toUpperCase().replace(/[^A-Z0-9]/gu, '');
+  return [
+    'APIKEY',
+    'ACCESSKEY',
+    'TOKEN',
+    'SECRET',
+    'PASSWORD',
+    'PRIVATEKEY',
+    'CREDENTIAL',
+    'AUTH',
+    'COOKIE',
+    'SESSION',
+    'CERTIFICATE',
+  ].some((marker) => canonical.includes(marker));
+}
+
 if (process.argv.includes('--test-environment-sanitizer')) {
   const sanitized = sanitizedNativeBuildEnvironment({
     PATH: '/usr/bin',
+    INCLUDE: 'C:\\Windows Kits\\Include',
+    LIB: 'C:\\Windows Kits\\Lib',
+    LIBPATH: 'C:\\Visual Studio\\LibPath',
     OPENROUTER_API_KEY: 'PRIVATE_CANARY',
     SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD: 'PRIVATE_CANARY',
+    npm_config__authToken: 'PRIVATE_CANARY',
+    NPM_CONFIG_ACCESSTOKEN: 'PRIVATE_CANARY',
+    NPM_CONFIG_OTP: 'PRIVATE_CANARY',
+    NPM_CONFIG_KEY: 'PRIVATE_CANARY',
+    NPM_CONFIG_CERT: 'PRIVATE_CANARY',
+    VSCMD_AUTHTOKEN: 'PRIVATE_CANARY',
     DATABASE_URL: 'PRIVATE_CANARY',
     CODEX_THREAD_ID: 'PRIVATE_CANARY',
   });
   if (
     sanitized.PATH !== '/usr/bin' ||
+    sanitized.INCLUDE !== 'C:\\Windows Kits\\Include' ||
+    sanitized.LIB !== 'C:\\Windows Kits\\Lib' ||
+    sanitized.LIBPATH !== 'C:\\Visual Studio\\LibPath' ||
     sanitized.OPENROUTER_API_KEY !== undefined ||
     sanitized.SPRINT_CODER_WINDOWS_CERTIFICATE_PASSWORD !== undefined ||
+    sanitized.npm_config__authToken !== undefined ||
+    sanitized.NPM_CONFIG_ACCESSTOKEN !== undefined ||
+    sanitized.NPM_CONFIG_OTP !== undefined ||
+    sanitized.NPM_CONFIG_KEY !== undefined ||
+    sanitized.NPM_CONFIG_CERT !== undefined ||
+    sanitized.VSCMD_AUTHTOKEN !== undefined ||
     sanitized.DATABASE_URL !== undefined ||
     sanitized.CODEX_THREAD_ID !== undefined
   )
