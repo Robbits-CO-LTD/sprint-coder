@@ -1,5 +1,9 @@
 import { Buffer } from 'node:buffer';
-import type { ProviderExecutionRequest, TaskSummary } from '@sprint-coder/contracts';
+import {
+  COMPUTER_USE_LIMITS,
+  type ProviderExecutionRequest,
+  type TaskSummary,
+} from '@sprint-coder/contracts';
 import type { PermissionEvaluation, PermissionRequest, ProviderEgress } from '@sprint-coder/domain';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
@@ -10,6 +14,111 @@ export type ProviderEgressDecision = Readonly<{
   allowed: boolean;
   evaluation: PermissionEvaluation;
 }>;
+
+/**
+ * The Computer Use provider path carries an ephemeral screenshot in addition to a bounded,
+ * redacted accessibility projection.  Keep this separate from the normal Turn context so the
+ * observation cannot accidentally enter chat history, context seals, or ToolImageBridge state.
+ */
+export type ComputerUseProviderEgressInput = Readonly<{
+  broker: PermissionBroker;
+  task: TaskSummary;
+  turnId: string;
+  sessionId: string;
+  providerId: string;
+  connectionId: string;
+  modelId: string;
+  prompt: string;
+  screenshotMimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  screenshotDigest: string;
+  screenshotByteCount: number;
+  accessibilityTreeDigest: string;
+  accessibilityTreeByteCount: number;
+  now: string;
+  endpointTrust?: 'trusted-local' | 'trusted-remote' | 'untrusted';
+  round: number;
+  signal?: AbortSignal;
+}>;
+
+export function authorizeComputerUseProviderEgress(
+  input: ComputerUseProviderEgressInput,
+): ProviderEgressDecision {
+  if (input.signal?.aborted) {
+    return Object.freeze({
+      allowed: false,
+      evaluation: {
+        decision: 'deny' as const,
+        reason: 'computer_use_provider_egress_canceled',
+        policyEpoch: input.broker.getPolicy(input.task.id).policyEpoch,
+        evaluationTrace: [],
+      },
+    });
+  }
+  if (
+    !/^[a-f0-9]{64}$/.test(input.screenshotDigest) ||
+    !/^[a-f0-9]{64}$/.test(input.accessibilityTreeDigest) ||
+    !Number.isSafeInteger(input.screenshotByteCount) ||
+    input.screenshotByteCount < 1 ||
+    !Number.isSafeInteger(input.accessibilityTreeByteCount) ||
+    input.accessibilityTreeByteCount < 0 ||
+    !Number.isSafeInteger(input.round) ||
+    input.round < 1 ||
+    input.round > COMPUTER_USE_LIMITS.maxRounds ||
+    input.sessionId.length < 1 ||
+    input.sessionId.length > 128
+  )
+    throw new Error('Invalid Computer Use provider egress facts');
+  const trust = input.endpointTrust ?? 'trusted-remote';
+  const providerTrust = trust === 'untrusted' ? ('untrusted-remote' as const) : trust;
+  const manifestDigest = digestCanonical({
+    sessionId: input.sessionId,
+    revision: input.round,
+    screenshot: {
+      mimeType: input.screenshotMimeType,
+      sha256: input.screenshotDigest,
+      byteLength: input.screenshotByteCount,
+    },
+    accessibilityTree: {
+      sha256: input.accessibilityTreeDigest,
+      byteLength: input.accessibilityTreeByteCount,
+    },
+  });
+  const context = {
+    fragments: [],
+    projectItems: [],
+    projectSnapshotDigest: null,
+    usageEvents: [],
+    compacted: false,
+  } as PreparedContext;
+  return authorizeOfficialApiProviderEgress(
+    {
+      broker: input.broker,
+      task: input.task,
+      turnId: input.turnId,
+      prompt: input.prompt,
+      context,
+      now: input.now,
+      payloadDigest: digestCanonical({
+        sessionId: input.sessionId,
+        round: input.round,
+        promptDigest: digestCanonical(input.prompt),
+        screenshotDigest: input.screenshotDigest,
+        accessibilityTreeDigest: input.accessibilityTreeDigest,
+      }),
+      adapterVersion: 'computer-use-v1',
+      connectionId: input.connectionId,
+      modelId: input.modelId,
+      endpointTrust: trust,
+      round: input.round,
+      toolCatalogDigest: digestCanonical(['computer-use-v1']),
+      attachmentManifestDigest: manifestDigest,
+      attachmentByteCount: input.screenshotByteCount,
+      ephemeral: true,
+    },
+    input.providerId,
+    providerTrust,
+  );
+}
 
 /** Normalize Provider-owned transport values before scanning the egress policy projection. */
 export function providerMessagesForEgressPolicy(
@@ -53,6 +162,8 @@ export type ProviderEgressInput = {
   toolCatalogDigest?: string;
   attachmentManifestDigest?: string;
   attachmentByteCount?: number;
+  /** Evaluate and revalidate without persisting a live, session-bound permission audit. */
+  ephemeral?: boolean;
 };
 
 export function dispatchAfterCodexProviderEgress(
@@ -258,17 +369,22 @@ function authorizeProviderEgress(
     basePolicy,
     now: input.now,
   };
-  const evaluation = input.broker.evaluate(evaluationInput);
+  const evaluation = input.ephemeral
+    ? input.broker.preview(evaluationInput)
+    : input.broker.evaluate(evaluationInput);
   if (
     (evaluation.decision !== 'allow' && evaluation.decision !== 'allow_once') ||
     evaluation.permit === undefined
   )
     return Object.freeze({ allowed: false, evaluation });
-  const revalidated = input.broker.revalidate({
+  const revalidationInput = {
     ...evaluationInput,
     permit: evaluation.permit,
     now: input.now,
-  });
+  };
+  const revalidated = input.ephemeral
+    ? input.broker.revalidateEphemeral(revalidationInput)
+    : input.broker.revalidate(revalidationInput);
   const finalEvaluation: PermissionEvaluation = revalidated.valid
     ? evaluation
     : {
