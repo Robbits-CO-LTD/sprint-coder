@@ -45,9 +45,30 @@ describe('mergeWorkspaceDiffs', () => {
     ]);
   });
 
+  it('keeps both persisted roots when only one Runtime row reports their shared relative path', () => {
+    const left = entry('/private/tmp/left/src/index.ts');
+    const right = entry('/private/tmp/right/src/index.ts', { ordinal: 2 });
+    const result = mergeWorkspaceDiffs(diff(left, right), diff(entry('left › src/index.ts')));
+
+    expect(result?.entries.map(({ path }) => path)).toEqual([
+      'left › src/index.ts',
+      left.path,
+      right.path,
+    ]);
+  });
+
   it('does not hide persisted external drift behind a Runtime applied row', () => {
     const result = mergeWorkspaceDiffs(
       diff(entry('/private/tmp/project/src/index.ts', { status: 'external_drift' })),
+      diff(entry('project › src/index.ts')),
+    );
+
+    expect(result?.entries).toHaveLength(2);
+  });
+
+  it('does not hide exact-path external drift behind a Runtime applied row', () => {
+    const result = mergeWorkspaceDiffs(
+      diff(entry('project › src/index.ts', { status: 'external_drift' })),
       diff(entry('project › src/index.ts')),
     );
 

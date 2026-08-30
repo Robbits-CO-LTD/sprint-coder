@@ -458,19 +458,20 @@ export function mergeWorkspaceDiffs(
   if (runtime === undefined) return persisted.entries.length === 0 ? null : persisted;
   const runtimeEntries = [...runtime.entries];
   const entries = [...runtimeEntries];
-  const known = new Set(
-    entries.map((entry) => `${entry.path}\u0000${entry.destination ?? ''}\u0000${entry.kind}`),
-  );
   for (const entry of persisted.entries) {
-    const key = `${entry.path}\u0000${entry.destination ?? ''}\u0000${entry.kind}`;
-    if (known.has(key)) continue;
     const rootedMatches = runtimeEntries.filter((candidate) =>
       sameRootedWorkspaceEntry(entry, candidate),
     );
     // Main's Edit Saga preserves the approved input spelling, which may be absolute, while a
     // Runtime `files.changed` report is always `root label › relative/path`. Collapse them only
     // when that suffix identifies exactly one Runtime row; ambiguity across roots stays visible.
-    if (rootedMatches.length === 1) continue;
+    const reverseMatches =
+      rootedMatches.length === 1
+        ? persisted.entries.filter((candidate) =>
+            sameRootedWorkspaceEntry(candidate, rootedMatches[0]!),
+          )
+        : [];
+    if (rootedMatches.length === 1 && reverseMatches.length === 1) continue;
     entries.push(entry);
   }
   return {
