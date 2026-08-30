@@ -48,7 +48,7 @@ jobs:
             printf '%s\n' "${changed_files}"
 
             # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
-            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
+            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^build-computer-use-native\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|computer-use-native/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
               full_matrix=true
             fi
           fi
@@ -118,6 +118,98 @@ jobs:
 
       - name: Test contracts and domain packages
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
+
+  computer-use-native-gate:
+    name: Computer Use native Gate 0 (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - label: macOS
+            os: macos-latest
+          - label: Windows
+            os: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Initialize MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Compile and manifest native artifact
+        run: npm run build:computer-use-native
+
+      - name: Build deterministic Win32 acceptance fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'computer-use-win32-acceptance-fixture'
+          ./apps/desktop/computer-use-native/fixtures/win32-acceptance/build.ps1 `
+            -OutputDirectory $output
+
+      - name: Run protocol harness with macOS sanitizers
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          harness="${RUNNER_TEMP}/computer-use-protocol-harness"
+          /usr/bin/clang++ \
+            -std=c++20 -O1 -g -fno-omit-frame-pointer \
+            -fsanitize=address,undefined \
+            -I apps/desktop/computer-use-native \
+            apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc \
+            -o "${harness}"
+          ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 \
+            "${harness}"
+
+      - name: Run protocol harness and attempt Windows ASan
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'
+          $include = 'apps/desktop/computer-use-native'
+          $normal = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.exe'
+          $normalObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl "/I$include" $source "/Fo$normalObject" "/Fe$normal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $normal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $asan = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.exe'
+          $asanObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /O1 /Zi /fsanitize=address "/I$include" $source "/Fo$asanObject" "/Fe$asan"
+          if ($LASTEXITCODE -ne 0) {
+            'Windows ASan: SKIP - windows-2022 MSVC sanitizer compile/link unavailable; mandatory malformed-frame harness passed.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          & $asan
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Windows ASan: PASS' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Verify Gate 0 loader tests
+        working-directory: apps/desktop
+        run: >-
+          npx vitest run
+          src/main/computer-use-native.test.ts
+          computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
@@ -597,7 +689,7 @@ jobs:
   required:
     name: CI required
     if: always()
-    needs: [quality-result, macos-result, windows-result]
+    needs: [quality-result, macos-result, windows-result, computer-use-native-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -606,7 +698,9 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality-result.result }}
           MACOS_RESULT: ${{ needs.macos-result.result }}
           WINDOWS_RESULT: ${{ needs.windows-result.result }}
+          COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
         run: |
           test "${QUALITY_RESULT}" = 'success'
           test "${MACOS_RESULT}" = 'success'
           test "${WINDOWS_RESULT}" = 'success'
+          test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'

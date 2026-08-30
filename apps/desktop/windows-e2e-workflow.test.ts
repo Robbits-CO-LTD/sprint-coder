@@ -67,6 +67,8 @@ describe('Windows major E2E workflow', () => {
     );
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeGreaterThan(-1);
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeLessThan(fullMatrixBranch);
-    expect(workflow).toContain('needs: [quality-result, macos-result, windows-result]');
+    expect(workflow).toContain(
+      'needs: [quality-result, macos-result, windows-result, computer-use-native-gate]',
+    );
   });
 });

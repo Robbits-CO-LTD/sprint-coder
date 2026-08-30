@@ -243,6 +243,49 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         run: npm run build:native-safe-fs
 
+      - name: Build Computer Use native artifact for Gate 0
+        run: npm run build:computer-use-native
+
+      - name: Verify Computer Use protocol with macOS sanitizers
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          harness="${RUNNER_TEMP}/computer-use-protocol-harness"
+          /usr/bin/clang++ \
+            -std=c++20 -O1 -g -fno-omit-frame-pointer \
+            -fsanitize=address,undefined \
+            -I apps/desktop/computer-use-native \
+            apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc \
+            -o "${harness}"
+          ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 \
+            "${harness}"
+
+      - name: Verify Computer Use protocol and attempt Windows ASan
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'
+          $include = 'apps/desktop/computer-use-native'
+          $normal = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.exe'
+          $normalObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl "/I$include" $source "/Fo$normalObject" "/Fe$normal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $normal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $asan = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.exe'
+          $asanObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /O1 /Zi /fsanitize=address "/I$include" $source "/Fo$asanObject" "/Fe$asan"
+          if ($LASTEXITCODE -ne 0) {
+            'Windows ASan: SKIP - windows-2022 MSVC sanitizer compile/link unavailable; mandatory malformed-frame harness passed.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          & $asan
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Windows ASan: PASS' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
       - name: Prepare temporary macOS signing credentials
         if: runner.os == 'macOS'
         shell: bash

@@ -1,0 +1,418 @@
+{
+  "schemaVersion": 3,
+  "issue": 333,
+  "sourceCommit": "0000000000000000000000000000000000000000",
+  "sourceRunId": "0",
+  "completedAt": "2026-08-30T00:00:00.000Z",
+  "artifacts": {
+    "windows": {
+      "sourceCommit": "0000000000000000000000000000000000000000",
+      "sourceRunId": "0",
+      "artifactName": "PENDING_SIGNED_WINDOWS_ARTIFACT",
+      "portable": {
+        "fileName": "Sprint-Coder-win32-x64-PENDING.zip",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "installer": {
+        "fileName": "Sprint-Coder-Installer.exe",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "macos": {
+      "sourceCommit": "0000000000000000000000000000000000000000",
+      "sourceRunId": "0",
+      "artifactName": "PENDING_NOTARIZED_MACOS_ARTIFACT",
+      "packageSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "harnessAttestation": {
+    "workflowPath": ".github/workflows/computer-use-evidence-harness.yml",
+    "workflowRunId": "0",
+    "workflowRunAttempt": 0,
+    "journeySetSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "transcriptSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "machineTranscript": {
+    "schemaVersion": 1,
+    "journeys": []
+  },
+  "providerBinding": {
+    "connectionIdDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "modelIdDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "endpointDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "catalogDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "policyEpoch": 0,
+    "adapterVersion": "PENDING",
+    "sessionIdDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "selectedFromCurrentTask": false,
+    "bindingStable": false,
+    "preflightAttempts": 0,
+    "preflightPassed": false,
+    "roundsAttempted": 0,
+    "roundsCompleted": 0,
+    "isOpenRouter": false,
+    "fallbackUsed": false,
+    "credentialChanged": false
+  },
+  "privacy": {
+    "databaseRawScreenshotAbsent": false,
+    "databaseRawAccessibilityTreeAbsent": false,
+    "databaseTypedTextAbsent": false,
+    "logRawScreenshotAbsent": false,
+    "logRawAccessibilityTreeAbsent": false,
+    "logTypedTextAbsent": false,
+    "telemetryRawScreenAbsent": false,
+    "crashArtifactRawScreenAbsent": false,
+    "providerRawOutputAbsent": false,
+    "providerReasoningAbsent": false,
+    "evidenceArtifactJsonOnly": false
+  },
+  "ac28Core": [
+    {
+      "id": "AC-28-WIN-FIXTURE-IDENTITY-OBSERVE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_FIXTURE_IDENTITY"
+    },
+    {
+      "id": "AC-28-WIN-FIXTURE-SEMANTIC",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_FIXTURE_SEMANTIC"
+    },
+    {
+      "id": "AC-28-WIN-FIXTURE-VISUAL",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_FIXTURE_VISUAL"
+    },
+    {
+      "id": "AC-28-WIN-FIXTURE-MIXED",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_FIXTURE_MIXED"
+    },
+    {
+      "id": "AC-28-WIN-FIXTURE-JAPANESE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_FIXTURE_JAPANESE"
+    },
+    {
+      "id": "AC-28-WIN-NOTEPAD-IDENTITY-OBSERVE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_NOTEPAD_IDENTITY"
+    },
+    {
+      "id": "AC-28-WIN-NOTEPAD-MIXED",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_NOTEPAD_MIXED"
+    },
+    {
+      "id": "AC-28-WIN-NOTEPAD-JAPANESE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_WIN_NOTEPAD_JAPANESE"
+    },
+    {
+      "id": "AC-28-MAC-TEXTEDIT-IDENTITY-OBSERVE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_TEXTEDIT_IDENTITY"
+    },
+    {
+      "id": "AC-28-MAC-TEXTEDIT-SEMANTIC",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_TEXTEDIT_SEMANTIC"
+    },
+    {
+      "id": "AC-28-MAC-TEXTEDIT-VISUAL",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_TEXTEDIT_VISUAL"
+    },
+    {
+      "id": "AC-28-MAC-TEXTEDIT-MIXED",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_TEXTEDIT_MIXED"
+    },
+    {
+      "id": "AC-28-MAC-TEXTEDIT-JAPANESE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_TEXTEDIT_JAPANESE"
+    },
+    {
+      "id": "AC-28-MAC-VSCODE-IDENTITY-OBSERVE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_VSCODE_IDENTITY"
+    },
+    {
+      "id": "AC-28-MAC-VSCODE-MIXED",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_VSCODE_MIXED"
+    },
+    {
+      "id": "AC-28-MAC-VSCODE-TEMP-WORKSPACE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_VSCODE_WORKSPACE"
+    },
+    {
+      "id": "AC-28-MAC-VSCODE-JAPANESE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_MAC_VSCODE_JAPANESE"
+    },
+    {
+      "id": "AC-28-PROVIDER-FIXED-IMAGE-PREFLIGHT",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PROVIDER_PREFLIGHT"
+    },
+    {
+      "id": "AC-28-PROVIDER-EXACT-THREE-ROUNDS",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PROVIDER_THREE_ROUNDS"
+    },
+    {
+      "id": "AC-28-PROVIDER-NO-FALLBACK",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PROVIDER_BINDING"
+    }
+  ],
+  "ac29Safety": [
+    {
+      "id": "AC-29-SAME-OWNER-DIALOG-REVISION",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_DIALOG_INVALIDATION"
+    },
+    {
+      "id": "AC-29-FOCUS-LOSS",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_FOCUS_LOSS"
+    },
+    {
+      "id": "AC-29-GEOMETRY-DRIFT",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_GEOMETRY_DRIFT"
+    },
+    {
+      "id": "AC-29-STALE-OBSERVATION",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_STALE_OBSERVATION"
+    },
+    {
+      "id": "AC-29-SECURE-FIELD",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_SECURE_FIELD"
+    },
+    {
+      "id": "AC-29-PAYMENT",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PAYMENT"
+    },
+    {
+      "id": "AC-29-CONTRACT",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_CONTRACT"
+    },
+    {
+      "id": "AC-29-INSTALLER",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_INSTALLER"
+    },
+    {
+      "id": "AC-29-ADMIN",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_ADMIN"
+    },
+    {
+      "id": "AC-29-FILE-PICKER-TAKEOVER",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_FILE_PICKER"
+    },
+    {
+      "id": "AC-29-OS-PROMPT-TAKEOVER",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_OS_PROMPT"
+    },
+    {
+      "id": "AC-29-OTHER-APP-WINDOW-DENY",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_OTHER_APP_WINDOW"
+    },
+    {
+      "id": "AC-29-VISUAL-PATCH-DRIFT",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_VISUAL_PATCH_DRIFT"
+    },
+    {
+      "id": "AC-29-DUPLICATE-NO-REDISPATCH",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_DUPLICATE_REQUEST"
+    },
+    {
+      "id": "AC-29-UNKNOWN-EFFECT-NO-RETRY",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_UNKNOWN_EFFECT"
+    },
+    {
+      "id": "AC-29-NATIVE-CRASH",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_NATIVE_CRASH"
+    },
+    {
+      "id": "AC-29-PARENT-DEATH",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PARENT_DEATH"
+    },
+    {
+      "id": "AC-29-EMERGENCY-SHORTCUT",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_EMERGENCY_SHORTCUT"
+    },
+    {
+      "id": "AC-29-PERSISTENT-STOP",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PERSISTENT_STOP"
+    },
+    {
+      "id": "AC-29-ZERO-AFTER-STOP",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_ZERO_AFTER_STOP"
+    },
+    {
+      "id": "AC-29-TYPE-MID-STOP",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_TYPE_MID_STOP"
+    },
+    {
+      "id": "AC-29-TASK-SWITCH",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_TASK_SWITCH"
+    },
+    {
+      "id": "AC-29-NEW-TURN",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_NEW_TURN"
+    },
+    {
+      "id": "AC-29-POLICY-EPOCH",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_POLICY_EPOCH"
+    },
+    {
+      "id": "AC-29-PROMPT-INJECTION",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PROMPT_INJECTION"
+    },
+    {
+      "id": "AC-29-PRIVACY-NONPERSISTENCE",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_PRIVACY_INSPECTION"
+    },
+    {
+      "id": "AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_UNSIGNED_WINDOWS"
+    },
+    {
+      "id": "AC-29-ADHOC-MACOS-FAIL-CLOSED",
+      "status": "FAIL",
+      "reasonCode": "EXTERNAL_GATE_NOT_RUN",
+      "evidenceCode": "PENDING_ADHOC_MACOS"
+    }
+  ],
+  "ac30Compatibility": [
+    {
+      "id": "AC-30-WINDOWS-18362-X64",
+      "status": "FAIL",
+      "reasonCode": "SIGNED_RUNTIME_NOT_RUN",
+      "evidenceCode": "WINDOWS_18362_RUNTIME_PENDING_V1"
+    },
+    {
+      "id": "AC-30-MACOS-12_3",
+      "status": "PASS",
+      "reasonCode": "NONE",
+      "evidenceCode": "MACOS_12_3_BUILD_PROBE_V1"
+    },
+    {
+      "id": "AC-30-ELECTRON-NAPI",
+      "status": "PASS",
+      "reasonCode": "NONE",
+      "evidenceCode": "ELECTRON_NAPI_HANDSHAKE_V1"
+    },
+    {
+      "id": "AC-30-PROVIDER-STRUCTURED",
+      "status": "FAIL",
+      "reasonCode": "REAL_PROVIDER_NOT_RUN",
+      "evidenceCode": "PROVIDER_STRUCTURED_PENDING_V1"
+    },
+    {
+      "id": "AC-30-PROVIDER-JSON",
+      "status": "FAIL",
+      "reasonCode": "REAL_PROVIDER_NOT_RUN",
+      "evidenceCode": "PROVIDER_JSON_PENDING_V1"
+    },
+    {
+      "id": "AC-30-UNSUPPORTED-LINUX",
+      "status": "SKIP",
+      "reasonCode": "UNSUPPORTED_PLATFORM_DOCUMENTED",
+      "evidenceCode": "LINUX_UNSUPPORTED_V1"
+    },
+    {
+      "id": "AC-30-REMOTE-DESKTOP",
+      "status": "SKIP",
+      "reasonCode": "OUT_OF_SCOPE_DOCUMENTED",
+      "evidenceCode": "REMOTE_DESKTOP_UNSUPPORTED_V1"
+    },
+    {
+      "id": "AC-30-WINDOWS-UWP-PACKAGE-PROXY",
+      "status": "SKIP",
+      "reasonCode": "UNSUPPORTED_WINDOW_PROXY_DOCUMENTED",
+      "evidenceCode": "WINDOWS_UWP_PROXY_UNSUPPORTED_V1"
+    },
+    {
+      "id": "AC-30-HARD-BOUNDARY-POLICY-LANGUAGE",
+      "status": "SKIP",
+      "reasonCode": "UNSUPPORTED_POLICY_LANGUAGE_DOCUMENTED",
+      "evidenceCode": "OTHER_UI_LANGUAGES_UNSUPPORTED_V1"
+    }
+  ]
+}

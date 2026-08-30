@@ -1,0 +1,189 @@
+name: Computer Use machine evidence harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_run_id:
+        description: Successful same-repository run containing the exact signed packages
+        required: true
+        type: string
+      signed_windows_artifact:
+        description: Artifact containing one portable ZIP and one installer
+        required: true
+        type: string
+      notarized_macos_artifact:
+        description: Artifact containing one notarized DMG
+        required: true
+        type: string
+      capture_session_id:
+        description: Opaque ID emitted by the protected external machine harness
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+jobs:
+  bind-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      source_commit: ${{ steps.bind.outputs.source_commit }}
+    steps:
+      - name: Bind exact package run
+        id: bind
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
+          CAPTURE_SESSION_ID: ${{ inputs.capture_session_id }}
+        run: |
+          set -euo pipefail
+          [[ "${PACKAGE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] || { echo '::error::package_run_id must be decimal.'; exit 1; }
+          [[ "${CAPTURE_SESSION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || { echo '::error::capture_session_id is unsafe.'; exit 1; }
+          metadata="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PACKAGE_RUN_ID}")"
+          [[ "$(jq -r '.conclusion' <<< "${metadata}")" == 'success' ]] || { echo '::error::Package run must be successful.'; exit 1; }
+          source_commit="$(jq -r '.head_sha' <<< "${metadata}")"
+          [[ "${source_commit}" == "${GITHUB_SHA}" ]] || { echo '::error::Harness and package run must use the same source commit.'; exit 1; }
+          printf 'source_commit=%s\n' "${source_commit}" >> "${GITHUB_OUTPUT}"
+
+  collect-transcript:
+    needs: bind-source
+    runs-on: [self-hosted, macOS, computer-use-final-gate]
+    environment: computer-use-final-gate
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact harness revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bind-source.outputs.source_commit }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+
+      - name: Import one bounded machine transcript
+        shell: bash
+        env:
+          CAPTURE_ROOT: ${{ vars.COMPUTER_USE_EVIDENCE_CAPTURE_ROOT }}
+          CAPTURE_SESSION_ID: ${{ inputs.capture_session_id }}
+        run: |
+          set -euo pipefail
+          [[ -n "${CAPTURE_ROOT}" && "${CAPTURE_ROOT}" == /* ]] || { echo '::error::Protected capture root is not configured.'; exit 1; }
+          source_path="${CAPTURE_ROOT}/${CAPTURE_SESSION_ID}/computer-use-machine-transcript.json"
+          [[ -f "${source_path}" && ! -L "${source_path}" ]] || { echo '::error::Machine harness transcript is missing or unsafe.'; exit 1; }
+          size="$(wc -c < "${source_path}")"
+          (( size > 0 && size <= 65536 )) || { echo '::error::Machine harness transcript is outside the 64 KiB bound.'; exit 1; }
+          mkdir -p "${RUNNER_TEMP}/computer-use-machine-transcript"
+          install -m 600 "${source_path}" "${RUNNER_TEMP}/computer-use-machine-transcript/computer-use-machine-transcript.json"
+
+      - name: Reject raw, non-canonical, or self-reported PASS capture before upload
+        shell: bash
+        env:
+          CAPTURE_PATH: ${{ runner.temp }}/computer-use-machine-transcript/computer-use-machine-transcript.json
+        run: |
+          set -euo pipefail
+          node generate-computer-use-final-gate-evidence.mjs \
+            --capture "${CAPTURE_PATH}" \
+            --validate-capture-only
+
+      - name: Upload bounded machine transcript for trusted sealing
+        uses: actions/upload-artifact@v7
+        with:
+          name: computer-use-machine-transcript-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/computer-use-machine-transcript/computer-use-machine-transcript.json
+          if-no-files-found: error
+          retention-days: 1
+
+  seal-evidence:
+    needs: [bind-source, collect-transcript]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact trusted builder revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bind-source.outputs.source_commit }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.23.2
+
+      - name: Download bounded machine transcript
+        uses: actions/download-artifact@v8
+        with:
+          name: computer-use-machine-transcript-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/computer-use-machine-transcript
+
+      - name: Download exact signed Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.signed_windows_artifact }}
+          path: ${{ runner.temp }}/computer-use-windows
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.package_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download exact notarized macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.notarized_macos_artifact }}
+          path: ${{ runner.temp }}/computer-use-macos
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.package_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Derive package-bound schema-v3 evidence from machine events
+        id: seal
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ needs.bind-source.outputs.source_commit }}
+          PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
+          WINDOWS_ARTIFACT: ${{ inputs.signed_windows_artifact }}
+          MACOS_ARTIFACT: ${{ inputs.notarized_macos_artifact }}
+          WINDOWS_ROOT: ${{ runner.temp }}/computer-use-windows
+          MACOS_ROOT: ${{ runner.temp }}/computer-use-macos
+          CAPTURE_PATH: ${{ runner.temp }}/computer-use-machine-transcript/computer-use-machine-transcript.json
+          OUTPUT_PATH: ${{ runner.temp }}/computer-use-final-gate.json
+        run: |
+          set -euo pipefail
+          mapfile -d '' portable < <(find "${WINDOWS_ROOT}" -type f -name 'Sprint-Coder-win32-x64-*.zip' -print0)
+          mapfile -d '' installer < <(find "${WINDOWS_ROOT}" -type f -name 'Sprint-Coder-Installer.exe' -print0)
+          mapfile -d '' dmg < <(find "${MACOS_ROOT}" -type f -name '*.dmg' -print0)
+          (( ${#portable[@]} == 1 && ${#installer[@]} == 1 && ${#dmg[@]} == 1 )) || { echo '::error::Expected exactly one portable ZIP, installer, and DMG.'; exit 1; }
+          portable_sha256="$(sha256sum "${portable[0]}" | awk '{print $1}')"
+          installer_sha256="$(sha256sum "${installer[0]}" | awk '{print $1}')"
+          macos_sha256="$(sha256sum "${dmg[0]}" | awk '{print $1}')"
+          node generate-computer-use-final-gate-evidence.mjs \
+            --capture "${CAPTURE_PATH}" \
+            --output "${OUTPUT_PATH}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --source-run-id "${PACKAGE_RUN_ID}" \
+            --windows-artifact "${WINDOWS_ARTIFACT}" \
+            --windows-portable-name "$(basename "${portable[0]}")" \
+            --windows-portable-sha256 "${portable_sha256}" \
+            --windows-installer-name "$(basename "${installer[0]}")" \
+            --windows-installer-sha256 "${installer_sha256}" \
+            --macos-artifact "${MACOS_ARTIFACT}" \
+            --macos-sha256 "${macos_sha256}" \
+            --workflow-run-id "${GITHUB_RUN_ID}" \
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          printf 'evidence_path=%s\n' "${OUTPUT_PATH}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest exact evidence bytes from the GitHub-hosted trusted builder
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.seal.outputs.evidence_path }}
+
+      - name: Upload only the attested bounded evidence JSON
+        uses: actions/upload-artifact@v7
+        with:
+          name: computer-use-final-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.seal.outputs.evidence_path }}
+          if-no-files-found: error
+          retention-days: 7
