@@ -2753,10 +2753,21 @@ if (runsWithElectronAbi)
 
         expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
         expect(
+          persistence.recordWorkspaceReadVerification({
+            taskId: task.id,
+            turnId: turn.turnId,
+            rootId: 'legacy-primary',
+            path: 'src/a.ts',
+            content: 'after',
+            createdAt: '2099-07-23T00:00:01.500Z',
+          }),
+        ).toMatchObject({ sagaId: 'second-saga', decision: 'complete' });
+        expect(
           persistence
             .listEvidenceRecords(task.id, turn.turnId)
-            .filter(({ kind }) => kind === 'verification_passed'),
-        ).toEqual([]);
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId }) => criterionId),
+        ).toEqual(['verification:second-saga']);
 
         const verificationSpec = createExecutionSpec({
           absoluteExecutable: process.execPath,
@@ -2793,13 +2804,15 @@ if (runsWithElectronAbi)
           truncated: false,
           finishedAt: '2099-07-23T00:00:02.200Z',
         });
-        persistence.recordCommandVerification({
-          taskId: task.id,
-          turnId: turn.turnId,
-          commandId: 'multi-saga-verification-command',
-          exitCode: 0,
-          createdAt: '2099-07-23T00:00:02.300Z',
-        });
+        expect(
+          persistence.recordCommandVerification({
+            taskId: task.id,
+            turnId: turn.turnId,
+            commandId: 'multi-saga-verification-command',
+            exitCode: 0,
+            createdAt: '2099-07-23T00:00:02.300Z',
+          }),
+        ).toMatchObject({ sagaId: 'first-saga', decision: 'complete' });
 
         expect(
           persistence
@@ -2814,6 +2827,85 @@ if (runsWithElectronAbi)
         persistence.close();
       },
     );
+
+    artifactIt('leaves a Saga committed after verification command start open', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(
+        task.id,
+        'do not let stale verification cover a later edit',
+      );
+      const verificationSpec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'd'.repeat(64),
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'e'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      persistence.prepareCommand({
+        id: 'early-verification-command',
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'early-verification-call',
+        spec: verificationSpec,
+        purpose: 'verification that started before the later edit',
+        risk: 'high',
+        createdAt: '2000-01-01T00:00:00.000Z',
+      });
+      persistence.beginCommand('early-verification-command');
+      persistence.startCommand({
+        commandId: 'early-verification-command',
+        pid: 123,
+        processStartTime: 'early-verification-process',
+        startedAt: '2000-01-01T00:00:00.100Z',
+      });
+
+      const workspaceFile = join(dirname(path), 'post-start-saga.txt');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(dirname(path), 'post-start-saga-artifacts'),
+        quotaBytes: 4096,
+      });
+      writeFileSync(workspaceFile, 'before');
+      await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+      ).apply({
+        id: 'post-start-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'post-start-saga-operation',
+        plan: persistedEditPlan(),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      persistence.completeCommand({
+        commandId: 'early-verification-command',
+        state: 'exited',
+        exitCode: 0,
+        signal: null,
+        outputBytes: 0,
+        truncated: false,
+        finishedAt: '2099-01-01T00:00:00.200Z',
+      });
+
+      expect(
+        persistence.recordCommandVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          commandId: 'early-verification-command',
+          exitCode: 0,
+          createdAt: '2099-01-01T00:00:00.300Z',
+        }),
+      ).toBeNull();
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .some(({ criterionId }) => criterionId === 'verification:post-start-saga'),
+      ).toBe(false);
+      persistence.close();
+    });
 
     it('rejects a persisted Edit plan whose sealed operation payload was modified', async () => {
       const { persistence, path } = createPersistence();
