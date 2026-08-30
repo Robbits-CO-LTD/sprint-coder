@@ -3,6 +3,7 @@ node_modules/
 apps/desktop/.vite/
 apps/desktop/out/
 apps/desktop/native-safe-fs/build/
+apps/desktop/computer-use-native/build/
 apps/desktop/sandbox-runner/build/
 apps/desktop/sandbox-runner/target/
 apps/desktop/managed-local/cache/

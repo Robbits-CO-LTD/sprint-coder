@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { createPackage as createAsarPackage, uncache as uncacheAsar } from '@electron/asar';
+import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import { describe, expect, it } from 'vitest';
 import config, {
   assertNativePackagingHost,
@@ -11,16 +13,25 @@ import config, {
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
   isManagedLocalPackagedPath,
+  isComputerUseNativeArtifactPath,
   MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT,
+  COMPUTER_USE_NATIVE_MANIFEST_PATH,
+  COMPUTER_USE_NATIVE_RESOURCE_ROOT,
   resolveWindowsSignOptions,
   NATIVE_ASAR_UNPACK_GLOB,
+  refreshPackagedComputerUseArtifactDigest,
   refreshPackagedSandboxRunnerDigest,
+  shouldIgnoreFromPackage,
+  verifyComputerUseNativeBuild,
+  verifyPackagedComputerUseNativeBundle,
   verifyBundledNodeResources,
 } from './forge.config';
 import {
   macAutoUpdateEligibleForIdentity,
+  computerUseNativePinForBuild,
   managedLocalSidecarPinsForBuild,
 } from './vite.main.config';
+import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
 import {
   planWindowsWizardInstaller,
   SQUIRREL_SETUP_EXE,
@@ -91,6 +102,131 @@ describe('native package target', () => {
       ),
     ).toBe(true);
     expect(isManagedLocalPackagedPath('C:\\Sprint Coder\\Sprint Coder.exe')).toBe(false);
+    expect(
+      isComputerUseNativeArtifactPath(
+        'C:\\Sprint Coder\\resources\\sprint-coder-computer-use-host.exe',
+      ),
+    ).toBe(true);
+    expect(
+      isComputerUseNativeArtifactPath(
+        '/Applications/Sprint Coder.app/Contents/Resources/sprint_coder_computer_use_native.node',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the Computer Use native artifact and manifest on the target host only', () => {
+    const resources = config.packagerConfig?.extraResource ?? [];
+    if (process.platform === 'darwin')
+      expect(resources).toContain(
+        `${COMPUTER_USE_NATIVE_RESOURCE_ROOT}/sprint_coder_computer_use_native.node`,
+      );
+    else if (process.platform === 'win32')
+      expect(resources).toContain(
+        `${COMPUTER_USE_NATIVE_RESOURCE_ROOT}/sprint-coder-computer-use-host.exe`,
+      );
+    else expect(resources).not.toContain(COMPUTER_USE_NATIVE_MANIFEST_PATH);
+    expect(config.packagerConfig?.extendInfo).toMatchObject({
+      NSScreenCaptureUsageDescription: expect.stringContaining('Screen Recording'),
+    });
+    expect(readFileSync(resolve(__dirname, 'computer-use-native/binding.gyp'), 'utf8')).toContain(
+      'MACOSX_DEPLOYMENT_TARGET',
+    );
+    expect(() => verifyComputerUseNativeBuild('linux', 'x64')).not.toThrow();
+    expect(
+      shouldIgnoreFromPackage(
+        '/computer-use-native/build/Release/sprint_coder_computer_use_native.node',
+      ),
+    ).toBe(true);
+    expect(
+      shouldIgnoreFromPackage(
+        '/computer-use-native/build/Release/computer-use-native.manifest.json',
+      ),
+    ).toBe(true);
+  });
+
+  it('packages exactly one Computer Use artifact/manifest in Resources and rejects asar duplicates', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-package-'));
+    try {
+      const outputPath = join(root, 'out');
+      const resources = join(outputPath, 'Sprint Coder.app', 'Contents', 'Resources');
+      const asarSource = join(root, 'asar-source');
+      const artifactName = 'sprint_coder_computer_use_native.node';
+      const artifactBytes = Buffer.from('native-fixture');
+      const digest = createHash('sha256').update(artifactBytes).digest('hex');
+      mkdirSync(join(asarSource, '.vite', 'build'), { recursive: true });
+      mkdirSync(resources, { recursive: true });
+      writeFileSync(join(resources, artifactName), artifactBytes);
+      const manifest = computerUseNativeManifestSchema.parse({
+        version: 1,
+        sourceCommit: 'f'.repeat(40),
+        platform: 'darwin',
+        architecture: 'arm64',
+        protocolVersion: 1,
+        apiVersion: 1,
+        nativeVersion: 'fixture',
+        moduleDigest: digest,
+        binaryDigest: digest,
+        signerDigest: null,
+        capabilities: ['observe'],
+      });
+      const compiledPin = computerUseNativeCompiledPin(manifest);
+      writeFileSync(
+        join(asarSource, '.vite', 'build', 'index.js'),
+        `const computerUsePin=${JSON.stringify(compiledPin)};`,
+      );
+      writeFileSync(join(resources, 'computer-use-native.manifest.json'), JSON.stringify(manifest));
+      await createAsarPackage(asarSource, join(resources, 'app.asar'));
+      expect(() =>
+        verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64'),
+      ).not.toThrow();
+
+      writeFileSync(join(asarSource, '.vite', 'build', 'index.js'), 'const stalePin=true;');
+      rmSync(join(resources, 'app.asar'), { force: true });
+      await createAsarPackage(asarSource, join(resources, 'app.asar'));
+      uncacheAsar(join(resources, 'app.asar'));
+      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
+        'Packaged Computer Use native artifact verification failed',
+      );
+      writeFileSync(
+        join(asarSource, '.vite', 'build', 'index.js'),
+        `const computerUsePin=${JSON.stringify(compiledPin)};`,
+      );
+
+      const duplicateDirectory = join(asarSource, 'computer-use-native', 'build', 'Release');
+      mkdirSync(duplicateDirectory, { recursive: true });
+      writeFileSync(join(duplicateDirectory, artifactName), artifactBytes);
+      rmSync(join(resources, 'app.asar'), { force: true });
+      await createAsarPackage(asarSource, join(resources, 'app.asar'));
+      uncacheAsar(join(resources, 'app.asar'));
+      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
+        'Packaged Computer Use native artifact verification failed',
+      );
+
+      rmSync(join(asarSource, 'computer-use-native'), { recursive: true, force: true });
+      writeFileSync(join(asarSource, artifactName), artifactBytes);
+      rmSync(join(resources, 'app.asar'), { force: true });
+      await createAsarPackage(asarSource, join(resources, 'app.asar'));
+      uncacheAsar(join(resources, 'app.asar'));
+      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow(
+        'Packaged Computer Use native artifact verification failed',
+      );
+
+      rmSync(join(asarSource, artifactName), { force: true });
+      rmSync(join(resources, 'app.asar'), { force: true });
+      await createAsarPackage(asarSource, join(resources, 'app.asar'));
+      uncacheAsar(join(resources, 'app.asar'));
+      const incompleteManifest = JSON.parse(
+        readFileSync(join(resources, 'computer-use-native.manifest.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      delete incompleteManifest.capabilities;
+      writeFileSync(
+        join(resources, 'computer-use-native.manifest.json'),
+        JSON.stringify(incompleteManifest),
+      );
+      expect(() => verifyPackagedComputerUseNativeBundle(outputPath, 'darwin', 'arm64')).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it.runIf(process.platform === 'win32')(
@@ -146,6 +282,34 @@ describe('macOS auto-update signing gate', () => {
   });
 });
 
+describe('Computer Use native Vite provenance pin', () => {
+  it('derives the signed Main pin from the exact platform manifest', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-vite-pin-'));
+    try {
+      const path = resolve(root, 'computer-use-native.manifest.json');
+      const digest = 'b'.repeat(64);
+      const manifest = computerUseNativeManifestSchema.parse({
+        version: 1,
+        sourceCommit: 'a'.repeat(40),
+        platform: process.platform === 'win32' ? 'win32' : 'darwin',
+        architecture: process.arch === 'arm64' ? 'arm64' : 'x64',
+        protocolVersion: 1,
+        apiVersion: 1,
+        nativeVersion: 'computer-use-native-gate0-1',
+        moduleDigest: digest,
+        binaryDigest: digest,
+        signerDigest: 'c'.repeat(64),
+        capabilities: ['observe', 'capture', 'accessibility', 'input'],
+      });
+      writeFileSync(path, JSON.stringify(manifest));
+
+      expect(computerUseNativePinForBuild(path)).toEqual(computerUseNativeCompiledPin(manifest));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Managed Local Vite pin injection', () => {
   it('defaults to no supported target and reads only the generated build pin', () => {
     expect(managedLocalSidecarPinsForBuild('/definitely/missing/pins.json')).toEqual({});
@@ -183,6 +347,42 @@ describe('macOS sandbox runner sealing', () => {
 
       expect(digest).toBe(createHash('sha256').update('post-signing-runner-bytes').digest('hex'));
       expect(readFileSync(`${runner}.sha256`, 'utf8')).toBe(`${digest}\n`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Computer Use native sealing', () => {
+  it('refreshes the manifest from post-signing artifact bytes', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-seal-'));
+    try {
+      const artifact = resolve(root, 'sprint_coder_computer_use_native.node');
+      const manifest = resolve(root, 'computer-use-native.manifest.json');
+      writeFileSync(artifact, 'post-signing-native-bytes');
+      writeFileSync(
+        manifest,
+        JSON.stringify({
+          version: 1,
+          sourceCommit: 'f'.repeat(40),
+          platform: 'darwin',
+          architecture: 'arm64',
+          protocolVersion: 1,
+          apiVersion: 1,
+          nativeVersion: 'fixture',
+          moduleDigest: '0'.repeat(64),
+          binaryDigest: '0'.repeat(64),
+          signerDigest: null,
+          capabilities: ['observe'],
+        }),
+      );
+
+      const digest = refreshPackagedComputerUseArtifactDigest(root, 'darwin');
+      const refreshed = JSON.parse(readFileSync(manifest, 'utf8')) as Record<string, unknown>;
+      expect(digest).toBe(createHash('sha256').update('post-signing-native-bytes').digest('hex'));
+      expect(refreshed['moduleDigest']).toBe(digest);
+      expect(refreshed['binaryDigest']).toBe(digest);
+      expect(refreshed['sourceCommit']).toBe('f'.repeat(40));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
