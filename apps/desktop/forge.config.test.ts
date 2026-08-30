@@ -283,7 +283,7 @@ describe('macOS auto-update signing gate', () => {
 });
 
 describe('Computer Use native Vite provenance pin', () => {
-  it('derives the signed Main pin from the exact platform manifest', () => {
+  it('derives the signed Main pin only for a supported matching platform manifest', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-computer-use-vite-pin-'));
     try {
       const path = resolve(root, 'computer-use-native.manifest.json');
@@ -303,7 +303,9 @@ describe('Computer Use native Vite provenance pin', () => {
       });
       writeFileSync(path, JSON.stringify(manifest));
 
-      expect(computerUseNativePinForBuild(path)).toEqual(computerUseNativeCompiledPin(manifest));
+      expect(computerUseNativePinForBuild(path)).toEqual(
+        process.platform === 'linux' ? null : computerUseNativeCompiledPin(manifest),
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

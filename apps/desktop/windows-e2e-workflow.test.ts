@@ -48,6 +48,8 @@ describe('Windows major E2E workflow', () => {
 
   it('runs on every CI invocation and uploads evidence without masking the test exit code', () => {
     expect(windowsE2EJob).not.toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(windowsE2EJob).toContain('ilammy/msvc-dev-cmd@v1');
+    expect(windowsE2EJob).toContain('npm run build:sandbox-runner');
     expect(windowsE2EJob).toContain('--config playwright.windows.config.ts');
     expect(windowsE2EJob).toContain('Tee-Object -FilePath $logPath');
     expect(windowsE2EJob).toContain('$testExitCode = $LASTEXITCODE');

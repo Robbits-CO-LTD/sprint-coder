@@ -228,6 +228,12 @@ jobs:
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
+      - name: Initialize MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Verify Electron binary
         run: node node_modules/electron/cli.js -p "process.versions.electron"
         env:

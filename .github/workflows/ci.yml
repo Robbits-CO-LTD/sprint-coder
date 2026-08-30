@@ -539,6 +539,10 @@ jobs:
         run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
+      - name: Initialize MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
@@ -597,6 +601,12 @@ jobs:
         run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
+      - name: Initialize MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@v6
