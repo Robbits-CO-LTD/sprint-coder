@@ -2719,6 +2719,102 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    artifactIt(
+      'records one successful verification command for every unverified committed saga in the Turn',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const turn = persistence.startTurn(task.id, 'create a directory and then a file');
+        const workspaceFile = join(dirname(path), 'multi-saga.txt');
+        const artifactRoot = join(dirname(path), 'multi-saga-artifacts');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: artifactRoot,
+          quotaBytes: 4096,
+        });
+        const store = new PersistenceEditSagaStore(persistence);
+
+        for (const [id, before, after, createdAt] of [
+          ['first-saga', 'before', 'middle', '2026-07-23T00:00:00.000Z'],
+          ['second-saga', 'middle', 'after', '2026-07-23T00:00:01.000Z'],
+        ] as const)
+          await new EditSagaExecutor(
+            store,
+            fileBoundary(workspaceFile, artifacts, before, after),
+            artifacts,
+          ).apply({
+            id,
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: `${id}-operation`,
+            plan: persistedEditPlan(before, after),
+            createdAt,
+          });
+
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .filter(({ kind }) => kind === 'verification_passed'),
+        ).toEqual([]);
+
+        const verificationSpec = createExecutionSpec({
+          absoluteExecutable: process.execPath,
+          executionIdentityDigest: 'd'.repeat(64),
+          argv: ['--version'],
+          cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'e'.repeat(64) },
+          envDelta: {},
+          stdinMode: 'closed',
+          shell: 'none',
+        });
+        persistence.prepareCommand({
+          id: 'multi-saga-verification-command',
+          taskId: task.id,
+          turnId: turn.turnId,
+          callId: 'multi-saga-verification-call',
+          spec: verificationSpec,
+          purpose: 'verify every committed edit in this Turn',
+          risk: 'high',
+          createdAt: '2099-07-23T00:00:02.000Z',
+        });
+        persistence.beginCommand('multi-saga-verification-command');
+        persistence.startCommand({
+          commandId: 'multi-saga-verification-command',
+          pid: 123,
+          processStartTime: 'multi-saga-verification-process',
+          startedAt: '2099-07-23T00:00:02.100Z',
+        });
+        persistence.completeCommand({
+          commandId: 'multi-saga-verification-command',
+          state: 'exited',
+          exitCode: 0,
+          signal: null,
+          outputBytes: 0,
+          truncated: false,
+          finishedAt: '2099-07-23T00:00:02.200Z',
+        });
+        persistence.recordCommandVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          commandId: 'multi-saga-verification-command',
+          exitCode: 0,
+          createdAt: '2099-07-23T00:00:02.300Z',
+        });
+
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId }) => criterionId)
+            .sort(),
+        ).toEqual(['verification:first-saga', 'verification:second-saga']);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turn.turnId, stage);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).not.toThrow();
+        persistence.close();
+      },
+    );
+
     it('rejects a persisted Edit plan whose sealed operation payload was modified', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -2951,14 +3047,14 @@ if (runsWithElectronAbi)
         spec: verificationSpec,
         purpose: 'targeted verification',
         risk: 'high',
-        createdAt: '2026-07-23T00:00:05.000Z',
+        createdAt: '2099-07-23T00:00:05.000Z',
       });
       persistence.beginCommand('verification-command');
       persistence.startCommand({
         commandId: 'verification-command',
         pid: 123,
         processStartTime: 'verification-process',
-        startedAt: '2026-07-23T00:00:05.100Z',
+        startedAt: '2099-07-23T00:00:05.100Z',
       });
       persistence.completeCommand({
         commandId: 'verification-command',
@@ -2967,7 +3063,7 @@ if (runsWithElectronAbi)
         signal: null,
         outputBytes: 0,
         truncated: false,
-        finishedAt: '2026-07-23T00:00:05.200Z',
+        finishedAt: '2099-07-23T00:00:05.200Z',
       });
       expect(
         persistence.recordCommandVerification({
@@ -2975,7 +3071,7 @@ if (runsWithElectronAbi)
           turnId: turn.turnId,
           commandId: 'verification-command',
           exitCode: 0,
-          createdAt: '2026-07-23T00:00:05.300Z',
+          createdAt: '2099-07-23T00:00:05.300Z',
         }),
       ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });
       expect(persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga')).toHaveLength(3);
@@ -7731,11 +7827,17 @@ function persistedObservation(value: string, identityDigest: string): OperationO
   };
 }
 
-function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffectBoundary {
+function fileBoundary(
+  filePath: string,
+  artifacts: EditArtifactStore,
+  expectedBefore = 'before',
+  expectedAfter = 'after',
+): EditEffectBoundary {
   const observeValue = (value: string) => persistedObservation(value, `file:${editHash(value)}`);
   return {
     async apply(step: EditSagaStep) {
-      if (readFileSync(filePath, 'utf8') !== 'before') throw new Error('unexpected pre-image');
+      if (readFileSync(filePath, 'utf8') !== expectedBefore)
+        throw new Error('unexpected pre-image');
       const reference = step.operation.postArtifact;
       if (reference === null) throw new Error('missing post artifact');
       const value = (await artifacts.read(reference)).toString('utf8');
@@ -7744,9 +7846,9 @@ function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffec
     },
     async observe() {
       const value = readFileSync(filePath, 'utf8');
-      return value === 'before'
+      return value === expectedBefore
         ? { state: 'pre' as const, observation: observeValue(value) }
-        : value === 'after'
+        : value === expectedAfter
           ? { state: 'post' as const, observation: observeValue(value) }
           : { state: 'drift' as const, observation: observeValue(value) };
     },

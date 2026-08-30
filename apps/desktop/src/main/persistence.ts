@@ -14204,30 +14204,45 @@ export class SqlitePersistenceClient implements PersistenceClient {
     exitCode: number;
     createdAt: string;
   }): AssuranceRound | null {
-    if (input.exitCode !== 0) return null;
-    const command = this.getCommand(input.commandId);
-    if (
-      command.taskId !== input.taskId ||
-      command.turnId !== input.turnId ||
-      command.state !== 'exited'
-    )
-      throw new OperationConflictError('Verification command is not a successful Turn command');
-    const saga = this.db
-      .prepare(
-        `SELECT id FROM edit_sagas
-         WHERE task_id = ? AND turn_id = ? AND state = 'committed'
-         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+    return this.db.transaction(() => {
+      if (input.exitCode !== 0) return null;
+      const command = this.getCommand(input.commandId);
+      if (
+        command.taskId !== input.taskId ||
+        command.turnId !== input.turnId ||
+        command.state !== 'exited' ||
+        command.startedAt === null
       )
-      .get(input.taskId, input.turnId) as { id: string } | undefined;
-    if (saga === undefined) return null;
-    return this.recordAssuranceVerification({
-      taskId: input.taskId,
-      turnId: input.turnId,
-      sagaId: saga.id,
-      outcome: 'passed',
-      failureClass: null,
-      createdAt: input.createdAt,
-    });
+        throw new OperationConflictError('Verification command is not a successful Turn command');
+      const verified = new Set(
+        this.listEvidenceRecords(input.taskId, input.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId }) => criterionId),
+      );
+      // `verification: true` is an explicit Turn-level claim. The command observes the complete
+      // workspace at process start, so it can close every earlier committed Saga still awaiting
+      // evidence. A Saga committed after that fence remains open for a later verification.
+      const sagas = this.db
+        .prepare(
+          `SELECT id FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed' AND updated_at <= ?
+           ORDER BY created_at, id`,
+        )
+        .all(input.taskId, input.turnId, command.startedAt) as { id: string }[];
+      let latest: AssuranceRound | null = null;
+      for (const saga of sagas) {
+        if (verified.has(`verification:${saga.id}`)) continue;
+        latest = this.recordAssuranceVerification({
+          taskId: input.taskId,
+          turnId: input.turnId,
+          sagaId: saga.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: input.createdAt,
+        });
+      }
+      return latest;
+    })();
   }
 
   recordWorkspaceReadVerification(input: {
