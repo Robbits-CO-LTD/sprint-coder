@@ -10,8 +10,7 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   NODE_VERSION: 22.23.2
@@ -21,11 +20,13 @@ jobs:
     name: Classify CI scope
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      contents: read
     outputs:
       full_matrix: ${{ steps.scope.outputs.full_matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # The PR classifier compares the real base and head commits. A complete checkout avoids
           # silently selecting the fast lane when a long-lived PR's base is outside a shallow clone.
@@ -48,7 +49,7 @@ jobs:
             printf '%s\n' "${changed_files}"
 
             # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
-            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
+            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^build-computer-use-native\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|computer-use-native/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
               full_matrix=true
             fi
           fi
@@ -60,6 +61,8 @@ jobs:
     name: quality (${{ matrix.label }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -72,10 +75,10 @@ jobs:
             command: format:check
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -103,12 +106,14 @@ jobs:
     name: package tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -119,21 +124,117 @@ jobs:
       - name: Test contracts and domain packages
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
 
+  computer-use-native-gate:
+    name: Computer Use native Gate 0 (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - label: macOS
+            os: macos-latest
+          - label: Windows
+            os: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Initialize MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Compile and manifest native artifact
+        run: npm run build:computer-use-native
+
+      - name: Build deterministic Win32 acceptance fixture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'computer-use-win32-acceptance-fixture'
+          ./apps/desktop/computer-use-native/fixtures/win32-acceptance/build.ps1 `
+            -OutputDirectory $output
+
+      - name: Run protocol harness with macOS sanitizers
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          harness="${RUNNER_TEMP}/computer-use-protocol-harness"
+          /usr/bin/clang++ \
+            -std=c++20 -O1 -g -fno-omit-frame-pointer \
+            -fsanitize=address,undefined \
+            -I apps/desktop/computer-use-native \
+            apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc \
+            -o "${harness}"
+          ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 \
+            "${harness}"
+
+      - name: Run protocol harness and attempt Windows ASan
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $source = 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'
+          $include = 'apps/desktop/computer-use-native'
+          $normal = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.exe'
+          $normalObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl "/I$include" $source "/Fo$normalObject" "/Fe$normal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $normal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $asan = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.exe'
+          $asanObject = Join-Path $env:RUNNER_TEMP 'computer-use-protocol-harness-asan.obj'
+          & cl.exe /nologo /std:c++20 /EHsc /O1 /Zi /fsanitize=address "/I$include" $source "/Fo$asanObject" "/Fe$asan"
+          if ($LASTEXITCODE -ne 0) {
+            'Windows ASan: SKIP - windows-2022 MSVC sanitizer compile/link unavailable; mandatory malformed-frame harness passed.' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          & $asan
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Windows ASan: PASS' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Verify Gate 0 loader tests
+        working-directory: apps/desktop
+        run: >-
+          npx vitest run
+          src/main/computer-use-native.test.ts
+          computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
+
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
     needs: classify
     runs-on: macos-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
         shard: [1/3, 2/3, 3/3]
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -149,7 +250,7 @@ jobs:
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
           key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
@@ -161,7 +262,7 @@ jobs:
 
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -180,12 +281,14 @@ jobs:
     needs: classify
     runs-on: macos-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -205,7 +308,7 @@ jobs:
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
           key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
@@ -217,7 +320,7 @@ jobs:
 
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -244,12 +347,14 @@ jobs:
     if: github.event_name == 'pull_request' && needs.classify.outputs.full_matrix != 'true'
     runs-on: windows-2022
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -262,7 +367,7 @@ jobs:
 
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -301,6 +406,8 @@ jobs:
     if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -313,10 +420,10 @@ jobs:
             label: Windows
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -336,7 +443,7 @@ jobs:
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
           key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
@@ -348,7 +455,7 @@ jobs:
 
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -384,11 +491,13 @@ jobs:
     if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -402,7 +511,7 @@ jobs:
         run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
           key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
@@ -412,7 +521,7 @@ jobs:
         run: npx --yes @electron/rebuild -f -w better-sqlite3
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -435,11 +544,13 @@ jobs:
     if: needs.classify.outputs.full_matrix == 'true'
     runs-on: windows-2022
     timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -447,11 +558,15 @@ jobs:
         run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
+      - name: Initialize MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
           key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
@@ -461,7 +576,7 @@ jobs:
         run: npx --yes @electron/rebuild -f -w better-sqlite3
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -493,11 +608,13 @@ jobs:
     needs: classify
     runs-on: windows-2022
     timeout-minutes: 40
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -505,9 +622,15 @@ jobs:
         run: npm ci
       - name: Install Electron binary
         run: node node_modules/electron/install.js
+      - name: Initialize MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
           key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json') }}
@@ -517,7 +640,7 @@ jobs:
         run: npx --yes @electron/rebuild -f -w better-sqlite3
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
-        uses: actions/cache@v6
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
           key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
@@ -538,7 +661,7 @@ jobs:
           SPRINT_CODER_E2E_MODE: dev
       - name: Upload Windows E2E evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: windows-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -597,7 +720,7 @@ jobs:
   required:
     name: CI required
     if: always()
-    needs: [quality-result, macos-result, windows-result]
+    needs: [quality-result, macos-result, windows-result, computer-use-native-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -606,7 +729,9 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality-result.result }}
           MACOS_RESULT: ${{ needs.macos-result.result }}
           WINDOWS_RESULT: ${{ needs.windows-result.result }}
+          COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
         run: |
           test "${QUALITY_RESULT}" = 'success'
           test "${MACOS_RESULT}" = 'success'
           test "${WINDOWS_RESULT}" = 'success'
+          test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'

@@ -7,7 +7,10 @@ import {
   expandAccessPreset,
   parseShellSegments,
   permissionRequestFingerprint,
+  permissionResourceIdentity,
   revalidateExecutionPermit,
+  resourceContains,
+  resourceSetIsSubset,
   revokeCapability,
   type PermissionRequest,
   type CapabilityCeiling,
@@ -1149,5 +1152,138 @@ describe('shell segment parsing', () => {
       reason: 'dangerous_later_segment',
       evaluations: [{ decision: 'allow' }, { decision: 'deny' }],
     });
+  });
+});
+
+describe('Computer Use permission bindings', () => {
+  const app = 'a'.repeat(64);
+  const window = 'b'.repeat(64);
+  const otherApp = 'c'.repeat(64);
+  const sessionResource = {
+    kind: 'computer-session',
+    platform: 'darwin',
+    appIdentityDigest: app,
+    windowIdentityDigest: window,
+    sessionId: 'session-1',
+    taskId: 'task-1',
+  } as const;
+  const revisionResource = {
+    kind: 'computer-revision',
+    platform: 'darwin',
+    appIdentityDigest: app,
+    windowIdentityDigest: window,
+    sessionId: 'session-1',
+    revision: 7,
+  } as const;
+
+  it('contains only resources bound to the selected app/window/session/revision', () => {
+    expect(
+      resourceContains(
+        { kind: 'computer-app-exact', platform: 'darwin', appIdentityDigest: app },
+        sessionResource,
+      ),
+    ).toBe(true);
+    expect(
+      resourceContains(
+        {
+          kind: 'computer-window-exact',
+          platform: 'darwin',
+          appIdentityDigest: app,
+          windowIdentityDigest: window,
+        },
+        revisionResource,
+      ),
+    ).toBe(true);
+    expect(
+      resourceContains(
+        { kind: 'computer-app-exact', appIdentityDigest: otherApp },
+        sessionResource,
+      ),
+    ).toBe(false);
+    expect(
+      resourceContains(
+        { kind: 'computer-revision-exact', sessionId: 'session-1', revision: 8 },
+        revisionResource,
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps child ceilings as strict app/window/session/revision subsets', () => {
+    const appSet = { kind: 'computer-app-exact', appIdentityDigest: app } as const;
+    const windowSet = {
+      kind: 'computer-window-exact',
+      appIdentityDigest: app,
+      windowIdentityDigest: window,
+    } as const;
+    const sessionSet = {
+      kind: 'computer-session-exact',
+      appIdentityDigest: app,
+      sessionId: 'session-1',
+    } as const;
+    const revisionSet = {
+      kind: 'computer-revision-exact',
+      appIdentityDigest: app,
+      sessionId: 'session-1',
+      revision: 7,
+    } as const;
+    expect(resourceSetIsSubset(windowSet, appSet)).toBe(true);
+    expect(resourceSetIsSubset(sessionSet, windowSet)).toBe(false);
+    expect(resourceSetIsSubset(revisionSet, sessionSet)).toBe(true);
+    expect(resourceSetIsSubset({ kind: 'all' }, appSet)).toBe(false);
+  });
+
+  it('does not persist Computer control in task or persistent grants', () => {
+    const common = {
+      id: 'computer-grant',
+      subjectId: 'leader',
+      capability: 'computer.control' as const,
+      resourceSet: { kind: 'computer-app-exact', appIdentityDigest: app } as const,
+      operations: ['control'] as const,
+      expiresAt: '2026-07-22T13:00:00.000Z',
+      policyEpoch: 4,
+      providerEgress: ['none'] as const,
+      sandboxProfiles: ['workspace-write'] as const,
+    };
+    expect(() => createSessionGrant({ ...common, scope: 'task' })).toThrow(
+      'Computer control grants must be ephemeral',
+    );
+    expect(createSessionGrant({ ...common, scope: 'once' })).toMatchObject({
+      capability: 'computer.control',
+      scope: 'once',
+    });
+    const broker = new PermissionBroker({
+      subjectId: 'leader',
+      policy: basePolicy(),
+      now: () => NOW,
+    });
+    expect(() => broker.rememberGrant({ ...common, scope: 'task' })).toThrow(
+      'Computer control grants must be ephemeral',
+    );
+  });
+
+  it('binds computer fingerprints to identity digests rather than screen text', () => {
+    const request = {
+      taskId: 'task-1',
+      subjectId: 'leader',
+      capability: 'computer.observe',
+      resource: { ...sessionResource },
+      operation: 'observe',
+      providerEgress: 'none',
+      sandboxProfile: 'read-only',
+      executionSpecDigest: 'd'.repeat(64),
+      reviewerInputDigest: 'e'.repeat(64),
+      risk: 'low',
+    } as const;
+    const fingerprint = permissionRequestFingerprint(request);
+    expect(fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(fingerprint).not.toContain('TextEdit');
+    expect(permissionResourceIdentity(sessionResource)).not.toContain('Save this file');
+    expect(
+      evaluatePermissionPolicy({
+        request: { ...request, operation: 'read' },
+        policy: basePolicy(),
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
   });
 });

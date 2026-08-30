@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   TeamActivitySummary,
   TurnDiff,
+  TurnDiffEntry,
 } from '../../types/sprint-coder';
 import { useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
@@ -449,24 +450,42 @@ export function Timeline({
   );
 }
 
-function mergeWorkspaceDiffs(
+export function mergeWorkspaceDiffs(
   persisted: TurnDiff | undefined,
   runtime: TurnDiff | undefined,
 ): TurnDiff | null {
   if (persisted === undefined) return runtime ?? null;
   if (runtime === undefined) return persisted.entries.length === 0 ? null : persisted;
-  const entries = [...runtime.entries];
-  const known = new Set(
-    entries.map((entry) => `${entry.path}\u0000${entry.destination ?? ''}\u0000${entry.kind}`),
-  );
+  const runtimeEntries = [...runtime.entries];
+  const entries = [...runtimeEntries];
   for (const entry of persisted.entries) {
-    const key = `${entry.path}\u0000${entry.destination ?? ''}\u0000${entry.kind}`;
-    if (!known.has(key)) entries.push(entry);
+    const rootedMatches = runtimeEntries.filter((candidate) =>
+      sameRootedWorkspaceEntry(entry, candidate),
+    );
+    // Main now projects both durable Saga diffs and Runtime reports through the same sealed root
+    // identity. Legacy absolute paths have no trustworthy root binding and therefore stay visible.
+    const reverseMatches =
+      rootedMatches.length === 1
+        ? persisted.entries.filter((candidate) =>
+            sameRootedWorkspaceEntry(candidate, rootedMatches[0]!),
+          )
+        : [];
+    if (rootedMatches.length === 1 && reverseMatches.length === 1) continue;
+    entries.push(entry);
   }
   return {
     turnId: runtime.turnId,
     entries: entries.map((entry, index) => ({ ...entry, ordinal: index + 1 })),
   };
+}
+
+function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEntry): boolean {
+  return (
+    persisted.kind === runtime.kind &&
+    persisted.status === runtime.status &&
+    persisted.path === runtime.path &&
+    persisted.destination === runtime.destination
+  );
 }
 
 function workerStateLabel(state: string): string {

@@ -5,12 +5,21 @@ import { MakerZIP } from '@electron-forge/maker-zip';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
-import { extractFile as extractAsarFile } from '@electron/asar';
+import { extractFile as extractAsarFile, listPackage as listAsarPackage } from '@electron/asar';
 import { sign as signWindowsFiles } from '@electron/windows-sign';
 import { createHash } from 'node:crypto';
-import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import {
   managedLocalTargetKey,
@@ -18,6 +27,7 @@ import {
   type ManagedLocalSidecarPin,
   type ManagedLocalTargetKey,
 } from './src/main/managed-local-sidecar-bundle';
+import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
 // build output (everything else, including this project's own source tree, is dropped
@@ -37,7 +47,7 @@ function isNativeSafeFsAddonPackagePath(file: string): boolean {
   );
 }
 
-function shouldIgnoreFromPackage(file: string): boolean {
+export function shouldIgnoreFromPackage(file: string): boolean {
   if (!file) return false;
   if (file === '/.vite' || file.startsWith('/.vite/')) return false;
   if (isNativeSafeFsAddonPackagePath(file)) return false;
@@ -81,7 +91,7 @@ const packagerWindowsSign =
     : {
         ...windowsSign,
         hookFunction: async (file: string) => {
-          if (isManagedLocalPackagedPath(file)) return;
+          if (shouldSkipPackagerCodeSign(file)) return;
           await signWindowsFiles({ files: [file], ...windowsSign });
         },
       };
@@ -92,6 +102,17 @@ const BUNDLED_NODE_SIGNER_SUBJECT =
 const BUNDLED_NODE_SIGNER_ISSUER =
   'CN=Microsoft ID Verified CS AOC CA 03, O=Microsoft Corporation, C=US';
 const BUNDLED_NODE_SIGNER_THUMBPRINT = '01A4F6F4AA2524CECF7A926DCD0BAA64B4956CF0';
+const MAC_TEAM_IDENTIFIER_PATTERN = /^[A-Z0-9]{10}$/u;
+
+function computerUseRepositorySourceCommit(): string {
+  const commit = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: resolve(__dirname, '..', '..'),
+    encoding: 'utf8',
+    windowsHide: true,
+  }).trim();
+  if (!/^[0-9a-f]{40}$/u.test(commit)) throw new Error('Computer Use source commit is unavailable');
+  return commit;
+}
 
 function bundledNodeResources(): string[] {
   if (process.platform !== 'win32') return [];
@@ -108,6 +129,31 @@ function sandboxRunnerResources(): string[] {
   return [executable, `${executable}.sha256`];
 }
 
+export const COMPUTER_USE_NATIVE_RESOURCE_ROOT = resolve(
+  __dirname,
+  'computer-use-native',
+  'build',
+  'Release',
+);
+export const COMPUTER_USE_NATIVE_MANIFEST_PATH = join(
+  COMPUTER_USE_NATIVE_RESOURCE_ROOT,
+  'computer-use-native.manifest.json',
+);
+
+function computerUseNativeResources(): string[] {
+  if (process.platform === 'darwin')
+    return [
+      join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint_coder_computer_use_native.node'),
+      COMPUTER_USE_NATIVE_MANIFEST_PATH,
+    ];
+  if (process.platform === 'win32')
+    return [
+      join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe'),
+      COMPUTER_USE_NATIVE_MANIFEST_PATH,
+    ];
+  return [];
+}
+
 export const MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT = resolve(
   __dirname,
   'managed-local',
@@ -122,6 +168,18 @@ function managedLocalSidecarResources(): string[] {
 export function isManagedLocalPackagedPath(path: string): boolean {
   const normalized = path.replaceAll('\\', '/').toLowerCase();
   return normalized.includes('/resources/managed-local/');
+}
+
+export function isComputerUseNativeArtifactPath(path: string): boolean {
+  const normalized = path.replaceAll('\\', '/').toLowerCase();
+  return (
+    normalized.endsWith('/sprint-coder-computer-use-host.exe') ||
+    normalized.endsWith('/sprint_coder_computer_use_native.node')
+  );
+}
+
+function shouldSkipPackagerCodeSign(path: string): boolean {
+  return isManagedLocalPackagedPath(path) || isComputerUseNativeArtifactPath(path);
 }
 
 function managedLocalPackageTarget(
@@ -146,6 +204,61 @@ function buildManagedLocalSidecar(platform: ForgePlatform, architecture: string)
       windowsHide: true,
     },
   );
+}
+
+function buildComputerUseNative(platform: ForgePlatform, architecture: string): void {
+  assertNativePackagingHost(platform);
+  const sourceCommit = computerUseRepositorySourceCommit();
+  execFileSync(
+    process.execPath,
+    [
+      resolve(__dirname, '..', '..', 'build-computer-use-native.mjs'),
+      `--target=${platform}`,
+      `--arch=${architecture}`,
+      `--source-commit=${sourceCommit}`,
+    ],
+    {
+      cwd: resolve(__dirname, '..', '..'),
+      stdio: 'inherit',
+      windowsHide: true,
+    },
+  );
+}
+
+async function prepareComputerUseNativeForViteBuild(
+  platform: ForgePlatform,
+  architecture: string,
+): Promise<void> {
+  if (platform !== 'darwin' && platform !== 'win32') return;
+  const artifactPath = join(
+    COMPUTER_USE_NATIVE_RESOURCE_ROOT,
+    platform === 'darwin'
+      ? 'sprint_coder_computer_use_native.node'
+      : 'sprint-coder-computer-use-host.exe',
+  );
+  if (platform === 'win32') {
+    if (windowsSign !== undefined)
+      await signWindowsFiles({ files: [artifactPath], ...windowsSign });
+    refreshPackagedComputerUseArtifactDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'win32');
+    refreshPackagedComputerUseWindowsSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
+  } else {
+    execFileSync(
+      '/usr/bin/codesign',
+      [
+        '--force',
+        '--options',
+        'runtime',
+        ...(macCodeSignIdentity === '-' ? ['--timestamp=none'] : ['--timestamp']),
+        '--sign',
+        macCodeSignIdentity,
+        artifactPath,
+      ],
+      { stdio: 'inherit' },
+    );
+    refreshPackagedComputerUseArtifactDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'darwin');
+    refreshComputerUseNativeMacModuleSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
+  }
+  verifyComputerUseNativeBuild(platform, architecture);
 }
 
 function generatedManagedLocalPin(target: ManagedLocalTargetKey): ManagedLocalSidecarPin {
@@ -183,6 +296,261 @@ export async function verifyPackagedManagedLocalSidecar(
   ).toString('utf8');
   if (!packagedMain.includes(pin.manifestSha256) || !packagedMain.includes(pin.upstreamRevision))
     throw new Error('Packaged Main does not contain the Managed Local compile-time pin');
+}
+
+export function verifyComputerUseNativeBuild(platform: ForgePlatform, architecture: string): void {
+  if (platform !== 'darwin' && platform !== 'win32') return;
+  assertNativePackagingHost(platform);
+  const expectedArtifact =
+    platform === 'darwin'
+      ? join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint_coder_computer_use_native.node')
+      : join(COMPUTER_USE_NATIVE_RESOURCE_ROOT, 'sprint-coder-computer-use-host.exe');
+  if (!existsSync(expectedArtifact) || !lstatSync(expectedArtifact).isFile())
+    throw new Error(`Computer Use native artifact was not built for ${platform}-${architecture}`);
+  if (!lstatSync(COMPUTER_USE_NATIVE_MANIFEST_PATH).isFile())
+    throw new Error('Computer Use native manifest was not built');
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(readFileSync(COMPUTER_USE_NATIVE_MANIFEST_PATH, 'utf8')) as unknown,
+  );
+  const digest = createHash('sha256').update(readFileSync(expectedArtifact)).digest('hex');
+  const sourceCommit = computerUseRepositorySourceCommit();
+  if (
+    manifest.sourceCommit !== sourceCommit ||
+    manifest.platform !== platform ||
+    manifest.architecture !== architecture ||
+    manifest.protocolVersion !== 1 ||
+    manifest.apiVersion !== 1 ||
+    manifest.moduleDigest !== digest ||
+    manifest.binaryDigest !== digest
+  )
+    throw new Error('Computer Use native manifest does not match its artifact');
+}
+
+export function verifyPackagedComputerUseNativeBundle(
+  outputPath: string,
+  platform: ForgePlatform,
+  architecture: string,
+): void {
+  if (platform !== 'darwin' && platform !== 'win32') return;
+  const resources =
+    platform === 'darwin'
+      ? join(
+          outputPath,
+          readdirSync(outputPath, { withFileTypes: true }).find(
+            (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
+          )?.name ?? '',
+          'Contents',
+          'Resources',
+        )
+      : join(outputPath, 'resources');
+  const manifestPath = join(resources, 'computer-use-native.manifest.json');
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+  );
+  const artifactName =
+    platform === 'darwin'
+      ? 'sprint_coder_computer_use_native.node'
+      : 'sprint-coder-computer-use-host.exe';
+  const artifactPath = join(resources, artifactName);
+  const packagedArtifactCount = countResourceBasename(resources, artifactName);
+  const packagedManifestCount = countResourceBasename(
+    resources,
+    'computer-use-native.manifest.json',
+  );
+  const asarEntries = listAsarPackage(join(resources, 'app.asar'), { isPack: false }).map((entry) =>
+    entry.replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase(),
+  );
+  const artifactEntry = artifactName.toLowerCase();
+  const manifestEntry = 'computer-use-native.manifest.json';
+  const hasAsarDuplicate = asarEntries.some(
+    (entry) =>
+      entry.includes('/computer-use-native/') ||
+      entry.startsWith('computer-use-native/') ||
+      entry === manifestEntry ||
+      entry.endsWith(`/${manifestEntry}`) ||
+      entry === artifactEntry ||
+      entry.endsWith(`/${artifactEntry}`),
+  );
+  const digest =
+    existsSync(artifactPath) && lstatSync(artifactPath).isFile()
+      ? createHash('sha256').update(readFileSync(artifactPath)).digest('hex')
+      : null;
+  const compiledPin = computerUseNativeCompiledPin(manifest);
+  const packagedMain = extractAsarFile(
+    join(resources, 'app.asar'),
+    join('.vite', 'build', 'index.js'),
+  ).toString('utf8');
+  const mainContainsCompiledPin = [
+    compiledPin.sourceCommit,
+    compiledPin.artifactDigest,
+    compiledPin.manifestDigest,
+  ].every((value) => packagedMain.includes(value));
+  if (
+    manifest.platform !== platform ||
+    manifest.architecture !== architecture ||
+    manifest.protocolVersion !== 1 ||
+    manifest.apiVersion !== 1 ||
+    packagedArtifactCount !== 1 ||
+    packagedManifestCount !== 1 ||
+    hasAsarDuplicate ||
+    !existsSync(artifactPath) ||
+    !lstatSync(artifactPath).isFile() ||
+    digest === null ||
+    manifest.moduleDigest !== digest ||
+    manifest.binaryDigest !== digest ||
+    !mainContainsCompiledPin
+  )
+    throw new Error(`Packaged Computer Use native artifact verification failed for ${platform}`);
+}
+
+function countResourceBasename(directory: string, expectedName: string): number {
+  let count = 0;
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.name === expectedName) count += 1;
+    if (entry.isDirectory() && !entry.isSymbolicLink())
+      count += countResourceBasename(path, expectedName);
+  }
+  return count;
+}
+
+export function refreshPackagedComputerUseArtifactDigest(
+  resourcesPath: string,
+  platform: 'darwin' | 'win32',
+): string {
+  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
+  const artifactPath = join(
+    resourcesPath,
+    platform === 'darwin'
+      ? 'sprint_coder_computer_use_native.node'
+      : 'sprint-coder-computer-use-host.exe',
+  );
+  if (!lstatSync(artifactPath).isFile() || !lstatSync(manifestPath).isFile())
+    throw new Error('Packaged Computer Use artifact or manifest is unavailable');
+  const digest = createHash('sha256').update(readFileSync(artifactPath)).digest('hex');
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+  );
+  if (manifest.platform !== platform)
+    throw new Error('Packaged Computer Use manifest platform changed');
+  writeFileSync(
+    manifestPath,
+    `${JSON.stringify({ ...manifest, moduleDigest: digest, binaryDigest: digest }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return digest;
+}
+
+export function refreshPackagedComputerUseWindowsSignerDigest(
+  resourcesPath: string,
+): string | null {
+  const artifactPath = join(resourcesPath, 'sprint-coder-computer-use-host.exe');
+  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
+  const signatureJson = execFileSync(
+    'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      'Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_COMPUTER_USE_HELPER; [pscustomobject]@{Status=$signature.Status.ToString();Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress',
+    ],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, SPRINT_CODER_COMPUTER_USE_HELPER: artifactPath },
+      windowsHide: true,
+    },
+  ).trim();
+  const signature = JSON.parse(signatureJson) as { Status?: unknown; Thumbprint?: unknown };
+  const signerDigest =
+    signature.Status === 'Valid' &&
+    typeof signature.Thumbprint === 'string' &&
+    /^[0-9A-F]{40}$/u.test(signature.Thumbprint.toUpperCase())
+      ? createHash('sha256').update(signature.Thumbprint.toUpperCase(), 'utf8').digest('hex')
+      : null;
+  if (windowsSign !== undefined && signerDigest === null)
+    throw new Error('Signed Windows Computer Use helper failed Authenticode verification');
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+  );
+  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, signerDigest }, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  return signerDigest;
+}
+
+export function refreshComputerUseNativeMacModuleSignerDigest(
+  resourcesPath: string,
+): string | null {
+  const artifactPath = join(resourcesPath, 'sprint_coder_computer_use_native.node');
+  const manifestPath = join(resourcesPath, 'computer-use-native.manifest.json');
+  const details = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', artifactPath], {
+    encoding: 'utf8',
+  });
+  if (details.status !== 0)
+    throw new Error('Unable to inspect the macOS Computer Use native module identity');
+  const output = `${details.stdout ?? ''}\n${details.stderr ?? ''}`;
+  const teamIdentifier = /(?:^|\n)TeamIdentifier=([^\n\r]+)/u.exec(output)?.[1]?.trim();
+  const signerDigest =
+    teamIdentifier !== undefined && MAC_TEAM_IDENTIFIER_PATTERN.test(teamIdentifier)
+      ? createHash('sha256').update(teamIdentifier, 'utf8').digest('hex')
+      : null;
+  if (macCodeSignIdentity !== '-' && signerDigest === null)
+    throw new Error('Developer ID-signed Computer Use native module has no TeamIdentifier');
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+  );
+  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, signerDigest }, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  return signerDigest;
+}
+
+/**
+ * Stamp the native manifest with proof from the already signed macOS app. Build-time environment
+ * variables are intentionally not accepted as signer evidence. The outer app is resealed by the
+ * caller after this write, so the signer digest is covered by CodeResources.
+ */
+export function refreshPackagedComputerUseSignerDigest(appPath: string): string {
+  const details = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', appPath], {
+    encoding: 'utf8',
+  });
+  if (details.status !== 0)
+    throw new Error('Unable to inspect the signed macOS Computer Use app identity');
+  const output = `${details.stdout ?? ''}\n${details.stderr ?? ''}`;
+  const teamIdentifier = /(?:^|\n)TeamIdentifier=([^\n\r]+)/u.exec(output)?.[1]?.trim();
+  if (teamIdentifier === undefined || !MAC_TEAM_IDENTIFIER_PATTERN.test(teamIdentifier))
+    throw new Error('Signed macOS Computer Use app identity is incomplete');
+  const modulePath = join(
+    appPath,
+    'Contents',
+    'Resources',
+    'sprint_coder_computer_use_native.node',
+  );
+  const moduleDetails = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', modulePath], {
+    encoding: 'utf8',
+  });
+  if (moduleDetails.status !== 0)
+    throw new Error('Unable to inspect the signed macOS Computer Use native module identity');
+  const moduleOutput = `${moduleDetails.stdout ?? ''}\n${moduleDetails.stderr ?? ''}`;
+  const moduleTeamIdentifier = /(?:^|\n)TeamIdentifier=([^\n\r]+)/u.exec(moduleOutput)?.[1]?.trim();
+  if (
+    moduleTeamIdentifier !== teamIdentifier ||
+    moduleTeamIdentifier === undefined ||
+    !MAC_TEAM_IDENTIFIER_PATTERN.test(moduleTeamIdentifier)
+  )
+    throw new Error('macOS Computer Use app and native module signer identities differ');
+  const signerDigest = createHash('sha256').update(teamIdentifier, 'utf8').digest('hex');
+  const manifestPath = join(appPath, 'Contents', 'Resources', 'computer-use-native.manifest.json');
+  const manifest = computerUseNativeManifestSchema.parse(
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown,
+  );
+  if (manifest.platform !== 'darwin')
+    throw new Error('Packaged macOS Computer Use manifest is invalid');
+  writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, signerDigest }, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  return signerDigest;
 }
 
 export function refreshPackagedSandboxRunnerDigest(appPath: string): string {
@@ -226,7 +594,7 @@ export function verifyBundledNodeResources(): void {
       '-NoProfile',
       '-NonInteractive',
       '-Command',
-      `Import-Module "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_NODE; [pscustomobject]@{Status=$signature.Status.ToString();Subject=$signature.SignerCertificate.Subject;Issuer=$signature.SignerCertificate.Issuer;Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress`,
+      `Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"; $signature = Microsoft.PowerShell.Security\\Get-AuthenticodeSignature -LiteralPath $env:SPRINT_CODER_NODE; [pscustomobject]@{Status=$signature.Status.ToString();Subject=$signature.SignerCertificate.Subject;Issuer=$signature.SignerCertificate.Issuer;Thumbprint=$signature.SignerCertificate.Thumbprint} | ConvertTo-Json -Compress`,
     ],
     {
       encoding: 'utf8',
@@ -324,7 +692,7 @@ function signAdhocBundle(appPath: string): void {
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      if (isManagedLocalPackagedPath(path)) continue;
+      if (shouldSkipPackagerCodeSign(path)) continue;
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         visit(path);
@@ -373,8 +741,13 @@ const config: ForgeConfig = {
     extraResource: [
       ...bundledNodeResources(),
       ...sandboxRunnerResources(),
+      ...computerUseNativeResources(),
       ...managedLocalSidecarResources(),
     ],
+    extendInfo: {
+      NSScreenCaptureUsageDescription:
+        'Sprint Coder needs Screen Recording permission to observe the explicitly selected app window.',
+    },
     ignore: shouldIgnoreFromPackage,
     // Production identities use @electron/osx-sign so nested Electron helpers and Frameworks keep
     // their per-process entitlements. Local ad-hoc packages are signed in the postPackage hook,
@@ -384,7 +757,7 @@ const config: ForgeConfig = {
       : {
           osxSign: {
             identity: macCodeSignIdentity,
-            ignore: isManagedLocalPackagedPath,
+            ignore: shouldSkipPackagerCodeSign,
           },
         }),
     ...(packagerWindowsSign === undefined ? {} : { windowsSign: packagerWindowsSign }),
@@ -401,14 +774,27 @@ const config: ForgeConfig = {
   },
   hooks: {
     generateAssets: async (_forgeConfig, platform, architecture) => {
+      buildComputerUseNative(platform, architecture);
       buildManagedLocalSidecar(platform, architecture);
     },
-    prePackage: async (_forgeConfig, platform) => {
+    prePackage: async (_forgeConfig, platform, architecture) => {
       assertNativePackagingHost(platform);
+      await prepareComputerUseNativeForViteBuild(platform, architecture);
       if (platform === 'win32') verifyBundledNodeResources();
     },
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') {
+        for (const outputPath of packageResult.outputPaths) {
+          if (packageResult.platform === 'win32')
+            refreshPackagedComputerUseArtifactDigest(join(outputPath, 'resources'), 'win32');
+          if (packageResult.platform === 'win32')
+            refreshPackagedComputerUseWindowsSignerDigest(join(outputPath, 'resources'));
+          verifyPackagedComputerUseNativeBundle(
+            outputPath,
+            packageResult.platform,
+            packageResult.arch,
+          );
+        }
         for (const outputPath of packageResult.outputPaths)
           await verifyPackagedManagedLocalSidecar(
             outputPath,
@@ -438,11 +824,18 @@ const config: ForgeConfig = {
         // Seal the signed bytes, then refresh only the outer app signature so CodeResources
         // covers the new manifest without rewriting the already-signed nested executable.
         refreshPackagedSandboxRunnerDigest(appPath);
+        refreshPackagedComputerUseArtifactDigest(join(appPath, 'Contents', 'Resources'), 'darwin');
+        if (macCodeSignIdentity !== '-') refreshPackagedComputerUseSignerDigest(appPath);
         resealMacAppBundle(appPath);
         execFileSync(
           '/usr/bin/codesign',
           ['--verify', '--deep', '--strict', '--verbose=2', appPath],
           { stdio: 'inherit' },
+        );
+        verifyPackagedComputerUseNativeBundle(
+          outputPath,
+          packageResult.platform,
+          packageResult.arch,
         );
         await verifyPackagedManagedLocalSidecar(
           outputPath,

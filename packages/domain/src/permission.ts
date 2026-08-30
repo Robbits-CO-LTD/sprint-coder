@@ -10,11 +10,13 @@ export const capabilities = [
   'external.open',
   'secret.use',
   'provider.egress',
+  'computer.observe',
+  'computer.control',
 ] as const;
 
 export type Capability = (typeof capabilities)[number];
 export type PermissionOperation =
-  'read' | 'write' | 'execute' | 'fetch' | 'open' | 'use' | 'egress';
+  'read' | 'write' | 'execute' | 'fetch' | 'open' | 'use' | 'egress' | 'observe' | 'control';
 export type ProviderEgress = 'none' | 'trusted-local' | 'trusted-remote' | 'untrusted-remote';
 export type SandboxProfile = 'read-only' | 'workspace-write' | 'full';
 export type AccessPreset = 'ask' | 'auto' | 'full';
@@ -68,7 +70,35 @@ export type PermissionResource =
       classifierVersion: string;
     }
   | { kind: 'secret'; secretId: string }
-  | { kind: 'external'; target: string };
+  | { kind: 'external'; target: string }
+  /** Stable app identity only; never use a process id or window handle as authority. */
+  | {
+      kind: 'computer-app';
+      platform: 'darwin' | 'win32';
+      appIdentityDigest: string;
+    }
+  | {
+      kind: 'computer-window';
+      platform: 'darwin' | 'win32';
+      appIdentityDigest: string;
+      windowIdentityDigest: string;
+    }
+  | {
+      kind: 'computer-session';
+      platform: 'darwin' | 'win32';
+      appIdentityDigest: string;
+      windowIdentityDigest: string;
+      sessionId: string;
+      taskId: string;
+    }
+  | {
+      kind: 'computer-revision';
+      platform: 'darwin' | 'win32';
+      appIdentityDigest: string;
+      windowIdentityDigest: string;
+      sessionId: string;
+      revision: number;
+    };
 
 export type ResourceSet =
   | { kind: 'workspace'; workspaceId?: string }
@@ -99,6 +129,32 @@ export type ResourceSet =
     }
   | { kind: 'secret-exact'; secretId: string }
   | { kind: 'external-exact'; target: string }
+  | {
+      kind: 'computer-app' | 'computer-app-exact';
+      platform?: 'darwin' | 'win32';
+      appIdentityDigest: string;
+    }
+  | {
+      kind: 'computer-window' | 'computer-window-exact';
+      platform?: 'darwin' | 'win32';
+      appIdentityDigest: string;
+      windowIdentityDigest: string;
+    }
+  | {
+      kind: 'computer-session' | 'computer-session-exact';
+      platform?: 'darwin' | 'win32';
+      appIdentityDigest: string;
+      windowIdentityDigest?: string;
+      sessionId: string;
+    }
+  | {
+      kind: 'computer-revision' | 'computer-revision-exact';
+      platform?: 'darwin' | 'win32';
+      appIdentityDigest?: string;
+      windowIdentityDigest?: string;
+      sessionId: string;
+      revision: number;
+    }
   | { kind: 'all' };
 
 export type PermissionRule = {
@@ -151,6 +207,13 @@ export type SessionGrant = {
   revokedAt?: string;
   consumedAt?: string;
 };
+
+/** The type-level shape exposed to callers that can issue Computer control grants. */
+export type EphemeralComputerControlGrant = Omit<SessionGrant, 'capability' | 'scope'> & {
+  capability: 'computer.control';
+  scope: 'once';
+};
+export type ComputerUseGrant = EphemeralComputerControlGrant;
 
 type ReviewerDecisionFacts = {
   reviewRequestId: string;
@@ -369,6 +432,15 @@ export function createSessionGrant(grant: SessionGrant): SessionGrant {
     throw new Error('Invalid grant operations');
   if (grant.providerEgress.length === 0 || grant.sandboxProfiles.length === 0)
     throw new Error('Grant egress and sandbox bounds are required');
+  // Computer control is intentionally ephemeral.  A task/persistent grant could outlive the
+  // foreground window, user takeover, or the policy epoch that established the app binding.
+  if (grant.capability === 'computer.control' && grant.scope !== 'once')
+    throw new Error('Computer control grants must be ephemeral');
+  if (
+    (grant.capability === 'computer.observe' || grant.capability === 'computer.control') &&
+    !isComputerResourceSet(grant.resourceSet)
+  )
+    throw new Error('Computer grants require an app, window, session, or revision binding');
   if (grant.capability === 'shell.execute' && grant.executionSpecDigest === undefined)
     throw new Error('Shell grants require an exact execution digest');
   return Object.freeze({
@@ -576,6 +648,8 @@ function requestFactsValid(request: PermissionRequest): boolean {
     'external.open': 'open',
     'secret.use': 'use',
     'provider.egress': 'egress',
+    'computer.observe': 'observe',
+    'computer.control': 'control',
   };
   if (request.operation !== expectedOperation[request.capability]) return false;
   if (request.capability !== 'provider.egress' && request.providerEgress !== 'none') return false;
@@ -654,6 +728,32 @@ function requestFactsValid(request: PermissionRequest): boolean {
       return false;
     }
   }
+  if (
+    request.resource.kind === 'computer-app' ||
+    request.resource.kind === 'computer-window' ||
+    request.resource.kind === 'computer-session' ||
+    request.resource.kind === 'computer-revision'
+  ) {
+    const computer = request.resource;
+    if (
+      !(['darwin', 'win32'] as const).includes(computer.platform) ||
+      !/^[a-f0-9]{64}$/.test(computer.appIdentityDigest)
+    )
+      return false;
+    if (computer.kind !== 'computer-app' && !/^[a-f0-9]{64}$/.test(computer.windowIdentityDigest))
+      return false;
+    if (
+      (computer.kind === 'computer-session' || computer.kind === 'computer-revision') &&
+      computer.sessionId.length === 0
+    )
+      return false;
+    if (computer.kind === 'computer-session' && computer.taskId.length === 0) return false;
+    if (
+      computer.kind === 'computer-revision' &&
+      (!Number.isSafeInteger(computer.revision) || computer.revision < 0)
+    )
+      return false;
+  }
   const resourceMatchesCapability =
     request.capability === 'workspace.read' || request.capability === 'workspace.write'
       ? request.resource.kind === 'workspace-path' ||
@@ -673,8 +773,14 @@ function requestFactsValid(request: PermissionRequest): boolean {
                   ? request.resource.kind === 'external' ||
                     request.resource.kind === 'workspace-path' ||
                     request.resource.kind === 'external-path'
-                  : request.resource.kind === 'workspace-path' ||
-                    request.resource.kind === 'external-path';
+                  : request.capability === 'computer.observe' ||
+                      request.capability === 'computer.control'
+                    ? request.resource.kind === 'computer-app' ||
+                      request.resource.kind === 'computer-window' ||
+                      request.resource.kind === 'computer-session' ||
+                      request.resource.kind === 'computer-revision'
+                    : request.resource.kind === 'workspace-path' ||
+                      request.resource.kind === 'external-path';
   return resourceMatchesCapability;
 }
 
@@ -755,7 +861,12 @@ export function revalidateExecutionPermit(input: {
   return { valid: true };
 }
 
-function permissionResourceIdentity(resource: PermissionResource): string {
+/**
+ * Stable, path-free identity used by permits and reviewer bindings.  Computer Use identities are
+ * represented only by their app/window/session digests; titles, paths, handles, and screen text
+ * never enter this value.
+ */
+export function permissionResourceIdentity(resource: PermissionResource): string {
   if (resource.kind === 'workspace-path')
     return JSON.stringify([
       resource.kind,
@@ -774,6 +885,33 @@ function permissionResourceIdentity(resource: PermissionResource): string {
   if (resource.kind === 'network') return JSON.stringify([resource.kind, resource.origin]);
   if (resource.kind === 'secret') return JSON.stringify([resource.kind, resource.secretId]);
   if (resource.kind === 'external') return JSON.stringify([resource.kind, resource.target]);
+  if (resource.kind === 'computer-app')
+    return JSON.stringify([resource.kind, resource.platform, resource.appIdentityDigest]);
+  if (resource.kind === 'computer-window')
+    return JSON.stringify([
+      resource.kind,
+      resource.platform,
+      resource.appIdentityDigest,
+      resource.windowIdentityDigest,
+    ]);
+  if (resource.kind === 'computer-session')
+    return JSON.stringify([
+      resource.kind,
+      resource.platform,
+      resource.appIdentityDigest,
+      resource.windowIdentityDigest,
+      resource.sessionId,
+      resource.taskId,
+    ]);
+  if (resource.kind === 'computer-revision')
+    return JSON.stringify([
+      resource.kind,
+      resource.platform,
+      resource.appIdentityDigest,
+      resource.windowIdentityDigest,
+      resource.sessionId,
+      resource.revision,
+    ]);
   if (resource.kind === 'provider-disclosure')
     return JSON.stringify([
       resource.kind,
@@ -800,6 +938,8 @@ function permissionResourceIdentity(resource: PermissionResource): string {
   ]);
 }
 
+export const permissionResourceFingerprint = permissionResourceIdentity;
+
 export function permissionRequestFingerprint(request: PermissionRequest): string {
   const resourceFacts =
     request.resource.kind === 'workspace-path'
@@ -811,7 +951,12 @@ export function permissionRequestFingerprint(request: PermissionRequest): string
         ]
       : request.resource.kind === 'external-path'
         ? [request.resource.kind, request.resource.identityDigest, request.resource.classification]
-        : request.resource;
+        : request.resource.kind === 'computer-app' ||
+            request.resource.kind === 'computer-window' ||
+            request.resource.kind === 'computer-session' ||
+            request.resource.kind === 'computer-revision'
+          ? permissionResourceIdentity(request.resource)
+          : request.resource;
   return createHash('sha256')
     .update(
       JSON.stringify([
@@ -879,7 +1024,8 @@ export function sessionGrantMatchesPermissionRequest(
   );
 }
 
-function resourceContains(set: ResourceSet, resource: PermissionResource): boolean {
+/** Returns true only when a permission resource is inside the exact bounded resource set. */
+export function resourceContains(set: ResourceSet, resource: PermissionResource): boolean {
   if (set.kind === 'all') return true;
   if (set.kind === 'workspace')
     return (
@@ -938,7 +1084,72 @@ function resourceContains(set: ResourceSet, resource: PermissionResource): boole
     );
   if (set.kind === 'secret-exact')
     return resource.kind === 'secret' && resource.secretId === set.secretId;
-  return resource.kind === 'external' && resource.target === set.target;
+  if (set.kind === 'computer-app' || set.kind === 'computer-app-exact')
+    return (
+      isComputerResource(resource) &&
+      resource.appIdentityDigest === set.appIdentityDigest &&
+      (set.platform === undefined || resource.platform === set.platform)
+    );
+  if (set.kind === 'computer-window' || set.kind === 'computer-window-exact')
+    return (
+      isComputerResource(resource) &&
+      resource.kind !== 'computer-app' &&
+      resource.appIdentityDigest === set.appIdentityDigest &&
+      resource.windowIdentityDigest === set.windowIdentityDigest &&
+      (set.platform === undefined || resource.platform === set.platform)
+    );
+  if (set.kind === 'computer-session' || set.kind === 'computer-session-exact')
+    return (
+      (resource.kind === 'computer-session' || resource.kind === 'computer-revision') &&
+      resource.sessionId === set.sessionId &&
+      resource.appIdentityDigest === set.appIdentityDigest &&
+      (set.windowIdentityDigest === undefined ||
+        resource.windowIdentityDigest === set.windowIdentityDigest) &&
+      (set.platform === undefined || resource.platform === set.platform)
+    );
+  if (set.kind === 'computer-revision' || set.kind === 'computer-revision-exact')
+    return (
+      resource.kind === 'computer-revision' &&
+      resource.sessionId === set.sessionId &&
+      resource.revision === set.revision &&
+      (set.appIdentityDigest === undefined ||
+        resource.appIdentityDigest === set.appIdentityDigest) &&
+      (set.windowIdentityDigest === undefined ||
+        resource.windowIdentityDigest === set.windowIdentityDigest) &&
+      (set.platform === undefined || resource.platform === set.platform)
+    );
+  if (set.kind === 'external-exact')
+    return resource.kind === 'external' && resource.target === set.target;
+  return false;
+}
+
+export const permissionResourceContains = resourceContains;
+
+function isComputerResource(
+  resource: PermissionResource,
+): resource is Extract<
+  PermissionResource,
+  { kind: 'computer-app' | 'computer-window' | 'computer-session' | 'computer-revision' }
+> {
+  return (
+    resource.kind === 'computer-app' ||
+    resource.kind === 'computer-window' ||
+    resource.kind === 'computer-session' ||
+    resource.kind === 'computer-revision'
+  );
+}
+
+function isComputerResourceSet(resourceSet: ResourceSet): boolean {
+  return (
+    resourceSet.kind === 'computer-app' ||
+    resourceSet.kind === 'computer-app-exact' ||
+    resourceSet.kind === 'computer-window' ||
+    resourceSet.kind === 'computer-window-exact' ||
+    resourceSet.kind === 'computer-session' ||
+    resourceSet.kind === 'computer-session-exact' ||
+    resourceSet.kind === 'computer-revision' ||
+    resourceSet.kind === 'computer-revision-exact'
+  );
 }
 
 function pathIsWithin(candidate: string, root: string): boolean {
@@ -1077,7 +1288,12 @@ function ceilingIsSubset(candidate: CapabilityCeiling, parent: CapabilityCeiling
   );
 }
 
-function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boolean {
+/**
+ * Checks the permission lattice without resolving a resource.  This is used when spawning a
+ * worker, and is intentionally conservative for Computer Use: an app/window/session/revision
+ * binding can only narrow to the same identity (or to a child revision), never to `all`.
+ */
+export function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boolean {
   if (parent.kind === 'all') return true;
   if (candidate.kind === 'all') return false;
   if (candidate.kind === 'workspace' && parent.kind === 'workspace')
@@ -1124,8 +1340,105 @@ function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet): boole
       candidate.disclosedDigest === parent.disclosedDigest &&
       candidate.classifierVersion === parent.classifierVersion
     );
+  if (
+    (candidate.kind === 'computer-app' || candidate.kind === 'computer-app-exact') &&
+    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-window' || candidate.kind === 'computer-window-exact') &&
+    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-session' || candidate.kind === 'computer-session-exact') &&
+    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
+    (parent.kind === 'computer-app' || parent.kind === 'computer-app-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-window' || candidate.kind === 'computer-window-exact') &&
+    (parent.kind === 'computer-window' || parent.kind === 'computer-window-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      candidate.windowIdentityDigest === parent.windowIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-session' || candidate.kind === 'computer-session-exact') &&
+    (parent.kind === 'computer-window' || parent.kind === 'computer-window-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      candidate.windowIdentityDigest === parent.windowIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
+    (parent.kind === 'computer-window' || parent.kind === 'computer-window-exact')
+  )
+    return (
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      candidate.windowIdentityDigest === parent.windowIdentityDigest &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-session' || candidate.kind === 'computer-session-exact') &&
+    (parent.kind === 'computer-session' || parent.kind === 'computer-session-exact')
+  )
+    return (
+      candidate.sessionId === parent.sessionId &&
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      (parent.windowIdentityDigest === undefined ||
+        candidate.windowIdentityDigest === parent.windowIdentityDigest) &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
+    (parent.kind === 'computer-session' || parent.kind === 'computer-session-exact')
+  )
+    return (
+      candidate.sessionId === parent.sessionId &&
+      candidate.appIdentityDigest === parent.appIdentityDigest &&
+      (parent.windowIdentityDigest === undefined ||
+        candidate.windowIdentityDigest === parent.windowIdentityDigest) &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
+  if (
+    (candidate.kind === 'computer-revision' || candidate.kind === 'computer-revision-exact') &&
+    (parent.kind === 'computer-revision' || parent.kind === 'computer-revision-exact')
+  )
+    return (
+      candidate.sessionId === parent.sessionId &&
+      candidate.revision === parent.revision &&
+      (parent.appIdentityDigest === undefined ||
+        candidate.appIdentityDigest === parent.appIdentityDigest) &&
+      (parent.windowIdentityDigest === undefined ||
+        candidate.windowIdentityDigest === parent.windowIdentityDigest) &&
+      (parent.platform === undefined || candidate.platform === parent.platform)
+    );
   return false;
 }
+
+export const permissionResourceSetIsSubset = resourceSetIsSubset;
+export const isResourceSetSubset = resourceSetIsSubset;
 
 function attachmentEgressFactsValid(manifestDigest: string | null, byteCount: number): boolean {
   return (

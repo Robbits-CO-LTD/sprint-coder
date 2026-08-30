@@ -6,6 +6,7 @@ import {
   ipcMain,
   net,
   protocol,
+  screen,
   session,
   shell,
   type IpcMainEvent,
@@ -25,6 +26,8 @@ import {
   prepareNativeSafeFsLockDirectory,
   type NativeSafeFs,
 } from './native-safe-fs';
+import { loadComputerUseNative } from './computer-use-native';
+import { createComputerUseNativeHost } from './computer-use-native-host';
 import { SqliteEditSagaLeaseGuard, SqlitePersistenceClient } from './persistence';
 import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
 import { reconcileUserFileSaves } from './user-file-save-saga';
@@ -152,6 +155,30 @@ if (squirrelStartup || !hasLock) {
         app.getPath('userData'),
       );
       nativeSafeFs = loadNativeSafeFs({ lockDirectoryPath: nativeSafeFsLockDirectory });
+      // The Computer Use host is always injected through the signed/packaged loader. In source
+      // builds this produces a visible unavailable capability; no PATH or renderer fallback is
+      // permitted to make desktop input reachable.
+      const computerUseNativeHost = createComputerUseNativeHost(
+        loadComputerUseNative(),
+        process.platform,
+        process.platform === 'win32'
+          ? {
+              windowsPhysicalBoundsToDip: (bounds) => {
+                const topLeft = screen.screenToDipPoint({ x: bounds.x, y: bounds.y });
+                const bottomRight = screen.screenToDipPoint({
+                  x: bounds.x + bounds.width,
+                  y: bounds.y + bounds.height,
+                });
+                return {
+                  x: topLeft.x,
+                  y: topLeft.y,
+                  width: bottomRight.x - topLeft.x,
+                  height: bottomRight.y - topLeft.y,
+                };
+              },
+            }
+          : {},
+      );
       const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
       persistence = new SqlitePersistenceClient(
         databasePath,
@@ -193,6 +220,8 @@ if (squirrelStartup || !hasLock) {
         trustedOrigin,
         workspaceEdit,
         managedLocalController,
+        undefined,
+        computerUseNativeHost,
       );
       await router.initialize();
       router.register();

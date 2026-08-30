@@ -10,6 +10,7 @@ import { PermissionBroker } from './permission-broker';
 import { SqlitePersistenceClient } from './persistence';
 import {
   authorizeCodexProviderEgress,
+  authorizeComputerUseProviderEgress,
   authorizeOfficialApiProviderEgress,
   dispatchAfterCodexProviderEgress,
 } from './provider-egress';
@@ -31,6 +32,31 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('Codex provider egress gate', () => {
+    it('evaluates Computer Use egress without persisting a live session-bound permission audit', () => {
+      const fixture = createFixture(false);
+      const decision = authorizeComputerUseProviderEgress({
+        broker: new PermissionBroker(fixture.persistence),
+        task: fixture.task,
+        turnId: 'computer-turn:ephemeral-session',
+        sessionId: 'ephemeral-session',
+        providerId: 'openai',
+        connectionId: 'connection-1',
+        modelId: 'vision-1',
+        prompt: 'bounded redacted screen layout',
+        screenshotMimeType: 'image/png',
+        screenshotDigest: 'a'.repeat(64),
+        screenshotByteCount: 128,
+        accessibilityTreeDigest: 'b'.repeat(64),
+        accessibilityTreeByteCount: 64,
+        now: '2026-07-23T00:00:00.000Z',
+        round: 1,
+      });
+
+      expect(decision).toMatchObject({ allowed: true, evaluation: { decision: 'allow' } });
+      expect(readAudit(fixture.path)).toEqual([]);
+      fixture.persistence.close();
+    });
+
     it('allows and audits a clean non-local Task through the exact provider policy', () => {
       const fixture = createFixture(false);
       const decision = authorizeCodexProviderEgress({

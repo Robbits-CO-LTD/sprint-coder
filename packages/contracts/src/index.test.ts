@@ -2050,3 +2050,336 @@ describe('Managed Local runtime contracts', () => {
     ).toThrow();
   });
 });
+
+describe('Computer Use contracts', () => {
+  const digest = 'a'.repeat(64);
+  const identity = {
+    platform: 'darwin' as const,
+    identityDigest: digest,
+    displayName: 'TextEdit',
+    bundleId: 'com.apple.TextEdit',
+    teamId: 'TEAMID',
+    policyLanguage: 'en' as const,
+    maximumMode: 'full_access_app' as const,
+  };
+
+  it('keeps mode, result, and action kinds closed', () => {
+    expect(contracts.computerUseModeSchema.parse('full_access_app')).toBe('full_access_app');
+    expect(contracts.computerUseResultSchema.parse('unknown_effect')).toBe('unknown_effect');
+    expect(() => contracts.computerUseModeSchema.parse('full')).toThrow();
+    expect(() => contracts.computerUseResultSchema.parse('success')).toThrow();
+    expect(() => contracts.computerUseActionKindSchema.parse('shell')).toThrow();
+    expect(
+      contracts.bindComputerUseMaximumMode('full_access_app', 'supervised', 'full_access_app'),
+    ).toBe('supervised');
+    expect(contracts.bindComputerUseMaximumMode('full_access_app', 'observe_only')).toBe(
+      'observe_only',
+    );
+  });
+
+  it('carries only an attested target policy language across profile, window, status, and observation DTOs', () => {
+    expect(contracts.computerAppIdentityRefSchema.parse(identity)).toMatchObject({
+      policyLanguage: 'en',
+    });
+    expect(() =>
+      contracts.computerAppIdentityRefSchema.parse({ ...identity, policyLanguage: 'es' }),
+    ).toThrow();
+    expect(
+      contracts.computerUseWindowCandidateSchema.parse({
+        windowId: 'window-1',
+        appIdentityDigest: digest,
+        windowIdentityDigest: 'b'.repeat(64),
+        title: 'TextEdit',
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+        focused: true,
+        eligible: true,
+        ownerKind: 'application',
+        modal: false,
+        revision: 1,
+        policyLanguage: 'ja',
+        maximumMode: 'supervised',
+      }).policyLanguage,
+    ).toBe('ja');
+    const supervisedProfile = contracts.computerAppProfileSchema.parse({
+      id: 'profile-1',
+      label: 'Visual Studio Code',
+      identity: { ...identity, maximumMode: 'supervised' },
+      mode: 'supervised',
+      maximumMode: 'supervised',
+      connectionId: 'connection-1',
+      modelId: 'vision-model',
+      providerEgressConsent: true,
+      remember: true,
+      profileRevision: 1,
+      policyLanguage: 'en',
+      createdAt: '2026-08-29T00:00:00.000Z',
+      updatedAt: '2026-08-29T00:00:00.000Z',
+    });
+    expect(supervisedProfile.maximumMode).toBe('supervised');
+    expect(() =>
+      contracts.computerAppProfileSchema.parse({
+        ...supervisedProfile,
+        mode: 'full_access_app',
+      }),
+    ).toThrow();
+  });
+
+  it('distinguishes an installed native boundary from missing OS permissions', () => {
+    const permissionRequired = contracts.computerUseAvailabilitySchema.parse({
+      platform: 'darwin',
+      state: 'native_unavailable',
+      featureEnabled: true,
+      packageReady: true,
+      handshakeReady: true,
+      observe: false,
+      control: false,
+      available: false,
+      reasonCode: 'screen_recording_permission_required',
+      manifestDigest: digest,
+    });
+    expect(permissionRequired.state).toBe('native_unavailable');
+    expect(() =>
+      contracts.computerUseAvailabilitySchema.parse({
+        ...permissionRequired,
+        state: 'ready',
+      }),
+    ).toThrow();
+  });
+
+  it('rejects renderer identity spoofing and profile path or pid injection', () => {
+    expect(contracts.computerAppIdentityRefSchema.parse(identity)).toEqual(identity);
+    expect(contracts.computerUseProfileRegisterInputSchema.parse({ taskId: 'task-1' })).toEqual({
+      taskId: 'task-1',
+    });
+    expect(() =>
+      contracts.computerUseProfileRegisterInputSchema.parse({
+        taskId: 'task-1',
+        label: 'TextEdit',
+        identity: { ...identity, path: '/Applications/TextEdit.app' },
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseProfileRegisterInputSchema.parse({
+        taskId: 'task-1',
+        pid: 12,
+      }),
+    ).toThrow();
+  });
+
+  it('enforces normalized coordinates, supported keys, and UTF-8 text bounds', () => {
+    expect(
+      contracts.computerUseActionSchema.parse({ type: 'click', x: 0, y: 1, button: 'left' }),
+    ).toMatchObject({ type: 'click' });
+    expect(() =>
+      contracts.computerUseActionSchema.parse({ action: 'click', coordinate: [0.5, 0.5] }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseActionSchema.parse({ type: 'click', x: 1.01, y: 0.5 }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseActionSchema.parse({ type: 'click', x: 0, y: 0, button: 'right' }),
+    ).toThrow();
+    expect(() => contracts.computerUseActionSchema.parse({ type: 'key', key: 'F12' })).toThrow();
+    expect(() =>
+      contracts.computerUseActionSchema.parse({ type: 'type', text: 'あ'.repeat(2_000) }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseActionSchema.parse({ type: 'wait', milliseconds: 5_001 }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseActionSchema.parse({ type: 'finish', unexpected: true }),
+    ).toThrow();
+  });
+
+  it('keeps observations bounded and expires them after capture', () => {
+    const observation = contracts.computerUseObservationSchema.parse({
+      sessionId: 'session-1',
+      appIdentityDigest: digest,
+      windowIdentityDigest: 'b'.repeat(64),
+      maximumMode: 'supervised',
+      screenBounds: { x: 20, y: 40, width: 1_920, height: 1_080 },
+      revision: 2,
+      observedAt: '2026-08-29T00:00:00.000Z',
+      expiresAt: '2026-08-29T00:00:30.000Z',
+      clientWidth: 1_920,
+      clientHeight: 1_080,
+      images: [
+        {
+          mimeType: 'image/png',
+          digest: 'c'.repeat(64),
+          byteLength: 100,
+          width: 1_920,
+          height: 1_080,
+        },
+      ],
+      treeDigest: null,
+      treeByteLength: 0,
+      treeDepth: 0,
+      treeNodeCount: 0,
+      policyLanguage: 'en',
+    });
+    expect(observation.policyLanguage).toBe('en');
+    expect(observation.maximumMode).toBe('supervised');
+    expect(observation.screenBounds).toEqual({ x: 20, y: 40, width: 1_920, height: 1_080 });
+    expect(observation.images).toHaveLength(1);
+    expect(() =>
+      contracts.computerUseObservationSchema.parse({
+        ...observation,
+        expiresAt: '2026-08-28T23:59:59.000Z',
+      }),
+    ).toThrow();
+  });
+
+  it('offers plan approval only for semantic actions and rejects malformed native handshakes', () => {
+    const approval = contracts.computerUseApprovalSchema.parse({
+      id: 'approval-1',
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      actionType: 'invoke',
+      actionDigest: digest,
+      targetLabel: 'Save',
+      preview: 'Invoke Save',
+      risk: 'low',
+      policyEpoch: 1,
+      observationRevision: 2,
+      eligibleForPlan: true,
+      allowedDecisions: ['allow_once', 'allow_plan', 'deny'],
+      state: 'pending',
+      decision: null,
+      revision: 0,
+      challenge: 'challenge-1',
+      createdAt: '2026-08-29T00:00:00.000Z',
+      expiresAt: '2026-08-29T00:00:30.000Z',
+    });
+    expect(approval.allowedDecisions).toContain('allow_plan');
+    expect(approval.allowedDecisions).toContain('deny');
+    expect(() =>
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        allowedDecisions: ['allow_once', 'allow_plan'],
+      }),
+    ).toThrow();
+    expect(
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        actionType: 'set_text',
+      }).eligibleForPlan,
+    ).toBe(true);
+    expect(() =>
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        actionType: 'scroll',
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseApprovalSchema.parse({
+        ...approval,
+        actionType: 'click',
+        eligibleForPlan: false,
+        allowedDecisions: ['allow_once', 'allow_plan', 'deny'],
+      }),
+    ).toThrow();
+    expect(() =>
+      contracts.computerUseNativeManifestSchema.parse({
+        version: 1,
+        sourceCommit: 'f'.repeat(40),
+        platform: 'win32',
+        architecture: 'arm64',
+        protocolVersion: 1,
+        apiVersion: 1,
+        nativeVersion: '1.0.0',
+        moduleDigest: digest,
+        binaryDigest: digest,
+        signerDigest: digest,
+        capabilities: ['observe'],
+      }),
+    ).toThrow();
+  });
+
+  it('requires egress consent to carry the selected Provider and Model binding', () => {
+    const input = contracts.computerUseStartInputSchema.parse({
+      taskId: 'task-1',
+      profileId: 'profile-1',
+      windowId: 'window-1',
+      mode: 'supervised',
+      connectionId: 'connection-1',
+      modelId: 'vision-model',
+      providerEgressConsent: true,
+      providerEgressConsentBinding: {
+        connectionId: 'connection-1',
+        modelId: 'vision-model',
+      },
+      expectedPolicyEpoch: 1,
+      expectedWindowRevision: 1,
+      expectedProfileRevision: 1,
+    });
+    expect(input.providerEgressConsentBinding).toEqual({
+      connectionId: 'connection-1',
+      modelId: 'vision-model',
+    });
+    const { providerEgressConsentBinding: _binding, ...withoutBinding } = input;
+    expect(() => contracts.computerUseStartInputSchema.parse(withoutBinding)).toThrow();
+    expect(() =>
+      contracts.computerUseStartInputSchema.parse({
+        ...input,
+        maximumMode: 'full_access_app',
+        screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+      }),
+    ).toThrow();
+    expect(
+      contracts.computerUseStartInputSchema.parse({
+        ...input,
+        resumeSessionId: 'session-1',
+      }).resumeSessionId,
+    ).toBe('session-1');
+  });
+
+  it('carries an ephemeral pending card in status without making it a persisted event', () => {
+    const status = contracts.computerUseSessionStatusSchema.parse({
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      profileId: 'profile-1',
+      windowId: 'window-1',
+      connectionId: 'connection-1',
+      modelId: 'vision-model',
+      appIdentityDigest: digest,
+      windowIdentityDigest: 'b'.repeat(64),
+      maximumMode: 'supervised',
+      mode: 'supervised',
+      state: 'awaiting_approval',
+      policyEpoch: 1,
+      observationRevision: 2,
+      round: 1,
+      maxRounds: 25,
+      startedAt: '2026-08-29T00:00:00.000Z',
+      expiresAt: '2026-08-29T01:00:00.000Z',
+      lastObservationAt: '2026-08-29T00:00:01.000Z',
+      stopReason: null,
+      pendingApproval: null,
+    });
+    expect(status.pendingApproval).toBeNull();
+    expect(() =>
+      contracts.computerUseSessionStatusSchema.parse({
+        ...status,
+        mode: 'full_access_app',
+        policyLanguage: 'unknown',
+      }),
+    ).toThrow();
+    expect(
+      contracts.computerUseSessionStatusSchema.parse({
+        ...status,
+        mode: 'full_access_app',
+        maximumMode: 'full_access_app',
+        policyLanguage: 'en',
+      }).mode,
+    ).toBe('full_access_app');
+    expect(() =>
+      contracts.computerUseSessionStatusSchema.parse({
+        ...status,
+        mode: 'full_access_app',
+        maximumMode: 'supervised',
+        policyLanguage: 'en',
+      }),
+    ).toThrow();
+  });
+});

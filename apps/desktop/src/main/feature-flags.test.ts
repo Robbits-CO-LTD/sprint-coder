@@ -1,9 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computerUseDesktopV1Enabled,
   multiProviderModelPickerV2Enabled,
   projectMultiFolderUxEnabled,
   settingsWorkspaceV2Enabled,
 } from './feature-flags';
+
+describe('computerUseDesktopV1Enabled', () => {
+  it('requires the exact privileged-preview opt-in', () => {
+    expect(computerUseDesktopV1Enabled({})).toBe(false);
+    expect(computerUseDesktopV1Enabled({ SPRINT_CODER_COMPUTER_USE_DESKTOP_V1: '0' })).toBe(false);
+    expect(computerUseDesktopV1Enabled({ SPRINT_CODER_COMPUTER_USE_DESKTOP_V1: 'true' })).toBe(
+      false,
+    );
+    expect(computerUseDesktopV1Enabled({ SPRINT_CODER_COMPUTER_USE_DESKTOP_V1: '1' })).toBe(true);
+  });
+});
 
 describe('multiProviderModelPickerV2Enabled', () => {
   it('enables the V2 picker by default', () => {

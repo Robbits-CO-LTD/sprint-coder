@@ -2637,6 +2637,296 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    artifactIt('projects UI Turn diff paths onto their sealed Workspace root label', async () => {
+      const { persistence, path } = createPersistence();
+      const rootId = randomUUID();
+      const workspaceKey = 'b'.repeat(64);
+      const rootIdentityDigest = 'a'.repeat(64);
+      const workspacePath = join(dirname(path), 'display-root');
+      const workspaceFile = join(workspacePath, 'src', 'a.ts');
+      mkdirSync(dirname(workspaceFile), { recursive: true });
+      writeFileSync(workspaceFile, 'before');
+      const project = persistence.createProject({
+        name: 'display paths',
+        folders: [
+          {
+            id: rootId,
+            path: workspacePath,
+            canonicalPath: workspacePath,
+            label: 'display-root',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('display diff', false, project.id);
+      const turn = persistence.startTurn(task.id, 'write one file using its absolute path');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(dirname(path), 'display-root-artifacts'),
+        quotaBytes: 4096,
+      });
+      await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'display-root-lease'),
+      ).apply({
+        id: 'display-root-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'display-root-operation',
+        plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+        mutationBinding: { rootId, workspacePath, workspaceKey, rootIdentityDigest },
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      expect(
+        persistence.recordWorkspaceReadVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          rootId,
+          path: workspaceFile,
+          content: 'after',
+          createdAt: '2026-07-23T00:00:01.000Z',
+        }),
+      ).toMatchObject({ decision: 'complete' });
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      persistence.completeTurn(task.id, turn.turnId, 'completed');
+
+      expect(persistence.snapshot(task.id).latestTurnDiff).toMatchObject({
+        turnId: turn.turnId,
+        entries: [expect.objectContaining({ path: 'display-root › src/a.ts' })],
+      });
+      persistence.close();
+    });
+
+    it('canonicalizes Windows FileChange separators without changing a POSIX backslash', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      bindMutationWorkspace(persistence, task.id, dirname(path), 'd'.repeat(64));
+      const turn = persistence.startTurn(task.id, 'record one platform-native file change');
+      const workspace = persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId);
+      const root = workspace?.roots[0];
+      expect(root).toBeDefined();
+
+      persistence.recordFileChanges({
+        taskId: task.id,
+        turnId: turn.turnId,
+        changes: [
+          {
+            rootId: root!.rootId,
+            rootLabel: root!.label,
+            path: 'src\\nested\\file.ts',
+            kind: 'update',
+          },
+        ],
+      });
+
+      expect(persistence.listFileChanges(task.id)[0]?.changes[0]?.path).toBe(
+        process.platform === 'win32' ? 'src/nested/file.ts' : 'src\\nested\\file.ts',
+      );
+      persistence.close();
+    });
+
+    artifactIt('uses a verified descendant file read to verify an earlier mkdir Saga', async () => {
+      const { persistence, path } = createPersistence();
+      const rootId = randomUUID();
+      const rootIdentityDigest = 'a'.repeat(64);
+      const workspacePath = join(dirname(path), 'mkdir-read-root');
+      const directoryPath = join(workspacePath, 'smoke-final');
+      const unrelatedDirectoryPath = join(workspacePath, 'unrelated');
+      const workspaceFile = join(directoryPath, 'codex.txt');
+      mkdirSync(workspacePath, { recursive: true });
+      const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
+      const project = persistence.createProject({
+        name: 'mkdir read verification',
+        folders: [
+          {
+            id: rootId,
+            path: workspacePath,
+            canonicalPath: workspacePath,
+            label: 'mkdir-read-root',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('mkdir then verify child', false, project.id);
+      const turn = persistence.startTurn(task.id, 'create a directory and a verified child file');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(dirname(path), 'mkdir-read-artifacts'),
+        quotaBytes: 4096,
+      });
+      const store = new PersistenceEditSagaStore(persistence);
+      const binding = { rootId, workspacePath, workspaceKey, rootIdentityDigest };
+
+      const directorySaga = await new EditSagaExecutor(
+        store,
+        directoryBoundary(directoryPath),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-read-directory-lease'),
+      ).apply({
+        id: 'mkdir-read-directory-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-read-directory-operation',
+        plan: persistedMkdirPlan(directoryPath),
+        mutationBinding: binding,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      const unrelatedDirectorySaga = await new EditSagaExecutor(
+        store,
+        directoryBoundary(unrelatedDirectoryPath),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-read-unrelated-lease'),
+      ).apply({
+        id: 'mkdir-read-unrelated-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-read-unrelated-operation',
+        plan: persistedMkdirPlan(unrelatedDirectoryPath),
+        mutationBinding: binding,
+        createdAt: new Date(Date.parse(directorySaga.updatedAt) + 1_000).toISOString(),
+      });
+      writeFileSync(workspaceFile, 'before');
+      const fileSaga = await new EditSagaExecutor(
+        store,
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-read-file-lease'),
+      ).apply({
+        id: 'mkdir-read-file-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-read-file-operation',
+        plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+        mutationBinding: binding,
+        createdAt: new Date(Date.parse(unrelatedDirectorySaga.updatedAt) + 1_000).toISOString(),
+      });
+
+      expect(
+        persistence.recordWorkspaceReadVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          rootId,
+          path: workspaceFile,
+          content: 'after',
+          createdAt: new Date(Date.parse(fileSaga.updatedAt) + 1_000).toISOString(),
+        }),
+      ).toMatchObject({ sagaId: 'mkdir-read-file-saga', decision: 'complete' });
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId }) => criterionId)
+          .sort(),
+      ).toEqual(['verification:mkdir-read-directory-saga', 'verification:mkdir-read-file-saga']);
+      expect(
+        persistence.recordAssuranceVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          sagaId: unrelatedDirectorySaga.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: new Date(Date.parse(fileSaga.updatedAt) + 2_000).toISOString(),
+        }),
+      ).toMatchObject({ decision: 'complete' });
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).not.toThrow();
+      persistence.close();
+    });
+
+    artifactIt('does not infer mkdir ancestry from unsealed original path spellings', async () => {
+      const { persistence, path } = createPersistence();
+      const rootId = randomUUID();
+      const rootIdentityDigest = 'a'.repeat(64);
+      const workspacePath = join(dirname(path), 'mkdir-spelling-root');
+      const directoryPath = join(workspacePath, 'actual-parent');
+      const siblingPath = join(workspacePath, 'actual-sibling');
+      const workspaceFile = join(siblingPath, 'file.txt');
+      mkdirSync(workspacePath, { recursive: true });
+      const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
+      const project = persistence.createProject({
+        name: 'mkdir spelling verification',
+        folders: [
+          {
+            id: rootId,
+            path: workspacePath,
+            canonicalPath: workspacePath,
+            label: 'mkdir-spelling-root',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('do not trust path spelling', false, project.id);
+      const turn = persistence.startTurn(task.id, 'verify only canonical descendants');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(dirname(path), 'mkdir-spelling-artifacts'),
+        quotaBytes: 4096,
+      });
+      const store = new PersistenceEditSagaStore(persistence);
+      const binding = { rootId, workspacePath, workspaceKey, rootIdentityDigest };
+      const directorySaga = await new EditSagaExecutor(
+        store,
+        directoryBoundary(directoryPath),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-spelling-directory-lease'),
+      ).apply({
+        id: 'mkdir-spelling-directory-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-spelling-directory-operation',
+        plan: persistedMkdirPlan('virtual/parent', directoryPath),
+        mutationBinding: binding,
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+      mkdirSync(siblingPath);
+      writeFileSync(workspaceFile, 'before');
+      const fileSaga = await new EditSagaExecutor(
+        store,
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'mkdir-spelling-file-lease'),
+      ).apply({
+        id: 'mkdir-spelling-file-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'mkdir-spelling-file-operation',
+        plan: persistedEditPlan('before', 'after', 'virtual/parent/file.txt', workspaceFile),
+        mutationBinding: binding,
+        createdAt: new Date(Date.parse(directorySaga.updatedAt) + 1_000).toISOString(),
+      });
+
+      expect(
+        persistence.recordWorkspaceReadVerification({
+          taskId: task.id,
+          turnId: turn.turnId,
+          rootId,
+          path: 'virtual/parent/file.txt',
+          content: 'after',
+          createdAt: new Date(Date.parse(fileSaga.updatedAt) + 1_000).toISOString(),
+        }),
+      ).toMatchObject({ sagaId: fileSaga.id, decision: 'complete' });
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId }) => criterionId),
+      ).toEqual(['verification:mkdir-spelling-file-saga']);
+      persistence.close();
+    });
+
     it('persists the Acceptance Contract and refuses completion before edit evidence exists', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -2717,6 +3007,80 @@ if (runsWithElectronAbi)
         ]),
       });
       reopened.close();
+    });
+
+    artifactIt('does not treat an exit-zero command as Edit Saga assurance evidence', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspacePath = dirname(path);
+      bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+      const turn = persistence.startTurn(task.id, 'keep command success as process evidence');
+      const workspaceFile = join(workspacePath, 'command-is-not-assurance.txt');
+      writeFileSync(workspaceFile, 'before');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(workspacePath, 'command-is-not-assurance-artifacts'),
+        quotaBytes: 4096,
+      });
+      await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'command-is-not-assurance-lease'),
+      ).apply({
+        id: 'command-is-not-assurance-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'command-is-not-assurance-operation',
+        plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+
+      const commandSpec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'd'.repeat(64),
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: workspacePath, identityDigest: 'e'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      persistence.prepareCommand({
+        id: 'ordinary-exit-zero-command',
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'ordinary-exit-zero-call',
+        spec: commandSpec,
+        purpose: 'record process success without creating assurance authority',
+        risk: 'high',
+        createdAt: '2099-07-23T00:00:01.000Z',
+      });
+      persistence.beginCommand('ordinary-exit-zero-command');
+      persistence.startCommand({
+        commandId: 'ordinary-exit-zero-command',
+        pid: 123,
+        processStartTime: 'ordinary-exit-zero-process',
+        startedAt: '2099-07-23T00:00:01.100Z',
+      });
+      persistence.completeCommand({
+        commandId: 'ordinary-exit-zero-command',
+        state: 'exited',
+        exitCode: 0,
+        signal: null,
+        outputBytes: 0,
+        truncated: false,
+        finishedAt: '2099-07-23T00:00:01.200Z',
+      });
+
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .some(({ kind }) => kind === 'verification_passed'),
+      ).toBe(false);
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+        AcceptanceEvidenceMissingError,
+      );
+      persistence.close();
     });
 
     it('rejects a persisted Edit plan whose sealed operation payload was modified', async () => {
@@ -2875,6 +3239,8 @@ if (runsWithElectronAbi)
     artifactIt('retries durable terminal artifact cleanup after restart', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
+      const workspacePath = dirname(path);
+      bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
       const turn = persistence.startTurn(task.id, 'terminal cleanup restart');
       const workspaceFile = join(dirname(path), 'cleanup-workspace.txt');
       const artifactRoot = join(dirname(path), 'cleanup-artifacts');
@@ -2894,6 +3260,7 @@ if (runsWithElectronAbi)
                 throw new EditSagaCrashError('terminal cleanup crash');
             },
           },
+          new SqliteEditSagaLeaseGuard(persistence, 'cleanup-saga-lease'),
         ).apply({
           id: 'cleanup-saga',
           taskId: task.id,
@@ -2934,48 +3301,14 @@ if (runsWithElectronAbi)
           createdAt: '2026-07-23T00:00:04.000Z',
         }),
       ).toMatchObject({ decision: 'repair', repairRoundsUsed: 1 });
-      const verificationSpec = createExecutionSpec({
-        absoluteExecutable: process.execPath,
-        executionIdentityDigest: 'd'.repeat(64),
-        argv: ['--version'],
-        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'e'.repeat(64) },
-        envDelta: {},
-        stdinMode: 'closed',
-        shell: 'none',
-      });
-      persistence.prepareCommand({
-        id: 'verification-command',
-        taskId: task.id,
-        turnId: turn.turnId,
-        callId: 'verification-call',
-        spec: verificationSpec,
-        purpose: 'targeted verification',
-        risk: 'high',
-        createdAt: '2026-07-23T00:00:05.000Z',
-      });
-      persistence.beginCommand('verification-command');
-      persistence.startCommand({
-        commandId: 'verification-command',
-        pid: 123,
-        processStartTime: 'verification-process',
-        startedAt: '2026-07-23T00:00:05.100Z',
-      });
-      persistence.completeCommand({
-        commandId: 'verification-command',
-        state: 'exited',
-        exitCode: 0,
-        signal: null,
-        outputBytes: 0,
-        truncated: false,
-        finishedAt: '2026-07-23T00:00:05.200Z',
-      });
       expect(
-        persistence.recordCommandVerification({
+        persistence.recordAssuranceVerification({
           taskId: task.id,
           turnId: turn.turnId,
-          commandId: 'verification-command',
-          exitCode: 0,
-          createdAt: '2026-07-23T00:00:05.300Z',
+          sagaId: 'cleanup-saga',
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: '2099-07-23T00:00:05.300Z',
         }),
       ).toMatchObject({ decision: 'complete', repairRoundsUsed: 1 });
       expect(persistence.listAssuranceRounds(task.id, turn.turnId, 'cleanup-saga')).toHaveLength(3);
@@ -7046,6 +7379,9 @@ if (runsWithElectronAbi)
         { version: 75 },
         { version: 76 },
         { version: 77 },
+        { version: 78 },
+        { version: 80 },
+        { version: 81 },
       ]);
       for (const [table, columns] of [
         [
@@ -7444,15 +7780,20 @@ else
     );
   });
 
-function persistedEditPlan(preImage = 'before', postImage = 'after'): PreparedStructuredPatch {
+function persistedEditPlan(
+  preImage = 'before',
+  postImage = 'after',
+  path = 'src/a.ts',
+  canonicalPath = '/workspace/src/a.ts',
+): PreparedStructuredPatch {
   const facts = {
     version: 1,
     policyEpoch: 0,
     operations: Object.freeze([
       Object.freeze({
         kind: 'update' as const,
-        path: 'src/a.ts',
-        canonicalPath: '/workspace/src/a.ts',
+        path,
+        canonicalPath,
         destination: null,
         canonicalDestination: null,
         revisionTokenId: 'token-1',
@@ -7534,6 +7875,29 @@ function persistedEditPlanForKind(kind: 'add' | 'delete' | 'rename'): PreparedSt
     version: 1 as const,
     policyEpoch: 0,
     operations: Object.freeze([operation]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+function persistedMkdirPlan(path: string, canonicalPath = path): PreparedStructuredPatch {
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      Object.freeze({
+        kind: 'mkdir' as const,
+        path,
+        canonicalPath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: null,
+        preRevision: null,
+        preImage: null,
+        postImage: null,
+        preHash: null,
+        postHash: null,
+      }),
+    ]),
   };
   return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
 }
@@ -7728,11 +8092,17 @@ function persistedObservation(value: string, identityDigest: string): OperationO
   };
 }
 
-function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffectBoundary {
+function fileBoundary(
+  filePath: string,
+  artifacts: EditArtifactStore,
+  expectedBefore = 'before',
+  expectedAfter = 'after',
+): EditEffectBoundary {
   const observeValue = (value: string) => persistedObservation(value, `file:${editHash(value)}`);
   return {
     async apply(step: EditSagaStep) {
-      if (readFileSync(filePath, 'utf8') !== 'before') throw new Error('unexpected pre-image');
+      if (readFileSync(filePath, 'utf8') !== expectedBefore)
+        throw new Error('unexpected pre-image');
       const reference = step.operation.postArtifact;
       if (reference === null) throw new Error('missing post artifact');
       const value = (await artifacts.read(reference)).toString('utf8');
@@ -7741,9 +8111,9 @@ function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffec
     },
     async observe() {
       const value = readFileSync(filePath, 'utf8');
-      return value === 'before'
+      return value === expectedBefore
         ? { state: 'pre' as const, observation: observeValue(value) }
-        : value === 'after'
+        : value === expectedAfter
           ? { state: 'post' as const, observation: observeValue(value) }
           : { state: 'drift' as const, observation: observeValue(value) };
     },
@@ -7753,6 +8123,34 @@ function fileBoundary(filePath: string, artifacts: EditArtifactStore): EditEffec
       const value = (await artifacts.read(reference)).toString('utf8');
       writeFileSync(filePath, value);
       return observeValue(value);
+    },
+  };
+}
+
+function directoryBoundary(directoryPath: string): EditEffectBoundary {
+  const observation = (): OperationObservation =>
+    existsSync(directoryPath)
+      ? {
+          source: {
+            state: 'present',
+            revision: { entryKind: 'directory', identityDigest: editHash(directoryPath) },
+          },
+          destination: { state: 'absent' },
+        }
+      : { source: { state: 'absent' }, destination: { state: 'absent' } };
+  return {
+    async apply() {
+      mkdirSync(directoryPath);
+      return observation();
+    },
+    async observe() {
+      return existsSync(directoryPath)
+        ? { state: 'post' as const, observation: observation() }
+        : { state: 'pre' as const, observation: observation() };
+    },
+    async restore() {
+      rmSync(directoryPath, { recursive: true, force: true });
+      return observation();
     },
   };
 }
@@ -7798,3 +8196,168 @@ function createLegacyV1Database(path: string): void {
   `);
   db.close();
 }
+
+if (runsWithElectronAbi)
+  describe('Computer Use profile and action persistence', () => {
+    it('persists only stable profile identity and privacy-safe action audit metadata', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('computer use persistence');
+      const profile = fixture.persistence.createComputerAppProfile({
+        id: 'computer-profile-1',
+        platform: 'darwin',
+        kind: 'macos-bundle',
+        label: 'Fixture App',
+        canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        appUrl: null,
+        identity: {
+          platform: 'darwin',
+          identityDigest: 'a'.repeat(64),
+          executablePath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+          executableDigest: 'b'.repeat(64),
+          teamId: 'TEAMID',
+        },
+        identityDigest: 'a'.repeat(64),
+        version: null,
+        executableDigest: 'b'.repeat(64),
+        mode: 'full_access_app',
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: true,
+        remember: true,
+      });
+      expect(profile.revision).toBe(1);
+      expect(fixture.persistence.listComputerAppProfiles()).toEqual([profile]);
+      const audit = fixture.persistence.recordComputerActionAudit({
+        taskId: task.id,
+        turnId: '1'.repeat(64),
+        sessionId: '2'.repeat(64),
+        profileId: profile.id,
+        profileRevision: profile.revision,
+        appIdentityDigest: 'a'.repeat(64),
+        windowIdentityDigest: 'c'.repeat(64),
+        observationRevision: 1,
+        observationDigest: 'e'.repeat(64),
+        clientWidth: 800,
+        clientHeight: 600,
+        actionDigest: 'd'.repeat(64),
+        actionKind: 'set_text',
+        route: 'semantic',
+        nativeRequestId: '3'.repeat(64),
+        policyEpoch: 0,
+      });
+      expect(
+        fixture.persistence.completeComputerActionAudit({
+          auditId: audit.id,
+          state: 'unknown_effect',
+          reasonCode: 'native_ack_unknown',
+          updatedAt: '2026-08-29T00:00:01.000Z',
+        }),
+      ).toMatchObject({ state: 'unknown_effect', reasonCode: 'native_ack_unknown' });
+      fixture.persistence.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
+        id: profile.id,
+        identityDigest: 'a'.repeat(64),
+        revision: 1,
+      });
+      expect(reopened.listComputerActionAudits(task.id)).toMatchObject([
+        expect.objectContaining({
+          state: 'unknown_effect',
+          actionKind: 'set_text',
+          appIdentityDigest: 'a'.repeat(64),
+          observationDigest: 'e'.repeat(64),
+          clientWidth: 800,
+          clientHeight: 600,
+        }),
+      ]);
+      reopened.close();
+      const db = new Database(fixture.path, { readonly: true });
+      const serialized = JSON.stringify(db.prepare('SELECT * FROM computer_action_audits').all());
+      expect(serialized).not.toContain('SUPER_SECRET_SOURCE');
+      db.close();
+    });
+
+    it('migrates a v78 profile with valid selection sentinels through v81', () => {
+      const fixture = createPersistence();
+      fixture.persistence.close();
+      const legacy = new Database(fixture.path);
+      legacy.exec('DROP TABLE computer_action_audits; DROP TABLE computer_app_profiles;');
+      legacy.exec(`
+        CREATE TABLE computer_app_profiles (
+          id TEXT PRIMARY KEY,
+          platform TEXT NOT NULL CHECK (platform IN ('win32', 'darwin')),
+          app_kind TEXT NOT NULL CHECK (app_kind IN ('win32-executable', 'windows-package', 'macos-bundle')),
+          display_name TEXT NOT NULL,
+          canonical_path TEXT NOT NULL,
+          app_url TEXT,
+          identity_json TEXT NOT NULL,
+          identity_digest TEXT NOT NULL,
+          version TEXT,
+          executable_digest TEXT,
+          revision INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(platform, identity_digest)
+        );
+        INSERT INTO computer_app_profiles(
+          id, platform, app_kind, display_name, canonical_path, app_url,
+          identity_json, identity_digest, version, executable_digest,
+          revision, created_at, updated_at
+        ) VALUES (
+          'legacy-computer-profile', 'darwin', 'macos-bundle', 'Legacy Fixture',
+          '/Applications/Legacy.app/Contents/MacOS/Legacy', NULL,
+          '{"platform":"darwin","identityDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', NULL,
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1,
+          '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z'
+        );
+        DELETE FROM schema_migrations WHERE version IN (80, 81);
+      `);
+      legacy.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
+        id: 'legacy-computer-profile',
+        connectionId: 'unselected',
+        modelId: 'unselected',
+      });
+      reopened.close();
+    });
+
+    it('enforces the bounded profile count before insert', () => {
+      const fixture = createPersistence();
+      const profile = {
+        platform: 'darwin' as const,
+        kind: 'macos-bundle' as const,
+        label: 'Fixture',
+        canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        appUrl: null,
+        identity: { platform: 'darwin', identityDigest: 'a'.repeat(64) },
+        version: null,
+        executableDigest: 'b'.repeat(64),
+        mode: 'full_access_app' as const,
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: false,
+        remember: false,
+      };
+      for (let index = 0; index < 64; index += 1)
+        fixture.persistence.createComputerAppProfile({
+          ...profile,
+          id: `computer-profile-${index}`,
+          label: `Fixture ${index}`,
+          identity: { ...profile.identity, identityDigest: index.toString(16).padStart(64, '0') },
+          identityDigest: index.toString(16).padStart(64, '0'),
+        });
+      expect(() =>
+        fixture.persistence.createComputerAppProfile({
+          ...profile,
+          id: 'computer-profile-over-limit',
+          identity: { ...profile.identity, identityDigest: 'f'.repeat(64) },
+          identityDigest: 'f'.repeat(64),
+        }),
+      ).toThrow('profile limit');
+      fixture.persistence.close();
+    });
+  });

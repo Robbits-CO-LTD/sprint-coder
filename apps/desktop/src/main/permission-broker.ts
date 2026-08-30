@@ -254,6 +254,20 @@ export class PermissionBroker {
   revalidate(
     input: PermissionEvaluationInput & { permit: ExecutionPermit },
   ): ReturnType<typeof revalidateExecutionPermit> {
+    return this.revalidateInternal(input, true);
+  }
+
+  /** Revalidate a Main-owned ephemeral lane without storing its live subject/session binding. */
+  revalidateEphemeral(
+    input: PermissionEvaluationInput & { permit: ExecutionPermit },
+  ): ReturnType<typeof revalidateExecutionPermit> {
+    return this.revalidateInternal(input, false);
+  }
+
+  private revalidateInternal(
+    input: PermissionEvaluationInput & { permit: ExecutionPermit },
+    persistAudit: boolean,
+  ): ReturnType<typeof revalidateExecutionPermit> {
     try {
       this.assertTrustedRequestFacts(input);
     } catch {
@@ -266,6 +280,7 @@ export class PermissionBroker {
       policyEpoch: this.persistence.getPermissionPolicy(input.taskId).policyEpoch,
       now: input.now,
       consumeOneTimeToken: (token) =>
+        !persistAudit ||
         input.permit.source !== 'reviewer_allow_once' ||
         input.permit.reviewRequestId === undefined ||
         input.permit.turnId === undefined ||
@@ -289,13 +304,14 @@ export class PermissionBroker {
       currentEvaluation.decision === 'allow' || currentEvaluation.decision === 'allow_once'
         ? permitResult
         : ({ valid: false, reason: 'current_policy_rejected' } as const);
-    this.persistence.recordPermissionAudit(input.taskId, input.request, {
-      decision: result.valid ? 'allow' : 'deny',
-      reason: result.valid ? 'execution_revalidation_valid' : result.reason,
-      policyEpoch: currentEvaluation.policyEpoch,
-      evaluationTrace: [...currentEvaluation.evaluationTrace, 'execution-revalidation'],
-      ...(result.valid ? { permit: input.permit } : {}),
-    });
+    if (persistAudit)
+      this.persistence.recordPermissionAudit(input.taskId, input.request, {
+        decision: result.valid ? 'allow' : 'deny',
+        reason: result.valid ? 'execution_revalidation_valid' : result.reason,
+        policyEpoch: currentEvaluation.policyEpoch,
+        evaluationTrace: [...currentEvaluation.evaluationTrace, 'execution-revalidation'],
+        ...(result.valid ? { permit: input.permit } : {}),
+      });
     return result;
   }
 
@@ -352,5 +368,7 @@ function operationForCapability(capability: Capability): PermissionOperation {
   if (capability === 'network.fetch') return 'fetch';
   if (capability === 'external.open') return 'open';
   if (capability === 'secret.use') return 'use';
+  if (capability === 'computer.observe') return 'observe';
+  if (capability === 'computer.control') return 'control';
   return 'egress';
 }

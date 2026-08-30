@@ -95,7 +95,6 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
             return {} as never;
           },
           completeBackgroundActivity: () => ({}) as never,
-          recordCommandVerification: () => null,
         },
         publish: () => undefined,
       } as unknown as CommandToolBoundary;
@@ -125,6 +124,19 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         policyEpoch: 1,
       };
       broker.startTurn(owner, 'codex');
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'legacy-boolean-verification-denied',
+          providerName: 'exec_command',
+          input: {
+            executable: '/bin/sh',
+            argv: ['-c', 'exit 0'],
+            purpose: 'legacy model assertion is not a verification plan',
+            verification: true,
+          },
+        }),
+      ).rejects.toThrow('input does not match');
       const started = (await broker.dispatch({
         ...owner,
         callId: 'exec-1',

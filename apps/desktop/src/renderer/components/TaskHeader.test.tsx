@@ -31,4 +31,21 @@ describe('TaskHeader Team button', () => {
     expect(button).not.toContain('<svg');
     expect(button).not.toContain('<small');
   });
+
+  it('exposes Computer Use only when Main made the gated entry available', () => {
+    const hidden = renderToStaticMarkup(<TaskHeader task={task} onToggleTeam={() => {}} />);
+    const visible = renderToStaticMarkup(
+      <TaskHeader
+        task={task}
+        onToggleTeam={() => {}}
+        onOpenComputerUse={() => {}}
+        computerUseActive
+      />,
+    );
+
+    expect(hidden).not.toContain('data-testid="computer-use-launch"');
+    expect(visible).toContain('data-testid="computer-use-launch"');
+    expect(visible).toContain('aria-pressed="true"');
+    expect(visible).toContain('Computer Use');
+  });
 });

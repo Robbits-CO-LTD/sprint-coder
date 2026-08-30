@@ -48,12 +48,16 @@ describe('Windows major E2E workflow', () => {
 
   it('runs on every CI invocation and uploads evidence without masking the test exit code', () => {
     expect(windowsE2EJob).not.toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(windowsE2EJob).toContain('ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756');
+    expect(windowsE2EJob).toContain('npm run build:sandbox-runner');
     expect(windowsE2EJob).toContain('--config playwright.windows.config.ts');
     expect(windowsE2EJob).toContain('Tee-Object -FilePath $logPath');
     expect(windowsE2EJob).toContain('$testExitCode = $LASTEXITCODE');
     expect(windowsE2EJob).not.toContain('continue-on-error');
     expect(windowsE2EJob).toContain('if: always()');
-    expect(windowsE2EJob).toContain('actions/upload-artifact@v7');
+    expect(windowsE2EJob).toContain(
+      'actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f',
+    );
     expect(windowsE2EJob).toContain('${{ runner.temp }}/windows-e2e.log');
     expect(windowsE2EJob).toContain('if-no-files-found: warn');
   });
@@ -67,6 +71,8 @@ describe('Windows major E2E workflow', () => {
     );
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeGreaterThan(-1);
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeLessThan(fullMatrixBranch);
-    expect(workflow).toContain('needs: [quality-result, macos-result, windows-result]');
+    expect(workflow).toContain(
+      'needs: [quality-result, macos-result, windows-result, computer-use-native-gate]',
+    );
   });
 });

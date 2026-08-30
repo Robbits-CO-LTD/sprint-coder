@@ -1,4 +1,5 @@
 import type { FileChange, TurnDiff } from '../types/sprint-coder';
+import { formatWorkspaceDisplayPath } from '../../workspace-display-path';
 import type { LiveFileEdit } from './file-edit-buffer';
 
 const MAX_EXACT_DIFF_LINES = 400;
@@ -93,7 +94,7 @@ export function summarizeRuntimeChanges(
       {
         ordinal: index + 1,
         kind: change.kind,
-        path: `${change.rootLabel} › ${change.path}`,
+        path: formatWorkspaceDisplayPath(change.rootLabel, change.path),
         destination: null,
         preHash: null,
         postHash: null,
