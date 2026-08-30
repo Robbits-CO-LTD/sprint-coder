@@ -37,7 +37,7 @@ function isNativeSafeFsAddonPackagePath(file: string): boolean {
   );
 }
 
-function shouldIgnoreFromPackage(file: string): boolean {
+export function shouldIgnoreFromPackage(file: string): boolean {
   if (!file) return false;
   if (file === '/.vite' || file.startsWith('/.vite/')) return false;
   if (isNativeSafeFsAddonPackagePath(file)) return false;
