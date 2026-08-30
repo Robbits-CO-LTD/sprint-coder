@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   TeamActivitySummary,
   TurnDiff,
+  TurnDiffEntry,
 } from '../../types/sprint-coder';
 import { useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
@@ -449,24 +450,64 @@ export function Timeline({
   );
 }
 
-function mergeWorkspaceDiffs(
+export function mergeWorkspaceDiffs(
   persisted: TurnDiff | undefined,
   runtime: TurnDiff | undefined,
 ): TurnDiff | null {
   if (persisted === undefined) return runtime ?? null;
   if (runtime === undefined) return persisted.entries.length === 0 ? null : persisted;
-  const entries = [...runtime.entries];
+  const runtimeEntries = [...runtime.entries];
+  const entries = [...runtimeEntries];
   const known = new Set(
     entries.map((entry) => `${entry.path}\u0000${entry.destination ?? ''}\u0000${entry.kind}`),
   );
   for (const entry of persisted.entries) {
     const key = `${entry.path}\u0000${entry.destination ?? ''}\u0000${entry.kind}`;
-    if (!known.has(key)) entries.push(entry);
+    if (known.has(key)) continue;
+    const rootedMatches = runtimeEntries.filter((candidate) =>
+      sameRootedWorkspaceEntry(entry, candidate),
+    );
+    // Main's Edit Saga preserves the approved input spelling, which may be absolute, while a
+    // Runtime `files.changed` report is always `root label › relative/path`. Collapse them only
+    // when that suffix identifies exactly one Runtime row; ambiguity across roots stays visible.
+    if (rootedMatches.length === 1) continue;
+    entries.push(entry);
   }
   return {
     turnId: runtime.turnId,
     entries: entries.map((entry, index) => ({ ...entry, ordinal: index + 1 })),
   };
+}
+
+function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEntry): boolean {
+  return (
+    persisted.kind === runtime.kind &&
+    persisted.status === runtime.status &&
+    workspacePathSuffixMatches(persisted.path, runtime.path) &&
+    ((persisted.destination === null && runtime.destination === null) ||
+      (persisted.destination !== null &&
+        runtime.destination !== null &&
+        workspacePathSuffixMatches(persisted.destination, runtime.destination)))
+  );
+}
+
+function workspacePathSuffixMatches(persisted: string, runtime: string): boolean {
+  const normalizedPersisted = persisted.replaceAll('\\', '/');
+  const normalizedRuntime = runtime.replaceAll('\\', '/');
+  if (normalizedPersisted === normalizedRuntime) return true;
+  const delimiter = ' › ';
+  const delimiterIndex = normalizedRuntime.lastIndexOf(delimiter);
+  if (delimiterIndex < 0) return false;
+  const relative = normalizedRuntime.slice(delimiterIndex + delimiter.length);
+  if (
+    relative.length === 0 ||
+    relative.startsWith('/') ||
+    relative === '..' ||
+    relative.startsWith('../') ||
+    /^[A-Za-z]:\//u.test(relative)
+  )
+    return false;
+  return normalizedPersisted === relative || normalizedPersisted.endsWith(`/${relative}`);
 }
 
 function workerStateLabel(state: string): string {
