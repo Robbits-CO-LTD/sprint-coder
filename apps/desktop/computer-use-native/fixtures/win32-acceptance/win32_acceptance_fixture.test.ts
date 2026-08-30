@@ -35,6 +35,7 @@ describe('deterministic Win32 Computer Use acceptance fixture', () => {
     expect(buildScript).toContain('$machine -ne 0x8664');
     expect(buildScript).toContain('/SUBSYSTEM:WINDOWS,10.00');
     expect(buildScript).toContain('/MANIFESTINPUT:');
+    expect(buildScript).toContain('/MANIFEST:EMBED');
     expect(
       shouldIgnoreFromPackage(
         '/computer-use-native/fixtures/win32-acceptance/sprint-coder-computer-use-fixture.exe',

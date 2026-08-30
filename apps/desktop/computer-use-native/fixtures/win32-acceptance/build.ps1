@@ -43,6 +43,7 @@ New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
   /NXCOMPAT `
   /DYNAMICBASE `
   /HIGHENTROPYVA `
+  /MANIFEST:EMBED `
   "/MANIFESTINPUT:$manifest" `
   user32.lib `
   gdi32.lib `
