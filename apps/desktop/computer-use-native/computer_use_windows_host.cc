@@ -436,8 +436,8 @@ std::string Sha256Bytes(const std::vector<std::uint8_t> &bytes) {
   if (BCryptCreateHash(algorithm, &hash, object.data(), object_bytes, nullptr,
                        0, 0) != 0 ||
       (!bytes.empty() &&
-       BCryptHashData(hash, bytes.data(), static_cast<ULONG>(bytes.size()),
-                      0) != 0) ||
+       BCryptHashData(hash, const_cast<PUCHAR>(bytes.data()),
+                      static_cast<ULONG>(bytes.size()), 0) != 0) ||
       BCryptFinishHash(hash, digest.data(), digest_bytes, 0) != 0) {
     if (hash != nullptr)
       BCryptDestroyHash(hash);
@@ -468,8 +468,7 @@ bool ReadProcessPath(HANDLE process, std::wstring *output) {
       QueryFullProcessImageNameW(process, 0, buffer.data(), &length) == TRUE;
   if (!read || length == 0 || length >= buffer.size())
     return false;
-  buffer.resize(length);
-  *output = std::move(buffer);
+  *output = std::wstring(buffer.data(), length);
   return true;
 }
 
@@ -660,17 +659,15 @@ bool ReadCertificateOrganization(PCCERT_CONTEXT certificate,
                                  std::wstring *organization) {
   if (certificate == nullptr || organization == nullptr)
     return false;
-  PCERT_RDN_ATTR attribute = CertFindRDNAttr(
-      szOID_ORGANIZATION_NAME, &certificate->pCertInfo->Subject);
-  if (attribute == nullptr)
-    return false;
-  const DWORD characters = CertRDNValueToStrW(attribute->dwValueType,
-                                               &attribute->Value, nullptr, 0);
+  void *organization_oid = const_cast<char *>(szOID_ORGANIZATION_NAME);
+  const DWORD characters = CertGetNameStringW(
+      certificate, CERT_NAME_ATTR_TYPE, 0, organization_oid, nullptr, 0);
   if (characters <= 1 || characters > 256)
     return false;
   std::wstring value(static_cast<std::size_t>(characters), L'\0');
-  if (CertRDNValueToStrW(attribute->dwValueType, &attribute->Value,
-                         value.data(), characters) != characters)
+  if (CertGetNameStringW(certificate, CERT_NAME_ATTR_TYPE, 0,
+                         organization_oid, value.data(), characters) !=
+      characters)
     return false;
   value.resize(characters - 1);
   *organization = std::move(value);
@@ -762,15 +759,16 @@ std::string CurrentHelperSignerDigest() {
         nullptr, path.data(), static_cast<DWORD>(path.size()));
     if (length == 0 || static_cast<std::size_t>(length) >= path.size())
       return std::string{};
-    path.resize(length);
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+    const std::wstring image_path(path.data(), length);
+    HANDLE file = CreateFileW(image_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                               nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
                               nullptr);
     if (file == INVALID_HANDLE_VALUE)
       return std::string{};
     std::string signer;
-    const bool verified = ReadAuthenticodeSignerDigest(file, path, &signer);
+    const bool verified =
+        ReadAuthenticodeSignerDigest(file, image_path, &signer);
     CloseHandle(file);
     return verified ? signer : std::string{};
   }();
@@ -944,13 +942,14 @@ bool IsPolicyLanguageSupported(std::string_view language) {
 }
 
 bool IsTrustedSystemNotepad(const WindowsExecutableIdentity &identity) {
-  std::vector<wchar_t> system_directory(32'768, L'\0');
+  std::vector<wchar_t> system_directory_buffer(32'768, L'\0');
   const UINT length = GetSystemDirectoryW(
-      system_directory.data(), static_cast<UINT>(system_directory.size()));
+      system_directory_buffer.data(),
+      static_cast<UINT>(system_directory_buffer.size()));
   if (length == 0 ||
-      static_cast<std::size_t>(length) >= system_directory.size())
+      static_cast<std::size_t>(length) >= system_directory_buffer.size())
     return false;
-  system_directory.resize(length);
+  std::wstring system_directory(system_directory_buffer.data(), length);
   if (!system_directory.empty() && system_directory.back() != L'\\')
     system_directory.push_back(L'\\');
   system_directory += L"note" L"pad.exe";
@@ -3687,8 +3686,16 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
     } else if (SUCCEEDED(target->GetCurrentPatternAs(UIA_ValuePatternId,
                                                      IID_PPV_ARGS(&pattern))) &&
                pattern != nullptr) {
-      *accepted = true;
-      action_result = pattern->SetValue(wide_text.c_str());
+      BSTR value = SysAllocStringLen(wide_text.data(),
+                                    static_cast<UINT>(wide_text.size()));
+      if (value == nullptr && !wide_text.empty()) {
+        *reason = "semantic_action_failed";
+      } else {
+        *accepted = true;
+        action_result = pattern->SetValue(value);
+      }
+      if (value != nullptr)
+        SysFreeString(value);
       pattern->Release();
     } else {
       *reason = "semantic_pattern_unavailable";

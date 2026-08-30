@@ -728,6 +728,7 @@ describe('Windows native helper compile boundary', () => {
     const binding = readFileSync(join(__dirname, '../../computer-use-native/binding.gyp'), 'utf8');
     for (const flag of ['/GS', '/guard:cf', '/sdl', '/NXCOMPAT', '/DYNAMICBASE', '/HIGHENTROPYVA'])
       expect(build).toContain(`'${flag}'`);
+    expect(build).toContain("'/DNOMINMAX'");
     expect(binding).toContain('-fstack-protector-strong');
     expect(binding).toContain('-D_FORTIFY_SOURCE=2');
     expect(binding).toContain('sprint_coder_computer_use_native');

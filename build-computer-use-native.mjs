@@ -216,6 +216,7 @@ if (target === 'linux') {
       '/DUNICODE',
       '/D_UNICODE',
       '/DWIN32_LEAN_AND_MEAN',
+      '/DNOMINMAX',
       '/D_WIN32_WINNT=0x0A00',
       '/DSPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE=1',
       `/FI${provenanceHeader}`,
