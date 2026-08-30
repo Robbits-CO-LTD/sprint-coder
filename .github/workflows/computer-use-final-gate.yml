@@ -33,16 +33,15 @@ concurrency:
   group: computer-use-final-gate-${{ inputs.package_run_id }}
   cancel-in-progress: false
 
-permissions:
-  actions: read
-  attestations: read
-  contents: read
+permissions: {}
 
 jobs:
   validate-dispatch:
     name: Validate explicit artifact inputs
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      actions: read
     outputs:
       source_commit: ${{ steps.provenance.outputs.source_commit }}
       evidence_run_attempt: ${{ steps.provenance.outputs.evidence_run_attempt }}
@@ -73,42 +72,129 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REF: ${{ github.ref }}
           PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
         run: |
           set -euo pipefail
+          [[ "${WORKFLOW_REF}" == 'refs/heads/main' ]] || { echo '::error::The external final gate must run from the trusted default branch.'; exit 1; }
           metadata="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PACKAGE_RUN_ID}")"
           conclusion="$(jq -r '.conclusion' <<< "${metadata}")"
           source_commit="$(jq -r '.head_sha' <<< "${metadata}")"
+          package_path="$(jq -r '.path' <<< "${metadata}")"
+          package_event="$(jq -r '.event' <<< "${metadata}")"
+          package_branch="$(jq -r '.head_branch' <<< "${metadata}")"
+          package_repository="$(jq -r '.head_repository.full_name' <<< "${metadata}")"
           [[ "${conclusion}" == 'success' ]] || { echo '::error::Package source run must be successful.'; exit 1; }
           [[ "${source_commit}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Package source commit is invalid.'; exit 1; }
+          [[ "${package_path}" == '.github/workflows/release-beta.yml' ]] || { echo '::error::Package run must come from release-beta.yml.'; exit 1; }
+          [[ "${package_event}" == 'push' ]] || { echo '::error::Package run must be a tag push.'; exit 1; }
+          [[ "${package_branch}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || { echo '::error::Package run must target a release tag.'; exit 1; }
+          [[ "${package_repository}" == "${GITHUB_REPOSITORY}" ]] || { echo '::error::Package run must come from this repository.'; exit 1; }
           evidence_metadata="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${EVIDENCE_RUN_ID}")"
           evidence_conclusion="$(jq -r '.conclusion' <<< "${evidence_metadata}")"
           evidence_commit="$(jq -r '.head_sha' <<< "${evidence_metadata}")"
           evidence_path="$(jq -r '.path' <<< "${evidence_metadata}")"
           evidence_event="$(jq -r '.event' <<< "${evidence_metadata}")"
+          evidence_branch="$(jq -r '.head_branch' <<< "${evidence_metadata}")"
+          evidence_repository="$(jq -r '.head_repository.full_name' <<< "${evidence_metadata}")"
           evidence_run_attempt="$(jq -r '.run_attempt' <<< "${evidence_metadata}")"
           [[ "${evidence_conclusion}" == 'success' ]] || { echo '::error::Evidence source run must be successful.'; exit 1; }
           [[ "${evidence_commit}" == "${source_commit}" ]] || { echo '::error::Evidence and package runs must use the same source commit.'; exit 1; }
           [[ "${evidence_path}" == '.github/workflows/computer-use-evidence-harness.yml' ]] || { echo '::error::Evidence must come from the dedicated machine harness workflow.'; exit 1; }
           [[ "${evidence_event}" == 'workflow_dispatch' ]] || { echo '::error::Evidence harness must be explicitly dispatched.'; exit 1; }
+          [[ "${evidence_branch}" == 'main' ]] || { echo '::error::Evidence harness must run from the trusted default branch.'; exit 1; }
+          [[ "${evidence_repository}" == "${GITHUB_REPOSITORY}" ]] || { echo '::error::Evidence harness must come from this repository.'; exit 1; }
           [[ "${evidence_run_attempt}" =~ ^[1-9][0-9]{0,9}$ ]] || { echo '::error::Evidence run attempt is invalid.'; exit 1; }
           printf 'source_commit=%s\n' "${source_commit}" >> "${GITHUB_OUTPUT}"
           printf 'evidence_run_attempt=%s\n' "${evidence_run_attempt}" >> "${GITHUB_OUTPUT}"
 
+  verify-evidence-attestation:
+    name: Verify evidence attestation before package execution
+    needs: validate-dispatch
+    runs-on: ubuntu-latest
+    environment: computer-use-final-gate
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # #387 setup must create this protected environment and its sentinel before
+      # any artifact is accepted by a downstream self-hosted package job.
+      - name: Require configured protected final-gate environment
+        shell: bash
+        env:
+          GATE_SENTINEL: ${{ vars.COMPUTER_USE_FINAL_GATE_SENTINEL }}
+        run: |
+          set -euo pipefail
+          [[ "${GATE_SENTINEL}" == 'computer-use-final-gate-v1' ]] || {
+            echo '::error::Protected computer-use-final-gate environment is not configured; complete #387 setup before verifying attestation.'
+            exit 1
+          }
+
+      - name: Download evidence for pre-execution attestation verification
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: ${{ inputs.evidence_artifact }}
+          path: ${{ runner.temp }}/computer-use-evidence-attestation
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.evidence_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify exactly one evidence file and its trusted workflow attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVIDENCE_ROOT: ${{ runner.temp }}/computer-use-evidence-attestation
+          SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          if find "${EVIDENCE_ROOT}" -type l -print -quit | grep -q .; then
+            echo '::error::Evidence artifacts must not contain symlinks.'
+            exit 1
+          fi
+          files=()
+          while IFS= read -r -d '' path; do files+=("${path}"); done < <(find "${EVIDENCE_ROOT}" -type f -print0)
+          if (( ${#files[@]} != 1 )) || [[ "$(basename "${files[0]:-missing}")" != 'computer-use-final-gate.json' ]]; then
+            echo '::error::Evidence artifact must contain only computer-use-final-gate.json.'
+            exit 1
+          fi
+          gh attestation verify "${files[0]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/computer-use-evidence-harness.yml" \
+            --source-digest "${SOURCE_COMMIT}" \
+            --deny-self-hosted-runners
+
   verify-windows-package:
     name: Verify signed Windows x64 package
-    needs: validate-dispatch
+    needs: [validate-dispatch, verify-evidence-attestation]
     runs-on: [self-hosted, windows, x64, computer-use-final-gate]
     timeout-minutes: 15
+    environment: computer-use-final-gate
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
     outputs:
       portable_name: ${{ steps.verify.outputs.portable_name }}
       portable_sha256: ${{ steps.verify.outputs.portable_sha256 }}
       installer_name: ${{ steps.verify.outputs.installer_name }}
       installer_sha256: ${{ steps.verify.outputs.installer_sha256 }}
     steps:
+      # #387 setup supplies the protected environment and expected release signer.
+      - name: Require configured protected final-gate environment
+        shell: pwsh
+        env:
+          GATE_SENTINEL: ${{ vars.COMPUTER_USE_FINAL_GATE_SENTINEL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GATE_SENTINEL -ne 'computer-use-final-gate-v1') {
+            throw 'Protected computer-use-final-gate environment is not configured; complete #387 setup before using this runner.'
+          }
+
       - name: Download the explicit signed Windows artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ inputs.signed_windows_artifact }}
           path: ${{ runner.temp }}/computer-use-windows-input
@@ -120,12 +206,46 @@ jobs:
         id: verify
         shell: pwsh
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_ROOT: ${{ runner.temp }}/computer-use-windows-input
           EXTRACT_ROOT: ${{ runner.temp }}/computer-use-windows-package
           SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
+          EXPECTED_WINDOWS_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_RELEASE_SIGNER_THUMBPRINT }}
+          EXPECTED_WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_RELEASE_SIGNER_SUBJECT }}
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
+
+          $expectedSignerThumbprint = ([string]$env:EXPECTED_WINDOWS_SIGNER_THUMBPRINT).Replace(' ', '').ToUpperInvariant()
+          $expectedSignerSubject = [string]$env:EXPECTED_WINDOWS_SIGNER_SUBJECT
+          if ($expectedSignerThumbprint -notmatch '^[0-9A-F]{40}$' -or [string]::IsNullOrWhiteSpace($expectedSignerSubject)) {
+            throw 'Protected Windows release signer variables are not configured; complete #387 setup before probing packages.'
+          }
+
+          function Assert-PeAmd64([string]$Path) {
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+              $dosHeader = [byte[]]::new(64)
+              if ($stream.Read($dosHeader, 0, $dosHeader.Length) -ne $dosHeader.Length -or $dosHeader[0] -ne 0x4D -or $dosHeader[1] -ne 0x5A) {
+                throw "${Path} is not a valid DOS executable."
+              }
+              $peOffset = [BitConverter]::ToInt32($dosHeader, 0x3C)
+              if ($peOffset -lt 64 -or $peOffset -gt ($stream.Length - 6)) {
+                throw "${Path} has an invalid PE header offset."
+              }
+              $stream.Position = $peOffset
+              $peHeader = [byte[]]::new(6)
+              if ($stream.Read($peHeader, 0, $peHeader.Length) -ne $peHeader.Length -or $peHeader[0] -ne 0x50 -or $peHeader[1] -ne 0x45 -or $peHeader[2] -ne 0 -or $peHeader[3] -ne 0) {
+                throw "${Path} is missing the PE signature."
+              }
+              if ([BitConverter]::ToUInt16($peHeader, 4) -ne 0x8664) {
+                throw "${Path} is not an AMD64 PE image."
+              }
+            }
+            finally {
+              $stream.Dispose()
+            }
+          }
 
           $links = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -Force | Where-Object {
             ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
@@ -137,11 +257,26 @@ jobs:
           if ($portable.Count -ne 1) { throw "Expected one signed portable ZIP, found $($portable.Count)." }
           if ($installer.Count -ne 1) { throw "Expected one signed installer, found $($installer.Count)." }
 
+          foreach ($path in @($portable[0].FullName, $installer[0].FullName)) {
+            & gh attestation verify $path `
+              --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "github.com/$env:GITHUB_REPOSITORY/.github/workflows/release-beta.yml" `
+              --source-digest $env:SOURCE_COMMIT `
+              --deny-self-hosted-runners
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows package artifact attestation verification failed: $path"
+            }
+          }
+
           $installerSignature = Get-AuthenticodeSignature -LiteralPath $installer[0].FullName
           if ($installerSignature.Status -ne 'Valid') { throw 'Windows installer Authenticode signature is invalid.' }
 
           if (Test-Path -LiteralPath $env:EXTRACT_ROOT) { Remove-Item -LiteralPath $env:EXTRACT_ROOT -Recurse -Force }
           Expand-Archive -LiteralPath $portable[0].FullName -DestinationPath $env:EXTRACT_ROOT
+          $extractedLinks = @(Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -Force | Where-Object {
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+          })
+          if ($extractedLinks.Count -ne 0) { throw 'Extracted Windows package must not contain reparse points.' }
           $app = @(Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'Sprint Coder.exe')
           $helper = @(
             Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'sprint-coder-computer-use-host.exe'
@@ -161,12 +296,23 @@ jobs:
           $appThumbprint = $appSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
           $helperThumbprint = $helperSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
           $installerThumbprint = $installerSignature.SignerCertificate.Thumbprint.ToUpperInvariant()
+          $appSubject = [string]$appSignature.SignerCertificate.Subject
+          $helperSubject = [string]$helperSignature.SignerCertificate.Subject
+          $installerSubject = [string]$installerSignature.SignerCertificate.Subject
           if (
             $appThumbprint -notmatch '^[0-9A-F]{40}$' -or
             $appThumbprint -ne $helperThumbprint -or
-            $appThumbprint -ne $installerThumbprint
+            $appThumbprint -ne $installerThumbprint -or
+            $appThumbprint -ne $expectedSignerThumbprint -or
+            $appSubject -notlike "*$expectedSignerSubject*" -or
+            $helperSubject -notlike "*$expectedSignerSubject*" -or
+            $installerSubject -notlike "*$expectedSignerSubject*"
           ) {
-            throw 'Installer, packaged app, and Computer Use helper signer identities differ.'
+            throw 'Installer, packaged app, and Computer Use helper do not use the configured release signer.'
+          }
+
+          foreach ($pePath in @($app[0].FullName, $helper[0].FullName)) {
+            Assert-PeAmd64 $pePath
           }
 
           $helperProbeText = @(& $helper[0].FullName --probe-json)
@@ -230,14 +376,30 @@ jobs:
 
   verify-macos-package:
     name: Verify notarized macOS package
-    needs: validate-dispatch
+    needs: [validate-dispatch, verify-evidence-attestation]
     runs-on: [self-hosted, macOS, computer-use-final-gate]
     timeout-minutes: 15
+    environment: computer-use-final-gate
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
     outputs:
       package_sha256: ${{ steps.verify.outputs.package_sha256 }}
     steps:
+      - name: Require configured protected final-gate environment
+        shell: bash
+        env:
+          GATE_SENTINEL: ${{ vars.COMPUTER_USE_FINAL_GATE_SENTINEL }}
+        run: |
+          set -euo pipefail
+          [[ "${GATE_SENTINEL}" == 'computer-use-final-gate-v1' ]] || {
+            echo '::error::Protected computer-use-final-gate environment is not configured; complete #387 setup before using this runner.'
+            exit 1
+          }
+
       - name: Download the explicit notarized macOS artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ inputs.notarized_macos_artifact }}
           path: ${{ runner.temp }}/computer-use-macos-input
@@ -246,7 +408,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Setup Node.js for strict manifest validation
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.2
 
@@ -254,11 +416,17 @@ jobs:
         id: verify
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_ROOT: ${{ runner.temp }}/computer-use-macos-input
           MOUNT_ROOT: ${{ runner.temp }}/computer-use-macos-mount
           SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
+          EXPECTED_MACOS_TEAM_IDENTIFIER: ${{ vars.MACOS_RELEASE_TEAM_IDENTIFIER }}
         run: |
           set -euo pipefail
+          [[ "${EXPECTED_MACOS_TEAM_IDENTIFIER:-}" =~ ^[A-Z0-9]{10}$ ]] || {
+            echo '::error::Protected macOS release signer variable is not configured; complete #387 setup before probing packages.'
+            exit 1
+          }
           mapfile=()
           while IFS= read -r -d '' path; do mapfile+=("${path}"); done < <(find "${INPUT_ROOT}" -type f -name '*.dmg' -print0)
           (( ${#mapfile[@]} == 1 )) || { echo "::error::Expected one DMG, found ${#mapfile[@]}."; exit 1; }
@@ -267,6 +435,12 @@ jobs:
             echo '::error::macOS package artifact must not contain symlinks.'
             exit 1
           fi
+
+          gh attestation verify "${dmg}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "github.com/${GITHUB_REPOSITORY}/.github/workflows/release-beta.yml" \
+            --source-digest "${SOURCE_COMMIT}" \
+            --deny-self-hosted-runners
 
           /usr/bin/codesign --verify --strict --verbose=2 "${dmg}"
           /usr/bin/xcrun stapler validate "${dmg}"
@@ -324,6 +498,7 @@ jobs:
           [[ "${app_team_identifier}" =~ ^[A-Z0-9]{10}$ ]] || { echo '::error::App TeamIdentifier is invalid or ad-hoc.'; exit 1; }
           [[ "${team_identifier}" =~ ^[A-Z0-9]{10}$ ]] || { echo '::error::Native module TeamIdentifier is invalid or ad-hoc.'; exit 1; }
           [[ "${app_team_identifier}" == "${team_identifier}" ]] || { echo '::error::App and native module TeamIdentifier differ.'; exit 1; }
+          [[ "${app_team_identifier}" == "${EXPECTED_MACOS_TEAM_IDENTIFIER}" ]] || { echo '::error::App TeamIdentifier is not the configured release signer.'; exit 1; }
           [[ "$(/usr/bin/plutil -extract sourceCommit raw -o - "${manifest}")" == "${SOURCE_COMMIT}" ]] || {
             echo '::error::Signed macOS Computer Use source commit does not match the package run.'
             exit 1
@@ -374,20 +549,35 @@ jobs:
     needs: [validate-dispatch, verify-windows-package, verify-macos-package]
     runs-on: ubuntu-latest
     environment: computer-use-final-gate
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
     timeout-minutes: 5
     steps:
+      - name: Require configured protected final-gate environment
+        shell: bash
+        env:
+          GATE_SENTINEL: ${{ vars.COMPUTER_USE_FINAL_GATE_SENTINEL }}
+        run: |
+          set -euo pipefail
+          [[ "${GATE_SENTINEL}" == 'computer-use-final-gate-v1' ]] || {
+            echo '::error::Protected computer-use-final-gate environment is not configured; complete #387 setup before validating evidence.'
+            exit 1
+          }
+
       - name: Checkout the exact workflow revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ needs.validate-dispatch.outputs.source_commit }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.2
 
       - name: Download JSON-only acceptance evidence
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ inputs.evidence_artifact }}
           path: ${{ runner.temp }}/computer-use-evidence

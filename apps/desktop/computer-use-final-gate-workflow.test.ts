@@ -13,6 +13,11 @@ type EvidenceRow = {
   evidenceCode: string;
 };
 
+type CaptureJourney = EvidenceRow & {
+  eventSequence: string[];
+  eventDigests: string[];
+};
+
 type EvidenceTemplate = {
   schemaVersion: number;
   sourceCommit: string;
@@ -235,10 +240,23 @@ function validateFixture(
   candidate: EvidenceTemplate,
   extraArguments: string[] = [],
   attestationVerified = true,
+  includeDefaultBindings = true,
 ) {
   const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-final-gate-'));
   const path = resolve(root, 'computer-use-final-gate.json');
   try {
+    const allowIncomplete = extraArguments.includes('--allow-incomplete');
+    const suppliedOptions = new Set(extraArguments.filter((argument) => argument.startsWith('--')));
+    const defaults: string[] = [];
+    if (includeDefaultBindings && !allowIncomplete) {
+      const bindingDefaults = completedBindingArguments(candidate);
+      for (let index = 0; index < bindingDefaults.length; index += 2) {
+        const option = bindingDefaults[index]!;
+        if (!suppliedOptions.has(option)) {
+          defaults.push(option, bindingDefaults[index + 1]!);
+        }
+      }
+    }
     writeFileSync(path, `${JSON.stringify(candidate)}\n`, { encoding: 'utf8', mode: 0o600 });
     return spawnSync(
       process.execPath,
@@ -247,6 +265,7 @@ function validateFixture(
         '--evidence',
         path,
         ...(attestationVerified ? ['--trusted-workflow-attestation-verified'] : []),
+        ...defaults,
         ...extraArguments,
       ],
       { encoding: 'utf8' },
@@ -254,6 +273,57 @@ function validateFixture(
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function completedBindingArguments(candidate: EvidenceTemplate): string[] {
+  return [
+    '--source-commit',
+    candidate.sourceCommit,
+    '--source-run-id',
+    candidate.sourceRunId,
+    '--evidence-run-id',
+    candidate.harnessAttestation.workflowRunId,
+    '--evidence-run-attempt',
+    String(candidate.harnessAttestation.workflowRunAttempt),
+    '--windows-artifact',
+    candidate.artifacts.windows.artifactName,
+    '--macos-artifact',
+    candidate.artifacts.macos.artifactName,
+    '--windows-portable-name',
+    candidate.artifacts.windows.portable.fileName,
+    '--windows-portable-sha256',
+    candidate.artifacts.windows.portable.sha256,
+    '--windows-installer-name',
+    candidate.artifacts.windows.installer.fileName,
+    '--windows-installer-sha256',
+    candidate.artifacts.windows.installer.sha256,
+    '--macos-sha256',
+    candidate.artifacts.macos.packageSha256,
+  ];
+}
+
+function incompleteCaptureFromTemplate(): {
+  schemaVersion: number;
+  completedAt: string;
+  providerBinding: Record<string, boolean | number | string>;
+  privacy: Record<string, boolean>;
+  journeys: CaptureJourney[];
+} {
+  const rows = [...template.ac28Core, ...template.ac29Safety, ...template.ac30Compatibility];
+  return {
+    schemaVersion: 1,
+    completedAt: template.completedAt,
+    providerBinding: template.providerBinding,
+    privacy: template.privacy,
+    journeys: rows.map((row) => {
+      const eventSequence = canonicalEventSequence(row.id, row.status);
+      return {
+        ...row,
+        eventSequence,
+        eventDigests: eventSequence.map((event, index) => sha256(`${row.id}:${event}:${index}`)),
+      };
+    }),
+  };
 }
 
 describe('Computer Use external final gate', () => {
@@ -320,6 +390,74 @@ describe('Computer Use external final gate', () => {
     const result = validateFixture(handAuthored, [], false);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('external GitHub artifact attestation verification');
+  });
+
+  it('accepts --allow-incomplete only for the exact canonical pending template', () => {
+    const templateResult = spawnSync(
+      process.execPath,
+      [validatorPath, '--evidence', templatePath, '--allow-incomplete'],
+      { encoding: 'utf8' },
+    );
+    expect(templateResult.status).toBe(0);
+
+    const changedMetadata = structuredClone(template);
+    changedMetadata.sourceCommit = 'a'.repeat(40);
+    changedMetadata.artifacts.windows.sourceCommit = changedMetadata.sourceCommit;
+    changedMetadata.artifacts.macos.sourceCommit = changedMetadata.sourceCommit;
+    const metadataResult = validateFixture(changedMetadata, ['--allow-incomplete'], false);
+    expect(metadataResult.status).not.toBe(0);
+    expect(metadataResult.stderr).toContain('canonical all-pending template');
+
+    const corePass = structuredClone(template);
+    corePass.ac28Core[0] = {
+      id: canonical.core[0]!.id,
+      status: 'PASS',
+      reasonCode: 'NONE',
+      evidenceCode: canonical.core[0]!.passEvidenceCode,
+    };
+    const corePassResult = validateFixture(corePass, ['--allow-incomplete'], false);
+    expect(corePassResult.status).not.toBe(0);
+    expect(corePassResult.stderr).toContain('canonical all-pending template');
+  });
+
+  it('rejects unknown verifier and generator options', () => {
+    const unknownVerifier = spawnSync(
+      process.execPath,
+      [validatorPath, '--evidence', templatePath, '--allow-incomplete', '--typo'],
+      { encoding: 'utf8' },
+    );
+    expect(unknownVerifier.status).not.toBe(0);
+    expect(unknownVerifier.stderr).toContain('unknown option --typo');
+
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-unknown-option-'));
+    const capturePath = resolve(root, 'computer-use-machine-transcript.json');
+    try {
+      writeFileSync(capturePath, `${JSON.stringify(incompleteCaptureFromTemplate())}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      const unknownGenerator = spawnSync(
+        process.execPath,
+        [generatorPath, '--capture', capturePath, '--validate-capture-only', '--typo'],
+        { encoding: 'utf8' },
+      );
+      expect(unknownGenerator.status).not.toBe(0);
+      expect(unknownGenerator.stderr).toContain('unknown option --typo');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('requires every completed source, run, artifact, and package binding', () => {
+    const complete = passingEvidence();
+    const bindings = completedBindingArguments(complete);
+    const missingMacHash = bindings.filter(
+      (argument, index) =>
+        argument !== '--macos-sha256' && bindings[index - 1] !== '--macos-sha256',
+    );
+    const result = validateFixture(complete, missingMacHash, true, false);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('--macos-sha256 is required');
   });
 
   it('refuses synthetic PASS capture and can only seal incomplete CLOSE_HOLD evidence', () => {
@@ -391,11 +529,20 @@ describe('Computer Use external final gate', () => {
         privacy: template.privacy,
         journeys: incompleteRows.map((row) => {
           const eventSequence = canonicalEventSequence(row.id, row.status);
+          const packageBindingSha256 = sha256(
+            JSON.stringify({
+              sourceCommit: expected.sourceCommit,
+              sourceRunId: expected.sourceRunId,
+              artifacts: expected.artifacts,
+            }),
+          );
           return {
             ...row,
             eventSequence,
             eventDigests: eventSequence.map((event, index) =>
-              sha256(`${row.id}:${event}:${index}`),
+              event === 'PACKAGE_BOUND'
+                ? packageBindingSha256
+                : sha256(`${row.id}:${event}:${index}`),
             ),
           };
         }),
@@ -414,7 +561,7 @@ describe('Computer Use external final gate', () => {
           [validatorPath, '--evidence', outputPath, '--allow-incomplete'],
           { encoding: 'utf8' },
         ).status,
-      ).toBe(0);
+      ).not.toBe(0);
       expect(
         spawnSync(
           process.execPath,
@@ -560,6 +707,57 @@ describe('Computer Use external final gate', () => {
         encoding: 'utf8',
       }).status,
     ).not.toBe(0);
+  });
+
+  it('refuses a capture whose PACKAGE_BOUND digest does not match the computed package binding', () => {
+    const expected = passingEvidence();
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-package-binding-'));
+    const capturePath = resolve(root, 'computer-use-machine-transcript.json');
+    const outputPath = resolve(root, 'computer-use-final-gate.json');
+    const capture = incompleteCaptureFromTemplate();
+    const packageArguments = [
+      '--source-commit',
+      expected.sourceCommit,
+      '--source-run-id',
+      expected.sourceRunId,
+      '--windows-artifact',
+      expected.artifacts.windows.artifactName,
+      '--windows-portable-name',
+      expected.artifacts.windows.portable.fileName,
+      '--windows-portable-sha256',
+      expected.artifacts.windows.portable.sha256,
+      '--windows-installer-name',
+      expected.artifacts.windows.installer.fileName,
+      '--windows-installer-sha256',
+      expected.artifacts.windows.installer.sha256,
+      '--macos-artifact',
+      expected.artifacts.macos.artifactName,
+      '--macos-sha256',
+      expected.artifacts.macos.packageSha256,
+      '--workflow-run-id',
+      expected.harnessAttestation.workflowRunId,
+      '--workflow-run-attempt',
+      String(expected.harnessAttestation.workflowRunAttempt),
+    ];
+    for (const row of capture.journeys) {
+      const packageEventIndex = row.eventSequence!.indexOf('PACKAGE_BOUND');
+      row.eventDigests![packageEventIndex] = 'e'.repeat(64);
+    }
+    try {
+      writeFileSync(capturePath, `${JSON.stringify(capture)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      const result = spawnSync(
+        process.execPath,
+        [generatorPath, '--capture', capturePath, '--output', outputPath, ...packageArguments],
+        { encoding: 'utf8' },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('PACKAGE_BOUND digest does not match');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects pending adapter provenance and two simultaneously selected Provider paths', () => {

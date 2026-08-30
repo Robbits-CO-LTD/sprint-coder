@@ -14,23 +14,45 @@ import {
 } from './verify-computer-use-final-gate.mjs';
 
 const MAX_CAPTURE_BYTES = 64 * 1024;
+const GENERATOR_BOOLEAN_OPTIONS = Object.freeze(['validate-capture-only']);
+const GENERATOR_VALUE_OPTIONS = Object.freeze([
+  'capture',
+  'output',
+  'source-commit',
+  'source-run-id',
+  'windows-artifact',
+  'windows-portable-name',
+  'windows-portable-sha256',
+  'windows-installer-name',
+  'windows-installer-sha256',
+  'macos-artifact',
+  'macos-sha256',
+  'workflow-run-id',
+  'workflow-run-attempt',
+]);
 
 function fail(message) {
   throw new Error(`Computer Use evidence harness refused capture: ${message}`);
 }
 
 function parseArguments(argv) {
-  const options = {};
+  const options = Object.create(null);
+  const booleanOptions = new Set(GENERATOR_BOOLEAN_OPTIONS);
+  const valueOptions = new Set(GENERATOR_VALUE_OPTIONS);
+  const knownOptions = new Set([...booleanOptions, ...valueOptions]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (!argument.startsWith('--')) fail(`unknown argument ${argument}`);
-    if (argument === '--validate-capture-only') {
-      options['validate-capture-only'] = true;
+    const key = argument.slice(2);
+    if (!knownOptions.has(key)) fail(`unknown option ${argument}`);
+    if (Object.prototype.hasOwnProperty.call(options, key)) fail(`duplicate option ${argument}`);
+    if (booleanOptions.has(key)) {
+      options[key] = true;
       continue;
     }
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) fail(`${argument} requires a value`);
-    options[argument.slice(2)] = value;
+    options[key] = value;
     index += 1;
   }
   return options;
@@ -110,6 +132,11 @@ function main() {
       'real runtime journey capture is not implemented; Core/Safety PASS evidence cannot be sealed',
     );
   const validateCaptureOnly = options['validate-capture-only'] === true;
+  if (
+    validateCaptureOnly &&
+    Object.keys(options).some((key) => key !== 'capture' && key !== 'validate-capture-only')
+  )
+    fail('--validate-capture-only accepts only --capture');
   const sourceCommit = validateCaptureOnly ? 'a'.repeat(40) : required(options, 'source-commit');
   const sourceRunId = validateCaptureOnly ? '1' : required(options, 'source-run-id');
   const artifacts = {
@@ -152,7 +179,8 @@ function main() {
     const eventDigests = [...row.eventDigests];
     const packageEventIndex = row.eventSequence.indexOf('PACKAGE_BOUND');
     if (packageEventIndex < 0) fail(`${row.id} is missing canonical PACKAGE_BOUND`);
-    eventDigests[packageEventIndex] = packageBindingSha256;
+    if (!validateCaptureOnly && eventDigests[packageEventIndex] !== packageBindingSha256)
+      fail(`${row.id} PACKAGE_BOUND digest does not match the computed package binding`);
     return {
       id: row.id,
       eventSequence: row.eventSequence,

@@ -426,7 +426,9 @@ describe('release artifacts', () => {
     expect(readFileSync(resolve(__dirname, 'forge.config.ts'), 'utf8')).toContain(
       "new MakerZIP({}, ['darwin', 'linux', 'win32'])",
     );
-    expect(workflow).toMatch(/release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@v7/);
+    expect(workflow).toMatch(
+      /release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u,
+    );
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(macPackageJob).not.toContain('if: github.event_name');
     expect(macResultJob).toContain('test "${MACOS_PACKAGE_RESULT}" = \'success\'');

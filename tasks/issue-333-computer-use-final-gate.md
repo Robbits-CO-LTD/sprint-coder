@@ -40,28 +40,28 @@ the gate machine exposes only that unsupported proxy, the Core row is `FAIL`, no
 
 All rows currently remain `FAIL` because signed/notarized interactive acceptance has not run.
 
-| ID                                     | Mandatory journey                                                                                                                                              | Exact PASS evidence code            |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| ID                                     | Mandatory journey                                                                                                                                                                              | Exact PASS evidence code            |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | `AC-28-WIN-FIXTURE-IDENTITY-OBSERVE`   | Signed Windows x64 package registers the same-release-certificate-signed deterministic Win32 fixture, binds its exact identity/window, and returns bounded window-only image/tree observations | `WIN_FIXTURE_IDENTITY_OBSERVE_V1`   |
-| `AC-28-WIN-FIXTURE-SEMANTIC`           | One fixture session completes semantic set-text, select, toggle, and invoke operations with state checks                                                       | `WIN_FIXTURE_SEMANTIC_ACTIONS_V1`   |
-| `AC-28-WIN-FIXTURE-VISUAL`             | One fixture session completes a normalized-coordinate left click and verifies only the intended client control changed                                         | `WIN_FIXTURE_VISUAL_ACTIONS_V1`     |
-| `AC-28-WIN-FIXTURE-MIXED`              | One fixture session interleaves semantic and visual operations without changing app/window binding                                                             | `WIN_FIXTURE_MIXED_ACTIONS_V1`      |
-| `AC-28-WIN-FIXTURE-JAPANESE`           | Unicode-scalar typing produces the fixed Japanese fixture value                                                                                                | `WIN_FIXTURE_JAPANESE_TEXT_V1`      |
-| `AC-28-WIN-NOTEPAD-IDENTITY-OBSERVE`   | The same signed package registers Notepad, binds its exact identity/window, and observes only that client                                                      | `WIN_NOTEPAD_IDENTITY_OBSERVE_V1`   |
-| `AC-28-WIN-NOTEPAD-MIXED`              | One Notepad session completes semantic and normalized visual actions with per-action state checks                                                              | `WIN_NOTEPAD_MIXED_ACTIONS_V1`      |
-| `AC-28-WIN-NOTEPAD-JAPANESE`           | Notepad receives and visibly retains the fixed Japanese fixture value                                                                                          | `WIN_NOTEPAD_JAPANESE_TEXT_V1`      |
-| `AC-28-MAC-TEXTEDIT-IDENTITY-OBSERVE`  | Notarized/stapled macOS package registers TextEdit, binds its signed identity/window, and returns bounded window-only image/tree observations                  | `MAC_TEXTEDIT_IDENTITY_OBSERVE_V1`  |
-| `AC-28-MAC-TEXTEDIT-SEMANTIC`          | One TextEdit session completes accessibility set-text/invoke operations with state checks                                                                      | `MAC_TEXTEDIT_SEMANTIC_ACTIONS_V1`  |
-| `AC-28-MAC-TEXTEDIT-VISUAL`            | One TextEdit session completes a normalized-coordinate left click and verifies the intended client target                                                      | `MAC_TEXTEDIT_VISUAL_ACTIONS_V1`    |
-| `AC-28-MAC-TEXTEDIT-MIXED`             | One TextEdit session interleaves semantic and visual operations without changing app/window binding                                                            | `MAC_TEXTEDIT_MIXED_ACTIONS_V1`     |
-| `AC-28-MAC-TEXTEDIT-JAPANESE`          | TextEdit receives and visibly retains the fixed Japanese fixture value                                                                                         | `MAC_TEXTEDIT_JAPANESE_TEXT_V1`     |
-| `AC-28-MAC-VSCODE-IDENTITY-OBSERVE`    | The same notarized package registers Visual Studio Code and observes only its selected window                                                                  | `MAC_VSCODE_IDENTITY_OBSERVE_V1`    |
-| `AC-28-MAC-VSCODE-MIXED`               | One VS Code session completes semantic and normalized visual actions with per-action state checks                                                              | `MAC_VSCODE_MIXED_ACTIONS_V1`       |
-| `AC-28-MAC-VSCODE-TEMP-WORKSPACE`      | VS Code operations remain inside a newly created disposable workspace and leave unrelated files/apps untouched                                                 | `MAC_VSCODE_TEMP_WORKSPACE_V1`      |
-| `AC-28-MAC-VSCODE-JAPANESE`            | The disposable VS Code workspace visibly receives the fixed Japanese fixture value                                                                             | `MAC_VSCODE_JAPANESE_TEXT_V1`       |
-| `AC-28-PROVIDER-FIXED-IMAGE-PREFLIGHT` | The current Task's selected non-OpenRouter Connection/Model returns the exact strict marker action from one built-in fixed-image preflight                     | `PROVIDER_FIXED_IMAGE_PREFLIGHT_V1` |
-| `AC-28-PROVIDER-EXACT-THREE-ROUNDS`    | The same bound session attempts and completes exactly three live observation/plan rounds—no fewer and no extra retry                                           | `PROVIDER_EXACT_THREE_ROUNDS_V1`    |
-| `AC-28-PROVIDER-NO-FALLBACK`           | Connection/model/endpoint/catalog/policy/adapter/session bindings remain stable, credentials remain unchanged, and no explicit or implicit fallback occurs     | `PROVIDER_BINDING_NO_FALLBACK_V1`   |
+| `AC-28-WIN-FIXTURE-SEMANTIC`           | One fixture session completes semantic set-text, select, toggle, and invoke operations with state checks                                                                                       | `WIN_FIXTURE_SEMANTIC_ACTIONS_V1`   |
+| `AC-28-WIN-FIXTURE-VISUAL`             | One fixture session completes a normalized-coordinate left click and verifies only the intended client control changed                                                                         | `WIN_FIXTURE_VISUAL_ACTIONS_V1`     |
+| `AC-28-WIN-FIXTURE-MIXED`              | One fixture session interleaves semantic and visual operations without changing app/window binding                                                                                             | `WIN_FIXTURE_MIXED_ACTIONS_V1`      |
+| `AC-28-WIN-FIXTURE-JAPANESE`           | Unicode-scalar typing produces the fixed Japanese fixture value                                                                                                                                | `WIN_FIXTURE_JAPANESE_TEXT_V1`      |
+| `AC-28-WIN-NOTEPAD-IDENTITY-OBSERVE`   | The same signed package registers Notepad, binds its exact identity/window, and observes only that client                                                                                      | `WIN_NOTEPAD_IDENTITY_OBSERVE_V1`   |
+| `AC-28-WIN-NOTEPAD-MIXED`              | One Notepad session completes semantic and normalized visual actions with per-action state checks                                                                                              | `WIN_NOTEPAD_MIXED_ACTIONS_V1`      |
+| `AC-28-WIN-NOTEPAD-JAPANESE`           | Notepad receives and visibly retains the fixed Japanese fixture value                                                                                                                          | `WIN_NOTEPAD_JAPANESE_TEXT_V1`      |
+| `AC-28-MAC-TEXTEDIT-IDENTITY-OBSERVE`  | Notarized/stapled macOS package registers TextEdit, binds its signed identity/window, and returns bounded window-only image/tree observations                                                  | `MAC_TEXTEDIT_IDENTITY_OBSERVE_V1`  |
+| `AC-28-MAC-TEXTEDIT-SEMANTIC`          | One TextEdit session completes accessibility set-text/invoke operations with state checks                                                                                                      | `MAC_TEXTEDIT_SEMANTIC_ACTIONS_V1`  |
+| `AC-28-MAC-TEXTEDIT-VISUAL`            | One TextEdit session completes a normalized-coordinate left click and verifies the intended client target                                                                                      | `MAC_TEXTEDIT_VISUAL_ACTIONS_V1`    |
+| `AC-28-MAC-TEXTEDIT-MIXED`             | One TextEdit session interleaves semantic and visual operations without changing app/window binding                                                                                            | `MAC_TEXTEDIT_MIXED_ACTIONS_V1`     |
+| `AC-28-MAC-TEXTEDIT-JAPANESE`          | TextEdit receives and visibly retains the fixed Japanese fixture value                                                                                                                         | `MAC_TEXTEDIT_JAPANESE_TEXT_V1`     |
+| `AC-28-MAC-VSCODE-IDENTITY-OBSERVE`    | The same notarized package registers Visual Studio Code and observes only its selected window                                                                                                  | `MAC_VSCODE_IDENTITY_OBSERVE_V1`    |
+| `AC-28-MAC-VSCODE-MIXED`               | One VS Code session completes semantic and normalized visual actions with per-action state checks                                                                                              | `MAC_VSCODE_MIXED_ACTIONS_V1`       |
+| `AC-28-MAC-VSCODE-TEMP-WORKSPACE`      | VS Code operations remain inside a newly created disposable workspace and leave unrelated files/apps untouched                                                                                 | `MAC_VSCODE_TEMP_WORKSPACE_V1`      |
+| `AC-28-MAC-VSCODE-JAPANESE`            | The disposable VS Code workspace visibly receives the fixed Japanese fixture value                                                                                                             | `MAC_VSCODE_JAPANESE_TEXT_V1`       |
+| `AC-28-PROVIDER-FIXED-IMAGE-PREFLIGHT` | The current Task's selected non-OpenRouter Connection/Model returns the exact strict marker action from one built-in fixed-image preflight                                                     | `PROVIDER_FIXED_IMAGE_PREFLIGHT_V1` |
+| `AC-28-PROVIDER-EXACT-THREE-ROUNDS`    | The same bound session attempts and completes exactly three live observation/plan rounds—no fewer and no extra retry                                                                           | `PROVIDER_EXACT_THREE_ROUNDS_V1`    |
+| `AC-28-PROVIDER-NO-FALLBACK`           | Connection/model/endpoint/catalog/policy/adapter/session bindings remain stable, credentials remain unchanged, and no explicit or implicit fallback occurs                                     | `PROVIDER_BINDING_NO_FALLBACK_V1`   |
 
 ## AC-29 Safety
 
@@ -133,13 +133,28 @@ with the package release certificate before the Windows interactive journeys.
 Run `.github/workflows/computer-use-final-gate.yml` only after all canonical interactive journeys
 have completed on the exact packages being submitted. The dispatch requires:
 
-1. A successful same-repository Actions run ID containing:
+1. A successful trusted release-tag run of `.github/workflows/release-beta.yml` containing:
    - one Authenticode-signed Windows portable ZIP and installer artifact; and
    - one Developer ID-signed, Apple-notarized, stapled macOS DMG artifact.
 2. A successful run of `.github/workflows/computer-use-evidence-harness.yml` at the same commit and
    its artifact containing **only** the attested `computer-use-final-gate.json`.
 3. Explicit confirmation that the schema-v3 machine transcript came from those exact package bytes
    and the current Task's selected non-OpenRouter Connection/Model.
+
+Issue #387 setup must add the sentinel to the existing protected `macos-signing` environment and
+create protected `windows-signing`, `release-publication`, and `computer-use-final-gate`
+environments. A repository-level `COMPUTER_USE_SIGNED_WINDOWS_GATE_ENABLED=true` variable is the
+explicit opt-in; `windows-signing` supplies its sentinel, PFX bytes/password, and exact expected
+Windows signer thumbprint/subject. `release-publication` separates public release writes
+from signing secrets. `computer-use-final-gate` supplies its sentinel, expected macOS Team ID, and
+the protected transcript capture root. Without those values the signed Windows job is skipped and
+the applicable signing, publication, or external Gate job fails closed before candidate bytes are
+parsed or executed. Ordinary beta releases continue to build the explicitly unsigned Windows
+artifact and do not enable Computer Use; publication remains held until its protected environment
+is configured. When the opt-in signed job runs, a separate GitHub-hosted job attests the Windows
+portable ZIP, installer, and notarized DMG; the final Gate verifies those package attestations
+against the exact `release-beta.yml` workflow and source digest before extraction, mounting, or
+helper probing.
 
 The workflow runs package checks on dedicated self-hosted runners labelled
 `computer-use-final-gate`. It verifies Windows installer/app/helper Authenticode identities,
@@ -155,6 +170,12 @@ Before schema validation, the final workflow verifies the evidence bytes with
 workflow path, `workflow_dispatch`, run ID, attempt, source commit, and successful conclusion. A
 missing attestation, unavailable attestation service, arbitrary same-commit workflow, or modified
 JSON fails closed.
+
+Both manual workflows must be dispatched from trusted `main`, and the package source must be a
+SemVer release tag whose commit is reachable from `main`. Protected jobs checkout only that exact
+trusted source revision. A successful PR run, fork artifact, arbitrary workflow path, mutable
+third-party Action tag, self-hosted attestation signer, or self-consistent unbound JSON is not
+acceptable evidence.
 
 For the Windows fixture journeys, build the non-production fixture from the exact source checkout
 with `apps/desktop/computer-use-native/fixtures/win32-acceptance/build.ps1`. Use an x64 MSVC
@@ -192,10 +213,11 @@ Dispatch `.github/workflows/computer-use-evidence-harness.yml` with the exact pa
 names and capture-session ID. Its GitHub-hosted sealing job independently hashes the portable ZIP,
 installer, and DMG, derives schema-v3 evidence with
 `generate-computer-use-final-gate-evidence.mjs`, attests the exact bytes, and uploads only
-`computer-use-final-gate.json`. The generator replaces every `PACKAGE_BOUND` event digest with a
-digest over the source commit, package run, artifact names, and all three package filenames/hashes;
-the verifier independently recomputes it for every journey. The final gate then validates the
-result with bindings equivalent to:
+`computer-use-final-gate.json`. The machine harness must place the digest over the source commit,
+package run, artifact names, and all three package filenames/hashes in every `PACKAGE_BOUND` event.
+The generator compares that capture digest with its independently computed binding and retains it
+unchanged; a mismatch fails before sealing. The verifier independently recomputes it for every
+journey. The final gate then validates the result with bindings equivalent to:
 
 ```bash
 node verify-computer-use-final-gate.mjs \

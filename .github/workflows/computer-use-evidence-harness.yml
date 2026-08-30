@@ -20,16 +20,14 @@ on:
         required: true
         type: string
 
-permissions:
-  actions: read
-  attestations: write
-  contents: read
-  id-token: write
+permissions: {}
 
 jobs:
   bind-source:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      actions: read
     outputs:
       source_commit: ${{ steps.bind.outputs.source_commit }}
     steps:
@@ -38,15 +36,25 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REF: ${{ github.ref }}
           PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
           CAPTURE_SESSION_ID: ${{ inputs.capture_session_id }}
         run: |
           set -euo pipefail
+          [[ "${WORKFLOW_REF}" == 'refs/heads/main' ]] || { echo '::error::The evidence harness must run from the trusted default branch.'; exit 1; }
           [[ "${PACKAGE_RUN_ID}" =~ ^[1-9][0-9]{0,19}$ ]] || { echo '::error::package_run_id must be decimal.'; exit 1; }
           [[ "${CAPTURE_SESSION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || { echo '::error::capture_session_id is unsafe.'; exit 1; }
           metadata="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PACKAGE_RUN_ID}")"
           [[ "$(jq -r '.conclusion' <<< "${metadata}")" == 'success' ]] || { echo '::error::Package run must be successful.'; exit 1; }
           source_commit="$(jq -r '.head_sha' <<< "${metadata}")"
+          package_path="$(jq -r '.path' <<< "${metadata}")"
+          package_event="$(jq -r '.event' <<< "${metadata}")"
+          package_branch="$(jq -r '.head_branch' <<< "${metadata}")"
+          package_repository="$(jq -r '.head_repository.full_name' <<< "${metadata}")"
+          [[ "${package_path}" == '.github/workflows/release-beta.yml' ]] || { echo '::error::Package run must come from release-beta.yml.'; exit 1; }
+          [[ "${package_event}" == 'push' ]] || { echo '::error::Package run must be a tag push.'; exit 1; }
+          [[ "${package_branch}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || { echo '::error::Package run must target a release tag.'; exit 1; }
+          [[ "${package_repository}" == "${GITHUB_REPOSITORY}" ]] || { echo '::error::Package run must come from this repository.'; exit 1; }
           [[ "${source_commit}" == "${GITHUB_SHA}" ]] || { echo '::error::Harness and package run must use the same source commit.'; exit 1; }
           printf 'source_commit=%s\n' "${source_commit}" >> "${GITHUB_OUTPUT}"
 
@@ -54,15 +62,29 @@ jobs:
     needs: bind-source
     runs-on: [self-hosted, macOS, computer-use-final-gate]
     environment: computer-use-final-gate
+    permissions:
+      contents: read
     timeout-minutes: 5
     steps:
+      # #387 setup must create this protected environment and capture-root policy.
+      - name: Require configured protected final-gate environment
+        shell: bash
+        env:
+          GATE_SENTINEL: ${{ vars.COMPUTER_USE_FINAL_GATE_SENTINEL }}
+        run: |
+          set -euo pipefail
+          [[ "${GATE_SENTINEL}" == 'computer-use-final-gate-v1' ]] || {
+            echo '::error::Protected computer-use-final-gate environment is not configured; complete #387 setup before using this runner.'
+            exit 1
+          }
+
       - name: Checkout exact harness revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ needs.bind-source.outputs.source_commit }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.2
 
@@ -92,7 +114,7 @@ jobs:
             --validate-capture-only
 
       - name: Upload bounded machine transcript for trusted sealing
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: computer-use-machine-transcript-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/computer-use-machine-transcript/computer-use-machine-transcript.json
@@ -102,26 +124,44 @@ jobs:
   seal-evidence:
     needs: [bind-source, collect-transcript]
     runs-on: ubuntu-latest
+    environment: computer-use-final-gate
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
     timeout-minutes: 10
     steps:
+      # #387 setup must create this protected environment before attestation writes.
+      - name: Require configured protected final-gate environment
+        shell: bash
+        env:
+          GATE_SENTINEL: ${{ vars.COMPUTER_USE_FINAL_GATE_SENTINEL }}
+        run: |
+          set -euo pipefail
+          [[ "${GATE_SENTINEL}" == 'computer-use-final-gate-v1' ]] || {
+            echo '::error::Protected computer-use-final-gate environment is not configured; complete #387 setup before sealing evidence.'
+            exit 1
+          }
+
       - name: Checkout exact trusted builder revision
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ needs.bind-source.outputs.source_commit }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.2
 
       - name: Download bounded machine transcript
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: computer-use-machine-transcript-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/computer-use-machine-transcript
 
       - name: Download exact signed Windows artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ inputs.signed_windows_artifact }}
           path: ${{ runner.temp }}/computer-use-windows
@@ -130,7 +170,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Download exact notarized macOS artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: ${{ inputs.notarized_macos_artifact }}
           path: ${{ runner.temp }}/computer-use-macos
@@ -176,12 +216,12 @@ jobs:
           printf 'evidence_path=%s\n' "${OUTPUT_PATH}" >> "${GITHUB_OUTPUT}"
 
       - name: Attest exact evidence bytes from the GitHub-hosted trusted builder
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: ${{ steps.seal.outputs.evidence_path }}
 
       - name: Upload only the attested bounded evidence JSON
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: computer-use-final-gate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.seal.outputs.evidence_path }}

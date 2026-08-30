@@ -8,6 +8,29 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const SAFE_CODE = /^[A-Z0-9][A-Z0-9_-]{0,63}$/u;
 const SAFE_ARTIFACT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const PENDING_REASON_CODE = 'EXTERNAL_GATE_NOT_RUN';
+const CANONICAL_PENDING_TEMPLATE_URL = new URL(
+  './tasks/evidence/issue-333-computer-use-final-gate-template.json',
+  import.meta.url,
+);
+const VERIFIER_BOOLEAN_OPTIONS = Object.freeze([
+  'self-test',
+  'allow-incomplete',
+  'trusted-workflow-attestation-verified',
+]);
+const VERIFIER_VALUE_OPTIONS = Object.freeze([
+  'evidence',
+  'source-commit',
+  'source-run-id',
+  'evidence-run-id',
+  'evidence-run-attempt',
+  'windows-artifact',
+  'macos-artifact',
+  'windows-portable-name',
+  'windows-portable-sha256',
+  'windows-installer-name',
+  'windows-installer-sha256',
+  'macos-sha256',
+]);
 export const COMPUTER_USE_PROVIDER_ADAPTER_VERSION = 'computer-use-v1';
 export const COMPUTER_USE_EVIDENCE_WORKFLOW = '.github/workflows/computer-use-evidence-harness.yml';
 export const COMPUTER_USE_TRANSCRIPT_SCHEMA_VERSION = 1;
@@ -291,6 +314,63 @@ function safeCode(value, path) {
     fail(`${path} must be a bounded stable code`);
 }
 
+function requireCompletedBindings({
+  expectedSourceCommit,
+  expectedSourceRunId,
+  expectedEvidenceRunId,
+  expectedEvidenceRunAttempt,
+  expectedWindowsArtifact,
+  expectedMacosArtifact,
+  expectedWindowsPortableName,
+  expectedWindowsPortableSha256,
+  expectedWindowsInstallerName,
+  expectedWindowsInstallerSha256,
+  expectedMacosSha256,
+}) {
+  const requiredStrings = [
+    ['--source-commit', expectedSourceCommit],
+    ['--source-run-id', expectedSourceRunId],
+    ['--evidence-run-id', expectedEvidenceRunId],
+    ['--windows-artifact', expectedWindowsArtifact],
+    ['--macos-artifact', expectedMacosArtifact],
+    ['--windows-portable-name', expectedWindowsPortableName],
+    ['--windows-portable-sha256', expectedWindowsPortableSha256],
+    ['--windows-installer-name', expectedWindowsInstallerName],
+    ['--windows-installer-sha256', expectedWindowsInstallerSha256],
+    ['--macos-sha256', expectedMacosSha256],
+  ];
+  for (const [option, value] of requiredStrings) {
+    if (typeof value !== 'string' || value.length === 0)
+      fail(`${option} is required for completed evidence`);
+  }
+  if (!/^[0-9a-f]{40}$/u.test(expectedSourceCommit))
+    fail('--source-commit must be a lowercase 40-character commit id');
+  for (const [option, value] of [
+    ['--source-run-id', expectedSourceRunId],
+    ['--evidence-run-id', expectedEvidenceRunId],
+  ]) {
+    if (!/^[1-9][0-9]{0,19}$/u.test(value)) fail(`${option} must be a decimal workflow run id`);
+  }
+  if (!Number.isSafeInteger(expectedEvidenceRunAttempt) || expectedEvidenceRunAttempt < 1)
+    fail('--evidence-run-attempt must be a positive integer');
+  for (const [option, value] of [
+    ['--windows-portable-sha256', expectedWindowsPortableSha256],
+    ['--windows-installer-sha256', expectedWindowsInstallerSha256],
+    ['--macos-sha256', expectedMacosSha256],
+  ]) {
+    if (!SHA256.test(value) || value === '0'.repeat(64))
+      fail(`${option} must be a non-zero lowercase SHA-256 digest`);
+  }
+  for (const [option, value] of [
+    ['--windows-artifact', expectedWindowsArtifact],
+    ['--macos-artifact', expectedMacosArtifact],
+    ['--windows-portable-name', expectedWindowsPortableName],
+    ['--windows-installer-name', expectedWindowsInstallerName],
+  ]) {
+    if (!SAFE_ARTIFACT_NAME.test(value)) fail(`${option} is unsafe`);
+  }
+}
+
 function requiredJourneyRows(value, journeys, path, { allowIncomplete }) {
   if (!Array.isArray(value) || value.length !== journeys.length)
     fail(`${path} must contain exactly ${journeys.length} rows`);
@@ -305,6 +385,7 @@ function requiredJourneyRows(value, journeys, path, { allowIncomplete }) {
     safeCode(row.evidenceCode, `${rowPath}.evidenceCode`);
 
     if (row.status === 'PASS') {
+      if (allowIncomplete) fail(`${rowPath} Core/Safety PASS is not valid in incomplete mode`);
       if (row.reasonCode !== 'NONE') fail(`${rowPath} PASS must use reasonCode NONE`);
       if (row.evidenceCode !== specification.passEvidenceCode)
         fail(`${rowPath} PASS must use evidenceCode ${specification.passEvidenceCode}`);
@@ -438,6 +519,20 @@ export function validateComputerUseFinalGateEvidence(
     'root',
   );
   if (evidence.schemaVersion !== 3 || evidence.issue !== 333) fail('schemaVersion/issue mismatch');
+  if (!allowIncomplete)
+    requireCompletedBindings({
+      expectedSourceCommit,
+      expectedSourceRunId,
+      expectedEvidenceRunId,
+      expectedEvidenceRunAttempt,
+      expectedWindowsArtifact,
+      expectedMacosArtifact,
+      expectedWindowsPortableName,
+      expectedWindowsPortableSha256,
+      expectedWindowsInstallerName,
+      expectedWindowsInstallerSha256,
+      expectedMacosSha256,
+    });
   if (typeof evidence.sourceCommit !== 'string' || !/^[0-9a-f]{40}$/u.test(evidence.sourceCommit))
     fail('sourceCommit must be a lowercase 40-character commit id');
   if (!allowIncomplete && evidence.sourceCommit === '0'.repeat(40)) fail('sourceCommit is pending');
@@ -778,24 +873,56 @@ function validFixture() {
   return fixture;
 }
 
+function canonicalPendingTemplate() {
+  let template;
+  try {
+    template = JSON.parse(readFileSync(CANONICAL_PENDING_TEMPLATE_URL, 'utf8'));
+  } catch (error) {
+    fail(`canonical all-pending template is unavailable: ${error.message}`);
+  }
+  return template;
+}
+
+function assertCanonicalPendingTemplate(evidence) {
+  const template = canonicalPendingTemplate();
+  if (JSON.stringify(evidence) !== JSON.stringify(template))
+    fail('allow-incomplete accepts only the canonical all-pending template');
+}
+
 function selfTest() {
   const fixture = validFixture();
-  assert.equal(validateComputerUseFinalGateEvidence(fixture).corePassed, true);
-  const { harnessAttestation: _omitted, ...handAuthored } = fixture;
-  assert.throws(
-    () => validateComputerUseFinalGateEvidence(handAuthored),
-    /keys must be exactly.*harnessAttestation/u,
-  );
+  const completedBindings = {
+    expectedSourceCommit: fixture.sourceCommit,
+    expectedSourceRunId: fixture.sourceRunId,
+    expectedEvidenceRunId: fixture.harnessAttestation.workflowRunId,
+    expectedEvidenceRunAttempt: fixture.harnessAttestation.workflowRunAttempt,
+    expectedWindowsArtifact: fixture.artifacts.windows.artifactName,
+    expectedMacosArtifact: fixture.artifacts.macos.artifactName,
+    expectedWindowsPortableName: fixture.artifacts.windows.portable.fileName,
+    expectedWindowsPortableSha256: fixture.artifacts.windows.portable.sha256,
+    expectedWindowsInstallerName: fixture.artifacts.windows.installer.fileName,
+    expectedWindowsInstallerSha256: fixture.artifacts.windows.installer.sha256,
+    expectedMacosSha256: fixture.artifacts.macos.packageSha256,
+  };
+  const validateComplete = (candidate, overrides = {}) =>
+    validateComputerUseFinalGateEvidence(candidate, {
+      ...completedBindings,
+      ...overrides,
+    });
+  assert.equal(validateComplete(fixture).corePassed, true);
+  const handAuthored = structuredClone(fixture);
+  delete handAuthored.harnessAttestation;
+  assert.throws(() => validateComplete(handAuthored), /keys must be exactly.*harnessAttestation/u);
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence(fixture, {
+      validateComplete(fixture, {
         expectedWindowsInstallerSha256: '4'.repeat(64),
       }),
     /Windows installer SHA-256 does not match/u,
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         ac28Core: fixture.ac28Core.map((row, index) =>
           index === 0 ? { ...row, status: 'SKIP', reasonCode: 'NOT_RUN' } : row,
@@ -805,7 +932,7 @@ function selfTest() {
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         ac29Safety: fixture.ac29Safety.map((row, index) =>
           index === 0 ? { ...row, evidenceCode: 'SELF_ATTESTED_PASS' } : row,
@@ -815,7 +942,7 @@ function selfTest() {
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         providerBinding: { ...fixture.providerBinding, roundsAttempted: 4 },
       }),
@@ -823,7 +950,7 @@ function selfTest() {
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         providerBinding: { ...fixture.providerBinding, fallbackUsed: true },
       }),
@@ -831,7 +958,7 @@ function selfTest() {
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         providerBinding: { ...fixture.providerBinding, adapterVersion: 'PENDING' },
       }),
@@ -839,7 +966,7 @@ function selfTest() {
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         ac30Compatibility: fixture.ac30Compatibility.map((row) =>
           row.id === 'AC-30-PROVIDER-JSON'
@@ -856,35 +983,38 @@ function selfTest() {
   );
   assert.throws(
     () =>
-      validateComputerUseFinalGateEvidence({
+      validateComplete({
         ...fixture,
         ac30Compatibility: fixture.ac30Compatibility.slice(0, -1),
       }),
     /must contain exactly 9 rows/u,
   );
   assert.throws(
-    () => validateComputerUseFinalGateEvidence({ ...fixture, rawScreen: 'forbidden' }),
+    () => validateComplete({ ...fixture, rawScreen: 'forbidden' }),
     /keys must be exactly/u,
   );
   console.log('Computer Use final gate evidence self-test passed.');
 }
 
 function parseArguments(argv) {
-  const options = {};
+  const options = Object.create(null);
+  const booleanOptions = new Set(VERIFIER_BOOLEAN_OPTIONS);
+  const valueOptions = new Set(VERIFIER_VALUE_OPTIONS);
+  const knownOptions = new Set([...booleanOptions, ...valueOptions]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (
-      argument === '--self-test' ||
-      argument === '--allow-incomplete' ||
-      argument === '--trusted-workflow-attestation-verified'
-    )
-      options[argument.slice(2)] = true;
-    else if (argument.startsWith('--')) {
+    if (!argument.startsWith('--')) fail(`unknown argument ${argument}`);
+    const key = argument.slice(2);
+    if (!knownOptions.has(key)) fail(`unknown option ${argument}`);
+    if (Object.prototype.hasOwnProperty.call(options, key)) fail(`duplicate option ${argument}`);
+    if (booleanOptions.has(key)) {
+      options[key] = true;
+    } else if (valueOptions.has(key)) {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith('--')) fail(`${argument} requires a value`);
-      options[argument.slice(2)] = value;
+      options[key] = value;
       index += 1;
-    } else fail(`unknown argument ${argument}`);
+    }
   }
   return options;
 }
@@ -892,6 +1022,8 @@ function parseArguments(argv) {
 function main() {
   const options = parseArguments(process.argv.slice(2));
   if (options['self-test']) {
+    if (Object.keys(options).length !== 1)
+      fail('--self-test cannot be combined with other options');
     selfTest();
     return;
   }
@@ -903,7 +1035,13 @@ function main() {
     fail('completed evidence requires external GitHub artifact attestation verification');
   const bytes = readFileSync(options.evidence);
   if (bytes.length > MAX_EVIDENCE_BYTES) fail(`evidence exceeds ${MAX_EVIDENCE_BYTES} bytes`);
-  const result = validateComputerUseFinalGateEvidence(JSON.parse(bytes.toString('utf8')), {
+  const candidate = JSON.parse(bytes.toString('utf8'));
+  if (options['allow-incomplete'] === true) {
+    if (VERIFIER_VALUE_OPTIONS.some((key) => key !== 'evidence' && options[key] !== undefined))
+      fail('--allow-incomplete accepts only the canonical all-pending template');
+    assertCanonicalPendingTemplate(candidate);
+  }
+  const result = validateComputerUseFinalGateEvidence(candidate, {
     allowIncomplete: options['allow-incomplete'] === true,
     expectedSourceCommit: options['source-commit'],
     expectedSourceRunId: options['source-run-id'],

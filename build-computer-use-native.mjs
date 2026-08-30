@@ -64,6 +64,9 @@ function run(command, arguments_, environment = process.env) {
 }
 
 export function sanitizedNativeBuildEnvironment(environment) {
+  // Node-gyp consumes npm_config_* after its CLI arguments, so even non-secret ambient
+  // values can replace the pinned Electron target, architecture, or header source. Keep
+  // every build control on the explicit command line and inject only a fixed log level.
   const allowed =
     /^(?:PATH|HOME|HOMEDRIVE|HOMEPATH|USER|USERNAME|LOGNAME|SHELL|COMSPEC|PATHEXT|PWD|INIT_CWD|TMPDIR|TEMP|TMP|TERM|LANG|LC_ALL|LC_CTYPE|NODE|PYTHON|CC|CXX|SDKROOT|DEVELOPER_DIR|MACOSX_DEPLOYMENT_TARGET|SYSTEMROOT|WINDIR|OS|PROCESSOR_[A-Z0-9_]+|NUMBER_OF_PROCESSORS|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|COMMONPROGRAMFILES(?:\(X86\))?|DRIVERDATA|COMMANDPROMPTTYPE|PLATFORM|PLATFORMTARGET|PREFERREDTOOLARCHITECTURE|INCLUDE|EXTERNAL_INCLUDE|LIB|LIBPATH|IFCPATH|VSINSTALLDIR|VISUALSTUDIOVERSION|DEVENVDIR|VCINSTALLDIR|VCTOOLSINSTALLDIR|VCTOOLSREDISTDIR|WINDOWSLIBPATH|WINDOWSSDKDIR|WINDOWSSDKVERSION|WINDOWSSDKLIBVERSION|WINDOWSSDKVERBINPATH|UCRTVERSION|UNIVERSALCRTSDKDIR|EXTENSIONSDKDIR|FRAMEWORKDIR|FRAMEWORKDIR32|FRAMEWORKVERSION|FRAMEWORKVERSION32|FRAMEWORK40VERSION|NETFXSDKDIR|VSCMD_[A-Z0-9_]+|__VSCMD_PREINIT_PATH)$/iu;
   return {
@@ -83,13 +86,17 @@ function isSecretLikeEnvironmentKey(key) {
     'APIKEY',
     'ACCESSKEY',
     'TOKEN',
+    'OTP',
     'SECRET',
     'PASSWORD',
+    'PASS',
     'PRIVATEKEY',
+    'KEY',
     'CREDENTIAL',
     'AUTH',
     'COOKIE',
     'SESSION',
+    'CERT',
     'CERTIFICATE',
   ].some((marker) => canonical.includes(marker));
 }
@@ -107,6 +114,27 @@ if (process.argv.includes('--test-environment-sanitizer')) {
     NPM_CONFIG_OTP: 'PRIVATE_CANARY',
     NPM_CONFIG_KEY: 'PRIVATE_CANARY',
     NPM_CONFIG_CERT: 'PRIVATE_CANARY',
+    NPM_CONFIG_PASS: 'PRIVATE_CANARY',
+    NPM_CONFIG_PRIVATE_KEY: 'PRIVATE_CANARY',
+    NPM_CONFIG_CERTIFICATE: 'PRIVATE_CANARY',
+    npm_config_target: '43.2.0',
+    npm_config_arch: 'arm64',
+    npm_config_target_arch: 'x64',
+    npm_config_runtime: 'electron',
+    npm_config_dist_url: 'https://electronjs.org/headers',
+    npm_config_cache: 'C:\\npm-cache',
+    npm_config_nodedir: 'C:\\electron-headers',
+    npm_config_node_gyp: 'C:\\node-gyp\\bin\\node-gyp.js',
+    npm_config_jobs: '2',
+    npm_config_build_from_source: 'true',
+    VSCMD_ARG_TGT_ARCH: 'x64',
+    VSCMD_VER: '17.0',
+    VCToolsInstallDir: 'C:\\VS\\VC\\Tools',
+    VSCMD_OTP: 'PRIVATE_CANARY',
+    VSCMD_KEY: 'PRIVATE_CANARY',
+    VSCMD_CERT: 'PRIVATE_CANARY',
+    VSCMD_PRIVATE_KEY: 'PRIVATE_CANARY',
+    VSCMD_CERTIFICATE: 'PRIVATE_CANARY',
     VSCMD_AUTHTOKEN: 'PRIVATE_CANARY',
     DATABASE_URL: 'PRIVATE_CANARY',
     CODEX_THREAD_ID: 'PRIVATE_CANARY',
@@ -123,6 +151,28 @@ if (process.argv.includes('--test-environment-sanitizer')) {
     sanitized.NPM_CONFIG_OTP !== undefined ||
     sanitized.NPM_CONFIG_KEY !== undefined ||
     sanitized.NPM_CONFIG_CERT !== undefined ||
+    sanitized.NPM_CONFIG_PASS !== undefined ||
+    sanitized.NPM_CONFIG_PRIVATE_KEY !== undefined ||
+    sanitized.NPM_CONFIG_CERTIFICATE !== undefined ||
+    sanitized.npm_config_target !== undefined ||
+    sanitized.npm_config_arch !== undefined ||
+    sanitized.npm_config_target_arch !== undefined ||
+    sanitized.npm_config_runtime !== undefined ||
+    sanitized.npm_config_dist_url !== undefined ||
+    sanitized.npm_config_cache !== undefined ||
+    sanitized.npm_config_nodedir !== undefined ||
+    sanitized.npm_config_node_gyp !== undefined ||
+    sanitized.npm_config_jobs !== undefined ||
+    sanitized.npm_config_build_from_source !== undefined ||
+    sanitized.npm_config_loglevel !== 'error' ||
+    sanitized.VSCMD_ARG_TGT_ARCH !== 'x64' ||
+    sanitized.VSCMD_VER !== '17.0' ||
+    sanitized.VCToolsInstallDir !== 'C:\\VS\\VC\\Tools' ||
+    sanitized.VSCMD_OTP !== undefined ||
+    sanitized.VSCMD_KEY !== undefined ||
+    sanitized.VSCMD_CERT !== undefined ||
+    sanitized.VSCMD_PRIVATE_KEY !== undefined ||
+    sanitized.VSCMD_CERTIFICATE !== undefined ||
     sanitized.VSCMD_AUTHTOKEN !== undefined ||
     sanitized.DATABASE_URL !== undefined ||
     sanitized.CODEX_THREAD_ID !== undefined
