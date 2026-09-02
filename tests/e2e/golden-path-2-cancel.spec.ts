@@ -25,7 +25,9 @@ test.describe('golden path 2: cancel mid-stream keeps the partial answer', () =>
   });
 
   test('stopping a running turn keeps the partial answer and shows a canceled state', async () => {
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, {
+      SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA: '1',
+    });
     const page: Page = await firstWindow(app);
     await completeSetupForFeatureTest(page);
 

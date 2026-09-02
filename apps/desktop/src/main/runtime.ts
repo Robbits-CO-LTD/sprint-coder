@@ -70,6 +70,7 @@ type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' 
   >;
 
 const executionStages: TurnStage[] = ['understanding', 'planning', 'executing'];
+const E2E_HOLD_MOCK_STREAM_FLAG = 'SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA';
 
 export class MockRuntimeAdapter {
   private readonly active = new Map<string, ActiveTurn>();
@@ -326,6 +327,7 @@ export class MockRuntimeAdapter {
         this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing')),
       );
       const chunks = chunkReply(loop.text);
+      let emittedReplyDeltas = 0;
       while (chunks.length > 0 || control.steering.length > 0) {
         if (chunks.length === 0) {
           const instruction = control.steering.shift();
@@ -339,6 +341,17 @@ export class MockRuntimeAdapter {
         await this.serialize(taskId, () =>
           this.publish(this.persistence.appendDelta(taskId, turnId, messageId, delta)),
         );
+        emittedReplyDeltas += 1;
+        // The packaged renderer can miss the mock's short streaming window on a loaded Windows
+        // host.  This opt-in belongs only to the isolated E2E process: production and ordinary
+        // mock turns retain their normal timing, while the cancel golden path must send a real
+        // cancel before the fixture is allowed to finish.
+        if (
+          emittedReplyDeltas === 1 &&
+          process.env[E2E_HOLD_MOCK_STREAM_FLAG] === '1' &&
+          !control.canceled
+        )
+          await waitUntilAborted(control.abortController.signal);
       }
       if (!control.canceled) await this.finish(taskId, turnId, 'completed');
     } catch {
@@ -511,4 +524,11 @@ function chunkReply(reply: string): string[] {
 
 function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function waitUntilAborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) =>
+    signal.addEventListener('abort', () => resolve(), { once: true }),
+  );
 }
