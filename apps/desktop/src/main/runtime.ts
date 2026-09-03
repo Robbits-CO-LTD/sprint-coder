@@ -344,14 +344,14 @@ export class MockRuntimeAdapter {
         emittedReplyDeltas += 1;
         // The packaged renderer can miss the mock's short streaming window on a loaded Windows
         // host.  This opt-in belongs only to the isolated E2E process: production and ordinary
-        // mock turns retain their normal timing, while the cancel golden path must send a real
-        // cancel before the fixture is allowed to finish.
+        // mock turns retain their normal timing. The test must observe the live stream before
+        // either sending a real cancel or clearing the flag through its Electron test handle.
         if (
           emittedReplyDeltas === 1 &&
           process.env[E2E_HOLD_MOCK_STREAM_FLAG] === '1' &&
           !control.canceled
         )
-          await waitUntilAborted(control.abortController.signal);
+          await waitForMockStreamRelease(control.abortController.signal);
       }
       if (!control.canceled) await this.finish(taskId, turnId, 'completed');
     } catch {
@@ -526,9 +526,17 @@ function pause(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function waitUntilAborted(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) =>
-    signal.addEventListener('abort', () => resolve(), { once: true }),
-  );
+function waitForMockStreamRelease(signal: AbortSignal): Promise<void> {
+  if (signal.aborted || process.env[E2E_HOLD_MOCK_STREAM_FLAG] !== '1') return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearInterval(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setInterval(() => {
+      if (process.env[E2E_HOLD_MOCK_STREAM_FLAG] !== '1') finish();
+    }, 100);
+    signal.addEventListener('abort', finish, { once: true });
+  });
 }

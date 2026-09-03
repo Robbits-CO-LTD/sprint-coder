@@ -1,12 +1,6 @@
 import { test, expect } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
-import {
-  closeApp,
-  createUserDataDir,
-  firstWindow,
-  launchApp,
-  removeUserDataDir,
-} from './helpers';
+import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 // docs/PRODUCT_AND_TECHNICAL_DESIGN.md §15.5 golden path 1:
 // 新規Task → message → streaming answer → restart → 復元。
@@ -27,7 +21,9 @@ test.describe('golden path 1: new task, streaming answer, restart, restore', () 
     const messageText = 'このリポジトリの構成を教えて (golden-path-1)';
 
     // --- First launch: create a task, send a message, watch it stream, then complete. ---
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, {
+      SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA: '1',
+    });
     let page: Page = await firstWindow(app);
 
     await page.getByTestId('sidebar-new-task-button').click();
@@ -47,7 +43,10 @@ test.describe('golden path 1: new task, streaming answer, restart, restore', () 
     await expect(streamingBubble).toBeVisible({ timeout: 15_000 });
     await expect(streamingBubble).not.toHaveText('', { timeout: 5_000 });
 
-    // Turn completes.
+    // Release only after observing the real streaming UI, then let normal completion persist it.
+    await app.evaluate(() => {
+      process.env['SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA'] = '0';
+    });
     await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 20_000 });
 
     const userMessage = page.getByTestId('user-message');

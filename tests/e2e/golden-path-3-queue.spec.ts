@@ -84,7 +84,9 @@ test.describe('Composer interrupt keeps the existing queue behind the replacemen
   });
 
   test('cancels Turn 1, starts the interruption, then runs the preserved queue', async () => {
-    app = await launchApp(userDataDir);
+    app = await launchApp(userDataDir, undefined, {
+      SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA: '1',
+    });
     const page: Page = await firstWindow(app);
     await completeSetupForFeatureTest(page);
 
@@ -98,6 +100,7 @@ test.describe('Composer interrupt keeps the existing queue behind the replacemen
     await textarea.press('Enter');
     const runCard = page.getByTestId('run-card');
     await expect(runCard).toHaveAttribute('data-run-status', 'running');
+    await expect(page.getByTestId('streaming-assistant-message')).toBeVisible();
 
     await textarea.fill(queuedText);
     await textarea.press('Enter');
@@ -106,11 +109,21 @@ test.describe('Composer interrupt keeps the existing queue behind the replacemen
     await textarea.fill(interruptText);
     const interruptButton = page.getByTestId('composer-interrupt-button');
     await expect(interruptButton).toHaveAccessibleName('割り込んで送信');
+    const userMessages = page.getByTestId('user-message');
+    await expect(userMessages).toHaveCount(1);
     await interruptButton.click();
+
+    // Keep Turn 1 alive until the real stop-and-send replaces it. Only then release the fixture:
+    // releasing before the click could let the queued input win the same timing race again.
+    await expect(userMessages).toHaveCount(2);
+    await expect(userMessages.nth(1)).toHaveText(interruptText);
+    await expect(page.getByTestId('queued-item')).toContainText(queuedText);
+    await app.evaluate(() => {
+      process.env['SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA'] = '0';
+    });
 
     // stopAndSend starts the interruption before the pre-existing queue. Once both finish, the
     // history order proves that the queue was retained rather than dropped or run first.
-    const userMessages = page.getByTestId('user-message');
     await expect(userMessages).toHaveCount(3, { timeout: 30_000 });
     await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
     await expect(userMessages.nth(0)).toHaveText(firstText);
