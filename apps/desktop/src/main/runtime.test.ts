@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TurnEvent, TurnStage } from '@sprint-coder/contracts';
 import type { IntelligenceStepState, ReasoningEffort, StepSnapshot } from '@sprint-coder/domain';
 import type { PersistenceClient } from './persistence';
@@ -103,6 +103,47 @@ class FakePersistence implements Pick<
 }
 
 describe('MockRuntimeAdapter', () => {
+  it('holds the first E2E delta until the fixture is released, then completes normally', async () => {
+    const flag = 'SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA';
+    vi.stubEnv(flag, '1');
+    const persistence = new FakePersistence();
+    const runtime = new MockRuntimeAdapter(persistence, () => undefined, 1);
+    try {
+      runtime.start('task', 'turn', '表示確認後に完了');
+      await waitFor(() => persistence.events.some((event) => event.type === 'message.delta'));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(persistence.events.filter((event) => event.type === 'message.delta')).toHaveLength(1);
+      expect(persistence.state).toBe('synthesizing');
+
+      vi.stubEnv(flag, '0');
+      await waitFor(() => persistence.state === 'completed');
+      expect(persistence.content).toContain('表示確認後に完了');
+      expect(
+        persistence.events.filter((event) => event.type === 'message.delta').length,
+      ).toBeGreaterThan(1);
+    } finally {
+      await runtime.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('cancels a held E2E stream without releasing it or emitting more deltas', async () => {
+    vi.stubEnv('SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA', '1');
+    const persistence = new FakePersistence();
+    const runtime = new MockRuntimeAdapter(persistence, () => undefined, 1);
+    try {
+      runtime.start('task', 'turn', '停止');
+      await waitFor(() => persistence.events.some((event) => event.type === 'message.delta'));
+      await runtime.cancel('turn');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(persistence.events.filter((event) => event.type === 'message.delta')).toHaveLength(1);
+      expect(persistence.events.some((event) => event.type === 'turn.completed')).toBe(false);
+    } finally {
+      await runtime.dispose();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('keeps workspace-bound tools reachable for Project roots', () => {
     const binding = mockWorkspaceBinding(null, {
       source: 'project',

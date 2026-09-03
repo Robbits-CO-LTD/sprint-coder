@@ -6,15 +6,19 @@ import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir 
 // a real runtime uses, which is what makes this testable at all: mock is the only runtime under
 // SPRINT_CODER_E2E_MODE=dev.
 
-async function withApp(label: string, body: (page: Page) => Promise<void>): Promise<void> {
+async function withApp(
+  label: string,
+  body: (page: Page, app: ElectronApplication) => Promise<void>,
+  environment: Readonly<Record<string, string>> = {},
+): Promise<void> {
   const dir = createUserDataDir(label);
   let app: ElectronApplication | null = null;
   try {
-    app = await launchApp(dir);
+    app = await launchApp(dir, undefined, environment);
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-new-task-button').click();
     await expect(page.getByTestId('composer-textarea')).toBeVisible();
-    await body(page);
+    await body(page, app);
   } finally {
     await closeApp(app);
     removeUserDataDir(dir);
@@ -23,37 +27,47 @@ async function withApp(label: string, body: (page: Page) => Promise<void>): Prom
 
 test.describe('Generation Canvas reasoning', () => {
   test('uses a large Canvas while active and settles into one compact history row', async () => {
-    await withApp('reasoning-height', async (page) => {
-      await page.getByTestId('composer-textarea').fill('思考ピルの高さを確認したい');
-      await page.getByTestId('composer-textarea').press('Enter');
+    await withApp(
+      'reasoning-height',
+      async (page, app) => {
+        await page.getByTestId('composer-textarea').fill('思考ピルの高さを確認したい');
+        await page.getByTestId('composer-textarea').press('Enter');
 
-      const runCard = page.getByTestId('run-card');
-      await expect(runCard).toBeVisible();
-      const activeHeight = await runCard.evaluate((el) => el.getBoundingClientRect().height);
-      expect(activeHeight).toBeGreaterThan(88);
-      await expect(runCard).toContainText('思考中');
-      await expect(runCard).toContainText('中'); // the current stage is always text
-      await expect(page.getByTestId('run-card-stop-button')).toBeVisible();
-      await expect(page.getByTestId('run-stage-progress')).toBeVisible();
-      await expect(page.getByTestId('generation-indicator')).toHaveAttribute('aria-hidden', 'true');
-      await expect(page.locator('.generation-pixel')).toHaveCount(9);
-      await expect(page.locator('.stage-row')).toHaveCount(0);
+        const runCard = page.getByTestId('run-card');
+        await expect(runCard).toBeVisible();
+        const activeHeight = await runCard.evaluate((el) => el.getBoundingClientRect().height);
+        expect(activeHeight).toBeGreaterThan(88);
+        await expect(runCard).toContainText('思考中');
+        await expect(runCard).toContainText('中'); // the current stage is always text
+        await expect(page.getByTestId('run-card-stop-button')).toBeVisible();
+        await expect(page.getByTestId('run-stage-progress')).toBeVisible();
+        await expect(page.getByTestId('generation-indicator')).toHaveAttribute(
+          'aria-hidden',
+          'true',
+        );
+        await expect(page.locator('.generation-pixel')).toHaveCount(9);
+        await expect(page.locator('.stage-row')).toHaveCount(0);
 
-      // Answer tokens stream below the Canvas without replacing it.
-      await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({
-        timeout: 30_000,
-      });
-      await expect(runCard).toHaveAttribute('data-run-status', 'running');
+        // Answer tokens stream below the Canvas without replacing it.
+        await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({
+          timeout: 30_000,
+        });
+        await expect(runCard).toHaveAttribute('data-run-status', 'running');
 
-      await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
-      await expect(page.getByTestId('generation-indicator')).toHaveAttribute(
-        'data-pattern',
-        'settled',
-      );
-      await expect
-        .poll(() => runCard.evaluate((el) => el.getBoundingClientRect().height))
-        .toBeLessThan(56);
-    });
+        await app.evaluate(() => {
+          process.env['SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA'] = '0';
+        });
+        await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
+        await expect(page.getByTestId('generation-indicator')).toHaveAttribute(
+          'data-pattern',
+          'settled',
+        );
+        await expect
+          .poll(() => runCard.evaluate((el) => el.getBoundingClientRect().height))
+          .toBeLessThan(56);
+      },
+      { SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA: '1' },
+    );
   });
 
   test('opens the reasoning panel, streams paragraphs, and never moves the timeline scroll', async () => {
