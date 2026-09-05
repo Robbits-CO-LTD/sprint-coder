@@ -2191,6 +2191,35 @@ describe('Computer Use contracts', () => {
     ).toThrow();
   });
 
+  it('rejects injected control and Apple function-key characters in type actions', () => {
+    for (const text of [
+      '\0',
+      '\r',
+      '\n',
+      '\t',
+      '\x1b',
+      '\x7f',
+      '\u0085',
+      '\uf700',
+      '\uf70b',
+      '\uf72d',
+      '\uf8ff',
+    ])
+      expect(contracts.computerUseActionSchema.safeParse({ type: 'type', text }).success).toBe(
+        false,
+      );
+    expect(
+      contracts.computerUseActionSchema.safeParse({ type: 'type', text: '日本語 👩‍💻' }).success,
+    ).toBe(true);
+    expect(
+      contracts.computerUseActionSchema.safeParse({
+        type: 'set_text',
+        targetId: 'field',
+        text: 'line one\nline two\tvalue',
+      }).success,
+    ).toBe(true);
+  });
+
   it('keeps observations bounded and expires them after capture', () => {
     const observation = contracts.computerUseObservationSchema.parse({
       sessionId: 'session-1',

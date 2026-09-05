@@ -18,6 +18,13 @@
 
 namespace sprint_coder::computer_use {
 
+constexpr bool IsTypeTextScalar(std::uint32_t scalar) noexcept {
+  return scalar >= 0x20 && scalar <= 0x10ffff &&
+         !(scalar >= 0x7f && scalar <= 0x9f) &&
+         !(scalar >= 0xd800 && scalar <= 0xdfff) &&
+         !(scalar >= 0xf700 && scalar <= 0xf8ff);
+}
+
 constexpr std::uint16_t kProtocolVersion = 1;
 constexpr std::uint16_t kApiVersion = 1;
 constexpr std::uint32_t kMaxMetadataBytes = 64 * 1024;

@@ -3673,6 +3673,7 @@ bool DecodeUtf8Scalars(std::string_view text, std::vector<std::uint32_t>* output
     if (scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff) ||
         (width == 3 && scalar < 0x800) || (width == 4 && scalar < 0x10000))
       return false;
+    if (!sprint_coder::computer_use::IsTypeTextScalar(scalar)) return false;
     output->push_back(scalar);
     index += width;
   }

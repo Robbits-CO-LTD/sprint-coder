@@ -1119,6 +1119,53 @@ describe('ComputerUseController', () => {
     await fixture.controller.stop(started.sessionId);
   });
 
+  it('records partial text as unknown_effect when a later scalar is rejected', async () => {
+    let calls = 0;
+    const fixture = createFixture({
+      dispatch: async () =>
+        ++calls === 1
+          ? { result: 'completed', reasonCode: null }
+          : { result: 'rejected', reasonCode: 'native_focus_changed' },
+    });
+    const started = await start(fixture, 'full_access_app');
+    await fixture.controller.observe(started.sessionId);
+    await expect(
+      fixture.controller.act(started.sessionId, { type: 'type', text: 'ab' }),
+    ).resolves.toMatchObject({ result: 'unknown_effect', reasonCode: 'native_focus_changed' });
+    expect([...fixture.audits.values()][0]?.state).toBe('unknown_effect');
+    await fixture.controller.stop(started.sessionId);
+  });
+
+  it.each(['unknown_effect', 'rejected', 'paused'] as const)(
+    'does not publish a resumable session after Stop and a late %s acknowledgement',
+    async (result) => {
+      let enter!: () => void;
+      let release!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const fixture = createFixture({
+        dispatch: async () => {
+          enter();
+          await gate;
+          return { result, reasonCode: 'native_ack_late' };
+        },
+      });
+      const started = await start(fixture, 'full_access_app');
+      await fixture.controller.observe(started.sessionId);
+      const action = fixture.controller.act(started.sessionId, click);
+      await entered;
+      await fixture.controller.stop(started.sessionId, 'emergency_stop');
+      release();
+      await action;
+      expect(fixture.controller.getStatus(started.sessionId)).toBeNull();
+      expect(fixture.statuses.at(-1)?.state).toBe('stopped');
+    },
+  );
+
   it('sends no later type scalar and reports a confirmed partial effect after Stop', async () => {
     let enteredFirst!: () => void;
     let releaseFirst!: () => void;

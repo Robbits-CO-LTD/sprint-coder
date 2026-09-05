@@ -45,8 +45,8 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #410 | Regression green; PR review pending | [bug] Anthropic への要求が 4096 出力トークンに固定され打ち切られても通知されない |
 | #411 | Regression green; PR review pending | [bug] provider の Retry-After を上限なしに待つため Team 実行が数時間止まって見える |
 | #412 | Regression green; PR review pending | [bug] クロスオリジンのリダイレクトで API キーヘッダが転送される |
-| #413 | Pending investigation | [bug] Computer Use で複数文字入力の途中で拒否されると「効果なし」として監査される |
-| #414 | Pending investigation | [bug] Computer Use を緊急停止した直後に「再開可能」な幽霊セッションが残る |
+| #413 | Regression green; PR review pending | [bug] Computer Use で複数文字入力の途中で拒否されると「効果なし」として監査される |
+| #414 | Regression green; PR review pending | [bug] Computer Use を緊急停止した直後に「再開可能」な幽霊セッションが残る |
 | #415 | Regression green; PR review pending | [bug] IPC ハンドラの出力側スキーマ違反が「入力内容を確認してください」として表示されログにも残らない |
 | #416 | Regression green; PR review pending | [bug] Project コンテキストが Worker 予算超過だと管理ツールセッションが解放されず親 Turn が終わらない |
 | #417 | Regression green; PR review pending | [bug] ツールライフサイクル記録が例外を投げると以後のツール呼び出しが Turn 内で永久に待つ |
@@ -63,7 +63,7 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #428 | Regression green; PR review pending | [bug] Managed Local モデルのメタデータ読み取りが 8 バイトごとにシステムコールを発行し極端に遅い |
 | #429 | Regression green; PR review pending | [bug] Skeptic の完了後も abort リスナーが残り期限切れ時に終了済み Turn へ無駄なキャンセルが飛ぶ |
 | #430 | Regression green; PR review pending | [bug] 失敗診断のコピー中にランタイム状態が変わるとコピーボタンが押せないままになる |
-| #431 | Pending investigation | [bug] Computer Use の文字入力に制御文字やファンクションキーを含めると許可リスト外のキー操作ができる |
+| #431 | Regression green; PR review pending | [bug] Computer Use の文字入力に制御文字やファンクションキーを含めると許可リスト外のキー操作ができる |
 | #434 | Excluded by explicit user follow-up; no feature implementation | ローカルAI設定で投機的デコード(speculative decoding)設定を可能にする |
 
 ## First checkpoint
@@ -93,3 +93,7 @@ Issues #390/#392/#394/#404/#420/#425/#426/#430 have failing-before and passing-a
 ## Team checkpoint
 
 #398/#399: failing-before and passing-after tests cover late cancel during actual isolation integration, stop while a catalog is preparing, writable steer restart, rate-limit retry reuse, and preflight failure reports. Complete TeamCoordinator integration and TeamWorkerRuntime tests PASS; domain suite 305 PASS; desktop/domain typecheck PASS. Required cancel semantics were rerun after preventing pending cancel from entering automatic retry. PR #437 review follow-up 0e58f68 retains supervisor cleanup for unregistered canceled startup sessions (39 tests PASS).
+
+## Computer Use defect checkpoint
+
+#413/#414/#431: partial scalar rejection and all late native acknowledgement variants reproduced before the fix. Contracts 68 PASS; controller/planner/native bridge 85 PASS. macOS native addon build PASS (unsigned verification artifact only); shared protocol harness PASS with ASan/UBSan, covering every C0/C1 and Apple function-key scalar. Semantic set_text keeps multiline content and printable Unicode/emoji remain accepted. Desktop/contracts typecheck and ESLint PASS. Existing signed-device/real-provider gates #387/#388 are not claimed and no new feature #434 work was performed.
