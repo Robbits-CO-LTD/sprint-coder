@@ -53,6 +53,8 @@ describe('attachment draft store state', () => {
     });
 
     await useAppStore.getState().startTurn(taskId, '  画像を確認して  ', undefined, [second.id]);
+    // Acceptance can happen while this Task has no event subscription.
+    expect(useAppStore.getState().sendingByTask[taskId]).toBe(false);
     expect(start).toHaveBeenCalledWith({
       taskId,
       text: '画像を確認して',

@@ -1,5 +1,5 @@
 import {
-  claudeEffortSchema,
+  effortOptionSchema,
   codexModelIdSchema,
   codexModelOptionSchema,
   publicErrorSchema,
@@ -462,7 +462,7 @@ export function isMainToRuntimeEnvelope(value: unknown): value is MainToRuntimeE
     codexModelIdSchema.safeParse(value.model).success &&
     (!('effort' in value) ||
       value.effort === undefined ||
-      claudeEffortSchema.safeParse(value.effort).success) &&
+      effortOptionSchema.shape.id.safeParse(value.effort).success) &&
     // Validated here rather than trusted: this value decides whether the adapter hands the CLI a
     // writable sandbox, so an unrecognised string must not fall through to a permissive default.
     (!('writeScope' in value) ||

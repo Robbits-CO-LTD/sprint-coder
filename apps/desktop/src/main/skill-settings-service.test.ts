@@ -27,6 +27,15 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
+  it('retries opening the store after a transient filesystem failure', async () => {
+    const root = await home();
+    const blocked = join(root, '.sprintcoder');
+    await writeFile(blocked, 'temporary obstruction');
+    const service = new SkillSettingsService({ homePath: root });
+    await expect(service.listCatalog()).rejects.toThrow();
+    await rm(blocked);
+    await expect(service.listCatalog()).resolves.toMatchObject({ items: [] });
+  });
   it('provides an explicit minimal catalog when the Skill Store is unavailable at startup', async () => {
     const service = new SkillSettingsService({ homePath: await home() });
     service.markContextCatalogUnavailable();

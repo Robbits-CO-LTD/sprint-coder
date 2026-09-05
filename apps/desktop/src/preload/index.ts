@@ -1231,7 +1231,8 @@ const api: SprintCoderApi = {
       return () => {
         if (!active) return;
         active = false;
-        ipcRenderer.removeListener(IPC_CHANNELS.turnsPort, listener);
+        // Keep the correlated listener until a pending transfer arrives so it can close the port.
+        if (port !== undefined) ipcRenderer.removeListener(IPC_CHANNELS.turnsPort, listener);
         port?.postMessage({ type: 'unsubscribe' });
         port?.close();
       };

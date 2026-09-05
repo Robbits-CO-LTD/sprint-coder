@@ -15,10 +15,12 @@ export function SkillSettingsSection({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const loaded = useRef(false);
 
   async function refresh() {
     setLoading(true);
+    setLoadFailed(false);
     setError(null);
     try {
       const api = window.sprintCoder?.skills;
@@ -32,14 +34,15 @@ export function SkillSettingsSection({
       loaded.current = true;
       setStatus('Sprint Coder Skillsを読み込みました。');
     } catch {
+      setLoadFailed(true);
       setError('Skill一覧を取得できませんでした。再読み込みしてください。');
     } finally {
       setLoading(false);
     }
   }
   useEffect(() => {
-    if (active && !loaded.current && !loading) void refresh();
-  }, [active, loading]);
+    if (active && !loaded.current && !loading && !loadFailed) void refresh();
+  }, [active, loading, loadFailed]);
   async function reload() {
     loaded.current = false;
     await refresh();

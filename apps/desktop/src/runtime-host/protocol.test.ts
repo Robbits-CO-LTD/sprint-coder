@@ -439,8 +439,16 @@ describe('Runtime Host protocol', () => {
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']) {
       expect(isMainToRuntimeEnvelope({ ...valid, effort })).toBe(true);
     }
-    expect(isMainToRuntimeEnvelope({ ...valid, effort: 'bogus' })).toBe(false);
+    for (const effort of ['', 'invalid effort', 'a'.repeat(65)]) {
+      expect(isMainToRuntimeEnvelope({ ...valid, effort })).toBe(false);
+    }
     expect(isMainToRuntimeEnvelope({ ...valid, effort: 5 })).toBe(false);
+  });
+
+  it('accepts catalog-defined Codex effort levels including ultra', () => {
+    for (const effort of ['none', 'ultra', 'future_level-2']) {
+      expect(isMainToRuntimeEnvelope({ ...startEnvelope(), effort })).toBe(true);
+    }
   });
 
   it('accepts only bounded structured diagnostics on Runtime errors', () => {

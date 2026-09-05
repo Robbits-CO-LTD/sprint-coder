@@ -365,6 +365,7 @@ let reasoningUnsubscribe: (() => void) | null = null;
 let fileEditUnsubscribe: (() => void) | null = null;
 let taskUpdateUnsubscribe: (() => void) | null = null;
 let updateHealthUnsubscribe: (() => void) | null = null;
+let runtimeStatusUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let projectRefreshToken = 0;
@@ -1055,8 +1056,12 @@ export const useAppStore = create<AppState>((set, get) => {
             if (info.updateHealth !== undefined) applyUpdateHealth(info.updateHealth);
           })
           .catch(() => undefined);
+      runtimeStatusUnsubscribe?.();
+      runtimeStatusUnsubscribe = null;
       if (typeof window.sprintCoder.runtime?.subscribeStatus === 'function')
-        window.sprintCoder.runtime.subscribeStatus((runtimeStatus) => set({ runtimeStatus }));
+        runtimeStatusUnsubscribe = window.sprintCoder.runtime.subscribeStatus((runtimeStatus) =>
+          set({ runtimeStatus }),
+        );
       updateHealthUnsubscribe?.();
       updateHealthUnsubscribe = null;
       if (typeof window.sprintCoder.updates?.subscribeHealth === 'function')
@@ -2301,6 +2306,11 @@ export const useAppStore = create<AppState>((set, get) => {
         // when the first message also produced an automatic title (issue #4).
         const renamed = result?.renamedTask;
         set((state) => ({
+          // The accepted event may have been published while another Task was selected.
+          sendingByTask:
+            state.pendingOptimisticIdByTask[taskId] === optimisticId
+              ? { ...state.sendingByTask, [taskId]: false }
+              : state.sendingByTask,
           tasks: state.tasks.map((task) =>
             task.id === taskId
               ? {
