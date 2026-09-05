@@ -696,6 +696,7 @@ import {
   providerFirstEventTimeoutMs,
 } from './provider-stream-deadline';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
+import { PROVIDER_OUTPUT_LIMIT_MESSAGE } from './provider-output-limit';
 import {
   buildProviderFailureDiagnostic,
   providerCauseFromDeadline,
@@ -1108,11 +1109,17 @@ export class IpcRouter {
       providerId: 'orcarouter',
       runtime: orcaRouter,
     });
-    const anthropic = new AnthropicProviderClient((connection) => {
-      if (connection.secretReference === null)
-        throw new Error('Anthropic Connection has no secret reference');
-      return parseAnthropicCredential(providerSecrets.get(connection.secretReference));
-    });
+    const anthropic = new AnthropicProviderClient(
+      (connection) => {
+        if (connection.secretReference === null)
+          throw new Error('Anthropic Connection has no secret reference');
+        return parseAnthropicCredential(providerSecrets.get(connection.secretReference));
+      },
+      undefined,
+      undefined,
+      (connectionId, modelId) =>
+        this.modelCatalog.find(connectionId, modelId)?.maxOutputTokens.value ?? null,
+    );
     this.providerRegistry.register({
       runtimeKind: 'official_api',
       providerId: 'anthropic',
@@ -7150,7 +7157,17 @@ export class IpcRouter {
           connection.providerId,
           this.providerEgressTrustForConnection(connection),
         );
-        if (!initialEgress.allowed) throw new Error('Provider egress was denied by policy');
+        if (!initialEgress.allowed)
+          throw new ProviderTurnFailureError(
+            {
+              failureStage: 'provider_error',
+              category: 'invalid_request',
+              retryable: false,
+              providerCode: 'policy_denied',
+              modelPreparation: 'not_required',
+            },
+            '送信ポリシーでProviderへの送信が拒否されました。Taskのローカル限定設定と機密情報の有無を確認してください。',
+          );
         if (
           providerImageDispatch !== undefined &&
           !(await this.providerImageAttachmentStillValid(
@@ -7316,7 +7333,7 @@ export class IpcRouter {
             toolCallCount: roundToolCalls.length,
             outputLength: roundOutput.join('').length,
           });
-          if (canRetryWithoutWorkspaceTools) {
+          if (canRetryWithoutWorkspaceTools && roundError.providerCode !== 'output_token_limit') {
             roundTools = Object.freeze([]);
             const guidanceIndex = messages.findIndex(
               ({ role, content }) => role === 'system' && content === workspaceGuidance,
@@ -7334,7 +7351,12 @@ export class IpcRouter {
             connection.providerId === 'ollama' ? 'completed' : 'not_required',
           );
           if (cause === null) throw new Error('Provider execution was canceled');
-          throw new ProviderTurnFailureError(cause);
+          throw new ProviderTurnFailureError(
+            cause,
+            roundError.providerCode === 'output_token_limit'
+              ? PROVIDER_OUTPUT_LIMIT_MESSAGE
+              : undefined,
+          );
         }
         if (!roundCompleted)
           throw new ProviderTurnFailureError(

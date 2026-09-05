@@ -42,7 +42,7 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #407 | Regression green; PR review pending | [bug] コマンド出力が上限に達した後も小さなチャンクが追記され欠落のある出力が連続して見える |
 | #408 | Regression green; PR review pending | [bug] Goal 実行中に Stop-and-Send すると無関係な次の Turn で Goal が完了・ブロック扱いになる |
 | #409 | Regression green; PR review pending | [bug] CRLF 形式の SSE がチャンク境界で分断されると応答の一部が黙って消える |
-| #410 | Pending investigation | [bug] Anthropic への要求が 4096 出力トークンに固定され打ち切られても通知されない |
+| #410 | Regression green; PR review pending | [bug] Anthropic への要求が 4096 出力トークンに固定され打ち切られても通知されない |
 | #411 | Regression green; PR review pending | [bug] provider の Retry-After を上限なしに待つため Team 実行が数時間止まって見える |
 | #412 | Regression green; PR review pending | [bug] クロスオリジンのリダイレクトで API キーヘッダが転送される |
 | #413 | Pending investigation | [bug] Computer Use で複数文字入力の途中で拒否されると「効果なし」として監査される |
@@ -56,7 +56,7 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #421 | Regression green; PR review pending | [bug] main が未捕捉例外で終了すると llama-server が残留しモデルがメモリに載ったままになる |
 | #422 | Regression green; PR review pending | [bug] Managed Local モデルの読み込み中に Turn をキャンセルしても読み込みが止まらない |
 | #423 | Regression green; PR review pending | [bug] Project フォルダ運用中に編集が quarantine されても Task に反映されず再起動まで全編集が失敗し続ける |
-| #424 | Pending investigation | [bug] 高エントロピー判定の誤検知で provider への送信が全面拒否され Turn が原因不明で失敗する |
+| #424 | Regression green; PR review pending | [bug] 高エントロピー判定の誤検知で provider への送信が全面拒否され Turn が原因不明で失敗する |
 | #425 | Regression green; PR review pending | [bug] Turn の port 購読を到着前に解除すると main 側の port が開いたまま残る |
 | #426 | Regression green; PR review pending | [bug] ランタイム状態の購読解除関数が捨てられ開発時に二重登録される |
 | #427 | Regression green; PR review pending | [bug] ワークスペース検索ツールだけが root の同一性チェックを通らない |
@@ -85,3 +85,7 @@ Issues #390/#392/#394/#404/#420/#425/#426/#430 have failing-before and passing-a
 ## Task and IPC checkpoint
 
 #391/#393/#408/#415/#423: 1,108 IPC/UI tests PASS, contracts 67 PASS, complete SQLite and Project integration suites PASS through their Electron ABI bridges. Regression proofs cover background activity without a Task port, destroyed-window disposal, private output validation, Goal replacement, and shared Project quarantine. Desktop/contracts typecheck PASS.
+
+## Provider output and disclosure checkpoint
+
+#410/#424: eight failing regressions passed after changes. Related 1,136 tests PASS, including the full Electron provider-egress gate suite. Anthropic uses its selected catalog maximum when known and retains the compatibility fallback when unknown. Truncated Anthropic/Chat Completions/Gemini responses cannot report completion or trigger tool-less automatic retry; a fixed UI notice explains the limit. Valid SRI hashes and the literal alphabet no longer trigger entropy-only rejection; credential-field and opaque-token tests stay blocked. Typecheck/ESLint PASS.

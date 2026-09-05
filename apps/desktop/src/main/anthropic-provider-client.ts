@@ -54,6 +54,10 @@ export class AnthropicProviderClient implements ProviderRuntime {
     private readonly resolveCredential: AnthropicCredentialResolver,
     private readonly providerFetch: ProviderFetch = secureProviderFetch,
     private readonly now: () => Date = () => new Date(),
+    private readonly outputLimitFor: (
+      connectionId: string,
+      modelId: string,
+    ) => number | null = () => null,
   ) {}
 
   async verify(
@@ -139,7 +143,9 @@ export class AnthropicProviderClient implements ProviderRuntime {
           'Content-Type': 'application/json',
           Accept: 'text/event-stream',
         },
-        body: JSON.stringify(anthropicMessageRequest(parsed)),
+        body: JSON.stringify(
+          anthropicMessageRequest(parsed, this.outputLimitFor(connection.id, parsed.modelId)),
+        ),
       });
       if (!response.ok) {
         const retryAfterMs = retryAfter(response.headers.get('retry-after'), this.now());
@@ -251,14 +257,20 @@ class AnthropicHttpError extends Error {
   }
 }
 
-function anthropicMessageRequest(request: ProviderExecutionRequest): Record<string, unknown> {
+function anthropicMessageRequest(
+  request: ProviderExecutionRequest,
+  outputLimit: number | null,
+): Record<string, unknown> {
   const system = request.messages
     .filter((message) => message.role === 'system')
     .map((message) => message.content)
     .join('\n\n');
   return {
     model: request.modelId,
-    max_tokens: 4_096,
+    max_tokens:
+      typeof outputLimit === 'number' && Number.isSafeInteger(outputLimit) && outputLimit > 0
+        ? outputLimit
+        : 4_096,
     stream: true,
     ...(system === '' ? {} : { system }),
     messages: request.messages

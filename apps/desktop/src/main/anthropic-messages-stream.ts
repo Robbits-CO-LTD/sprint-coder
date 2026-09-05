@@ -1,3 +1,4 @@
+import { providerCompletionEvent } from './provider-output-limit';
 import type { CanonicalProviderEvent, NormalizedProviderUsage } from '@sprint-coder/contracts';
 import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
@@ -124,7 +125,7 @@ export async function* normalizeAnthropicMessagesStream(
         },
       };
       yield { type: 'usage', usage };
-      yield { type: 'completed', stopReason };
+      yield providerCompletionEvent(stopReason);
     }
   }
 }
