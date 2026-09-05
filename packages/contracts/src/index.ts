@@ -4666,7 +4666,13 @@ const computerClickActionSchema = z
   })
   .strict();
 const computerTypeActionSchema = z
-  .object({ type: z.literal('type'), text: computerUseUtf8TextSchema })
+  .object({
+    type: z.literal('type'),
+    text: computerUseUtf8TextSchema.refine(
+      (text) => !/[\p{Cc}\uF700-\uF8FF]/u.test(text),
+      'Control and function-key characters require explicit key actions',
+    ),
+  })
   .strict();
 const computerKeyActionSchema = z
   .object({ type: z.literal('key'), key: computerUseKeySchema })

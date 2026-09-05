@@ -1885,17 +1885,13 @@ export class ComputerUseController {
       (nativeResult.result === 'completed' || nativeResult.result === 'unknown_effect')
     )
       record.planGrant!.remaining -= 1;
-    if (nativeResult.result === 'unknown_effect') {
-      record.status = this.status(
-        record,
-        'paused',
-        null,
-        observation.revision,
-        record.status.round,
-      );
-      this.emit(record.status);
-    }
-    if (nativeResult.result === 'rejected' || nativeResult.result === 'paused') {
+    if (
+      !record.controller.signal.aborted &&
+      this.sessions.has(sessionId) &&
+      (nativeResult.result === 'unknown_effect' ||
+        nativeResult.result === 'rejected' ||
+        nativeResult.result === 'paused')
+    ) {
       record.status = this.status(
         record,
         'paused',
@@ -1963,7 +1959,13 @@ export class ComputerUseController {
       // next microtask. Downgrading a confirmed completion/rejection to canceled corrupts the
       // durable audit. A partial multi-scalar type still reaches the next loop boundary, where the
       // abort becomes unknown_effect because the whole requested action did not complete.
-      if (result.result !== 'completed') return result;
+      if (result.result !== 'completed')
+        return index === 0
+          ? result
+          : {
+              result: 'unknown_effect',
+              reasonCode: result.reasonCode ?? 'partial_type',
+            };
     }
     return result;
   }

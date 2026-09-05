@@ -44,6 +44,15 @@ std::uint32_t Next(std::uint32_t *state) {
 } // namespace
 
 int main() {
+  using sprint_coder::computer_use::IsTypeTextScalar;
+  for (std::uint32_t scalar = 0; scalar < 0x20; ++scalar)
+    if (!Check(!IsTypeTextScalar(scalar), "type-c0-control")) return 1;
+  for (std::uint32_t scalar = 0x7f; scalar <= 0x9f; ++scalar)
+    if (!Check(!IsTypeTextScalar(scalar), "type-c1-control")) return 1;
+  for (std::uint32_t scalar = 0xf700; scalar <= 0xf8ff; ++scalar)
+    if (!Check(!IsTypeTextScalar(scalar), "type-function-key")) return 1;
+  if (!Check(IsTypeTextScalar(0x65e5) && IsTypeTextScalar(0x1f469) &&
+             IsTypeTextScalar(0x200d) && IsTypeTextScalar(0x1f4bb), "type-printable-unicode")) return 1;
   const std::array<std::uint8_t, 17> metadata = {
       '{', '"', 'o', 'p', 'e', 'r', 'a', 't', 'i', 'o', 'n', '"', ':', '"', 'x', '"', '}',
   };
