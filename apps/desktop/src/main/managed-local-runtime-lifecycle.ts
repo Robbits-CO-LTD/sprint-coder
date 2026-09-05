@@ -191,7 +191,7 @@ export class ManagedLocalRuntimeLifecycle {
           );
           return null;
         }
-        if (this.current !== null) await this.stopCurrent();
+        await this.stopCurrent();
         const hardware = await this.collectHardware();
         const fit = this.assess(descriptor, hardware);
         this.assertStartable(descriptor, fit);
@@ -418,7 +418,10 @@ export class ManagedLocalRuntimeLifecycle {
   private async stopCurrent(): Promise<void> {
     this.cancelIdleRelease();
     const current = this.current;
-    if (current === null) return;
+    if (current === null) {
+      await this.supervisor.stop();
+      return;
+    }
     await current.session.stop();
     this.current = null;
     this.notifyChanged();
