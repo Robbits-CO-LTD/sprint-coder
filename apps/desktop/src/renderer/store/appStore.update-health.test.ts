@@ -3,6 +3,21 @@ import type { UpdateHealth } from '../types/sprint-coder';
 import { useAppStore } from './appStore';
 
 describe('update health notification', () => {
+  it('replaces the runtime status subscription when init runs again', async () => {
+    const unsubscribe = vi.fn();
+    const subscribeStatus = vi.fn(() => unsubscribe);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { list: async () => [], subscribe: () => () => undefined },
+        projects: { list: async () => [] },
+        runtime: { subscribeStatus },
+      },
+    });
+    await useAppStore.getState().init();
+    await useAppStore.getState().init();
+    expect(subscribeStatus).toHaveBeenCalledTimes(2);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
     useAppStore.setState({ updateHealth: null, toast: null });

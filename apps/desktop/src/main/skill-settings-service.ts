@@ -547,6 +547,9 @@ export class SkillSettingsService {
   private async getStore(): Promise<SkillStore> {
     this.store ??= SkillStore.open({
       rootPath: join(this.input.homePath, '.sprintcoder', 'skills'),
+    }).catch((error: unknown) => {
+      this.store = null;
+      throw error;
     });
     return this.store;
   }

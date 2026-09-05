@@ -6,6 +6,14 @@ import { AUTO_TITLE_MAX_LENGTH, deriveTaskTitle } from './task-title';
 // pin down exactly what the sidebar will read.
 
 describe('deriveTaskTitle', () => {
+  it.each([
+    ['user_id が undefined になる', 'user_id が undefined になる'],
+    ['__init__.py を修正', '__init__.py を修正'],
+    ['`managed_local_runtime.ts` のバグを直して', 'managed_local_runtime.ts のバグを直して'],
+    ['a*b と unmatched` を保持', 'a*b と unmatched` を保持'],
+  ])('preserves identifiers in %s', (input, expected) => {
+    expect(deriveTaskTitle(input)).toBe(expected);
+  });
   it('uses a short single-line message verbatim', () => {
     expect(deriveTaskTitle('ログイン画面のバグを直して')).toBe('ログイン画面のバグを直して');
   });

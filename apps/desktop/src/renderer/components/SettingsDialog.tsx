@@ -689,7 +689,7 @@ export function UpdateHealthGroup() {
 
 /** Read-only facts the renderer already holds. No new backend call: application info and Runtime
  * liveness are loaded at launch, and the settings page only presents that canonical snapshot. */
-function DiagnosticsGroup() {
+export function DiagnosticsGroup() {
   const runtimeStatus = useAppStore((s) => s.runtimeStatus);
   const recovery = useAppStore((s) => s.recovery);
   const appVersion = useAppStore((s) => s.appVersion);
@@ -703,7 +703,7 @@ function DiagnosticsGroup() {
     (runtimeStatus.taskId !== selectedTaskId || runtimeStatus.diagnosticId === null);
   const diagnosticSelectionKey = `${selectedTaskId ?? 'none'}:${currentDiagnosticId ?? 'latest'}`;
   const [copyResult, setCopyResult] = useState<{ key: string; text: string } | null>(null);
-  const [copyPendingKey, setCopyPendingKey] = useState<string | null>(null);
+  const [copyPending, setCopyPending] = useState<{ key: string; generation: number } | null>(null);
   const diagnosticRequestGeneration = useRef(0);
   const diagnosticsMounted = useRef(true);
 
@@ -733,7 +733,7 @@ function DiagnosticsGroup() {
     const diagnosticId = currentDiagnosticId;
     const selectionKey = diagnosticSelectionKey;
     const generation = ++diagnosticRequestGeneration.current;
-    setCopyPendingKey(selectionKey);
+    setCopyPending({ key: selectionKey, generation });
     try {
       const diagnostic = await window.sprintCoder.runtime.getFailureDiagnostic({
         taskId,
@@ -751,8 +751,8 @@ function DiagnosticsGroup() {
       if (diagnosticsMounted.current && generation === diagnosticRequestGeneration.current)
         setCopyResult({ key: selectionKey, text: '失敗診断をコピーできませんでした' });
     } finally {
-      if (diagnosticsMounted.current && generation === diagnosticRequestGeneration.current)
-        setCopyPendingKey(null);
+      if (diagnosticsMounted.current)
+        setCopyPending((pending) => (pending?.generation === generation ? null : pending));
     }
   }
 
@@ -780,7 +780,7 @@ function DiagnosticsGroup() {
           disabled={
             selectedTaskId === null ||
             currentFailureCannotBeCopied ||
-            copyPendingKey === diagnosticSelectionKey
+            copyPending?.key === diagnosticSelectionKey
           }
           onClick={() => void copyFailureDiagnostic()}
           data-testid="settings-copy-runtime-diagnostic"

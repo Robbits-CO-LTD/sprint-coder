@@ -101,8 +101,11 @@ function stripDecoration(line: string): string {
       .replace(/^\s*>+\s*/, '')
       .replace(/^\s*[-*+]\s+(\[[ xX]\]\s+)?/, '')
       .replace(/^\s*\d+[.)]\s+/, '')
-      // Inline emphasis/code around the whole line, e.g. "**バグを直して**" or "`npm test`が落ちる".
-      .replace(/[*_`]+/g, '')
+      // Remove paired markup while preserving punctuation inside identifiers and code spans.
+      .replace(
+        /(`+)([^`]+)\1|\*\*([^*]+)\*\*|(?<![\p{L}\p{N}_])(_{1,2})([^_]+)\4(?![\p{L}\p{N}_.])/gu,
+        (_match, _ticks, code, bold, _underscores, emphasis) => code ?? bold ?? emphasis,
+      )
       // Any residual control characters, plus every whitespace run collapsed so a tab-indented
       // paste does not become a title full of gaps.
       // eslint-disable-next-line no-control-regex
