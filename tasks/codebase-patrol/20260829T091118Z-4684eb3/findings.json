@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "repository": "Robbits-CO-LTD/sprint-coder",
+  "source_sha": "4684eb356d8308995c5eb10a518b11f6df2bca83",
+  "mode": "full",
+  "publication_mode": "live-file-via-bug-investigation-to-issue",
+  "findings": [
+    {
+      "rule_id": "ERR-02",
+      "severity": "P1",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/main/openai-chat-completions-stream.ts",
+      "symbol_or_endpoint": "normalizeOpenAIChatCompletionsStream",
+      "fingerprint": "961429ff1ceebabc5302200f71e1a29974f0cfb8efa773954e9f20cbdce4c99e",
+      "status": "root_cause_confirmed"
+    },
+    {
+      "rule_id": "ERR-03",
+      "severity": "P1",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/main/openai-provider-client.ts",
+      "symbol_or_endpoint": "ProviderRuntime.execute abort forwarding",
+      "fingerprint": "19c16e854a02011ab51a18a53bfbed6d3ce7fbe51153a5402b2cc4ea7f606ea3",
+      "status": "root_cause_confirmed"
+    },
+    {
+      "rule_id": "ERR-03",
+      "severity": "P1",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/main/provider-verification.ts",
+      "symbol_or_endpoint": "ProviderVerificationService.verify",
+      "fingerprint": "c63efc508f41f0c8ab206949cd96ff9f0152bd988e00af4d41e6ac9dd4aaab27",
+      "status": "root_cause_confirmed"
+    },
+    {
+      "rule_id": "ERR-04",
+      "severity": "P1",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/main/public-model-catalog.ts",
+      "symbol_or_endpoint": "readBoundedText",
+      "fingerprint": "df65a82f1c007856db47d7b6154c227b0483f1913be4e64251457f0b2dbee3ce",
+      "status": "root_cause_confirmed"
+    },
+    {
+      "rule_id": "ERR-04",
+      "severity": "P1",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/main/local-model-download-manager.ts",
+      "symbol_or_endpoint": "LocalModelDownloadManager.downloadArtifact",
+      "fingerprint": "1f728545b9308e1bd0ce8fb56976f1e5d9a603a882dee21efc02270bba64f8a8",
+      "status": "root_cause_confirmed"
+    }
+  ]
+}

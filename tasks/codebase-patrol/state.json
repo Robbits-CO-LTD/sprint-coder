@@ -1,0 +1,45 @@
+{
+  "schema_version": 3,
+  "repository": "Robbits-CO-LTD/sprint-coder",
+  "last_report_commit": "4684eb356d8308995c5eb10a518b11f6df2bca83",
+  "last_report": "tasks/codebase-patrol/20260829T091118Z-4684eb3/report.md",
+  "publication_mode": "auto-file",
+  "created_issues": [
+    {
+      "repository": "Robbits-CO-LTD/sprint-coder",
+      "number": 374,
+      "url": "https://github.com/Robbits-CO-LTD/sprint-coder/issues/374",
+      "fingerprint": "961429ff1ceebabc5302200f71e1a29974f0cfb8efa773954e9f20cbdce4c99e",
+      "commit": "4684eb356d8308995c5eb10a518b11f6df2bca83"
+    },
+    {
+      "repository": "Robbits-CO-LTD/sprint-coder",
+      "number": 375,
+      "url": "https://github.com/Robbits-CO-LTD/sprint-coder/issues/375",
+      "fingerprint": "19c16e854a02011ab51a18a53bfbed6d3ce7fbe51153a5402b2cc4ea7f606ea3",
+      "commit": "4684eb356d8308995c5eb10a518b11f6df2bca83"
+    },
+    {
+      "repository": "Robbits-CO-LTD/sprint-coder",
+      "number": 376,
+      "url": "https://github.com/Robbits-CO-LTD/sprint-coder/issues/376",
+      "fingerprint": "c63efc508f41f0c8ab206949cd96ff9f0152bd988e00af4d41e6ac9dd4aaab27",
+      "commit": "4684eb356d8308995c5eb10a518b11f6df2bca83"
+    },
+    {
+      "repository": "Robbits-CO-LTD/sprint-coder",
+      "number": 377,
+      "url": "https://github.com/Robbits-CO-LTD/sprint-coder/issues/377",
+      "fingerprint": "df65a82f1c007856db47d7b6154c227b0483f1913be4e64251457f0b2dbee3ce",
+      "commit": "4684eb356d8308995c5eb10a518b11f6df2bca83"
+    },
+    {
+      "repository": "Robbits-CO-LTD/sprint-coder",
+      "number": 378,
+      "url": "https://github.com/Robbits-CO-LTD/sprint-coder/issues/378",
+      "fingerprint": "1f728545b9308e1bd0ce8fb56976f1e5d9a603a882dee21efc02270bba64f8a8",
+      "commit": "4684eb356d8308995c5eb10a518b11f6df2bca83"
+    }
+  ],
+  "dismissed": []
+}

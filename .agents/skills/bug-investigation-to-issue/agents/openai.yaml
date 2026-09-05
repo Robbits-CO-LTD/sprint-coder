@@ -1,0 +1,4 @@
+interface:
+  display_name: "バグ徹底調査・Issue化"
+  short_description: "再現と根本原因の証拠を揃え、重複なくIssue化する"
+  default_prompt: "$bug-investigation-to-issue を使い、報告されたバグを徹底調査してGitHub Issueに起票してください。"

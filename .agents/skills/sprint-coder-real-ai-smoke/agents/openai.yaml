@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sprint Coder Real AI Smoke"
+  short_description: "開発版UIと実AI tool-useを実操作で検証"
+  default_prompt: "Use $sprint-coder-real-ai-smoke to verify the Sprint Coder development build with Computer Use and real AI providers."
