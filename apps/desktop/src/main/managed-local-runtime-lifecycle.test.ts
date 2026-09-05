@@ -93,6 +93,7 @@ function hardware(
 class FakeSession {
   state: SupervisorSnapshot['state'] = 'running';
   stopCount = 0;
+  stopError: Error | null = null;
   readonly snapshotValue: SupervisorSnapshot = {
     state: 'running',
     target: 'darwin-arm64',
@@ -116,6 +117,7 @@ class FakeSession {
       authenticatedFetch: async () => new Response('{}', { status: 200 }),
       stop: async () => {
         this.stopCount += 1;
+        if (this.stopError !== null) throw this.stopError;
         this.state = 'stopped';
         return { ...this.snapshotValue, state: 'stopped', stoppedAt: '2026-08-24T00:00:01.000Z' };
       },
@@ -204,6 +206,43 @@ function lifecycle(
 }
 
 describe('ManagedLocalRuntimeLifecycle', () => {
+  it('retries stopping a startup session that was canceled before it became current', async () => {
+    const controller = new AbortController();
+    class CanceledSupervisor extends FakeSupervisor {
+      override async start(input: ManagedLocalRuntimeStartInput) {
+        const session = await super.start(input);
+        this.sessions.at(-1)!.stopError = new Error('stop timed out');
+        controller.abort();
+        return session;
+      }
+      override async stop() {
+        return this.sessions.at(-1)?.session().stop() ?? null;
+      }
+    }
+    const supervisor = new CanceledSupervisor();
+    const { subject } = lifecycle({ supervisor });
+    await expect(
+      subject.acquire(await descriptor('a'), false, controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(supervisor.sessions[0]!.stopCount).toBe(1);
+    supervisor.sessions[0]!.stopError = null;
+    await subject.dispose();
+    expect(supervisor.sessions[0]!.stopCount).toBe(2);
+  });
+  it('leaves draining and wakes later requests when stopping fails', async () => {
+    const model = await descriptor('a');
+    const { subject, supervisor } = lifecycle({
+      memory: () => ({ availableBytes: 0, totalBytes: 32 * 1024 ** 3 }),
+    });
+    const lease = await subject.acquire(model, false);
+    await lease.release();
+    supervisor.sessions[0]!.stopError = new Error('stop failed');
+    await expect(subject.pollMemoryPressure()).rejects.toThrow('stop failed');
+    expect(subject.snapshot().state).not.toBe('stopping');
+    supervisor.sessions[0]!.stopError = null;
+    await subject.dispose();
+    await expect(subject.acquire(model, false)).rejects.toMatchObject({ code: 'disposed' });
+  });
   it('shares one loaded model and honors pending automatic release after the final lease', async () => {
     const model = await descriptor('a');
     const { subject, supervisor } = lifecycle();

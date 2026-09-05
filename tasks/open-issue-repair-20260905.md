@@ -33,9 +33,9 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #398 | Pending investigation | [bug] 実行完了直前に Team の停止・steer を行うと以後その Task の Team 操作がすべて固まる |
 | #399 | Pending investigation | [bug] 書き込み可能な Team 実行を steer すると再実行が必ず失敗し Worker が待機のまま残る |
 | #400 | Regression green; PR review pending | [bug] provider レート制限の 3 回目の再試行が配送上限に阻まれ誤ったエラーで失敗する |
-| #401 | Pending investigation | [bug] Managed Local の llama-server がシグナルで落ちると停止操作が 10 秒固まって失敗する |
-| #402 | Pending investigation | [bug] Managed Local の停止に失敗するとライフサイクルが draining のまま固まり以後の Turn が永久に待つ |
-| #403 | Pending investigation | [bug] Linux では空きメモリの見積もりが過小でモデルが「不足」扱いになり 5 秒ごとに停止される |
+| #401 | Regression green; PR review pending | [bug] Managed Local の llama-server がシグナルで落ちると停止操作が 10 秒固まって失敗する |
+| #402 | Regression green; PR review pending | [bug] Managed Local の停止に失敗するとライフサイクルが draining のまま固まり以後の Turn が永久に待つ |
+| #403 | Central hypothesis refuted by pinned libuv source; Linux packaged observation pending | [bug] Linux では空きメモリの見積もりが過小でモデルが「不足」扱いになり 5 秒ごとに停止される |
 | #404 | Regression green; PR review pending | [bug] 自動生成される Task タイトルから識別子中のアンダースコアやバッククォートが消える |
 | #405 | Pending investigation | [bug] 日本語などのファイル名では未コミットの自分の編集がモデルの変更として差分に混ざる |
 | #406 | Pending investigation | [bug] エディタ保存が検証済み記述子ではなくパス名でコピーするため差し替え競合で任意ファイルを読める |
@@ -53,14 +53,14 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #418 | Pending investigation | [bug] 大文字小文字だけが違うパスで同じファイルを 2 回書くパッチが別ファイル扱いになり衝突検出をすり抜ける |
 | #419 | Obsolete surface confirmed removed in PR #316; closeout pending | [bug] ~/.codex/skills に置いた Skill が設定画面のスキャンと取り込みで見つからない |
 | #420 | Regression green; PR review pending | [bug] Skill ストアの初回オープンに一度失敗すると再起動まで Skill 機能全体が使えない |
-| #421 | Pending investigation | [bug] main が未捕捉例外で終了すると llama-server が残留しモデルがメモリに載ったままになる |
-| #422 | Pending investigation | [bug] Managed Local モデルの読み込み中に Turn をキャンセルしても読み込みが止まらない |
+| #421 | Regression green; PR review pending | [bug] main が未捕捉例外で終了すると llama-server が残留しモデルがメモリに載ったままになる |
+| #422 | Regression green; PR review pending | [bug] Managed Local モデルの読み込み中に Turn をキャンセルしても読み込みが止まらない |
 | #423 | Pending investigation | [bug] Project フォルダ運用中に編集が quarantine されても Task に反映されず再起動まで全編集が失敗し続ける |
 | #424 | Pending investigation | [bug] 高エントロピー判定の誤検知で provider への送信が全面拒否され Turn が原因不明で失敗する |
 | #425 | Regression green; PR review pending | [bug] Turn の port 購読を到着前に解除すると main 側の port が開いたまま残る |
 | #426 | Regression green; PR review pending | [bug] ランタイム状態の購読解除関数が捨てられ開発時に二重登録される |
 | #427 | Pending investigation | [bug] ワークスペース検索ツールだけが root の同一性チェックを通らない |
-| #428 | Pending investigation | [bug] Managed Local モデルのメタデータ読み取りが 8 バイトごとにシステムコールを発行し極端に遅い |
+| #428 | Regression green; PR review pending | [bug] Managed Local モデルのメタデータ読み取りが 8 バイトごとにシステムコールを発行し極端に遅い |
 | #429 | Regression green; PR review pending | [bug] Skeptic の完了後も abort リスナーが残り期限切れ時に終了済み Turn へ無駄なキャンセルが飛ぶ |
 | #430 | Regression green; PR review pending | [bug] 失敗診断のコピー中にランタイム状態が変わるとコピーボタンが押せないままになる |
 | #431 | Pending investigation | [bug] Computer Use の文字入力に制御文字やファンクションキーを含めると許可リスト外のキー操作ができる |
@@ -73,3 +73,7 @@ Issues #390/#392/#394/#404/#420/#425/#426/#430 have failing-before and passing-a
 ## Provider and Runtime checkpoint
 
 #395/#396/#397/#400/#409/#411/#412/#429: failing-before and passing-after regression tests. Related 14 files: 171 PASS including real Electron ABI TeamCoordinator integration; Retry-After empty/blank additions: 12 PASS. Codex TurnError/CodexErrorInfo validated against locally generated app-server TypeScript bindings; raw provider messages are not forwarded. Desktop typecheck PASS; ESLint has only an unchanged unused-variable warning in team-coordinator.ts.
+
+## Managed Local checkpoint
+
+#401/#402/#421/#422/#428: 59 PASS and one existing real-sidecar opt-in SKIP. Includes a real child-process kill test, signal-exit/no-overlap checks, startup cancel, and GGUF read-count regression (5,013 calls before buffering). Desktop typecheck and touched-file ESLint PASS. #403: Electron 43.2.0 / Node 24.18.0 / libuv 1.52.1 confirmed locally; [pinned libuv source](https://github.com/libuv/libuv/blob/v1.52.1/src/unix/linux.c#L1941) already uses MemAvailable. No duplicate Linux memory parser added.

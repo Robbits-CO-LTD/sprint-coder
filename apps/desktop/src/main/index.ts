@@ -81,6 +81,7 @@ let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
 let autoUpdateController: AutoUpdateController | null = null;
 let managedLocalLifecycle: ManagedLocalRuntimeLifecycle | null = null;
+process.once('exit', () => managedLocalLifecycle?.killNow());
 let managedLocalController: ManagedLocalController | null = null;
 let managedLocalMemoryTimer: ReturnType<typeof setInterval> | null = null;
 let shutdownCommitted = false;
@@ -343,6 +344,7 @@ function initializePersistentDiagnostics(): void {
   }
 
   process.on('uncaughtException', (error) => {
+    managedLocalLifecycle?.killNow();
     secureLogger.error(
       'Uncaught exception in Main process',
       { process: 'main', error },

@@ -1,10 +1,27 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type * as FsPromises from 'node:fs/promises';
 import { readGgufBlockCount } from './gguf-metadata';
 
 const roots: string[] = [];
+const io = vi.hoisted(() => ({ reads: 0 }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof FsPromises>();
+  return {
+    ...original,
+    open: async (...args: Parameters<typeof original.open>) => {
+      const handle = await original.open(...args);
+      const read = handle.read.bind(handle);
+      handle.read = ((...readArgs: Parameters<typeof read>) => {
+        io.reads += 1;
+        return read(...readArgs);
+      }) as typeof handle.read;
+      return handle;
+    },
+  };
+});
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -54,6 +71,19 @@ async function fixture(body: Buffer): Promise<string> {
 }
 
 describe('readGgufBlockCount', () => {
+  it('reads tokenizer strings in bounded blocks rather than issuing one read per token', async () => {
+    const tokens = Buffer.concat([
+      string('tokenizer.ggml.tokens'),
+      uint32(9),
+      uint32(8),
+      uint64(5000),
+      ...Array.from({ length: 5000 }, () => string('token')),
+    ]);
+    const path = await fixture(gguf([tokens, metadataUint32('llama.block_count', 40)]));
+    io.reads = 0;
+    expect(await readGgufBlockCount(path)).toBe(40);
+    expect(io.reads).toBeLessThan(20);
+  });
   it('reads one architecture block count without loading tensor data', async () => {
     const path = await fixture(
       gguf([
