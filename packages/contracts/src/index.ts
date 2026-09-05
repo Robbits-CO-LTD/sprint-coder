@@ -164,6 +164,8 @@ export const taskSummarySchema = z
     /** Whether the Task has accepted at least one user message. Older backends may omit this;
      * renderers must treat absence as an established Task for compatibility. */
     hasConversation: z.boolean().optional(),
+    /** Window-wide activity snapshot; independent of the selected Task's event port. */
+    activeTurnId: idSchema.nullable().optional(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
   })

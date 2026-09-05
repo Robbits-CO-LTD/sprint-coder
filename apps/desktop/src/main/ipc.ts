@@ -2944,7 +2944,7 @@ export class IpcRouter {
       (input) => this.persistence.commandOutputTail(input),
     );
     this.handle(IPC_CHANNELS.tasksList, emptyPayloadSchema, z.array(taskSummarySchema), () =>
-      this.persistence.listTasks(),
+      this.persistence.listTasks().map((task) => this.taskWithActivity(task)),
     );
     this.handleMutation(
       IPC_CHANNELS.tasksCreate,
@@ -4208,14 +4208,16 @@ export class IpcRouter {
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
     await this.computerUseController.dispose();
-    this.window.webContents.removeListener?.(
-      'did-start-navigation',
-      this.handleComputerUseRendererNavigation,
-    );
-    this.window.webContents.removeListener?.(
-      'render-process-gone',
-      this.handleComputerUseRendererGone,
-    );
+    if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed()) {
+      this.window.webContents.removeListener?.(
+        'did-start-navigation',
+        this.handleComputerUseRendererNavigation,
+      );
+      this.window.webContents.removeListener?.(
+        'render-process-gone',
+        this.handleComputerUseRendererGone,
+      );
+    }
     this.computerUseActivationGate.dispose();
     this.computerUseEmergencyStop.dispose();
     this.computerUseEmergencySessionId = null;
@@ -4326,7 +4328,14 @@ export class IpcRouter {
           const envelope = envelopeSchema.parse(raw) as CommandEnvelope<TInput>;
           if (hasTaskId(envelope.payload) && envelope.taskId !== envelope.payload.taskId)
             throw new SecurityError();
-          const value = outputSchema.parse(await handler(envelope.payload, event, envelope));
+          const output = await handler(envelope.payload, event, envelope);
+          let value: TOutput;
+          try {
+            value = outputSchema.parse(output);
+          } catch {
+            // Zod errors can include response values or private schema literals.
+            throw new Error('IPC handler output failed schema validation');
+          }
           return { ok: true, requestId: envelope.requestId, value };
         } catch (error) {
           const publicError = toPublicError(error);
@@ -6819,7 +6828,16 @@ export class IpcRouter {
 
   private pushTaskUpdated(task: ReturnType<PersistenceClient['getTask']>): void {
     if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-    this.window.webContents.send(IPC_CHANNELS.tasksUpdated, taskSummarySchema.parse(task));
+    this.window.webContents.send(
+      IPC_CHANNELS.tasksUpdated,
+      taskSummarySchema.parse(this.taskWithActivity(task)),
+    );
+  }
+
+  private taskWithActivity(
+    task: ReturnType<PersistenceClient['getTask']>,
+  ): ReturnType<PersistenceClient['getTask']> {
+    return { ...task, activeTurnId: this.persistence.getActiveTurnId(task.id) };
   }
 
   private async cancelRuntime(taskId: string, turnId: string): Promise<boolean> {
@@ -8146,6 +8164,8 @@ export class IpcRouter {
   private publish(rawEvent: TurnEvent): void {
     const event = turnEventSchema.parse(rawEvent);
     this.recordTurnDiagnosticEvent(event);
+    if (event.type === 'turn.accepted' || event.type === 'turn.completed')
+      this.pushTaskUpdated(this.persistence.getTask(event.taskId));
     for (const binding of this.ports) {
       if (binding.taskId === event.taskId) binding.port.postMessage(event);
     }
