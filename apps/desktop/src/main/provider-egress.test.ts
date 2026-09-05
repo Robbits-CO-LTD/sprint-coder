@@ -32,6 +32,28 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('Codex provider egress gate', () => {
+    it('allows public package integrity metadata through the complete egress gate', () => {
+      const fixture = createFixture(false);
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'integrity-metadata',
+          prompt: JSON.stringify({
+            integrity: `sha512-${createHash('sha512').update('public fixture').digest('base64')}`,
+          }),
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision.allowed).toBe(true);
+      expect(dispatches).toBe(1);
+      fixture.persistence.close();
+    });
     it('evaluates Computer Use egress without persisting a live session-bound permission audit', () => {
       const fixture = createFixture(false);
       const decision = authorizeComputerUseProviderEgress({

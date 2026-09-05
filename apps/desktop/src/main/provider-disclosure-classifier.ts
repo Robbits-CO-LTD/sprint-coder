@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { redactSecrets } from './secret-redactor';
 
-export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v2';
+export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v3';
 
 export type ProviderDisclosureClassification = 'safe' | 'sensitive' | 'uncertain';
 
@@ -46,10 +46,9 @@ export function assessProviderDisclosure(
   if (matches(STRUCTURED_CREDENTIAL_FIELD, content)) reasons.add('credential-field');
   if (baselineRedacted !== content) reasons.add('known-secret-pattern');
 
-  const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some(([candidate]) => {
-    if (/^(?:[a-f0-9]{24,}|[A-Z0-9_]{24,})$/u.test(candidate)) return false;
-    return shannonEntropy(candidate) >= 4.25;
-  });
+  const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some(([candidate]) =>
+    isHighEntropyCandidate(candidate),
+  );
   if (highEntropy) reasons.add('high-entropy-value');
 
   const directSensitive = [...reasons].some((reason) => reason !== 'credential-prone-filename');
@@ -70,7 +69,7 @@ export function assessProviderDisclosure(
     });
   if (highEntropy)
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate) =>
-      shannonEntropy(candidate) >= 4.25 ? '[REDACTED_HIGH_ENTROPY]' : candidate,
+      isHighEntropyCandidate(candidate) ? '[REDACTED_HIGH_ENTROPY]' : candidate,
     );
   // A credential-prone file with no recognized token is precisely the case where regex-based
   // redaction cannot establish that any preview or Provider payload is safe. Disclose only an
@@ -107,6 +106,18 @@ function shannonEntropy(value: string): number {
     entropy -= probability * Math.log2(probability);
   }
   return entropy;
+}
+
+function isHighEntropyCandidate(candidate: string): boolean {
+  if (/^(?:[a-f0-9]{24,}|[A-Z0-9_]{24,})$/u.test(candidate)) return false;
+  if (candidate === 'abcdefghijklmnopqrstuvwxyz') return false;
+  if (
+    /^(?:sha256-[A-Za-z0-9+/]{43}=|sha384-[A-Za-z0-9+/]{64}|sha512-[A-Za-z0-9+/]{86}==)$/u.test(
+      candidate,
+    )
+  )
+    return false;
+  return shannonEntropy(candidate) >= 4.25;
 }
 
 function matches(pattern: RegExp, value: string): boolean {

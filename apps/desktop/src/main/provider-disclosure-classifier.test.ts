@@ -1,7 +1,28 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { assessProviderDisclosure } from './provider-disclosure-classifier';
 
 describe('provider disclosure classifier', () => {
+  it.each(['sha256', 'sha384', 'sha512'])(
+    'does not redact a valid %s integrity digest',
+    (algorithm) => {
+      const integrity = `${algorithm}-${createHash(algorithm).update('public package fixture').digest('base64')}`;
+      const content = JSON.stringify({ integrity });
+      expect(assessProviderDisclosure(content, 'package-lock.json')).toMatchObject({
+        classification: 'safe',
+        redactedContent: content,
+      });
+      expect(assessProviderDisclosure(JSON.stringify({ password: integrity })).classification).toBe(
+        'sensitive',
+      );
+    },
+  );
+  it('recognizes the literal public alphabet without accepting opaque base64', () => {
+    expect(assessProviderDisclosure('abcdefghijklmnopqrstuvwxyz').classification).toBe('safe');
+    expect(assessProviderDisclosure('8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH').classification).toBe(
+      'sensitive',
+    );
+  });
   it.each([
     ['URI userinfo', 'postgres://alice:correct-horse@example.com/db', 'uri-userinfo'],
     ['OpenAI key', 'key=sk-proj-abcdefghijklmnopqrstuvwxyz1234', 'ai-provider-token'],

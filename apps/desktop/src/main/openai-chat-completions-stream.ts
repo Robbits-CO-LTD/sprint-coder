@@ -1,3 +1,4 @@
+import { providerCompletionEvent } from './provider-output-limit';
 import type { CanonicalProviderEvent, ProviderMessageToolCall } from '@sprint-coder/contracts';
 import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
@@ -117,7 +118,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
       source: usage === null ? 'unknown' : 'provider_api',
     },
   };
-  yield { type: 'completed', stopReason };
+  yield providerCompletionEvent(stopReason);
 }
 
 function reasoningTextsFromDelta(delta: Record<string, unknown>): string[] {
