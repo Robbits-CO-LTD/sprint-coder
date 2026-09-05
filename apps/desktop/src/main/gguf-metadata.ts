@@ -22,6 +22,8 @@ const FIXED_VALUE_BYTES: Readonly<Record<number, number>> = {
 
 class GgufReader {
   private position = 0;
+  private buffer: Buffer = Buffer.alloc(0);
+  private bufferStart = 0;
 
   constructor(
     private readonly handle: FileHandle,
@@ -43,14 +45,20 @@ class GgufReader {
     const output = Buffer.allocUnsafe(length);
     let offset = 0;
     while (offset < length) {
-      const result = await this.handle.read(
-        output,
-        offset,
-        length - offset,
-        this.position + offset,
-      );
-      if (result.bytesRead === 0) throw new Error('Unexpected GGUF metadata EOF');
-      offset += result.bytesRead;
+      const position = this.position + offset;
+      if (position < this.bufferStart || position >= this.bufferStart + this.buffer.length) {
+        const buffer = Buffer.allocUnsafe(
+          Math.min(64 * 1024, this.fileSize - position, MAX_METADATA_BYTES - position),
+        );
+        const result = await this.handle.read(buffer, 0, buffer.length, position);
+        if (result.bytesRead === 0) throw new Error('Unexpected GGUF metadata EOF');
+        this.buffer = buffer.subarray(0, result.bytesRead);
+        this.bufferStart = position;
+      }
+      const start = position - this.bufferStart;
+      const count = Math.min(length - offset, this.buffer.length - start);
+      this.buffer.copy(output, offset, start, start + count);
+      offset += count;
     }
     this.position += length;
     return output;

@@ -1,10 +1,10 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
-import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ManagedLocalRuntimeError,
   ManagedLocalRuntimeSupervisor,
@@ -69,6 +69,7 @@ class FakeChild extends EventEmitter {
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
     this.kills.push(signal);
+    if (this.signalCode !== null) return false;
     if (signal === 'SIGTERM' && this.ignoreTerm) return true;
     if (this.exitCode === null) {
       this.exitCode = 0;
@@ -134,6 +135,67 @@ function harness(
 }
 
 describe('ManagedLocalRuntimeSupervisor', () => {
+  it('terminates its real owned child synchronously during fatal-exit cleanup', async () => {
+    let child: ChildProcess | undefined;
+    const supervisor = new ManagedLocalRuntimeSupervisor({
+      loadBundle: async () => bundle(),
+      spawnProcess: (_command, _args, options) => {
+        child = spawn(
+          process.execPath,
+          ['-e', "console.log('listening on http://127.0.0.1:43210');setInterval(() => {}, 1000)"],
+          { ...options, cwd: process.cwd() },
+        );
+        return child;
+      },
+      fetch: async (_url, init) =>
+        new Response('{}', { status: new Headers(init?.headers).has('Authorization') ? 200 : 401 }),
+      startupTimeoutMs: 1000,
+      stopTimeoutMs: 100,
+    });
+    try {
+      await supervisor.start({ kind: 'router_probe', ...(await directories()) });
+      if (child === undefined) throw new Error('Child was not started');
+      const exited = once(child, 'exit');
+      supervisor.killNow();
+      await exited;
+      expect(child.signalCode).toBe('SIGKILL');
+    } finally {
+      supervisor.killNow();
+    }
+  });
+  it('does not launch another child after a stop timed out while its child is alive', async () => {
+    const env = harness();
+    const paths = await directories();
+    const session = await env.supervisor.start({ kind: 'router_probe', ...paths });
+    vi.spyOn(env.child, 'kill').mockReturnValue(true);
+    await expect(session.stop()).rejects.toMatchObject({ code: 'runtime_stopped' });
+    await expect(env.supervisor.start({ kind: 'router_probe', ...paths })).rejects.toMatchObject({
+      code: 'already_running',
+    });
+    env.child.crash(1);
+    await expect(session.stop()).resolves.toMatchObject({ state: 'crashed' });
+  });
+  it('cancels startup before a cold model begins listening', async () => {
+    const controller = new AbortController();
+    const env = harness({ emitListening: false, startupTimeoutMs: 500 });
+    const start = env.supervisor.start(
+      { kind: 'router_probe', ...(await directories()) },
+      controller.signal,
+    );
+    const outcome = expect(start).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(env.spawnArgs().length).toBeGreaterThan(0));
+    controller.abort();
+    await outcome;
+    expect(env.child.kills).toEqual(['SIGTERM']);
+  });
+  it('does not wait or send signals to an already signal-terminated child', async () => {
+    const env = harness();
+    const session = await env.supervisor.start({ kind: 'router_probe', ...(await directories()) });
+    env.child.signalCode = 'SIGSEGV';
+    env.child.emit('exit', null, 'SIGSEGV');
+    await expect(session.stop()).resolves.toMatchObject({ state: 'crashed', signal: 'SIGSEGV' });
+    expect(env.child.kills).toEqual([]);
+  });
   it('uses OS-assigned loopback, keeps the token out of argv, verifies auth, and redacts diagnostics', async () => {
     const paths = await directories();
     const env = harness();

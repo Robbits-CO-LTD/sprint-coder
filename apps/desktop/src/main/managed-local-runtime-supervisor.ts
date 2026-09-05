@@ -155,12 +155,17 @@ export class ManagedLocalRuntimeSupervisor {
     return this.active?.snapshot ?? null;
   }
 
-  async start(input: ManagedLocalRuntimeStartInput): Promise<ManagedLocalRuntimeSession> {
-    if (this.active !== null && !['stopped', 'crashed'].includes(this.active.snapshot.state))
+  async start(
+    input: ManagedLocalRuntimeStartInput,
+    signal?: AbortSignal,
+  ): Promise<ManagedLocalRuntimeSession> {
+    signal?.throwIfAborted();
+    if (this.active !== null && !childHasExited(this.active.child))
       throw new ManagedLocalRuntimeError('already_running', 'A Managed Local runtime is active');
     const bundle = await this.loadBundle();
     const settings = input.kind === 'model' ? validateModelSettings(input, bundle) : null;
     const prepared = await prepareStartInput(input);
+    signal?.throwIfAborted();
     const token = this.randomToken();
     if (!/^[a-zA-Z0-9_-]{32,128}$/u.test(token))
       throw new ManagedLocalRuntimeError('invalid_input', 'Managed Local token generator failed');
@@ -214,10 +219,11 @@ export class ManagedLocalRuntimeSupervisor {
     child.once('error', () => this.recordSpawnError(active));
 
     try {
-      const port = await waitForListeningPort(active, this.startupTimeoutMs, this.delay);
+      const port = await waitForListeningPort(active, this.startupTimeoutMs, this.delay, signal);
       const origin = `http://${LOOPBACK_HOST}:${port}`;
-      await this.verifyAuthentication(origin, token);
-      await this.waitForHealth(origin, token, input.kind === 'model');
+      await this.verifyAuthentication(origin, token, signal);
+      await this.waitForHealth(origin, token, input.kind === 'model', signal);
+      signal?.throwIfAborted();
       if (active.snapshot.state === 'crashed')
         throw new ManagedLocalRuntimeError(
           'runtime_stopped',
@@ -229,6 +235,7 @@ export class ManagedLocalRuntimeSupervisor {
       return session;
     } catch (error) {
       await this.stopActive(active);
+      signal?.throwIfAborted();
       if (error instanceof ManagedLocalRuntimeError) throw error;
       throw new ManagedLocalRuntimeError('spawn_failed', 'Managed Local startup failed');
     }
@@ -237,6 +244,16 @@ export class ManagedLocalRuntimeSupervisor {
   async stop(): Promise<ManagedLocalRuntimeSnapshot | null> {
     if (this.active === null) return null;
     return this.stopActive(this.active);
+  }
+
+  killNow(): void {
+    const child = this.active?.child;
+    if (child === undefined || childHasExited(child)) return;
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Fatal-exit cleanup cannot await or throw back into the uncaught-exception handler.
+    }
   }
 
   private createSession(active: ActiveRuntime, origin: string): ManagedLocalRuntimeSession {
@@ -273,11 +290,17 @@ export class ManagedLocalRuntimeSupervisor {
     });
   }
 
-  private async verifyAuthentication(origin: string, token: string): Promise<void> {
+  private async verifyAuthentication(
+    origin: string,
+    token: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const unauthenticated = await this.fetch(`${origin}/props`, {
       redirect: 'error',
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
+      signal: startupRequestSignal(this.requestTimeoutMs, signal),
     }).catch(() => null);
+    signal?.throwIfAborted();
     const unauthenticatedStatus = unauthenticated?.status ?? null;
     await unauthenticated?.body?.cancel().catch(() => undefined);
     if (unauthenticatedStatus !== 401)
@@ -288,8 +311,9 @@ export class ManagedLocalRuntimeSupervisor {
     const authenticated = await this.fetch(`${origin}/props`, {
       headers: { Authorization: `Bearer ${token}` },
       redirect: 'error',
-      signal: AbortSignal.timeout(this.requestTimeoutMs),
+      signal: startupRequestSignal(this.requestTimeoutMs, signal),
     }).catch(() => null);
+    signal?.throwIfAborted();
     if (authenticated?.ok !== true)
       throw new ManagedLocalRuntimeError(
         'authentication_failed',
@@ -302,14 +326,17 @@ export class ManagedLocalRuntimeSupervisor {
     origin: string,
     token: string,
     requireLoaded: boolean,
+    signal?: AbortSignal,
   ): Promise<void> {
     const deadline = Date.now() + this.startupTimeoutMs;
     do {
+      signal?.throwIfAborted();
       const response = await this.fetch(`${origin}/health`, {
         headers: { Authorization: `Bearer ${token}` },
         redirect: 'error',
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        signal: startupRequestSignal(this.requestTimeoutMs, signal),
       }).catch(() => null);
+      signal?.throwIfAborted();
       if (response?.status === 200) {
         await response.body?.cancel().catch(() => undefined);
         return;
@@ -330,10 +357,10 @@ export class ManagedLocalRuntimeSupervisor {
       if (active.snapshot.state === 'stopped') return active.snapshot;
       if (active.snapshot.state !== 'crashed')
         active.snapshot = { ...active.snapshot, state: 'stopping' };
-      if (active.child.exitCode === null) {
+      if (!childHasExited(active.child)) {
         active.child.kill('SIGTERM');
         const exited = await waitForExit(active.child, this.stopTimeoutMs);
-        if (!exited && active.child.exitCode === null) {
+        if (!exited && !childHasExited(active.child)) {
           active.child.kill('SIGKILL');
           if (!(await waitForExit(active.child, this.stopTimeoutMs))) {
             active.snapshot = {
@@ -354,9 +381,13 @@ export class ManagedLocalRuntimeSupervisor {
           state: 'stopped',
           stoppedAt: this.now().toISOString(),
           exitCode: active.child.exitCode,
+          signal: active.child.signalCode,
         };
       return active.snapshot;
-    })();
+    })().catch((error: unknown) => {
+      active.stopPromise = null;
+      throw error;
+    });
     return active.stopPromise;
   }
 
@@ -576,9 +607,11 @@ async function waitForListeningPort(
   active: ActiveRuntime,
   timeoutMs: number,
   delay: (milliseconds: number) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   do {
+    signal?.throwIfAborted();
     if (active.snapshot.state === 'crashed')
       throw new ManagedLocalRuntimeError('spawn_failed', 'Managed Local exited before listening');
     const match = LISTENING.exec(active.diagnostic.rawValue());
@@ -626,7 +659,7 @@ function positiveTimeout(value: number | undefined, fallback: number): number {
 }
 
 async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null) return true;
+  if (childHasExited(child)) return true;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       child.off('exit', onExit);
@@ -637,10 +670,19 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<bool
       resolve(true);
     };
     child.once('exit', onExit);
-    if (child.exitCode !== null) {
+    if (childHasExited(child)) {
       clearTimeout(timer);
       child.off('exit', onExit);
       resolve(true);
     }
   });
+}
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function startupRequestSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
 }

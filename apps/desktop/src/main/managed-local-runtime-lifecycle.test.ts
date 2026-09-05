@@ -93,6 +93,7 @@ function hardware(
 class FakeSession {
   state: SupervisorSnapshot['state'] = 'running';
   stopCount = 0;
+  stopError: Error | null = null;
   readonly snapshotValue: SupervisorSnapshot = {
     state: 'running',
     target: 'darwin-arm64',
@@ -116,6 +117,7 @@ class FakeSession {
       authenticatedFetch: async () => new Response('{}', { status: 200 }),
       stop: async () => {
         this.stopCount += 1;
+        if (this.stopError !== null) throw this.stopError;
         this.state = 'stopped';
         return { ...this.snapshotValue, state: 'stopped', stoppedAt: '2026-08-24T00:00:01.000Z' };
       },
@@ -204,6 +206,20 @@ function lifecycle(
 }
 
 describe('ManagedLocalRuntimeLifecycle', () => {
+  it('leaves draining and wakes later requests when stopping fails', async () => {
+    const model = await descriptor('a');
+    const { subject, supervisor } = lifecycle({
+      memory: () => ({ availableBytes: 0, totalBytes: 32 * 1024 ** 3 }),
+    });
+    const lease = await subject.acquire(model, false);
+    await lease.release();
+    supervisor.sessions[0]!.stopError = new Error('stop failed');
+    await expect(subject.pollMemoryPressure()).rejects.toThrow('stop failed');
+    expect(subject.snapshot().state).not.toBe('stopping');
+    supervisor.sessions[0]!.stopError = null;
+    await subject.dispose();
+    await expect(subject.acquire(model, false)).rejects.toMatchObject({ code: 'disposed' });
+  });
   it('shares one loaded model and honors pending automatic release after the final lease', async () => {
     const model = await descriptor('a');
     const { subject, supervisor } = lifecycle();

@@ -103,6 +103,7 @@ export class ManagedLocalRuntimeLifecycle {
     | Promise<Readonly<{ availableBytes: number; totalBytes: number }>>;
   private current: CurrentModel | null = null;
   private phase: 'open' | 'draining' | 'disposed' = 'open';
+  private disposeRequested = false;
   private tail: Promise<void> = Promise.resolve();
   private readonly changed = new Set<() => void>();
   private idleReleaseGeneration = 0;
@@ -196,21 +197,29 @@ export class ManagedLocalRuntimeLifecycle {
         this.assertStartable(descriptor, fit);
         let session: ManagedLocalRuntimeSession;
         try {
-          session = await this.supervisor.start({
-            kind: 'model',
-            modelRoot: descriptor.modelRoot,
-            modelPath: descriptor.modelPath,
-            ...(descriptor.mmprojPath === undefined || descriptor.mmprojPath === null
-              ? {}
-              : { mmprojPath: descriptor.mmprojPath }),
-            modelAlias: descriptor.id,
-            scratchRoot: descriptor.scratchRoot,
-            backend: descriptor.backend,
-            contextTokens: descriptor.contextTokens,
-            batchSize: descriptor.batchSize,
-            gpuLayers: descriptor.gpuLayers,
-          });
+          session = await this.supervisor.start(
+            {
+              kind: 'model',
+              modelRoot: descriptor.modelRoot,
+              modelPath: descriptor.modelPath,
+              ...(descriptor.mmprojPath === undefined || descriptor.mmprojPath === null
+                ? {}
+                : { mmprojPath: descriptor.mmprojPath }),
+              modelAlias: descriptor.id,
+              scratchRoot: descriptor.scratchRoot,
+              backend: descriptor.backend,
+              contextTokens: descriptor.contextTokens,
+              batchSize: descriptor.batchSize,
+              gpuLayers: descriptor.gpuLayers,
+            },
+            signal,
+          );
+          if (signal.aborted) {
+            await session.stop();
+            throw canceled();
+          }
         } catch {
+          if (signal.aborted) throw canceled();
           const guidance = recovery(
             descriptor,
             'Managed Localを起動できませんでした。診断を確認して再試行してください。',
@@ -303,9 +312,14 @@ export class ManagedLocalRuntimeLifecycle {
 
   async dispose(): Promise<void> {
     if (this.phase === 'disposed') return;
+    this.disposeRequested = true;
     await this.drainAndStop('dispose');
     this.phase = 'disposed';
     this.notifyChanged();
+  }
+
+  killNow(): void {
+    this.supervisor.killNow();
   }
 
   private assess(
@@ -387,24 +401,27 @@ export class ManagedLocalRuntimeLifecycle {
   private async drainAndStop(reason: 'memory_pressure' | 'dispose'): Promise<void> {
     if (this.phase === 'disposed') return;
     this.phase = 'draining';
-    const current = this.current;
-    if (current !== null && current.leases.size > 0)
-      await this.onDrainRequested(current.descriptor.id, current.leases.size, reason);
-    const deadline = this.nowMs() + this.drainTimeoutMs;
-    while (this.current !== null && this.current.leases.size > 0 && this.nowMs() < deadline)
-      await this.waitForChange(undefined, Math.max(1, deadline - this.nowMs()));
-    await this.exclusive(() => this.stopCurrent());
-    if (reason === 'memory_pressure') this.phase = 'open';
-    this.notifyChanged();
+    try {
+      const current = this.current;
+      if (current !== null && current.leases.size > 0)
+        await this.onDrainRequested(current.descriptor.id, current.leases.size, reason);
+      const deadline = this.nowMs() + this.drainTimeoutMs;
+      while (this.current !== null && this.current.leases.size > 0 && this.nowMs() < deadline)
+        await this.waitForChange(undefined, Math.max(1, deadline - this.nowMs()));
+      await this.exclusive(() => this.stopCurrent());
+    } finally {
+      this.phase = this.disposeRequested ? 'disposed' : 'open';
+      this.notifyChanged();
+    }
   }
 
   private async stopCurrent(): Promise<void> {
     this.cancelIdleRelease();
     const current = this.current;
     if (current === null) return;
+    await current.session.stop();
     this.current = null;
     this.notifyChanged();
-    await current.session.stop();
   }
 
   private reconcileCrash(): void {
