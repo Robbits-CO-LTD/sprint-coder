@@ -356,10 +356,6 @@ export class ClaudeRuntimeAdapter {
     this.active.set(turnId, control);
     if (teamMcp === undefined) accepted();
     const prompt = serializedPayload ?? buildClaudePrompt(input, contextFragments, projectItems);
-    child.stdin.end(
-      nativeSkillInvocation === '' ? prompt : `${nativeSkillInvocation}\n\n${prompt}`,
-    );
-
     let failed = false;
     let sawCompletion = false;
     const effectiveTimeoutMs = teamMcp === undefined ? this.timeoutMs : 60 * 60_000;
@@ -381,6 +377,15 @@ export class ClaudeRuntimeAdapter {
       },
     );
     deadline.start();
+    child.stdin.on('error', () => {
+      if (failed || control.canceled || sawCompletion) return;
+      failed = true;
+      failWithDiagnostic(
+        publicError('RUNTIME_FAILED', 'Claude CLIへの入力送信に失敗しました。', true),
+        'startup_error',
+      );
+      void terminateProcessTree(child);
+    });
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;
@@ -416,7 +421,7 @@ export class ClaudeRuntimeAdapter {
         'spawn_error',
       );
     });
-    child.once('exit', (code) => {
+    child.once('close', (code) => {
       deadline.stop();
       this.active.delete(turnId);
       cleanup();
@@ -430,6 +435,9 @@ export class ClaudeRuntimeAdapter {
       }
       exited(exitCode, control.canceled);
     });
+    child.stdin.end(
+      nativeSkillInvocation === '' ? prompt : `${nativeSkillInvocation}\n\n${prompt}`,
+    );
   }
 
   async cancel(turnId: string): Promise<boolean> {

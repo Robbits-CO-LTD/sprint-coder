@@ -217,8 +217,13 @@ export async function fetchWithProviderEndpointPolicy(
       throw new Error('Provider redirects for requests with a body are forbidden');
     const next = new URL(location, prepared.canonicalUrl);
     if (next.origin !== prepared.origin) {
-      headers = new Headers(headers);
-      for (const name of ['authorization', 'cookie', 'proxy-authorization']) headers.delete(name);
+      const redirectedHeaders = new Headers();
+      // Provider profiles can put credentials in arbitrary headers, so a denylist is insufficient.
+      for (const name of ['accept', 'accept-language', 'content-type', 'user-agent']) {
+        const value = headers.get(name);
+        if (value !== null) redirectedHeaders.set(name, value);
+      }
+      headers = redirectedHeaders;
     }
     url = next;
   }

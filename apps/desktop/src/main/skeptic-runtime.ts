@@ -110,14 +110,14 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
     // Checked after the probe too: an abort during it should not start a turn nobody will read.
     if (signal.aborted) throw new Error('Verification was cancelled before it started');
 
+    const onAbort = () => {
+      // Tell the provider to stop. The panel has already stopped waiting, so a turn left running
+      // would be spent with no reader.
+      void Promise.resolve(client.cancel(runtimeTaskId, turnId)).catch(() => undefined);
+      settle?.({ error: new Error('Verification exceeded its deadline') });
+    };
     const outcome = await new Promise<{ text: string } | { error: Error }>((resolve) => {
       settle = resolve;
-      const onAbort = () => {
-        // Tell the provider to stop. The panel has already stopped waiting, so a turn left running
-        // would be spent with no reader.
-        void Promise.resolve(client.cancel(runtimeTaskId, turnId)).catch(() => undefined);
-        resolve({ error: new Error('Verification exceeded its deadline') });
-      };
       signal.addEventListener('abort', onAbort, { once: true });
       client.start(
         runtimeTaskId,
@@ -132,6 +132,7 @@ export function createSkepticRunner(deps: SkepticRuntimeDeps): SkepticRunner {
         'read-only',
       );
     }).finally(() => {
+      signal.removeEventListener('abort', onAbort);
       settle = null;
     });
 

@@ -2047,9 +2047,10 @@ export class TeamCoordinator {
   ): boolean {
     const attempt = this.persistence.getTeamAttempt(attemptId);
     if (attempt.providerCallOrdinal >= DEFAULT_RATE_LIMIT_RETRY_COUNT) return false;
+    const delayMs = rateLimitRetryDelayMs(attempt.providerCallOrdinal, error.retryAfterMs);
+    if (delayMs === null) return false;
     const waitingAttempt = this.persistence.recordTeamAttemptRateLimited(attempt.id, this.isoNow());
     const waitingExecution = this.persistence.getTeamExecution(input.executionId);
-    const delayMs = rateLimitRetryDelayMs(attempt.providerCallOrdinal, error.retryAfterMs);
     const requeued = this.executionScheduler.requeueActive(input.executionId, {
       executionId: input.executionId,
       teamId: input.teamId,

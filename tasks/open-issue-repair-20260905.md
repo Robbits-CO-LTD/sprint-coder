@@ -27,12 +27,12 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #392 | Regression green; PR review pending | [bug] Skill 一覧の取得に失敗すると設定画面が無限に再取得を繰り返す |
 | #393 | Pending investigation | [bug] Windows・Linux でウィンドウを閉じて終了すると後片付けの大半がスキップされる |
 | #394 | Regression green; PR review pending | [bug] Codex で effort に ultra を選ぶと全 Turn が「Turn開始入力を拒否」で失敗する |
-| #395 | Pending investigation | [bug] CLI が prompt 読み込み前に終了すると Runtime Host プロセスごと落ちる |
-| #396 | Pending investigation | [bug] CLI の起動失敗時に Turn の後始末が走らず一時ディレクトリや状態が残る |
-| #397 | Pending investigation | [bug] Codex の API 失敗やレート制限が「出力を解釈できませんでした」の再試行不可エラーになる |
+| #395 | Regression green; PR review pending | [bug] CLI が prompt 読み込み前に終了すると Runtime Host プロセスごと落ちる |
+| #396 | Regression green; PR review pending | [bug] CLI の起動失敗時に Turn の後始末が走らず一時ディレクトリや状態が残る |
+| #397 | Regression green; PR review pending | [bug] Codex の API 失敗やレート制限が「出力を解釈できませんでした」の再試行不可エラーになる |
 | #398 | Pending investigation | [bug] 実行完了直前に Team の停止・steer を行うと以後その Task の Team 操作がすべて固まる |
 | #399 | Pending investigation | [bug] 書き込み可能な Team 実行を steer すると再実行が必ず失敗し Worker が待機のまま残る |
-| #400 | Pending investigation | [bug] provider レート制限の 3 回目の再試行が配送上限に阻まれ誤ったエラーで失敗する |
+| #400 | Regression green; PR review pending | [bug] provider レート制限の 3 回目の再試行が配送上限に阻まれ誤ったエラーで失敗する |
 | #401 | Pending investigation | [bug] Managed Local の llama-server がシグナルで落ちると停止操作が 10 秒固まって失敗する |
 | #402 | Pending investigation | [bug] Managed Local の停止に失敗するとライフサイクルが draining のまま固まり以後の Turn が永久に待つ |
 | #403 | Pending investigation | [bug] Linux では空きメモリの見積もりが過小でモデルが「不足」扱いになり 5 秒ごとに停止される |
@@ -41,10 +41,10 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #406 | Pending investigation | [bug] エディタ保存が検証済み記述子ではなくパス名でコピーするため差し替え競合で任意ファイルを読める |
 | #407 | Pending investigation | [bug] コマンド出力が上限に達した後も小さなチャンクが追記され欠落のある出力が連続して見える |
 | #408 | Pending investigation | [bug] Goal 実行中に Stop-and-Send すると無関係な次の Turn で Goal が完了・ブロック扱いになる |
-| #409 | Pending investigation | [bug] CRLF 形式の SSE がチャンク境界で分断されると応答の一部が黙って消える |
+| #409 | Regression green; PR review pending | [bug] CRLF 形式の SSE がチャンク境界で分断されると応答の一部が黙って消える |
 | #410 | Pending investigation | [bug] Anthropic への要求が 4096 出力トークンに固定され打ち切られても通知されない |
-| #411 | Pending investigation | [bug] provider の Retry-After を上限なしに待つため Team 実行が数時間止まって見える |
-| #412 | Pending investigation | [bug] クロスオリジンのリダイレクトで API キーヘッダが転送される |
+| #411 | Regression green; PR review pending | [bug] provider の Retry-After を上限なしに待つため Team 実行が数時間止まって見える |
+| #412 | Regression green; PR review pending | [bug] クロスオリジンのリダイレクトで API キーヘッダが転送される |
 | #413 | Pending investigation | [bug] Computer Use で複数文字入力の途中で拒否されると「効果なし」として監査される |
 | #414 | Pending investigation | [bug] Computer Use を緊急停止した直後に「再開可能」な幽霊セッションが残る |
 | #415 | Pending investigation | [bug] IPC ハンドラの出力側スキーマ違反が「入力内容を確認してください」として表示されログにも残らない |
@@ -61,7 +61,7 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #426 | Regression green; PR review pending | [bug] ランタイム状態の購読解除関数が捨てられ開発時に二重登録される |
 | #427 | Pending investigation | [bug] ワークスペース検索ツールだけが root の同一性チェックを通らない |
 | #428 | Pending investigation | [bug] Managed Local モデルのメタデータ読み取りが 8 バイトごとにシステムコールを発行し極端に遅い |
-| #429 | Pending investigation | [bug] Skeptic の完了後も abort リスナーが残り期限切れ時に終了済み Turn へ無駄なキャンセルが飛ぶ |
+| #429 | Regression green; PR review pending | [bug] Skeptic の完了後も abort リスナーが残り期限切れ時に終了済み Turn へ無駄なキャンセルが飛ぶ |
 | #430 | Regression green; PR review pending | [bug] 失敗診断のコピー中にランタイム状態が変わるとコピーボタンが押せないままになる |
 | #431 | Pending investigation | [bug] Computer Use の文字入力に制御文字やファンクションキーを含めると許可リスト外のキー操作ができる |
 | #434 | Pending investigation | ローカルAI設定で投機的デコード(speculative decoding)設定を可能にする |
@@ -69,3 +69,7 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 ## First checkpoint
 
 Issues #390/#392/#394/#404/#420/#425/#426/#430 have failing-before and passing-after regression evidence. Desktop typecheck passed. Related tests: 19 files, 125 PASS, 13 pre-existing SKIP (Windows-only protocol or retired import APIs). Diagnostics race was rerun after the final cleanup change. Touched-file ESLint passed. Final PR/native/release gates are not claimed.
+
+## Provider and Runtime checkpoint
+
+#395/#396/#397/#400/#409/#411/#412/#429: failing-before and passing-after regression tests. Related 14 files: 171 PASS including real Electron ABI TeamCoordinator integration; Retry-After empty/blank additions: 12 PASS. Codex TurnError/CodexErrorInfo validated against locally generated app-server TypeScript bindings; raw provider messages are not forwarded. Desktop typecheck PASS; ESLint has only an unchanged unused-variable warning in team-coordinator.ts.

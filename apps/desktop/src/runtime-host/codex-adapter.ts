@@ -456,6 +456,17 @@ export class CodexRuntimeAdapter {
       },
     );
     deadline.start();
+    child.stdin.on('error', () => {
+      if (failed || control.canceled || sawCompletion) return;
+      failed = true;
+      rejectPending(new Error('Codex stdin failed'));
+      void releaseLocalImages();
+      failWithDiagnostic(
+        publicError('RUNTIME_FAILED', 'Codex CLIへの入力送信に失敗しました。', true),
+        'startup_error',
+      );
+      void terminateCodexProcessTree(child);
+    });
 
     createInterface({ input: child.stdout }).on('line', (line) => {
       if (failed || control.canceled || line.trim() === '') return;
@@ -591,17 +602,19 @@ export class CodexRuntimeAdapter {
             child.stdin.end();
           },
         );
-      } catch {
+      } catch (error) {
         failed = true;
         rejectPending(new Error('Codex app-server protocol failed'));
         void releaseLocalImages();
         failWithDiagnostic(
-          publicError(
-            'RUNTIME_PROTOCOL_ERROR',
-            'Codex app-serverの出力を解釈できませんでした。',
-            false,
-          ),
-          'protocol_error',
+          error instanceof CodexTurnFailedError
+            ? error.publicFailure
+            : publicError(
+                'RUNTIME_PROTOCOL_ERROR',
+                'Codex app-serverの出力を解釈できませんでした。',
+                false,
+              ),
+          error instanceof CodexTurnFailedError ? 'abnormal_exit' : 'protocol_error',
         );
         void terminateCodexProcessTree(child);
       }
@@ -731,7 +744,7 @@ export class CodexRuntimeAdapter {
         'spawn_error',
       );
     });
-    child.once('exit', (code) => {
+    child.once('close', (code) => {
       deadline.stop();
       rejectPending(new Error('Codex runtime exited'));
       void releaseLocalImages();
@@ -857,12 +870,66 @@ export function handleCodexNotification(
   }
   if (method === 'turn/completed') {
     const turn = asRecord(params['turn']);
+    if (turn['status'] === 'failed' || turn['status'] === 'interrupted')
+      throw new CodexTurnFailedError(turn['status'], turn['error']);
     if (turn['status'] !== 'completed')
       throw new Error(`Codex turn failed with status ${String(turn['status'])}`);
     advanceStage('synthesizing');
     const finalText = agentMessageBoundary.finalText();
     emit(finalText === null ? { type: 'completed' } : { type: 'completed', finalText });
     completed();
+  }
+}
+
+class CodexTurnFailedError extends Error {
+  readonly publicFailure: ReturnType<typeof publicError>;
+
+  constructor(status: 'failed' | 'interrupted', error: unknown) {
+    super('Codex reported a failed Turn');
+    const record =
+      typeof error === 'object' && error !== null ? (error as Record<string, unknown>) : {};
+    const info = record['codexErrorInfo'];
+    let tag = typeof info === 'string' ? info : null;
+    let httpStatus: unknown;
+    if (typeof info === 'object' && info !== null && !Array.isArray(info)) {
+      const entries = Object.entries(info);
+      if (entries.length === 1) {
+        const [key, payload] = entries[0]!;
+        tag = key;
+        if (typeof payload === 'object' && payload !== null && 'httpStatusCode' in payload)
+          httpStatus = payload.httpStatusCode;
+      }
+    }
+    if (tag === 'usageLimitExceeded' || tag === 'rateLimitExceeded' || httpStatus === 429)
+      this.publicFailure = publicError(
+        'RUNTIME_RATE_LIMIT',
+        'Codexの利用上限に達しました。時間をおいて再試行してください。',
+        false,
+      );
+    else if (tag === 'unauthorized' || httpStatus === 401 || httpStatus === 403)
+      this.publicFailure = publicError(
+        'RUNTIME_FAILED',
+        'Codexの認証を確認して、再度ログインしてください。',
+        false,
+      );
+    else if (
+      tag === 'serverOverloaded' ||
+      tag === 'internalServerError' ||
+      (typeof httpStatus === 'number' && httpStatus >= 500 && httpStatus <= 599)
+    )
+      this.publicFailure = publicError(
+        'RUNTIME_UNAVAILABLE',
+        'Codexの接続先で一時的な障害が発生しました。再試行してください。',
+        true,
+      );
+    else
+      this.publicFailure = publicError(
+        'RUNTIME_FAILED',
+        status === 'interrupted'
+          ? 'Codexの実行が中断されました。再試行してください。'
+          : 'CodexがこのTurnを完了できませんでした。',
+        status === 'interrupted',
+      );
   }
 }
 
