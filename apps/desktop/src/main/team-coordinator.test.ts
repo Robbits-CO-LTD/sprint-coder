@@ -28,6 +28,7 @@ import {
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
+import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { WorkerWorktreeManager } from './worker-worktree';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
@@ -1022,6 +1023,128 @@ if (runsWithElectronAbi)
         repositories: [{ state: 'cleaned' }],
       });
       expect(persistence.getTeamMissionWorktree(submission.executionId)).toBeNull();
+      persistence.close();
+    });
+
+    it('restarts a steered writable execution without quarantining its reusable isolation', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Steered isolation');
+      const runtime = new InterruptibleWorkerRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'complete',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'first',
+        doneCriteria: ['runtime completes'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => runtime.contents.length === 1);
+      await coordinator.steerExecution(task.id, submission.executionId, 'revised');
+      await waitFor(
+        () =>
+          runtime.contents.length === 2 ||
+          persistence.getTeamExecution(submission.executionId).state === 'failed',
+      );
+      expect(runtime.contents).toHaveLength(2);
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)?.phase).toBe('running');
+      runtime.complete(writer.id);
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15000,
+      );
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+      );
+      persistence.close();
+    });
+
+    it('retries a rate-limited writable execution within its existing isolation', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Retry isolation');
+      class RateLimitedWriter extends WorktreeWritingRuntime {
+        calls = 0;
+        override async execute(input: Parameters<WorktreeWritingRuntime['execute']>[0]) {
+          this.calls += 1;
+          if (this.calls === 1) throw new ProviderRateLimitedError('fixture rate limit', 0);
+          return super.execute(input);
+        }
+      }
+      const runtime = new RateLimitedWriter();
+      const { manager, workspace } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'complete',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write',
+        doneCriteria: ['done'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () =>
+          ['completed', 'failed'].includes(
+            persistence.getTeamExecution(submission.executionId).state,
+          ),
+        15000,
+      );
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
+      expect(runtime.calls).toBe(2);
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+      );
+      persistence.close();
+    });
+
+    it('rejects a late interruption instead of hanging while integration is finishing', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Late interruption');
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const scheduler = new PausedIntegrationScheduler();
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        new WorktreeWritingRuntime(),
+        manager,
+        scheduler,
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'complete',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write',
+        doneCriteria: ['done'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => scheduler.jobs.length === 1);
+      let failure = '';
+      void coordinator.cancelExecution(task.id, submission.executionId).catch((error: Error) => {
+        failure = error.message;
+      });
+      await vi.waitFor(() => expect(failure).toContain('finalizing'), { timeout: 250 });
       persistence.close();
     });
 
@@ -3900,6 +4023,18 @@ if (runsWithElectronAbi)
         state: 'failed',
         lastError: 'deliberate preflight failure',
       });
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === worker.id)?.state).toBe(
+        'failed',
+      );
+      expect(
+        coordinator
+          .get(task.id)
+          ?.messages.some(
+            (message) =>
+              message.sourceAgentId === worker.id &&
+              message.content.includes('deliberate preflight failure'),
+          ),
+      ).toBe(true);
       persistence.close();
     });
 

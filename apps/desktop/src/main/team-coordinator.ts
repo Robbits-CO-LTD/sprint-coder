@@ -1274,6 +1274,9 @@ export class TeamCoordinator {
     kind: ExecutionInterruptionControl['kind'],
     instruction: string | null,
   ): Promise<TeamExecutionSubmission> {
+    const dispatch = this.persistence.getTeamExecutionDispatch(execution.id);
+    if (this.persistence.getTeamDelivery(dispatch.messageId)?.state === 'acked')
+      throw new Error('Execution is finalizing and can no longer be interrupted');
     if (this.executionInterruptions.has(execution.id))
       throw new Error('Execution interruption is already in progress');
     let resolve!: (value: TeamExecutionSubmission) => void;
@@ -1852,33 +1855,46 @@ export class TeamCoordinator {
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
       this.releaseReservations(reservations);
-      if (missionWorktree !== null)
-        this.quarantineMissionWorktree(missionWorktree.executionId, error);
-      const persistedIsolation =
-        executionIsolation ?? this.persistence.getTeamExecutionIsolation(input.executionId);
-      if (persistedIsolation !== null && !integrationResume)
-        this.quarantineExecutionIsolation(persistedIsolation.executionId, error);
-      if (
-        attemptId !== null &&
-        this.handleRequestedInterruption({
-          ...input,
-          attemptId,
-        })
-      )
-        return;
-      if (
-        !integrationResume &&
-        attemptId !== null &&
-        error instanceof ProviderRateLimitedError &&
-        this.requeueRateLimitedExecution(input, attemptId, worker, error)
-      )
-        return;
-      if (
-        !integrationResume &&
-        attemptId !== null &&
-        this.requeueSafeRuntimeFailure(input, attemptId, worker, error)
-      )
-        return;
+      let retryScheduled = false;
+      try {
+        if (
+          attemptId !== null &&
+          this.executionInterruptions.get(input.executionId)?.kind === 'steer' &&
+          this.handleRequestedInterruption({ ...input, attemptId })
+        ) {
+          retryScheduled = true;
+          return;
+        }
+        if (
+          !integrationResume &&
+          !this.executionInterruptions.has(input.executionId) &&
+          attemptId !== null &&
+          error instanceof ProviderRateLimitedError &&
+          this.requeueRateLimitedExecution(input, attemptId, worker, error)
+        ) {
+          retryScheduled = true;
+          return;
+        }
+        if (
+          !integrationResume &&
+          !this.executionInterruptions.has(input.executionId) &&
+          attemptId !== null &&
+          this.requeueSafeRuntimeFailure(input, attemptId, worker, error)
+        ) {
+          retryScheduled = true;
+          return;
+        }
+      } finally {
+        if (!retryScheduled) {
+          if (missionWorktree !== null)
+            this.quarantineMissionWorktree(missionWorktree.executionId, error);
+          const persistedIsolation =
+            executionIsolation ?? this.persistence.getTeamExecutionIsolation(input.executionId);
+          if (persistedIsolation !== null && !integrationResume)
+            this.quarantineExecutionIsolation(persistedIsolation.executionId, error);
+        }
+      }
+      if (attemptId !== null && this.handleRequestedInterruption({ ...input, attemptId })) return;
       const failureSummary = (
         error instanceof Error ? error.message : 'Worker runtime failed'
       ).slice(0, 4_000);
@@ -1952,22 +1968,25 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       if (preflightFailure && mission !== null) this.cancelMissionRemainder(execution.id, 'failed');
-      if (attemptId !== null && !integrationResume)
+      if (!integrationResume)
         this.persistWorkerResult(
           input.teamId,
           worker,
           leader,
           failureCompletion,
           input.executionId,
-          attemptId,
+          attemptId ?? undefined,
         );
       const current = this.persistence
         .getTeamSnapshot(input.teamId)
         .agents.find(({ id }) => id === worker.id);
-      if (current?.state === 'busy')
+      if (
+        current?.state === 'busy' ||
+        (preflightFailure && current !== undefined && ['ready', 'waiting'].includes(current.state))
+      )
         this.persistence.transitionWorkerState(
           worker.id,
-          mission === null && !integrationResume ? 'failed' : 'waiting',
+          preflightFailure || (mission === null && !integrationResume) ? 'failed' : 'waiting',
         );
       this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
       const delivery = this.persistence.getTeamDelivery(input.messageId);
