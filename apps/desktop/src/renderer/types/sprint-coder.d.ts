@@ -28,6 +28,7 @@ export type TaskSummary = {
   workspacePath: string | null;
   localOnly: boolean;
   hasConversation?: boolean;
+  activeTurnId?: string | null;
   createdAt: string;
   updatedAt: string;
 };

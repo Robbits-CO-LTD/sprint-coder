@@ -671,7 +671,7 @@ function ArchivedTasks({
   );
 }
 
-function TaskRow({
+export function TaskRow({
   task,
   selectedTaskId,
   onSelect,
@@ -683,7 +683,9 @@ function TaskRow({
   onToggleArchive,
 }: { task: TaskSummary } & RowProps) {
   const isActive = task.id === selectedTaskId;
-  const turnStatus = useAppStore((state) => state.turnByTask[task.id]?.status);
+  const turnStatus = useAppStore((state) =>
+    isActive ? state.turnByTask[task.id]?.status : task.activeTurnId ? 'running' : undefined,
+  );
   const activity = taskActivityState(turnStatus);
   return (
     <div className={`sb-row${isActive ? ' active' : ''}`} data-task-id={task.id} tabIndex={-1}>

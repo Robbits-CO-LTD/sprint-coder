@@ -1691,6 +1691,23 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('pauses the Goal before starting an unrelated stop-and-send Turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Goal replacement');
+      const goal = persistence.startGoalTurn(task.id, 'original objective');
+      const replacement = persistence.replaceActiveTurn(
+        task.id,
+        goal.started.turnId,
+        'unrelated request',
+      );
+      expect(persistence.getTask(task.id).goalState?.status).toBe('paused');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, replacement.started.turnId, stage);
+      persistence.completeTurnAndFinishGoal(task.id, replacement.started.turnId, 'completed');
+      expect(persistence.getTask(task.id).goalState?.status).toBe('paused');
+      persistence.close();
+    });
+
     it('takes custody of a generated image and announces it on the Turn event stream', () => {
       // issue #11. The bytes come from a directory the Codex CLI owns, so their *contents* are the
       // only thing worth trusting — hence the magic-byte gate rather than a filename check.
@@ -2635,6 +2652,65 @@ if (runsWithElectronAbi)
       persistence.releaseMutationLease(token, '2026-07-23T00:00:02.000Z');
       await guard.stop(lease, saga);
       persistence.close();
+    });
+
+    it('quarantines both the owner and other Tasks sharing a Project root after policy revocation', async () => {
+      const { persistence } = createPersistence();
+      const rootId = randomUUID();
+      const workspaceKey = 'b'.repeat(64);
+      const rootIdentityDigest = 'a'.repeat(64);
+      const project = persistence.createProject({
+        name: 'quarantine',
+        folders: [
+          {
+            id: rootId,
+            path: '/workspace',
+            canonicalPath: '/workspace',
+            label: 'workspace',
+            role: 'primary',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+        ],
+      });
+      const task = persistence.createTask('owner', false, project.id);
+      const sibling = persistence.createTask('sibling', false, project.id);
+      const turn = persistence.startTurn(task.id, 'edit');
+      const saga = persistence.prepareEditSaga(
+        await stageEditSagaRequest({
+          id: 'project-quarantine-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'project-quarantine-operation',
+          plan: persistedEditPlan(),
+          mutationBinding: {
+            rootId,
+            workspacePath: '/workspace',
+            workspaceKey,
+            rootIdentityDigest,
+          },
+          createdAt: '2026-07-23T00:00:00.000Z',
+        }),
+      );
+      const guard = new SqliteEditSagaLeaseGuard(
+        persistence,
+        'project-quarantine-executor',
+        () => new Date('2026-07-23T00:00:01.000Z'),
+      );
+      const lease = await guard.acquire(saga, 'forward');
+      try {
+        persistence.setAccessPreset(task.id, 'auto');
+        expect(() => persistence.startTurn(sibling.id, 'must not start')).toThrow(
+          MutationQuarantinedError,
+        );
+        persistence.cancelTurn(task.id, turn.turnId);
+        expect(() => persistence.startTurn(task.id, 'must not start')).toThrow(
+          MutationQuarantinedError,
+        );
+      } finally {
+        await guard.stop(lease, saga);
+        persistence.close();
+      }
     });
 
     artifactIt('projects UI Turn diff paths onto their sealed Workspace root label', async () => {

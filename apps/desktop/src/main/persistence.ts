@@ -13870,12 +13870,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
            task_id, workspace_key, reason, source_saga_id, fence, created_at, cleared_at, revision
          )
          SELECT id, ?, ?, ?, ?, ?, NULL, 0 FROM tasks WHERE mutation_scope_key = ?
+           OR project_id IN (SELECT project_id FROM project_workspace_roots WHERE workspace_key = ?)
          ON CONFLICT(task_id, workspace_key) DO UPDATE SET
            reason = excluded.reason, source_saga_id = excluded.source_saga_id,
            fence = excluded.fence, created_at = excluded.created_at, cleared_at = NULL,
            revision = task_mutation_quarantines.revision + 1`,
       )
-      .run(row.workspace_key, reason, sourceSagaId, fence, now, row.workspace_key);
+      .run(
+        row.workspace_key,
+        reason,
+        sourceSagaId,
+        fence,
+        now,
+        row.workspace_key,
+        row.workspace_key,
+      );
+    if (sourceSagaId !== null)
+      this.quarantineSagaOwnerInTransaction(row.workspace_key, sourceSagaId, reason, fence, now);
     try {
       this.invalidateNativeWorkspace(row.workspace_key, String(fence));
     } catch {
@@ -14931,7 +14942,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const activeTurnId = this.getActiveTurnId(taskId);
       if (activeTurnId !== expectedActiveTurnId)
         throw new Error('Active Turn changed before stop-and-send commit');
-      const canceledEvent = activeTurnId === null ? null : this.cancelTurn(taskId, activeTurnId);
+      const canceledEvent =
+        activeTurnId === null ? null : this.cancelTurnAndFinishGoal(taskId, activeTurnId).event;
       const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
       return { canceledEvent, started };
     })();
