@@ -179,8 +179,8 @@ export class ToolBroker {
       if (state === 'succeeded' || state === 'failed' || state === 'denied' || state === 'canceled')
         terminal = true;
     };
-    transition('requested');
     try {
+      transition('requested');
       if (this.getCurrentPolicyEpoch(request.taskId) !== bound.context.policyEpoch)
         throw new Error('Tool dispatch rejected because the policy epoch changed');
       const entry = bound.snapshot.entries.find(
@@ -307,15 +307,12 @@ export class ToolBroker {
       )
         transition('backgrounded');
       else transition('succeeded');
-      if (!resultGateStarted) {
-        resultGateStarted = true;
-        await bound.resultGate.complete(ordinal);
-      }
       return output;
     } catch (error) {
       if (!terminal) transition(request.signal?.aborted ? 'canceled' : 'failed');
-      if (!resultGateStarted) await bound.resultGate.complete(ordinal);
       throw error;
+    } finally {
+      if (!resultGateStarted) await bound.resultGate.complete(ordinal);
     }
   }
 }

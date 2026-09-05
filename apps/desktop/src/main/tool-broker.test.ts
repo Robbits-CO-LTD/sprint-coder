@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ToolRegistry,
   createToolDefinition,
@@ -75,6 +75,53 @@ const context: ToolExecutionContext = {
 };
 
 describe('Main ToolBroker', () => {
+  it.each(['requested', 'failed'] as const)(
+    'unblocks later results when lifecycle recording throws at %s',
+    async (failureState) => {
+      const { registry, echo } = createRegistry();
+      const broker = new ToolBroker(
+        registry,
+        () => 3,
+        authorizePure,
+        (event) => {
+          if (event.callId === 'first' && event.state === failureState)
+            throw new Error('audit unavailable');
+        },
+      );
+      broker.registerImplementation({
+        toolId: echo.toolId,
+        implementationKind: 'built-in',
+        execute: (input) => {
+          if ((input as { text: string }).text === 'first') throw new Error('operation failed');
+          return { text: 'second' };
+        },
+      });
+      broker.startTurn(context, 'mock');
+      await expect(
+        broker.dispatch({
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: 'first',
+          providerName: 'mock_echo',
+          input: { text: 'first' },
+        }),
+      ).rejects.toThrow();
+      let result: unknown;
+      const second = broker
+        .dispatch({
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: 'second',
+          providerName: 'mock_echo',
+          input: { text: 'second' },
+        })
+        .then((value) => {
+          result = value;
+        });
+      await vi.waitFor(() => expect(result).toEqual({ text: 'second' }), { timeout: 200 });
+      await second;
+    },
+  );
   it('dispatches only the exact ToolId pinned by the Turn snapshot', async () => {
     const { registry, echo } = createRegistry();
     const broker = new ToolBroker(registry, () => 3, authorizePure);

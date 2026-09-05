@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   symlinkSync,
   statSync,
   unlinkSync,
@@ -38,6 +39,8 @@ const fileSystemFault = vi.hoisted(() => ({
   afterPublicationContent: null as string | null,
   failBoundaryRead: false,
   stagingSymlinkTarget: null as string | null,
+  sourceSwap: null as { source: string; outside: string } | null,
+  copiedStageText: null as string | null,
 }));
 
 vi.mock('./native-file-publication', async (importOriginal) => {
@@ -90,7 +93,17 @@ vi.mock('node:child_process', async (importOriginal) => {
         const target = options?.env?.['SPRINT_CODER_TARGET'];
         if (target !== undefined) writeFileSync(target, fileSystemFault.concurrentWindowsContent);
       }
+      const swap = fileSystemFault.sourceSwap;
+      const stage = args[0] === '/bin/cp' && Array.isArray(args[1]) ? args[1].at(-1) : undefined;
+      const swapping = swap !== null && stage?.includes('.sprint-coder-stage-') === true;
+      if (swapping) {
+        renameSync(swap.source, `${swap.source}.original`);
+        symlinkSync(swap.outside, swap.source);
+        fileSystemFault.sourceSwap = null;
+      }
       const result = actual.execFileSync(...args);
+      if (swapping && stage !== undefined)
+        fileSystemFault.copiedStageText = readFileSync(stage, 'utf8');
       if (
         fileSystemFault.stagingSymlinkTarget !== null &&
         args[0] === '/bin/cp' &&
@@ -256,6 +269,25 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
 });
 
 describe('saveWorkspaceFile (issue #43)', () => {
+  it.skipIf(process.platform === 'win32')(
+    'does not copy an outside file after the validated source pathname is replaced',
+    () => {
+      const root = workspace();
+      const file = join(root, 'source.txt');
+      const outside = join(workspace(), 'outside.txt');
+      writeFileSync(file, 'before\n');
+      writeFileSync(outside, 'outside fixture\n');
+      fileSystemFault.sourceSwap = { source: file, outside };
+      try {
+        saveWorkspaceFile(root, 'source.txt', 'after\n', digestOf('before\n'));
+        expect(fileSystemFault.copiedStageText).toBe('before\n');
+        expect(readFileSync(outside, 'utf8')).toBe('outside fixture\n');
+      } finally {
+        fileSystemFault.sourceSwap = null;
+        fileSystemFault.copiedStageText = null;
+      }
+    },
+  );
   it('writes when the file still matches the digest the editor started from', () => {
     const root = workspace();
     writeFileSync(join(root, 'a.ts'), 'before\n');

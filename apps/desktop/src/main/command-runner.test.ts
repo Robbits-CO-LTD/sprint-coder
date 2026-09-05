@@ -86,6 +86,26 @@ async function workspace(): Promise<string> {
 const executionIt = it;
 
 describe('CommandRunner', () => {
+  executionIt('never appends a later small chunk after output has been truncated', async () => {
+    const root = await workspace();
+    const chunks: CommandOutputChunk[] = [];
+    const spec = await prepareTestExecutionSpec({
+      workspacePath: root,
+      executable: process.execPath,
+      argv: [
+        '-e',
+        "process.stdout.write('line\\n'.repeat(2000));setTimeout(() => process.stderr.write('TAIL_MARKER'), 30)",
+      ],
+      cwd: '.',
+    });
+    const result = await new CommandRunner({ maxOutputBytes: 1000, maxBatchBytes: 128 }).run(spec, {
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    });
+    expect(result.truncated).toBe(true);
+    expect(chunks.map(({ text }) => text).join('')).not.toContain('TAIL_MARKER');
+  });
   it('normalizes equivalent explicit and inherited icacls entries', () => {
     const path = 'C:\\Temp\\workspace';
     const before = `${path} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;

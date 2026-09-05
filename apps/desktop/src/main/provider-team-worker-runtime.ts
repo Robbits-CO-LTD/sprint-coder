@@ -124,6 +124,13 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.executionId ?? input.envelope.deliveryId;
+    const prompt = workerPrompt(input.worker, input.content, input.priorConversation);
+    const inheritedContext = reserveTeamWorkerContext(
+      applyWorkerContextInheritance(
+        input.worker,
+        this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
+      ),
+    );
     const managedToolSession =
       input.workspaceSet === undefined || connection.id !== this.deps.managedToolsConnectionId
         ? undefined
@@ -136,13 +143,6 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
-    const prompt = workerPrompt(input.worker, input.content, input.priorConversation);
-    const inheritedContext = reserveTeamWorkerContext(
-      applyWorkerContextInheritance(
-        input.worker,
-        this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
-      ),
-    );
 
     const controller = new AbortController();
     const abortFromCaller = (): void => controller.abort(input.signal?.reason);

@@ -18,6 +18,7 @@ import {
   createPathGuard,
   openGuardedExistingFile,
   revalidatePathGuard,
+  PathGuardError,
   type PathGuard,
 } from './path-guard';
 import {
@@ -403,6 +404,7 @@ type PreparedWorkspaceInput = Readonly<{
   raw?: unknown;
   workspace: EffectiveWorkspaceSet;
   mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
+  expectedRootIdentityDigest?: string;
 }>;
 
 const issuedPreparedInputs = new WeakSet<object>();
@@ -864,6 +866,7 @@ export class ManagedCodingHarness {
       relativePath: request.path,
       guard,
       workspace,
+      ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
       raw: Object.freeze(request),
     });
     issuedPreparedInputs.add(prepared);
@@ -892,10 +895,33 @@ export class ManagedCodingHarness {
       request.glob,
     );
     const matches: { path: string; line: number; text: string }[] = [];
+    const root = resolveWorkspaceToolRoot(input.workspace, input.rootId);
+    if (root === null) throw new Error('Workspace rootId is not present in this Turn');
+    const expectedRootIdentityDigest = input.expectedRootIdentityDigest;
+    if (input.workspace.source === 'project' && expectedRootIdentityDigest === undefined)
+      throw new Error('Workspace root identity is incomplete');
+    const candidateGuard = async (relativePath: string): Promise<PathGuard | null> => {
+      try {
+        return await createPathGuard({
+          rootId: root.rootId,
+          workspacePath: root.path,
+          expectedRootIdentityDigest,
+          targetPath: relativePath,
+          operation: 'read',
+        });
+      } catch (error) {
+        if (error instanceof PathGuardError && error.code === 'IDENTITY_CHANGED') throw error;
+        return null;
+      }
+    };
     if (request.mode === 'files') {
-      const files = candidates.files
-        .filter((path) => path.includes(request.query))
-        .slice(0, request.maxResults);
+      const files: string[] = [];
+      for (const path of candidates.files) {
+        if (!path.includes(request.query)) continue;
+        if ((await candidateGuard(path))?.targetIdentity?.kind === 'file') files.push(path);
+        if (files.length >= request.maxResults) break;
+      }
+      await revalidatePathGuard(input.guard);
       return {
         rootId: input.rootId,
         rootLabel: input.rootLabel,
@@ -911,21 +937,9 @@ export class ManagedCodingHarness {
     let withheldFiles = 0;
     for (const relativePath of candidates.files) {
       if (matches.length >= request.maxResults) break;
-      let guard: PathGuard;
+      const guard = await candidateGuard(relativePath);
+      if (guard?.targetIdentity?.kind !== 'file') continue;
       try {
-        const workspace = input.workspace;
-        const root = resolveWorkspaceToolRoot(workspace, input.rootId);
-        if (root === null) throw new Error('Workspace rootId is not present in this Turn');
-        const expectedRootIdentityDigest =
-          workspace.source === 'project' ? input.mutationBinding?.rootIdentityDigest : undefined;
-        guard = await createPathGuard({
-          rootId: root.rootId,
-          workspacePath: root.path,
-          ...(expectedRootIdentityDigest === undefined ? {} : { expectedRootIdentityDigest }),
-          targetPath: relativePath,
-          operation: 'read',
-        });
-        if (guard.targetIdentity?.kind !== 'file') continue;
         const read = await this.revisions.readGuarded({
           owner: { taskId: context.taskId, turnId: context.turnId },
           guard,

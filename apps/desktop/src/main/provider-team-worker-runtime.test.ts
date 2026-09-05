@@ -31,6 +31,67 @@ const connection: ProviderConnection = {
 };
 
 describe('ProviderAwareTeamWorkerRuntime', () => {
+  it('does not retain a managed tool session when inherited context exceeds the Worker budget', async () => {
+    let outstandingSessions = 0;
+    const adapter = new ProviderAwareTeamWorkerRuntime({
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+      verification: {
+        requireVerifiedForExecution: async () => connection,
+      } as unknown as ProviderVerificationService,
+      registry: new MainProviderRegistry(),
+      getConnection: () => connection,
+      authorizeEgress: vi.fn(() => true),
+      managerGuidance: '',
+      managerTools: [],
+      workerGuidance: '',
+      workerTools: [],
+      executeManagerTool: vi.fn(),
+      managedToolsConnectionId: connection.id,
+      prepareManagedTools: async () => {
+        outstandingSessions += 1;
+        return {
+          tools: [],
+          execute: vi.fn(),
+          release: () => {
+            outstandingSessions -= 1;
+          },
+        };
+      },
+      contextFor: () => ({
+        fragments: [],
+        usageEvents: [],
+        compacted: false,
+        projectSnapshotDigest: 'b'.repeat(64),
+        projectItems: [
+          {
+            id: 'project:oversized',
+            kind: 'instruction',
+            authority: 'user',
+            localOnly: false,
+            content: 'x'.repeat(128 * 1024 + 1),
+            sealedDigest: 'a'.repeat(64),
+            sourceTaskId: null,
+            sourceTurnId: null,
+            sourceReferenceId: null,
+            capturedAt: '2026-09-05T00:00:00.000Z',
+          },
+        ],
+      }),
+    });
+    await expect(
+      adapter.execute({
+        worker: { ...providerWorker(), contextInheritancePolicy: 'full_fork' },
+        envelope,
+        content: 'task',
+        workspaceSet: {
+          primaryRootId: 'root-1',
+          roots: [{ rootId: 'root-1', path: '/workspace', label: 'workspace', role: 'primary' }],
+          digest: 'b'.repeat(64),
+        },
+      }),
+    ).rejects.toThrow();
+    expect(outstandingSessions).toBe(0);
+  });
   it('keeps a connection-less legacy or mock Worker on the existing Runtime path', async () => {
     const fallbackStart = vi.fn(async () => ({ pid: null }));
     const fallbackExecute = vi.fn(async () => ({

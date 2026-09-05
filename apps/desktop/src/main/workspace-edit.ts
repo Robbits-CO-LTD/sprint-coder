@@ -197,7 +197,7 @@ export function saveWorkspaceFile(
       const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
       if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
     } else {
-      stageTargetFile(absolute, staging);
+      stageTargetFile(descriptor, staging);
       // A watcher can replace the freshly-copied pathname before we make a read-only staging file
       // writable. Open without following links first and mutate only that validated inode, so a
       // planted symlink cannot redirect chmod outside the Workspace.
@@ -397,19 +397,22 @@ function publishStagedFile(
   }
 }
 
-function stageTargetFile(absolute: string, staging: string): void {
+function stageTargetFile(sourceDescriptor: number, staging: string): void {
   // copyFile does not promise POSIX ACL/xattr retention. Use the trusted system copy command on
   // supported hosts so an atomic editor save cannot silently strip security metadata.
   if (process.platform === 'linux') {
     execFileSync(
       '/bin/cp',
-      ['--preserve=all', '--reflink=auto', '--no-target-directory', absolute, staging],
-      { stdio: 'ignore' },
+      ['--preserve=all', '--reflink=auto', '--no-target-directory', '/proc/self/fd/3', staging],
+      { stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor], timeout: 5_000 },
     );
     return;
   }
   if (process.platform === 'darwin') {
-    execFileSync('/bin/cp', ['-p', absolute, staging], { stdio: 'ignore' });
+    execFileSync('/bin/cp', ['-p', '/dev/fd/3', staging], {
+      stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor],
+      timeout: 5_000,
+    });
     return;
   }
   throw new Error(`Atomic metadata-preserving saves are unsupported on ${process.platform}`);
@@ -433,7 +436,10 @@ function restoreStagedMetadata(
         '/proc/self/fd/3',
         '/proc/self/fd/4',
       ],
-      { stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor] },
+      {
+        stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor],
+        timeout: 5_000,
+      },
     );
   }
   const now = new Date();
