@@ -721,7 +721,7 @@ export class CommandRunner {
         return flushChain;
       };
       const queueText = (stream: 'stdout' | 'stderr', text: string): void => {
-        if (text.length === 0) return;
+        if (text.length === 0 || truncated) return;
         for (const part of splitUtf8(text, this.maxBatchBytes)) {
           const byteLength = Buffer.byteLength(part);
           if (outputBytes + byteLength > this.maxOutputBytes) {

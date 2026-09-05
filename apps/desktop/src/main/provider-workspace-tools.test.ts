@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import type * as FsPromises from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { renameSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import {
   appendFile,
   link,
@@ -37,6 +38,19 @@ import { workspaceMutationBinding } from './path-guard';
 import { ManagedCommandSessions } from './managed-command-sessions';
 
 const roots: string[] = [];
+const searchRace = vi.hoisted(() => ({ beforeReaddir: null as (() => void) | null }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof FsPromises>();
+  return {
+    ...original,
+    readdir: async (...args: Parameters<typeof original.readdir>) => {
+      const callback = searchRace.beforeReaddir;
+      searchRace.beforeReaddir = null;
+      callback?.();
+      return original.readdir(...args);
+    },
+  };
+});
 
 describe('provider command output', () => {
   it('reports truncation when either output boundary truncated', () => {
@@ -60,12 +74,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function harness(options: { beforeExecute?: (root: string) => boolean } = {}) {
+async function harness(
+  options: { beforeExecute?: (root: string) => boolean; project?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-workspace-'));
   roots.push(root);
   const workspace: EffectiveWorkspaceSet = {
-    source: 'task',
-    projectId: null,
+    source: options.project ? 'project' : 'task',
+    projectId: options.project ? 'project-1' : null,
     primaryRootId: 'root-a',
     roots: [
       {
@@ -79,9 +95,12 @@ async function harness(options: { beforeExecute?: (root: string) => boolean } = 
     digest: 'a'.repeat(64),
   };
   const authorizationGuards: unknown[] = [];
+  const rootIdentity = options.project
+    ? (await workspaceMutationBinding(root)).rootIdentityDigest
+    : undefined;
   const tools = new ProviderWorkspaceTools({
     workspaceFor: () => workspace,
-    rootIdentityFor: () => undefined,
+    rootIdentityFor: () => (options.project ? rootIdentity : undefined),
     policyEpochFor: () => 1,
     authorizer: (request) => {
       authorizationGuards.push(workspaceToolAuthorizationGuard(request.input));
@@ -103,6 +122,68 @@ async function harness(options: { beforeExecute?: (root: string) => boolean } = 
 }
 
 describe('Provider workspace read tools', () => {
+  it('does not return data from a transient replacement root during a search', async () => {
+    const { root, tools, context } = await harness({ project: true });
+    const replacement = `${root}.replacement`;
+    const previous = `${root}.previous`;
+    roots.push(replacement, previous);
+    await mkdir(join(root, 'a/b'), { recursive: true });
+    await mkdir(join(replacement, 'a/b'), { recursive: true });
+    await writeFile(join(root, 'a/b/result.txt'), 'needle original\n');
+    await writeFile(join(replacement, 'a/b/result.txt'), 'needle replacement\n');
+    const originalRead = FileRevisionRegistry.prototype.readGuarded;
+    const read = vi
+      .spyOn(FileRevisionRegistry.prototype, 'readGuarded')
+      .mockImplementation(async function (this: FileRevisionRegistry, input) {
+        const result = await originalRead.call(this, input);
+        renameSync(root, replacement);
+        renameSync(previous, root);
+        return result;
+      });
+    searchRace.beforeReaddir = () => {
+      renameSync(root, previous);
+      renameSync(replacement, root);
+    };
+    try {
+      await expect(
+        tools.broker.dispatch({
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: 'transient-search-root-swap',
+          providerName: 'search_workspace',
+          input: { query: 'needle', path: 'a/b' },
+        }),
+      ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
+    } finally {
+      searchRace.beforeReaddir = null;
+      read.mockRestore();
+    }
+  });
+  it('rejects a substituted Project root even when the approved nested directory is moved intact', async () => {
+    const { root, tools, context } = await harness({
+      project: true,
+      beforeExecute: (path) => {
+        const previous = `${path}.previous`;
+        roots.push(previous);
+        renameSync(path, previous);
+        mkdirSync(path);
+        renameSync(join(previous, 'a'), join(path, 'a'));
+        writeFileSync(join(path, 'a/b/result.txt'), 'needle replacement\n');
+        return true;
+      },
+    });
+    await mkdir(join(root, 'a/b'), { recursive: true });
+    await writeFile(join(root, 'a/b/result.txt'), 'needle original\n');
+    await expect(
+      tools.broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'search-root-swap',
+        providerName: 'search_workspace',
+        input: { query: 'needle', path: 'a/b' },
+      }),
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
+  });
   it('exposes legacy Mock fixtures only to the exact Mock fixture Turn', async () => {
     const tools = new ProviderWorkspaceTools({
       workspaceFor: () => null,

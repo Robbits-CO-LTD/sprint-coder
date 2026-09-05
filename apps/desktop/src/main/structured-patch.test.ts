@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -325,5 +325,45 @@ describe('structured patch preparation', () => {
         readFile(join(workspace, 'src/a.txt'), 'utf8'),
       ),
     ).toBe('alpha beta gamma\n');
+  });
+
+  it('rejects two differently cased references to the same file before preparing effects', async ({
+    skip,
+  }) => {
+    const { workspace, registry, a } = await fixture();
+    const alias = join(workspace, 'src', 'A.txt');
+    const aliasStat = await stat(alias).catch(() => null);
+    if (aliasStat === null) {
+      skip();
+      return;
+    }
+    const other = await registry.read({
+      owner,
+      workspacePath: workspace,
+      targetPath: 'src/A.txt',
+      policyEpoch: 1,
+    });
+    await expect(
+      prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: [
+          {
+            kind: 'update',
+            path: 'src/a.txt',
+            revision: a.reference,
+            edits: [{ oldText: 'beta', newText: 'first' }],
+          },
+          {
+            kind: 'update',
+            path: 'src/A.txt',
+            revision: other.reference,
+            edits: [{ oldText: 'beta', newText: 'second' }],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
   });
 });

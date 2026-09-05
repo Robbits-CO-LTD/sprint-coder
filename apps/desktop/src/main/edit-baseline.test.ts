@@ -30,9 +30,14 @@ describe('dirtyPathsFrom (issue #41)', () => {
     // Both sides of a rename are suspect: the Turn did not create either state, so HEAD is not a
     // safe baseline for either name.
     const paths = dirtyPathsFrom(
-      [' M src/a.ts', '?? src/new.ts', 'A  src/staged.ts', 'R  src/old.ts -> src/renamed.ts'].join(
-        '\n',
-      ),
+      [
+        ' M src/a.ts',
+        '?? src/new.ts',
+        'A  src/staged.ts',
+        'R  src/renamed.ts',
+        'src/old.ts',
+        '',
+      ].join('\0'),
     );
     expect([...paths].sort()).toEqual([
       'src/a.ts',
@@ -43,17 +48,31 @@ describe('dirtyPathsFrom (issue #41)', () => {
     ]);
   });
 
-  it('unquotes a path git escaped, so an unusual name is not mistaken for clean', () => {
-    expect(dirtyPathsFrom(' M "src/\\303\\251.ts"').size).toBe(1);
-    expect(dirtyPathsFrom(' M "src/a b.ts"').has('src/a b.ts')).toBe(true);
+  it('preserves unusual paths from NUL-delimited Git output', () => {
+    expect(dirtyPathsFrom(' M src/é.ts\0').has('src/é.ts')).toBe(true);
+    expect(dirtyPathsFrom(' M src/a b.ts\0').has('src/a b.ts')).toBe(true);
   });
 
   it('ignores blank and truncated lines', () => {
-    expect(dirtyPathsFrom('\n M\n').size).toBe(0);
+    expect(dirtyPathsFrom('\0 M\0').size).toBe(0);
   });
 });
 
 describe('createEditBaselines (issue #41)', () => {
+  it.each(
+    ['メモ.md', 'é.ts', ' leading -> name .md', 'line\nname.ts'].filter(
+      (name) => process.platform !== 'win32' || !/[>\n]/.test(name),
+    ),
+  )('keeps user edits out of the baseline for %j', async (name) => {
+    const root = repo();
+    writeFileSync(join(root, name), 'committed\n');
+    commitAll(root);
+    writeFileSync(join(root, name), 'user work\n');
+    const baselines = createEditBaselines(root);
+    baselines.note(name);
+    writeFileSync(join(root, name), 'model work\n');
+    expect(await baselines.get(name)).toBe('user work\n');
+  });
   it('uses the committed content for a file that was clean when the Turn started', async () => {
     // The whole reason git is preferred: this still answers correctly after the file on disk has
     // already been rewritten, so there is no snapshot to take and no race to lose.

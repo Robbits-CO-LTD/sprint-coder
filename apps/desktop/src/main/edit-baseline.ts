@@ -46,7 +46,7 @@ export function createEditBaselines(
   // Started immediately and awaited lazily: a Turn's first file usually arrives hundreds of
   // milliseconds later, so this is normally resolved by the time anything needs it, and nothing
   // blocks on it if it is not.
-  const cleanPaths = git(['status', '--porcelain', '--untracked-files=all']).then((output) =>
+  const cleanPaths = git(['status', '--porcelain', '-z', '--untracked-files=all']).then((output) =>
     output === null ? null : dirtyPathsFrom(output),
   );
   const baselines = new Map<string, Promise<string | null>>();
@@ -85,26 +85,18 @@ export function createEditBaselines(
 /** Paths that already differed from HEAD when the Turn began, including untracked ones. */
 export function dirtyPathsFrom(porcelain: string): Set<string> {
   const paths = new Set<string>();
-  for (const line of porcelain.split('\n')) {
-    // `XY <path>`; a rename is `R  old -> new` and both sides are suspect.
-    if (line.length < 4) continue;
-    const rest = line.slice(3);
-    for (const part of rest.split(' -> ')) {
-      const path = unquoteGitPath(part.trim());
-      if (path.length > 0) paths.add(path);
+  const records = porcelain.split('\0');
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    if (record.length < 4 || record[2] !== ' ') continue;
+    paths.add(record.slice(3));
+    // Porcelain -z supplies the destination first, followed by a separate source record.
+    if (/[RC]/.test(record.slice(0, 2))) {
+      const source = records[++index];
+      if (source) paths.add(source);
     }
   }
   return paths;
-}
-
-/** git quotes paths with unusual bytes as a C string; a mis-parsed name must not read as clean. */
-function unquoteGitPath(value: string): string {
-  if (!value.startsWith('"') || !value.endsWith('"') || value.length < 2) return value;
-  try {
-    return JSON.parse(value) as string;
-  } catch {
-    return value;
-  }
 }
 
 function runGit(cwd: string, args: string[]): Promise<string | null> {
