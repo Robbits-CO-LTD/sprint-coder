@@ -1,3 +1,4 @@
+import { secureProviderFetch } from './provider-endpoint-policy';
 import {
   providerExecutionRequestSchema,
   type CanonicalProviderEvent,
@@ -51,7 +52,7 @@ export class AnthropicProviderClient implements ProviderRuntime {
 
   constructor(
     private readonly resolveCredential: AnthropicCredentialResolver,
-    private readonly providerFetch: ProviderFetch = fetch,
+    private readonly providerFetch: ProviderFetch = secureProviderFetch,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -388,7 +389,7 @@ function positiveInteger(value: unknown): number | null {
 }
 
 function retryAfter(value: string | null, now: Date): number | null {
-  if (value === null) return null;
+  if (value === null || value.trim() === '') return null;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1_000);
   const date = Date.parse(value);

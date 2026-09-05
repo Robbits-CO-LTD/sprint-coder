@@ -116,13 +116,31 @@ describe('ProviderEndpointPolicy', () => {
       fetchWithProviderEndpointPolicy(
         endpointPolicy,
         'https://one.test/v1',
-        { headers: { authorization: 'Bearer secret', 'x-safe': 'kept' } },
+        {
+          headers: {
+            authorization: 'Bearer secret',
+            'x-safe': 'custom credential',
+            'x-api-key': 'anthropic-secret',
+            'x-goog-api-key': 'gemini-secret',
+            'openai-project': 'private-project',
+            'openai-organization': 'private-organization',
+            accept: 'application/json',
+          },
+        },
         transport,
       ),
     ).resolves.toMatchObject({ status: 200 });
     expect(observed[0]!.get('authorization')).toBe('Bearer secret');
     expect(observed[1]!.get('authorization')).toBeNull();
-    expect(observed[1]!.get('x-safe')).toBe('kept');
+    for (const name of [
+      'x-safe',
+      'x-api-key',
+      'x-goog-api-key',
+      'openai-project',
+      'openai-organization',
+    ])
+      expect(observed[1]!.get(name)).toBeNull();
+    expect(observed[1]!.get('accept')).toBe('application/json');
   });
 
   it('pins one validated DNS answer set for the transport call', async () => {

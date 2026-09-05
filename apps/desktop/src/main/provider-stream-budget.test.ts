@@ -8,6 +8,30 @@ import {
 } from './provider-stream-budget';
 
 describe('ProviderStreamBudget', () => {
+  it('preserves CRLF-delimited events and DONE across every byte boundary', async () => {
+    const wire = new TextEncoder().encode(
+      'data: {"value":"日本語"}\r\n\r\ndata: {"value":2}\r\n\r\ndata: [DONE]\r\n\r\n',
+    );
+    for (let boundary = 1; boundary < wire.length; boundary += 1) {
+      const onDone = vi.fn();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(wire.slice(0, boundary));
+          controller.enqueue(wire.slice(boundary));
+          controller.close();
+        },
+      });
+      const events = [];
+      for await (const event of readBoundedServerSentJson(
+        stream,
+        new ProviderStreamBudget(),
+        onDone,
+      ))
+        events.push(event);
+      expect(events, `byte boundary ${boundary}`).toEqual([{ value: '日本語' }, { value: 2 }]);
+      expect(onDone, `byte boundary ${boundary}`).toHaveBeenCalledTimes(1);
+    }
+  });
   it.each([
     ['empty stream', ''],
     [

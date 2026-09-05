@@ -151,7 +151,7 @@ export async function* readBoundedServerSentJson(
       budget.assertTime();
       const { done, value } = await reader.read();
       if (value !== undefined) budget.consumeRaw(value.byteLength);
-      pending += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n');
+      pending = (pending + decoder.decode(value, { stream: !done })).replace(/\r\n/g, '\n');
       let boundary = pending.indexOf('\n\n');
       if (boundary < 0 && Buffer.byteLength(pending, 'utf8') > PROVIDER_STREAM_LIMITS.eventBytes)
         throw new ProviderQuotaExceededError('event_bytes');

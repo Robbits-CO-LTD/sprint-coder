@@ -105,6 +105,16 @@ function harness(overrides: Partial<SkepticRuntimeDeps> = {}) {
 const never = new AbortController().signal;
 
 describe('running a skeptic on a real runtime', () => {
+  it('does not cancel a completed skeptic when a sibling deadline expires', async () => {
+    const controller = new AbortController();
+    const h = harness();
+    const pending = h.run({ skepticIndex: 0, prompt: 'judge', signal: controller.signal });
+    await Promise.resolve();
+    h.complete('turn-1', 'done');
+    await pending;
+    controller.abort();
+    expect(h.cancels).toEqual([]);
+  });
   it('returns the text the runtime streamed back', async () => {
     const h = harness();
     const pending = h.run({ skepticIndex: 0, prompt: 'judge this', signal: never });

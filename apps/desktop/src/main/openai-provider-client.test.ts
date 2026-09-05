@@ -204,42 +204,49 @@ describe('OpenAIProviderClient', () => {
     expect(events.at(-1)).toEqual({ type: 'completed', stopReason: 'completed' });
   });
 
-  it('emits rate-limit admission information without misclassifying credentials', async () => {
-    const client = new OpenAIProviderClient(
-      () => ({ apiKey: 'valid-key' }),
-      async () => new Response(null, { status: 429, headers: { 'Retry-After': '2' } }),
-      () => new Date('2026-07-28T01:00:00.000Z'),
-    );
-    const events = [];
-    for await (const event of client.execute(
-      connection,
-      {
-        executionId: 'execution-429',
-        connectionId: connection.id,
-        modelId: 'gpt-5.2',
-        messages: [{ role: 'user', content: 'hello' }],
-      },
-      new AbortController().signal,
-    ))
-      events.push(event);
-    expect(events).toEqual([
-      {
-        type: 'rate_limit',
-        retryAfterMs: 2_000,
-        observedAt: '2026-07-28T01:00:00.000Z',
-      },
-      {
-        type: 'error',
-        error: {
-          category: 'rate_limited',
-          message: 'OpenAI API rate limit reached',
-          retryable: true,
-          retryAfterMs: 2_000,
-          providerCode: 'http_429',
+  it.each([
+    ['2', 2_000],
+    ['', null],
+    [' ', null],
+  ] as const)(
+    'normalizes Retry-After %j without misclassifying credentials',
+    async (header, retryAfterMs) => {
+      const client = new OpenAIProviderClient(
+        () => ({ apiKey: 'valid-key' }),
+        async () => new Response(null, { status: 429, headers: { 'Retry-After': header } }),
+        () => new Date('2026-07-28T01:00:00.000Z'),
+      );
+      const events = [];
+      for await (const event of client.execute(
+        connection,
+        {
+          executionId: 'execution-429',
+          connectionId: connection.id,
+          modelId: 'gpt-5.2',
+          messages: [{ role: 'user', content: 'hello' }],
         },
-      },
-    ]);
-  });
+        new AbortController().signal,
+      ))
+        events.push(event);
+      expect(events).toEqual([
+        {
+          type: 'rate_limit',
+          retryAfterMs,
+          observedAt: '2026-07-28T01:00:00.000Z',
+        },
+        {
+          type: 'error',
+          error: {
+            category: 'rate_limited',
+            message: 'OpenAI API rate limit reached',
+            retryable: true,
+            retryAfterMs,
+            providerCode: 'http_429',
+          },
+        },
+      ]);
+    },
+  );
 
   it('cancels the in-flight HTTP stream by execution ID', async () => {
     let notifyStarted: (() => void) | undefined;
