@@ -206,6 +206,29 @@ function lifecycle(
 }
 
 describe('ManagedLocalRuntimeLifecycle', () => {
+  it('retries stopping a startup session that was canceled before it became current', async () => {
+    const controller = new AbortController();
+    class CanceledSupervisor extends FakeSupervisor {
+      override async start(input: ManagedLocalRuntimeStartInput) {
+        const session = await super.start(input);
+        this.sessions.at(-1)!.stopError = new Error('stop timed out');
+        controller.abort();
+        return session;
+      }
+      override async stop() {
+        return this.sessions.at(-1)?.session().stop() ?? null;
+      }
+    }
+    const supervisor = new CanceledSupervisor();
+    const { subject } = lifecycle({ supervisor });
+    await expect(
+      subject.acquire(await descriptor('a'), false, controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(supervisor.sessions[0]!.stopCount).toBe(1);
+    supervisor.sessions[0]!.stopError = null;
+    await subject.dispose();
+    expect(supervisor.sessions[0]!.stopCount).toBe(2);
+  });
   it('leaves draining and wakes later requests when stopping fails', async () => {
     const model = await descriptor('a');
     const { subject, supervisor } = lifecycle({
