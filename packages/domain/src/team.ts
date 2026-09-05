@@ -117,7 +117,7 @@ const teamTransitions: Readonly<Record<TeamState, readonly TeamState[]>> = {
 const workerTransitions: Readonly<Record<WorkerState, readonly WorkerState[]>> = {
   invited: ['spawning', 'stopped'],
   spawning: ['ready', 'failed', 'stopped'],
-  ready: ['busy', 'stopped'],
+  ready: ['busy', 'failed', 'stopped'],
   busy: ['waiting', 'done', 'failed', 'stopped'],
   waiting: ['busy', 'done', 'failed', 'stopped'],
   done: [],

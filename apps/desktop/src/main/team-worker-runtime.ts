@@ -126,6 +126,7 @@ class TeamRuntimeExecutionError extends Error {
 type TeamWorkerExecutionInput = Parameters<TeamWorkerRuntime['execute']>[0];
 
 export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
+  private readonly executionAborts = new Map<string, AbortController>();
   private readonly simulator = new DeterministicTeamWorkerRuntime();
   private readonly clients = new Map<'claude' | 'codex', RuntimeHostClient>();
   private readonly pending = new Map<string, PendingRun>();
@@ -214,6 +215,24 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 
   async execute(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
+    input.signal?.throwIfAborted();
+    const controller = new AbortController();
+    this.executionAborts.set(input.worker.id, controller);
+    try {
+      return await this.executeWithSignal({
+        ...input,
+        signal:
+          input.signal === undefined
+            ? controller.signal
+            : AbortSignal.any([input.signal, controller.signal]),
+      });
+    } finally {
+      if (this.executionAborts.get(input.worker.id) === controller)
+        this.executionAborts.delete(input.worker.id);
+    }
+  }
+
+  private async executeWithSignal(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
     const choices = uniqueRuntimeChoices(this.deps.selectRuntimes(input.worker)).filter(
       ({ kind }) => this.deps.availability.isAvailable(kind),
     );
@@ -424,6 +443,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     input.signal?.addEventListener('abort', abort, { once: true });
     let runtimeStarted = false;
     try {
+      input.signal?.throwIfAborted();
       return await new Promise<string>((resolve, reject) => {
         this.pending.set(turnId, {
           resolve,
@@ -481,7 +501,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 
   async stop(agentId: string): Promise<void> {
     const active = this.activeByAgent.get(agentId);
-    if (active === undefined) return;
+    if (active === undefined) {
+      this.executionAborts.get(agentId)?.abort(new Error('Worker execution stopped'));
+      return;
+    }
     try {
       await this.client(active.kind).cancel(active.taskId, active.turnId);
     } finally {
@@ -498,6 +521,8 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 
   dispose(): void {
+    for (const controller of this.executionAborts.values()) controller.abort();
+    this.executionAborts.clear();
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }

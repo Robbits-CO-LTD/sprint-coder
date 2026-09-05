@@ -1,6 +1,6 @@
 # Open Issue repair batch (2026-09-05)
 
-Outcome: repair the 46 open Issues requested by the user, preserving existing work.
+Outcome: repair existing-feature defects from the initial 46-Issue inventory, preserving existing work. User follow-up explicitly excludes new feature #434 and authorizes merging the repair PRs after CI and review.
 Required: verify current causes, add focused regression evidence, implement bounded groups, run affected checks and prepare reviewable PRs.
 Non-goals: unrelated refactors, weakening security or signed-device gates, release publication or credential changes.
 Proof: reproduce each defect at its original observation point, rerun the same regression, then affected typecheck/lint and relevant boundary tests.
@@ -30,8 +30,8 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #395 | Regression green; PR review pending | [bug] CLI が prompt 読み込み前に終了すると Runtime Host プロセスごと落ちる |
 | #396 | Regression green; PR review pending | [bug] CLI の起動失敗時に Turn の後始末が走らず一時ディレクトリや状態が残る |
 | #397 | Regression green; PR review pending | [bug] Codex の API 失敗やレート制限が「出力を解釈できませんでした」の再試行不可エラーになる |
-| #398 | Pending investigation | [bug] 実行完了直前に Team の停止・steer を行うと以後その Task の Team 操作がすべて固まる |
-| #399 | Pending investigation | [bug] 書き込み可能な Team 実行を steer すると再実行が必ず失敗し Worker が待機のまま残る |
+| #398 | Regression green; PR review pending | [bug] 実行完了直前に Team の停止・steer を行うと以後その Task の Team 操作がすべて固まる |
+| #399 | Regression green; PR review pending | [bug] 書き込み可能な Team 実行を steer すると再実行が必ず失敗し Worker が待機のまま残る |
 | #400 | Regression green; PR review pending | [bug] provider レート制限の 3 回目の再試行が配送上限に阻まれ誤ったエラーで失敗する |
 | #401 | Regression green; PR review pending | [bug] Managed Local の llama-server がシグナルで落ちると停止操作が 10 秒固まって失敗する |
 | #402 | Regression green; PR review pending | [bug] Managed Local の停止に失敗するとライフサイクルが draining のまま固まり以後の Turn が永久に待つ |
@@ -64,7 +64,7 @@ Each group is validated independently. Computer Use #333/#387/#388 retain actual
 | #429 | Regression green; PR review pending | [bug] Skeptic の完了後も abort リスナーが残り期限切れ時に終了済み Turn へ無駄なキャンセルが飛ぶ |
 | #430 | Regression green; PR review pending | [bug] 失敗診断のコピー中にランタイム状態が変わるとコピーボタンが押せないままになる |
 | #431 | Pending investigation | [bug] Computer Use の文字入力に制御文字やファンクションキーを含めると許可リスト外のキー操作ができる |
-| #434 | Pending investigation | ローカルAI設定で投機的デコード(speculative decoding)設定を可能にする |
+| #434 | Excluded by explicit user follow-up; no feature implementation | ローカルAI設定で投機的デコード(speculative decoding)設定を可能にする |
 
 ## First checkpoint
 
@@ -89,3 +89,7 @@ Issues #390/#392/#394/#404/#420/#425/#426/#430 have failing-before and passing-a
 ## Provider output and disclosure checkpoint
 
 #410/#424: eight failing regressions passed after changes. Related 1,136 tests PASS, including the full Electron provider-egress gate suite. Anthropic uses its selected catalog maximum when known and retains the compatibility fallback when unknown. Truncated Anthropic/Chat Completions/Gemini responses cannot report completion or trigger tool-less automatic retry; a fixed UI notice explains the limit. Valid SRI hashes and the literal alphabet no longer trigger entropy-only rejection; credential-field and opaque-token tests stay blocked. Typecheck/ESLint PASS.
+
+## Team checkpoint
+
+#398/#399: failing-before and passing-after tests cover late cancel during actual isolation integration, stop while a catalog is preparing, writable steer restart, rate-limit retry reuse, and preflight failure reports. Complete TeamCoordinator integration and TeamWorkerRuntime tests PASS; domain suite 305 PASS; desktop/domain typecheck PASS. Required cancel semantics were rerun after preventing pending cancel from entering automatic retry. PR #437 review follow-up 0e58f68 retains supervisor cleanup for unregistered canceled startup sessions (39 tests PASS).

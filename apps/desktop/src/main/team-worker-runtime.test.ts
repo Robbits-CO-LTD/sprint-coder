@@ -161,6 +161,7 @@ function runtime(
     authorizeEgress?: TeamWorkerRuntimeDeps['authorizeEgress'];
     selectRuntimes?: TeamWorkerRuntimeDeps['selectRuntimes'];
     availability?: TeamRuntimeAvailabilityTracker;
+    catalogFor?: TeamWorkerRuntimeDeps['catalogFor'];
   } = {},
 ): RuntimeHostTeamWorkerRuntime {
   return new RuntimeHostTeamWorkerRuntime({
@@ -168,7 +169,7 @@ function runtime(
       overrides.selectRuntimes ?? (() => [{ kind: 'claude', model: 'claude-opus-5' }]),
     availability: overrides.availability ?? new TeamRuntimeAvailabilityTracker(),
     workspaceFor: () => '/workspace',
-    catalogFor: () => ({ tools: [] }),
+    catalogFor: overrides.catalogFor ?? (() => ({ tools: [] })),
     authorizeEgress: overrides.authorizeEgress ?? (() => true),
     ...(overrides.teamMcpFor === undefined ? {} : { teamMcpFor: overrides.teamMcpFor }),
     ...(overrides.releaseTeamMcp === undefined ? {} : { releaseTeamMcp: overrides.releaseTeamMcp }),
@@ -178,6 +179,25 @@ function runtime(
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('does not start a Worker stopped while its tool catalog is preparing', async () => {
+    let releaseCatalog!: (value: { tools: never[] }) => void;
+    const catalog = new Promise<{ tools: never[] }>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    const catalogFor = vi.fn(() => catalog);
+    const subject = runtime({ catalogFor });
+    const pending = subject.execute({ worker: worker(false), envelope, content: 'test' });
+    const outcome = pending.then(
+      () => 'completed',
+      () => 'stopped',
+    );
+    await vi.waitFor(() => expect(catalogFor).toHaveBeenCalled());
+    await subject.stop('worker-1');
+    releaseCatalog({ tools: [] });
+    expect(await outcome).toBe('stopped');
+    expect(runtimeHostMock.starts).toHaveLength(0);
+    subject.dispose();
+  });
   it('re-enables a runtime after a short retry delay when no reset time is known', () => {
     const availability = new TeamRuntimeAvailabilityTracker();
     const unavailableAt = Date.parse('2026-08-09T12:00:00.000Z');
