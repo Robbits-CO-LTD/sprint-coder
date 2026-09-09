@@ -82,6 +82,46 @@ const SOURCE = [
 ].join('\n');
 
 describe('anchor failure recovery', () => {
+  it('preserves intentional literal escapes when the exact anchor already matches', async () => {
+    const { workspace, registry, a } = await fileFixture('const pattern = "\\n";\n');
+    const patch = await prepareStructuredPatch({
+      owner,
+      workspacePath: workspace,
+      policyEpoch: 1,
+      registry,
+      operations: [
+        {
+          kind: 'update',
+          path: 'src/a.txt',
+          revision: a.reference,
+          edits: [{ oldText: '"\\n"', newText: '"\\r\\n"' }],
+        },
+      ],
+    });
+    expect(patch.operations[0]?.postImage).toBe('const pattern = "\\r\\n";\n');
+  });
+  it.each(['\n', '\r\n'])(
+    'identifies literal newline escapes without applying them (%j)',
+    async (lineEnding) => {
+      const content = [
+        'def line_total(unit_cents, quantity):',
+        '    return unit_cents + quantity',
+        '',
+      ].join(lineEnding);
+      const escaped = content.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+      const failure = await anchorFailure(content, [{ oldText: escaped, newText: 'replacement' }]);
+      expect(failure.code).toBe('ANCHOR_NOT_FOUND');
+      expect(failure.recovery).toMatchObject({ cause: 'escaped_newlines', nearest: null });
+    },
+  );
+
+  it('does not blame escaping when decoded text is also unrelated', async () => {
+    const failure = await anchorFailure('alpha\nbeta\n', [
+      { oldText: 'other\\nregion', newText: 'x' },
+    ]);
+    expect(failure.recovery?.cause).toBe('absent');
+  });
+
   it('names the near-miss when only line endings differ', async () => {
     const failure = await anchorFailure(SOURCE, [
       { oldText: 'function alpha(input) {\r\n  return input + 1;\r\n}', newText: 'x' },

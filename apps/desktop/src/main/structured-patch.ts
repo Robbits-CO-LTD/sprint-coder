@@ -69,14 +69,20 @@ export type PatchValidationErrorCode =
 /**
  * Why an anchor did not resolve, most specific first.
  *
- * The first three are near-misses the caller can fix without looking at the file again: the anchor
- * describes the right region and only its whitespace or line endings are wrong. `drifted` means the
+ * Encoding and whitespace near-misses can be fixed without looking at the file again: the anchor
+ * describes the right region but its string encoding, whitespace or line endings are wrong. `drifted` means the
  * region is recognisable but its text has moved on, so the caller needs the current text. `absent`
  * means the region could not be located at all — either nothing resembles the anchor, or its opening
  * line is so common that naming any one occurrence would mislead.
  */
 export type AnchorFailureCause =
-  'line_ending' | 'trailing_whitespace' | 'indentation' | 'drifted' | 'absent' | 'ambiguous';
+  | 'escaped_newlines'
+  | 'line_ending'
+  | 'trailing_whitespace'
+  | 'indentation'
+  | 'drifted'
+  | 'absent'
+  | 'ambiguous';
 
 /**
  * What the file looks like now, attached to the failure that reported it.
@@ -314,7 +320,7 @@ function applyAnchoredEdits(
 /**
  * Works out why an anchor missed, cheaply and only once the match has already failed.
  *
- * The whitespace probes run first because they are the near-misses: when the anchor matches after
+ * The encoding and whitespace probes run first because they are near-misses: when the anchor matches after
  * normalising line endings, trailing spaces, or indentation, the caller can fix its own text without
  * being shown the file. Only when none of those explain it does the drift search look for where the
  * region went, using the anchor's opening line as the locator.
@@ -332,6 +338,10 @@ function describeMissingAnchor(content: string, anchor: string, editIndex: numbe
   if (anchor.trim().length === 0) return miss('absent');
 
   if (content.length <= MAX_NORMALIZATION_PROBE_CHARS) {
+    // Diagnose only: never silently rewrite an edit's literal string values.
+    const decoded = anchor.replace(/\\r/g, '\r').replace(/\\n/g, '\n');
+    if (decoded !== anchor && decoded.trim().length > 0 && content.includes(decoded))
+      return miss('escaped_newlines');
     if (stripCarriageReturns(content).includes(stripCarriageReturns(anchor)))
       return miss('line_ending');
     if (stripTrailingSpaces(content).includes(stripTrailingSpaces(anchor)))
