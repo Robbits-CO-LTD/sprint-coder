@@ -43,6 +43,7 @@ export class ClaudeJsonlNormalizer {
   private stageIndex = -1;
   private readonly messageId = randomUUID();
   private completed = false;
+  private readonly pendingManagedTools = new Set<string>();
   private rateLimitRejected = false;
   private rateLimitResetAtEpochSeconds: number | null = null;
   // Captured from the session-init report's own `model` field (e.g. "claude-sonnet-5") — the
@@ -50,6 +51,10 @@ export class ClaudeJsonlNormalizer {
   // on the terminal `completed` event so Main can show it in the UI (see the ADR amendment).
   private resolvedModel: string | undefined;
   constructor(private readonly expected: ClaudeExpectedCapabilities = MANAGED_CAPABILITIES) {}
+
+  hasPendingManagedTools(): boolean {
+    return this.pendingManagedTools.size > 0;
+  }
 
   push(line: string): RuntimeCanonicalEvent[] {
     let value: unknown;
@@ -70,7 +75,10 @@ export class ClaudeJsonlNormalizer {
     }
     if (type === 'stream_event') return this.pushStreamEvent(value);
     if (type === 'assistant') return this.rememberToolUse(value);
-    if (type === 'user') return [];
+    if (type === 'user') {
+      this.rememberToolResult(value);
+      return [];
+    }
     if (type === 'rate_limit_event') {
       this.rememberRateLimit(value);
       return [];
@@ -132,6 +140,7 @@ export class ClaudeJsonlNormalizer {
       const name = readString(block, 'name');
       const id = readString(block, 'id');
       if (name === null || id === null) continue;
+      if (this.expected.teamMcp?.toolNames.includes(name)) this.pendingManagedTools.add(id);
       operations.push({
         type: 'operation',
         phase: 'tool_call_start',
@@ -140,6 +149,17 @@ export class ClaudeJsonlNormalizer {
       });
     }
     return operations.length === 0 ? [] : [...this.advanceTo('executing'), ...operations];
+  }
+
+  private rememberToolResult(value: Record<string, unknown>): void {
+    const message = isRecord(value['message']) ? value['message'] : null;
+    const content = message?.['content'];
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (!isRecord(block) || block['type'] !== 'tool_result') continue;
+      const id = readString(block, 'tool_use_id');
+      if (id !== null) this.pendingManagedTools.delete(id);
+    }
   }
 
   private pushResult(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
@@ -161,6 +181,7 @@ export class ClaudeJsonlNormalizer {
     }
     if (this.completed) return [];
     this.completed = true;
+    this.pendingManagedTools.clear();
     return [
       ...this.advanceTo('synthesizing'),
       this.resolvedModel === undefined

@@ -135,6 +135,26 @@ describe('the agent edit tool', () => {
     },
   );
 
+  it.each([
+    { kind: 'add', field: 'content', value: '' },
+    { kind: 'update', field: 'edits', value: [{ oldText: 'before', newText: 'after' }] },
+    { kind: 'rename', field: 'destination', value: 'src/b.txt' },
+  ])('requires $field for batch $kind in the published schema', ({ kind, field, value }) => {
+    const operation = {
+      kind,
+      path: 'src/a.txt',
+      ...(kind === 'add' ? {} : { revision: { version: 1, tokenId: 'read-revision' } }),
+    };
+    expect(
+      toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, { operations: [operation] }),
+    ).toBe(false);
+    expect(
+      toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, {
+        operations: [{ ...operation, [field]: value }],
+      }),
+    ).toBe(true);
+  });
+
   it('continues accepting single-file edits and new-file batches without a revision', () => {
     expect(
       toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, {

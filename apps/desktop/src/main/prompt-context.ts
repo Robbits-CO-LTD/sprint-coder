@@ -1,3 +1,4 @@
+import { codexManagedToolName } from '../runtime-host/managed-tool-names';
 import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { RuntimeWriteScope } from '@sprint-coder/contracts';
@@ -79,7 +80,10 @@ export function compilePromptGuidance(input: {
   const tools = input.toolCatalog.entries
     .filter(({ providerName }) => parentTools === null || parentTools.has(providerName))
     .map((entry) => ({
-      name: entry.providerName,
+      name:
+        input.toolCatalog.providerId === 'codex'
+          ? codexManagedToolName(entry.providerName)
+          : entry.providerName,
       id: entry.toolId,
       kind: entry.kind,
       sideEffect: entry.sideEffect,

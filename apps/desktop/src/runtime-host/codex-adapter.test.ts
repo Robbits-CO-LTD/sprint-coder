@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
   CodexAgentMessageBoundary,
@@ -33,6 +33,7 @@ import type { RuntimeCanonicalEvent, RuntimeFailureDiagnostic } from './protocol
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -464,6 +465,12 @@ describe('Codex runtime probe', () => {
       const calls: unknown[] = [];
       const events: Array<{ type: string; stage?: string }> = [];
       let stagesAtManagedCall: string[] = [];
+      const realSetTimeout = globalThis.setTimeout;
+      // Scale only the production 90-second idle deadline; the fake CLI stays silent during host approval.
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) =>
+        realSetTimeout(callback, ms === 90_000 ? 50 : ms, ...args),
+      );
+      const failures: unknown[] = [];
       const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
       await new Promise<void>((resolve) => {
         adapter.start(
@@ -476,7 +483,7 @@ describe('Codex runtime probe', () => {
           (event: RuntimeCanonicalEvent) => {
             events.push(event);
           },
-          () => undefined,
+          (error) => failures.push(error),
           () => resolve(),
           undefined,
           undefined,
@@ -492,6 +499,7 @@ describe('Codex runtime probe', () => {
               event.type === 'stage' && event.stage !== undefined ? [event.stage] : [],
             );
             calls.push(call);
+            await new Promise((resolve) => setTimeout(resolve, 120));
             return { success: true, output: { content: 'managed' } };
           },
         );
@@ -504,6 +512,8 @@ describe('Codex runtime probe', () => {
           catalogDigest: snapshot.digest,
         },
       ]);
+      expect(failures).toEqual([]);
+      expect(events).toContainEqual(expect.objectContaining({ type: 'completed' }));
       expect(stagesAtManagedCall.at(-1)).toBe('executing');
       expect(stagesAtManagedCall).not.toContain('synthesizing');
     },

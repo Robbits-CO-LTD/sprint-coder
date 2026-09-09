@@ -1,3 +1,4 @@
+import { codexManagedToolName } from './managed-tool-names';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -524,23 +525,33 @@ export class CodexRuntimeAdapter {
                 if (managedEntry !== undefined) {
                   if (invokeManagedTool === undefined || toolCatalogSnapshot === undefined)
                     throw new Error('Managed tool bridge is unavailable');
-                  const result = await invokeManagedTool({
-                    callId: requiredString(params['callId'], 'dynamic tool call id'),
-                    toolName: managedEntry.providerName,
-                    arguments: params['arguments'],
-                    catalogDigest: toolCatalogSnapshot.digest,
-                  });
-                  response = codexDynamicToolResponseFromManaged(result);
+                  const resumeActivity = deadline.pauseActivity();
+                  try {
+                    const result = await invokeManagedTool({
+                      callId: requiredString(params['callId'], 'dynamic tool call id'),
+                      toolName: managedEntry.providerName,
+                      arguments: params['arguments'],
+                      catalogDigest: toolCatalogSnapshot.digest,
+                    });
+                    response = codexDynamicToolResponseFromManaged(result);
+                  } finally {
+                    resumeActivity();
+                  }
                 } else {
                   if (teamMcp === undefined || !teamMcp.toolNames.includes(tool as TeamMcpToolName))
                     throw new Error('Unexpected dynamic Team tool');
-                  const result = await send('mcpServer/tool/call', {
-                    server: 'team',
-                    threadId,
-                    tool,
-                    arguments: params['arguments'],
-                  });
-                  response = codexDynamicToolResponseFromMcp(result);
+                  const resumeActivity = deadline.pauseActivity();
+                  try {
+                    const result = await send('mcpServer/tool/call', {
+                      server: 'team',
+                      threadId,
+                      tool,
+                      arguments: params['arguments'],
+                    });
+                    response = codexDynamicToolResponseFromMcp(result);
+                  } finally {
+                    resumeActivity();
+                  }
                 }
                 if (!canRespond()) return;
                 sendResponse(responseId, response);
@@ -1132,14 +1143,6 @@ export function buildCodexManagedDynamicTools(
       deferLoading: false,
     };
   });
-}
-
-function codexManagedToolName(providerName: string): string {
-  // Distinguish the host's approved command tools from disabled Codex native shell tools.
-  // Calls are mapped back to the pinned catalog name before the host validates/authorizes them.
-  return providerName === 'exec_command' || providerName === 'write_stdin'
-    ? `sprint_${providerName}`
-    : providerName;
 }
 
 export function codexInitializeCapabilities(

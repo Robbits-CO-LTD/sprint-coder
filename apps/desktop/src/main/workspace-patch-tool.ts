@@ -97,6 +97,18 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
               },
               then: { required: ['revision'] },
             },
+            {
+              if: { properties: { kind: { const: 'add' } }, required: ['kind'] },
+              then: { required: ['content'] },
+            },
+            {
+              if: { properties: { kind: { const: 'update' } }, required: ['kind'] },
+              then: { required: ['edits'] },
+            },
+            {
+              if: { properties: { kind: { const: 'rename' } }, required: ['kind'] },
+              then: { required: ['destination'] },
+            },
           ],
         },
       },

@@ -363,6 +363,7 @@ export class ClaudeRuntimeAdapter {
       },
     );
     deadline.start();
+    let resumeToolWait: (() => void) | null = null;
     child.stdin.on('error', () => {
       if (failed || control.canceled || sawCompletion) return;
       failed = true;
@@ -380,6 +381,12 @@ export class ClaudeRuntimeAdapter {
         for (const event of normalizer.push(line)) {
           if (event.type === 'completed') sawCompletion = true;
           emit(event);
+        }
+        if (normalizer.hasPendingManagedTools()) {
+          resumeToolWait ??= deadline.pauseActivity();
+        } else {
+          resumeToolWait?.();
+          resumeToolWait = null;
         }
       } catch (error) {
         failed = true;

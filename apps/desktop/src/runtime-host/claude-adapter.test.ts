@@ -1,8 +1,9 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ClaudeRuntimeAdapter,
   buildClaudeArgs,
   buildClaudePrompt,
   buildClaudeTeamMcpConfig,
@@ -18,12 +19,77 @@ import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
 });
 
 describe('Claude runtime probe', () => {
+  it.skipIf(process.platform === 'win32')(
+    'survives a quiet managed tool wait and resumes after its result',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'claude-managed-wait-'));
+      temporaryRoots.push(root);
+      const script = join(root, 'claude');
+      await writeFile(
+        script,
+        [
+          `#!${process.execPath}`,
+          "const send = value => process.stdout.write(JSON.stringify(value) + '\\n');",
+          'process.stdin.resume();',
+          "process.stdin.on('end', () => {",
+          "send({type: 'system', subtype: 'init', tools: ['mcp__team__exec_command'], mcp_servers: [{name: 'team', status: 'connected'}]});",
+          "send({type: 'assistant', message: {content: [{type: 'tool_use', id: 'call-1', name: 'mcp__team__exec_command'}]}});",
+          'setTimeout(() => {',
+          "send({type: 'user', message: {content: [{type: 'tool_result', tool_use_id: 'call-1', content: 'ok'}]}});",
+          "send({type: 'result', is_error: false});",
+          '}, 120);',
+          '});',
+        ].join('\n'),
+        { mode: 0o700 },
+      );
+      const realSetTimeout = globalThis.setTimeout;
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) =>
+        realSetTimeout(callback, ms === 90_000 ? 50 : ms, ...args),
+      );
+      const adapter = new ClaudeRuntimeAdapter(2_000);
+      adapter.setCliResolution({
+        source: 'explicit',
+        executable: script,
+        version: 'test',
+        compatibility: 'verified',
+        capabilities: [],
+      });
+      const failures: unknown[] = [];
+      const events: unknown[] = [];
+      await new Promise<void>((resolve) =>
+        adapter.start(
+          'quiet-tool',
+          'request',
+          [],
+          () => undefined,
+          root,
+          'auto',
+          (event) => events.push(event),
+          (error) => failures.push(error),
+          () => resolve(),
+          {
+            socketPath: join(root, 'unused.sock'),
+            token: 'test-token',
+            guidance: 'test',
+            toolNames: [],
+            managedTools: [
+              { name: 'exec_command', description: 'test', inputSchema: { type: 'object' } },
+            ],
+          },
+        ),
+      );
+      expect(failures).toEqual([]);
+      expect(events).toContainEqual({ type: 'completed' });
+    },
+  );
+
   it('materializes only selected managed revisions as explicit namespaced invocations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-skill-plugin-'));
     temporaryRoots.push(root);

@@ -87,6 +87,40 @@ describe('ClaudeJsonlNormalizer', () => {
     ]);
   });
 
+  it('tracks only configured managed calls until every matching result arrives', () => {
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: [],
+      teamMcp: { serverName: 'team', toolNames: ['mcp__team__exec_command'] },
+    });
+    const use = (id: string, name = 'mcp__team__exec_command') =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id, name }] },
+        }),
+      );
+    const result = (id: string) =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'user',
+          message: { content: [{ type: 'tool_result', tool_use_id: id }] },
+        }),
+      );
+    use('unknown', 'mcp__other__exec_command');
+    expect(normalizer.hasPendingManagedTools()).toBe(false);
+    use('one');
+    use('two');
+    use('one');
+    result('unknown');
+    result('one');
+    expect(normalizer.hasPendingManagedTools()).toBe(true);
+    result('two');
+    expect(normalizer.hasPendingManagedTools()).toBe(false);
+    use('three');
+    normalizer.push(JSON.stringify({ type: 'result', is_error: false }));
+    expect(normalizer.hasPendingManagedTools()).toBe(false);
+  });
+
   it('maps a Claude result failure (is_error) to a thrown output error, not a silent completion', () => {
     const fixture = readFileSync(join(__dirname, 'fixtures/claude-error.jsonl'), 'utf8');
     const normalizer = new ClaudeJsonlNormalizer();

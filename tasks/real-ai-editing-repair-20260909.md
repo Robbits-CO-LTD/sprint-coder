@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Claude, Codex and Ollama now complete an authorized workspace edit, trusted read-back and a real verification command through the Managed Harness on macOS. Existing source changes unrelated to these paths are excluded. Release publication and merge are outside this task.
+Claude, Codex and Ollama now complete an authorized workspace edit, trusted read-back and a real verification command through the Managed Harness on macOS. Existing source changes unrelated to these paths are excluded. Release publication remains outside this task. The user subsequently authorized merging PR #443 and this dependent PR #446.
 
 ## Confirmed causes and repairs
 
@@ -50,4 +50,14 @@ These are UI-driven real-model runs. Earlier failures and operator-canceled diag
 - Local evidence: /Users/yusei/sc-real-ai-repair-20260909/accepted-real-ai-evidence.json (metadata, hashes and markers only).
 - Before-fix report: /Users/yusei/sc-three-ai-20260909-z_4a7_m3/report.md.
 - macOS development build only. Packaged and Windows real-provider acceptance remain unverified.
-- This branch starts at PR #443's current head and is reviewed as a dependent PR; it does not merge or publish that existing work.
+- This branch starts at PR #443's head. Merge the dependency first and retarget PR #446 to main; verify the latest CI and review findings before merging.
+
+## Fable 5.1 secondary review follow-up
+
+An actual `claude-fable-5-1` read-only review of commit 581f2a8 identified two reproducible contract mismatches and a CLI idle-timeout risk. Independent tests confirmed all three causes:
+
+- Codex execution guidance listed canonical shell names while dynamic tools used `sprint_` aliases. The same pure name mapping now supplies both surfaces, after applying the canonical parent tool ceiling. Claude and Ollama names are unchanged.
+- Batch add/update/rename accepted missing content/edits/destination in the published schema even though the parser rejects them. Conditional required fields now agree with execution; revision requirements remain in force.
+- Quiet host-tool waits triggered the 90-second CLI idle deadline in both adapters. Fake CLI subprocesses reproduced `RUNTIME_TIMEOUT` using only a scaled idle clock. Activity leases now suspend that clock while known managed tools run; concurrent waits, result release, total timeout and stop/restart are covered. These adapter tests are protocol evidence, not a new real-provider approval wait longer than 90 seconds.
+
+The follow-up checkpoint passed 154 tests in six directly affected suites, desktop typecheck and targeted ESLint. The original three UI-driven real-model acceptance runs above remain the live edit/command evidence. A fresh immutable-head Fable 5.1 review and CI are required before PR #446 merge.

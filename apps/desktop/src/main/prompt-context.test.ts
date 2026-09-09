@@ -85,6 +85,39 @@ describe('prompt context compiler', () => {
     expect(withCeiling.content).not.toContain('write_file');
   });
 
+  it.each(['codex', 'claude', 'ollama'])(
+    'advertises callable names for %s after applying the parent ceiling',
+    (providerId) => {
+      const compiled = compilePromptGuidance({
+        workspace,
+        toolCatalog: {
+          ...catalog([
+            tool('exec_command', 'command.exec', 'command', 'write'),
+            tool('write_stdin', 'command.stdin', 'command', 'write'),
+            tool('read_file', 'workspace.read', 'workspace', 'read'),
+          ]),
+          providerId,
+        },
+        workspaceRules: [],
+        vcs: [],
+        agent: {
+          role: 'subagent',
+          mode: 'write-capable',
+          parentToolNames: ['exec_command', 'read_file'],
+        },
+      });
+      const commandName = providerId === 'codex' ? 'sprint_exec_command' : 'exec_command';
+      expect(compiled.context.tools.map(({ name }) => name).sort()).toEqual(
+        [commandName, 'read_file'].sort(),
+      );
+      expect(compiled.content).toContain(commandName);
+      expect(compiled.content).not.toContain('write_stdin');
+      expect(compiled.context.tools.find(({ name }) => name === commandName)?.id).toBe(
+        'command.exec',
+      );
+    },
+  );
+
   it('includes only explicitly selected Skills and connected integrations', () => {
     const compiled = compilePromptGuidance({
       workspace,
