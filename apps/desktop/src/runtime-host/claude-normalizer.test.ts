@@ -35,9 +35,9 @@ describe('ClaudeJsonlNormalizer', () => {
       'understanding',
       'planning',
       'executing',
+      'delta',
+      'delta',
       'synthesizing',
-      'delta',
-      'delta',
       'completed',
     ]);
     const deltas = events.filter((event) => event.type === 'delta');
@@ -54,6 +54,71 @@ describe('ClaudeJsonlNormalizer', () => {
     // The fixture's system/init event carries "model":"claude-sonnet-5" — captured and surfaced
     // on the terminal completed event (see the ADR amendment).
     expect(events.at(-1)).toEqual({ type: 'completed', resolvedModel: 'claude-sonnet-5' });
+  });
+
+  it('keeps explanatory text approval-eligible until the final result', () => {
+    const normalizer = new ClaudeJsonlNormalizer();
+    const preamble = normalizer.push(
+      JSON.stringify({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'I will verify the edited file.' },
+        },
+      }),
+    );
+    expect(preamble.filter((event) => event.type === 'stage').at(-1)).toEqual({
+      type: 'stage',
+      stage: 'executing',
+    });
+    const tool = normalizer.push(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', name: 'mcp__team__exec_command', id: 'command-1' }],
+        },
+      }),
+    );
+    expect(tool).toContainEqual(expect.objectContaining({ type: 'operation' }));
+    expect([...preamble, ...tool]).not.toContainEqual({ type: 'stage', stage: 'synthesizing' });
+    expect(normalizer.push(JSON.stringify({ type: 'result', is_error: false }))).toEqual([
+      { type: 'stage', stage: 'synthesizing' },
+      { type: 'completed' },
+    ]);
+  });
+
+  it('tracks only configured managed calls until every matching result arrives', () => {
+    const normalizer = new ClaudeJsonlNormalizer({
+      builtInTools: [],
+      teamMcp: { serverName: 'team', toolNames: ['mcp__team__exec_command'] },
+    });
+    const use = (id: string, name = 'mcp__team__exec_command') =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id, name }] },
+        }),
+      );
+    const result = (id: string) =>
+      normalizer.push(
+        JSON.stringify({
+          type: 'user',
+          message: { content: [{ type: 'tool_result', tool_use_id: id }] },
+        }),
+      );
+    use('unknown', 'mcp__other__exec_command');
+    expect(normalizer.hasPendingManagedTools()).toBe(false);
+    use('one');
+    use('two');
+    use('one');
+    result('unknown');
+    result('one');
+    expect(normalizer.hasPendingManagedTools()).toBe(true);
+    result('two');
+    expect(normalizer.hasPendingManagedTools()).toBe(false);
+    use('three');
+    normalizer.push(JSON.stringify({ type: 'result', is_error: false }));
+    expect(normalizer.hasPendingManagedTools()).toBe(false);
   });
 
   it('maps a Claude result failure (is_error) to a thrown output error, not a silent completion', () => {

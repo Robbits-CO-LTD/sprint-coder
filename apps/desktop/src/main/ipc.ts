@@ -696,7 +696,10 @@ import {
   providerFirstEventTimeoutMs,
 } from './provider-stream-deadline';
 import { ProviderQuotaExceededError, ProviderStreamBudget } from './provider-stream-budget';
-import { PROVIDER_OUTPUT_LIMIT_MESSAGE } from './provider-output-limit';
+import {
+  PROVIDER_EMPTY_RESPONSE_MESSAGE,
+  PROVIDER_OUTPUT_LIMIT_MESSAGE,
+} from './provider-output-limit';
 import {
   buildProviderFailureDiagnostic,
   providerCauseFromDeadline,
@@ -5447,6 +5450,7 @@ export class IpcRouter {
           task: this.persistence.getTask(taskId),
           turnId: started.turnId,
           prompt: gatePayload.toString('utf8'),
+          knownWorkspaceRoots: started.workspaceSet.roots.map((root) => root.path),
           context,
           now: new Date().toISOString(),
           payloadDigest: serializedPayload.digest,
@@ -7270,6 +7274,7 @@ export class IpcRouter {
               executionId,
               firstEventTimeoutMs: providerFirstEventTimeoutMs({
                 providerId: connection.providerId,
+                hasTools: toolsForRound.length > 0,
                 hasInlineImages: dispatchRound.messages.some(
                   (message) => (message.inlineImages?.length ?? 0) > 0,
                 ),
@@ -7355,7 +7360,9 @@ export class IpcRouter {
             cause,
             roundError.providerCode === 'output_token_limit'
               ? PROVIDER_OUTPUT_LIMIT_MESSAGE
-              : undefined,
+              : roundError.providerCode === 'empty_response'
+                ? PROVIDER_EMPTY_RESPONSE_MESSAGE
+                : undefined,
           );
         }
         if (!roundCompleted)
@@ -7397,12 +7404,15 @@ export class IpcRouter {
           );
         });
         if (invalidToolCall !== undefined) {
+          const guidance = roundTools.find(
+            ({ name }) => name === invalidToolCall.name,
+          )?.description;
           for (const toolCall of roundToolCalls)
             messages.push({
               role: 'tool',
               content: providerToolErrorContent(
                 'INVALID_TOOL_INPUT',
-                `Tool input validation failed for ${invalidToolCall.name}`,
+                `Tool input validation failed for ${invalidToolCall.name}. ${guidance ?? 'Use a tool from the provided catalog and follow its input schema.'}`,
               ),
               toolCallId: toolCall.callId,
               toolName: toolCall.name,

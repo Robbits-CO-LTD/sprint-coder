@@ -37,6 +37,8 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
     version: '1',
   }),
   providerName: 'apply_patch',
+  description:
+    'Edit workspace files through the recoverable Edit Saga. Read the file first. A single-file request MUST include the top-level path (workspace-relative filename) AND edits containing exact oldText/newText pairs. Alternatively provide operations for a batch; every update/delete/rename needs the revision returned by read_file (version and tokenId). Never invent a revision. New add operations need content; rename needs destination. After editing, read the file back with read_file before finishing.',
   kind: 'fileWrite',
   schemaVersion: 1,
   inputSchema: {
@@ -87,9 +89,36 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
           },
           required: ['kind', 'path'],
           additionalProperties: false,
+          allOf: [
+            {
+              if: {
+                properties: { kind: { enum: ['update', 'delete', 'rename'] } },
+                required: ['kind'],
+              },
+              then: { required: ['revision'] },
+            },
+            {
+              if: { properties: { kind: { const: 'add' } }, required: ['kind'] },
+              then: { required: ['content'] },
+            },
+            {
+              if: { properties: { kind: { const: 'update' } }, required: ['kind'] },
+              then: { required: ['edits'] },
+            },
+            {
+              if: { properties: { kind: { const: 'rename' } }, required: ['kind'] },
+              then: { required: ['destination'] },
+            },
+          ],
         },
       },
     },
+    allOf: [
+      {
+        if: { not: { required: ['operations'] } },
+        then: { required: ['path', 'edits'] },
+      },
+    ],
     additionalProperties: false,
   },
   outputSchema: { type: 'object' },

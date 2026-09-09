@@ -13,8 +13,11 @@ import {
   authorizeComputerUseProviderEgress,
   authorizeOfficialApiProviderEgress,
   dispatchAfterCodexProviderEgress,
+  dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
 import type { PreparedContext } from './context-ledger';
+import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
+import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 
 const cleanup: string[] = [];
 const context: PreparedContext = {
@@ -32,6 +35,85 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('Codex provider egress gate', () => {
+    it.each([
+      { localOnly: true, suffix: '' },
+      { localOnly: false, suffix: '\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH' },
+      { localOnly: false, suffix: '\npassword="not-for-a-provider"' },
+    ])('keeps protected egress denied with a known root (%#)', ({ localOnly, suffix }) => {
+      const fixture = createFixture(localOnly);
+      const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
+      let dispatches = 0;
+      const decision = dispatchAfterCodexProviderEgress(
+        {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'protected-workspace-root',
+          prompt: `${root}${suffix}`,
+          knownWorkspaceRoots: [root],
+          context,
+          now: '2026-09-05T00:00:00.000Z',
+        },
+        () => {
+          dispatches += 1;
+        },
+      );
+      expect(decision.allowed).toBe(false);
+      expect(dispatches).toBe(0);
+      fixture.persistence.close();
+    });
+    it.each(['codex', 'claude'] as const)(
+      'dispatches %s generated guidance containing the selected Workspace root',
+      (kind) => {
+        const fixture = createFixture(false);
+        const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
+        const guidance = compilePromptGuidance({
+          workspace: {
+            primaryRootId: 'root',
+            digest: 'workspace',
+            roots: [{ rootId: 'root', path: root, label: 'workspace', role: 'primary' }],
+          },
+          toolCatalog: {
+            revision: 1,
+            providerId: kind,
+            workspaceId: 'root',
+            entries: [],
+            digest: 'catalog',
+          },
+          workspaceRules: [],
+          vcs: [],
+        });
+        const payload = serializeCliExecutionPayload({
+          kind,
+          request: 'Reply only OK.',
+          contextFragments: injectPromptGuidance([], guidance),
+          projectItems: [],
+        });
+        let dispatches = 0;
+        const input = {
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'workspace-root',
+          prompt: payload.text,
+          payloadDigest: payload.digest,
+          context,
+          now: '2026-09-05T00:00:00.000Z',
+          knownWorkspaceRoots: [root],
+        };
+        const dispatch =
+          kind === 'codex' ? dispatchAfterCodexProviderEgress : dispatchAfterClaudeProviderEgress;
+        const decision = dispatch(input, () => {
+          dispatches += 1;
+        });
+        expect(decision.allowed).toBe(true);
+        expect(dispatches).toBe(1);
+        expect(readAudit(fixture.path)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ capability: 'provider.egress', decision: 'allow' }),
+          ]),
+        );
+        fixture.persistence.close();
+      },
+    );
     it('allows public package integrity metadata through the complete egress gate', () => {
       const fixture = createFixture(false);
       let dispatches = 0;

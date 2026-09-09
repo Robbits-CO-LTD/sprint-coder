@@ -47,6 +47,7 @@ async function startHarness(
   options: {
     normalTimeoutMs?: number;
     longTimeoutMs?: number;
+    managedTimeoutMs?: number;
     capabilities?: {
       projectMemory: boolean;
       skillDrafts: boolean;
@@ -146,6 +147,9 @@ async function startHarness(
       ...(options.longTimeoutMs === undefined
         ? {}
         : { TEAM_BRIDGE_TEST_LONG_TIMEOUT_MS: String(options.longTimeoutMs) }),
+      ...(options.managedTimeoutMs === undefined
+        ? {}
+        : { TEAM_BRIDGE_TEST_MANAGED_TIMEOUT_MS: String(options.managedTimeoutMs) }),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -520,6 +524,31 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       TEAM_MCP_TOOL_NAMES.length,
     );
     expect(harness.bridgeAuthenticationAttempts()).toBe(2);
+  });
+
+  it('keeps a managed command pending while the user decides beyond the ordinary timeout', async () => {
+    const harness = await startHarness({
+      normalTimeoutMs: 30,
+      managedTimeoutMs: 500,
+      managedTools: [
+        { name: 'exec_command', description: 'Host command', inputSchema: { type: 'object' } },
+      ],
+    });
+    harness.send({
+      jsonrpc: '2.0',
+      id: 90,
+      method: 'tools/call',
+      params: { name: 'exec_command', arguments: {} },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    harness.bridgeRespond({ ok: true, result: { exitCode: 0 } });
+    const reply = await harness.nextMessage();
+    expect(reply['id']).toBe(90);
+    expect(reply['result']).toMatchObject({
+      content: [{ type: 'text', text: JSON.stringify({ exitCode: 0 }) }],
+    });
+    expect(reply['result']).not.toHaveProperty('isError', true);
   });
 
   it('marks the MCP result isError:true when the bridge reports a failure', async () => {

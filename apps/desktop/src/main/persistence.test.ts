@@ -937,6 +937,14 @@ if (runsWithElectronAbi)
       expect(requested.approval.state).toBe('pending');
       expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
 
+      // A CLI can keep explaining its command while the host waits for the user's decision.
+      persistence.appendDelta(task.id, turn.turnId, messageId, '承認を待ちます。');
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+      expect(persistence.getApproval(task.id, requested.approval.id).state).toBe('pending');
+      expect(persistence.listMessages(task.id).at(-1)?.content).toBe(
+        '内容を確認します。承認を待ちます。',
+      );
+
       persistence.close();
     });
 
@@ -6647,6 +6655,85 @@ if (runsWithElectronAbi)
       db.close();
     });
 
+    it('migrates legacy command state constraints without losing command output', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const spec = createExecutionSpec({
+        absoluteExecutable: process.execPath,
+        executionIdentityDigest: 'c'.repeat(64),
+        argv: ['--version'],
+        cwdIdentity: { canonicalPath: process.cwd(), identityDigest: 'a'.repeat(64) },
+        envDelta: {},
+        stdinMode: 'closed',
+        shell: 'none',
+      });
+      persistence.prepareCommand({
+        id: 'legacy-command',
+        taskId: task.id,
+        turnId: turn.turnId,
+        callId: 'legacy-call',
+        spec,
+        purpose: 'Verify fixture',
+        risk: 'high',
+        createdAt: new Date().toISOString(),
+      });
+      persistence.close();
+      const legacy = new Database(path);
+      legacy.pragma('foreign_keys = OFF');
+      const schema = (
+        legacy.prepare("SELECT sql FROM sqlite_master WHERE name = 'command_runs'").get() as {
+          sql: string;
+        }
+      ).sql;
+      legacy.exec(`
+        ${schema.replace(/CREATE TABLE "?command_runs"?/, 'CREATE TABLE legacy_commands').replace("'starting',", '')};
+        INSERT INTO legacy_commands SELECT * FROM command_runs;
+        DROP TABLE command_runs;
+        ALTER TABLE legacy_commands RENAME TO command_runs;
+        CREATE INDEX command_runs_task_created_idx ON command_runs(task_id, created_at, id);
+        DELETE FROM schema_migrations WHERE version = 82;
+      `);
+      legacy
+        .prepare(
+          `INSERT INTO command_output_chunks VALUES (?, 1, 'stdout', 'legacy-output', 13, ?, ?)`,
+        )
+        .run(
+          'legacy-command',
+          createHash('sha256').update('legacy-output').digest('hex'),
+          new Date().toISOString(),
+        );
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getCommand('legacy-command').purpose).toBe('Verify fixture');
+      expect(migrated.getCommand('legacy-command').state).toBe('interrupted');
+      const resumedTask = migrated.createTask();
+      const resumedTurn = startExecutingTurn(migrated, resumedTask.id);
+      migrated.prepareCommand({
+        id: 'new-command',
+        taskId: resumedTask.id,
+        turnId: resumedTurn.turnId,
+        callId: 'new-call',
+        spec,
+        purpose: 'Verify migration',
+        risk: 'high',
+        createdAt: new Date().toISOString(),
+      });
+      expect(migrated.beginCommand('new-command').state).toBe('starting');
+      migrated.close();
+      const verified = new Database(path, { readonly: true });
+      expect(verified.prepare('SELECT text FROM command_output_chunks').all()).toEqual([
+        { text: 'legacy-output' },
+      ]);
+      expect(verified.pragma('foreign_key_check')).toEqual([]);
+      verified.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getCommand('legacy-command').state).toBe('interrupted');
+      expect(reopened.getCommand('new-command').state).toBe('interrupted');
+      reopened.close();
+    });
+
     it('persists command lifecycle and replays sanitized mixed-stream output in global order', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -7458,6 +7545,7 @@ if (runsWithElectronAbi)
         { version: 78 },
         { version: 80 },
         { version: 81 },
+        { version: 82 },
       ]);
       for (const [table, columns] of [
         [

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   OLLAMA_IMAGE_FIRST_EVENT_TIMEOUT_MS,
+  OLLAMA_TOOL_FIRST_EVENT_TIMEOUT_MS,
   PROVIDER_FIRST_EVENT_TIMEOUT_MS,
   providerEventsWithDeadline,
   providerFirstEventTimeoutMs,
@@ -20,7 +21,7 @@ async function* yieldsOnceThenWaits(): AsyncIterable<string> {
 }
 
 describe('providerEventsWithDeadline', () => {
-  it('allows bounded extra first-token time only for Ollama image requests', () => {
+  it('allows bounded extra first-token time only for Ollama image or tool requests', () => {
     expect(providerFirstEventTimeoutMs({ providerId: 'ollama', hasInlineImages: true })).toBe(
       OLLAMA_IMAGE_FIRST_EVENT_TIMEOUT_MS,
     );
@@ -30,6 +31,12 @@ describe('providerEventsWithDeadline', () => {
     expect(providerFirstEventTimeoutMs({ providerId: 'openrouter', hasInlineImages: true })).toBe(
       PROVIDER_FIRST_EVENT_TIMEOUT_MS,
     );
+    expect(
+      providerFirstEventTimeoutMs({ providerId: 'ollama', hasInlineImages: false, hasTools: true }),
+    ).toBe(OLLAMA_TOOL_FIRST_EVENT_TIMEOUT_MS);
+    expect(
+      providerFirstEventTimeoutMs({ providerId: 'openai', hasInlineImages: false, hasTools: true }),
+    ).toBe(PROVIDER_FIRST_EVENT_TIMEOUT_MS);
   });
 
   it('fails when the provider does not emit its first event', async () => {

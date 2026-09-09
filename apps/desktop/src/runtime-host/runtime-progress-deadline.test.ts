@@ -65,6 +65,74 @@ describe('RuntimeProgressDeadline', () => {
     }
   });
 
+  it('pauses silence across overlapping tool waits and resumes only after the last result', async () => {
+    vi.useFakeTimers();
+    try {
+      const phases: string[] = [];
+      const deadline = new RuntimeProgressDeadline(
+        { firstEventMs: 45_000, idleMs: 90_000, totalMs: 3_600_000 },
+        (phase) => phases.push(phase),
+      );
+      deadline.start();
+      deadline.progress();
+      const first = deadline.pauseActivity();
+      const second = deadline.pauseActivity();
+      await vi.advanceTimersByTimeAsync(120_000);
+      deadline.progress();
+      first();
+      first();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(phases).toEqual([]);
+      second();
+      await vi.advanceTimersByTimeAsync(89_999);
+      expect(phases).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(phases).toEqual(['idle']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the total deadline active during a tool wait', async () => {
+    vi.useFakeTimers();
+    try {
+      const phases: string[] = [];
+      const deadline = new RuntimeProgressDeadline(
+        { firstEventMs: 45_000, idleMs: 90_000, totalMs: 180_000 },
+        (phase) => phases.push(phase),
+      );
+      deadline.start();
+      const resume = deadline.pauseActivity();
+      await vi.advanceTimersByTimeAsync(180_000);
+      resume();
+      expect(phases).toEqual(['total']);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores stale tool releases after stop and restart', async () => {
+    vi.useFakeTimers();
+    try {
+      const phases: string[] = [];
+      const deadline = new RuntimeProgressDeadline(
+        { firstEventMs: 45_000, idleMs: 90_000, totalMs: 180_000 },
+        (phase) => phases.push(phase),
+      );
+      deadline.start();
+      const stale = deadline.pauseActivity();
+      deadline.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      deadline.start();
+      stale();
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(phases).toEqual(['first_event']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('leaves no timer after a completed Turn stops the deadline', () => {
     vi.useFakeTimers();
     try {

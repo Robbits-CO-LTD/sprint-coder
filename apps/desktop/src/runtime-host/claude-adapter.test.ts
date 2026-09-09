@@ -1,8 +1,9 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ClaudeRuntimeAdapter,
   buildClaudeArgs,
   buildClaudePrompt,
   buildClaudeTeamMcpConfig,
@@ -18,12 +19,77 @@ import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
 });
 
 describe('Claude runtime probe', () => {
+  it.skipIf(process.platform === 'win32')(
+    'survives a quiet managed tool wait and resumes after its result',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'claude-managed-wait-'));
+      temporaryRoots.push(root);
+      const script = join(root, 'claude');
+      await writeFile(
+        script,
+        [
+          `#!${process.execPath}`,
+          "const send = value => process.stdout.write(JSON.stringify(value) + '\\n');",
+          'process.stdin.resume();',
+          "process.stdin.on('end', () => {",
+          "send({type: 'system', subtype: 'init', tools: ['mcp__team__exec_command'], mcp_servers: [{name: 'team', status: 'connected'}]});",
+          "send({type: 'assistant', message: {content: [{type: 'tool_use', id: 'call-1', name: 'mcp__team__exec_command'}]}});",
+          'setTimeout(() => {',
+          "send({type: 'user', message: {content: [{type: 'tool_result', tool_use_id: 'call-1', content: 'ok'}]}});",
+          "send({type: 'result', is_error: false});",
+          '}, 120);',
+          '});',
+        ].join('\n'),
+        { mode: 0o700 },
+      );
+      const realSetTimeout = globalThis.setTimeout;
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) =>
+        realSetTimeout(callback, ms === 90_000 ? 50 : ms, ...args),
+      );
+      const adapter = new ClaudeRuntimeAdapter(2_000);
+      adapter.setCliResolution({
+        source: 'explicit',
+        executable: script,
+        version: 'test',
+        compatibility: 'verified',
+        capabilities: [],
+      });
+      const failures: unknown[] = [];
+      const events: unknown[] = [];
+      await new Promise<void>((resolve) =>
+        adapter.start(
+          'quiet-tool',
+          'request',
+          [],
+          () => undefined,
+          root,
+          'auto',
+          (event) => events.push(event),
+          (error) => failures.push(error),
+          () => resolve(),
+          {
+            socketPath: join(root, 'unused.sock'),
+            token: 'test-token',
+            guidance: 'test',
+            toolNames: [],
+            managedTools: [
+              { name: 'exec_command', description: 'test', inputSchema: { type: 'object' } },
+            ],
+          },
+        ),
+      );
+      expect(failures).toEqual([]);
+      expect(events).toContainEqual({ type: 'completed' });
+    },
+  );
+
   it('materializes only selected managed revisions as explicit namespaced invocations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-skill-plugin-'));
     temporaryRoots.push(root);
@@ -219,6 +285,8 @@ describe('Claude runtime probe', () => {
           },
         }),
         expect.objectContaining({ id: 'claude-opus-5' }),
+        expect.objectContaining({ id: 'claude-fable-5', displayName: 'Fable 5' }),
+        expect.objectContaining({ id: 'claude-fable-5-1', displayName: 'Fable 5.1' }),
       ]),
     });
   });
@@ -349,6 +417,15 @@ describe('Claude runtime probe', () => {
     expect(buildClaudeArgs('auto')).not.toContain('--model');
   });
 
+  it.each(['claude-fable-5', 'claude-fable-5-1'])(
+    'passes the selected Fable version %s without replacing it with an alias',
+    (model) => {
+      const args = buildClaudeArgs(model);
+      expect(args[args.indexOf('--model') + 1]).toBe(model);
+      expect(args).not.toContain('--fallback-model');
+    },
+  );
+
   it('passes --effort when an effort level is given, verified valid values from the installed CLI', () => {
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode']) {
       const args = buildClaudeArgs('auto', undefined, effort);
@@ -366,7 +443,15 @@ describe('Claude runtime probe', () => {
     // The model choice must never widen the tool set. Asserted per model because `--model` is
     // appended last and an argv built by concatenation is exactly where an ordering bug would put
     // the wrong value after `--tools`.
-    for (const model of ['auto', 'sonnet', 'claude-opus-5', 'haiku', 'claude-sonnet-5']) {
+    for (const model of [
+      'auto',
+      'sonnet',
+      'claude-opus-5',
+      'claude-fable-5',
+      'claude-fable-5-1',
+      'haiku',
+      'claude-sonnet-5',
+    ]) {
       const args = buildClaudeArgs(model);
       const toolsFlagIndex = args.indexOf('--tools');
       expect(toolsFlagIndex).toBeGreaterThanOrEqual(0);

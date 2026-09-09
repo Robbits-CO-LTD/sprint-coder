@@ -8,7 +8,7 @@ import type { PermissionEvaluation, PermissionRequest, ProviderEgress } from '@s
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
 import type { PermissionBroker } from './permission-broker';
-import { assessProviderDisclosure } from './provider-disclosure-classifier';
+import { assessProviderEgressDisclosure } from './provider-disclosure-classifier';
 
 export type ProviderEgressDecision = Readonly<{
   allowed: boolean;
@@ -151,6 +151,8 @@ export type ProviderEgressInput = {
   task: TaskSummary;
   turnId: string;
   prompt: string;
+  /** Exact canonical roots from Main's sealed Turn workspace. No prefix or glob matching. */
+  knownWorkspaceRoots?: readonly string[];
   context: PreparedContext;
   now: string;
   payloadDigest?: string;
@@ -234,7 +236,7 @@ function authorizeProviderEgress(
     ...input.context.projectItems.map((item) => item.content),
   ].join('\n');
   const secretScan =
-    assessProviderDisclosure(content).classification === 'safe'
+    assessProviderEgressDisclosure(content, input.knownWorkspaceRoots).classification === 'safe'
       ? ('clean' as const)
       : ('blocked' as const);
   const textByteCount = Buffer.byteLength(content, 'utf8');

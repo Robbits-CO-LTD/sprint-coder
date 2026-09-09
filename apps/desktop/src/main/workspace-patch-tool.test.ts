@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
+import { toolValueMatchesSchema } from '@sprint-coder/domain';
 import {
   executeWorkspacePatch,
   executeWorkspacePatchBatch,
@@ -113,6 +114,67 @@ describe('the agent edit tool', () => {
     };
     expect(schema.properties.edits.minItems).toBe(1);
   });
+
+  it.each(['update', 'delete', 'rename'])(
+    'requires a read revision in the published schema for a batch %s',
+    (kind) => {
+      const operation = {
+        kind,
+        path: 'src/a.txt',
+        ...(kind === 'update' ? { edits: [{ oldText: 'before', newText: 'after' }] } : {}),
+        ...(kind === 'rename' ? { destination: 'src/b.txt' } : {}),
+      };
+      expect(
+        toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, { operations: [operation] }),
+      ).toBe(false);
+      expect(
+        toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, {
+          operations: [{ ...operation, revision: { version: 1, tokenId: 'read-revision' } }],
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    { kind: 'add', field: 'content', value: '' },
+    { kind: 'update', field: 'edits', value: [{ oldText: 'before', newText: 'after' }] },
+    { kind: 'rename', field: 'destination', value: 'src/b.txt' },
+  ])('requires $field for batch $kind in the published schema', ({ kind, field, value }) => {
+    const operation = {
+      kind,
+      path: 'src/a.txt',
+      ...(kind === 'add' ? {} : { revision: { version: 1, tokenId: 'read-revision' } }),
+    };
+    expect(
+      toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, { operations: [operation] }),
+    ).toBe(false);
+    expect(
+      toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, {
+        operations: [{ ...operation, [field]: value }],
+      }),
+    ).toBe(true);
+  });
+
+  it('continues accepting single-file edits and new-file batches without a revision', () => {
+    expect(
+      toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, {
+        path: 'src/a.txt',
+        edits: [{ oldText: 'before', newText: 'after' }],
+      }),
+    ).toBe(true);
+    expect(
+      toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, {
+        operations: [{ kind: 'add', path: 'new.txt', content: 'new' }],
+      }),
+    ).toBe(true);
+  });
+
+  it.each([{}, { edits: [{ oldText: 'before', newText: 'after' }] }, { path: 'src/a.txt' }])(
+    'rejects incomplete single-file requests in the published schema',
+    (input) => {
+      expect(toolValueMatchesSchema(WORKSPACE_PATCH_TOOL.inputSchema, input)).toBe(false);
+    },
+  );
 
   it('hands a validated plan to the Saga rather than writing anything itself', async () => {
     const { workspace, identity, deps, applied, patchWriteGuard, patchReadGuard } = await harness();
