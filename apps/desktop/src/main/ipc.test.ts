@@ -2894,12 +2894,20 @@ describe('Provider Team completion and model errors', () => {
       evaluationTrace: ['test-allow'],
       permit: { id: 'test-permit' },
     }));
+    const readResult = {
+      rootId: 'root-a',
+      path: 'notes.txt',
+      content: 'first\n\t"quoted"\n',
+      revision: { version: 1, tokenId: 'read-reference' },
+      truncated: false,
+    };
+    const recordReadVerification = vi.fn();
     const brokerDispatch = vi.fn(
       async (
         request: { callId: string; providerName: string },
         consume?: (result: unknown) => Promise<unknown>,
       ) => {
-        if (request.providerName !== 'view_image') return { path: 'notes.txt', content: 'ok' };
+        if (request.providerName !== 'view_image') return readResult;
         return consume!(request.callId === 'call-image-a' ? resultFor(imageA) : resultFor(imageB));
       },
     );
@@ -2960,6 +2968,7 @@ describe('Provider Team completion and model errors', () => {
         getPermissionPolicy: () => ({ policyEpoch: 1 }),
         getActiveTurnId: () => turnId,
         readTurnWorkspaceSetForTask: () => null,
+        recordWorkspaceReadVerification: recordReadVerification,
         changeStage: vi.fn(() => ({ type: 'stage.changed' })),
         appendDelta: vi.fn(() => ({ type: 'message.delta' })),
       },
@@ -3031,9 +3040,35 @@ describe('Provider Team completion and model errors', () => {
 
     expect(execute).toHaveBeenCalledTimes(3);
     const request2 = execute.mock.calls[1]?.[1] as {
-      messages: Array<{ content: string; inlineImages?: Array<{ base64: string }> }>;
+      messages: Array<{
+        role?: string;
+        toolName?: string;
+        content: string;
+        inlineImages?: Array<{ base64: string }>;
+      }>;
     };
     const request3 = execute.mock.calls[2]?.[1] as typeof request2;
+    const readMessage = request3.messages.find((message) => message.toolName === 'read_file');
+    expect(readMessage?.role).toBe('tool');
+    expect(readMessage?.content.endsWith(readResult.content)).toBe(true);
+    expect(JSON.parse(readMessage!.content.split('\n\n')[0]!)).toMatchObject({
+      ok: true,
+      result: {
+        rootId: readResult.rootId,
+        revision: readResult.revision,
+        contentFormat: 'verbatim_text_below',
+      },
+    });
+    expect(recordReadVerification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId,
+        turnId,
+        rootId: readResult.rootId,
+        path: readResult.path,
+        content: readResult.content,
+      }),
+    );
+
     const request2Images = request2.messages.flatMap((message) => message.inlineImages ?? []);
     const request3Images = request3.messages.flatMap((message) => message.inlineImages ?? []);
     expect(request2Images.map(({ base64 }) => base64)).toEqual([
