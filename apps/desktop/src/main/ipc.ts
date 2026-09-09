@@ -588,6 +588,7 @@ import { ReasoningBatcher } from './reasoning-batcher';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { RetryableActionRegistry } from './retryable-action';
 import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor';
+import { formatProviderToolResult } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
@@ -7467,7 +7468,7 @@ export class IpcRouter {
               if (!isProviderImageBridgeDispatchResult(result))
                 throw new Error('Provider image tool result escaped its private bridge');
               content = result.toolMessage.content;
-            } else content = redactSecrets(JSON.stringify({ ok: true, result }));
+            } else content = formatProviderToolResult(connection.providerId, toolCall.name, result);
             succeeded = true;
           } catch (error) {
             if (controller.signal.aborted) throw error;
