@@ -804,11 +804,39 @@ describe('Main image attachment dispatch boundary', () => {
       calls.push('release');
     });
 
-    await expect(cancelRuntimeWithFinalCleanup(cancel, release)).rejects.toThrow(
-      'forced restart after unconfirmed stop',
-    );
+    await expect(
+      cancelRuntimeWithFinalCleanup(cancel, release, async () => undefined),
+    ).rejects.toThrow('forced restart after unconfirmed stop');
     expect(calls).toEqual(['cancel', 'release']);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('waits for managed command cancellation even if Runtime cancellation throws synchronously', async () => {
+    const calls: string[] = [];
+    let finishCommands: () => void = () => undefined;
+    const commands = new Promise<void>((resolve) => {
+      finishCommands = resolve;
+    });
+    const cancellation = cancelRuntimeWithFinalCleanup(
+      () => {
+        calls.push('runtime');
+        throw new Error('runtime stop failed');
+      },
+      async () => {
+        calls.push('release');
+      },
+      async () => {
+        calls.push('commands');
+        await commands;
+        calls.push('commands-stopped');
+      },
+    );
+    const outcome = cancellation.catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toEqual(['runtime', 'commands']);
+    finishCommands();
+    await expect(outcome).resolves.toMatchObject({ message: 'runtime stop failed' });
+    expect(calls).toEqual(['runtime', 'commands', 'commands-stopped', 'release']);
   });
 
   it('projects accepted Provider images once in DB order without exposing bytes to policy scan', async () => {

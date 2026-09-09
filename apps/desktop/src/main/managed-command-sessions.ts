@@ -44,7 +44,7 @@ export class ManagedCommandSessions {
   async start(
     spec: ExecutionSpec,
     owner: Readonly<{ taskId: string; turnId: string }>,
-    hooks: Pick<RunOptions, 'beforeSpawn' | 'onStarted' | 'onChunk' | 'onBatch'> = {},
+    hooks: Pick<RunOptions, 'signal' | 'beforeSpawn' | 'onStarted' | 'onChunk' | 'onBatch'> = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
     if (this.sessions.size >= this.maxSessions) this.evictTerminal();
@@ -69,6 +69,9 @@ export class ManagedCommandSessions {
       turnId: owner.turnId,
     };
     this.sessions.set(session.id, session);
+    const abortFromCaller = (): void => session.controller.abort(hooks.signal?.reason);
+    hooks.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    if (hooks.signal?.aborted) abortFromCaller();
     session.completion = this.runner
       .run(spec, {
         signal: session.controller.signal,
@@ -95,10 +98,14 @@ export class ManagedCommandSessions {
         session.state = result.canceled ? 'canceled' : 'exited';
       })
       .catch((error: unknown) => {
-        session.state = 'failed';
+        session.state =
+          session.controller.signal.aborted && session.executionId === null ? 'canceled' : 'failed';
         session.error = error instanceof Error ? error.message : 'Command failed';
       })
-      .finally(() => session.resolveStarted());
+      .finally(() => {
+        hooks.signal?.removeEventListener('abort', abortFromCaller);
+        session.resolveStarted();
+      });
     await session.started;
     if (session.state === 'failed') throw new Error(session.error ?? 'Managed command failed');
     return this.snapshot(session, 0);
@@ -164,6 +171,20 @@ export class ManagedCommandSessions {
     await Promise.allSettled([...this.sessions.values()].map(({ completion }) => completion));
     await this.runner.dispose();
     this.sessions.clear();
+  }
+
+  async terminateTurn(owner: Readonly<{ taskId: string; turnId: string }>): Promise<void> {
+    const owned = [...this.sessions.values()].filter(
+      (session) =>
+        session.taskId === owner.taskId &&
+        session.turnId === owner.turnId &&
+        (session.state === 'starting' || session.state === 'running'),
+    );
+    for (const session of owned)
+      session.controller.abort(new Error('Managed command Turn canceled'));
+    await Promise.allSettled(owned.map(({ completion }) => completion));
+    if (owned.some(({ state }) => state === 'failed'))
+      throw new Error('Managed command Turn cancellation could not be confirmed');
   }
 
   async terminateTask(taskId: string): Promise<void> {

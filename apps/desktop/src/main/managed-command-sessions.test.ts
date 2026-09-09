@@ -57,6 +57,81 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       await sessions.dispose();
     });
 
+    it('propagates the tool call abort signal to its running command', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-abort-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: ['-c', 'while :; do sleep 1; done'],
+      });
+      const sessions = new ManagedCommandSessions();
+      const owner = { taskId: 'task-1', turnId: 'turn-1' };
+      const controller = new AbortController();
+      const hooks = { signal: controller.signal, beforeSpawn: () => undefined };
+      try {
+        const started = await sessions.start(spec, owner, hooks);
+        controller.abort();
+        await expect(sessions.waitFor(started.sessionId, owner, 5_000)).resolves.toMatchObject({
+          state: 'canceled',
+        });
+      } finally {
+        await sessions.dispose();
+      }
+    });
+
+    it('does not spawn an already canceled command', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-preabort-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: ['-c', 'printf unexpected > spawned.txt'],
+      });
+      const sessions = new ManagedCommandSessions();
+      const owner = { taskId: 'task-1', turnId: 'turn-1' };
+      const controller = new AbortController();
+      controller.abort();
+      try {
+        const started = await sessions.start(spec, owner, { signal: controller.signal });
+        expect(started.state).toBe('canceled');
+        expect(started.executionId).toBe(null);
+        await expect(readFile(join(workspace, 'spawned.txt'))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        await sessions.dispose();
+      }
+    });
+
+    it('terminates only the selected Task and Turn after a command has returned a session', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-turn-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: ['-c', 'while :; do sleep 1; done'],
+      });
+      const sessions = new ManagedCommandSessions();
+      const firstOwner = { taskId: 'task-1', turnId: 'turn-1' };
+      const secondOwner = { taskId: 'task-1', turnId: 'turn-2' };
+      const thirdOwner = { taskId: 'task-2', turnId: 'turn-1' };
+      try {
+        const first = await sessions.start(spec, firstOwner);
+        const second = await sessions.start(spec, secondOwner);
+        const third = await sessions.start(spec, thirdOwner);
+        await sessions.terminateTurn(firstOwner);
+        expect(sessions.poll(first.sessionId, firstOwner).state).toBe('canceled');
+        expect(sessions.poll(second.sessionId, secondOwner).state).toBe('running');
+        expect(sessions.poll(third.sessionId, thirdOwner).state).toBe('running');
+      } finally {
+        await sessions.dispose();
+      }
+    });
+
     it('stops every session owned by a Task when its policy epoch changes', async () => {
       if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-policy-'));

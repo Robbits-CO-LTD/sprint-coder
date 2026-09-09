@@ -6884,8 +6884,10 @@ export class IpcRouter {
             };
           this.detachCanceledTurnBookkeeping(turnId);
           return async () => {
-            await cancelRuntimeWithFinalCleanup(cancelAction, () =>
-              this.releaseTurnAttachmentCustody(turnId),
+            await cancelRuntimeWithFinalCleanup(
+              cancelAction,
+              () => this.releaseTurnAttachmentCustody(turnId),
+              () => this.managedCodingHarness.cancelTurn(taskId, turnId),
             );
           };
         }),
@@ -8319,9 +8321,16 @@ export class TaskMailbox {
 export async function cancelRuntimeWithFinalCleanup(
   cancelRuntime: () => Promise<void>,
   releaseCustody: () => Promise<void>,
+  cancelCommands: () => Promise<void>,
 ): Promise<void> {
   try {
-    await cancelRuntime();
+    // Stop both owners even if one fails, and retain custody until both stop attempts settle.
+    const results = await Promise.allSettled([
+      Promise.resolve().then(cancelRuntime),
+      Promise.resolve().then(cancelCommands),
+    ]);
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
   } finally {
     await releaseCustody();
   }
