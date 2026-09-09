@@ -35,11 +35,18 @@ export function usesInactiveWindowPresentation(
   return environment['SPRINT_CODER_E2E_BACKGROUND'] === '1';
 }
 
+export function usesHiddenWindowPresentation(
+  environment: Readonly<NodeJS.ProcessEnv> = process.env,
+): boolean {
+  return environment['SPRINT_CODER_E2E_HIDDEN'] === '1';
+}
+
 /** Keeps automated app windows visible for rendering without stealing OS focus. */
 export function presentWindow(
   target: WindowPresentationTarget,
   environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): void {
+  if (usesHiddenWindowPresentation(environment)) return;
   if (usesInactiveWindowPresentation(environment)) target.showInactive();
   else target.show();
 }
@@ -49,6 +56,7 @@ export function restoreWindow(
   target: WindowRestoreTarget,
   environment: Readonly<NodeJS.ProcessEnv> = process.env,
 ): void {
+  if (usesHiddenWindowPresentation(environment)) return;
   if (target.isMinimized()) target.restore();
   if (!target.isVisible()) presentWindow(target, environment);
   if (!usesInactiveWindowPresentation(environment)) target.focus();

@@ -99,6 +99,23 @@ describe('window presentation', () => {
     expect(window.focus).toHaveBeenCalledOnce();
   });
 
+  it('keeps hidden E2E windows hidden even when background presentation is also enabled', () => {
+    const window: WindowRestoreTarget = {
+      ...presentationTarget(),
+      focus: vi.fn(),
+      isMinimized: vi.fn(() => true),
+      isVisible: vi.fn(() => false),
+      restore: vi.fn(),
+    };
+    const environment = { SPRINT_CODER_E2E_HIDDEN: '1', SPRINT_CODER_E2E_BACKGROUND: '1' };
+    presentWindow(window, environment);
+    restoreWindow(window, environment);
+    expect(window.show).not.toHaveBeenCalled();
+    expect(window.showInactive).not.toHaveBeenCalled();
+    expect(window.restore).not.toHaveBeenCalled();
+    expect(window.focus).not.toHaveBeenCalled();
+  });
+
   it('restores hidden E2E windows without focusing them', () => {
     const window: WindowRestoreTarget = {
       ...presentationTarget(),

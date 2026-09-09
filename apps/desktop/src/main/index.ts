@@ -69,6 +69,7 @@ import {
   isWindowControlAction,
   presentWindow,
   restoreWindow,
+  usesHiddenWindowPresentation,
   WINDOW_CONTROL_CHANNELS,
   windowChromeOptions,
 } from '../window-controls';
@@ -149,6 +150,8 @@ if (squirrelStartup || !hasLock) {
   void app
     .whenReady()
     .then(async () => {
+      if (process.platform === 'darwin' && usesHiddenWindowPresentation())
+        app.setActivationPolicy('prohibited');
       if (!isDevelopment) registerProductionProtocol();
       const managedLocalBundle = await initializeManagedLocalSidecarCapability();
       if (managedLocalBundle !== null) initializeManagedLocalLifecycle(managedLocalBundle);
@@ -489,6 +492,7 @@ function createWindow(): BrowserWindow {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
+      ...(usesHiddenWindowPresentation() ? { backgroundThrottling: false } : {}),
     },
   });
   if (process.platform !== 'darwin') window.setMenu(null);

@@ -177,6 +177,14 @@ npm start
 
 E2Eはpackage作成とnative module検証を含みます。通常の変更では対象test、typecheck、lintから先に実行してください。CIはmacOS、Windows、Linuxで検証します。
 
+作業中のデスクトップにウィンドウを表示せず開発版E2Eを実行する場合は、非表示モードを明示します。
+
+```bash
+SPRINT_CODER_E2E_MODE=dev SPRINT_CODER_E2E_HIDDEN=1 npm run e2e -- --grep-invert 'macOS window lifecycle'
+```
+
+このモードでは描画とDOM操作を維持し、起動・再表示によるウィンドウ表示を抑止します。macOSではアプリのactivationも禁止します。既存の開発用ウィンドウには適用しません。実ウィンドウの再表示を確認する`macOS window lifecycle`は上記コマンドの対象外です。Computer Useによる実画面操作、OSのフォーカス挙動、可視ウィンドウの性能受入れは非表示E2Eでは証明できません。
+
 <details>
 <summary><strong>Windowsインストーラーをローカルで作る</strong></summary>
 
