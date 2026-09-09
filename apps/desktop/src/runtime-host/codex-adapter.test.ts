@@ -397,108 +397,117 @@ describe('Codex runtime probe', () => {
     expect(diagnosticText).not.toContain('private team guidance');
   });
 
-  it('routes a managed dynamic tool to the client and disables Codex native environments', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-codex-'));
-    temporaryRoots.push(root);
-    const script = join(root, 'managed-codex.mjs');
-    await writeFile(
-      script,
-      [
-        "import { createInterface } from 'node:readline';",
-        'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
-        "createInterface({ input: process.stdin }).on('line', (line) => {",
-        '  const message = JSON.parse(line);',
-        "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
-        "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
-        "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
-        "  if (message.method === 'thread/start') {",
-        "    if (message.params.sandbox !== 'read-only' || message.params.environments?.length !== 0) process.exit(21);",
-        "    if (message.params.dynamicTools?.[0]?.name !== 'read_file') process.exit(22);",
-        "    send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-managed' } } });",
-        '  }',
-        "  if (message.method === 'turn/start') {",
-        "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
-        "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
-        "    send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'preamble', delta: '実行します。' } });",
-        "    send({ jsonrpc: '2.0', id: 'managed-call', method: 'item/tool/call', params: { threadId: 'thread-managed', turnId: 'turn-1', callId: 'call-read', namespace: null, tool: 'read_file', arguments: { path: 'README.md' } } });",
-        '  }',
-        "  if (message.id === 'managed-call' && message.result?.success === true) {",
-        "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
-        '  }',
-        '});',
-      ].join('\n'),
-    );
-    const registry = new ToolRegistry();
-    registry.register(
-      createToolDefinition({
-        toolId: createToolId({
-          provider: 'builtin',
-          namespace: 'workspace',
-          name: 'read',
-          version: '1',
-        }),
-        providerName: 'read_file',
-        kind: 'fileRead',
-        schemaVersion: 1,
-        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
-        outputSchema: { type: 'object' },
-        sideEffect: 'read',
-        risk: 'low',
-        requiredCapabilities: ['workspace.read'],
-        executionTarget: 'main',
-        implementationKind: 'built-in',
-        priority: 1,
-        workspaceBinding: { kind: 'any' },
-        providerCompatibility: ['*'],
-      }),
-    );
-    const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
-    const calls: unknown[] = [];
-    const events: Array<{ type: string; stage?: string }> = [];
-    let stagesAtManagedCall: string[] = [];
-    const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
-    await new Promise<void>((resolve) => {
-      adapter.start(
-        'managed-tool-turn',
-        'request',
-        [],
-        () => undefined,
-        root,
-        'auto',
-        (event: RuntimeCanonicalEvent) => {
-          events.push(event);
-        },
-        () => undefined,
-        () => resolve(),
-        undefined,
-        undefined,
-        'workspace-write',
-        [],
-        [],
-        undefined,
-        undefined,
-        undefined,
-        snapshot,
-        async (call) => {
-          stagesAtManagedCall = events.flatMap((event) =>
-            event.type === 'stage' && event.stage !== undefined ? [event.stage] : [],
-          );
-          calls.push(call);
-          return { success: true, output: { content: 'managed' } };
-        },
+  it.each([
+    ['read_file', 'read_file'],
+    ['exec_command', 'sprint_exec_command'],
+    ['write_stdin', 'sprint_write_stdin'],
+  ])(
+    'routes host tool %s through %s with native environments disabled',
+    async (providerName, toolName) => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-codex-'));
+      temporaryRoots.push(root);
+      const script = join(root, 'managed-codex.mjs');
+      await writeFile(
+        script,
+        [
+          "import { createInterface } from 'node:readline';",
+          'const send = (value) => process.stdout.write(`${JSON.stringify(value)}\\n`);',
+          "createInterface({ input: process.stdin }).on('line', (line) => {",
+          '  const message = JSON.parse(line);',
+          "  if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'skills/extraRoots/set') send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "  if (message.method === 'skills/list') send({ jsonrpc: '2.0', id: message.id, result: { data: [{ cwd: message.params.cwds[0], skills: [], errors: [] }] } });",
+          "  if (message.method === 'thread/start') {",
+          "    if (message.params.sandbox !== 'read-only' || message.params.environments?.length !== 0) process.exit(21);",
+          `    if (message.params.dynamicTools?.[0]?.name !== ${JSON.stringify(toolName)}) process.exit(22);`,
+          "    if (!message.params.developerInstructions?.includes('host-tools integration')) process.exit(23);",
+          "    if (message.params.approvalPolicy !== 'never') process.exit(24);",
+          "    send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: 'thread-managed' } } });",
+          '  }',
+          "  if (message.method === 'turn/start') {",
+          "    send({ jsonrpc: '2.0', id: message.id, result: {} });",
+          "    send({ jsonrpc: '2.0', method: 'turn/started', params: {} });",
+          "    send({ jsonrpc: '2.0', method: 'item/agentMessage/delta', params: { itemId: 'preamble', delta: '実行します。' } });",
+          `    send({ jsonrpc: '2.0', id: 'managed-call', method: 'item/tool/call', params: { threadId: 'thread-managed', turnId: 'turn-1', callId: 'call-read', namespace: null, tool: ${JSON.stringify(toolName)}, arguments: { path: 'README.md' } } });`,
+          '  }',
+          "  if (message.id === 'managed-call' && message.result?.success === true) {",
+          "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+          '  }',
+          '});',
+        ].join('\n'),
       );
-    });
-    expect(calls).toEqual([
-      {
-        callId: 'call-read',
-        toolName: 'read_file',
-        arguments: { path: 'README.md' },
-        catalogDigest: snapshot.digest,
-      },
-    ]);
-    expect(stagesAtManagedCall.at(-1)).toBe('executing');
-    expect(stagesAtManagedCall).not.toContain('synthesizing');
-  });
+      const registry = new ToolRegistry();
+      registry.register(
+        createToolDefinition({
+          toolId: createToolId({
+            provider: 'builtin',
+            namespace: 'workspace',
+            name: 'read',
+            version: '1',
+          }),
+          providerName,
+          kind: 'fileRead',
+          schemaVersion: 1,
+          inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+          outputSchema: { type: 'object' },
+          sideEffect: 'read',
+          risk: 'low',
+          requiredCapabilities: ['workspace.read'],
+          executionTarget: 'main',
+          implementationKind: 'built-in',
+          priority: 1,
+          workspaceBinding: { kind: 'any' },
+          providerCompatibility: ['*'],
+        }),
+      );
+      const snapshot = registry.createSnapshot({ providerId: 'codex', workspaceId: 'workspace-1' });
+      const calls: unknown[] = [];
+      const events: Array<{ type: string; stage?: string }> = [];
+      let stagesAtManagedCall: string[] = [];
+      const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
+      await new Promise<void>((resolve) => {
+        adapter.start(
+          'managed-tool-turn',
+          'request',
+          [],
+          () => undefined,
+          root,
+          'auto',
+          (event: RuntimeCanonicalEvent) => {
+            events.push(event);
+          },
+          () => undefined,
+          () => resolve(),
+          undefined,
+          undefined,
+          'workspace-write',
+          [],
+          [],
+          undefined,
+          undefined,
+          undefined,
+          snapshot,
+          async (call) => {
+            stagesAtManagedCall = events.flatMap((event) =>
+              event.type === 'stage' && event.stage !== undefined ? [event.stage] : [],
+            );
+            calls.push(call);
+            return { success: true, output: { content: 'managed' } };
+          },
+        );
+      });
+      expect(calls).toEqual([
+        {
+          callId: 'call-read',
+          toolName: providerName,
+          arguments: { path: 'README.md' },
+          catalogDigest: snapshot.digest,
+        },
+      ]);
+      expect(stagesAtManagedCall.at(-1)).toBe('executing');
+      expect(stagesAtManagedCall).not.toContain('synthesizing');
+    },
+  );
 
   it('constructs ordered app-server localImage inputs without embedding paths in text', () => {
     expect(
@@ -571,6 +580,52 @@ describe('Codex runtime probe', () => {
     expect(
       readCodexModels({ HOME: home }, join(home, 'ignored-os-home')).map(({ id }) => id),
     ).toEqual(['auto', 'gpt-home-override']);
+  });
+
+  it('reads Astra and its advertised effort levels from the CLI catalog', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-astra-catalog-'));
+    temporaryRoots.push(home);
+    const cache = join(home, 'codex');
+    await mkdir(cache);
+    await writeFile(
+      join(cache, 'models_cache.json'),
+      JSON.stringify({
+        models: [
+          {
+            slug: 'gpt-6-astra',
+            display_name: 'GPT-6-Astra',
+            description: 'Our most capable model for complex, demanding work.',
+            visibility: 'list',
+            input_modalities: ['text', 'image'],
+            default_reasoning_level: 'medium',
+            supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(
+              (effort) => ({ effort, description: effort }),
+            ),
+          },
+        ],
+      }),
+    );
+
+    const model = readCodexModels({ CODEX_HOME: cache }, home).find(
+      ({ id }) => id === 'gpt-6-astra',
+    );
+    expect(model).toMatchObject({
+      id: 'gpt-6-astra',
+      displayName: 'GPT-6-Astra',
+      defaultEffort: 'medium',
+      capabilities: { toolCalling: { value: true }, multimodalInput: { value: true } },
+    });
+    expect(model?.efforts?.map(({ id }) => id)).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+      'ultra',
+    ]);
+    expect(buildCodexArgs('gpt-6-astra', 'max')).toEqual(
+      expect.arrayContaining(['model="gpt-6-astra"', 'model_reasoning_effort="max"']),
+    );
   });
 
   it('resolves the user-local Codex CLI when a packaged macOS app has a system-only PATH', async () => {

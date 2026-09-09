@@ -1,4 +1,4 @@
-import { providerCompletionEvent } from './provider-output-limit';
+import { providerCompletionEvent, PROVIDER_EMPTY_RESPONSE_MESSAGE } from './provider-output-limit';
 import type { CanonicalProviderEvent, ProviderMessageToolCall } from '@sprint-coder/contracts';
 import { ProviderStreamBudget, readBoundedServerSentJson } from './provider-stream-budget';
 
@@ -18,6 +18,8 @@ export async function* normalizeOpenAIChatCompletionsStream(
   let stopReason = 'completed';
   let usage: Record<string, unknown> | null = null;
   let terminalFrameSeen = false;
+  let visibleOutputSeen = false;
+  let toolCallCount = 0;
   const tools = new Map<number, ToolAccumulator>();
 
   for await (const value of readBoundedServerSentJson(body, budget, () => {
@@ -57,6 +59,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
         yield { type: 'reasoning_delta', text: reasoning };
       }
       if (typeof delta.content === 'string' && delta.content.length > 0) {
+        visibleOutputSeen ||= delta.content.trim().length > 0;
         budget.consumeOutput(delta.content);
         yield { type: 'output_delta', text: delta.content };
       }
@@ -95,6 +98,7 @@ export async function* normalizeOpenAIChatCompletionsStream(
   for (const tool of [...tools.entries()].sort(([a], [b]) => a - b).map(([, value]) => value)) {
     if (tool.callId === null || tool.name === null) continue;
     budget.consumeToolCall();
+    toolCallCount += 1;
     yield {
       type: 'tool_call',
       callId: tool.callId,
@@ -118,7 +122,19 @@ export async function* normalizeOpenAIChatCompletionsStream(
       source: usage === null ? 'unknown' : 'provider_api',
     },
   };
-  yield providerCompletionEvent(stopReason);
+  const completion = providerCompletionEvent(stopReason);
+  if (completion.type === 'completed' && !visibleOutputSeen && toolCallCount === 0)
+    yield {
+      type: 'error',
+      error: {
+        category: 'provider_unavailable',
+        message: PROVIDER_EMPTY_RESPONSE_MESSAGE,
+        retryable: true,
+        retryAfterMs: null,
+        providerCode: 'empty_response',
+      },
+    };
+  else yield completion;
 }
 
 function reasoningTextsFromDelta(delta: Record<string, unknown>): string[] {

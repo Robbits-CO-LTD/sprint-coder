@@ -91,36 +91,10 @@ const CLAUDE_CODE_CAPABILITIES: NonNullable<CodexModelOption['capabilities']> = 
   reasoning: claudeCapability(CLAUDE_MODEL_CONFIG_SOURCE),
 };
 
-// The CLI does not expose a model catalog to enumerate (unlike Codex's models_cache.json), so a
-// static curated list ships instead, per the ADR. Every entry below is verified against the
-// installed CLI with a real probe turn (`claude -p "1" --model <id> --output-format json --tools ''
-// --strict-mcp-config --safe-mode --no-session-persistence`), reading the concrete model id back
-// from the result's `modelUsage` key — displayName/description spell out that verified id so
-// "which model is this?" has a concrete answer instead of a bare label.
-//
-// Re-probed 2026-07-25 on CLI 2.1.218 (issue #7):
-//   (no --model)         -> claude-sonnet-5            (the adapter's own `auto` sentinel)
-//   --model sonnet       -> claude-sonnet-5
-//   --model haiku        -> claude-haiku-4-5-20251001
-//   --model opus         -> claude-opus-4-8            <-- alias lags behind the tier
-//   --model claude-opus-5 -> claude-opus-5
-//   --model fable        -> claude-opus-4-8            <-- silent fallback, see below
-//   --model claude-fable-5 -> claude-opus-4-8          <-- likewise
-//
-// Hence the asymmetry in this list: `sonnet` and `haiku` stay as aliases because they verifiably
-// resolve to the current model of their tier and will keep tracking it for free, while the top
-// tier pins the concrete `claude-opus-5`. The `opus` alias still resolves to claude-opus-4-8 on
-// this CLI, so keeping it would mean a user who picks "the most capable model" silently gets an
-// older one — a stale alias is worse than a pin that has to be bumped by hand. Retiring a catalog
-// id needs a matching entry in `RETIRED_CLAUDE_MODEL_IDS` (main/persistence.ts) so an existing
-// preference follows rather than silently pinning the old model.
-//
-// `fable` remains deliberately absent, but for a different reason than before: it is now listed in
-// `claude --help`'s own alias examples, so the earlier "not a documented tier" rationale no longer
-// holds — however both `fable` and `claude-fable-5` resolve to claude-opus-4-8 here, i.e. the CLI
-// accepts them and silently serves something else. Shipping a "Fable 5" entry that does not run
-// Fable 5 is worse than omitting it. Re-probe before adding: if `--model claude-fable-5` ever
-// reports `claude-fable-5` in `modelUsage`, it belongs in this list.
+// Claude has no model-list endpoint in the CLI, so this catalog uses official model IDs.
+// Pin Opus and Fable versions: older CLI aliases have silently resolved to a different model.
+// Fable 5.1 requires Claude Code 2.1.255+:
+// https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan
 const CLAUDE_MODELS: CodexModelOption[] = [
   {
     id: 'auto',
@@ -137,7 +111,19 @@ const CLAUDE_MODELS: CodexModelOption[] = [
   {
     id: 'claude-opus-5',
     displayName: 'Opus 5',
-    description: '最も高性能なモデル（claude-opus-5、低速・高コスト）',
+    description: '複雑な推論・コーディング向け（claude-opus-5）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
+  },
+  {
+    id: 'claude-fable-5-1',
+    displayName: 'Fable 5.1',
+    description: '高度な推論・長時間の作業向け（claude-fable-5-1、Claude Code 2.1.255以上）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
+  },
+  {
+    id: 'claude-fable-5',
+    displayName: 'Fable 5',
+    description: '高度な推論・長時間の作業向け（claude-fable-5）',
     capabilities: CLAUDE_CODE_CAPABILITIES,
   },
   {

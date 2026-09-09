@@ -1,6 +1,51 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { assessProviderDisclosure } from './provider-disclosure-classifier';
+import {
+  assessProviderDisclosure,
+  assessProviderEgressDisclosure,
+} from './provider-disclosure-classifier';
+
+describe('sealed Workspace root egress classification', () => {
+  const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
+  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+
+  it('uses exact Main-issued root context only for composite entropy', () => {
+    expect(assessProviderDisclosure(root).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(root).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(root, [root])).toMatchObject({
+      classification: 'safe',
+      redactedContent: root,
+    });
+  });
+
+  it.each([
+    `${root}/child`,
+    `${root}-other`,
+    `${root}/${opaque}`,
+    opaque,
+    `${root}\n${opaque}`,
+    `password="${root}"`,
+    `cookie: ${root}`,
+  ])('does not exempt other values or credential fields (%#)', (content) => {
+    const assessment = assessProviderEgressDisclosure(content, [root]);
+    expect(assessment.classification).toBe('sensitive');
+    expect(assessment.redactedContent).not.toBe(content);
+  });
+
+  it.each([opaque, 'sk-proj-abcdefghijklmnopqrstuvwxyz1234', 'AKIAIOSFODNN7EXAMPLE'])(
+    'still blocks a secret-bearing root (%#)',
+    (value) => {
+      const secretRoot = `/private/tmp/${value}/workspace`;
+      expect(assessProviderEgressDisclosure(secretRoot, [secretRoot]).classification).toBe(
+        'sensitive',
+      );
+    },
+  );
+
+  it('cannot exempt an opaque value just by supplying it as a root', () => {
+    expect(assessProviderEgressDisclosure(opaque, [opaque]).classification).toBe('sensitive');
+  });
+});
 
 describe('provider disclosure classifier', () => {
   it.each(['sha256', 'sha384', 'sha512'])(

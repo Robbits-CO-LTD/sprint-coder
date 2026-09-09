@@ -94,6 +94,16 @@ export type CodexProbe = {
 
 const CODEX_CLI_REFERENCE = 'https://developers.openai.com/codex/cli/reference';
 const CODEX_MODEL_CACHE_REFERENCE = 'Codex CLI models_cache.json';
+export const CODEX_MANAGED_TOOL_GUIDANCE = `This is a Sprint Coder host-tools integration.
+There is no native Codex execution environment. The native read-only sandbox and never approval
+policy do not describe the separately supplied host tools. Workspace reads, edits and commands
+must use those dynamic tools and their exact input schemas. Sprint Coder enforces the selected
+workspace, file revisions, permissions, command sandbox and user approvals for every host call.
+For an authorized edit or command, invoke the corresponding host tool; do not infer that it is
+unavailable from the native sandbox. Respect any denial or failure the host returns. Never use
+native filesystem or shell operations to bypass the host. After each successful edit, use read_file
+to read back the changed file before finishing; the host requires that evidence even when a test
+command succeeds. Also run the verification commands requested by the user.`;
 const unknownCapability = { value: null, source: 'unknown' as const };
 const codexRuntimeCapability = (value: boolean, sourceReference: string) => ({
   value,
@@ -507,14 +517,16 @@ export class CodexRuntimeAdapter {
                 requiredString(params['callId'], 'dynamic tool call id');
                 if (params['namespace'] !== null || threadId !== activeThreadId)
                   throw new Error('Unexpected dynamic tool identity');
-                const managed = managedDynamicTools.some(({ name }) => name === tool);
+                const managedEntry = toolCatalogSnapshot?.entries.find(
+                  (entry) => codexManagedToolName(entry.providerName) === tool,
+                );
                 let response: CodexDynamicToolResponse;
-                if (managed) {
+                if (managedEntry !== undefined) {
                   if (invokeManagedTool === undefined || toolCatalogSnapshot === undefined)
                     throw new Error('Managed tool bridge is unavailable');
                   const result = await invokeManagedTool({
                     callId: requiredString(params['callId'], 'dynamic tool call id'),
-                    toolName: tool,
+                    toolName: managedEntry.providerName,
                     arguments: params['arguments'],
                     catalogDigest: toolCatalogSnapshot.digest,
                   });
@@ -672,6 +684,9 @@ export class CodexRuntimeAdapter {
             sandbox: 'read-only',
             environments: [],
             ephemeral: true,
+            ...(managedDynamicTools.length === 0
+              ? {}
+              : { developerInstructions: CODEX_MANAGED_TOOL_GUIDANCE }),
             ...(dynamicTools.length === 0 ? {} : { dynamicTools }),
             ...(model === 'auto' ? {} : { model }),
           }),
@@ -1106,16 +1121,25 @@ export function buildCodexManagedDynamicTools(
 ): CodexDynamicToolSpec[] {
   const names = new Set<string>();
   return snapshot.entries.map((entry) => {
-    if (names.has(entry.providerName)) throw new Error('Duplicate managed dynamic tool name');
-    names.add(entry.providerName);
+    const name = codexManagedToolName(entry.providerName);
+    if (names.has(name)) throw new Error('Duplicate managed dynamic tool name');
+    names.add(name);
     return {
       type: 'function',
-      name: entry.providerName,
+      name,
       description: entry.description,
       inputSchema: JSON.parse(JSON.stringify(entry.inputSchema)) as unknown,
       deferLoading: false,
     };
   });
+}
+
+function codexManagedToolName(providerName: string): string {
+  // Distinguish the host's approved command tools from disabled Codex native shell tools.
+  // Calls are mapped back to the pinned catalog name before the host validates/authorizes them.
+  return providerName === 'exec_command' || providerName === 'write_stdin'
+    ? `sprint_${providerName}`
+    : providerName;
 }
 
 export function codexInitializeCapabilities(

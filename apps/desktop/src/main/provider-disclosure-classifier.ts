@@ -32,6 +32,22 @@ export function assessProviderDisclosure(
   content: string,
   relativePath?: string,
 ): ProviderDisclosureAssessment {
+  return assessDisclosure(content, relativePath, []);
+}
+
+/** Roots must come from Main's sealed Turn workspace, never from Provider/Renderer text. */
+export function assessProviderEgressDisclosure(
+  content: string,
+  knownWorkspaceRoots: readonly string[] = [],
+): ProviderDisclosureAssessment {
+  return assessDisclosure(content, undefined, knownWorkspaceRoots);
+}
+
+function assessDisclosure(
+  content: string,
+  relativePath: string | undefined,
+  knownWorkspaceRoots: readonly string[],
+): ProviderDisclosureAssessment {
   const reasons = new Set<string>();
   const baselineRedacted = redactSecrets(content);
   if (relativePath !== undefined && CREDENTIAL_FILENAME.test(basename(relativePath)))
@@ -47,7 +63,7 @@ export function assessProviderDisclosure(
   if (baselineRedacted !== content) reasons.add('known-secret-pattern');
 
   const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some(([candidate]) =>
-    isHighEntropyCandidate(candidate),
+    isSensitiveEntropyCandidate(candidate, knownWorkspaceRoots),
   );
   if (highEntropy) reasons.add('high-entropy-value');
 
@@ -69,7 +85,9 @@ export function assessProviderDisclosure(
     });
   if (highEntropy)
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate) =>
-      isHighEntropyCandidate(candidate) ? '[REDACTED_HIGH_ENTROPY]' : candidate,
+      isSensitiveEntropyCandidate(candidate, knownWorkspaceRoots)
+        ? '[REDACTED_HIGH_ENTROPY]'
+        : candidate,
     );
   // A credential-prone file with no recognized token is precisely the case where regex-based
   // redaction cannot establish that any preview or Provider payload is safe. Disclose only an
@@ -118,6 +136,17 @@ function isHighEntropyCandidate(candidate: string): boolean {
   )
     return false;
   return shannonEntropy(candidate) >= 4.25;
+}
+
+function isSensitiveEntropyCandidate(
+  candidate: string,
+  knownWorkspaceRoots: readonly string[],
+): boolean {
+  if (!isHighEntropyCandidate(candidate)) return false;
+  if (!candidate.startsWith('/') || !knownWorkspaceRoots.includes(candidate)) return true;
+  // A sealed filesystem root has real separators, unlike an arbitrary slash-bearing token.
+  // Only split that exact root; descendants, lookalikes, and credential patterns stay checked.
+  return candidate.split('/').some((part) => part.length >= 24 && isHighEntropyCandidate(part));
 }
 
 function matches(pattern: RegExp, value: string): boolean {

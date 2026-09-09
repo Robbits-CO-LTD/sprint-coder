@@ -110,8 +110,10 @@ export class ClaudeJsonlNormalizer {
 
     const text = readString(delta, 'text');
     if (text === null || text.length === 0) return [];
+    // Claude also emits text before invoking tools. Approval requests must remain valid until
+    // the result event confirms that no more tools will run.
     return [
-      ...this.advanceTo('synthesizing'),
+      ...this.advanceTo('executing'),
       { type: 'delta', messageId: this.messageId, delta: text },
     ];
   }

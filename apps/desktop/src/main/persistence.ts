@@ -3752,6 +3752,58 @@ const migrations = [
         CHECK (remember IN (0, 1));
     `,
   },
+  {
+    version: 82,
+    checksum: 'commands-v82-starting-state',
+    // Early v14 databases predate the starting state. Rebuild the parent and its output table
+    // together so foreign-key cascades cannot discard historical output during the replacement.
+    sql: `
+      CREATE TABLE command_output_chunks_v82_backup AS SELECT * FROM command_output_chunks;
+      DROP TABLE command_output_chunks;
+      CREATE TABLE command_runs_v82 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        call_id TEXT NOT NULL,
+        spec_json TEXT NOT NULL,
+        spec_digest TEXT NOT NULL CHECK (length(spec_digest) = 64),
+        state TEXT NOT NULL CHECK (state IN (
+          'prepared', 'starting', 'running', 'exited', 'canceled', 'failed', 'interrupted'
+        )),
+        pid INTEGER,
+        process_start_time TEXT,
+        exit_code INTEGER,
+        signal TEXT,
+        output_bytes INTEGER NOT NULL DEFAULT 0 CHECK (output_bytes >= 0),
+        truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        purpose TEXT NOT NULL DEFAULT 'コマンドを実行します',
+        risk TEXT NOT NULL DEFAULT 'high' CHECK (risk IN ('low', 'medium', 'high')),
+        UNIQUE(turn_id, call_id)
+      );
+      INSERT INTO command_runs_v82
+        SELECT id, task_id, turn_id, call_id, spec_json, spec_digest, state, pid,
+          process_start_time, exit_code, signal, output_bytes, truncated, created_at,
+          started_at, finished_at, purpose, risk FROM command_runs;
+      DROP TABLE command_runs;
+      ALTER TABLE command_runs_v82 RENAME TO command_runs;
+      CREATE INDEX command_runs_task_created_idx ON command_runs(task_id, created_at, id);
+      CREATE TABLE command_output_chunks (
+        command_id TEXT NOT NULL REFERENCES command_runs(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL CHECK (seq > 0),
+        stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+        text TEXT NOT NULL,
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0 AND byte_length <= 65536),
+        content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(command_id, seq)
+      );
+      INSERT INTO command_output_chunks SELECT * FROM command_output_chunks_v82_backup;
+      DROP TABLE command_output_chunks_v82_backup;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -15271,10 +15323,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent {
     return this.db.transaction(() => {
       const turn = this.getTurn(taskId, turnId);
-      // Official Providers may stream a short preamble before returning a managed tool call.
-      // Keep that text durable while the Turn remains approval-eligible in `executing`; the caller
-      // advances to `synthesizing` only after the final tool-free Provider round.
-      if (turn.state !== 'executing' && turn.state !== 'synthesizing')
+      // A CLI can continue explaining a tool while its approval is pending. Persist the text
+      // without changing that approval state; only the user's decision can resume execution.
+      if (
+        turn.state !== 'executing' &&
+        turn.state !== 'waiting_approval' &&
+        turn.state !== 'synthesizing'
+      )
         throw new Error('Turn is not streaming');
       const addedBytes = Buffer.byteLength(delta, 'utf8');
       const persistedBytes =
