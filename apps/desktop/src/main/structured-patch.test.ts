@@ -111,7 +111,7 @@ describe('anchor failure recovery', () => {
       const escaped = content.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
       const failure = await anchorFailure(content, [{ oldText: escaped, newText: 'replacement' }]);
       expect(failure.code).toBe('ANCHOR_NOT_FOUND');
-      expect(failure.recovery).toMatchObject({ cause: 'escaped_newlines', nearest: null });
+      expect(failure.recovery).toMatchObject({ cause: 'escaped_whitespace', nearest: null });
     },
   );
 
@@ -121,6 +121,19 @@ describe('anchor failure recovery', () => {
     ]);
     expect(failure.recovery?.cause).toBe('absent');
   });
+
+  it.each([
+    ['first\r\nsecond\r\n', 'first\\nsecond\\n'],
+    ['first\nsecond\n', 'first\\r\\nsecond\\r\\n'],
+    ['first\n\tsecond\n', 'first\\n\\tsecond\\n'],
+  ])(
+    'identifies escaped whitespace combined with line endings or tabs',
+    async (content, oldText) => {
+      const failure = await anchorFailure(content, [{ oldText, newText: 'x' }]);
+      expect(failure.code).toBe('ANCHOR_NOT_FOUND');
+      expect(failure.recovery?.cause).toBe('escaped_whitespace');
+    },
+  );
 
   it('names the near-miss when only line endings differ', async () => {
     const failure = await anchorFailure(SOURCE, [

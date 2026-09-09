@@ -25,8 +25,8 @@ export function describeAnchorFailure(error: PatchValidationError): string | nul
 
 function headline(recovery: AnchorRecovery): string {
   switch (recovery.cause) {
-    case 'escaped_newlines':
-      return 'the anchor would match after replacing literal newline escapes with line breaks.';
+    case 'escaped_whitespace':
+      return "the anchor would match after decoding literal whitespace escapes and using the file's line endings.";
     case 'line_ending':
       return 'the anchor matches except for its line endings.';
     case 'trailing_whitespace':
@@ -44,11 +44,11 @@ function headline(recovery: AnchorRecovery): string {
 
 function body(recovery: AnchorRecovery): readonly string[] {
   switch (recovery.cause) {
-    case 'escaped_newlines':
+    case 'escaped_whitespace':
       return [
-        'Send actual line breaks in the decoded oldText and newText values, not literal backslash-n or backslash-r text. Prefer a short, unique single-line anchor when possible. Retry with corrected string values. Do not re-read.',
+        "Use actual line breaks and tabs in decoded oldText and newText values where the file has them, with the file's line endings. Do not substitute literal backslash-n, backslash-r or backslash-t text for whitespace. Preserve intentional escapes in code. Prefer a short, unique single-line anchor when possible. Retry with corrected string values. Do not re-read.",
       ];
-    // The three near-misses are fixable from the model's own text. Showing it the file would invite
+    // These whitespace near-misses are fixable from the model's own text. Showing the file invites
     // a re-read it does not need, and re-reading is the expensive habit this exists to break.
     case 'line_ending':
       return ["Send the same anchor with the file's line endings and retry. Do not re-read."];

@@ -76,7 +76,7 @@ export type PatchValidationErrorCode =
  * line is so common that naming any one occurrence would mislead.
  */
 export type AnchorFailureCause =
-  | 'escaped_newlines'
+  | 'escaped_whitespace'
   | 'line_ending'
   | 'trailing_whitespace'
   | 'indentation'
@@ -110,7 +110,7 @@ export type AnchorRecovery = Readonly<{
 /** A recovery payload is a hint for the next attempt, never large enough to crowd out the retry. */
 const MAX_RECOVERY_TEXT_BYTES = 4096;
 const MAX_RECOVERY_OCCURRENCES = 10;
-/** Above this the whitespace probes would copy more than they are worth; drift search still runs. */
+/** Above this the encoding and whitespace probes cost too much; drift search still runs. */
 const MAX_NORMALIZATION_PROBE_CHARS = 4_000_000;
 
 export class PatchValidationError extends Error {
@@ -339,9 +339,14 @@ function describeMissingAnchor(content: string, anchor: string, editIndex: numbe
 
   if (content.length <= MAX_NORMALIZATION_PROBE_CHARS) {
     // Diagnose only: never silently rewrite an edit's literal string values.
-    const decoded = anchor.replace(/\\r/g, '\r').replace(/\\n/g, '\n');
-    if (decoded !== anchor && decoded.trim().length > 0 && content.includes(decoded))
-      return miss('escaped_newlines');
+    const decoded = anchor.replace(/\\r/g, '\r').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+    if (
+      decoded !== anchor &&
+      decoded.trim().length > 0 &&
+      (content.includes(decoded) ||
+        stripCarriageReturns(content).includes(stripCarriageReturns(decoded)))
+    )
+      return miss('escaped_whitespace');
     if (stripCarriageReturns(content).includes(stripCarriageReturns(anchor)))
       return miss('line_ending');
     if (stripTrailingSpaces(content).includes(stripTrailingSpaces(anchor)))

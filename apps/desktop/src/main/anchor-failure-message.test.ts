@@ -59,7 +59,7 @@ describe('telling a model why its edit did not apply', () => {
     const message = await messageFor('first\nsecond\n', [
       { oldText: 'first\\nsecond\\n', newText: 'x' },
     ]);
-    expect(message).toContain('literal newline escapes');
+    expect(message).toContain('literal whitespace escapes');
     expect(message).toContain('oldText and newText');
     expect(message).toContain('single-line anchor');
     expect(message).toContain('Do not re-read');
