@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ExecutionSpec } from '@sprint-coder/domain';
 import {
   CommandRunner,
+  CommandRunnerError,
   type CommandOutputChunk,
   type CommandResult,
   type RunOptions,
@@ -25,6 +26,7 @@ type Session = {
   chunks: CommandOutputChunk[];
   result: CommandResult | null;
   error: string | null;
+  terminationUnconfirmed: boolean;
   started: Promise<void>;
   resolveStarted(): void;
   completion: Promise<void>;
@@ -44,7 +46,7 @@ export class ManagedCommandSessions {
   async start(
     spec: ExecutionSpec,
     owner: Readonly<{ taskId: string; turnId: string }>,
-    hooks: Pick<RunOptions, 'beforeSpawn' | 'onStarted' | 'onChunk' | 'onBatch'> = {},
+    hooks: Pick<RunOptions, 'signal' | 'beforeSpawn' | 'onStarted' | 'onChunk' | 'onBatch'> = {},
     sessionId = randomUUID(),
   ): Promise<ManagedCommandSnapshot> {
     if (this.sessions.size >= this.maxSessions) this.evictTerminal();
@@ -62,6 +64,7 @@ export class ManagedCommandSessions {
       chunks: [],
       result: null,
       error: null,
+      terminationUnconfirmed: false,
       started,
       resolveStarted,
       completion: Promise.resolve(),
@@ -69,6 +72,9 @@ export class ManagedCommandSessions {
       turnId: owner.turnId,
     };
     this.sessions.set(session.id, session);
+    const abortFromCaller = (): void => session.controller.abort(hooks.signal?.reason);
+    hooks.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    if (hooks.signal?.aborted) abortFromCaller();
     session.completion = this.runner
       .run(spec, {
         signal: session.controller.signal,
@@ -96,9 +102,14 @@ export class ManagedCommandSessions {
       })
       .catch((error: unknown) => {
         session.state = 'failed';
+        session.terminationUnconfirmed =
+          error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED';
         session.error = error instanceof Error ? error.message : 'Command failed';
       })
-      .finally(() => session.resolveStarted());
+      .finally(() => {
+        hooks.signal?.removeEventListener('abort', abortFromCaller);
+        session.resolveStarted();
+      });
     await session.started;
     if (session.state === 'failed') throw new Error(session.error ?? 'Managed command failed');
     return this.snapshot(session, 0);
@@ -166,6 +177,23 @@ export class ManagedCommandSessions {
     this.sessions.clear();
   }
 
+  async terminateTurn(owner: Readonly<{ taskId: string; turnId: string }>): Promise<void> {
+    const owned = [...this.sessions.values()].filter(
+      (session) =>
+        session.taskId === owner.taskId &&
+        session.turnId === owner.turnId &&
+        (session.state === 'starting' ||
+          session.state === 'running' ||
+          session.terminationUnconfirmed),
+    );
+    for (const session of owned)
+      if (session.state === 'starting' || session.state === 'running')
+        session.controller.abort(new Error('Managed command Turn canceled'));
+    await Promise.allSettled(owned.map(({ completion }) => completion));
+    if (owned.some(({ terminationUnconfirmed }) => terminationUnconfirmed))
+      throw new Error('Managed command Turn cancellation could not be confirmed');
+  }
+
   async terminateTask(taskId: string): Promise<void> {
     const owned = [...this.sessions.values()].filter(
       (session) =>
@@ -199,7 +227,12 @@ export class ManagedCommandSessions {
 
   private evictTerminal(): void {
     for (const [id, session] of this.sessions) {
-      if (session.state === 'starting' || session.state === 'running') continue;
+      if (
+        session.state === 'starting' ||
+        session.state === 'running' ||
+        session.terminationUnconfirmed
+      )
+        continue;
       this.sessions.delete(id);
       if (this.sessions.size < this.maxSessions) return;
     }

@@ -6884,13 +6884,19 @@ export class IpcRouter {
             };
           this.detachCanceledTurnBookkeeping(turnId);
           return async () => {
-            await cancelRuntimeWithFinalCleanup(cancelAction, () =>
-              this.releaseTurnAttachmentCustody(turnId),
+            await cancelRuntimeWithFinalCleanup(
+              cancelAction,
+              () => this.releaseTurnAttachmentCustody(turnId),
+              () => this.managedCodingHarness.cancelTurn(taskId, turnId),
             );
           };
         }),
       (error) => {
-        if (kind === 'codex' || kind === 'claude') this.quarantinedRuntimeKinds.add(kind);
+        if (
+          (kind === 'codex' || kind === 'claude') &&
+          !(error instanceof ManagedCommandCancellationError)
+        )
+          this.quarantinedRuntimeKinds.add(kind);
         this.quarantinedRuntimeTasks.add(taskId);
         secureLogger.warn(
           'Runtime cancellation was not confirmed; persisted Turn cancellation will continue without dispatching another runtime',
@@ -6898,6 +6904,11 @@ export class IpcRouter {
             taskId,
             turnId,
             error,
+            ...(error instanceof AggregateError
+              ? { cancellationErrors: error.errors }
+              : error instanceof ManagedCommandCancellationError
+                ? { commandCancellationError: error.cause }
+                : {}),
           },
         );
       },
@@ -8316,12 +8327,31 @@ export class TaskMailbox {
   }
 }
 
+export class ManagedCommandCancellationError extends Error {
+  constructor(cause: unknown) {
+    super('Managed command cancellation could not be confirmed', { cause });
+    this.name = 'ManagedCommandCancellationError';
+  }
+}
+
 export async function cancelRuntimeWithFinalCleanup(
   cancelRuntime: () => Promise<void>,
   releaseCustody: () => Promise<void>,
+  cancelCommands: () => Promise<void>,
 ): Promise<void> {
   try {
-    await cancelRuntime();
+    // Stop both owners even if one fails, and retain custody until both stop attempts settle.
+    const [runtime, commands] = await Promise.allSettled([
+      Promise.resolve().then(cancelRuntime),
+      Promise.resolve().then(cancelCommands),
+    ]);
+    if (runtime.status === 'rejected' && commands.status === 'rejected')
+      throw new AggregateError(
+        [runtime.reason, commands.reason],
+        'Runtime and managed command cancellation failed',
+      );
+    if (runtime.status === 'rejected') throw runtime.reason;
+    if (commands.status === 'rejected') throw new ManagedCommandCancellationError(commands.reason);
   } finally {
     await releaseCustody();
   }

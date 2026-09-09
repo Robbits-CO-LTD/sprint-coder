@@ -669,6 +669,11 @@ export class ManagedCodingHarness {
     await this.commandSessions?.terminateTask(taskId);
   }
 
+  async cancelTurn(taskId: string, turnId: string): Promise<void> {
+    this.finishTurn(taskId, turnId);
+    await this.commandSessions?.terminateTurn({ taskId, turnId });
+  }
+
   finishTurn(taskId: string, turnId: string): void {
     this.broker.finishTurn(taskId, turnId);
     this.revisions.finishTurn({ taskId, turnId });
