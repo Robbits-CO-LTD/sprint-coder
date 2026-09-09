@@ -132,6 +132,41 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       }
     });
 
+    it.each([
+      'SPAWN_FAILED',
+      'EXECUTION_SPEC_INVALID',
+      'EXECUTION_IDENTITY_CHANGED',
+      'OUTPUT_OVERFLOW',
+    ] as const)('does not quarantine a Turn after a settled %s command error', async (code) => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-settled-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: ['-c', 'exit 0'],
+      });
+      const runner = new CommandRunner();
+      const run = vi
+        .spyOn(runner, 'run')
+        .mockRejectedValueOnce(new CommandRunnerError(code, 'settled failure'));
+      const sessions = new ManagedCommandSessions(runner, 1);
+      const owner = { taskId: 'task-1', turnId: 'turn-1' };
+      try {
+        await expect(sessions.start(spec, owner)).rejects.toThrow('settled failure');
+        await expect(sessions.terminateTurn(owner)).resolves.toBeUndefined();
+        run.mockRestore();
+        const nextOwner = { taskId: 'task-1', turnId: 'turn-2' };
+        const next = await sessions.start(spec, nextOwner);
+        await expect(sessions.wait(next.sessionId, nextOwner)).resolves.toMatchObject({
+          state: 'exited',
+        });
+      } finally {
+        run.mockRestore();
+        await sessions.dispose();
+      }
+    });
+
     it('retains termination failure before onStarted even when the caller aborted', async () => {
       if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
       const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-unconfirmed-'));
@@ -150,7 +185,7 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
           'pre-start process remains',
         );
       });
-      const sessions = new ManagedCommandSessions(runner);
+      const sessions = new ManagedCommandSessions(runner, 1);
       const owner = { taskId: 'task-1', turnId: 'turn-1' };
       try {
         await expect(
@@ -162,6 +197,9 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
           ),
         ).rejects.toThrow('pre-start process remains');
         expect(sessions.poll('00000000-0000-4000-8000-000000000001', owner).state).toBe('failed');
+        await expect(sessions.start(spec, { taskId: 'task-2', turnId: 'turn-2' })).rejects.toThrow(
+          'session limit reached',
+        );
         await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
         await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
       } finally {

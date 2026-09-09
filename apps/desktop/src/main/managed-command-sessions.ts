@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ExecutionSpec } from '@sprint-coder/domain';
 import {
   CommandRunner,
+  CommandRunnerError,
   type CommandOutputChunk,
   type CommandResult,
   type RunOptions,
@@ -25,6 +26,7 @@ type Session = {
   chunks: CommandOutputChunk[];
   result: CommandResult | null;
   error: string | null;
+  terminationUnconfirmed: boolean;
   started: Promise<void>;
   resolveStarted(): void;
   completion: Promise<void>;
@@ -62,6 +64,7 @@ export class ManagedCommandSessions {
       chunks: [],
       result: null,
       error: null,
+      terminationUnconfirmed: false,
       started,
       resolveStarted,
       completion: Promise.resolve(),
@@ -99,6 +102,8 @@ export class ManagedCommandSessions {
       })
       .catch((error: unknown) => {
         session.state = 'failed';
+        session.terminationUnconfirmed =
+          error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED';
         session.error = error instanceof Error ? error.message : 'Command failed';
       })
       .finally(() => {
@@ -177,14 +182,15 @@ export class ManagedCommandSessions {
       (session) =>
         session.taskId === owner.taskId &&
         session.turnId === owner.turnId &&
-        session.state !== 'exited' &&
-        session.state !== 'canceled',
+        (session.state === 'starting' ||
+          session.state === 'running' ||
+          session.terminationUnconfirmed),
     );
     for (const session of owned)
       if (session.state === 'starting' || session.state === 'running')
         session.controller.abort(new Error('Managed command Turn canceled'));
     await Promise.allSettled(owned.map(({ completion }) => completion));
-    if (owned.some(({ state }) => state === 'failed'))
+    if (owned.some(({ terminationUnconfirmed }) => terminationUnconfirmed))
       throw new Error('Managed command Turn cancellation could not be confirmed');
   }
 
@@ -221,7 +227,12 @@ export class ManagedCommandSessions {
 
   private evictTerminal(): void {
     for (const [id, session] of this.sessions) {
-      if (session.state === 'starting' || session.state === 'running') continue;
+      if (
+        session.state === 'starting' ||
+        session.state === 'running' ||
+        session.terminationUnconfirmed
+      )
+        continue;
       this.sessions.delete(id);
       if (this.sessions.size < this.maxSessions) return;
     }
