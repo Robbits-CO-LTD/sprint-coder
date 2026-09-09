@@ -1,8 +1,8 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { prepareExecutionSpec } from './command-runner';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CommandRunner, CommandRunnerError, prepareExecutionSpec } from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 
@@ -128,6 +128,44 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
         expect(sessions.poll(second.sessionId, secondOwner).state).toBe('running');
         expect(sessions.poll(third.sessionId, thirdOwner).state).toBe('running');
       } finally {
+        await sessions.dispose();
+      }
+    });
+
+    it('retains termination failure before onStarted even when the caller aborted', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-unconfirmed-'));
+      roots.push(workspace);
+      const spec = await prepareExecutionSpec({
+        workspacePath: workspace,
+        executable: '/bin/sh',
+        argv: ['-c', 'exit 0'],
+      });
+      const controller = new AbortController();
+      const runner = new CommandRunner();
+      const run = vi.spyOn(runner, 'run').mockImplementation(async () => {
+        controller.abort();
+        throw new CommandRunnerError(
+          'PROCESS_TREE_TERMINATION_FAILED',
+          'pre-start process remains',
+        );
+      });
+      const sessions = new ManagedCommandSessions(runner);
+      const owner = { taskId: 'task-1', turnId: 'turn-1' };
+      try {
+        await expect(
+          sessions.start(
+            spec,
+            owner,
+            { signal: controller.signal },
+            '00000000-0000-4000-8000-000000000001',
+          ),
+        ).rejects.toThrow('pre-start process remains');
+        expect(sessions.poll('00000000-0000-4000-8000-000000000001', owner).state).toBe('failed');
+        await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
+        await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
+      } finally {
+        run.mockRestore();
         await sessions.dispose();
       }
     });

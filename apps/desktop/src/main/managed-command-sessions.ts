@@ -98,8 +98,7 @@ export class ManagedCommandSessions {
         session.state = result.canceled ? 'canceled' : 'exited';
       })
       .catch((error: unknown) => {
-        session.state =
-          session.controller.signal.aborted && session.executionId === null ? 'canceled' : 'failed';
+        session.state = 'failed';
         session.error = error instanceof Error ? error.message : 'Command failed';
       })
       .finally(() => {
@@ -178,10 +177,12 @@ export class ManagedCommandSessions {
       (session) =>
         session.taskId === owner.taskId &&
         session.turnId === owner.turnId &&
-        (session.state === 'starting' || session.state === 'running'),
+        session.state !== 'exited' &&
+        session.state !== 'canceled',
     );
     for (const session of owned)
-      session.controller.abort(new Error('Managed command Turn canceled'));
+      if (session.state === 'starting' || session.state === 'running')
+        session.controller.abort(new Error('Managed command Turn canceled'));
     await Promise.allSettled(owned.map(({ completion }) => completion));
     if (owned.some(({ state }) => state === 'failed'))
       throw new Error('Managed command Turn cancellation could not be confirmed');

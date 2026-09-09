@@ -17,3 +17,9 @@ Stopping a Turn must terminate its running managed commands before cancellation 
 The focused before-fix regressions fail on signal propagation, missing Turn-scoped termination and cleanup occurring before command cancellation. After repair, tests cover active-call abort, already-aborted input without spawning, exact Task/Turn ownership, and Runtime failure while command cleanup remains pending. The same real-provider packaged cancellation scenario is the final symptom-gone check.
 
 Evidence directory: /Users/yusei/sc-packaged-acceptance-20260909. The accepted multi-turn editing tests, negative-amount fixture repair and command cancellation tests are separate cases. Auto-preset high-risk denials are intended policy behavior, not fixed by broadening permissions. Local package signing is ad-hoc; notarized distribution and Windows device acceptance remain separate.
+
+## Secondary review follow-up
+
+Fable 5.1 identified two additional failure-path defects. A command-only termination failure now quarantines its owning Task without quarantining every Task using the same CLI; Runtime failures retain the existing kind-level quarantine. Both simultaneous failures are retained and logged. A pre-onStarted CommandRunner error remains failed even if abort races with it; an already-aborted request still returns the runner's normal canceled result without spawning. Repeating Turn termination cannot treat a retained failed session as confirmed stopped. Regression tests cover these failure classifications and retry behavior.
+
+Windows device testing was explicitly deferred by the user on 2026-09-10. macOS package validation continues independently.

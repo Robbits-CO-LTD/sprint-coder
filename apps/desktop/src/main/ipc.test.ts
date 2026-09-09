@@ -1,3 +1,4 @@
+import { RetryableActionRegistry } from './retryable-action';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -563,6 +564,63 @@ describe('Turn cancellation boundary', () => {
     expect(stopped).toBe(false);
     expect(onFailure).toHaveBeenCalledOnce();
     expect(finalize).toHaveBeenCalledOnce();
+  });
+
+  it.each(
+    ['codex', 'claude'].flatMap((kind) => [
+      { kind, runtimeFails: false, commandFails: true },
+      { kind, runtimeFails: true, commandFails: false },
+      { kind, runtimeFails: true, commandFails: true },
+    ]),
+  )(
+    'scopes stop failure quarantine for $kind (runtime=$runtimeFails, command=$commandFails)',
+    async ({ kind, runtimeFails, commandFails }) => {
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      const runtimeKinds = new Set<string>();
+      const tasks = new Set<string>();
+      Object.assign(router, {
+        canceledRuntimeTurns: new Set<string>(),
+        turnRuntimes: new Map([['turn-1', kind]]),
+        runtimeCancelActions: new RetryableActionRegistry(),
+        pendingTaskTitles: new Map(),
+        runtimeFor: () => ({
+          cancel: async () => {
+            if (runtimeFails) throw new Error('runtime stop unconfirmed');
+          },
+        }),
+        managedCodingHarness: {
+          cancelTurn: async () => {
+            if (commandFails) throw new Error('command stop unconfirmed');
+          },
+        },
+        detachCanceledTurnBookkeeping: () => undefined,
+        releaseTurnAttachmentCustody: async () => undefined,
+        quarantinedRuntimeKinds: runtimeKinds,
+        quarantinedRuntimeTasks: tasks,
+      });
+      const cancel = Reflect.get(IpcRouter.prototype, 'cancelRuntime') as (
+        taskId: string,
+        turnId: string,
+      ) => Promise<boolean>;
+      expect(await cancel.call(router, 'task-1', 'turn-1')).toBe(false);
+      expect([...tasks]).toEqual(['task-1']);
+      expect([...runtimeKinds]).toEqual(runtimeFails ? [kind] : []);
+    },
+  );
+
+  it('retains both cancellation failures for diagnosis', async () => {
+    const runtime = new Error('runtime stop');
+    const commands = new Error('command stop');
+    const outcome = cancelRuntimeWithFinalCleanup(
+      async () => {
+        throw runtime;
+      },
+      async () => undefined,
+      async () => {
+        throw commands;
+      },
+    ).catch((error: unknown) => error);
+    await expect(outcome).resolves.toMatchObject({ errors: [runtime, commands] });
   });
 
   it('keeps queued input dormant when Team stop-all cancels its Leader', () => {
