@@ -7347,13 +7347,14 @@ export class IpcRouter {
             shouldRetryEmptyOllamaToolRound({
               providerId: connection.providerId,
               error: roundError,
+              ordinal,
               retries: emptyToolRoundRetries,
               hasTools: toolsForRound.length > 0,
               hasImages: dispatchRound.messages.some(
                 (message) => (message.inlineImages?.length ?? 0) > 0,
               ),
               toolCallCount: roundToolCalls.length,
-              outputLength: roundOutput.join('').length,
+              outputLength: roundOutput.join('').trim().length,
               canceled: controller.signal.aborted,
             })
           ) {
@@ -8762,6 +8763,7 @@ export function shouldRetryProviderWithoutTools(input: {
 export function shouldRetryEmptyOllamaToolRound(input: {
   providerId: string;
   error: NormalizedProviderError;
+  ordinal: number;
   retries: number;
   hasTools: boolean;
   hasImages: boolean;
@@ -8773,6 +8775,7 @@ export function shouldRetryEmptyOllamaToolRound(input: {
     input.providerId === 'ollama' &&
     input.error.providerCode === 'empty_response' &&
     input.error.retryable &&
+    input.ordinal < MAX_PROVIDER_LEADER_ROUNDS &&
     input.retries < 2 &&
     input.hasTools &&
     !input.hasImages &&

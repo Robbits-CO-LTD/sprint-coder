@@ -5445,6 +5445,7 @@ describe('empty Ollama tool-round recovery', () => {
   const input = {
     providerId: 'ollama',
     error,
+    ordinal: 1,
     retries: 0,
     hasTools: true,
     hasImages: false,
@@ -5459,6 +5460,7 @@ describe('empty Ollama tool-round recovery', () => {
   });
   it.each([
     { providerId: 'openai' },
+    { ordinal: 32 },
     { hasTools: false },
     { hasImages: true },
     { toolCallCount: 1 },
@@ -5473,6 +5475,14 @@ describe('empty Ollama tool-round recovery', () => {
 
 describe('Ollama empty-round integration', () => {
   it.each([
+    {
+      providerId: 'ollama',
+      emptyRounds: 1,
+      calls: 3,
+      completes: true,
+      partial: 'whitespace',
+      images: false,
+    },
     {
       providerId: 'ollama',
       emptyRounds: 1,
@@ -5556,7 +5566,11 @@ describe('Ollama empty-round integration', () => {
             return;
           }
           if (current <= emptyRounds + 1) {
-            if (partial) yield { type: 'output_delta' as const, text: 'partial' };
+            if (partial)
+              yield {
+                type: 'output_delta' as const,
+                text: partial === 'whitespace' ? ' \n\t' : 'partial',
+              };
             yield {
               type: 'error' as const,
               error: {
