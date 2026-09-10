@@ -7,9 +7,14 @@ for (const kind of ['architecture', 'workflow'] as const) {
   // eslint-disable-next-line no-empty-pattern
   test(`renders pinned Archify ${kind} inside a sandboxed Task panel`, async ({}, testInfo) => {
     const profile = createUserDataDir(`archify-${kind}`);
-    const app = await launchApp(profile);
+    // The bundled worker must work without discovering an external Node on PATH.
+    // Set both spellings because Windows environment keys are case-insensitive.
+    const app = await launchApp(profile, undefined, { PATH: '', Path: '' });
     try {
       const page = await firstWindow(app);
+      await app.evaluate(({ BrowserWindow }) => {
+        BrowserWindow.getAllWindows()[0]!.setContentSize(1024, 740);
+      });
       await page.addInitScript(() => {
         const diagnostics = {
           errors: [] as string[],
@@ -66,10 +71,15 @@ for (const kind of ['architecture', 'workflow'] as const) {
         diagram,
       });
       await page.getByTestId('composer-textarea').fill('existing draft');
+      await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'true');
       await page.getByTestId('graph-toggle').click();
       const panel = page.getByTestId('graph-panel');
       const frame = page.frameLocator('[data-testid="graph-frame"]');
       await expect(frame.locator('svg[role="img"]')).toBeVisible();
+      await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'false');
+      await expect
+        .poll(async () => (await page.getByTestId('composer-textarea').boundingBox())?.width ?? 0)
+        .toBeGreaterThanOrEqual(350);
       expect(await frame.locator('body').evaluate(() => typeof window.sprintCoder)).toBe(
         'undefined',
       );
@@ -99,6 +109,7 @@ for (const kind of ['architecture', 'workflow'] as const) {
       ).toBe(200);
       await panel.getByRole('button', { name: '閉じる', exact: true }).click();
       await expect(page.getByTestId('graph-toggle')).toBeFocused();
+      await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'true');
       await expect
         .poll(() =>
           app.evaluate(async ({ net }, url) => (await net.fetch(url!)).status, displayedUrl),

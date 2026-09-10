@@ -131,18 +131,22 @@ export default function App() {
   // specs. Below the breakpoint the sidebar becomes an overlay instead of a flex sibling, so it
   // stops taking width from the conversation at all.
   const narrowViewport = useMediaQuery(NARROW_VIEWPORT_QUERY);
+  const compactGraphViewport = useMediaQuery('(max-width: 1440px)');
+  const sidebarOverlay = narrowViewport || (graphOpen && !teamViewOpen && compactGraphViewport);
   const [sidebarCollapsed, setSidebarCollapsedState] = useState(() =>
-    defaultSidebarCollapsed(narrowViewport, readStoredSidebarCollapsed()),
+    defaultSidebarCollapsed(sidebarOverlay, readStoredSidebarCollapsed()),
   );
   // Crossing the breakpoint re-derives the default rather than keeping whatever was showing:
   // entering narrow must collapse (an expanded overlay would cover the conversation), and leaving
   // it restores the stored preference. The user's stored choice is never written by this path.
-  const wasNarrowRef = useRef(narrowViewport);
+  // A graph needs room beside the conversation. Reuse the history drawer while
+  // both are open, restoring the user's stored sidebar preference when it closes.
+  const wasNarrowRef = useRef(sidebarOverlay);
   useEffect(() => {
-    if (wasNarrowRef.current === narrowViewport) return;
-    wasNarrowRef.current = narrowViewport;
-    setSidebarCollapsedState(defaultSidebarCollapsed(narrowViewport, readStoredSidebarCollapsed()));
-  }, [narrowViewport]);
+    if (wasNarrowRef.current === sidebarOverlay) return;
+    wasNarrowRef.current = sidebarOverlay;
+    setSidebarCollapsedState(defaultSidebarCollapsed(sidebarOverlay, readStoredSidebarCollapsed()));
+  }, [sidebarOverlay]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsedState((collapsed) => {
@@ -314,7 +318,7 @@ export default function App() {
             chromeInert ? 'team-mode' : '',
             setupReveal ? 'setup-reveal' : '',
             sidebarCollapsed ? 'sidebar-collapsed' : '',
-            narrowViewport ? 'sidebar-overlay' : '',
+            sidebarOverlay ? 'sidebar-overlay' : '',
           ]
             .filter(Boolean)
             .join(' ')}
@@ -329,7 +333,7 @@ export default function App() {
           {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
           covers content. Only rendered in the overlay form, where the sidebar is not a layout
           sibling and so cannot be dismissed by simply looking away from it. */}
-          {!showSetupWizard && narrowViewport && !sidebarCollapsed && (
+          {!showSetupWizard && sidebarOverlay && !sidebarCollapsed && (
             <button
               type="button"
               className="sidebar-scrim"
