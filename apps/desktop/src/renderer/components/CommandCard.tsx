@@ -20,6 +20,7 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
   const [outputError, setOutputError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [now, setNow] = useState(Date.now());
@@ -112,6 +113,7 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
   async function stopExecution(): Promise<void> {
     if (stopping || !window.sprintCoder) return;
     setStopping(true);
+    setStopRequested(true);
     setStopError(null);
     try {
       // A model may finish its answer while a yielded command is still running.
@@ -231,7 +233,12 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
           {expanded ? '出力を折り畳む' : '出力を展開'}
         </button>
       </footer>
-      {stopError ? <p role="alert">{stopError}</p> : null}
+      {stopError || (stopRequested && command.state === 'failed') ? (
+        <p role="alert">
+          {stopError ??
+            '停止を確認できませんでした。アプリを再起動してからもう一度お試しください。'}
+        </p>
+      ) : null}
     </section>
   );
 }

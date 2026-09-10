@@ -64,6 +64,15 @@ it('stops the owning execution after the answer finishes and permits retry after
       root.render(
         <CommandCard
           taskId="task-1"
+          card={{ ...card, command: { ...card.command, state: 'failed' } }}
+        />,
+      ),
+    );
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('アプリを再起動');
+    await act(async () =>
+      root.render(
+        <CommandCard
+          taskId="task-1"
           card={{ ...card, command: { ...card.command, state: 'canceled' } }}
         />,
       ),
