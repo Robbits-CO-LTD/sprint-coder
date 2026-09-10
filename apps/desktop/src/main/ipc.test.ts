@@ -139,6 +139,7 @@ import {
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
+  shouldRetryEmptyOllamaToolRound,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
   runBestEffortCancellation,
@@ -5431,4 +5432,284 @@ describe('clampCodexEffort (issue #6)', () => {
   it('passes an empty stored level straight through', () => {
     expect(clampCodexEffort('', models, 'gpt-5.6-sol')).toBe('');
   });
+});
+
+describe('empty Ollama tool-round recovery', () => {
+  const error = {
+    category: 'provider_unavailable' as const,
+    message: 'empty',
+    retryable: true,
+    retryAfterMs: null,
+    providerCode: 'empty_response',
+  };
+  const input = {
+    providerId: 'ollama',
+    error,
+    retries: 0,
+    hasTools: true,
+    hasImages: false,
+    toolCallCount: 0,
+    outputLength: 0,
+    canceled: false,
+  };
+  it('allows only two text-only empty-round retries', () => {
+    expect(shouldRetryEmptyOllamaToolRound(input)).toBe(true);
+    expect(shouldRetryEmptyOllamaToolRound({ ...input, retries: 1 })).toBe(true);
+    expect(shouldRetryEmptyOllamaToolRound({ ...input, retries: 2 })).toBe(false);
+  });
+  it.each([
+    { providerId: 'openai' },
+    { hasTools: false },
+    { hasImages: true },
+    { toolCallCount: 1 },
+    { outputLength: 1 },
+    { canceled: true },
+    { error: { ...error, retryable: false } },
+    { error: { ...error, providerCode: 'output_token_limit' } },
+  ])('does not replay a non-eligible or potentially consumed round', (change) => {
+    expect(shouldRetryEmptyOllamaToolRound({ ...input, ...change })).toBe(false);
+  });
+});
+
+describe('Ollama empty-round integration', () => {
+  it.each([
+    {
+      providerId: 'ollama',
+      emptyRounds: 1,
+      calls: 3,
+      completes: true,
+      partial: false,
+      images: false,
+    },
+    {
+      providerId: 'ollama',
+      emptyRounds: 3,
+      calls: 4,
+      completes: false,
+      partial: false,
+      images: false,
+    },
+    {
+      providerId: 'other',
+      emptyRounds: 1,
+      calls: 2,
+      completes: false,
+      partial: false,
+      images: false,
+    },
+    {
+      providerId: 'ollama',
+      emptyRounds: 1,
+      calls: 2,
+      completes: false,
+      partial: true,
+      images: false,
+    },
+    {
+      providerId: 'ollama',
+      emptyRounds: 1,
+      calls: 2,
+      completes: false,
+      partial: false,
+      images: true,
+    },
+  ])(
+    'bounds recovery without repeating prior tools: $providerId / empty=$emptyRounds / partial=$partial / images=$images',
+    async ({ providerId, emptyRounds, calls, completes, partial, images }) => {
+      const taskId = 'empty-recovery-task';
+      const turnId = 'empty-recovery-turn';
+      const connection = {
+        id: 'empty-recovery-connection',
+        providerId,
+        runtimeKind: 'openai_compatible',
+        displayName: 'Recovery fixture',
+        enabled: true,
+        secretReference: null,
+        verification: {
+          status: 'verified',
+          verifiedAt: new Date(0).toISOString(),
+          expiresAt: new Date(Date.now() + 60000).toISOString(),
+          message: null,
+        },
+        rateLimit: {
+          mode: 'auto',
+          maxConcurrentRequests: null,
+          requestsPerMinute: null,
+          tokensPerMinute: null,
+          lastObservedRateLimitHeaders: null,
+        },
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+      let ordinal = 0;
+      const execute = vi.fn((_connection: unknown, _request: unknown) => {
+        const current = ++ordinal;
+        return (async function* () {
+          if (current === 1) {
+            yield {
+              type: 'tool_call' as const,
+              callId: 'read-once',
+              name: 'read_file',
+              input: { path: 'notes.txt' },
+            };
+            yield { type: 'completed' as const, stopReason: 'tool_calls' };
+            return;
+          }
+          if (current <= emptyRounds + 1) {
+            if (partial) yield { type: 'output_delta' as const, text: 'partial' };
+            yield {
+              type: 'error' as const,
+              error: {
+                category: 'provider_unavailable' as const,
+                message: 'empty',
+                retryable: true,
+                retryAfterMs: null,
+                providerCode: 'empty_response',
+              },
+            };
+            return;
+          }
+          yield { type: 'output_delta' as const, text: 'done' };
+          yield { type: 'completed' as const, stopReason: 'stop' };
+        })();
+      });
+      const dispatch = vi.fn().mockResolvedValue({
+        rootId: 'root-1',
+        path: 'notes.txt',
+        content: 'first\nsecond',
+        revision: { version: 1, tokenId: 'read-reference' },
+        truncated: false,
+      });
+      const complete = vi.fn().mockResolvedValue(undefined);
+      const fail = vi.fn().mockResolvedValue(undefined);
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        canceledRuntimeTurns: new Set(),
+        turnRuntimes: new Map([[turnId, 'provider']]),
+        providerAbortByTurn: new Map(),
+        providerExecutionIdByTurn: new Map(),
+        managedWorkerTurn: new Map(),
+        managedWorkerCall: new Map(),
+        providerVerification: {
+          requireVerifiedForExecution: vi.fn().mockResolvedValue(connection),
+        },
+        providerRegistry: { resolve: () => ({ execute, cancel: vi.fn() }) },
+        modelCatalog: { find: () => ({ toolCalling: { value: true } }) },
+        permissionBroker: {
+          evaluate: () => ({
+            decision: 'allow',
+            reason: 'test',
+            policyEpoch: 1,
+            evaluationTrace: [],
+            permit: { id: 'test' },
+          }),
+          revalidate: () => ({ valid: true, reason: 'test' }),
+        },
+        persistence: {
+          getTask: () => ({ id: taskId, projectId: null, localOnly: false }),
+          getProviderConnection: () => connection,
+          getPermissionPolicy: () => ({ policyEpoch: 1 }),
+          getActiveTurnId: () => turnId,
+          readTurnWorkspaceSetForTask: () => null,
+          changeStage: vi.fn(() => ({ type: 'stage.changed' })),
+          appendDelta: vi.fn(() => ({ type: 'message.delta' })),
+          recordWorkspaceReadVerification: vi.fn(),
+        },
+        mailbox: { run: async (_id: string, action: () => unknown) => action() },
+        publish: vi.fn(),
+        ensureProviderEndpointConsent: vi.fn().mockResolvedValue(undefined),
+        prepareContext: () => ({
+          fragments: [
+            {
+              id: 'current',
+              taskId,
+              source: 'history',
+              trust: 'user',
+              tokenEstimate: 1,
+              content: 'read notes',
+              createdAt: new Date(0).toISOString(),
+              messageId: 'message-recovery',
+            },
+          ],
+          projectItems: [],
+          projectSnapshotDigest: null,
+        }),
+        prepareProviderTurnImageAttachments: () =>
+          images
+            ? {
+                binding: { kind: 'provider_inline' },
+                inlineImages: [{ mimeType: 'image/png', base64: 'YQ==' }],
+                auditImages: [
+                  { id: 'image-1', mimeType: 'image/png', byteLength: 1, sha256: 'a'.repeat(64) },
+                ],
+                manifestDigest: 'b'.repeat(64),
+                byteCount: 1,
+              }
+            : undefined,
+        providerImageAttachmentStillValid: vi.fn().mockResolvedValue(true),
+        providerEgressTrustForConnection: () => 'trusted-local',
+        managedCodingHarness: {
+          broker: { dispatch },
+          startTurn: () => ({
+            digest: 'a'.repeat(64),
+            providerId,
+            entries: [
+              {
+                providerName: 'read_file',
+                inputSchema: {
+                  type: 'object',
+                  properties: { path: { type: 'string' } },
+                  required: ['path'],
+                  additionalProperties: false,
+                },
+              },
+            ],
+          }),
+          finishTurn: vi.fn(),
+        },
+        teamCoordinator: { hasUnfinishedTeamWork: () => false },
+        applyProviderTurnEvent: vi.fn(),
+        beginProviderSynthesis: vi.fn().mockResolvedValue(undefined),
+        completeProviderTeamTurn: complete,
+        finishProviderFailureWithDiagnostic: fail,
+        cancelProviderExecution: vi.fn().mockResolvedValue(undefined),
+      });
+      const started = {
+        turnId,
+        text: 'read notes',
+        skills: [],
+        event: { type: 'turn.accepted', taskId, userMessage: { id: 'message-recovery' } },
+        modelSelection: {
+          connectionId: connection.id,
+          requestedProvider: providerId,
+          requestedModel: 'test-model',
+        },
+        workspaceSet: { digest: 'workspace', roots: [{ rootId: 'root-1' }] },
+      };
+      const start = Reflect.get(IpcRouter.prototype, 'startProviderTurn') as (
+        started: unknown,
+        connectionId: string,
+      ) => Promise<void>;
+      await start.call(router, started, connection.id);
+      expect(execute).toHaveBeenCalledTimes(calls);
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(complete).toHaveBeenCalledTimes(completes ? 1 : 0);
+      expect(fail).toHaveBeenCalledTimes(completes ? 0 : 1);
+      if (completes) {
+        const last = execute.mock.calls.at(-1)?.[1] as {
+          messages: Array<{ role: string; content: string; toolCallId?: string }>;
+        };
+        expect(last.messages.filter((message) => message.toolCallId === 'read-once')).toHaveLength(
+          1,
+        );
+        expect(
+          last.messages.some(
+            (message) =>
+              message.role === 'system' &&
+              message.content.includes('Do not repeat successful writes or commands'),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
 });

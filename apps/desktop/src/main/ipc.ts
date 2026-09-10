@@ -7101,6 +7101,7 @@ export class IpcRouter {
       const seenProviderToolCallIds = new Set<string>();
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
+      let emptyToolRoundRetries = 0;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
         const executionId = providerTurnCallId(started.turnId, ordinal);
         this.providerExecutionIdByTurn.set(started.turnId, executionId);
@@ -7342,6 +7343,33 @@ export class IpcRouter {
           });
         }
         if (roundError !== undefined) {
+          if (
+            shouldRetryEmptyOllamaToolRound({
+              providerId: connection.providerId,
+              error: roundError,
+              retries: emptyToolRoundRetries,
+              hasTools: toolsForRound.length > 0,
+              hasImages: dispatchRound.messages.some(
+                (message) => (message.inlineImages?.length ?? 0) > 0,
+              ),
+              toolCallCount: roundToolCalls.length,
+              outputLength: roundOutput.join('').length,
+              canceled: controller.signal.aborted,
+            })
+          ) {
+            emptyToolRoundRetries += 1;
+            messages.push({
+              role: 'system',
+              content:
+                'The preceding model response contained no usable text or tool calls. Continue the existing request from the completed tool results. Emit a valid reply or a valid call of a declared tool. Do not repeat successful writes or commands, and do not claim success without verification.',
+            });
+            secureLogger.warn('Ollama returned an empty tool round; retrying', {
+              taskId,
+              turnId: started.turnId,
+              attempt: emptyToolRoundRetries,
+            });
+            continue;
+          }
           const canRetryWithoutWorkspaceTools = shouldRetryProviderWithoutTools({
             ordinal,
             workspaceToolsBound: workspaceToolSnapshot !== undefined,
@@ -8728,6 +8756,29 @@ export function shouldRetryProviderWithoutTools(input: {
     input.errorCategory === 'invalid_request' &&
     input.toolCallCount === 0 &&
     input.outputLength === 0
+  );
+}
+
+export function shouldRetryEmptyOllamaToolRound(input: {
+  providerId: string;
+  error: NormalizedProviderError;
+  retries: number;
+  hasTools: boolean;
+  hasImages: boolean;
+  toolCallCount: number;
+  outputLength: number;
+  canceled: boolean;
+}): boolean {
+  return (
+    input.providerId === 'ollama' &&
+    input.error.providerCode === 'empty_response' &&
+    input.error.retryable &&
+    input.retries < 2 &&
+    input.hasTools &&
+    !input.hasImages &&
+    input.toolCallCount === 0 &&
+    input.outputLength === 0 &&
+    !input.canceled
   );
 }
 
