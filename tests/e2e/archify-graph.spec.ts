@@ -2,11 +2,39 @@ import { expect, test } from '@playwright/test';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 for (const kind of ['architecture', 'workflow'] as const) {
+  // Electron owns the browser; Playwright still requires its fixture argument before testInfo.
+  // eslint-disable-next-line no-empty-pattern
   test(`renders pinned Archify ${kind} inside a sandboxed Task panel`, async ({}, testInfo) => {
     const profile = createUserDataDir(`archify-${kind}`);
     const app = await launchApp(profile);
     try {
       const page = await firstWindow(app);
+      await page.addInitScript(() => {
+        const diagnostics = {
+          errors: [] as string[],
+          blockedDirectives: [] as string[],
+          clicks: [] as { id: string; trusted: boolean }[],
+        };
+        Object.defineProperty(window, '__graphDiagnostics', { value: diagnostics });
+        window.addEventListener('error', (event) => {
+          if (diagnostics.errors.length < 10) diagnostics.errors.push(event.message.slice(0, 200));
+        });
+        document.addEventListener('securitypolicyviolation', (event) => {
+          if (diagnostics.blockedDirectives.length < 10)
+            diagnostics.blockedDirectives.push(event.effectiveDirective);
+        });
+        document.addEventListener(
+          'click',
+          (event) => {
+            if (diagnostics.clicks.length < 10)
+              diagnostics.clicks.push({
+                id: event.target instanceof Element ? (event.target.closest('[id]')?.id ?? '') : '',
+                trusted: event.isTrusted,
+              });
+          },
+          true,
+        );
+      });
       await page.getByTestId('sidebar-new-task-button').click();
       const taskId = await page.evaluate(
         async () => (await window.sprintCoder!.tasks.list())[0]!.id,
@@ -94,6 +122,23 @@ for (const kind of ['architecture', 'workflow'] as const) {
         expect(result.retained?.revision).toBe(view.revision);
       }
     } finally {
+      const graphFrame = app
+        .windows()
+        .flatMap((page) => page.frames())
+        .find((frame) => frame.url().startsWith('app://graph/'));
+      if (graphFrame) {
+        const diagnostics = await graphFrame
+          .evaluate(() => ({
+            readyState: document.readyState,
+            theme: document.documentElement.getAttribute('data-theme'),
+            observations: Reflect.get(window, '__graphDiagnostics'),
+          }))
+          .catch(() => ({ unavailable: true }));
+        await testInfo.attach('graph-viewer-diagnostics', {
+          body: JSON.stringify(diagnostics, null, 2),
+          contentType: 'application/json',
+        });
+      }
       await closeApp(app);
       removeUserDataDir(profile);
     }
