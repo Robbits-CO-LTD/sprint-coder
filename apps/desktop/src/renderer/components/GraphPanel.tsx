@@ -1,16 +1,46 @@
 import { useEffect, useRef, useState } from 'react';
-import type { GraphSelection, GraphView } from '@sprint-coder/contracts';
+import type { GraphSelection, GraphView, GraphGeneration } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { acceptGraphSelection } from '../lib/graph-selection';
 import { GraphHistoryPanel } from './GraphHistoryPanel';
+import { GraphGenerationNotice } from './GraphGenerationNotice';
+import { acceptGraphGeneration } from '../lib/graph-generation';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
   const [selection, setSelection] = useState<GraphSelection | null>(null);
   const [comment, setComment] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [generation, setGeneration] = useState<GraphGeneration | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const generationSequence = useRef(0);
   const frame = useRef<HTMLIFrameElement>(null);
   const currentView = useRef<GraphView | null>(null);
+  useEffect(() => {
+    const api = window.sprintCoder?.graphs;
+    if (typeof api?.generation !== 'function' || typeof api.subscribeGeneration !== 'function')
+      return;
+    let active = true;
+    const update = (value: unknown) => {
+      if (!active) return;
+      const accepted = acceptGraphGeneration(value, taskId, generationSequence.current);
+      if (!accepted) return;
+      generationSequence.current = accepted.sequence;
+      setGeneration(accepted);
+      setCancelError(null);
+    };
+    const unsubscribe = api.subscribeGeneration(update);
+    void api
+      .generation(taskId)
+      .then(update)
+      .catch(() => {
+        if (active) setCancelError('図の生成状態を確認できませんでした。');
+      });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [taskId]);
   useEffect(() => {
     let disposed = false;
     const api = window.sprintCoder?.graphs;
@@ -89,6 +119,25 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
           閉じる
         </button>
       </header>
+      {generation ? (
+        <GraphGenerationNotice
+          generation={generation}
+          view={view}
+          onCancel={() => {
+            setCancelError(null);
+            const sequence = generationSequence.current;
+            void window.sprintCoder?.graphs.cancel(taskId, generation.id).catch(() => {
+              if (generationSequence.current === sequence)
+                setCancelError('取消処理を確認できませんでした。');
+            });
+          }}
+        />
+      ) : null}
+      {cancelError ? (
+        <p role="alert" className="settings-provider-error">
+          {cancelError}
+        </p>
+      ) : null}
       {view ? (
         <iframe
           key={view.instanceId}

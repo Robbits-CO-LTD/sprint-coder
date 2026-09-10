@@ -8,7 +8,12 @@ import { GraphRenderService } from './graph-render';
 import { prepareGraphInput } from './graph-input';
 import { prepareGraphHtml, trustedArchifyScripts } from './graph-html';
 import { validateGraphDocumentWrite, type GraphDocumentStore } from './graph-document';
-import type { GraphDocument } from '@sprint-coder/contracts';
+import type { GraphDocument, GraphGeneration } from '@sprint-coder/contracts';
+import {
+  beginGraphGeneration,
+  cancelGraphGeneration,
+  finishGraphGeneration,
+} from './graph-generation';
 
 const roots: string[] = [];
 const vendorRoot = resolve('vendor/archify');
@@ -48,7 +53,29 @@ describe('Archify generation boundary', () => {
       roots.push(root);
       const documents = new Map<string, GraphDocument>();
       const history = new Map<string, GraphDocument[]>();
+      const generations = new Map<string, GraphGeneration>();
+      let pauseRender: ((signal: AbortSignal) => Promise<void>) | null = null;
       const store: GraphDocumentStore = {
+        getGraphGeneration: (id) => generations.get(id) ?? null,
+        beginGraphGeneration: (id, title, base) => {
+          const value = beginGraphGeneration(id, title, base, generations.get(id) ?? null);
+          generations.set(id, value);
+          return value;
+        },
+        cancelGraphGeneration: (id, generationId) => {
+          const current = generations.get(id)!;
+          if (current.id !== generationId) throw new Error('Stale generation');
+          const value = cancelGraphGeneration(current);
+          generations.set(id, value);
+          return value;
+        },
+        finishGraphGeneration: (id, generationId, state, stage) => {
+          const current = generations.get(id)!;
+          if (current.id !== generationId) throw new Error('Stale generation');
+          const value = finishGraphGeneration(current, state, stage);
+          generations.set(id, value);
+          return value;
+        },
         getGraphDocument: (id) => structuredClone(documents.get(id) ?? null),
         getGraphDocumentVersion: (id, revision) =>
           structuredClone(history.get(id)?.find((doc) => doc.renderRevision === revision) ?? null),
@@ -60,7 +87,7 @@ describe('Archify generation boundary', () => {
               .reverse()
               .slice(0, limit),
           ),
-        saveGraphDocument: (document, expected) => {
+        saveGraphDocument: (document, expected, generationId) => {
           const saved = validateGraphDocumentWrite(
             document,
             documents.get(document.taskId) ?? null,
@@ -68,6 +95,14 @@ describe('Archify generation boundary', () => {
           );
           documents.set(document.taskId, saved);
           history.set(document.taskId, [...(history.get(document.taskId) ?? []), saved]);
+          if (generationId) {
+            const current = generations.get(document.taskId)!;
+            if (current.id !== generationId) throw new Error('Stale generation');
+            generations.set(
+              document.taskId,
+              finishGraphGeneration(current, 'succeeded', null, saved.renderRevision),
+            );
+          }
           return saved;
         },
       };
@@ -78,7 +113,8 @@ describe('Archify generation boundary', () => {
           workRoot: root,
           workerPath: '/unused',
           parentOrigin: 'app://bundle',
-          run: async (mode, input, directory) => {
+          run: async (mode, input, directory, signal) => {
+            if (mode === 'render' && pauseRender) await pauseRender(signal);
             const entry =
               mode === 'render'
                 ? join(vendorRoot, 'renderers', input.kind, `render-${input.kind}.mjs`)
@@ -132,7 +168,7 @@ describe('Archify generation boundary', () => {
       service.release(taskId, reopened.instanceId);
       expect(service.response(new URL(reopened.artifactUrl)).status).toBe(404);
       expect(service.response(new URL(`${view.artifactUrl}?arbitrary=1`)).status).toBe(404);
-      service.dispose();
+      await service.dispose();
       expect(service.response(new URL(view.artifactUrl)).status).toBe(404);
       const afterRestart = createService();
       const [earlierRestore, restored] = await Promise.all([
@@ -146,7 +182,47 @@ describe('Archify generation boundary', () => {
       expect(afterRestart.response(new URL(earlierRestore!.artifactUrl)).status).toBe(404);
       expect(afterRestart.response(new URL(restored!.artifactUrl)).status).toBe(200);
       expect(store.getGraphDocument(taskId)?.renderRevision).toBe(1);
-      afterRestart.dispose();
+      expect(afterRestart.generation(taskId)?.state).toBe('failed');
+      await afterRestart.dispose();
+      const stopping = createService();
+      await stopping.get(taskId);
+      let entered!: () => void;
+      let acknowledgeStop!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const stopped = new Promise<void>((resolve) => {
+        acknowledgeStop = resolve;
+      });
+      pauseRender = async (signal) => {
+        entered();
+        await stopped;
+        signal.throwIfAborted();
+      };
+      const states: string[] = [];
+      stopping.subscribeGeneration((value) => states.push(value.state));
+      const result = stopping.render({ taskId, diagram: diagram(kind) }).then(
+        () => 'published',
+        () => 'rejected',
+      );
+      await started;
+      const activeId = stopping.generation(taskId)!.id;
+      expect(() => stopping.cancel(taskId, '00000000-0000-4000-8000-000000000099')).toThrow(
+        'changed',
+      );
+      expect(stopping.generation(taskId)?.state).toBe('running');
+      let disposed = false;
+      const shutdown = stopping.dispose().then(() => {
+        disposed = true;
+      });
+      expect(stopping.generation(taskId)).toMatchObject({ id: activeId, state: 'canceling' });
+      expect(disposed).toBe(false);
+      acknowledgeStop();
+      expect(await result).toBe('rejected');
+      await shutdown;
+      expect(disposed).toBe(true);
+      expect(states).toEqual(['running', 'canceling', 'canceled']);
+      expect(store.getGraphDocument(taskId)?.renderRevision).toBe(1);
     },
   );
 

@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { graphDocumentSchema, type GraphDocument } from '@sprint-coder/contracts';
+import {
+  graphDocumentSchema,
+  type GraphDocument,
+  type GraphGeneration,
+} from '@sprint-coder/contracts';
 import { prepareGraphInput } from './graph-input';
 
 export interface GraphDocumentStore {
@@ -10,7 +14,24 @@ export interface GraphDocumentStore {
     limit?: number,
     beforeRenderRevision?: number,
   ): GraphDocument[];
-  saveGraphDocument(document: GraphDocument, expectedRenderRevision: number): GraphDocument;
+  saveGraphDocument(
+    document: GraphDocument,
+    expectedRenderRevision: number,
+    generationId?: string,
+  ): GraphDocument;
+  getGraphGeneration(taskId: string): GraphGeneration | null;
+  beginGraphGeneration(
+    taskId: string,
+    title: string | null,
+    baseRenderRevision: number,
+  ): GraphGeneration;
+  cancelGraphGeneration(taskId: string, generationId: string): GraphGeneration;
+  finishGraphGeneration(
+    taskId: string,
+    generationId: string,
+    state: 'failed' | 'canceled',
+    failureStage: GraphGeneration['failureStage'],
+  ): GraphGeneration;
 }
 
 function object(value: unknown): Record<string, unknown> {

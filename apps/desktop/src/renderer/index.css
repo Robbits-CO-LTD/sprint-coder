@@ -1753,6 +1753,14 @@ button {
   min-height: 220px;
   border: 0;
 }
+.graph-panel > .graph-generation {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.graph-generation p {
+  margin: 4px 0;
+}
 .graph-panel > section {
   padding: 12px;
   display: grid;

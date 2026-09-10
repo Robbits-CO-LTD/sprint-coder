@@ -3,10 +3,12 @@ import { z } from 'zod';
 import {
   graphRenderInputSchema,
   graphGetInputSchema,
+  graphCancelInputSchema,
   graphHistoryInputSchema,
   graphHistorySchema,
   graphCompareInputSchema,
   graphDiffSchema,
+  graphGenerationSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -281,12 +283,27 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, input),
     get: (taskId) =>
       invoke(IPC_CHANNELS.graphsGet, graphGetInputSchema, graphViewSchema.nullable(), { taskId }),
+    generation: (taskId) =>
+      invoke(IPC_CHANNELS.graphsGeneration, graphGetInputSchema, graphGenerationSchema.nullable(), {
+        taskId,
+      }),
+    subscribeGeneration: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        const parsed = graphGenerationSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.graphsGenerationUpdated, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.graphsGenerationUpdated, handler);
+    },
     history: (input) =>
       invoke(IPC_CHANNELS.graphsHistory, graphHistoryInputSchema, graphHistorySchema, input),
     compare: (input) =>
       invoke(IPC_CHANNELS.graphsCompare, graphCompareInputSchema, graphDiffSchema, input),
-    cancel: (taskId) =>
-      invoke(IPC_CHANNELS.graphsCancel, graphGetInputSchema, z.undefined(), { taskId }),
+    cancel: (taskId, generationId) =>
+      invoke(IPC_CHANNELS.graphsCancel, graphCancelInputSchema, z.undefined(), {
+        taskId,
+        generationId,
+      }),
     release: (taskId, instanceId) =>
       invoke(IPC_CHANNELS.graphsRelease, graphReleaseInputSchema, z.undefined(), {
         taskId,

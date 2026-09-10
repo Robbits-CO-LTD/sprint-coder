@@ -3,11 +3,17 @@ import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { join } from 'node:path';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { z } from 'zod';
-import type { GraphDocument, GraphView } from '@sprint-coder/contracts';
+import type {
+  GraphDocument,
+  GraphView,
+  GraphGeneration,
+  GraphRenderInput,
+} from '@sprint-coder/contracts';
 import {
   graphHistoryInputSchema,
   graphHistorySchema,
   graphCompareInputSchema,
+  graphRenderInputSchema,
   type GraphHistory,
   type GraphDiff,
 } from '@sprint-coder/contracts';
@@ -15,6 +21,8 @@ import { ARCHIFY_MANIFEST_SHA256, prepareGraphInput, type PreparedGraphInput } f
 import { prepareGraphHtml, trustedArchifyScripts } from './graph-html';
 import { nextGraphDocument, type GraphDocumentStore } from './graph-document';
 import { compareGraphDocuments, graphVersionSummary } from './graph-diff';
+import { graphGenerationActive } from './graph-generation';
+import { secureLogger } from './secure-logger';
 
 type StoredGraph = {
   document: GraphDocument;
@@ -29,10 +37,13 @@ type Run = (
   directory: string,
   signal: AbortSignal,
 ) => Promise<string>;
+type RunningGraph = { controller: AbortController; done: Promise<void>; generationId?: string };
 
 export class GraphRenderService {
   private readonly documents = new Map<string, StoredGraph>();
-  private readonly running = new Map<string, AbortController>();
+  private readonly running = new Map<string, RunningGraph>();
+  private readonly generationListeners = new Set<(value: GraphGeneration) => void>();
+  private closed = false;
   private readonly restoring = new Map<string, Promise<GraphView>>();
   private scripts: readonly string[] | null = null;
   private readonly run: Run;
@@ -53,29 +64,59 @@ export class GraphRenderService {
   }
 
   async render(raw: unknown): Promise<GraphView> {
-    const input = prepareGraphInput(raw);
+    const input = graphRenderInputSchema.parse(raw);
     const prior = this.options.store.getGraphDocument(input.taskId);
-    return this.generate(input, nextGraphDocument(input.taskId, input.diagram, prior), true);
+    return this.generate(input, prior, true);
   }
 
   private async generate(
-    input: PreparedGraphInput,
-    document: GraphDocument,
+    raw: GraphRenderInput,
+    priorDocument: GraphDocument | null,
     save: boolean,
   ): Promise<GraphView> {
-    if (this.running.has(input.taskId) || this.running.size >= 2)
+    if (this.closed) throw new Error('Graph renderer is closed');
+    const taskId = raw.taskId;
+    if (this.running.has(taskId) || this.running.size >= 2)
       throw new Error('Graph renderer is busy');
-    if (!this.documents.has(input.taskId) && this.documents.size >= 32) {
+    if (!this.documents.has(taskId) && this.documents.size >= 32) {
       const expired = [...this.documents].find(([, record]) => !record.live);
       if (expired) this.documents.delete(expired[0]);
     }
-    if (!this.documents.has(input.taskId) && this.documents.size >= 32)
+    if (!this.documents.has(taskId) && this.documents.size >= 32)
       throw new Error('Graph session capacity reached');
     const controller = new AbortController();
-    this.running.set(input.taskId, controller);
+    let settled!: () => void;
+    const operation: RunningGraph = {
+      controller,
+      done: new Promise<void>((resolve) => {
+        settled = resolve;
+      }),
+    };
+    this.running.set(taskId, operation);
+    let stage: NonNullable<GraphGeneration['failureStage']> = 'input';
     let directory: string | undefined;
     try {
+      if (save) {
+        const title = z
+          .object({ title: z.string().min(1).max(160) })
+          .safeParse(raw.diagram['meta']);
+        const generation = this.options.store.beginGraphGeneration(
+          taskId,
+          title.success ? title.data.title : null,
+          priorDocument?.renderRevision ?? 0,
+        );
+        operation.generationId = generation.id;
+        this.notifyGeneration(generation);
+      }
+      controller.signal.throwIfAborted();
+      const input = prepareGraphInput(raw);
+      const document = save
+        ? nextGraphDocument(taskId, input.diagram, priorDocument)
+        : priorDocument;
+      if (!document) throw new Error('Graph document is unavailable');
+      stage = 'engine';
       await this.verifyVendor();
+      stage = 'render';
       await mkdir(this.options.workRoot, { recursive: true, mode: 0o700 });
       directory = await mkdtemp(join(this.options.workRoot, 'render-'));
       await writeFile(join(directory, 'input.json'), JSON.stringify(input.diagram), {
@@ -83,6 +124,7 @@ export class GraphRenderService {
         flag: 'wx',
       });
       await this.run('render', input, directory, controller.signal);
+      stage = 'check';
       const checker = await this.run('check', input, directory, controller.signal);
       const report = z
         .object({
@@ -131,7 +173,13 @@ export class GraphRenderService {
       });
       // Only a successfully rendered, independently checked and sanitized document
       // enters history. A failed replacement leaves the last valid version intact.
-      if (save) this.options.store.saveGraphDocument(document, document.renderRevision - 1);
+      stage = 'publish';
+      if (save)
+        this.options.store.saveGraphDocument(
+          document,
+          document.renderRevision - 1,
+          operation.generationId,
+        );
       else if (
         this.options.store.getGraphDocument(input.taskId)?.renderRevision !==
         document.renderRevision
@@ -144,25 +192,48 @@ export class GraphRenderService {
         response,
         live: true,
       });
+      if (save) this.notifyGeneration(this.options.store.getGraphGeneration(taskId)!);
       return finalized;
+    } catch (error) {
+      if (operation.generationId) {
+        const current = this.options.store.getGraphGeneration(taskId);
+        if (current?.id === operation.generationId && graphGenerationActive(current)) {
+          const canceled = controller.signal.aborted || current.state === 'canceling';
+          this.notifyGeneration(
+            this.options.store.finishGraphGeneration(
+              taskId,
+              current.id,
+              canceled ? 'canceled' : 'failed',
+              canceled ? null : stage,
+            ),
+          );
+        }
+      }
+      throw error;
     } finally {
-      this.running.delete(input.taskId);
-      if (directory !== undefined) await rm(directory, { recursive: true, force: true });
+      if (directory !== undefined) {
+        try {
+          await rm(directory, { recursive: true, force: true });
+        } catch {
+          secureLogger.warn('Graph temporary files could not be removed', {
+            category: 'graph_cleanup',
+          });
+        }
+      }
+      this.running.delete(taskId);
+      settled();
     }
   }
 
   async get(taskId: string): Promise<GraphView | null> {
+    if (this.closed) throw new Error('Graph renderer is closed');
     const document = this.options.store.getGraphDocument(taskId);
     if (!document) return null;
     let record = this.documents.get(taskId);
     if (record?.document.renderRevision !== document.renderRevision) {
       let pending = this.restoring.get(taskId);
       if (!pending) {
-        pending = this.generate(
-          prepareGraphInput({ taskId, diagram: document.diagram }),
-          document,
-          false,
-        );
+        pending = this.generate({ taskId, diagram: document.diagram }, document, false);
         this.restoring.set(taskId, pending);
       }
       try {
@@ -219,12 +290,57 @@ export class GraphRenderService {
     if (!before || !after) throw new Error('Graph version not found');
     return compareGraphDocuments(before, after);
   }
-  cancel(taskId: string): void {
-    this.running.get(taskId)?.abort();
+  cancel(taskId: string, expectedGenerationId?: string): void {
+    const operation = this.running.get(taskId);
+    if (!operation) return;
+    if (expectedGenerationId !== undefined && operation.generationId !== expectedGenerationId)
+      throw new Error('Graph generation changed before cancellation');
+    try {
+      if (operation.generationId) {
+        const previous = this.options.store.getGraphGeneration(taskId);
+        if (!previous || previous.id !== operation.generationId)
+          throw new Error('Graph generation changed');
+        if (previous.state === 'running')
+          this.notifyGeneration(
+            this.options.store.cancelGraphGeneration(taskId, operation.generationId),
+          );
+      }
+    } finally {
+      operation.controller.abort();
+    }
   }
-  dispose(): void {
-    for (const controller of this.running.values()) controller.abort();
+  async dispose(): Promise<void> {
+    this.closed = true;
+    const pending = [...this.running.values()].map((operation) => operation.done);
+    for (const taskId of this.running.keys()) {
+      try {
+        this.cancel(taskId);
+      } catch {
+        secureLogger.warn('Graph shutdown status could not be saved', {
+          category: 'graph_shutdown',
+        });
+      }
+    }
+    await Promise.all(pending);
     this.documents.clear();
+    this.generationListeners.clear();
+  }
+
+  generation(taskId: string): GraphGeneration | null {
+    return this.options.store.getGraphGeneration(taskId);
+  }
+  subscribeGeneration(listener: (value: GraphGeneration) => void): () => void {
+    this.generationListeners.add(listener);
+    return () => this.generationListeners.delete(listener);
+  }
+  private notifyGeneration(value: GraphGeneration): void {
+    for (const listener of this.generationListeners) {
+      try {
+        listener(value);
+      } catch {
+        secureLogger.warn('Graph status notification failed', { category: 'graph_status' });
+      }
+    }
   }
 
   response(url: URL): Response {

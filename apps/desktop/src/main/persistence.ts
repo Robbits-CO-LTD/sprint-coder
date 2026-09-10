@@ -1,6 +1,15 @@
 import Database from 'better-sqlite3';
-import type { GraphDocument } from '@sprint-coder/contracts';
+import {
+  graphGenerationSchema,
+  type GraphDocument,
+  type GraphGeneration,
+} from '@sprint-coder/contracts';
 import { parseStoredGraphDocument, validateGraphDocumentWrite } from './graph-document';
+import {
+  beginGraphGeneration as makeGraphGeneration,
+  cancelGraphGeneration as markGraphCanceling,
+  finishGraphGeneration as markGraphFinished,
+} from './graph-generation';
 import {
   closeSync,
   copyFileSync,
@@ -3824,6 +3833,16 @@ const migrations = [
         ON graph_document_versions(task_id, semantic_revision, render_revision);
     `,
   },
+  {
+    version: 85,
+    checksum: 'graph-generation-v85-latest-attempt-state',
+    sql: `CREATE TABLE graph_generation_status (
+      task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      state TEXT NOT NULL CHECK (state IN ('running', 'canceling', 'succeeded', 'failed', 'canceled', 'interrupted')),
+      status_json TEXT NOT NULL
+    );`,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -5846,6 +5865,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('busy_timeout = 5000');
       this.runMigrations(databasePath);
+      this.recoverGraphGenerations();
       this.backfillLegacyMutationScopes();
       this.backfillLegacyEditSagaBindings();
       this.backfillLegacyNativeEditSagaRevisions();
@@ -6953,8 +6973,102 @@ export class SqlitePersistenceClient implements PersistenceClient {
     });
   }
 
-  saveGraphDocument(document: GraphDocument, expectedRenderRevision: number): GraphDocument {
+  getGraphGeneration(taskId: string): GraphGeneration | null {
+    this.getTaskRow(taskId);
+    const row = this.db
+      .prepare('SELECT sequence, state, status_json FROM graph_generation_status WHERE task_id = ?')
+      .get(taskId) as { sequence: number; state: string; status_json: string } | undefined;
+    if (!row) return null;
+    const value = graphGenerationSchema.parse(JSON.parse(row.status_json));
+    if (value.taskId !== taskId || value.sequence !== row.sequence || value.state !== row.state)
+      throw new Error('Graph generation state mismatch');
+    return value;
+  }
+
+  private writeGraphGeneration(value: GraphGeneration): void {
+    const parsed = graphGenerationSchema.parse(value);
+    this.db
+      .prepare(
+        `INSERT INTO graph_generation_status(task_id, sequence, state, status_json) VALUES (?, ?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, status_json=excluded.status_json`,
+      )
+      .run(parsed.taskId, parsed.sequence, parsed.state, JSON.stringify(parsed));
+  }
+
+  beginGraphGeneration(
+    taskId: string,
+    title: string | null,
+    baseRenderRevision: number,
+  ): GraphGeneration {
     return this.db.transaction(() => {
+      if ((this.getGraphDocument(taskId)?.renderRevision ?? 0) !== baseRenderRevision)
+        throw new Error('Graph generation base changed');
+      const value = makeGraphGeneration(
+        taskId,
+        title,
+        baseRenderRevision,
+        this.getGraphGeneration(taskId),
+      );
+      this.writeGraphGeneration(value);
+      return value;
+    })();
+  }
+
+  cancelGraphGeneration(taskId: string, generationId: string): GraphGeneration {
+    return this.db.transaction(() => {
+      const current = this.getGraphGeneration(taskId);
+      if (!current || current.id !== generationId) throw new Error('Graph generation changed');
+      const value = markGraphCanceling(current);
+      this.writeGraphGeneration(value);
+      return value;
+    })();
+  }
+
+  finishGraphGeneration(
+    taskId: string,
+    generationId: string,
+    state: 'failed' | 'canceled',
+    failureStage: GraphGeneration['failureStage'],
+  ): GraphGeneration {
+    return this.db.transaction(() => {
+      const current = this.getGraphGeneration(taskId);
+      if (!current || current.id !== generationId) throw new Error('Graph generation changed');
+      const value = markGraphFinished(current, state, failureStage);
+      this.writeGraphGeneration(value);
+      return value;
+    })();
+  }
+
+  private recoverGraphGenerations(): void {
+    this.db.transaction(() => {
+      const rows = this.db
+        .prepare(
+          "SELECT task_id FROM graph_generation_status WHERE state IN ('running', 'canceling')",
+        )
+        .all() as { task_id: string }[];
+      for (const row of rows) {
+        const current = this.getGraphGeneration(row.task_id)!;
+        this.writeGraphGeneration(markGraphFinished(current, 'interrupted'));
+      }
+    })();
+  }
+
+  saveGraphDocument(
+    document: GraphDocument,
+    expectedRenderRevision: number,
+    generationId?: string,
+  ): GraphDocument {
+    return this.db.transaction(() => {
+      const generation =
+        generationId === undefined ? null : this.getGraphGeneration(document.taskId);
+      if (
+        generationId !== undefined &&
+        (!generation ||
+          generation.id !== generationId ||
+          generation.state !== 'running' ||
+          generation.baseRenderRevision !== expectedRenderRevision)
+      )
+        throw new Error('Graph generation changed before publication');
       const parsed = validateGraphDocumentWrite(
         document,
         this.getGraphDocument(document.taskId),
@@ -6971,6 +7085,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
           parsed.renderRevision,
           parsed.semanticRevision,
           JSON.stringify(parsed),
+        );
+      if (generation)
+        this.writeGraphGeneration(
+          markGraphFinished(generation, 'succeeded', null, parsed.renderRevision),
         );
       return parsed;
     })();

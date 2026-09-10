@@ -137,6 +137,89 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('persists graph failures and recovers only unfinished generation attempts', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Generation lifecycle');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Saved' },
+        components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+        connections: [],
+      };
+      const first = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(first, 0);
+      const canceled = persistence.beginGraphGeneration(task.id, 'Canceled', 1);
+      persistence.cancelGraphGeneration(task.id, canceled.id);
+      const candidate = nextGraphDocument(
+        task.id,
+        { ...diagram, meta: { title: 'Replacement' } },
+        first,
+      );
+      expect(() => persistence.saveGraphDocument(candidate, 1, canceled.id)).toThrow();
+      expect(persistence.getGraphDocument(task.id)).toEqual(first);
+      persistence.finishGraphGeneration(task.id, canceled.id, 'canceled', null);
+      const rejected = persistence.beginGraphGeneration(task.id, 'Rejected', 1);
+      expect(() =>
+        persistence.finishGraphGeneration(task.id, canceled.id, 'failed', 'publish'),
+      ).toThrow();
+      const failed = persistence.finishGraphGeneration(task.id, rejected.id, 'failed', 'check');
+      persistence.close();
+      let reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphGeneration(task.id)).toEqual(failed);
+      expect(reopened.getGraphDocument(task.id)).toEqual(first);
+      const unfinished = reopened.beginGraphGeneration(task.id, 'Unfinished', 1);
+      reopened.close();
+      reopened = new SqlitePersistenceClient(path);
+      const interrupted = reopened.getGraphGeneration(task.id)!;
+      expect(interrupted).toMatchObject({
+        id: unfinished.id,
+        state: 'interrupted',
+        sequence: unfinished.sequence + 1,
+      });
+      reopened.close();
+      reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphGeneration(task.id)).toEqual(interrupted);
+      const successful = reopened.beginGraphGeneration(task.id, 'Replacement', 1);
+      reopened.saveGraphDocument(candidate, 1, successful.id);
+      reopened.close();
+      reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphGeneration(task.id)).toMatchObject({
+        id: successful.id,
+        state: 'succeeded',
+        resultRenderRevision: 2,
+      });
+      expect(reopened.getGraphDocument(task.id)).toEqual(candidate);
+      reopened.close();
+    });
+
+    it('adds generation state to a v84 graph database without changing saved versions', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Existing graph');
+      const document = nextGraphDocument(
+        task.id,
+        {
+          schema_version: 1,
+          diagram_type: 'architecture',
+          meta: { title: 'Existing' },
+          components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+          connections: [],
+        },
+        null,
+      );
+      persistence.saveGraphDocument(document, 0);
+      persistence.close();
+      const old = new Database(path);
+      old.exec(
+        'DROP TABLE graph_generation_status; DELETE FROM schema_migrations WHERE version = 85;',
+      );
+      old.close();
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getGraphDocument(task.id)).toEqual(document);
+      expect(migrated.getGraphGeneration(task.id)).toBeNull();
+      migrated.close();
+    });
+
     it('persists graph history, rejects stale writes and restores semantic revisions', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('Graph owner');
@@ -199,7 +282,7 @@ if (runsWithElectronAbi)
       db.close();
     });
 
-    it('pages saved graph history without skipping or repeating versions', () => {
+    it('pages saved graph history without skipping or repeating versions', async () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('History pages');
       const diagram = {
@@ -244,7 +327,7 @@ if (runsWithElectronAbi)
           .changes[0]?.fields,
       ).toEqual([{ name: 'title', before: 'Version 1', after: 'Version 30' }]);
       expect(run).not.toHaveBeenCalled();
-      service.dispose();
+      await service.dispose();
       persistence.close();
     });
 
@@ -254,7 +337,7 @@ if (runsWithElectronAbi)
       persistence.close();
       const old = new Database(path);
       old.exec(
-        'DROP TABLE graph_document_versions; DELETE FROM schema_migrations WHERE version = 84;',
+        'DROP TABLE graph_generation_status; DROP TABLE graph_document_versions; DELETE FROM schema_migrations WHERE version IN (84, 85);',
       );
       old.close();
       const migrated = new SqlitePersistenceClient(path);
@@ -7686,6 +7769,7 @@ if (runsWithElectronAbi)
         { version: 81 },
         { version: 82 },
         { version: 84 },
+        { version: 85 },
       ]);
       for (const [table, columns] of [
         [

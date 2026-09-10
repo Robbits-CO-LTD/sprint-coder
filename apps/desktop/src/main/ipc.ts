@@ -12,10 +12,12 @@ import {
 import {
   graphRenderInputSchema,
   graphGetInputSchema,
+  graphCancelInputSchema,
   graphHistoryInputSchema,
   graphHistorySchema,
   graphCompareInputSchema,
   graphDiffSchema,
+  graphGenerationSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -865,6 +867,7 @@ export function computerUseProviderModelIsEligible(input: {
 }
 
 export class IpcRouter {
+  private graphGenerationUnsubscribe: (() => void) | null = null;
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
@@ -1755,6 +1758,20 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.graphGenerationUnsubscribe =
+      this.graphs?.subscribeGeneration((generation) => {
+        if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.graphsGenerationUpdated, generation);
+      }) ?? null;
+    this.handle(
+      IPC_CHANNELS.graphsGeneration,
+      graphGetInputSchema,
+      graphGenerationSchema.nullable(),
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        return this.graphs?.generation(input.taskId) ?? null;
+      },
+    );
     this.handle(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, (input) =>
       this.updateInstallMutationGate.run(async () => {
         this.persistence.getTask(input.taskId);
@@ -1774,10 +1791,10 @@ export class IpcRouter {
         return this.graphs?.get(input.taskId) ?? null;
       },
     );
-    this.handle(IPC_CHANNELS.graphsCancel, graphGetInputSchema, z.undefined(), (input) =>
+    this.handle(IPC_CHANNELS.graphsCancel, graphCancelInputSchema, z.undefined(), (input) =>
       this.updateInstallMutationGate.run(() => {
         this.persistence.getTask(input.taskId);
-        this.graphs?.cancel(input.taskId);
+        this.graphs?.cancel(input.taskId, input.generationId);
       }),
     );
     this.handle(
@@ -4333,7 +4350,9 @@ export class IpcRouter {
     await this.compatibleRuntime.dispose();
     await this.managedLocalProviderRuntime?.dispose();
     this.claudeRuntime.dispose();
-    this.graphs?.dispose();
+    this.graphGenerationUnsubscribe?.();
+    this.graphGenerationUnsubscribe = null;
+    await this.graphs?.dispose();
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();

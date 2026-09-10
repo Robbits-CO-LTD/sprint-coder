@@ -7,6 +7,7 @@ import {
   IPC_CHANNELS,
   graphRenderInputSchema,
   graphGetInputSchema,
+  graphCancelInputSchema,
   graphHistoryInputSchema,
   graphCompareInputSchema,
   graphReleaseInputSchema,
@@ -5049,9 +5050,10 @@ describe('isTrustedIpcSender', () => {
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.graphsRender]: graphRenderInputSchema,
   [IPC_CHANNELS.graphsGet]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsGeneration]: graphGetInputSchema,
   [IPC_CHANNELS.graphsHistory]: graphHistoryInputSchema,
   [IPC_CHANNELS.graphsCompare]: graphCompareInputSchema,
-  [IPC_CHANNELS.graphsCancel]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsCancel]: graphCancelInputSchema,
   [IPC_CHANNELS.graphsRelease]: graphReleaseInputSchema,
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
   [IPC_CHANNELS.runtimeFailureDiagnosticGet]: runtimeFailureDiagnosticQuerySchema,
@@ -5203,6 +5205,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
 // command-envelope parser, so they are intentionally outside the adversarial input-schema table.
 const NON_ROUTER_CHANNELS = new Set<string>([
   IPC_CHANNELS.graphsUpdated,
+  IPC_CHANNELS.graphsGenerationUpdated,
   IPC_CHANNELS.tasksUpdated,
   IPC_CHANNELS.teamsEvent,
   IPC_CHANNELS.turnsPort,

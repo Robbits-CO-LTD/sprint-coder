@@ -140,12 +140,14 @@ for (const kind of ['architecture', 'workflow'] as const) {
             return {
               result: await pending,
               retained: await window.sprintCoder!.graphs.get(input.taskId),
+              generation: await window.sprintCoder!.graphs.generation(input.taskId),
             };
           },
           { taskId, diagram: { ...diagram, meta: { title: 'Canceled replacement' } } },
         );
         expect(result.result).toBe('canceled');
         expect(result.retained?.revision).toBe(view.revision);
+        expect(result.generation?.state).toBe('canceled');
       }
       const nodeKey = kind === 'architecture' ? 'components' : 'nodes';
       const revisedNodes = nodes.map((node) => ({
@@ -188,6 +190,39 @@ for (const kind of ['architecture', 'workflow'] as const) {
         .getByTestId('graph-panel')
         .getByRole('button', { name: '閉じる', exact: true })
         .click();
+      await page.getByTestId('graph-toggle').click();
+      await expect(
+        page.frameLocator('[data-testid="graph-frame"]').locator('svg[role="img"]'),
+      ).toBeVisible();
+      const retainedUrl = await page.getByTestId('graph-frame').getAttribute('src');
+      const rejection = await page.evaluate(
+        async (input) =>
+          window.sprintCoder!.graphs.render(input).then(
+            () => 'published',
+            () => 'rejected',
+          ),
+        {
+          taskId,
+          diagram: {
+            ...revisedDiagram,
+            meta: { title: 'Rejected proposal', output: '/outside.html' },
+          },
+        },
+      );
+      expect(rejection).toBe('rejected');
+      await expect(page.getByTestId('graph-generation')).toHaveAttribute('data-state', 'failed');
+      await expect(page.getByTestId('graph-generation')).toContainText(
+        '新しい図を作成できませんでした',
+      );
+      await expect(page.getByTestId('graph-generation')).toContainText(
+        `保存済みの版 ${redrawn.revision}`,
+      );
+      await expect(page.getByTestId('graph-frame')).toHaveAttribute('src', retainedUrl!);
+      await page.screenshot({ path: testInfo.outputPath(`failed-proposal-${kind}.png`) });
+      await page
+        .getByTestId('graph-panel')
+        .getByRole('button', { name: '閉じる', exact: true })
+        .click();
       const savedDraft = await page.getByTestId('composer-textarea').inputValue();
       await expect
         .poll(() => page.evaluate(async (id) => window.sprintCoder!.tasks.getDraft(id), taskId))
@@ -211,6 +246,11 @@ for (const kind of ['architecture', 'workflow'] as const) {
       await restarted.getByTestId('graph-toggle').click();
       const restoredFrame = restarted.frameLocator('[data-testid="graph-frame"]');
       await expect(restoredFrame.locator('svg[role="img"]')).toBeVisible();
+      await expect(restarted.getByTestId('graph-generation')).toHaveAttribute(
+        'data-state',
+        'failed',
+      );
+      await expect(restarted.getByTestId('graph-generation')).toContainText('Rejected proposal');
       await expect(restoredFrame.locator('html')).toHaveAttribute('data-graph-id', view.id);
       await expect(restoredFrame.locator('html')).toHaveAttribute(
         'data-graph-revision',

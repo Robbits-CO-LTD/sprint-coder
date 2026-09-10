@@ -3629,6 +3629,9 @@ export const graphRenderInputSchema = z
   .object({ taskId: idSchema, diagram: z.record(z.string(), z.unknown()) })
   .strict();
 export const graphGetInputSchema = z.object({ taskId: idSchema }).strict();
+export const graphCancelInputSchema = graphGetInputSchema
+  .extend({ generationId: z.string().uuid().optional() })
+  .strict();
 export const graphReleaseInputSchema = graphGetInputSchema
   .extend({ instanceId: z.string().uuid() })
   .strict();
@@ -3648,6 +3651,30 @@ export const graphDocumentSchema = z
   })
   .strict();
 export type GraphDocument = z.infer<typeof graphDocumentSchema>;
+export const graphGenerationSchema = z
+  .object({
+    id: z.string().uuid(),
+    taskId: idSchema,
+    sequence: z.number().int().positive(),
+    state: z.enum(['running', 'canceling', 'succeeded', 'failed', 'canceled', 'interrupted']),
+    proposedTitle: z.string().min(1).max(160).nullable(),
+    baseRenderRevision: z.number().int().nonnegative(),
+    resultRenderRevision: z.number().int().positive().nullable(),
+    failureStage: z.enum(['input', 'engine', 'render', 'check', 'publish']).nullable(),
+    startedAt: z.string().datetime(),
+    finishedAt: z.string().datetime().nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const active = value.state === 'running' || value.state === 'canceling';
+    if (
+      active !== (value.finishedAt === null) ||
+      (value.state === 'succeeded') !== (value.resultRenderRevision !== null) ||
+      (value.state === 'failed') !== (value.failureStage !== null)
+    )
+      context.addIssue({ code: 'custom', message: 'Inconsistent graph generation state' });
+  });
+export type GraphGeneration = z.infer<typeof graphGenerationSchema>;
 export const graphHistoryInputSchema = graphGetInputSchema
   .extend({
     beforeRenderRevision: z.number().int().positive().optional(),
@@ -5188,9 +5215,11 @@ export interface SprintCoderApi {
   graphs: {
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
+    generation(taskId: string): Promise<GraphGeneration | null>;
+    subscribeGeneration(listener: (generation: GraphGeneration) => void): () => void;
     history(input: GraphHistoryInput): Promise<GraphHistory>;
     compare(input: GraphCompareInput): Promise<GraphDiff>;
-    cancel(taskId: string): Promise<void>;
+    cancel(taskId: string, generationId?: string): Promise<void>;
     release(taskId: string, instanceId: string): Promise<void>;
     subscribe(listener: (view: GraphView) => void): () => void;
   };
@@ -5511,6 +5540,8 @@ export interface SprintCoderApi {
 export const IPC_CHANNELS = {
   graphsRender: 'sprint-coder:graphs:render',
   graphsGet: 'sprint-coder:graphs:get',
+  graphsGeneration: 'sprint-coder:graphs:generation',
+  graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',
   graphsCancel: 'sprint-coder:graphs:cancel',
