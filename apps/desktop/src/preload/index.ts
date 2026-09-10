@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
+  graphRenderInputSchema,
+  graphGetInputSchema,
+  graphReleaseInputSchema,
+  graphViewSchema,
   IPC_CHANNELS,
   anthropicConnectionCreateInputSchema,
   appInfoSchema,
@@ -268,6 +272,27 @@ window.addEventListener(
 );
 
 const api: SprintCoderApi = {
+  graphs: {
+    render: (input) =>
+      invoke(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, input),
+    get: (taskId) =>
+      invoke(IPC_CHANNELS.graphsGet, graphGetInputSchema, graphViewSchema.nullable(), { taskId }),
+    cancel: (taskId) =>
+      invoke(IPC_CHANNELS.graphsCancel, graphGetInputSchema, z.undefined(), { taskId }),
+    release: (taskId, instanceId) =>
+      invoke(IPC_CHANNELS.graphsRelease, graphReleaseInputSchema, z.undefined(), {
+        taskId,
+        instanceId,
+      }),
+    subscribe: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        const parsed = graphViewSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.graphsUpdated, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.graphsUpdated, handler);
+    },
+  },
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
   computerUse: {
     availability: () =>

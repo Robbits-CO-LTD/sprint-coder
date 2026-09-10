@@ -9,7 +9,14 @@ import {
   type IpcMainInvokeEvent,
   type MessagePortMain,
 } from 'electron';
+import {
+  graphRenderInputSchema,
+  graphGetInputSchema,
+  graphReleaseInputSchema,
+  graphViewSchema,
+} from '@sprint-coder/contracts';
 import { createHash, randomUUID } from 'node:crypto';
+import type { GraphRenderService } from './graph-render';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import {
@@ -1026,6 +1033,7 @@ export class IpcRouter {
     providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
     computerUseNative: ComputerUseNativeHost = createUnavailableComputerUseNativeHost(),
     computerUseActivationGate?: ComputerUseUserActivationGate,
+    private readonly graphs: GraphRenderService | null = null,
   ) {
     this.providerEndpointPolicy = providerEndpointPolicy;
     this.providerEndpointChallenges = new ProviderEndpointConsentChallenges(providerEndpointPolicy);
@@ -1743,6 +1751,37 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.handle(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, (input) =>
+      this.updateInstallMutationGate.run(async () => {
+        this.persistence.getTask(input.taskId);
+        if (this.graphs === null) throw new Error('Graph renderer is unavailable');
+        const view = await this.graphs.render(input);
+        if (!this.window.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.graphsUpdated, view);
+        return view;
+      }),
+    );
+    this.handle(
+      IPC_CHANNELS.graphsGet,
+      graphGetInputSchema,
+      graphViewSchema.nullable(),
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        return this.graphs?.get(input.taskId) ?? null;
+      },
+    );
+    this.handle(IPC_CHANNELS.graphsCancel, graphGetInputSchema, z.undefined(), (input) =>
+      this.updateInstallMutationGate.run(() => {
+        this.persistence.getTask(input.taskId);
+        this.graphs?.cancel(input.taskId);
+      }),
+    );
+    this.handle(IPC_CHANNELS.graphsRelease, graphReleaseInputSchema, z.undefined(), (input) =>
+      this.updateInstallMutationGate.run(() => {
+        this.persistence.getTask(input.taskId);
+        this.graphs?.release(input.taskId, input.instanceId);
+      }),
+    );
     ipcMain.on(IPC_CHANNELS.computerUseActivationIntent, this.handleComputerUseActivationIntent);
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
@@ -4275,10 +4314,15 @@ export class IpcRouter {
     await this.compatibleRuntime.dispose();
     await this.managedLocalProviderRuntime?.dispose();
     this.claudeRuntime.dispose();
+    this.graphs?.dispose();
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
+  }
+
+  graphArtifactResponse(url: URL): Response {
+    return this.graphs?.response(url) ?? new Response('Not found', { status: 404 });
   }
 
   getActiveTurnsForUpdate(): readonly {

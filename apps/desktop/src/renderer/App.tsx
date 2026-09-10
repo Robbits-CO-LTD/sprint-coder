@@ -3,6 +3,7 @@ import './index.css';
 import { useAppStore } from './store/appStore';
 import { Sidebar } from './components/Sidebar';
 import { TaskHeader } from './components/TaskHeader';
+import { GraphPanel } from './components/GraphPanel';
 import { SurfaceLayer, captureSurfaceState } from './components/ChatSurface/SurfaceLayer';
 import type { CapturedSurfaceState } from './components/ChatSurface/SurfaceLayer';
 import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
@@ -96,6 +97,7 @@ export default function App() {
     readStoredTeamViewPreference,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
   const [setupComplete] = useState(readSetupComplete);
   const [setupReveal, setSetupReveal] = useState(false);
   const setupWasVisibleRef = useRef(false);
@@ -342,6 +344,8 @@ export default function App() {
             ) : selectedTask ? (
               <>
                 <TaskHeader
+                  graphOpen={graphOpen}
+                  onToggleGraph={() => setGraphOpen((value) => !value)}
                   task={selectedTask}
                   onToggleTeam={requestEnterTeam}
                   {...(computerUse.enabled
@@ -401,6 +405,18 @@ export default function App() {
               onSwitchToListView={switchToListView}
             />
           )}
+          {graphOpen && selectedTask && !teamViewOpen ? (
+            <GraphPanel
+              key={selectedTask.id}
+              taskId={selectedTask.id}
+              onClose={() => {
+                setGraphOpen(false);
+                requestAnimationFrame(() =>
+                  document.querySelector<HTMLElement>('[data-testid="graph-toggle"]')?.focus(),
+                );
+              }}
+            />
+          ) : null}
           {teamListActive && selectedTask && (
             <TeamListView
               task={selectedTask}

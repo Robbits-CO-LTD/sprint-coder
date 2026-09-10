@@ -3625,6 +3625,42 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
     z.object({ ok: z.literal(false), requestId: idSchema, error: publicErrorSchema }).strict(),
   ]);
 
+export const graphRenderInputSchema = z
+  .object({ taskId: idSchema, diagram: z.record(z.string(), z.unknown()) })
+  .strict();
+export const graphGetInputSchema = z.object({ taskId: idSchema }).strict();
+export const graphReleaseInputSchema = graphGetInputSchema
+  .extend({ instanceId: z.string().uuid() })
+  .strict();
+export const graphElementIdSchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u);
+export const graphViewSchema = z
+  .object({
+    id: z.string().uuid(),
+    taskId: idSchema,
+    revision: z.number().int().positive(),
+    title: z.string().min(1).max(160),
+    kind: z.enum(['architecture', 'workflow']),
+    digest: digestSchema,
+    instanceId: z.string().uuid(),
+    viewRevision: z.number().int().positive(),
+    artifactUrl: z.string().regex(/^app:\/\/graph\/[a-f0-9-]{36}\?theme=dark$/u),
+    nodeIds: z.array(graphElementIdSchema).min(1).max(64),
+    edgeIds: z.array(graphElementIdSchema).max(192),
+  })
+  .strict();
+export type GraphView = z.infer<typeof graphViewSchema>;
+export type GraphRenderInput = z.infer<typeof graphRenderInputSchema>;
+export const graphSelectionSchema = z
+  .object({
+    type: z.literal('sprint-graph-selection'),
+    instanceId: z.string().uuid(),
+    graphId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    kind: z.enum(['node', 'edge']),
+    id: graphElementIdSchema,
+  })
+  .strict();
+export type GraphSelection = z.infer<typeof graphSelectionSchema>;
 export const emptyPayloadSchema = z.object({}).strict();
 export const skillProviderSchema = z.enum(['claude', 'agents']);
 export const skillCatalogItemSchema = z
@@ -5066,6 +5102,13 @@ export type ComputerUseApi = {
 };
 
 export interface SprintCoderApi {
+  graphs: {
+    render(input: GraphRenderInput): Promise<GraphView>;
+    get(taskId: string): Promise<GraphView | null>;
+    cancel(taskId: string): Promise<void>;
+    release(taskId: string, instanceId: string): Promise<void>;
+    subscribe(listener: (view: GraphView) => void): () => void;
+  };
   /** Optional until the gated Computer Use capability is exposed by Main/Preload. */
   computerUse?: ComputerUseApi;
   app: { getInfo(): Promise<AppInfo> };
@@ -5381,6 +5424,11 @@ export interface SprintCoderApi {
 }
 
 export const IPC_CHANNELS = {
+  graphsRender: 'sprint-coder:graphs:render',
+  graphsGet: 'sprint-coder:graphs:get',
+  graphsCancel: 'sprint-coder:graphs:cancel',
+  graphsRelease: 'sprint-coder:graphs:release',
+  graphsUpdated: 'sprint-coder:graphs:updated',
   appGetInfo: 'sprint-coder:app:get-info',
   tasksList: 'sprint-coder:tasks:list',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */

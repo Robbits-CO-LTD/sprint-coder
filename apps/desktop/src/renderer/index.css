@@ -1715,6 +1715,56 @@ button {
 }
 
 /* ---------- Main / Task header ---------- */
+.graph-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 min(52vw, 900px);
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-subtle);
+  overflow: auto;
+}
+.graph-panel > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+}
+.graph-panel > header small {
+  display: block;
+  color: var(--text-secondary);
+}
+.graph-panel > header > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.graph-panel > header button {
+  flex-shrink: 0;
+}
+.graph-panel iframe {
+  flex: 1;
+  width: 100%;
+  min-height: 220px;
+  border: 0;
+}
+.graph-panel > section {
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+.graph-panel textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+@media (max-width: 900px) {
+  .graph-panel {
+    position: absolute;
+    inset: 46px 0 0;
+    z-index: 20;
+  }
+}
+
 .main {
   flex: 1;
   display: flex;

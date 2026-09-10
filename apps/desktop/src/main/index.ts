@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { dirname, extname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IpcRouter } from './ipc';
+import { GraphRenderService } from './graph-render';
 import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
@@ -152,7 +153,7 @@ if (squirrelStartup || !hasLock) {
     .then(async () => {
       if (process.platform === 'darwin' && usesHiddenWindowPresentation())
         app.setActivationPolicy('prohibited');
-      if (!isDevelopment) registerProductionProtocol();
+      registerProductionProtocol();
       const managedLocalBundle = await initializeManagedLocalSidecarCapability();
       if (managedLocalBundle !== null) initializeManagedLocalLifecycle(managedLocalBundle);
       const nativeSafeFsLockDirectory = await prepareNativeSafeFsLockDirectory(
@@ -226,6 +227,13 @@ if (squirrelStartup || !hasLock) {
         managedLocalController,
         undefined,
         computerUseNativeHost,
+        undefined,
+        new GraphRenderService({
+          vendorRoot: join(app.getAppPath(), 'vendor', 'archify'),
+          workRoot: join(app.getPath('userData'), 'graph-render'),
+          workerPath: join(__dirname, 'graph-render-host.js'),
+          parentOrigin: trustedOrigin,
+        }),
       );
       await router.initialize();
       router.register();
@@ -738,9 +746,13 @@ async function wireEditSagaRecovery(
 
 function registerProductionProtocol(): void {
   const rendererRoot = join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}`);
-  const resources = buildResourceManifest(rendererRoot);
+  const resources = isDevelopment ? new Map<string, string>() : buildResourceManifest(rendererRoot);
   protocol.handle('app', async (request) => {
     const url = new URL(request.url);
+    if (url.host === 'graph')
+      return request.method === 'GET'
+        ? (router?.graphArtifactResponse(url) ?? new Response('Not found', { status: 404 }))
+        : new Response('Not found', { status: 404 });
     const key = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
     const filePath = resources.get(key);
     if (url.host !== 'bundle' || filePath === undefined)
@@ -749,7 +761,7 @@ function registerProductionProtocol(): void {
     const headers = new Headers(response.headers);
     headers.set(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-src app://graph; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     );
     headers.set('Content-Type', mimeType(filePath));
     return new Response(response.body, { status: response.status, headers });

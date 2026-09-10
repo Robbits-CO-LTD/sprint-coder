@@ -5,6 +5,9 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  graphRenderInputSchema,
+  graphGetInputSchema,
+  graphReleaseInputSchema,
   anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
   computerUseApprovalResolveInputSchema,
@@ -5042,6 +5045,10 @@ describe('isTrustedIpcSender', () => {
 // ipcMain.on messages in index.ts. None are bound to an ipcMain.handle envelope schema, so they are
 // deliberately excluded and asserted absent below.
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
+  [IPC_CHANNELS.graphsRender]: graphRenderInputSchema,
+  [IPC_CHANNELS.graphsGet]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsCancel]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsRelease]: graphReleaseInputSchema,
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
   [IPC_CHANNELS.runtimeFailureDiagnosticGet]: runtimeFailureDiagnosticQuerySchema,
   [IPC_CHANNELS.settingsGetRuntime]: emptyPayloadSchema,
@@ -5191,6 +5198,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
 // Channels owned directly by Main or sent from Main to Renderer do not pass through IpcRouter's
 // command-envelope parser, so they are intentionally outside the adversarial input-schema table.
 const NON_ROUTER_CHANNELS = new Set<string>([
+  IPC_CHANNELS.graphsUpdated,
   IPC_CHANNELS.tasksUpdated,
   IPC_CHANNELS.teamsEvent,
   IPC_CHANNELS.turnsPort,
