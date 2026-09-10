@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatProviderToolResult } from './provider-tool-result';
+import { assessProviderDisclosure } from './provider-disclosure-classifier';
 
 const content = 'def example():\n\treturn "quoted"\n# Preserve literal \\n';
 const read = {
@@ -69,5 +70,78 @@ describe('Provider tool result text', () => {
     });
     expect(output).not.toContain('abcdefghijklmnop');
     expect(output).toContain('[REDACTED]');
+  });
+});
+
+describe('Ollama command diagnostic disclosure', () => {
+  const root = '/Users/yusei/sc-packaged-acceptance-20260909/workspaces/ollama';
+  const diagnostic = 'File "' + root + '/pricing.py", line 9\\nSyntaxError: unexpected character';
+  it('redacts blocked command text while preserving failure metadata and the raw result', () => {
+    const result = {
+      executionId: 'command-1',
+      exitCode: 1,
+      stdout: '',
+      stderr: diagnostic,
+      outputBytes: 200,
+      truncated: false,
+    };
+    const before = structuredClone(result);
+    expect(assessProviderDisclosure(diagnostic).classification).toBe('sensitive');
+    const output = formatProviderToolResult('ollama', 'exec_command', result);
+    expect(assessProviderDisclosure(output).classification).toBe('safe');
+    const parsed = JSON.parse(output).result;
+    expect(parsed).toMatchObject({
+      executionId: 'command-1',
+      exitCode: 1,
+      outputBytes: 200,
+      truncated: false,
+      outputRedacted: true,
+    });
+    expect(parsed.stderr).toContain('SyntaxError: unexpected character');
+    expect(parsed.stderr).toContain('line 9');
+    expect(parsed.stderr).not.toContain(root);
+    expect(result).toEqual(before);
+  });
+  it('redacts polled stdout/stderr chunks and errors without changing cursor or byte metadata', () => {
+    const token = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+    const result = {
+      sessionId: 'session-1',
+      state: 'failed',
+      nextCursor: 2,
+      result: null,
+      error: diagnostic,
+      chunks: [
+        { seq: 1, stream: 'stdout', text: token, byteLength: token.length },
+        { seq: 2, stream: 'stderr', text: diagnostic, byteLength: 200 },
+      ],
+    };
+    const before = structuredClone(result);
+    const output = formatProviderToolResult('ollama', 'poll_command', result);
+    expect(assessProviderDisclosure(output).classification).toBe('safe');
+    const parsed = JSON.parse(output).result;
+    expect(parsed).toMatchObject({ sessionId: 'session-1', nextCursor: 2, outputRedacted: true });
+    expect(
+      parsed.chunks.map(({ seq, byteLength }: { seq: number; byteLength: number }) => ({
+        seq,
+        byteLength,
+      })),
+    ).toEqual([
+      { seq: 1, byteLength: token.length },
+      { seq: 2, byteLength: 200 },
+    ]);
+    expect(output).not.toContain(token);
+    expect(result).toEqual(before);
+  });
+  it('keeps safe command output byte-for-byte without a redaction marker', () => {
+    const result = {
+      exitCode: 0,
+      stdout: 'SC_PACKAGE_OK:round1:og12b6\\n',
+      stderr: '',
+      truncated: false,
+    };
+    expect(JSON.parse(formatProviderToolResult('ollama', 'exec_command', result))).toEqual({
+      ok: true,
+      result,
+    });
   });
 });
