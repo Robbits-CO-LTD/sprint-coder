@@ -4,6 +4,7 @@ import { GRAPH_TOOLS, createGraphToolBoundary } from './graph-tools';
 
 const context = { taskId: 'task-a', turnId: 'turn-a', workspaceId: null, policyEpoch: 1 };
 const input = {
+  sources: [],
   expectedRenderRevision: 0,
   diagram: {
     schema_version: 1,
@@ -35,6 +36,14 @@ describe('Task graph tools in the managed harness', () => {
     expect(signal?.aborted).toBe(true);
     expect(await pending).toBeInstanceOf(Error);
     expect(publish).not.toHaveBeenCalled();
+    const revoked = boundary
+      .propose(input, { ...context, turnId: 'turn-policy' }, { callId: 'policy' })
+      .catch((error: unknown) => error);
+    boundary.policyEpochChanged!('other-task');
+    expect(signal?.aborted).toBe(false);
+    boundary.policyEpochChanged!(context.taskId);
+    expect(signal?.aborted).toBe(true);
+    expect(await revoked).toBeInstanceOf(Error);
     render.mockClear();
     const closed = createGraphToolBoundary(service, publish, async () => {
       throw new Error('installing');
@@ -93,6 +102,7 @@ describe('Task graph tools in the managed harness', () => {
         input,
         context,
         expect.objectContaining({ callId: 'propose', signal: controller.signal }),
+        [],
       );
       await expect(
         harness.broker.dispatch({

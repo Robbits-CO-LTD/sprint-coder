@@ -8,6 +8,7 @@ const kindLabels = {
   phase: '段階',
   group: 'グループ',
   diagram: '図の情報',
+  source: '根拠参照',
 };
 const actionLabels = { added: '追加', removed: '削除', changed: '変更' };
 const fieldLabels = new Map(
@@ -36,6 +37,16 @@ const fieldLabels = new Map(
     legend: '凡例',
     engineering_profile: '設計の検査条件',
     views: '表示ガイド',
+    excerpt: '参照コード',
+    contentHash: 'ファイル内容ハッシュ',
+    excerptHash: '参照範囲ハッシュ',
+    rootIdentityDigest: 'Workspaceの識別情報',
+    rootId: 'Workspace',
+    path: 'ファイル',
+    lineStart: '開始行',
+    lineEnd: '終了行',
+    elementKind: '参照先の種類',
+    elementId: '参照先',
   }),
 );
 

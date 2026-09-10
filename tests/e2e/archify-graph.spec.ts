@@ -1,6 +1,135 @@
 import { expect, test } from '@playwright/test';
-import { writeFile } from 'node:fs/promises';
-import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  closeApp,
+  createUserDataDir,
+  firstWindow,
+  launchApp,
+  removeUserDataDir,
+  assignCurrentTaskToProjectFolder,
+  REPO_ROOT,
+} from './helpers';
+
+test('binds an authorized file read and detects changed source bytes after restart', async () => {
+  const profile = createUserDataDir('graph-source-proposal');
+  const workspace = await mkdtemp(
+    join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-source-'),
+  );
+  await writeFile(
+    join(workspace, 'graph-source.ts'),
+    'export function readConfig() {\n  return "config";\n}\n',
+  );
+  let app = await launchApp(profile, undefined, {
+    SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+    PATH: '',
+    Path: '',
+  });
+  try {
+    const page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+    await assignCurrentTaskToProjectFolder(page, 'Graph sources', workspace);
+    const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
+    await page.getByTestId('composer-textarea').fill('[fixture:graph-source-proposal]');
+    await page.getByTestId('composer-send-button').click();
+    await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
+    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
+      timeout: 30000,
+    });
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+    await page.getByTestId('graph-toggle').click();
+    const frame = page.frameLocator('[data-testid="graph-frame"]');
+    await frame.locator('[data-node-id="api"]').first().click();
+    const sources = page.getByTestId('graph-sources');
+    await sources.locator('summary').click();
+    await sources.getByRole('button', { name: '現在の内容を確認' }).click();
+    await expect(sources.getByTestId('graph-source-status')).toContainText('現在のファイルと一致');
+    await writeFile(
+      join(workspace, 'graph-source.ts'),
+      'export function readConfig() {\n  return "changed";\n}\n',
+    );
+    await sources.getByRole('button', { name: '再確認' }).click();
+    await expect(sources.getByTestId('graph-source-status')).toContainText('ファイルが変更');
+    await expect(sources).toContainText('return "config"');
+    await expect(sources).toContainText('return "changed"');
+    await page.screenshot({ path: test.info().outputPath('source-changed.png') });
+    await closeApp(app);
+    app = await launchApp(profile, undefined, {
+      SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+      PATH: '',
+      Path: '',
+    });
+    const reopened = await firstWindow(app);
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+    await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
+    await reopened.getByTestId('graph-toggle').click();
+    await reopened
+      .frameLocator('[data-testid="graph-frame"]')
+      .locator('[data-node-id="api"]')
+      .first()
+      .click();
+    const restored = reopened.getByTestId('graph-sources');
+    await restored.locator('summary').click();
+    await expect(restored).toContainText('return "config"');
+    await restored.getByRole('button', { name: '現在の内容を確認' }).click();
+    await expect(restored.getByTestId('graph-source-status')).toContainText('ファイルが変更');
+    const original = await reopened.evaluate(
+      async (id) =>
+        (
+          await window.sprintCoder!.graphs.sources({
+            taskId: id,
+            renderRevision: 1,
+            elementKind: 'node',
+            elementId: 'api',
+          })
+        )[0]!,
+      taskId,
+    );
+    await reopened
+      .getByTestId('graph-panel')
+      .getByRole('button', { name: '閉じる', exact: true })
+      .click();
+    await reopened.getByTestId('composer-textarea').fill('[fixture:graph-source-proposal]');
+    await reopened.getByTestId('composer-send-button').click();
+    await reopened.getByRole('button', { name: '今回のみ許可', exact: true }).click();
+    await expect(reopened.getByTestId('assistant-message')).toHaveCount(2);
+    await expect(reopened.getByTestId('assistant-message').last()).toContainText(
+      'GRAPH_TOOL_FLOW_OK',
+    );
+    const updated = await reopened.evaluate(
+      async (id) =>
+        (
+          await window.sprintCoder!.graphs.sources({
+            taskId: id,
+            renderRevision: 2,
+            elementKind: 'node',
+            elementId: 'api',
+          })
+        )[0]!,
+      taskId,
+    );
+    expect(updated.id).toBe(original.id);
+    expect(updated.contentHash).not.toBe(original.contentHash);
+    await reopened.getByTestId('graph-toggle').click();
+    await reopened.getByTestId('graph-history').locator('summary').click();
+    await expect(reopened.getByTestId('graph-diff')).toContainText('参照コード');
+    await expect(reopened.getByTestId('graph-diff')).toContainText('return "config"');
+    await expect(reopened.getByTestId('graph-diff')).toContainText('return "changed"');
+  } finally {
+    await closeApp(app);
+    removeUserDataDir(profile);
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
 
 test('the model tool path proposes and reads back a draft through the real Main service', async () => {
   const profile = createUserDataDir('graph-tool-proposal');

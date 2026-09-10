@@ -9,6 +9,10 @@ import {
   graphCompareInputSchema,
   graphDiffSchema,
   graphGenerationSchema,
+  graphSourceRefSchema,
+  graphSourcesInputSchema,
+  graphSourcePreviewInputSchema,
+  graphSourcePreviewSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -279,6 +283,20 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    sources: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsSources,
+        graphSourcesInputSchema,
+        z.array(graphSourceRefSchema).max(64),
+        input,
+      ),
+    previewSource: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsSourcePreview,
+        graphSourcePreviewInputSchema,
+        graphSourcePreviewSchema,
+        input,
+      ),
     render: (input) =>
       invoke(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, input),
     get: (taskId) =>

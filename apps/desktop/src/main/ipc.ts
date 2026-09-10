@@ -18,6 +18,10 @@ import {
   graphCompareInputSchema,
   graphDiffSchema,
   graphGenerationSchema,
+  graphSourceRefSchema,
+  graphSourcesInputSchema,
+  graphSourcePreviewInputSchema,
+  graphSourcePreviewSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -604,6 +608,7 @@ import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor'
 import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
+import { previewGraphSource } from './graph-source-preview';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -1771,6 +1776,41 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.handle(
+      IPC_CHANNELS.graphsSources,
+      graphSourcesInputSchema,
+      z.array(graphSourceRefSchema).max(64),
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        const document = this.graphs?.document(input.taskId, input.renderRevision);
+        if (!document) throw new Error('Graph version not found');
+        return document.sources.filter(
+          (source) =>
+            source.elementKind === input.elementKind && source.elementId === input.elementId,
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsSourcePreview,
+      graphSourcePreviewInputSchema,
+      graphSourcePreviewSchema,
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        const source = this.graphs
+          ?.document(input.taskId, input.renderRevision)
+          ?.sources.find((entry) => entry.id === input.sourceId);
+        if (!source) throw new Error('Graph source not found');
+        const root = resolveEffectiveWorkspaceRoot(
+          this.persistence.getEffectiveWorkspaceSet(input.taskId),
+          source.rootId,
+        );
+        return previewGraphSource(
+          source,
+          root?.path ?? null,
+          this.persistence.getPermissionPolicy(input.taskId).policyEpoch,
+        );
+      },
+    );
     this.graphGenerationUnsubscribe =
       this.graphs?.subscribeGeneration((generation) => {
         if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())

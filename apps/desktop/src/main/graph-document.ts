@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   graphDocumentSchema,
+  graphSourceRefSchema,
+  type GraphSourceRef,
   type GraphDocument,
   type GraphGeneration,
 } from '@sprint-coder/contracts';
@@ -134,19 +136,31 @@ export function canonicalGraphJson(value: unknown): string {
   return JSON.stringify(stable(value)) ?? '';
 }
 
-export function graphSemanticDigest(diagram: Record<string, unknown>): string {
-  return createHash('sha256')
-    .update(canonicalGraphJson(graphSemanticProjection(diagram)))
-    .digest('hex');
+export function graphSemanticDigest(
+  diagram: Record<string, unknown>,
+  sources: readonly GraphSourceRef[] = [],
+): string {
+  const projection = graphSemanticProjection(diagram);
+  const content =
+    sources.length === 0
+      ? projection
+      : {
+          diagram: projection,
+          sources: byId(sources.map(({ observedAt: _observedAt, ...source }) => source)),
+        };
+  return createHash('sha256').update(canonicalGraphJson(content)).digest('hex');
 }
 
 export function nextGraphDocument(
   taskId: string,
   diagram: Record<string, unknown>,
   prior: GraphDocument | null,
+  sourceRefs: readonly GraphSourceRef[] = [],
 ): GraphDocument {
   const input = prepareGraphInput({ taskId, diagram });
-  const digest = graphSemanticDigest(input.diagram);
+  const sources = sourceRefs.map((source) => graphSourceRefSchema.parse(source));
+  validateSources(sources, input.nodeIds, input.edgeIds);
+  const digest = graphSemanticDigest(input.diagram, sources);
   const now = new Date().toISOString();
   return graphDocumentSchema.parse({
     id: prior?.id ?? randomUUID(),
@@ -157,6 +171,7 @@ export function nextGraphDocument(
     renderRevision: (prior?.renderRevision ?? 0) + 1,
     semanticDigest: digest,
     diagram: input.diagram,
+    sources,
     createdAt: prior?.createdAt ?? now,
     updatedAt: now,
   });
@@ -168,10 +183,11 @@ export function parseStoredGraphDocument(value: unknown): GraphDocument {
   if (
     document.kind !== input.kind ||
     document.title !== input.title ||
-    document.semanticDigest !== graphSemanticDigest(input.diagram) ||
+    document.semanticDigest !== graphSemanticDigest(input.diagram, document.sources) ||
     document.semanticRevision > document.renderRevision
   )
     throw new Error('Graph document content mismatch');
+  validateSources(document.sources, input.nodeIds, input.edgeIds);
   return document;
 }
 
@@ -181,7 +197,7 @@ export function validateGraphDocumentWrite(
   expectedRenderRevision: number,
 ): GraphDocument {
   const parsed = graphDocumentSchema.parse(document);
-  const expected = nextGraphDocument(parsed.taskId, parsed.diagram, prior);
+  const expected = nextGraphDocument(parsed.taskId, parsed.diagram, prior, parsed.sources);
   if (
     (prior?.renderRevision ?? 0) !== expectedRenderRevision ||
     parsed.renderRevision !== expected.renderRevision ||
@@ -193,4 +209,21 @@ export function validateGraphDocumentWrite(
   )
     throw new Error('Graph document revision conflict');
   return parsed;
+}
+
+function validateSources(
+  sources: readonly GraphSourceRef[],
+  nodeIds: readonly string[],
+  edgeIds: readonly string[],
+): void {
+  if (sources.length > 64 || new Set(sources.map((source) => source.id)).size !== sources.length)
+    throw new Error('Invalid graph source inventory');
+  for (const source of sources) {
+    if (
+      !(source.elementKind === 'node' ? nodeIds : edgeIds).includes(source.elementId) ||
+      Buffer.byteLength(source.excerpt) > 16384 ||
+      createHash('sha256').update(source.excerpt).digest('hex') !== source.excerptHash
+    )
+      throw new Error('Invalid graph source binding');
+  }
 }

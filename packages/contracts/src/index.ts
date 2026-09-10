@@ -3636,6 +3636,72 @@ export const graphReleaseInputSchema = graphGetInputSchema
   .extend({ instanceId: z.string().uuid() })
   .strict();
 export const graphElementIdSchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u);
+export const graphSourceRequestSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('read'),
+      tokenId: z.string().uuid(),
+      elementKind: z.enum(['node', 'edge']),
+      elementId: graphElementIdSchema,
+      lineStart: z.number().int().positive(),
+      lineEnd: z.number().int().positive(),
+    })
+    .strict(),
+  z.object({ kind: z.literal('saved'), sourceId: z.string().uuid() }).strict(),
+]);
+export type GraphSourceRequest = z.infer<typeof graphSourceRequestSchema>;
+export const graphSourceRefSchema = z
+  .object({
+    id: z.string().uuid(),
+    elementKind: z.enum(['node', 'edge']),
+    elementId: graphElementIdSchema,
+    rootId: idSchema,
+    rootIdentityDigest: digestSchema,
+    path: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine(
+        (value) =>
+          !value.startsWith('/') &&
+          !value.includes('\\') &&
+          !value.includes('\0') &&
+          value.split('/').every((part) => part !== '..' && part !== '.' && part.length > 0),
+      ),
+    lineStart: z.number().int().positive(),
+    lineEnd: z.number().int().positive(),
+    contentHash: digestSchema,
+    excerptHash: digestSchema,
+    excerpt: z.string().max(16384),
+    observedAt: z.string().datetime(),
+  })
+  .strict()
+  .refine((value) => value.lineStart <= value.lineEnd);
+export type GraphSourceRef = z.infer<typeof graphSourceRefSchema>;
+export const graphSourcesInputSchema = z
+  .object({
+    taskId: idSchema,
+    renderRevision: z.number().int().positive(),
+    elementKind: z.enum(['node', 'edge']),
+    elementId: graphElementIdSchema,
+  })
+  .strict();
+export const graphSourcePreviewInputSchema = z
+  .object({
+    taskId: idSchema,
+    renderRevision: z.number().int().positive(),
+    sourceId: z.string().uuid(),
+  })
+  .strict();
+export const graphSourcePreviewSchema = z
+  .object({
+    source: graphSourceRefSchema,
+    status: z.enum(['current', 'changed', 'root_changed', 'missing', 'unavailable']),
+    currentExcerpt: z.string().max(16384).nullable(),
+    truncated: z.boolean(),
+  })
+  .strict();
+export type GraphSourcePreview = z.infer<typeof graphSourcePreviewSchema>;
 export const graphDocumentSchema = z
   .object({
     id: z.string().uuid(),
@@ -3646,6 +3712,7 @@ export const graphDocumentSchema = z
     renderRevision: z.number().int().positive(),
     semanticDigest: digestSchema,
     diagram: z.record(z.string(), z.unknown()),
+    sources: z.array(graphSourceRefSchema).max(64).default([]),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
@@ -3715,7 +3782,7 @@ export const graphDiffSchema = z
       .array(
         z
           .object({
-            kind: z.enum(['node', 'edge', 'lane', 'phase', 'group', 'diagram']),
+            kind: z.enum(['node', 'edge', 'lane', 'phase', 'group', 'diagram', 'source']),
             id: z.string().max(4000).nullable(),
             action: z.enum(['added', 'removed', 'changed']),
             beforeLabel: z.string().max(4000).nullable(),
@@ -3734,7 +3801,7 @@ export const graphDiffSchema = z
           })
           .strict(),
       )
-      .max(2050),
+      .max(2180),
   })
   .strict();
 export type GraphHistoryInput = z.infer<typeof graphHistoryInputSchema>;
@@ -3764,6 +3831,7 @@ export const graphProposeToolInputSchema = z
   .object({
     diagram: z.record(z.string(), z.unknown()),
     expectedRenderRevision: z.number().int().nonnegative(),
+    sources: z.array(graphSourceRequestSchema).max(64).default([]),
   })
   .strict();
 export const graphReadToolInputSchema = z
@@ -3774,6 +3842,46 @@ export const GRAPH_PROPOSE_TOOL_INPUT_JSON_SCHEMA = {
   properties: {
     diagram: { type: 'object' },
     expectedRenderRevision: { type: 'integer', minimum: 0 },
+    sources: {
+      type: 'array',
+      maxItems: 64,
+      items: {
+        type: 'object',
+        properties: {
+          kind: { enum: ['read', 'saved'] },
+          tokenId: { type: 'string' },
+          sourceId: { type: 'string' },
+          elementKind: { enum: ['node', 'edge'] },
+          elementId: { type: 'string' },
+          lineStart: { type: 'integer', minimum: 1 },
+          lineEnd: { type: 'integer', minimum: 1 },
+        },
+        required: ['kind'],
+        additionalProperties: false,
+        allOf: [
+          {
+            if: { properties: { kind: { const: 'read' } }, required: ['kind'] },
+            then: {
+              required: ['tokenId', 'elementKind', 'elementId', 'lineStart', 'lineEnd'],
+              not: { required: ['sourceId'] },
+            },
+          },
+          {
+            if: { properties: { kind: { const: 'saved' } }, required: ['kind'] },
+            then: {
+              required: ['sourceId'],
+              allOf: [
+                { not: { required: ['tokenId'] } },
+                { not: { required: ['elementKind'] } },
+                { not: { required: ['elementId'] } },
+                { not: { required: ['lineStart'] } },
+                { not: { required: ['lineEnd'] } },
+              ],
+            },
+          },
+        ],
+      },
+    },
   },
   required: ['diagram', 'expectedRenderRevision'],
   additionalProperties: false,
@@ -5239,6 +5347,10 @@ export interface SprintCoderApi {
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
     generation(taskId: string): Promise<GraphGeneration | null>;
+    sources(input: z.infer<typeof graphSourcesInputSchema>): Promise<GraphSourceRef[]>;
+    previewSource(
+      input: z.infer<typeof graphSourcePreviewInputSchema>,
+    ): Promise<GraphSourcePreview>;
     subscribeGeneration(listener: (generation: GraphGeneration) => void): () => void;
     history(input: GraphHistoryInput): Promise<GraphHistory>;
     compare(input: GraphCompareInput): Promise<GraphDiff>;
@@ -5564,6 +5676,8 @@ export const IPC_CHANNELS = {
   graphsRender: 'sprint-coder:graphs:render',
   graphsGet: 'sprint-coder:graphs:get',
   graphsGeneration: 'sprint-coder:graphs:generation',
+  graphsSources: 'sprint-coder:graphs:sources',
+  graphsSourcePreview: 'sprint-coder:graphs:source-preview',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

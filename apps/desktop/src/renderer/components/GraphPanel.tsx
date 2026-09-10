@@ -4,6 +4,7 @@ import { useAppStore } from '../store/appStore';
 import { acceptGraphSelection } from '../lib/graph-selection';
 import { GraphHistoryPanel } from './GraphHistoryPanel';
 import { GraphGenerationNotice } from './GraphGenerationNotice';
+import { GraphSourcesPanel } from './GraphSourcesPanel';
 import { acceptGraphGeneration } from '../lib/graph-generation';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
@@ -159,6 +160,13 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
       ) : null}
       {view ? <GraphHistoryPanel key={`${view.id}:${view.renderRevision}`} view={view} /> : null}
       <section className="graph-comment" aria-label="選択箇所へのコメント">
+        {view && selection ? (
+          <GraphSourcesPanel
+            key={`${view.id}:${view.renderRevision}:${selection.kind}:${selection.id}`}
+            view={view}
+            selection={selection}
+          />
+        ) : null}
         <p className="settings-hint" data-testid="graph-selection">
           {selection
             ? `選択: ${selection.kind === 'node' ? 'ノード' : '接続'} ${selection.id}`

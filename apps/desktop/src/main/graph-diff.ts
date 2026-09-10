@@ -114,6 +114,11 @@ export function compareGraphDocuments(oldValue: GraphDocument, newValue: GraphDo
     Object.fromEntries(Object.entries(oldProjection).filter(([key]) => !recordKeys.has(key))),
     Object.fromEntries(Object.entries(newProjection).filter(([key]) => !recordKeys.has(key))),
   );
+  const sourceRecord = (source: GraphDocument['sources'][number]) => {
+    const { observedAt: _observedAt, ...fields } = source;
+    return { ...fields, label: `${source.path}:${source.lineStart}-${source.lineEnd}` };
+  };
+  compareRecords('source', before.sources.map(sourceRecord), after.sources.map(sourceRecord));
   const contentChanged = before.semanticDigest !== after.semanticDigest;
   return graphDiffSchema.parse({
     graphId: before.id,

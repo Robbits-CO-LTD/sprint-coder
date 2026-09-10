@@ -8,6 +8,7 @@ import type {
   GraphView,
   GraphGeneration,
   GraphRenderInput,
+  GraphSourceRef,
 } from '@sprint-coder/contracts';
 import {
   graphHistoryInputSchema,
@@ -65,7 +66,11 @@ export class GraphRenderService {
 
   async render(
     raw: unknown,
-    options: { expectedRenderRevision?: number; signal?: AbortSignal } = {},
+    options: {
+      expectedRenderRevision?: number;
+      signal?: AbortSignal;
+      sources?: readonly GraphSourceRef[];
+    } = {},
   ): Promise<GraphView> {
     options.signal?.throwIfAborted();
     const input = graphRenderInputSchema.parse(raw);
@@ -75,7 +80,7 @@ export class GraphRenderService {
       (prior?.renderRevision ?? 0) !== options.expectedRenderRevision
     )
       throw new Error('Graph version changed; read the current document before proposing again');
-    return this.generate(input, prior, true, options.signal);
+    return this.generate(input, prior, true, options.signal, options.sources);
   }
 
   private async generate(
@@ -83,6 +88,7 @@ export class GraphRenderService {
     priorDocument: GraphDocument | null,
     save: boolean,
     signal?: AbortSignal,
+    sources: readonly GraphSourceRef[] = [],
   ): Promise<GraphView> {
     if (this.closed) throw new Error('Graph renderer is closed');
     const taskId = raw.taskId;
@@ -131,7 +137,7 @@ export class GraphRenderService {
       controller.signal.throwIfAborted();
       const input = prepareGraphInput(raw);
       const document = save
-        ? nextGraphDocument(taskId, input.diagram, priorDocument)
+        ? nextGraphDocument(taskId, input.diagram, priorDocument, sources)
         : priorDocument;
       if (!document) throw new Error('Graph document is unavailable');
       stage = 'engine';

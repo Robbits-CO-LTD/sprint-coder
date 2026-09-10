@@ -137,6 +137,48 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('preserves source snapshots and reads legacy graph rows that predate sources', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Graph source storage');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Source storage' },
+        components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+        connections: [],
+      };
+      const first = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(first, 0);
+      const source = {
+        id: randomUUID(),
+        elementKind: 'node' as const,
+        elementId: 'api',
+        rootId: 'root-a',
+        rootIdentityDigest: 'a'.repeat(64),
+        path: 'code.ts',
+        lineStart: 1,
+        lineEnd: 1,
+        contentHash: 'b'.repeat(64),
+        excerpt: 'const value = 1;',
+        excerptHash: createHash('sha256').update('const value = 1;').digest('hex'),
+        observedAt: '2026-09-11T00:00:00Z',
+      };
+      const second = nextGraphDocument(task.id, diagram, first, [source]);
+      persistence.saveGraphDocument(second, 1);
+      persistence.close();
+      const raw = new Database(path);
+      const { sources: _sources, ...legacy } = first;
+      raw
+        .prepare(
+          'UPDATE graph_document_versions SET document_json = ? WHERE task_id = ? AND render_revision = 1',
+        )
+        .run(JSON.stringify(legacy), task.id);
+      raw.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphDocumentVersion(task.id, 1)).toEqual(first);
+      expect(reopened.getGraphDocument(task.id)).toEqual(second);
+      reopened.close();
+    });
     it('persists graph failures and recovers only unfinished generation attempts', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('Generation lifecycle');

@@ -14,6 +14,7 @@ import {
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
 import { FileRevisionRegistry } from './file-revision';
+import { GraphReadReceipts } from './graph-sources';
 import { GRAPH_TOOLS, registerGraphTools, type GraphToolBoundary } from './graph-tools';
 import {
   createPathGuard,
@@ -415,6 +416,7 @@ type PreparedWorkspaceInput = Readonly<{
 const issuedPreparedInputs = new WeakSet<object>();
 
 export class ManagedCodingHarness {
+  private readonly graphReads = new GraphReadReceipts();
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
   private readonly providersByTurn = new Map<string, string>();
@@ -454,7 +456,14 @@ export class ManagedCodingHarness {
         registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     registerApprovalProbeTool(this.broker);
-    if (deps.graphs) registerGraphTools(this.broker, deps.graphs);
+    if (deps.graphs)
+      registerGraphTools(this.broker, deps.graphs, (requests, context, control) =>
+        this.graphReads.resolve(
+          requests,
+          context,
+          deps.workspaceFor(context.taskId, context.turnId, control.callId)?.digest ?? null,
+        ),
+      );
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
       this.commandSessions = sessions;
@@ -674,6 +683,7 @@ export class ManagedCodingHarness {
   }
 
   async policyEpochChanged(taskId: string): Promise<void> {
+    this.deps.graphs?.policyEpochChanged?.(taskId);
     await this.commandSessions?.terminateTask(taskId);
   }
 
@@ -683,6 +693,7 @@ export class ManagedCodingHarness {
   }
 
   finishTurn(taskId: string, turnId: string): void {
+    this.graphReads.finishTurn(taskId, turnId);
     this.deps.graphs?.finishTurn?.(taskId, turnId);
     this.broker.finishTurn(taskId, turnId);
     this.revisions.finishTurn({ taskId, turnId });
@@ -830,6 +841,21 @@ export class ManagedCodingHarness {
       assessed.redactedContent,
       input.raw as ReturnType<typeof parseWorkspaceInput>,
     );
+    if (this.deps.graphs)
+      this.graphReads.record({
+        context,
+        workspaceDigest: input.workspace.digest,
+        guard: input.guard,
+        observed: this.revisions.observed({
+          owner: context,
+          reference: read.reference,
+          policyEpoch: context.policyEpoch,
+        }),
+        disclosed: assessed.redactedContent,
+        returned: ranged.content,
+        range: ranged.range,
+        observedAt: new Date().toISOString(),
+      });
     return {
       rootId: input.rootId,
       rootLabel: input.rootLabel,
