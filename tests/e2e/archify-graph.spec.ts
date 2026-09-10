@@ -141,8 +141,10 @@ for (const kind of ['architecture', 'workflow'] as const) {
           path: diagnosticsPath,
           contentType: 'application/json',
         });
-        if (testInfo.status !== testInfo.expectedStatus)
-          await graphFrame.page().screenshot({ path: testInfo.outputPath('viewer-failure.png') });
+        // Test status is finalized after this finally block, so capture any still-open
+        // graph here (successful tests already closed it). This also flushes an image
+        // of the actual failing window into the CI artifact, not just its DOM snapshot.
+        await graphFrame.page().screenshot({ path: testInfo.outputPath('viewer-at-cleanup.png') });
       }
       await closeApp(app);
       removeUserDataDir(profile);
