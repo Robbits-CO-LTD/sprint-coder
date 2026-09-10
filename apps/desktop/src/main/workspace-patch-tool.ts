@@ -38,7 +38,7 @@ export const WORKSPACE_PATCH_TOOL: ToolDefinition = createToolDefinition({
   }),
   providerName: 'apply_patch',
   description:
-    'Edit workspace files through the recoverable Edit Saga. Read the file first. A single-file request MUST include the top-level path (workspace-relative filename) AND edits containing exact oldText/newText pairs. Alternatively provide operations for a batch; every update/delete/rename needs the revision returned by read_file (version and tokenId). Never invent a revision. New add operations need content; rename needs destination. After editing, read the file back with read_file before finishing.',
+    'Edit workspace files through the recoverable Edit Saga. Read the file first. A single-file request MUST include the top-level path (workspace-relative filename) AND edits containing exact oldText/newText pairs. Alternatively provide operations for a batch; every update/delete/rename needs the revision returned by read_file (version and tokenId). Never invent a revision. Prefer short, unique single-line anchors copied from the latest read. Multi-line oldText/newText values must contain actual line breaks after decoding, not literal backslash-n text. New add operations need content; rename needs destination. After editing, read the file back with read_file before finishing.',
   kind: 'fileWrite',
   schemaVersion: 1,
   inputSchema: {

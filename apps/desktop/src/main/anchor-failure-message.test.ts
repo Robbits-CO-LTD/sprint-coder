@@ -55,6 +55,15 @@ const SOURCE = [
 ].join('\n');
 
 describe('telling a model why its edit did not apply', () => {
+  it('explains an escaped newline anchor and requests a precise retry', async () => {
+    const message = await messageFor('first\nsecond\n', [
+      { oldText: 'first\\nsecond\\n', newText: 'x' },
+    ]);
+    expect(message).toContain('literal whitespace escapes');
+    expect(message).toContain('oldText and newText');
+    expect(message).toContain('single-line anchor');
+    expect(message).toContain('Do not re-read');
+  });
   it('says which edit of the batch failed', async () => {
     const message = await messageFor(SOURCE, [
       { oldText: '  return input + 1;', newText: 'a' },

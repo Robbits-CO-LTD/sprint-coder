@@ -588,6 +588,7 @@ import { ReasoningBatcher } from './reasoning-batcher';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { RetryableActionRegistry } from './retryable-action';
 import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor';
+import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
@@ -7100,6 +7101,7 @@ export class IpcRouter {
       const seenProviderToolCallIds = new Set<string>();
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
+      let emptyToolRoundRetries = 0;
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
         const executionId = providerTurnCallId(started.turnId, ordinal);
         this.providerExecutionIdByTurn.set(started.turnId, executionId);
@@ -7341,6 +7343,34 @@ export class IpcRouter {
           });
         }
         if (roundError !== undefined) {
+          if (
+            shouldRetryEmptyOllamaToolRound({
+              providerId: connection.providerId,
+              error: roundError,
+              ordinal,
+              retries: emptyToolRoundRetries,
+              hasTools: toolsForRound.length > 0,
+              hasImages: dispatchRound.messages.some(
+                (message) => (message.inlineImages?.length ?? 0) > 0,
+              ),
+              toolCallCount: roundToolCalls.length,
+              outputLength: roundOutput.join('').trim().length,
+              canceled: controller.signal.aborted,
+            })
+          ) {
+            emptyToolRoundRetries += 1;
+            messages.push({
+              role: 'system',
+              content:
+                'The preceding model response contained no usable text or tool calls. Continue the existing request from the completed tool results. Emit a valid reply or a valid call of a declared tool. Do not repeat successful writes or commands, and do not claim success without verification.',
+            });
+            secureLogger.warn('Ollama returned an empty tool round; retrying', {
+              taskId,
+              turnId: started.turnId,
+              attempt: emptyToolRoundRetries,
+            });
+            continue;
+          }
           const canRetryWithoutWorkspaceTools = shouldRetryProviderWithoutTools({
             ordinal,
             workspaceToolsBound: workspaceToolSnapshot !== undefined,
@@ -7467,7 +7497,13 @@ export class IpcRouter {
               if (!isProviderImageBridgeDispatchResult(result))
                 throw new Error('Provider image tool result escaped its private bridge');
               content = result.toolMessage.content;
-            } else content = redactSecrets(JSON.stringify({ ok: true, result }));
+            } else
+              content = formatProviderToolResult(
+                connection.providerId,
+                toolCall.name,
+                result,
+                started.workspaceSet.roots.map((root) => root.path),
+              );
             succeeded = true;
           } catch (error) {
             if (controller.signal.aborted) throw error;
@@ -7478,7 +7514,12 @@ export class IpcRouter {
               throw new Error(`Managed Local tool failed repeatedly: ${toolCall.name}`, {
                 cause: error,
               });
-            content = providerWorkspaceToolFailure(error);
+            content = redactProviderCommandFailure(
+              connection.providerId,
+              toolCall.name,
+              providerWorkspaceToolFailure(error),
+              started.workspaceSet.roots.map((root) => root.path),
+            );
           }
           streamBudget.consumeToolResult(content);
           messages.push({
@@ -8727,6 +8768,31 @@ export function shouldRetryProviderWithoutTools(input: {
     input.errorCategory === 'invalid_request' &&
     input.toolCallCount === 0 &&
     input.outputLength === 0
+  );
+}
+
+export function shouldRetryEmptyOllamaToolRound(input: {
+  providerId: string;
+  error: NormalizedProviderError;
+  ordinal: number;
+  retries: number;
+  hasTools: boolean;
+  hasImages: boolean;
+  toolCallCount: number;
+  outputLength: number;
+  canceled: boolean;
+}): boolean {
+  return (
+    input.providerId === 'ollama' &&
+    input.error.providerCode === 'empty_response' &&
+    input.error.retryable &&
+    input.ordinal < MAX_PROVIDER_LEADER_ROUNDS &&
+    input.retries < 2 &&
+    input.hasTools &&
+    !input.hasImages &&
+    input.toolCallCount === 0 &&
+    input.outputLength === 0 &&
+    !input.canceled
   );
 }
 
