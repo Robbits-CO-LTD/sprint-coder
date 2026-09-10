@@ -5,9 +5,19 @@ export function formatProviderToolResult(
   providerId: string,
   toolName: string,
   result: unknown,
+  knownWorkspaceRoots: readonly string[] = [],
 ): string {
-  if (providerId === 'ollama' && ['exec_command', 'poll_command'].includes(toolName))
-    result = redactCommandOutput(result);
+  if (isOllamaCommand(providerId, toolName)) {
+    const redacted = redactCommandOutput(result, knownWorkspaceRoots);
+    const output = redactSecrets(JSON.stringify({ ok: true, result: redacted }));
+    if (assessProviderDisclosure(output).classification === 'safe') return output;
+    return redactSecrets(
+      JSON.stringify({
+        ok: true,
+        result: redactCommandOutput(redacted, knownWorkspaceRoots, true),
+      }),
+    );
+  }
   if (providerId === 'ollama' && toolName === 'read_file' && isFileReadResult(result)) {
     const { content, ...metadata } = result;
     // Gemma's native tool strings preserve escapes. Give it file text rather than a JSON
@@ -21,11 +31,76 @@ export function formatProviderToolResult(
   return redactSecrets(JSON.stringify({ ok: true, result }));
 }
 
-function redactCommandOutput(result: unknown): unknown {
+export function redactProviderCommandFailure(
+  providerId: string,
+  toolName: string,
+  content: string,
+  knownWorkspaceRoots: readonly string[] = [],
+): string {
+  if (!isOllamaCommand(providerId, toolName)) return content;
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(content);
+  } catch {
+    return content;
+  }
+  if (
+    !isRecord(envelope) ||
+    !isRecord(envelope.error) ||
+    typeof envelope.error.message !== 'string'
+  )
+    return content;
+  const message = redactCommandText(envelope.error.message, knownWorkspaceRoots);
+  const output = redactSecrets(
+    JSON.stringify({ ...envelope, error: { ...envelope.error, message } }),
+  );
+  if (assessProviderDisclosure(output).classification === 'safe') return output;
+  return redactSecrets(
+    JSON.stringify({
+      ...envelope,
+      error: { ...envelope.error, message: '[REDACTED_COMMAND_OUTPUT]' },
+      outputRedacted: true,
+    }),
+  );
+}
+
+function isOllamaCommand(providerId: string, toolName: string): boolean {
+  return providerId === 'ollama' && ['exec_command', 'poll_command'].includes(toolName);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function redactCommandText(text: string, knownWorkspaceRoots: readonly string[]): string {
+  // Main supplies the sealed roots. Remove only a root followed by a real separator;
+  // filenames and any sensitive suffix still pass through the disclosure classifier.
+  const roots = knownWorkspaceRoots
+    .filter((root) => typeof root === 'string')
+    .map((root, index) => ({
+      root: root.replace(/[\\/]+$/u, ''),
+      label: '<workspace-' + (index + 1) + '>',
+    }))
+    .filter(({ root }) => root.length > 1 && !/^[a-z]:$/iu.test(root))
+    .sort((a, b) => b.root.length - a.root.length);
+  for (const { root, label } of roots)
+    for (const separator of ['/', '\\'])
+      text = text.split(root + separator).join(label + separator);
+  return assessProviderDisclosure(text).redactedContent;
+}
+
+function redactCommandOutput(
+  result: unknown,
+  knownWorkspaceRoots: readonly string[],
+  maskAll = false,
+): unknown {
   if (typeof result !== 'object' || result === null || Array.isArray(result)) return result;
   let changed = false;
   const redact = (text: string): string => {
-    const redacted = assessProviderDisclosure(text).redactedContent;
+    const redacted =
+      maskAll && text.length > 0
+        ? '[REDACTED_COMMAND_OUTPUT]'
+        : redactCommandText(text, knownWorkspaceRoots);
     changed ||= redacted !== text;
     return redacted;
   };

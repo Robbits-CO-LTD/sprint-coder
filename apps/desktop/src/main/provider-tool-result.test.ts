@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatProviderToolResult } from './provider-tool-result';
+import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { assessProviderDisclosure } from './provider-disclosure-classifier';
 
 const content = 'def example():\n\treturn "quoted"\n# Preserve literal \\n';
@@ -75,7 +75,7 @@ describe('Provider tool result text', () => {
 
 describe('Ollama command diagnostic disclosure', () => {
   const root = '/Users/yusei/sc-packaged-acceptance-20260909/workspaces/ollama';
-  const diagnostic = 'File "' + root + '/pricing.py", line 9\\nSyntaxError: unexpected character';
+  const diagnostic = 'File "' + root + '/pricing.py", line 9\nSyntaxError: unexpected character';
   it('redacts blocked command text while preserving failure metadata and the raw result', () => {
     const result = {
       executionId: 'command-1',
@@ -87,7 +87,7 @@ describe('Ollama command diagnostic disclosure', () => {
     };
     const before = structuredClone(result);
     expect(assessProviderDisclosure(diagnostic).classification).toBe('sensitive');
-    const output = formatProviderToolResult('ollama', 'exec_command', result);
+    const output = formatProviderToolResult('ollama', 'exec_command', result, [root]);
     expect(assessProviderDisclosure(output).classification).toBe('safe');
     const parsed = JSON.parse(output).result;
     expect(parsed).toMatchObject({
@@ -99,6 +99,7 @@ describe('Ollama command diagnostic disclosure', () => {
     });
     expect(parsed.stderr).toContain('SyntaxError: unexpected character');
     expect(parsed.stderr).toContain('line 9');
+    expect(parsed.stderr).toContain('<workspace-1>/pricing.py');
     expect(parsed.stderr).not.toContain(root);
     expect(result).toEqual(before);
   });
@@ -116,7 +117,7 @@ describe('Ollama command diagnostic disclosure', () => {
       ],
     };
     const before = structuredClone(result);
-    const output = formatProviderToolResult('ollama', 'poll_command', result);
+    const output = formatProviderToolResult('ollama', 'poll_command', result, [root]);
     expect(assessProviderDisclosure(output).classification).toBe('safe');
     const parsed = JSON.parse(output).result;
     expect(parsed).toMatchObject({ sessionId: 'session-1', nextCursor: 2, outputRedacted: true });
@@ -135,7 +136,7 @@ describe('Ollama command diagnostic disclosure', () => {
   it('keeps safe command output byte-for-byte without a redaction marker', () => {
     const result = {
       exitCode: 0,
-      stdout: 'SC_PACKAGE_OK:round1:og12b6\\n',
+      stdout: 'SC_PACKAGE_OK:round1:og12b6\n',
       stderr: '',
       truncated: false,
     };
@@ -143,5 +144,55 @@ describe('Ollama command diagnostic disclosure', () => {
       ok: true,
       result,
     });
+  });
+});
+
+describe('Ollama command output framing and exceptions', () => {
+  const root = '/Users/yusei/sc-packaged-acceptance-20260909/workspaces/ollama';
+  it('masks text when JSON escaping changes its disclosure classification', () => {
+    const stderr = 'cookie: ab\nTraceback from a command';
+    expect(assessProviderDisclosure(stderr).classification).toBe('safe');
+    const output = formatProviderToolResult('ollama', 'exec_command', { exitCode: 1, stderr }, [
+      root,
+    ]);
+    expect(assessProviderDisclosure(output).classification).toBe('safe');
+    expect(JSON.parse(output).result).toEqual({
+      exitCode: 1,
+      stderr: '[REDACTED_COMMAND_OUTPUT]',
+      outputRedacted: true,
+    });
+  });
+  it('preserves a failure code and basename through the exception envelope', () => {
+    const error = { code: 'SPAWN_FAILED', message: 'Failed at "' + root + '/pricing.py"' };
+    const output = redactProviderCommandFailure(
+      'ollama',
+      'exec_command',
+      JSON.stringify({ ok: false, error }),
+      [root],
+    );
+    expect(JSON.parse(output)).toEqual({
+      ok: false,
+      error: { code: 'SPAWN_FAILED', message: 'Failed at "<workspace-1>/pricing.py"' },
+    });
+    expect(assessProviderDisclosure(output).classification).toBe('safe');
+  });
+  it('does not hide sensitive suffixes or accept root lookalikes', () => {
+    const token = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+    const stderr = root + '/' + token + '.py\n' + root + '-other/pricing.py';
+    const output = formatProviderToolResult('ollama', 'exec_command', { stderr }, [root]);
+    expect(output).not.toContain(token);
+    expect(output).not.toContain('<workspace-1>-other');
+    expect(assessProviderDisclosure(output).classification).toBe('safe');
+  });
+  it('keeps other providers and non-command failure envelopes unchanged', () => {
+    const content = JSON.stringify({
+      ok: false,
+      error: { code: 'FAIL', message: root + '/pricing.py' },
+    });
+    expect(redactProviderCommandFailure('openai', 'exec_command', content, [root])).toBe(content);
+    expect(redactProviderCommandFailure('ollama', 'read_file', content, [root])).toBe(content);
+    expect(redactProviderCommandFailure('ollama', 'exec_command', 'not JSON', [root])).toBe(
+      'not JSON',
+    );
   });
 });
