@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -48,17 +48,27 @@ test('binds an authorized file read and detects changed source bytes after resta
     const sources = page.getByTestId('graph-sources');
     await expect(sources.getByTestId('graph-evidence-kind')).toHaveText('コード参照あり');
     await sources.locator('summary').click();
+    await expect(page.getByTestId('graph-source-freshness')).toContainText(
+      '根拠ファイルの内容は一致',
+    );
     await sources.getByRole('button', { name: '現在の内容を確認' }).click();
     await expect(sources.getByTestId('graph-source-status')).toContainText('現在のファイルと一致');
     await writeFile(
       join(workspace, 'graph-source.ts'),
       'export function readConfig() {\n  return "changed";\n}\n',
     );
-    await sources.getByRole('button', { name: '再確認' }).click();
+    await expect(page.getByTestId('graph-source-freshness')).toContainText('古い根拠');
     await expect(sources.getByTestId('graph-source-status')).toContainText('ファイルが変更');
+    await sources.getByRole('button', { name: '現在の内容を確認' }).click();
     await expect(sources).toContainText('return "config"');
     await expect(sources).toContainText('return "changed"');
     await page.screenshot({ path: test.info().outputPath('source-changed.png') });
+    await rename(join(workspace, 'graph-source.ts'), join(workspace, 'graph-source.saved.ts'));
+    await expect(sources.getByTestId('graph-source-status')).toContainText(
+      'ファイルが見つかりません',
+    );
+    await rename(join(workspace, 'graph-source.saved.ts'), join(workspace, 'graph-source.ts'));
+    await expect(sources.getByTestId('graph-source-status')).toContainText('ファイルが変更');
     await closeApp(app);
     app = await launchApp(profile, undefined, {
       SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',

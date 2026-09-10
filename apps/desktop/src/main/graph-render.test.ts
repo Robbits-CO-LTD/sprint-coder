@@ -134,6 +134,13 @@ describe('Archify generation boundary', () => {
         });
       const service = createService();
       const view = await service.render({ taskId, diagram: diagram(kind) });
+      expect(service.liveDocument(taskId, view.instanceId, view.renderRevision).id).toBe(view.id);
+      expect(() =>
+        service.liveDocument('other-task', view.instanceId, view.renderRevision),
+      ).toThrow('expired');
+      expect(() => service.liveDocument(taskId, view.instanceId, view.renderRevision + 1)).toThrow(
+        'expired',
+      );
       expect(view.nodeIds).toEqual(['client', 'api', 'store']);
       await expect(
         service.render({ taskId, diagram: diagram(kind) }, { expectedRenderRevision: 0 }),
@@ -170,6 +177,9 @@ describe('Archify generation boundary', () => {
       service.release(taskId, view.instanceId);
       expect(service.response(new URL(reopened.artifactUrl)).status).toBe(200);
       service.release(taskId, reopened.instanceId);
+      expect(() =>
+        service.liveDocument(taskId, reopened.instanceId, reopened.renderRevision),
+      ).toThrow('expired');
       expect(service.response(new URL(reopened.artifactUrl)).status).toBe(404);
       expect(service.response(new URL(`${view.artifactUrl}?arbitrary=1`)).status).toBe(404);
       await service.dispose();

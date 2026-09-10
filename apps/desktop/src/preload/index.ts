@@ -13,6 +13,8 @@ import {
   graphSourcesInputSchema,
   graphSourcePreviewInputSchema,
   graphSourcePreviewSchema,
+  graphSourceCheckInputSchema,
+  graphSourceStatusSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -283,6 +285,21 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    checkSources: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsSourceCheck,
+        graphSourceCheckInputSchema,
+        graphSourceStatusSchema,
+        input,
+      ),
+    subscribeSources: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        const parsed = graphSourceStatusSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.graphsSourceStatus, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.graphsSourceStatus, handler);
+    },
     sources: (input) =>
       invoke(
         IPC_CHANNELS.graphsSources,

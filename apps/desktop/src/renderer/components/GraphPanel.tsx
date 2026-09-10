@@ -6,6 +6,7 @@ import { GraphHistoryPanel } from './GraphHistoryPanel';
 import { GraphGenerationNotice } from './GraphGenerationNotice';
 import { GraphSourcesPanel } from './GraphSourcesPanel';
 import { acceptGraphGeneration } from '../lib/graph-generation';
+import { useGraphSourceStatus } from '../lib/use-graph-source-status';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
@@ -17,6 +18,10 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
   const generationSequence = useRef(0);
   const frame = useRef<HTMLIFrameElement>(null);
   const currentView = useRef<GraphView | null>(null);
+  const sourceState = useGraphSourceStatus(
+    view,
+    selection ? `${selection.kind}:${selection.id}` : null,
+  );
   useEffect(() => {
     const api = window.sprintCoder?.graphs;
     if (typeof api?.generation !== 'function' || typeof api.subscribeGeneration !== 'function')
@@ -159,12 +164,32 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         </p>
       ) : null}
       {view ? <GraphHistoryPanel key={`${view.id}:${view.renderRevision}`} view={view} /> : null}
+      {sourceState.error ? (
+        <p role="status">根拠の現在状態を確認できませんでした。</p>
+      ) : sourceState.status ? (
+        <p className="settings-hint" role="status" data-testid="graph-source-freshness">
+          {sourceState.status.phase === 'checking'
+            ? '根拠の現在状態を確認しています…'
+            : sourceState.status.sources.length === 0
+              ? 'コード根拠の参照はありません。'
+              : sourceState.status.sources.every((source) => source.status === 'current')
+                ? '確認時点では、根拠ファイルの内容は一致しています。'
+                : '古い根拠、または確認できない参照があります。'}
+          {sourceState.status.checkedAt
+            ? ` 確認: ${new Date(sourceState.status.checkedAt).toLocaleTimeString()}`
+            : ''}
+          {!sourceState.status.monitoring && sourceState.status.sources.length > 0
+            ? ' 自動通知を利用できないため、再表示時に確認します。'
+            : ''}
+        </p>
+      ) : null}
       <section className="graph-comment" aria-label="選択箇所へのコメント">
         {view && selection ? (
           <GraphSourcesPanel
             key={`${view.id}:${view.renderRevision}:${selection.kind}:${selection.id}`}
             view={view}
             selection={selection}
+            freshness={sourceState.status}
           />
         ) : null}
         <p className="settings-hint" data-testid="graph-selection">

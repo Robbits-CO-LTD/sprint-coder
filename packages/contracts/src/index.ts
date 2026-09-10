@@ -3702,6 +3702,30 @@ export const graphSourcePreviewSchema = z
   })
   .strict();
 export type GraphSourcePreview = z.infer<typeof graphSourcePreviewSchema>;
+export const graphSourceCheckInputSchema = z
+  .object({
+    taskId: idSchema,
+    renderRevision: z.number().int().positive(),
+    instanceId: z.string().uuid(),
+  })
+  .strict();
+export type GraphSourceCheckInput = z.infer<typeof graphSourceCheckInputSchema>;
+export const graphSourceStatusSchema = graphSourceCheckInputSchema
+  .extend({
+    sequence: z.number().int().positive(),
+    phase: z.enum(['checking', 'checked']),
+    checkedAt: z.string().datetime().nullable(),
+    monitoring: z.boolean(),
+    sources: z
+      .array(
+        z
+          .object({ sourceId: z.string().uuid(), status: graphSourcePreviewSchema.shape.status })
+          .strict(),
+      )
+      .max(64),
+  })
+  .strict();
+export type GraphSourceStatus = z.infer<typeof graphSourceStatusSchema>;
 export const graphAnnotationSchema = z
   .object({
     elementKind: z.enum(['node', 'edge']),
@@ -5380,6 +5404,8 @@ export type ComputerUseApi = {
 
 export interface SprintCoderApi {
   graphs: {
+    checkSources(input: GraphSourceCheckInput): Promise<GraphSourceStatus>;
+    subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
     generation(taskId: string): Promise<GraphGeneration | null>;
@@ -5714,6 +5740,8 @@ export const IPC_CHANNELS = {
   graphsGeneration: 'sprint-coder:graphs:generation',
   graphsSources: 'sprint-coder:graphs:sources',
   graphsSourcePreview: 'sprint-coder:graphs:source-preview',
+  graphsSourceCheck: 'sprint-coder:graphs:source-check',
+  graphsSourceStatus: 'sprint-coder:graphs:source-status',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

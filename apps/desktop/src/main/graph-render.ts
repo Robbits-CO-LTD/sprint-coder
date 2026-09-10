@@ -296,6 +296,16 @@ export class GraphRenderService {
     const record = this.documents.get(taskId);
     if (record?.view.instanceId === instanceId) record.live = false;
   }
+  liveDocument(taskId: string, instanceId: string, renderRevision: number): GraphDocument {
+    const record = this.documents.get(taskId);
+    if (
+      !record?.live ||
+      record.view.instanceId !== instanceId ||
+      record.document.renderRevision !== renderRevision
+    )
+      throw new Error('Graph view expired');
+    return record.document;
+  }
   history(raw: unknown): GraphHistory {
     const input = graphHistoryInputSchema.parse(raw);
     const documents = this.options.store.listGraphDocumentVersions(

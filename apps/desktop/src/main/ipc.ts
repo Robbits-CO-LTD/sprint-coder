@@ -22,6 +22,8 @@ import {
   graphSourcesInputSchema,
   graphSourcePreviewInputSchema,
   graphSourcePreviewSchema,
+  graphSourceCheckInputSchema,
+  graphSourceStatusSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -609,6 +611,7 @@ import { formatProviderToolResult, redactProviderCommandFailure } from './provid
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
 import { previewGraphSource } from './graph-source-preview';
+import { GraphSourceMonitor } from './graph-source-monitor';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -996,6 +999,7 @@ export class IpcRouter {
   // generated-image-collector.ts for why).
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
+  private readonly graphSourceMonitor: GraphSourceMonitor;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly managedCodingHarness: ManagedCodingHarness;
   private readonly autoReviewer = AutoReviewer.createProduction();
@@ -1048,6 +1052,21 @@ export class IpcRouter {
     computerUseActivationGate?: ComputerUseUserActivationGate,
     private readonly graphs: GraphRenderService | null = null,
   ) {
+    this.graphSourceMonitor = new GraphSourceMonitor({
+      document: (input) => {
+        this.persistence.getTask(input.taskId);
+        if (!this.graphs) throw new Error('Graph service unavailable');
+        return this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
+      },
+      binding: (taskId) => ({
+        workspace: this.persistence.getEffectiveWorkspaceSet(taskId),
+        policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+      }),
+      publish: (status) => {
+        if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.graphsSourceStatus, status);
+      },
+    });
     this.providerEndpointPolicy = providerEndpointPolicy;
     this.providerEndpointChallenges = new ProviderEndpointConsentChallenges(providerEndpointPolicy);
     this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
@@ -1777,6 +1796,12 @@ export class IpcRouter {
 
   register(): void {
     this.handle(
+      IPC_CHANNELS.graphsSourceCheck,
+      graphSourceCheckInputSchema,
+      graphSourceStatusSchema,
+      (input) => this.graphSourceMonitor.check(input),
+    );
+    this.handle(
       IPC_CHANNELS.graphsSources,
       graphSourcesInputSchema,
       z.array(graphSourceRefSchema).max(64),
@@ -1869,6 +1894,7 @@ export class IpcRouter {
       this.updateInstallMutationGate.run(() => {
         this.persistence.getTask(input.taskId);
         this.graphs?.release(input.taskId, input.instanceId);
+        this.graphSourceMonitor.release(input.taskId, input.instanceId);
       }),
     );
     ipcMain.on(IPC_CHANNELS.computerUseActivationIntent, this.handleComputerUseActivationIntent);
@@ -3027,6 +3053,7 @@ export class IpcRouter {
           },
         );
         await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
+        this.graphSourceMonitor.invalidate(input.taskId);
         return value;
       },
     );
@@ -3729,7 +3756,7 @@ export class IpcRouter {
         if (selectedPath === undefined)
           throw new Error('Directory selection did not include a path');
         const binding = await workspaceMutationBinding(selectedPath);
-        return this.persistence.executeOperation(
+        const value = this.persistence.executeOperation(
           principal,
           input.taskId,
           IPC_CHANNELS.workspaceSelect,
@@ -3744,6 +3771,8 @@ export class IpcRouter {
             return workspaceValue(binding.canonicalPath);
           },
         );
+        this.graphSourceMonitor.invalidate(input.taskId);
+        return value;
       },
     );
 
@@ -4405,6 +4434,7 @@ export class IpcRouter {
     this.claudeRuntime.dispose();
     this.graphGenerationUnsubscribe?.();
     this.graphGenerationUnsubscribe = null;
+    this.graphSourceMonitor.dispose();
     await this.graphs?.dispose();
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
@@ -4541,17 +4571,24 @@ export class IpcRouter {
       hash,
     );
     if (cached.found) return { value: cached.value as TOutput, executed: false };
-    return {
-      value: this.persistence.executeOperation(
-        principal,
-        taskId,
-        kind,
-        envelope.operationId,
-        hash,
-        action,
-      ),
-      executed: true,
-    };
+    const value = this.persistence.executeOperation(
+      principal,
+      taskId,
+      kind,
+      envelope.operationId,
+      hash,
+      action,
+    );
+    if (
+      [
+        IPC_CHANNELS.projectsFoldersReplace,
+        IPC_CHANNELS.projectsUpdate,
+        IPC_CHANNELS.projectsAssignTask,
+        IPC_CHANNELS.projectsUnassignTask,
+      ].some((channel) => channel === kind)
+    )
+      this.graphSourceMonitor.invalidate();
+    return { value, executed: true };
   }
 
   private createGenericManagedRuntimeToolHandlers(): GenericManagedRuntimeToolHandlers {
@@ -6982,6 +7019,7 @@ export class IpcRouter {
   }
 
   private pushTaskUpdated(task: ReturnType<PersistenceClient['getTask']>): void {
+    this.graphSourceMonitor.invalidate(task.id);
     if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.tasksUpdated,
@@ -8392,6 +8430,8 @@ export class IpcRouter {
 
   private publish(rawEvent: TurnEvent): void {
     const event = turnEventSchema.parse(rawEvent);
+    if (event.type === 'file.saved' || event.type === 'files.changed')
+      this.graphSourceMonitor.invalidate(event.taskId);
     this.recordTurnDiagnosticEvent(event);
     if (event.type === 'turn.accepted' || event.type === 'turn.completed')
       this.pushTaskUpdated(this.persistence.getTask(event.taskId));

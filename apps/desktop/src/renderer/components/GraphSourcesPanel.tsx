@@ -4,6 +4,7 @@ import type {
   GraphSourceRef,
   GraphSourcePreview,
   GraphView,
+  GraphSourceStatus,
 } from '@sprint-coder/contracts';
 
 const statusText = {
@@ -17,13 +18,22 @@ const statusText = {
 export function GraphSourcesPanel({
   view,
   selection,
+  freshness,
 }: {
   view: GraphView;
   selection: GraphSelection;
+  freshness: GraphSourceStatus | null;
 }) {
   const [sources, setSources] = useState<GraphSourceRef[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [previews, setPreviews] = useState<Record<string, GraphSourcePreview>>({});
+  const [storedPreviews, setPreviews] = useState<
+    Record<string, { value: GraphSourcePreview; sequence: number | undefined }>
+  >({});
+  const previews = Object.fromEntries(
+    Object.entries(storedPreviews)
+      .filter(([, entry]) => entry.sequence === freshness?.sequence)
+      .map(([id, entry]) => [id, entry.value]),
+  );
   const [loading, setLoading] = useState<string | null>(null);
   const alive = useRef(true);
   const annotation = view.annotations?.find(
@@ -56,6 +66,7 @@ export function GraphSourcesPanel({
     const api = window.sprintCoder?.graphs;
     if (typeof api?.previewSource !== 'function' || loading !== null) return;
     setLoading(source.id);
+    const sequence = freshness?.sequence;
     setError(null);
     try {
       const preview = await api.previewSource({
@@ -63,7 +74,8 @@ export function GraphSourcesPanel({
         renderRevision: view.renderRevision,
         sourceId: source.id,
       });
-      if (alive.current) setPreviews((current) => ({ ...current, [source.id]: preview }));
+      if (alive.current)
+        setPreviews((current) => ({ ...current, [source.id]: { value: preview, sequence } }));
     } catch {
       if (alive.current) setError('根拠参照を確認できませんでした。');
     } finally {
@@ -106,9 +118,15 @@ export function GraphSourcesPanel({
                 : '現在の内容を確認'}
           </button>
           <p role="status" data-testid="graph-source-status">
-            {previews[source.id]
-              ? statusText[previews[source.id]!.status]
-              : '現在のファイルとはまだ照合していません。'}
+            {freshness?.phase === 'checking'
+              ? '現在の内容を確認しています…'
+              : previews[source.id]
+                ? statusText[previews[source.id]!.status]
+                : freshness?.sources.some((entry) => entry.sourceId === source.id)
+                  ? statusText[
+                      freshness.sources.find((entry) => entry.sourceId === source.id)!.status
+                    ]
+                  : '現在のファイルとはまだ照合していません。'}
           </p>
           {previews[source.id]?.currentExcerpt !== null &&
           previews[source.id]?.currentExcerpt !== undefined ? (

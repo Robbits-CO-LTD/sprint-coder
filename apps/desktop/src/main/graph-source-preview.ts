@@ -3,7 +3,7 @@ import type { GraphSourceRef, GraphSourcePreview } from '@sprint-coder/contracts
 import { workspaceMutationBinding, PathGuardError } from './path-guard';
 import { readRevisionBoundFile } from './file-revision';
 
-/** User-initiated local inspection, using the same guarded read boundary as Workspace reads. */
+/** Local inspection through the Workspace read boundary; automatic monitors discard the excerpt. */
 export async function previewGraphSource(
   source: GraphSourceRef,
   workspacePath: string | null,

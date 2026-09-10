@@ -8,6 +8,7 @@ import {
   graphRenderInputSchema,
   graphGetInputSchema,
   graphSourcesInputSchema,
+  graphSourceCheckInputSchema,
   graphSourcePreviewInputSchema,
   graphCancelInputSchema,
   graphHistoryInputSchema,
@@ -5053,6 +5054,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.graphsRender]: graphRenderInputSchema,
   [IPC_CHANNELS.graphsGet]: graphGetInputSchema,
   [IPC_CHANNELS.graphsSources]: graphSourcesInputSchema,
+  [IPC_CHANNELS.graphsSourceCheck]: graphSourceCheckInputSchema,
   [IPC_CHANNELS.graphsSourcePreview]: graphSourcePreviewInputSchema,
   [IPC_CHANNELS.graphsGeneration]: graphGetInputSchema,
   [IPC_CHANNELS.graphsHistory]: graphHistoryInputSchema,
@@ -5208,6 +5210,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
 // Channels owned directly by Main or sent from Main to Renderer do not pass through IpcRouter's
 // command-envelope parser, so they are intentionally outside the adversarial input-schema table.
 const NON_ROUTER_CHANNELS = new Set<string>([
+  IPC_CHANNELS.graphsSourceStatus,
   IPC_CHANNELS.graphsUpdated,
   IPC_CHANNELS.graphsGenerationUpdated,
   IPC_CHANNELS.tasksUpdated,
