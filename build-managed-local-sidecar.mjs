@@ -392,6 +392,10 @@ async function signNativeArtifacts(target, artifacts) {
           ['--force', '--options', 'runtime', '--timestamp', '--sign', identity, path],
           { stdio: 'inherit' },
         );
+      else
+        execFileSync('/usr/bin/codesign', ['--force', '--timestamp=none', '--sign', '-', path], {
+          stdio: 'inherit',
+        });
       execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', path], {
         stdio: 'inherit',
       });
