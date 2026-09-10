@@ -105,6 +105,35 @@ describe('readGgufBlockCount', () => {
 });
 
 describe('readGgufModelMetadata', () => {
+  it('derives f16 KV and extracted hidden-state memory from bounded DFlash dimensions', async () => {
+    const targetLayers = Buffer.concat([
+      string('dflash.target_layers'),
+      uint32(9),
+      uint32(4),
+      uint64(3),
+      uint32(1),
+      uint32(2),
+      uint32(3),
+    ]);
+    const entries = [
+      metadataString('general.architecture', 'dflash'),
+      metadataUint32('dflash.block_count', 4),
+      metadataUint32('dflash.embedding_length', 1024),
+      metadataUint32('dflash.attention.head_count', 8),
+      metadataUint32('dflash.attention.head_count_kv', 2),
+      metadataUint32('dflash.attention.key_length', 128),
+      metadataUint32('dflash.attention.value_length', 256),
+      targetLayers,
+    ];
+    expect(await readGgufModelMetadata(await fixture(gguf(entries)))).toMatchObject({
+      kvBytesPerToken: 6144,
+      hiddenBytesPerToken: 6144,
+    });
+    const duplicate = await readGgufModelMetadata(
+      await fixture(gguf([...entries, metadataUint32('dflash.attention.key_length', 128)])),
+    );
+    expect(duplicate?.kvBytesPerToken).toBeUndefined();
+  });
   it('identifies a DFlash draft and its architecture-bound context from the actual GGUF', async () => {
     const path = await fixture(
       gguf([

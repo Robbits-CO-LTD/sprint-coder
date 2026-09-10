@@ -84,6 +84,7 @@ export const managedLocalSidecarManifestSchema = z
     platform: managedLocalPlatformSchema,
     architecture: managedLocalArchitectureSchema,
     candidateBackends: z.array(managedLocalBackendSchema).min(1).max(4),
+    speculativeDflash: z.boolean().optional(),
     artifacts: z.array(managedLocalArtifactSchema).min(2).max(128),
   })
   .strict()
@@ -158,6 +159,7 @@ const managedLocalSidecarPinSchema = z
     runtimeVersion: z.string().regex(RUNTIME_VERSION),
     upstreamRevision: z.string().regex(UPSTREAM_REVISION),
     manifestSha256: z.string().regex(SHA256),
+    speculativeDflash: z.boolean().optional(),
   })
   .strict();
 
@@ -308,7 +310,8 @@ export async function verifyManagedLocalSidecarBundle(
   if (
     `${manifest.platform}-${manifest.architecture}` !== target ||
     manifest.runtimeVersion !== pin.runtimeVersion ||
-    manifest.upstreamRevision !== pin.upstreamRevision
+    manifest.upstreamRevision !== pin.upstreamRevision ||
+    (manifest.speculativeDflash === true) !== (pin.speculativeDflash === true)
   )
     throw new ManagedLocalSidecarError(
       'manifest_mismatch',

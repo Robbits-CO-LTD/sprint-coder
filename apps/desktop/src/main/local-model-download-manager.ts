@@ -789,6 +789,15 @@ export class LocalModelDownloadRepository {
     })();
   }
 
+  assertModelUnreferenced(modelId: string): void {
+    if (
+      Object.values(this.readSpeculativeSettingsMap()).some(
+        ({ draftModelId }) => draftModelId === modelId,
+      )
+    )
+      throw new Error('Draft model is still referenced');
+  }
+
   close(): void {
     this.db.close();
   }

@@ -7,6 +7,11 @@ import type {
 } from '@sprint-coder/contracts';
 
 export type LocalFitEstimateInput = Readonly<{
+  draft?: Readonly<{
+    weightsBytes: number | null;
+    kvBytesPerToken: number | null;
+    scratchBytes: number | null;
+  }>;
   weightsBytes: number | null;
   contextTokens: number | null;
   kvBytesPerToken: number | null;
@@ -33,7 +38,8 @@ function checkedCeil(value: number): number | null {
 }
 
 function calculateBreakdown(input: LocalFitEstimateInput): LocalFitMemoryBreakdown | null {
-  const { weightsBytes, contextTokens, kvBytesPerToken, scratchBytes, runtimeReserveBytes } = input;
+  let { weightsBytes, scratchBytes } = input;
+  const { contextTokens, kvBytesPerToken, runtimeReserveBytes } = input;
   if (
     weightsBytes === null ||
     contextTokens === null ||
@@ -59,8 +65,30 @@ function calculateBreakdown(input: LocalFitEstimateInput): LocalFitMemoryBreakdo
   )
     return null;
 
-  const kvCacheBytes = checkedCeil(contextTokens * kvBytesPerToken);
+  let kvCacheBytes = checkedCeil(contextTokens * kvBytesPerToken);
   if (kvCacheBytes === null) return null;
+  let draft: LocalFitMemoryBreakdown['draft'];
+  if (input.draft !== undefined) {
+    const d = input.draft;
+    if (
+      d.weightsBytes === null ||
+      d.kvBytesPerToken === null ||
+      d.scratchBytes === null ||
+      !Number.isSafeInteger(d.weightsBytes) ||
+      d.weightsBytes <= 0 ||
+      !Number.isSafeInteger(d.kvBytesPerToken) ||
+      d.kvBytesPerToken <= 0 ||
+      !Number.isSafeInteger(d.scratchBytes) ||
+      d.scratchBytes < 0
+    )
+      return null;
+    const draftKv = checkedCeil(contextTokens * d.kvBytesPerToken);
+    if (draftKv === null) return null;
+    draft = { weightsBytes: d.weightsBytes, kvCacheBytes: draftKv, scratchBytes: d.scratchBytes };
+    weightsBytes += d.weightsBytes;
+    kvCacheBytes += draftKv;
+    scratchBytes += d.scratchBytes;
+  }
   const workingBytes = weightsBytes + kvCacheBytes + scratchBytes;
   const guardedWorkingBytes = checkedCeil(workingBytes * input.safetyFactor);
   if (guardedWorkingBytes === null) return null;
@@ -70,6 +98,7 @@ function calculateBreakdown(input: LocalFitEstimateInput): LocalFitMemoryBreakdo
   const requiredHostBytes = guardedWorkingBytes - acceleratorWorkingBytes + runtimeReserveBytes;
   if (!Number.isSafeInteger(requiredHostBytes)) return null;
   return {
+    ...(draft === undefined ? {} : { draft }),
     weightsBytes,
     kvCacheBytes,
     scratchBytes,
@@ -168,6 +197,17 @@ function equalBinding(left: LocalVerificationBinding, right: LocalVerificationBi
     left.gpuOffloadRatio === right.gpuOffloadRatio &&
     left.sidecarVersion === right.sidecarVersion &&
     left.backend === right.backend &&
+    ((left.speculative === undefined && right.speculative === undefined) ||
+      (left.speculative !== undefined &&
+        right.speculative !== undefined &&
+        left.speculative.type === right.speculative.type &&
+        left.speculative.draftModelId === right.speculative.draftModelId &&
+        left.speculative.draftTokensMax === right.speculative.draftTokensMax &&
+        left.speculative.draftArtifactHashes.length ===
+          right.speculative.draftArtifactHashes.length &&
+        left.speculative.draftArtifactHashes.every(
+          (hash, index) => hash === right.speculative!.draftArtifactHashes[index],
+        ))) &&
     left.artifactHashes.length === right.artifactHashes.length &&
     left.artifactHashes.every((hash, index) => hash === right.artifactHashes[index])
   );

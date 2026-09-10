@@ -97,6 +97,20 @@ async function fixture(target: ManagedLocalTargetKey = hostTarget): Promise<{
 }
 
 describe('Managed Local sidecar bundle boundary', () => {
+  it('requires DFlash capability to match the hashed manifest and the application pin', async () => {
+    const env = await fixture();
+    const manifest = { ...env.manifest, speculativeDflash: true };
+    const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
+    await writeFile(env.manifestPath, bytes);
+    const pin = { ...env.pin, manifestSha256: sha256(bytes) };
+    await expect(verifyManagedLocalSidecarBundle(env.root, pin)).rejects.toMatchObject({
+      code: 'manifest_mismatch',
+    });
+    expect(
+      (await verifyManagedLocalSidecarBundle(env.root, { ...pin, speculativeDflash: true }))
+        .manifest.speculativeDflash,
+    ).toBe(true);
+  });
   it('accepts only a complete bundle whose manifest and every artifact match the application pin', async () => {
     const env = await fixture();
 

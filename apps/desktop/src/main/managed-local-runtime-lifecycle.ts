@@ -13,6 +13,8 @@ import {
 import {
   ManagedLocalRuntimeSupervisor,
   type ManagedLocalRuntimeSession,
+  type ManagedLocalDraftModel,
+  managedLocalDraftBinding,
 } from './managed-local-runtime-supervisor';
 import type {
   ManagedLocalBackend,
@@ -28,6 +30,10 @@ export type ManagedLocalModelDescriptor = Readonly<{
   id: string;
   modelRoot: string;
   modelPath: string;
+  modelsRoot?: string;
+  baseModelId?: string | null;
+  artifactHashes?: readonly string[];
+  draft?: ManagedLocalDraftModel | null;
   /** Optional for mixed-version callers; Main supplies this only for image-capable bundles. */
   mmprojPath?: string | null;
   scratchRoot: string;
@@ -157,6 +163,10 @@ export class ManagedLocalRuntimeLifecycle {
       target: this.bundle.target,
       runtimeVersion: runtime.runtimeVersion,
       modelId: current.descriptor.id,
+      speculative:
+        current.descriptor.draft == null
+          ? null
+          : managedLocalDraftBinding(current.descriptor.draft),
       backend: runtime.backend,
       gpuLayers: runtime.gpuLayers,
       contextTokens: runtime.contextTokens,
@@ -181,7 +191,10 @@ export class ManagedLocalRuntimeLifecycle {
         if (this.phase === 'disposed') throw disposedError();
         if (this.phase === 'draining') return null;
         this.reconcileCrash();
-        if (this.current !== null && this.current.descriptor.id === descriptor.id)
+        if (
+          this.current !== null &&
+          managedLocalDescriptorsMatch(this.current.descriptor, descriptor)
+        )
           return this.createLease(this.current, automaticRelease);
         if (this.current !== null && this.current.leases.size > 0) {
           void this.onDrainRequested(
@@ -202,6 +215,11 @@ export class ManagedLocalRuntimeLifecycle {
               kind: 'model',
               modelRoot: descriptor.modelRoot,
               modelPath: descriptor.modelPath,
+              ...(descriptor.modelsRoot === undefined ? {} : { modelsRoot: descriptor.modelsRoot }),
+              ...(descriptor.baseModelId === undefined
+                ? {}
+                : { baseModelId: descriptor.baseModelId }),
+              ...(descriptor.draft == null ? {} : { draft: descriptor.draft }),
               ...(descriptor.mmprojPath === undefined || descriptor.mmprojPath === null
                 ? {}
                 : { mmprojPath: descriptor.mmprojPath }),
@@ -256,7 +274,10 @@ export class ManagedLocalRuntimeLifecycle {
   }
 
   assertDeletable(modelId: string): void {
-    if (this.current?.descriptor.id === modelId)
+    if (
+      this.current !== null &&
+      (this.current.descriptor.id === modelId || this.current.descriptor.draft?.id === modelId)
+    )
       throw new ManagedLocalLifecycleError(
         'model_busy',
         this.current.fit,
@@ -270,7 +291,11 @@ export class ManagedLocalRuntimeLifecycle {
 
   async stopModel(modelId: string): Promise<void> {
     await this.exclusive(async () => {
-      if (this.current?.descriptor.id !== modelId) return;
+      if (
+        this.current === null ||
+        (this.current.descriptor.id !== modelId && this.current.descriptor.draft?.id !== modelId)
+      )
+        return;
       if (this.current.leases.size > 0)
         throw new ManagedLocalLifecycleError(
           'model_busy',
@@ -513,6 +538,7 @@ function validateDescriptor(
   descriptor: ManagedLocalModelDescriptor,
   candidateBackends: readonly ManagedLocalBackend[],
 ): void {
+  if (descriptor.draft != null) managedLocalDraftBinding(descriptor.draft);
   if (
     !/^[a-f0-9]{64}$/u.test(descriptor.id) ||
     !candidateBackends.includes(descriptor.backend) ||
@@ -527,6 +553,11 @@ function validateDescriptor(
     descriptor.batchSize > 4_096 ||
     descriptor.batchSize > descriptor.contextTokens ||
     descriptor.fit.contextTokens !== descriptor.contextTokens ||
+    (descriptor.draft != null) !== (descriptor.fit.draft !== undefined) ||
+    (descriptor.draft != null &&
+      (descriptor.draft.id === descriptor.id ||
+        descriptor.baseModelId == null ||
+        descriptor.draft.baseModelId !== descriptor.baseModelId)) ||
     (descriptor.backend === 'cpu' &&
       (descriptor.gpuLayers !== 0 || descriptor.fit.gpuOffloadRatio !== 0)) ||
     (descriptor.backend !== 'cpu' && descriptor.gpuLayers === 0)
@@ -537,6 +568,30 @@ function validateDescriptor(
       recovery(descriptor, 'モデル実行設定を確認してください。'),
       'Invalid Managed Local descriptor',
     );
+}
+
+export function managedLocalDescriptorsMatch(
+  a: ManagedLocalModelDescriptor,
+  b: ManagedLocalModelDescriptor,
+): boolean {
+  return (
+    a.id === b.id &&
+    a.modelRoot === b.modelRoot &&
+    a.modelPath === b.modelPath &&
+    a.modelsRoot === b.modelsRoot &&
+    a.baseModelId === b.baseModelId &&
+    (a.mmprojPath ?? null) === (b.mmprojPath ?? null) &&
+    a.backend === b.backend &&
+    a.gpuLayers === b.gpuLayers &&
+    a.contextTokens === b.contextTokens &&
+    a.batchSize === b.batchSize &&
+    JSON.stringify(a.artifactHashes ?? []) === JSON.stringify(b.artifactHashes ?? []) &&
+    JSON.stringify(a.draft == null ? null : managedLocalDraftBinding(a.draft)) ===
+      JSON.stringify(b.draft == null ? null : managedLocalDraftBinding(b.draft)) &&
+    (a.draft?.modelRoot ?? null) === (b.draft?.modelRoot ?? null) &&
+    (a.draft?.modelPath ?? null) === (b.draft?.modelPath ?? null) &&
+    (a.draft?.baseModelId ?? null) === (b.draft?.baseModelId ?? null)
+  );
 }
 
 function recovery(

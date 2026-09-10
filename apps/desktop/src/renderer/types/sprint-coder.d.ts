@@ -1204,6 +1204,12 @@ export interface SprintCoderApi {
     ): Promise<import('@sprint-coder/contracts').ProviderConnection>;
   };
   localAI: {
+    speculativeSettings(
+      modelId: string,
+    ): Promise<import('@sprint-coder/contracts').ManagedLocalSpeculativeSettingsView>;
+    setSpeculativeSettings(
+      input: import('@sprint-coder/contracts').ManagedLocalSpeculativeSettingsSetInput,
+    ): Promise<import('@sprint-coder/contracts').ManagedLocalSpeculativeSettingsView>;
     hardware(): Promise<import('@sprint-coder/contracts').LocalHardwareSnapshot>;
     runtime(): Promise<import('@sprint-coder/contracts').ManagedLocalRuntimeSnapshot>;
     launchSettings(

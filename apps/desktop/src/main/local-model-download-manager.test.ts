@@ -7,6 +7,15 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SqlitePersistenceClient } from './persistence';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import { ManagedLocalController } from './managed-local-controller';
+import { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
+import {
+  ManagedLocalRuntimeSupervisor,
+  type ManagedLocalRuntimeStartInput,
+  type ManagedLocalRuntimeSession,
+} from './managed-local-runtime-supervisor';
+import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
+import type { LocalHardwareSnapshot } from '@sprint-coder/contracts';
 import {
   LocalModelDownloadManager,
   LocalModelDownloadRepository,
@@ -35,13 +44,31 @@ function modelMetadata(architecture: string): Buffer {
     Buffer.from('GGUF'),
     u32(3),
     u64(0),
-    u64(2),
+    u64(7),
     string('general.architecture'),
     u32(8),
     string(architecture),
     string(`${architecture}.context_length`),
     u32(4),
     u32(32768),
+    string(`${architecture}.block_count`),
+    u32(4),
+    u32(2),
+    string(`${architecture}.embedding_length`),
+    u32(4),
+    u32(1024),
+    string(`${architecture}.attention.head_count`),
+    u32(4),
+    u32(8),
+    string(`${architecture}.attention.head_count_kv`),
+    u32(4),
+    u32(2),
+    string(`${architecture}.target_layers`),
+    u32(9),
+    u32(4),
+    u64(2),
+    u32(1),
+    u32(2),
   ]);
 }
 
@@ -98,6 +125,177 @@ async function fixture(input?: {
 
 if (runsWithElectronAbi)
   describe('LocalModelDownloadManager', () => {
+    it('connects controller settings, real SQLite/model files, runtime ownership and pair-bound evidence', async () => {
+      const env = await fixture({ bytes: [modelMetadata('llama'), modelMetadata('dflash')] });
+      const targetPlan = {
+        ...env.plan,
+        architecture: 'llama',
+        baseModelId: 'owner/base',
+        artifacts: [env.plan.artifacts[0]!],
+      };
+      const draftPlan = {
+        ...env.plan,
+        architecture: 'dflash',
+        baseModelId: 'owner/base',
+        artifacts: [env.plan.artifacts[1]!],
+      };
+      const target = env.manager.enqueue(targetPlan);
+      const draft = env.manager.enqueue(draftPlan);
+      await env.manager.run(target.id, targetPlan);
+      await env.manager.run(draft.id, draftPlan);
+      env.repository.setLaunchSettings(target.modelId, {
+        backend: 'cpu',
+        gpuLayers: 0,
+        contextTokens: 1024,
+        batchSize: 512,
+      });
+      env.repository.close();
+      const bundle: VerifiedManagedLocalSidecarBundle = {
+        target: 'darwin-arm64',
+        rootPath: '/fixture',
+        serverPath: '/fixture/server',
+        licensePath: '/fixture/license',
+        artifactPaths: {},
+        manifestSha256: 'e'.repeat(64),
+        manifest: {
+          schemaVersion: 1,
+          runtime: 'llama.cpp',
+          runtimeVersion: 'test-dflash',
+          upstreamRepository: 'https://github.com/ggml-org/llama.cpp',
+          upstreamRevision: 'f'.repeat(40),
+          platform: 'darwin',
+          architecture: 'arm64',
+          candidateBackends: ['cpu'],
+          speculativeDflash: true,
+          artifacts: [],
+        },
+      };
+      const hardware: LocalHardwareSnapshot = {
+        version: 1,
+        status: 'complete',
+        observedAt: new Date().toISOString(),
+        platform: 'darwin',
+        architecture: 'arm64',
+        memory: { totalBytes: 32 * 1024 ** 3, availableBytes: 16 * 1024 ** 3, topology: 'unified' },
+        cpu: { model: 'fixture', logicalCores: 4, features: [], featuresStatus: 'known' },
+        gpuDevicesStatus: 'known',
+        gpus: [],
+        backends: [{ kind: 'cpu', status: 'available' }],
+        unknownComponents: [],
+      };
+      const starts: ManagedLocalRuntimeStartInput[] = [];
+      class TestSupervisor extends ManagedLocalRuntimeSupervisor {
+        override async start(
+          input: ManagedLocalRuntimeStartInput,
+        ): Promise<ManagedLocalRuntimeSession> {
+          if (input.kind !== 'model') throw new Error('model required');
+          starts.push(input);
+          let state: 'running' | 'stopped' = 'running';
+          const snapshot = () => ({
+            state,
+            target: bundle.target,
+            runtimeVersion: bundle.manifest.runtimeVersion,
+            baseUrl: 'http://127.0.0.1:1234/v1',
+            backend: input.backend,
+            gpuLayers: input.gpuLayers,
+            contextTokens: input.contextTokens,
+            batchSize: input.batchSize,
+            startedAt: new Date().toISOString(),
+            stoppedAt: null,
+            exitCode: null,
+            signal: null,
+          });
+          return {
+            baseUrl: 'http://127.0.0.1:1234/v1',
+            snapshot,
+            diagnostics: () => '',
+            stop: async () => {
+              state = 'stopped';
+              return snapshot();
+            },
+            authenticatedFetch: async (_path, init) => {
+              const request = JSON.parse(String(init?.body)) as {
+                tools?: unknown[];
+                messages: Array<{ content: string }>;
+              };
+              const nonce = /nonce ([a-f0-9-]+)\./u.exec(request.messages[0]!.content)?.[1];
+              const message = request.tools
+                ? {
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'call-1',
+                        type: 'function',
+                        function: {
+                          name: 'sprint_self_test',
+                          arguments: JSON.stringify({ nonce }),
+                        },
+                      },
+                    ],
+                  }
+                : {
+                    content:
+                      request.messages.length === 1
+                        ? 'one two three four five six seven eight nine ten'
+                        : 'DONE',
+                  };
+              return new Response(
+                JSON.stringify({
+                  choices: [{ message }],
+                  timings: { draft_n: 12, draft_n_accepted: 9 },
+                }),
+              );
+            },
+          };
+        }
+      }
+      const lifecycle = new ManagedLocalRuntimeLifecycle({
+        bundle,
+        supervisor: new TestSupervisor({ loadBundle: async () => bundle }),
+        collectHardware: async () => hardware,
+      });
+      const controller = await ManagedLocalController.create({
+        databasePath: join(env.root, 'app.sqlite3'),
+        storeRoot: env.store.rootPath,
+        bundle,
+        lifecycle,
+        collectHardware: async () => hardware,
+      });
+      try {
+        const view = await controller.getSpeculativeSettings(target.modelId);
+        expect(view.eligibleDrafts.map(({ id }) => id)).toEqual([draft.modelId]);
+        await controller.setSpeculativeSettings(target.modelId, {
+          type: 'draft-dflash',
+          draftModelId: draft.modelId,
+          draftTokensMax: 3,
+        });
+        const fit = await controller.verify(target.modelId);
+        expect(fit.state).toBe('verified_tools');
+        expect(fit.verification?.binding.speculative).toMatchObject({
+          draftModelId: draft.modelId,
+          draftArtifactHashes: [draftPlan.artifacts[0]!.sha256],
+          draftTokensMax: 3,
+        });
+        expect(fit.breakdown?.draft?.weightsBytes).toBe(env.bytes[1]!.byteLength);
+        expect(starts[0]).toMatchObject({
+          kind: 'model',
+          modelAlias: target.modelId,
+          draft: { id: draft.modelId, draftTokensMax: 3 },
+        });
+        await expect(controller.delete(draft.modelId)).rejects.toThrow('referenced');
+        expect(lifecycle.snapshot().state).toBe('running');
+        await controller.setSpeculativeSettings(target.modelId, {
+          type: 'off',
+          draftModelId: null,
+          draftTokensMax: 3,
+        });
+        expect(lifecycle.snapshot().state).toBe('stopped');
+        await controller.delete(draft.modelId);
+      } finally {
+        await lifecycle.dispose();
+        await controller.dispose();
+      }
+    });
     it('installs verified draft metadata, persists a pair, and serializes deletion against references', async () => {
       const env = await fixture({ bytes: [modelMetadata('llama'), modelMetadata('dflash')] });
       const targetPlan = {
