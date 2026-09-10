@@ -3633,6 +3633,21 @@ export const graphReleaseInputSchema = graphGetInputSchema
   .extend({ instanceId: z.string().uuid() })
   .strict();
 export const graphElementIdSchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u);
+export const graphDocumentSchema = z
+  .object({
+    id: z.string().uuid(),
+    taskId: idSchema,
+    kind: z.enum(['architecture', 'workflow']),
+    title: z.string().min(1).max(160),
+    semanticRevision: z.number().int().positive(),
+    renderRevision: z.number().int().positive(),
+    semanticDigest: digestSchema,
+    diagram: z.record(z.string(), z.unknown()),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type GraphDocument = z.infer<typeof graphDocumentSchema>;
 export const graphViewSchema = z
   .object({
     id: z.string().uuid(),

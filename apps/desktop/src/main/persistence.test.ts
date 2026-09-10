@@ -41,6 +41,7 @@ import {
   validateCanvasNodePositions,
 } from './persistence';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
+import { nextGraphDocument } from './graph-document';
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { modelSelectionForRuntime } from './connection-identity';
 import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
@@ -135,6 +136,89 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('persists graph history, rejects stale writes and restores semantic revisions', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Graph owner');
+      const other = persistence.createTask('Other graph');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Plan' },
+        components: [{ id: 'service', type: 'backend', label: 'Service', pos: [40, 40] }],
+        connections: [],
+      };
+      const first = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(first, 0);
+      const redraw = nextGraphDocument(
+        task.id,
+        {
+          ...diagram,
+          components: [{ ...diagram.components[0]!, pos: [200, 100] }],
+        },
+        first,
+      );
+      persistence.saveGraphDocument(redraw, 1);
+      const revised = nextGraphDocument(
+        task.id,
+        { ...diagram, meta: { title: 'Revised plan' } },
+        redraw,
+      );
+      persistence.saveGraphDocument(revised, 2);
+      expect(() => persistence.saveGraphDocument(revised, 2)).toThrow('revision conflict');
+      expect(persistence.getGraphDocument(other.id)).toBeNull();
+      expect(
+        persistence
+          .listGraphDocumentVersions(task.id)
+          .map((doc) => [doc.renderRevision, doc.semanticRevision]),
+      ).toEqual([
+        [3, 2],
+        [2, 1],
+        [1, 1],
+      ]);
+      expect(() =>
+        persistence.saveGraphDocument({ ...revised, taskId: 'missing-task' }, 0),
+      ).toThrow();
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphDocument(task.id)).toEqual(revised);
+      expect(reopened.listGraphDocumentVersions(task.id)).toHaveLength(3);
+      reopened.close();
+      const db = new Database(path);
+      db.pragma('foreign_keys = ON');
+      db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+      expect(db.prepare('SELECT COUNT(*) AS count FROM graph_document_versions').get()).toEqual({
+        count: 0,
+      });
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      db.close();
+    });
+
+    it('adds graph storage to the v82 database without changing existing tasks', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Before graph storage');
+      persistence.close();
+      const old = new Database(path);
+      old.exec(
+        'DROP TABLE graph_document_versions; DELETE FROM schema_migrations WHERE version = 84;',
+      );
+      old.close();
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getTask(task.id).title).toBe('Before graph storage');
+      expect(migrated.getGraphDocument(task.id)).toBeNull();
+      migrated.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphDocument(task.id)).toBeNull();
+      reopened.close();
+      const verified = new Database(path);
+      expect(
+        verified
+          .prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 84')
+          .get(),
+      ).toEqual({ count: 1 });
+      expect(verified.pragma('foreign_key_check')).toEqual([]);
+      verified.close();
+    });
+
     it('migrates and owns image attachment drafts by Task', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('attachment owner');
@@ -7546,6 +7630,7 @@ if (runsWithElectronAbi)
         { version: 80 },
         { version: 81 },
         { version: 82 },
+        { version: 84 },
       ]);
       for (const [table, columns] of [
         [

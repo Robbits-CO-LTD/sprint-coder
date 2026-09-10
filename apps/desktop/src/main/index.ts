@@ -229,6 +229,7 @@ if (squirrelStartup || !hasLock) {
         computerUseNativeHost,
         undefined,
         new GraphRenderService({
+          store: persistence,
           vendorRoot: join(app.getAppPath(), 'vendor', 'archify'),
           workRoot: join(app.getPath('userData'), 'graph-render'),
           workerPath: join(__dirname, 'graph-render-host.js'),

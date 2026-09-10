@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3';
+import type { GraphDocument } from '@sprint-coder/contracts';
+import { parseStoredGraphDocument, validateGraphDocumentWrite } from './graph-document';
 import {
   closeSync,
   copyFileSync,
@@ -3804,6 +3806,24 @@ const migrations = [
       DROP TABLE command_output_chunks_v82_backup;
     `,
   },
+  {
+    // v83 is reserved by the independent DFlash migration in PR #453. Migration
+    // application tracks each version individually, so this gap cannot skip v83.
+    version: 84,
+    checksum: 'graph-documents-v84-typed-render-history',
+    sql: `
+      CREATE TABLE graph_document_versions (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        graph_id TEXT NOT NULL,
+        render_revision INTEGER NOT NULL CHECK (render_revision > 0),
+        semantic_revision INTEGER NOT NULL CHECK (semantic_revision > 0 AND semantic_revision <= render_revision),
+        document_json TEXT NOT NULL,
+        PRIMARY KEY (task_id, render_revision)
+      );
+      CREATE INDEX graph_document_semantic_idx
+        ON graph_document_versions(task_id, semantic_revision, render_revision);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -6872,6 +6892,60 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   getTask(taskId: string): TaskSummary {
     return toTask(this.getTaskRow(taskId), this.hasConversation(taskId));
+  }
+
+  getGraphDocument(taskId: string): GraphDocument | null {
+    this.getTaskRow(taskId);
+    const row = this.db
+      .prepare(
+        `SELECT document_json FROM graph_document_versions
+      WHERE task_id = ? ORDER BY render_revision DESC LIMIT 1`,
+      )
+      .get(taskId) as { document_json: string } | undefined;
+    if (row === undefined) return null;
+    const document = parseStoredGraphDocument(JSON.parse(row.document_json));
+    if (document.taskId !== taskId) throw new Error('Graph document task mismatch');
+    return document;
+  }
+
+  listGraphDocumentVersions(taskId: string, limit = 25): GraphDocument[] {
+    this.getTaskRow(taskId);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new Error('Invalid graph history limit');
+    const rows = this.db
+      .prepare(
+        `SELECT document_json FROM graph_document_versions
+      WHERE task_id = ? ORDER BY render_revision DESC LIMIT ?`,
+      )
+      .all(taskId, limit) as { document_json: string }[];
+    return rows.map((row) => {
+      const document = parseStoredGraphDocument(JSON.parse(row.document_json));
+      if (document.taskId !== taskId) throw new Error('Graph document task mismatch');
+      return document;
+    });
+  }
+
+  saveGraphDocument(document: GraphDocument, expectedRenderRevision: number): GraphDocument {
+    return this.db.transaction(() => {
+      const parsed = validateGraphDocumentWrite(
+        document,
+        this.getGraphDocument(document.taskId),
+        expectedRenderRevision,
+      );
+      this.db
+        .prepare(
+          `INSERT INTO graph_document_versions
+        (task_id, graph_id, render_revision, semantic_revision, document_json) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          parsed.taskId,
+          parsed.id,
+          parsed.renderRevision,
+          parsed.semanticRevision,
+          JSON.stringify(parsed),
+        );
+      return parsed;
+    })();
   }
 
   createTask(title?: string, localOnly = false, projectId?: string): TaskSummary {

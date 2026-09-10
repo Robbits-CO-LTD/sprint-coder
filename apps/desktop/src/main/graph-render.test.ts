@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { GraphRenderService } from './graph-render';
 import { prepareGraphInput } from './graph-input';
 import { prepareGraphHtml, trustedArchifyScripts } from './graph-html';
+import { validateGraphDocumentWrite, type GraphDocumentStore } from './graph-document';
+import type { GraphDocument } from '@sprint-coder/contracts';
 
 const roots: string[] = [];
 const vendorRoot = resolve('vendor/archify');
@@ -44,29 +46,45 @@ describe('Archify generation boundary', () => {
     async (kind) => {
       const root = await mkdtemp(join(tmpdir(), 'sc-graph-test-'));
       roots.push(root);
-      const service = new GraphRenderService({
-        vendorRoot,
-        workRoot: root,
-        workerPath: '/unused',
-        parentOrigin: 'app://bundle',
-        run: async (mode, input, directory) => {
-          const entry =
-            mode === 'render'
-              ? join(vendorRoot, 'renderers', input.kind, `render-${input.kind}.mjs`)
-              : join(vendorRoot, 'scripts', 'check-render-output.mjs');
-          const paths =
-            mode === 'render'
-              ? [join(directory, 'input.json'), join(directory, 'diagram.html')]
-              : [join(directory, 'diagram.html')];
-          return (
-            await execute(process.execPath, [entry, ...paths], {
-              timeout: 15_000,
-              maxBuffer: 256 * 1024,
-              env: { ARCHIFY_UPDATE_CHECK_DISABLED: '1' },
-            })
-          ).stdout;
+      const documents = new Map<string, GraphDocument>();
+      const store: GraphDocumentStore = {
+        getGraphDocument: (id) => structuredClone(documents.get(id) ?? null),
+        saveGraphDocument: (document, expected) => {
+          const saved = validateGraphDocumentWrite(
+            document,
+            documents.get(document.taskId) ?? null,
+            expected,
+          );
+          documents.set(document.taskId, saved);
+          return saved;
         },
-      });
+      };
+      const createService = () =>
+        new GraphRenderService({
+          store,
+          vendorRoot,
+          workRoot: root,
+          workerPath: '/unused',
+          parentOrigin: 'app://bundle',
+          run: async (mode, input, directory) => {
+            const entry =
+              mode === 'render'
+                ? join(vendorRoot, 'renderers', input.kind, `render-${input.kind}.mjs`)
+                : join(vendorRoot, 'scripts', 'check-render-output.mjs');
+            const paths =
+              mode === 'render'
+                ? [join(directory, 'input.json'), join(directory, 'diagram.html')]
+                : [join(directory, 'diagram.html')];
+            return (
+              await execute(process.execPath, [entry, ...paths], {
+                timeout: 15_000,
+                maxBuffer: 256 * 1024,
+                env: { ARCHIFY_UPDATE_CHECK_DISABLED: '1' },
+              })
+            ).stdout;
+          },
+        });
+      const service = createService();
       const view = await service.render({ taskId, diagram: diagram(kind) });
       expect(view.nodeIds).toEqual(['client', 'api', 'store']);
       const response = service.response(new URL(view.artifactUrl));
@@ -84,7 +102,7 @@ describe('Archify generation boundary', () => {
           diagram: { ...diagram(kind), meta: { title: 'unsafe', output: '/outside.html' } },
         }),
       ).rejects.toThrow();
-      const reopened = service.get(taskId)!;
+      const reopened = (await service.get(taskId))!;
       expect(reopened).toMatchObject({
         id: view.id,
         revision: view.revision,
@@ -98,6 +116,19 @@ describe('Archify generation boundary', () => {
       expect(service.response(new URL(`${view.artifactUrl}?arbitrary=1`)).status).toBe(404);
       service.dispose();
       expect(service.response(new URL(view.artifactUrl)).status).toBe(404);
+      const afterRestart = createService();
+      const [earlierRestore, restored] = await Promise.all([
+        afterRestart.get(taskId),
+        afterRestart.get(taskId),
+      ]);
+      expect(earlierRestore).not.toBeNull();
+      expect(restored).not.toBeNull();
+      expect(restored).toMatchObject({ id: view.id, revision: view.revision, digest: view.digest });
+      expect(restored!.instanceId).not.toBe(view.instanceId);
+      expect(afterRestart.response(new URL(earlierRestore!.artifactUrl)).status).toBe(404);
+      expect(afterRestart.response(new URL(restored!.artifactUrl)).status).toBe(200);
+      expect(store.getGraphDocument(taskId)?.renderRevision).toBe(1);
+      afterRestart.dispose();
     },
   );
 

@@ -3,11 +3,13 @@ import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { join } from 'node:path';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { z } from 'zod';
-import type { GraphView } from '@sprint-coder/contracts';
+import type { GraphDocument, GraphView } from '@sprint-coder/contracts';
 import { ARCHIFY_MANIFEST_SHA256, prepareGraphInput, type PreparedGraphInput } from './graph-input';
 import { prepareGraphHtml, trustedArchifyScripts } from './graph-html';
+import { nextGraphDocument, type GraphDocumentStore } from './graph-document';
 
 type StoredGraph = {
+  document: GraphDocument;
   view: GraphView;
   rawHtml: string;
   response: { html: string; csp: string };
@@ -23,6 +25,7 @@ type Run = (
 export class GraphRenderService {
   private readonly documents = new Map<string, StoredGraph>();
   private readonly running = new Map<string, AbortController>();
+  private readonly restoring = new Map<string, Promise<GraphView>>();
   private scripts: readonly string[] | null = null;
   private readonly run: Run;
 
@@ -32,6 +35,7 @@ export class GraphRenderService {
       workRoot: string;
       workerPath: string;
       parentOrigin: string;
+      store: GraphDocumentStore;
       run?: Run;
     },
   ) {
@@ -42,8 +46,21 @@ export class GraphRenderService {
 
   async render(raw: unknown): Promise<GraphView> {
     const input = prepareGraphInput(raw);
+    const prior = this.options.store.getGraphDocument(input.taskId);
+    return this.generate(input, nextGraphDocument(input.taskId, input.diagram, prior), true);
+  }
+
+  private async generate(
+    input: PreparedGraphInput,
+    document: GraphDocument,
+    save: boolean,
+  ): Promise<GraphView> {
     if (this.running.has(input.taskId) || this.running.size >= 2)
       throw new Error('Graph renderer is busy');
+    if (!this.documents.has(input.taskId) && this.documents.size >= 32) {
+      const expired = [...this.documents].find(([, record]) => !record.live);
+      if (expired) this.documents.delete(expired[0]);
+    }
     if (!this.documents.has(input.taskId) && this.documents.size >= 32)
       throw new Error('Graph session capacity reached');
     const controller = new AbortController();
@@ -84,12 +101,12 @@ export class GraphRenderService {
       const prior = this.documents.get(input.taskId);
       const instanceId = randomUUID();
       const view: GraphView = {
-        id: prior?.view.id ?? randomUUID(),
+        id: document.id,
         taskId: input.taskId,
-        revision: (prior?.view.revision ?? 0) + 1,
+        revision: document.semanticRevision,
         title: input.title,
         kind: input.kind,
-        digest: createHash('sha256').update(JSON.stringify(input.diagram)).digest('hex'),
+        digest: document.semanticDigest,
         instanceId,
         viewRevision: (prior?.view.viewRevision ?? 0) + 1,
         artifactUrl: `app://graph/${instanceId}?theme=dark`,
@@ -103,7 +120,21 @@ export class GraphRenderService {
         instanceId: view.instanceId,
         parentOrigin: this.options.parentOrigin,
       });
-      this.documents.set(input.taskId, { view: finalized, rawHtml, response, live: true });
+      // Only a successfully rendered, independently checked and sanitized document
+      // enters history. A failed replacement leaves the last valid version intact.
+      if (save) this.options.store.saveGraphDocument(document, document.renderRevision - 1);
+      else if (
+        this.options.store.getGraphDocument(input.taskId)?.renderRevision !==
+        document.renderRevision
+      )
+        throw new Error('Graph changed while restoring its viewer');
+      this.documents.set(input.taskId, {
+        document,
+        view: finalized,
+        rawHtml,
+        response,
+        live: true,
+      });
       return finalized;
     } finally {
       this.running.delete(input.taskId);
@@ -111,9 +142,28 @@ export class GraphRenderService {
     }
   }
 
-  get(taskId: string): GraphView | null {
-    const record = this.documents.get(taskId);
-    if (!record) return null;
+  async get(taskId: string): Promise<GraphView | null> {
+    const document = this.options.store.getGraphDocument(taskId);
+    if (!document) return null;
+    let record = this.documents.get(taskId);
+    if (record?.document.renderRevision !== document.renderRevision) {
+      let pending = this.restoring.get(taskId);
+      if (!pending) {
+        pending = this.generate(
+          prepareGraphInput({ taskId, diagram: document.diagram }),
+          document,
+          false,
+        );
+        this.restoring.set(taskId, pending);
+      }
+      try {
+        await pending;
+      } finally {
+        if (this.restoring.get(taskId) === pending) this.restoring.delete(taskId);
+      }
+      record = this.documents.get(taskId);
+      if (record?.document.renderRevision !== document.renderRevision) return this.get(taskId);
+    }
     const instanceId = randomUUID();
     const view = {
       ...record.view,

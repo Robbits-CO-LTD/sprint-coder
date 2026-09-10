@@ -9,12 +9,23 @@ for (const kind of ['architecture', 'workflow'] as const) {
     const profile = createUserDataDir(`archify-${kind}`);
     // The bundled worker must work without discovering an external Node on PATH.
     // Set both spellings because Windows environment keys are case-insensitive.
-    const app = await launchApp(profile, undefined, { PATH: '', Path: '' });
+    let app = await launchApp(profile, undefined, { PATH: '', Path: '' });
     try {
       const page = await firstWindow(app);
       await app.evaluate(({ BrowserWindow }) => {
         BrowserWindow.getAllWindows()[0]!.setContentSize(1024, 740);
       });
+      // Hosted runners have no user's foreground application to preserve. Their
+      // showInactive window needs focus for native pointer delivery; local tests
+      // keep their hidden/non-focus presentation and never take this path.
+      if (process.env['GITHUB_ACTIONS'] === 'true') {
+        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.focus());
+        await expect
+          .poll(() =>
+            app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
+          )
+          .toBe(true);
+      }
       await page.addInitScript(() => {
         const diagnostics = {
           errors: [] as string[],
@@ -133,6 +144,40 @@ for (const kind of ['architecture', 'workflow'] as const) {
         expect(result.result).toBe('canceled');
         expect(result.retained?.revision).toBe(view.revision);
       }
+      const savedDraft = await page.getByTestId('composer-textarea').inputValue();
+      await expect
+        .poll(() => page.evaluate(async (id) => window.sprintCoder!.tasks.getDraft(id), taskId))
+        .toBe(savedDraft);
+      await closeApp(app);
+      app = await launchApp(profile, undefined, { PATH: '', Path: '' });
+      const restarted = await firstWindow(app);
+      if (process.env['GITHUB_ACTIONS'] === 'true') {
+        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.focus());
+        await expect
+          .poll(() =>
+            app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
+          )
+          .toBe(true);
+      }
+      await restarted.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
+      await expect(restarted.getByTestId('composer-textarea')).toHaveValue(savedDraft);
+      await restarted.getByTestId('graph-toggle').click();
+      const restoredFrame = restarted.frameLocator('[data-testid="graph-frame"]');
+      await expect(restoredFrame.locator('svg[role="img"]')).toBeVisible();
+      await expect(restoredFrame.locator('html')).toHaveAttribute('data-graph-id', view.id);
+      await expect(restoredFrame.locator('html')).toHaveAttribute(
+        'data-graph-revision',
+        String(view.revision),
+      );
+      expect(await restarted.getByTestId('graph-frame').getAttribute('src')).not.toBe(displayedUrl);
+      expect(
+        await app.evaluate(async ({ net }, url) => (await net.fetch(url!)).status, displayedUrl),
+      ).toBe(404);
+      await restarted.screenshot({ path: testInfo.outputPath(`restored-${kind}.png`) });
+      await restarted
+        .getByTestId('graph-panel')
+        .getByRole('button', { name: '閉じる', exact: true })
+        .click();
     } finally {
       const graphFrame = app
         .windows()
