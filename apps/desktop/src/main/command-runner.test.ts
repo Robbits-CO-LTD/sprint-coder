@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { renameSync, writeFileSync } from 'node:fs';
+import { realpathSync, renameSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -378,6 +378,28 @@ describe('CommandRunner', () => {
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'preserves a nested cwd and relative writes through the Windows sandbox wrapper',
+    async () => {
+      expect((await probeSandboxRunner()).available).toBe(true);
+      const root = await workspace();
+      const nested = join(root, 'sub');
+      await mkdir(nested);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        cwd: 'sub',
+        executable: process.execPath,
+        argv: ['-e', "require('node:fs').writeFileSync('result.txt', process.cwd())"],
+      });
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(0);
+      expect(realpathSync.native(await readFile(join(nested, 'result.txt'), 'utf8'))).toBe(
+        realpathSync.native(nested),
+      );
+      await expect(access(join(root, 'result.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     },
   );
 

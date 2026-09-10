@@ -1,0 +1,132 @@
+#![cfg(windows)]
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+struct Fixture(PathBuf);
+
+// The Windows backend temporarily grants executable-directory access. Keep tests
+// using the same Node installation from changing that shared ACL concurrently.
+static EXECUTION_LOCK: Mutex<()> = Mutex::new(());
+
+impl Fixture {
+    fn new() -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("windows-command-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(path.join("workspace/sub")).unwrap();
+        fs::write(path.join("outside.txt"), "private").unwrap();
+        fs::write(path.join("workspace/sub/value.cjs"), "module.exports = 42;").unwrap();
+        Self(path)
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        let node = Command::new("node")
+            .env_remove("NODE_OPTIONS")
+            .args(["-p", "process.execPath"])
+            .output()
+            .unwrap();
+        assert!(node.status.success());
+        Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
+            .env_remove("NODE_OPTIONS")
+            .args(["--exec", "workspace-write"])
+            .arg(self.0.join("workspace"))
+            .arg("--protected-home")
+            .arg(std::env::var_os("USERPROFILE").unwrap())
+            .arg("--")
+            .arg(String::from_utf8(node.stdout).unwrap().trim())
+            .args(args)
+            .current_dir(self.0.join("workspace/sub"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // This unique directory was created by this fixture beneath the crate's target folder.
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!("fixture cleanup failed: {error}");
+        }
+    }
+}
+
+#[test]
+fn preserves_the_requested_subdirectory() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
+    let fixture = Fixture::new();
+    let output = fixture.run(&[
+        "-e",
+        "require('node:fs').writeFileSync('result.txt', 'inside'); console.log(process.cwd())",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::canonicalize(String::from_utf8(output.stdout).unwrap().trim()).unwrap(),
+        fs::canonicalize(fixture.0.join("workspace/sub")).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("workspace/sub/result.txt")).unwrap(),
+        "inside"
+    );
+    assert!(!fixture.0.join("workspace/result.txt").exists());
+}
+
+#[test]
+fn preserves_sandbox_boundary_when_using_nested_cwd() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
+    let fixture = Fixture::new();
+    let script = format!(
+        "const fs=require('node:fs'),a=require('node:assert/strict');a.equal(require({}),42);a.throws(()=>fs.readFileSync({}));a.throws(()=>fs.readdirSync({}));a.throws(()=>fs.writeFileSync({},'changed'));console.log('NODE_BOUNDARY_OK');",
+        serde_json::to_string(&fixture.0.join("workspace/sub/value.cjs")).unwrap(),
+        serde_json::to_string(&fixture.0.join("outside.txt")).unwrap(),
+        serde_json::to_string(&fixture.0).unwrap(),
+        serde_json::to_string(&fixture.0.join("outside.txt")).unwrap(),
+    );
+    // AppContainer cannot inspect the drive root on every machine. These explicit Node
+    // options avoid that runtime dependency; the test is about the sandbox boundary.
+    let output = fixture.run(&[
+        "--preserve-symlinks",
+        "--preserve-symlinks-main",
+        "-e",
+        &script,
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "NODE_BOUNDARY_OK"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("outside.txt")).unwrap(),
+        "private"
+    );
+}
+
+#[test]
+fn sandbox_probe_keeps_its_explicit_workspace() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
+        .arg("--probe-json")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["available"], true, "{result}");
+}

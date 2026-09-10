@@ -139,6 +139,7 @@ pub fn restricted_token_probe() -> Result<(), String> {
         .port();
     let execution = execute_impl(
         &inside,
+        &inside,
         &probe_executable.to_string_lossy(),
         &[
             "--windows-probe-child".into(),
@@ -173,13 +174,22 @@ pub fn run_probe_child(inside_marker: &Path, outside_marker: &Path, port: u16) -
 }
 
 pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {
-    execute_impl(root, executable, argv).unwrap_or(70)
+    let Ok(cwd) = std::env::current_dir() else {
+        return 70;
+    };
+    execute_impl(root, &cwd, executable, argv).unwrap_or(70)
 }
 
-fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, String> {
+fn execute_impl(root: &Path, cwd: &Path, executable: &str, argv: &[String]) -> Result<u8, String> {
     let Ok(root) = std::fs::canonicalize(root) else {
         return Err("appcontainer_workspace_resolution_failed".to_owned());
     };
+    // Preserve the host-sealed working directory independently of the access boundary.
+    let cwd =
+        std::fs::canonicalize(cwd).map_err(|_| "appcontainer_cwd_resolution_failed".to_owned())?;
+    if !is_path_inside(&root, &cwd) {
+        return Err("appcontainer_cwd_outside_workspace".to_owned());
+    }
     let workspace_profile = appcontainer_workspace_profile(&root);
     let _workspace_mutex = acquire_workspace_mutex(&workspace_profile)?;
     let profile = appcontainer_profile_name(&workspace_profile);
@@ -211,7 +221,7 @@ fn execute_impl(root: &Path, executable: &str, argv: &[String]) -> Result<u8, St
         let _ = delete_appcontainer_profile(&profile);
         return Err("appcontainer_acl_failed".to_owned());
     }
-    let result = spawn_appcontainer(sid.0, &root, executable, argv);
+    let result = spawn_appcontainer(sid.0, &cwd, executable, argv);
     let workspace_acl_removed = remove_inherited_acl(&root, &sid_string);
     let executable_acl_removed =
         executable_directory.is_none_or(|path| remove_tree_acl(path, &sid_string));
