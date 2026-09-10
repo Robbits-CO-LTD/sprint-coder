@@ -12,6 +12,10 @@ import {
 import {
   graphRenderInputSchema,
   graphGetInputSchema,
+  graphHistoryInputSchema,
+  graphHistorySchema,
+  graphCompareInputSchema,
+  graphDiffSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -1776,6 +1780,21 @@ export class IpcRouter {
         this.graphs?.cancel(input.taskId);
       }),
     );
+    this.handle(
+      IPC_CHANNELS.graphsHistory,
+      graphHistoryInputSchema,
+      graphHistorySchema,
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        if (this.graphs === null) throw new Error('Graph service is unavailable');
+        return this.graphs.history(input);
+      },
+    );
+    this.handle(IPC_CHANNELS.graphsCompare, graphCompareInputSchema, graphDiffSchema, (input) => {
+      this.persistence.getTask(input.taskId);
+      if (this.graphs === null) throw new Error('Graph service is unavailable');
+      return this.graphs.compare(input);
+    });
     this.handle(IPC_CHANNELS.graphsRelease, graphReleaseInputSchema, z.undefined(), (input) =>
       this.updateInstallMutationGate.run(() => {
         this.persistence.getTask(input.taskId);

@@ -855,15 +855,7 @@ export type CanvasViewSaveInput = {
 export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
-  graphs: {
-    render(
-      input: import('@sprint-coder/contracts').GraphRenderInput,
-    ): Promise<import('@sprint-coder/contracts').GraphView>;
-    get(taskId: string): Promise<import('@sprint-coder/contracts').GraphView | null>;
-    cancel(taskId: string): Promise<void>;
-    release(taskId: string, instanceId: string): Promise<void>;
-    subscribe(listener: (view: import('@sprint-coder/contracts').GraphView) => void): () => void;
-  };
+  graphs: import('@sprint-coder/contracts').SprintCoderApi['graphs'];
   computerUse?: import('@sprint-coder/contracts').ComputerUseApi;
   app: {
     getInfo(): Promise<{

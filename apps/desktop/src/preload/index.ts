@@ -3,6 +3,10 @@ import { z } from 'zod';
 import {
   graphRenderInputSchema,
   graphGetInputSchema,
+  graphHistoryInputSchema,
+  graphHistorySchema,
+  graphCompareInputSchema,
+  graphDiffSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -277,6 +281,10 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, input),
     get: (taskId) =>
       invoke(IPC_CHANNELS.graphsGet, graphGetInputSchema, graphViewSchema.nullable(), { taskId }),
+    history: (input) =>
+      invoke(IPC_CHANNELS.graphsHistory, graphHistoryInputSchema, graphHistorySchema, input),
+    compare: (input) =>
+      invoke(IPC_CHANNELS.graphsCompare, graphCompareInputSchema, graphDiffSchema, input),
     cancel: (taskId) =>
       invoke(IPC_CHANNELS.graphsCancel, graphGetInputSchema, z.undefined(), { taskId }),
     release: (taskId, instanceId) =>

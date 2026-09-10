@@ -3648,11 +3648,79 @@ export const graphDocumentSchema = z
   })
   .strict();
 export type GraphDocument = z.infer<typeof graphDocumentSchema>;
+export const graphHistoryInputSchema = graphGetInputSchema
+  .extend({
+    beforeRenderRevision: z.number().int().positive().optional(),
+  })
+  .strict();
+export const graphVersionSummarySchema = graphDocumentSchema.pick({
+  id: true,
+  taskId: true,
+  kind: true,
+  title: true,
+  semanticRevision: true,
+  renderRevision: true,
+  updatedAt: true,
+});
+export const graphHistorySchema = z
+  .object({
+    versions: z.array(graphVersionSummarySchema).max(25),
+    nextBeforeRenderRevision: z.number().int().positive().nullable(),
+  })
+  .strict();
+export const graphCompareInputSchema = z
+  .object({
+    taskId: idSchema,
+    beforeRenderRevision: z.number().int().positive(),
+    afterRenderRevision: z.number().int().positive(),
+  })
+  .strict()
+  .refine((value) => value.beforeRenderRevision < value.afterRenderRevision);
+export const graphDiffSchema = z
+  .object({
+    graphId: z.string().uuid(),
+    taskId: idSchema,
+    before: graphVersionSummarySchema,
+    after: graphVersionSummarySchema,
+    contentChanged: z.boolean(),
+    presentationOnly: z.boolean(),
+    changes: z
+      .array(
+        z
+          .object({
+            kind: z.enum(['node', 'edge', 'lane', 'phase', 'group', 'diagram']),
+            id: z.string().max(4000).nullable(),
+            action: z.enum(['added', 'removed', 'changed']),
+            beforeLabel: z.string().max(4000).nullable(),
+            afterLabel: z.string().max(4000).nullable(),
+            fields: z
+              .array(
+                z
+                  .object({
+                    name: z.string().max(256),
+                    before: z.string().max(262144).nullable(),
+                    after: z.string().max(262144).nullable(),
+                  })
+                  .strict(),
+              )
+              .max(64),
+          })
+          .strict(),
+      )
+      .max(2050),
+  })
+  .strict();
+export type GraphHistoryInput = z.infer<typeof graphHistoryInputSchema>;
+export type GraphHistory = z.infer<typeof graphHistorySchema>;
+export type GraphVersionSummary = z.infer<typeof graphVersionSummarySchema>;
+export type GraphCompareInput = z.infer<typeof graphCompareInputSchema>;
+export type GraphDiff = z.infer<typeof graphDiffSchema>;
 export const graphViewSchema = z
   .object({
     id: z.string().uuid(),
     taskId: idSchema,
     revision: z.number().int().positive(),
+    renderRevision: z.number().int().positive(),
     title: z.string().min(1).max(160),
     kind: z.enum(['architecture', 'workflow']),
     digest: digestSchema,
@@ -5120,6 +5188,8 @@ export interface SprintCoderApi {
   graphs: {
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
+    history(input: GraphHistoryInput): Promise<GraphHistory>;
+    compare(input: GraphCompareInput): Promise<GraphDiff>;
     cancel(taskId: string): Promise<void>;
     release(taskId: string, instanceId: string): Promise<void>;
     subscribe(listener: (view: GraphView) => void): () => void;
@@ -5441,6 +5511,8 @@ export interface SprintCoderApi {
 export const IPC_CHANNELS = {
   graphsRender: 'sprint-coder:graphs:render',
   graphsGet: 'sprint-coder:graphs:get',
+  graphsHistory: 'sprint-coder:graphs:history',
+  graphsCompare: 'sprint-coder:graphs:compare',
   graphsCancel: 'sprint-coder:graphs:cancel',
   graphsRelease: 'sprint-coder:graphs:release',
   graphsUpdated: 'sprint-coder:graphs:updated',

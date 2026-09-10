@@ -1726,6 +1726,11 @@ button {
   overflow: auto;
 }
 .graph-panel > header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex-shrink: 0;
+  background: var(--bg-panel);
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -1756,6 +1761,67 @@ button {
 .graph-panel textarea {
   min-height: 64px;
   resize: vertical;
+}
+.graph-history {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.graph-panel:has(.graph-history[open]) > .graph-comment {
+  display: none;
+}
+.graph-history summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.graph-history-content {
+  max-height: 300px;
+  overflow: auto;
+  padding-top: 10px;
+}
+.graph-history-content label {
+  display: grid;
+  gap: 6px;
+}
+.graph-history-content select {
+  width: 100%;
+  min-width: 0;
+}
+.graph-diff-changes {
+  margin: 10px 0 0;
+  padding-left: 20px;
+}
+.graph-diff-changes > li {
+  margin-bottom: 14px;
+}
+.graph-diff-changes dl {
+  margin: 8px 0 0;
+}
+.graph-diff-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.graph-diff-field dt {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.graph-diff-field dd {
+  margin: 0;
+  padding: 6px;
+  min-width: 0;
+  background: var(--neutral-wash);
+}
+.graph-diff-field dd > span {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.graph-diff-field pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0 0;
+  font: inherit;
 }
 @media (max-width: 900px) {
   .graph-panel {

@@ -6908,16 +6908,44 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return document;
   }
 
-  listGraphDocumentVersions(taskId: string, limit = 25): GraphDocument[] {
+  getGraphDocumentVersion(taskId: string, renderRevision: number): GraphDocument | null {
+    this.getTaskRow(taskId);
+    if (!Number.isSafeInteger(renderRevision) || renderRevision < 1)
+      throw new Error('Invalid graph revision');
+    const row = this.db
+      .prepare(
+        `SELECT document_json FROM graph_document_versions
+      WHERE task_id = ? AND render_revision = ?`,
+      )
+      .get(taskId, renderRevision) as { document_json: string } | undefined;
+    if (row === undefined) return null;
+    const document = parseStoredGraphDocument(JSON.parse(row.document_json));
+    if (document.taskId !== taskId || document.renderRevision !== renderRevision)
+      throw new Error('Graph document version mismatch');
+    return document;
+  }
+
+  listGraphDocumentVersions(
+    taskId: string,
+    limit = 25,
+    beforeRenderRevision?: number,
+  ): GraphDocument[] {
     this.getTaskRow(taskId);
     if (!Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new Error('Invalid graph history limit');
+    if (
+      beforeRenderRevision !== undefined &&
+      (!Number.isSafeInteger(beforeRenderRevision) || beforeRenderRevision < 1)
+    )
+      throw new Error('Invalid graph history cursor');
     const rows = this.db
       .prepare(
         `SELECT document_json FROM graph_document_versions
-      WHERE task_id = ? ORDER BY render_revision DESC LIMIT ?`,
+        WHERE task_id = ? AND render_revision < ? ORDER BY render_revision DESC LIMIT ?`,
       )
-      .all(taskId, limit) as { document_json: string }[];
+      .all(taskId, beforeRenderRevision ?? Number.MAX_SAFE_INTEGER, limit) as {
+      document_json: string;
+    }[];
     return rows.map((row) => {
       const document = parseStoredGraphDocument(JSON.parse(row.document_json));
       if (document.taskId !== taskId) throw new Error('Graph document task mismatch');

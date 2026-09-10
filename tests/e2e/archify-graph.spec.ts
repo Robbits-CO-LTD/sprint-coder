@@ -147,6 +147,47 @@ for (const kind of ['architecture', 'workflow'] as const) {
         expect(result.result).toBe('canceled');
         expect(result.retained?.revision).toBe(view.revision);
       }
+      const nodeKey = kind === 'architecture' ? 'components' : 'nodes';
+      const revisedNodes = nodes.map((node) => ({
+        ...node,
+        label: node.id === 'api' ? 'API boundary' : node.label,
+      }));
+      const revisedDiagram = { ...diagram, [nodeKey]: revisedNodes };
+      const changed = await page.evaluate(
+        async (input) => window.sprintCoder!.graphs.render(input),
+        { taskId, diagram: revisedDiagram },
+      );
+      expect(changed.revision).toBe(view.revision + 1);
+      await page.getByTestId('graph-toggle').click();
+      const history = page.getByTestId('graph-history');
+      await expect(history).toHaveAttribute('data-render-revision', String(changed.renderRevision));
+      await history.locator('summary').click();
+      await expect(page.getByTestId('graph-diff')).toBeVisible();
+      await expect(page.getByTestId('graph-diff')).toContainText('API boundary');
+      const movedNodes = revisedNodes.map((node, index) => ({
+        ...node,
+        ...(kind === 'architecture' ? { pos: [60 + index * 220, 80] } : { col: index + 1 }),
+      }));
+      const redrawn = await page.evaluate(
+        async (input) => window.sprintCoder!.graphs.render(input),
+        {
+          taskId,
+          diagram: { ...revisedDiagram, [nodeKey]: movedNodes },
+        },
+      );
+      expect(redrawn.revision).toBe(changed.revision);
+      await expect(history).toHaveAttribute('data-render-revision', String(redrawn.renderRevision));
+      await history.locator('summary').click();
+      await expect(page.getByTestId('graph-diff')).toContainText('配置・表示のみ変わっています');
+      await history
+        .getByRole('combobox', { name: '比較する保存版' })
+        .selectOption(String(view.renderRevision));
+      await expect(page.getByTestId('graph-diff')).toContainText('API boundary');
+      await page.screenshot({ path: testInfo.outputPath(`comparison-${kind}.png`) });
+      await page
+        .getByTestId('graph-panel')
+        .getByRole('button', { name: '閉じる', exact: true })
+        .click();
       const savedDraft = await page.getByTestId('composer-textarea').inputValue();
       await expect
         .poll(() => page.evaluate(async (id) => window.sprintCoder!.tasks.getDraft(id), taskId))
@@ -173,7 +214,7 @@ for (const kind of ['architecture', 'workflow'] as const) {
       await expect(restoredFrame.locator('html')).toHaveAttribute('data-graph-id', view.id);
       await expect(restoredFrame.locator('html')).toHaveAttribute(
         'data-graph-revision',
-        String(view.revision),
+        String(redrawn.revision),
       );
       expect(await restarted.getByTestId('graph-frame').getAttribute('src')).not.toBe(displayedUrl);
       expect(

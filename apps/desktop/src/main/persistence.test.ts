@@ -42,6 +42,7 @@ import {
 } from './persistence';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import { nextGraphDocument } from './graph-document';
+import { GraphRenderService } from './graph-render';
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { modelSelectionForRuntime } from './connection-identity';
 import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
@@ -166,6 +167,11 @@ if (runsWithElectronAbi)
       persistence.saveGraphDocument(revised, 2);
       expect(() => persistence.saveGraphDocument(revised, 2)).toThrow('revision conflict');
       expect(persistence.getGraphDocument(other.id)).toBeNull();
+      expect(persistence.getGraphDocumentVersion(task.id, 1)).toEqual(first);
+      expect(persistence.getGraphDocumentVersion(other.id, 1)).toBeNull();
+      expect(persistence.getGraphDocumentVersion(task.id, 999)).toBeNull();
+      expect(persistence.listGraphDocumentVersions(task.id, 1, 3)).toEqual([redraw]);
+      expect(() => persistence.listGraphDocumentVersions(task.id, 25, -1)).toThrow('cursor');
       expect(
         persistence
           .listGraphDocumentVersions(task.id)
@@ -191,6 +197,55 @@ if (runsWithElectronAbi)
       });
       expect(db.pragma('foreign_key_check')).toEqual([]);
       db.close();
+    });
+
+    it('pages saved graph history without skipping or repeating versions', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('History pages');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Version 1' },
+        components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+        connections: [],
+      };
+      let document = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(document, 0);
+      for (let revision = 2; revision <= 30; revision++) {
+        document = nextGraphDocument(
+          task.id,
+          { ...diagram, meta: { title: `Version ${revision}` } },
+          document,
+        );
+        persistence.saveGraphDocument(document, revision - 1);
+      }
+      const run = vi.fn(async () => '');
+      const service = new GraphRenderService({
+        store: persistence,
+        vendorRoot: '/unused',
+        workRoot: '/unused',
+        workerPath: '/unused',
+        parentOrigin: 'app://bundle',
+        run,
+      });
+      const first = service.history({ taskId: task.id });
+      expect(first.versions).toHaveLength(25);
+      expect(first.nextBeforeRenderRevision).toBe(6);
+      const second = service.history({
+        taskId: task.id,
+        beforeRenderRevision: first.nextBeforeRenderRevision,
+      });
+      expect(second.nextBeforeRenderRevision).toBeNull();
+      expect([...first.versions, ...second.versions].map((entry) => entry.renderRevision)).toEqual(
+        Array.from({ length: 30 }, (_, index) => 30 - index),
+      );
+      expect(
+        service.compare({ taskId: task.id, beforeRenderRevision: 1, afterRenderRevision: 30 })
+          .changes[0]?.fields,
+      ).toEqual([{ name: 'title', before: 'Version 1', after: 'Version 30' }]);
+      expect(run).not.toHaveBeenCalled();
+      service.dispose();
+      persistence.close();
     });
 
     it('adds graph storage to the v82 database without changing existing tasks', () => {

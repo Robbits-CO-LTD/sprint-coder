@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { GraphSelection, GraphView } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { acceptGraphSelection } from '../lib/graph-selection';
+import { GraphHistoryPanel } from './GraphHistoryPanel';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
@@ -107,7 +108,8 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
           {error}
         </p>
       ) : null}
-      <section aria-label="選択箇所へのコメント">
+      {view ? <GraphHistoryPanel key={`${view.id}:${view.renderRevision}`} view={view} /> : null}
+      <section className="graph-comment" aria-label="選択箇所へのコメント">
         <p className="settings-hint" data-testid="graph-selection">
           {selection
             ? `選択: ${selection.kind === 'node' ? 'ノード' : '接続'} ${selection.id}`

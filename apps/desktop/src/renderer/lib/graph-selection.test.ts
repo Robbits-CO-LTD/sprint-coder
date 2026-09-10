@@ -13,6 +13,7 @@ describe('Graph frame selection boundary', () => {
       id,
       taskId: id,
       revision: 2,
+      renderRevision: 2,
       viewRevision: 3,
       title: 'Graph',
       kind: 'architecture',

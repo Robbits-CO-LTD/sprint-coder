@@ -4,9 +4,17 @@ import { join } from 'node:path';
 import { utilityProcess, type UtilityProcess } from 'electron';
 import { z } from 'zod';
 import type { GraphDocument, GraphView } from '@sprint-coder/contracts';
+import {
+  graphHistoryInputSchema,
+  graphHistorySchema,
+  graphCompareInputSchema,
+  type GraphHistory,
+  type GraphDiff,
+} from '@sprint-coder/contracts';
 import { ARCHIFY_MANIFEST_SHA256, prepareGraphInput, type PreparedGraphInput } from './graph-input';
 import { prepareGraphHtml, trustedArchifyScripts } from './graph-html';
 import { nextGraphDocument, type GraphDocumentStore } from './graph-document';
+import { compareGraphDocuments, graphVersionSummary } from './graph-diff';
 
 type StoredGraph = {
   document: GraphDocument;
@@ -104,6 +112,7 @@ export class GraphRenderService {
         id: document.id,
         taskId: input.taskId,
         revision: document.semanticRevision,
+        renderRevision: document.renderRevision,
         title: input.title,
         kind: input.kind,
         digest: document.semanticDigest,
@@ -184,6 +193,31 @@ export class GraphRenderService {
   release(taskId: string, instanceId: string): void {
     const record = this.documents.get(taskId);
     if (record?.view.instanceId === instanceId) record.live = false;
+  }
+  history(raw: unknown): GraphHistory {
+    const input = graphHistoryInputSchema.parse(raw);
+    const documents = this.options.store.listGraphDocumentVersions(
+      input.taskId,
+      26,
+      input.beforeRenderRevision,
+    );
+    return graphHistorySchema.parse({
+      versions: documents.slice(0, 25).map(graphVersionSummary),
+      nextBeforeRenderRevision: documents.length > 25 ? documents[24]!.renderRevision : null,
+    });
+  }
+  compare(raw: unknown): GraphDiff {
+    const input = graphCompareInputSchema.parse(raw);
+    const before = this.options.store.getGraphDocumentVersion(
+      input.taskId,
+      input.beforeRenderRevision,
+    );
+    const after = this.options.store.getGraphDocumentVersion(
+      input.taskId,
+      input.afterRenderRevision,
+    );
+    if (!before || !after) throw new Error('Graph version not found');
+    return compareGraphDocuments(before, after);
   }
   cancel(taskId: string): void {
     this.running.get(taskId)?.abort();

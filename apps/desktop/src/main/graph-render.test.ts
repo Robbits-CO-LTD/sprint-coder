@@ -47,8 +47,19 @@ describe('Archify generation boundary', () => {
       const root = await mkdtemp(join(tmpdir(), 'sc-graph-test-'));
       roots.push(root);
       const documents = new Map<string, GraphDocument>();
+      const history = new Map<string, GraphDocument[]>();
       const store: GraphDocumentStore = {
         getGraphDocument: (id) => structuredClone(documents.get(id) ?? null),
+        getGraphDocumentVersion: (id, revision) =>
+          structuredClone(history.get(id)?.find((doc) => doc.renderRevision === revision) ?? null),
+        listGraphDocumentVersions: (id, limit = 25, before = Number.MAX_SAFE_INTEGER) =>
+          structuredClone(
+            (history.get(id) ?? [])
+              .filter((doc) => doc.renderRevision < before)
+              .slice()
+              .reverse()
+              .slice(0, limit),
+          ),
         saveGraphDocument: (document, expected) => {
           const saved = validateGraphDocumentWrite(
             document,
@@ -56,6 +67,7 @@ describe('Archify generation boundary', () => {
             expected,
           );
           documents.set(document.taskId, saved);
+          history.set(document.taskId, [...(history.get(document.taskId) ?? []), saved]);
           return saved;
         },
       };
@@ -87,6 +99,12 @@ describe('Archify generation boundary', () => {
       const service = createService();
       const view = await service.render({ taskId, diagram: diagram(kind) });
       expect(view.nodeIds).toEqual(['client', 'api', 'store']);
+      expect(service.history({ taskId }).versions).toMatchObject([
+        { renderRevision: 1, semanticRevision: 1 },
+      ]);
+      expect(() =>
+        service.compare({ taskId, beforeRenderRevision: 1, afterRenderRevision: 2 }),
+      ).toThrow('not found');
       const response = service.response(new URL(view.artifactUrl));
       expect(response.status).toBe(200);
       expect(response.headers.get('Content-Security-Policy')).toContain("connect-src 'none'");

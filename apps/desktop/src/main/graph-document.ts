@@ -4,6 +4,12 @@ import { prepareGraphInput } from './graph-input';
 
 export interface GraphDocumentStore {
   getGraphDocument(taskId: string): GraphDocument | null;
+  getGraphDocumentVersion(taskId: string, renderRevision: number): GraphDocument | null;
+  listGraphDocumentVersions(
+    taskId: string,
+    limit?: number,
+    beforeRenderRevision?: number,
+  ): GraphDocument[];
   saveGraphDocument(document: GraphDocument, expectedRenderRevision: number): GraphDocument;
 }
 
@@ -40,7 +46,7 @@ function stable(value: unknown): unknown {
 
 /** The pinned IR's geometry is presentation; labels, relations and group membership are meaning.
  * Unknown fields stay in the digest rather than silently granting them layout-only status. */
-export function graphSemanticDigest(diagram: Record<string, unknown>): string {
+export function graphSemanticProjection(diagram: Record<string, unknown>): Record<string, unknown> {
   const workflow = diagram['diagram_type'] === 'workflow';
   const nodeKey = workflow ? 'nodes' : 'components';
   const edgeKey = workflow ? 'edges' : 'connections';
@@ -100,8 +106,16 @@ export function graphSemanticDigest(diagram: Record<string, unknown>): string {
       omit(boundary, ['pad']),
     );
   }
+  return projection;
+}
+
+export function canonicalGraphJson(value: unknown): string {
+  return JSON.stringify(stable(value)) ?? '';
+}
+
+export function graphSemanticDigest(diagram: Record<string, unknown>): string {
   return createHash('sha256')
-    .update(JSON.stringify(stable(projection)))
+    .update(canonicalGraphJson(graphSemanticProjection(diagram)))
     .digest('hex');
 }
 

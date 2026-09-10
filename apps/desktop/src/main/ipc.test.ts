@@ -7,6 +7,8 @@ import {
   IPC_CHANNELS,
   graphRenderInputSchema,
   graphGetInputSchema,
+  graphHistoryInputSchema,
+  graphCompareInputSchema,
   graphReleaseInputSchema,
   anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
@@ -5047,6 +5049,8 @@ describe('isTrustedIpcSender', () => {
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.graphsRender]: graphRenderInputSchema,
   [IPC_CHANNELS.graphsGet]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsHistory]: graphHistoryInputSchema,
+  [IPC_CHANNELS.graphsCompare]: graphCompareInputSchema,
   [IPC_CHANNELS.graphsCancel]: graphGetInputSchema,
   [IPC_CHANNELS.graphsRelease]: graphReleaseInputSchema,
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
