@@ -49,7 +49,7 @@ jobs:
             printf '%s\n' "${changed_files}"
 
             # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
-            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^build-computer-use-native\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|computer-use-native/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
+            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(native-safe-fs|managed-local-sidecar)\.mjs$|^build-computer-use-native\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|sandbox-runner/|computer-use-native/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
               full_matrix=true
             fi
           fi

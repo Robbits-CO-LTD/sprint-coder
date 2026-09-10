@@ -3,9 +3,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Fixture(PathBuf);
+
+// The Windows backend temporarily grants executable-directory access. Keep tests
+// using the same Node installation from changing that shared ACL concurrently.
+static EXECUTION_LOCK: Mutex<()> = Mutex::new(());
 
 impl Fixture {
     fn new() -> Self {
@@ -49,12 +54,15 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         // This unique directory was created by this fixture beneath the crate's target folder.
-        fs::remove_dir_all(&self.0).unwrap();
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!("fixture cleanup failed: {error}");
+        }
     }
 }
 
 #[test]
 fn preserves_the_requested_subdirectory() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
     let fixture = Fixture::new();
     let output = fixture.run(&[
         "-e",
@@ -66,8 +74,8 @@ fn preserves_the_requested_subdirectory() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()),
-        fixture.0.join("workspace/sub")
+        fs::canonicalize(String::from_utf8(output.stdout).unwrap().trim()).unwrap(),
+        fs::canonicalize(fixture.0.join("workspace/sub")).unwrap()
     );
     assert_eq!(
         fs::read_to_string(fixture.0.join("workspace/sub/result.txt")).unwrap(),
@@ -78,6 +86,7 @@ fn preserves_the_requested_subdirectory() {
 
 #[test]
 fn preserves_sandbox_boundary_when_using_nested_cwd() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
     let fixture = Fixture::new();
     let script = format!(
         "const fs=require('node:fs'),a=require('node:assert/strict');a.equal(require({}),42);a.throws(()=>fs.readFileSync({}));a.throws(()=>fs.readdirSync({}));a.throws(()=>fs.writeFileSync({},'changed'));console.log('NODE_BOUNDARY_OK');",
@@ -111,6 +120,7 @@ fn preserves_sandbox_boundary_when_using_nested_cwd() {
 
 #[test]
 fn sandbox_probe_keeps_its_explicit_workspace() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
         .arg("--probe-json")
         .stdin(Stdio::null())

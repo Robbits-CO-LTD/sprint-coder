@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { renameSync, writeFileSync } from 'node:fs';
+import { realpathSync, renameSync, writeFileSync } from 'node:fs';
 import {
   access,
   chmod,
@@ -396,8 +396,8 @@ describe('CommandRunner', () => {
       });
       const result = await new CommandRunner({ sandboxed: true }).run(spec);
       expect(result.exitCode).toBe(0);
-      await expect(readFile(join(nested, 'result.txt'), 'utf8')).resolves.toBe(
-        spec.cwdIdentity.canonicalPath,
+      expect(realpathSync.native(await readFile(join(nested, 'result.txt'), 'utf8'))).toBe(
+        realpathSync.native(nested),
       );
       await expect(access(join(root, 'result.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
     },
