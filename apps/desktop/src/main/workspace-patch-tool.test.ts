@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -97,6 +97,60 @@ async function harness(content = SOURCE) {
 }
 
 describe('the agent edit tool', () => {
+  it('rejects case-alias batches before starting any Edit Saga', async ({ skip }) => {
+    const { workspace, identity, deps, applied, patchWriteGuard, patchReadGuard } = await harness();
+    if (!(await stat(join(workspace, 'src/A.txt')).catch(() => null)))
+      return skip('The fixture filesystem is case-sensitive');
+    const alternateGuard = await createPathGuard({
+      rootId: 'root-a',
+      workspacePath: workspace,
+      expectedRootIdentityDigest: identity.rootIdentityDigest,
+      targetPath: 'src/A.txt',
+      operation: 'write',
+    });
+    const original = await deps.revisions.readGuarded({
+      owner: context,
+      guard: patchReadGuard,
+      policyEpoch: 1,
+    });
+    const alternate = await deps.revisions.readGuarded({
+      owner: context,
+      guard: await createPathGuard({
+        rootId: 'root-a',
+        workspacePath: workspace,
+        expectedRootIdentityDigest: identity.rootIdentityDigest,
+        targetPath: 'src/A.txt',
+        operation: 'read',
+      }),
+      policyEpoch: 1,
+    });
+    await expect(
+      executeWorkspacePatchBatch(
+        {
+          operations: [
+            {
+              kind: 'update',
+              path: 'src/a.txt',
+              revision: original.reference,
+              edits: [{ oldText: 'input + 1', newText: 'input + 2' }],
+            },
+            {
+              kind: 'update',
+              path: 'src/A.txt',
+              revision: alternate.reference,
+              edits: [{ oldText: 'input + 1', newText: 'input + 3' }],
+            },
+          ],
+        },
+        context,
+        deps,
+        [patchWriteGuard, alternateGuard],
+      ),
+    ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+    expect(applied).toEqual([]);
+    expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
+  });
+
   it('declares both capabilities used by its read-before-write behavior', () => {
     expect(WORKSPACE_PATCH_TOOL.kind).toBe('fileWrite');
     expect(WORKSPACE_PATCH_TOOL.sideEffect).toBe('write');

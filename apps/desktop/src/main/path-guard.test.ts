@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { link, mkdtemp, mkdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import {
+  link,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join, parse } from 'node:path';
+import { basename, join, parse } from 'node:path';
 import {
   PathGuardError,
   canonicalizeResourcePath,
@@ -37,6 +48,91 @@ async function fixture() {
 }
 
 describe('path guard', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'canonicalizes an available Windows 8.3 alias',
+    async ({ skip }) => {
+      const { workspace } = await fixture();
+      const name = 'LongFilenameForCanonicalIdentity.txt';
+      const longPath = join(workspace, 'src', name);
+      await writeFile(longPath, 'original');
+      // GetShortPathNameW can return the original long name when the volume has no
+      // short names. Only that supported outcome is skipped; API errors fail the test.
+      // https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getshortpathnamew
+      const shortPath = execFileSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class CanonicalAliasProbe {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern uint GetShortPathNameW(string path, StringBuilder result, uint size);
+}
+'@
+$buffer = New-Object System.Text.StringBuilder 32768
+$size = [CanonicalAliasProbe]::GetShortPathNameW($env:SC_ALIAS_TEST_PATH, $buffer, 32768)
+if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
+[Console]::Write($buffer.ToString())
+`,
+        ],
+        {
+          env: { ...process.env, SC_ALIAS_TEST_PATH: longPath },
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: 65536,
+        },
+      ).trim();
+      const shortName = basename(shortPath);
+      if (shortName.toLowerCase() === name.toLowerCase())
+        return skip('The fixture volume did not allocate an 8.3 filename');
+      expect(shortName).toMatch(/^[^.]{1,8}\.[^.]{1,3}$/u);
+      const original = await canonicalizeResourcePath({
+        workspacePath: workspace,
+        targetPath: `src/${name}`,
+        operation: 'read',
+      });
+      const alternate = await canonicalizeResourcePath({
+        workspacePath: workspace,
+        targetPath: `src/${shortName}`,
+        operation: 'read',
+      });
+      expect(basename(original.resolvedPath)).toBe(name);
+      expect(alternate.resolvedPath).toBe(original.resolvedPath);
+      expect(alternate.targetIdentity).toEqual(original.targetIdentity);
+    },
+    20000,
+  );
+
+  it('canonicalizes existing case aliases to the actual directory entry spelling', async ({
+    skip,
+  }) => {
+    const { workspace } = await fixture();
+    await writeFile(join(workspace, 'src', 'README.md'), 'original');
+    const alias = await stat(join(workspace, 'src', 'readme.md')).catch(() => null);
+    if (!alias) return skip('The fixture filesystem is case-sensitive');
+    const original = await canonicalizeResourcePath({
+      workspacePath: workspace,
+      targetPath: 'src/README.md',
+      operation: 'read',
+    });
+    const alternate = await canonicalizeResourcePath({
+      workspacePath: workspace,
+      targetPath: 'src/readme.md',
+      operation: 'read',
+    });
+    expect(
+      original.resolvedPath.endsWith(`${process.platform === 'win32' ? '\\' : '/'}README.md`),
+    ).toBe(true);
+    expect(alternate.resolvedPath).toBe(original.resolvedPath);
+    expect(alternate.targetIdentity).toEqual(original.targetIdentity);
+  });
+
   it('canonicalizes a workspace-relative path to a stable identity', async () => {
     const { workspace } = await fixture();
     const identity = await canonicalizeResourcePath({

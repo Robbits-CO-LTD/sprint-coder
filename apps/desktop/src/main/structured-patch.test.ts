@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -418,5 +418,80 @@ describe('structured patch preparation', () => {
         ],
       }),
     ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+    expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe('alpha beta gamma\n');
+    expect((await stat(alias)).ino).toBe(aliasStat.ino);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects actual symlink aliases before preparing effects',
+    async () => {
+      const { workspace, registry, a } = await fixture();
+      // File symlinks are refused at the read boundary. A directory alias can be
+      // read and must still converge when its regular-file endpoints are claimed.
+      await symlink('src', join(workspace, 'alias-src'), 'dir');
+      const alias = await registry.read({
+        owner,
+        workspacePath: workspace,
+        targetPath: 'alias-src/a.txt',
+        policyEpoch: 1,
+      });
+      await expect(
+        prepareStructuredPatch({
+          owner,
+          workspacePath: workspace,
+          policyEpoch: 1,
+          registry,
+          operations: [
+            {
+              kind: 'update',
+              path: 'src/a.txt',
+              revision: a.reference,
+              edits: [{ oldText: 'beta', newText: 'first' }],
+            },
+            {
+              kind: 'update',
+              path: 'alias-src/a.txt',
+              revision: alias.reference,
+              edits: [{ oldText: 'beta', newText: 'second' }],
+            },
+          ],
+        }),
+      ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+      expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe('alpha beta gamma\n');
+    },
+  );
+
+  it('preserves distinct case-sensitive files as separate endpoints', async ({ skip }) => {
+    const { workspace, registry, a } = await fixture();
+    if (await stat(join(workspace, 'src/A.txt')).catch(() => null))
+      return skip('The fixture filesystem is case-insensitive');
+    await writeFile(join(workspace, 'src/A.txt'), 'separate');
+    const alternate = await registry.read({
+      owner,
+      workspacePath: workspace,
+      targetPath: 'src/A.txt',
+      policyEpoch: 1,
+    });
+    const patch = await prepareStructuredPatch({
+      owner,
+      workspacePath: workspace,
+      policyEpoch: 1,
+      registry,
+      operations: [
+        {
+          kind: 'update',
+          path: 'src/a.txt',
+          revision: a.reference,
+          edits: [{ oldText: 'beta', newText: 'first' }],
+        },
+        {
+          kind: 'update',
+          path: 'src/A.txt',
+          revision: alternate.reference,
+          edits: [{ oldText: 'separate', newText: 'second' }],
+        },
+      ],
+    });
+    expect(new Set(patch.operations.map((operation) => operation.canonicalPath)).size).toBe(2);
   });
 });

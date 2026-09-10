@@ -456,6 +456,8 @@ async function resolveExisting(
   code: Extract<PathGuardErrorCode, 'PATH_NOT_FOUND'>,
 ): Promise<string> {
   try {
+    // fs/promises.realpath already uses the native canonicalizer. The callback/sync
+    // emulations can retain case aliases and break structured-patch endpoint claims.
     return await realpath(path);
   } catch (error) {
     if (isNotFound(error)) throw new PathGuardError(code, 'Path does not exist or is dangling');
