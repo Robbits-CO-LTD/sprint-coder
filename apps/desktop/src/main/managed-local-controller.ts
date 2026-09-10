@@ -499,6 +499,7 @@ export class ManagedLocalController {
     // temporary probe valid without mutating the user's configured batch size.
     const batchSize = managedLocalProbeBatchSize(launch.batchSize, contextTokens);
     const modelPath = this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'model'));
+    const targetMetadata = draft === null ? null : await readGgufModelMetadata(modelPath);
     const gpuOffloadRatio = await this.installedGpuOffloadRatio(modelPath, launch);
     if (gpuOffloadRatio === null)
       throw new Error('Managed Local model layer metadata is unavailable for GPU fit');
@@ -535,7 +536,7 @@ export class ManagedLocalController {
               }),
           weightsBytes: model.totalBytes,
           contextTokens,
-          kvBytesPerToken: 128 * 1_024,
+          kvBytesPerToken: draft === null ? 128 * 1_024 : (targetMetadata?.kvBytesPerToken ?? null),
           scratchBytes: Math.max(256 * 1_024 * 1_024, Math.ceil(model.totalBytes * 0.1)),
           runtimeReserveBytes: 768 * 1_024 * 1_024,
           safetyFactor: 1.15,

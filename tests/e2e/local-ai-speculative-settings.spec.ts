@@ -11,7 +11,7 @@ import {
   REPO_ROOT,
 } from './helpers';
 
-test('shows draft-only models and refuses to enable DFlash on an unsupported bundled runtime', async ({}, testInfo) => {
+test('shows draft-only models and gates DFlash settings on bundled support and artifact integrity', async ({}, testInfo) => {
   const userDataDir = createUserDataDir('dflash-settings');
   let app = await launchApp(userDataDir);
   try {
@@ -49,8 +49,31 @@ test('shows draft-only models and refuses to enable DFlash on an unsupported bun
     const target = page.getByTestId(`local-ai-launch-${'a'.repeat(64)}`);
     await target.getByText('投機的デコード（DFlash2）', { exact: true }).click();
     await expect(target.getByRole('combobox', { name: '方式', exact: true })).toHaveValue('off');
-    await expect(target.locator('option[value="draft-dflash"]')).toHaveJSProperty('disabled', true);
-    await expect(target).toContainText('同梱RuntimeはDFlash2に対応していません。');
+    const supported = await page.evaluate(
+      async () => (await window.sprintCoder!.localAI.speculativeSettings('a'.repeat(64))).supported,
+    );
+    await expect(target.locator('option[value="draft-dflash"]')).toHaveJSProperty(
+      'disabled',
+      !supported,
+    );
+    if (supported) {
+      await target
+        .getByRole('combobox', { name: '方式', exact: true })
+        .selectOption('draft-dflash');
+      await expect(target.getByRole('combobox', { name: '下書きモデル', exact: true })).toHaveValue(
+        'b'.repeat(64),
+      );
+      await target.getByRole('button', { name: '投機的デコード設定を保存' }).click();
+      await expect(target.getByRole('alert')).toContainText('保存できませんでした');
+      expect(
+        await page.evaluate(
+          async () =>
+            (await window.sprintCoder!.localAI.speculativeSettings('a'.repeat(64))).configured.type,
+        ),
+      ).toBe('off');
+    } else {
+      await expect(target).toContainText('同梱RuntimeはDFlash2に対応していません。');
+    }
     await target.getByRole('button', { name: '投機的デコード設定を保存' }).scrollIntoViewIfNeeded();
     const screenshot = testInfo.outputPath('dflash-settings.png');
     await page.screenshot({ path: screenshot });
