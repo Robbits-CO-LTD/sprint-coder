@@ -57,6 +57,7 @@ async function startHarness(
     allowedTools?: readonly string[] | null;
     managedTools?: readonly { name: string; description: string; inputSchema: object }[];
     rejectFirstAuthentication?: boolean;
+    holdFirstAuthentication?: boolean;
   } = {},
 ): Promise<Harness> {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-mcp-test-'));
@@ -97,6 +98,16 @@ async function startHarness(
         };
         if (request.tool === '__authenticate__') {
           authenticationAttempts += 1;
+          if (options.holdFirstAuthentication === true && authenticationAttempts === 1) {
+            bridgeResponders.push({
+              requestId: request.requestId,
+              respond: (response) =>
+                socket.write(
+                  `${JSON.stringify({ ...(response as object), requestId: request.requestId })}\n`,
+                ),
+            });
+            continue;
+          }
           if (options.rejectFirstAuthentication === true && authenticationAttempts === 1) {
             socket.destroy();
             continue;
@@ -192,6 +203,20 @@ async function startHarness(
 }
 
 describe('team-mcp-server-source (MCP stdio handshake)', () => {
+  it('waits for a pending warm-up rejection before authenticating tools/list again', async () => {
+    const harness = await startHarness({ holdFirstAuthentication: true });
+    await vi_waitFor(() => harness.bridgeAuthenticationAttempts() === 1);
+    harness.send({ jsonrpc: '2.0', id: 30, method: 'tools/list' });
+    harness.send({ jsonrpc: '2.0', id: 31, method: 'ping' });
+    expect((await harness.nextMessage())['id']).toBe(31);
+    harness.bridgeRespond({ ok: false });
+    const reply = await harness.nextMessage();
+    expect(reply['id']).toBe(30);
+    expect(
+      (reply['result'] as { tools: { name: string }[] }).tools.map(({ name }) => name).sort(),
+    ).toEqual([...TEAM_MCP_TOOL_NAMES].sort());
+    expect(harness.bridgeAuthenticationAttempts()).toBe(2);
+  });
   it('uses a fresh connection for tools/list after warm-up authentication is rejected', async () => {
     const harness = await startHarness({ rejectFirstAuthentication: true });
     await vi_waitFor(
