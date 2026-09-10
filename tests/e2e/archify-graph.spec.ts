@@ -19,7 +19,10 @@ for (const kind of ['architecture', 'workflow'] as const) {
       // showInactive window needs focus for native pointer delivery; local tests
       // keep their hidden/non-focus presentation and never take this path.
       if (process.env['GITHUB_ACTIONS'] === 'true') {
-        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.focus());
+        await app.evaluate(({ app: electronApp, BrowserWindow }) => {
+          electronApp.focus({ steal: true });
+          BrowserWindow.getAllWindows()[0]!.focus();
+        });
         await expect
           .poll(() =>
             app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
@@ -152,7 +155,10 @@ for (const kind of ['architecture', 'workflow'] as const) {
       app = await launchApp(profile, undefined, { PATH: '', Path: '' });
       const restarted = await firstWindow(app);
       if (process.env['GITHUB_ACTIONS'] === 'true') {
-        await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.focus());
+        await app.evaluate(({ app: electronApp, BrowserWindow }) => {
+          electronApp.focus({ steal: true });
+          BrowserWindow.getAllWindows()[0]!.focus();
+        });
         await expect
           .poll(() =>
             app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
