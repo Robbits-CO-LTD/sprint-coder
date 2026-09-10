@@ -382,6 +382,28 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'preserves a nested cwd and relative writes through the Windows sandbox wrapper',
+    async () => {
+      expect((await probeSandboxRunner()).available).toBe(true);
+      const root = await workspace();
+      const nested = join(root, 'sub');
+      await mkdir(nested);
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        cwd: 'sub',
+        executable: process.execPath,
+        argv: ['-e', "require('node:fs').writeFileSync('result.txt', process.cwd())"],
+      });
+      const result = await new CommandRunner({ sandboxed: true }).run(spec);
+      expect(result.exitCode).toBe(0);
+      await expect(readFile(join(nested, 'result.txt'), 'utf8')).resolves.toBe(
+        spec.cwdIdentity.canonicalPath,
+      );
+      await expect(access(join(root, 'result.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
     'enforces Windows AppContainer workspace-write through the packaged sandbox helper',
     async () => {
       if (!(await probeSandboxRunner()).available) return;

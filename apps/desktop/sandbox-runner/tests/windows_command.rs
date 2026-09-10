@@ -25,11 +25,13 @@ impl Fixture {
 
     fn run(&self, args: &[&str]) -> Output {
         let node = Command::new("node")
+            .env_remove("NODE_OPTIONS")
             .args(["-p", "process.execPath"])
             .output()
             .unwrap();
         assert!(node.status.success());
         Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
+            .env_remove("NODE_OPTIONS")
             .args(["--exec", "workspace-write"])
             .arg(self.0.join("workspace"))
             .arg("--protected-home")
@@ -54,7 +56,10 @@ impl Drop for Fixture {
 #[test]
 fn preserves_the_requested_subdirectory() {
     let fixture = Fixture::new();
-    let output = fixture.run(&["-e", "console.log(process.cwd())"]);
+    let output = fixture.run(&[
+        "-e",
+        "require('node:fs').writeFileSync('result.txt', 'inside'); console.log(process.cwd())",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -64,6 +69,11 @@ fn preserves_the_requested_subdirectory() {
         PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()),
         fixture.0.join("workspace/sub")
     );
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("workspace/sub/result.txt")).unwrap(),
+        "inside"
+    );
+    assert!(!fixture.0.join("workspace/result.txt").exists());
 }
 
 #[test]
