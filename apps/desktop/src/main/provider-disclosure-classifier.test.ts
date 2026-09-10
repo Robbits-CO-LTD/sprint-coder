@@ -9,6 +9,30 @@ describe('sealed Workspace root egress classification', () => {
   const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
   const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
 
+  it('recognizes a Windows descendant only with its Main-issued drive and root', () => {
+    const windowsRoot = 'F:\\sc-real-ai-20260910\\fixtures';
+    const path = 'F:/sc-real-ai-20260910/fixtures/qwen38';
+    expect(assessProviderEgressDisclosure(path).classification).toBe('sensitive');
+    for (const root of [windowsRoot, `${windowsRoot}\\`, windowsRoot.replaceAll('\\', '/')]) {
+      const content = JSON.stringify({ message: path });
+      expect(assessProviderEgressDisclosure(content, [root])).toMatchObject({
+        classification: 'safe',
+        redactedContent: content,
+      });
+    }
+    for (const content of [
+      path.replace('F:', 'G:'),
+      path.replace('/fixtures/', '/fixtures-other/'),
+      `${path}/${opaque}`,
+      `${path}/8Jv2mQp7Zx4Lk9Wd6Tn3R/s5Yc1Ua0BfH8Jv2mQp7Zx`,
+      `password="${path}"`,
+      `${path}\n${opaque}`,
+    ])
+      expect(assessProviderEgressDisclosure(content, [windowsRoot]).classification).toBe(
+        'sensitive',
+      );
+  });
+
   it('uses exact Main-issued root context only for composite entropy', () => {
     expect(assessProviderDisclosure(root).classification).toBe('sensitive');
     expect(assessProviderEgressDisclosure(root).classification).toBe('sensitive');

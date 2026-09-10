@@ -38,6 +38,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     connection: ProviderConnection;
     prompt: string;
     context: PreparedContext;
+    knownWorkspaceRoots: readonly string[];
   }): boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   managerGuidance: string | ((worker: AgentRecord) => string);
@@ -240,6 +241,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             connection,
             prompt: JSON.stringify(providerMessagesForEgressPolicy(messages)),
             context: inheritedContext,
+            knownWorkspaceRoots: input.workspaceSet?.roots.map((root) => root.path) ?? [],
           })
         )
           throw new Error('Provider Worker egress was denied');

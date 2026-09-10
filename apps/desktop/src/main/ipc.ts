@@ -1261,13 +1261,21 @@ export class IpcRouter {
       verification: this.providerVerification,
       registry: this.providerRegistry,
       getConnection: (connectionId) => this.persistence.getProviderConnection(connectionId),
-      authorizeEgress: ({ worker, executionId, connection, prompt, context }) =>
+      authorizeEgress: ({
+        worker,
+        executionId,
+        connection,
+        prompt,
+        context,
+        knownWorkspaceRoots,
+      }) =>
         authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
             task: this.persistence.getTask(worker.taskId),
             turnId: executionId,
             prompt,
+            knownWorkspaceRoots,
             context,
             now: new Date().toISOString(),
           },
@@ -7155,6 +7163,7 @@ export class IpcRouter {
             task: this.persistence.getTask(taskId),
             turnId: started.turnId,
             prompt: initialPolicyPayload,
+            knownWorkspaceRoots: started.workspaceSet.roots.map((root) => root.path),
             context,
             now: new Date().toISOString(),
             payloadDigest: initialPayloadDigest,
@@ -7235,6 +7244,7 @@ export class IpcRouter {
             {
               broker: this.permissionBroker,
               task: this.persistence.getTask(taskId),
+              knownWorkspaceRoots: started.workspaceSet.roots.map((root) => root.path),
               turnId: started.turnId,
               prompt: JSON.stringify({
                 messages: providerMessagesForEgressPolicy(dispatchRound.messages),

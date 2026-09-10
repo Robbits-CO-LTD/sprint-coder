@@ -244,6 +244,18 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       envelope,
       content: '調査してください',
       priorConversation: [{ direction: 'sent', role: 'Leader', content: '前回まとめた調査論点' }],
+      workspaceSet: {
+        primaryRootId: 'root-1',
+        roots: [
+          {
+            rootId: 'root-1',
+            path: 'F:/sc-real-ai-20260910/fixtures',
+            label: 'workspace',
+            role: 'primary',
+          },
+        ],
+        digest: 'b'.repeat(64),
+      },
     });
 
     expect(fallbackExecute).not.toHaveBeenCalled();
@@ -251,6 +263,7 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       expect.objectContaining({
         connection,
         executionId: 'delivery-1',
+        knownWorkspaceRoots: ['F:/sc-real-ai-20260910/fixtures'],
         context: expect.objectContaining({
           projectItems: [expect.objectContaining({ id: 'project:one:instruction' })],
         }),

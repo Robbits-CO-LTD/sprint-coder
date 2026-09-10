@@ -1158,14 +1158,28 @@ function workspaceClaims(
 
 export function providerToolsFromSnapshot(snapshot: ToolCatalogSnapshot): readonly ProviderTool[] {
   const names = new Set<string>();
+  const commandEditingAvailable =
+    snapshot.entries.some(
+      (entry) => entry.providerName === MANAGED_EXEC_COMMAND_TOOL.providerName,
+    ) &&
+    !snapshot.entries.some((entry) => entry.providerName === WORKSPACE_PATCH_TOOL.providerName);
   return Object.freeze(
     snapshot.entries.map((entry) => {
       if (names.has(entry.providerName)) throw new Error('Provider tool name collision');
       names.add(entry.providerName);
       const description = descriptions.get(entry.providerName);
-      const resolvedDescription = description ?? TEAM_TOOL_DESCRIPTIONS[entry.providerName];
+      let resolvedDescription = description ?? TEAM_TOOL_DESCRIPTIONS[entry.providerName];
       if (resolvedDescription === undefined)
         throw new Error('Provider tool description is unavailable');
+      if (commandEditingAvailable && entry.providerName === WORKSPACE_CREATE_FILE_TOOL.providerName)
+        resolvedDescription +=
+          ' Existing files can be edited through an approved exec_command using an installed runtime; do not create a replacement under a different filename and claim the original was edited. Read back the original and verify it afterward.';
+      if (
+        process.platform === 'win32' &&
+        entry.providerName === MANAGED_EXEC_COMMAND_TOOL.providerName
+      )
+        resolvedDescription +=
+          ' Windows AppContainer: PowerShell filesystem cmdlets can fall back to the drive root even when the process cwd is correct. For file edits, use an installed runtime with direct file I/O (for example Node fs) and absolute workspace file paths. Do not infer a new workspace path from a shell error. Interpreter code is one argv element without extra shell quoting.';
       return Object.freeze({
         name: entry.providerName,
         description: resolvedDescription,

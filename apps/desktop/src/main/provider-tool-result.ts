@@ -77,10 +77,14 @@ function redactCommandText(text: string, knownWorkspaceRoots: readonly string[])
   // filenames and any sensitive suffix still pass through the disclosure classifier.
   const roots = knownWorkspaceRoots
     .filter((root) => typeof root === 'string')
-    .map((root, index) => ({
-      root: root.replace(/[\\/]+$/u, ''),
-      label: '<workspace-' + (index + 1) + '>',
-    }))
+    .flatMap((root, index) =>
+      [...new Set(/^[a-z]:[\\/]/iu.test(root) ? [root, root.replaceAll('\\', '/')] : [root])].map(
+        (variant) => ({
+          root: variant.replace(/[\\/]+$/u, ''),
+          label: '<workspace-' + (index + 1) + '>',
+        }),
+      ),
+    )
     .filter(({ root }) => root.length > 1 && !/^[a-z]:$/iu.test(root))
     .sort((a, b) => b.root.length - a.root.length);
   for (const { root, label } of roots)

@@ -481,7 +481,7 @@ function connectSocket() {
 }
 
 function callBridge(tool, args) {
-  return connectSocket().then(
+  return warmup.then(() => connectSocket()).then(
     (connection) =>
       writeBridgeRequest(
         connection,
@@ -499,9 +499,9 @@ function callBridge(tool, args) {
   );
 }
 
-if (SOCKET_PATH && TOKEN) {
-  connectSocket().catch(() => {});
-}
+// A caller arriving during failed warm-up must not inherit its rejected promise.
+// Await cleanup first, then authenticate a fresh connection; never replay a tool call.
+const warmup = SOCKET_PATH && TOKEN ? connectSocket().catch(() => {}) : Promise.resolve();
 
 let stdinBuffer = '';
 process.stdin.setEncoding('utf8');
@@ -570,7 +570,7 @@ function handleLine(line) {
       send({ jsonrpc: '2.0', id: message.id, result: { tools: [] } });
       return;
     }
-    connectSocket().then(
+    warmup.then(() => connectSocket()).then(
       (connection) =>
         send({ jsonrpc: '2.0', id: message.id, result: { tools: connection.availableTools } }),
       () => send({ jsonrpc: '2.0', id: message.id, result: { tools: [] } }),

@@ -148,6 +148,22 @@ describe('Ollama command diagnostic disclosure', () => {
 });
 
 describe('Ollama command output framing and exceptions', () => {
+  it('normalizes Windows root separators without hiding a sensitive suffix', () => {
+    const root = 'F:\\sc-real-ai-20260910\\fixtures';
+    const path = 'F:/sc-real-ai-20260910/fixtures/qwen38/calc.cjs';
+    const output = formatProviderToolResult('ollama', 'exec_command', { stdout: path }, [root]);
+    expect(JSON.parse(output).result.stdout).toBe('<workspace-1>/qwen38/calc.cjs');
+    const token = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+    const protectedOutput = formatProviderToolResult(
+      'ollama',
+      'exec_command',
+      {
+        stdout: `${path}/${token}`,
+      },
+      [root],
+    );
+    expect(protectedOutput).not.toContain(token);
+  });
   const root = '/Users/yusei/sc-packaged-acceptance-20260909/workspaces/ollama';
   it('masks text when JSON escaping changes its disclosure classification', () => {
     const stderr = 'cookie: ab\nTraceback from a command';
