@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 for (const kind of ['architecture', 'workflow'] as const) {
@@ -134,10 +135,14 @@ for (const kind of ['architecture', 'workflow'] as const) {
             observations: Reflect.get(window, '__graphDiagnostics'),
           }))
           .catch(() => ({ unavailable: true }));
+        const diagnosticsPath = testInfo.outputPath('viewer-diagnostics.json');
+        await writeFile(diagnosticsPath, JSON.stringify(diagnostics, null, 2));
         await testInfo.attach('graph-viewer-diagnostics', {
-          body: JSON.stringify(diagnostics, null, 2),
+          path: diagnosticsPath,
           contentType: 'application/json',
         });
+        if (testInfo.status !== testInfo.expectedStatus)
+          await graphFrame.page().screenshot({ path: testInfo.outputPath('viewer-failure.png') });
       }
       await closeApp(app);
       removeUserDataDir(profile);
