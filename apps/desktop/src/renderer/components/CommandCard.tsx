@@ -19,6 +19,8 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
   const [outputs, setOutputs] = useState<CommandOutputRecord[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [now, setNow] = useState(Date.now());
   const expandedRef = useRef(false);
@@ -105,6 +107,25 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
     setOutputs([]);
     setExpanded(true);
     void loadOutput(true);
+  }
+
+  async function stopExecution(): Promise<void> {
+    if (stopping || !window.sprintCoder) return;
+    setStopping(true);
+    setStopError(null);
+    try {
+      // A model may finish its answer while a yielded command is still running.
+      // Cancel the owning turn, not whichever newer turn is currently active.
+      await window.sprintCoder.turns.cancel({
+        taskId,
+        turnId: command.turnId,
+        startNextQueued: false,
+      });
+    } catch {
+      setStopError('停止を確認できませんでした。もう一度お試しください。');
+    } finally {
+      setStopping(false);
+    }
   }
 
   return (
@@ -201,10 +222,16 @@ export function CommandCard({ taskId, card }: { taskId: string; card: CommandCar
 
       <footer className="command-card__footer">
         {command.truncated ? <span>出力上限に達しました</span> : <span />}
+        {command.state === 'running' || command.state === 'starting' ? (
+          <button type="button" disabled={stopping} onClick={() => void stopExecution()}>
+            {stopping ? '停止中…' : 'この実行を停止'}
+          </button>
+        ) : null}
         <button type="button" onClick={toggleExpanded}>
           {expanded ? '出力を折り畳む' : '出力を展開'}
         </button>
       </footer>
+      {stopError ? <p role="alert">{stopError}</p> : null}
     </section>
   );
 }
