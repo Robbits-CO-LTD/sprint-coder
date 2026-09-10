@@ -1,4 +1,5 @@
-import { open, type FileHandle } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, open, type FileHandle } from 'node:fs/promises';
 
 const GGUF_MAGIC = Buffer.from('GGUF', 'ascii');
 const MAX_METADATA_ENTRIES = 65_536;
@@ -128,12 +129,22 @@ async function integerValue(reader: GgufReader, type: number): Promise<number | 
   return null;
 }
 
-/** Reads only the bounded GGUF metadata prefix and returns one architecture block count. */
-export async function readGgufBlockCount(path: string): Promise<number | null> {
+export type GgufModelMetadata = Readonly<{
+  architecture: string | null;
+  blockCount: number | null;
+  contextLength: number | null;
+}>;
+
+/** Reads metadata only; model weights and tokenizer contents are never materialized. */
+export async function readGgufModelMetadata(path: string): Promise<GgufModelMetadata | null> {
   let handle: FileHandle | null = null;
   try {
-    handle = await open(path, 'r');
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) return null;
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== before.dev || stat.ino !== before.ino)
+      return null;
     const reader = new GgufReader(handle, stat.size);
     if (!(await reader.bytes(4)).equals(GGUF_MAGIC)) return null;
     const version = await reader.uint32();
@@ -143,10 +154,23 @@ export async function readGgufBlockCount(path: string): Promise<number | null> {
     if (metadataCount > MAX_METADATA_ENTRIES) return null;
 
     const blockCounts: number[] = [];
+    let architectureEntries = 0;
+    let architecture: string | null = null;
+    const contexts: Array<{ key: string; value: number | null }> = [];
     for (let index = 0; index < metadataCount; index += 1) {
       const key = await reader.string(MAX_KEY_BYTES);
       const type = await reader.uint32();
-      if (key.endsWith('.block_count')) {
+      if (key === 'general.architecture') {
+        architectureEntries += 1;
+        if (type === 8) {
+          const value = await reader.string(128);
+          architecture = /^[a-z][a-z0-9_]{0,127}$/u.test(value) ? value : null;
+        } else {
+          await skipValue(reader, type);
+        }
+      } else if (key.endsWith('.context_length')) {
+        contexts.push({ key, value: await integerValue(reader, type) });
+      } else if (key.endsWith('.block_count')) {
         const value = await integerValue(reader, type);
         if (value !== null && Number.isSafeInteger(value) && value > 0 && value <= 4_096)
           blockCounts.push(value);
@@ -154,10 +178,28 @@ export async function readGgufBlockCount(path: string): Promise<number | null> {
         await skipValue(reader, type);
       }
     }
-    return blockCounts.length === 1 ? blockCounts[0]! : null;
+    if (architectureEntries !== 1) architecture = null;
+    const context = contexts.length === 1 ? contexts[0] : undefined;
+    return {
+      architecture,
+      blockCount: blockCounts.length === 1 ? blockCounts[0]! : null,
+      contextLength:
+        architecture !== null &&
+        context?.key === `${architecture}.context_length` &&
+        context.value !== null &&
+        Number.isSafeInteger(context.value) &&
+        context.value > 0
+          ? context.value
+          : null,
+    };
   } catch {
     return null;
   } finally {
     await handle?.close();
   }
+}
+
+/** Keeps the existing block-count-only callers compatible with metadata lacking an architecture. */
+export async function readGgufBlockCount(path: string): Promise<number | null> {
+  return (await readGgufModelMetadata(path))?.blockCount ?? null;
 }

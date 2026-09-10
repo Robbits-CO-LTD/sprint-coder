@@ -232,7 +232,7 @@ export class ManagedLocalController {
     const models = await Promise.all(
       this.manager
         .listInstalledModels()
-        .filter(({ state }) => state === 'installed')
+        .filter(({ state, purpose }) => state === 'installed' && purpose !== 'draft-dflash')
         .map(async (model): Promise<ProviderModel | null> => {
           const artifacts = this.manager.artifactExpectations(model.id);
           const imageInputCapability = managedLocalImageInputCapability(artifacts);
@@ -298,7 +298,10 @@ export class ManagedLocalController {
   imageInputCapability(modelId: string): boolean | null {
     const installed = this.manager
       .listInstalledModels()
-      .find((model) => model.id === modelId && model.state === 'installed');
+      .find(
+        (model) =>
+          model.id === modelId && model.state === 'installed' && model.purpose !== 'draft-dflash',
+      );
     if (installed === undefined) return null;
     return managedLocalImageInputCapability(this.manager.artifactExpectations(modelId));
   }
@@ -325,7 +328,8 @@ export class ManagedLocalController {
     const model = this.manager
       .listInstalledModels()
       .find((candidate) => candidate.id === modelId && candidate.state === 'installed');
-    if (model === undefined) throw new Error('Managed Local model is not startable');
+    if (model === undefined || model.purpose === 'draft-dflash')
+      throw new Error('Managed Local model is not startable');
     const artifacts = this.manager.artifactExpectations(model.id);
     const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
     const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
@@ -728,6 +732,8 @@ export function installPlan(
     immutableRevision: revision,
     quantization,
     artifacts: ordered,
+    architecture: detail.architecture,
+    baseModelId: detail.baseModelId ?? null,
   };
 }
 

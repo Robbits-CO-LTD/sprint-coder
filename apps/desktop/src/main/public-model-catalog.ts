@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import {
+  localModelBaseModelIdSchema,
   publicModelCatalogDetailInputSchema,
   publicModelCatalogDetailSchema,
   publicModelCatalogPageSchema,
@@ -294,14 +295,28 @@ export class PublicModelCatalogService {
     }
   }
 
-  private async huggingFaceDetail(sourceId: string): Promise<PublicModelCatalogDetail> {
+  async resolveBaseModelId(sourceId: string, immutableRevision: string): Promise<string | null> {
+    if (!/^[a-f0-9]{40}$/u.test(immutableRevision))
+      throw new Error('Invalid immutable Hugging Face revision');
+    return (await this.huggingFaceDetail(sourceId, immutableRevision)).baseModelId ?? null;
+  }
+
+  private async huggingFaceDetail(
+    sourceId: string,
+    expectedRevision?: string,
+  ): Promise<PublicModelCatalogDetail> {
     assertHuggingFaceRepo(sourceId);
     const summaryResponse = await this.fetchJson(
-      `${HF_ORIGIN}${HF_MODELS_PATH}/${sourceId.split('/').map(encodeURIComponent).join('/')}?blobs=true`,
+      `${HF_ORIGIN}${HF_MODELS_PATH}/${sourceId.split('/').map(encodeURIComponent).join('/')}${expectedRevision === undefined ? '' : `/revision/${expectedRevision}`}?blobs=true`,
     );
     const value = asRecord(summaryResponse.value);
     const item = normalizeHuggingFaceItem(value);
     if (item === null) throw new Error('Invalid Hugging Face model detail');
+    if (
+      expectedRevision !== undefined &&
+      (item.immutableRevision !== expectedRevision || item.sourceId !== sourceId)
+    )
+      throw new Error('Hugging Face model revision changed');
     const siblings = arrayOfRecords(value.siblings).slice(0, 256);
     const artifacts = bindGenericMmprojArtifacts(
       siblings
@@ -341,6 +356,7 @@ export class PublicModelCatalogService {
       architecture:
         boundedString(gguf?.architecture, 128) ??
         firstString(asOptionalRecord(value.config)?.architectures),
+      baseModelId: declaredBaseModelId(cardData?.base_model),
       parameterCount: safePositiveInteger(gguf?.total),
       contextTokens:
         safePositiveInteger(gguf?.context_length) ??
@@ -477,6 +493,18 @@ async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void
 function assertHuggingFaceRepo(sourceId: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u.test(sourceId))
     throw new Error('Invalid Hugging Face repository id');
+}
+
+function declaredBaseModelId(value: unknown): string | null {
+  const values = typeof value === 'string' ? [value] : Array.isArray(value) ? value : [];
+  if (values.length === 0 || values.length > 32) return null;
+  const ids = new Set<string>();
+  for (const candidate of values) {
+    const parsed = localModelBaseModelIdSchema.safeParse(candidate);
+    if (!parsed.success) return null;
+    ids.add(parsed.data);
+  }
+  return ids.size === 1 ? [...ids][0]! : null;
 }
 
 function nextLink(header: string | null, current: string): string | null {

@@ -95,6 +95,8 @@ function detail(overrides: Partial<PublicModelCatalogDetail> = {}): PublicModelC
 describe('installPlan', () => {
   it('pins an installable GGUF to its immutable resolve URL, size, and digest', () => {
     expect(installPlan(detail(), ['artifact-q4'], 'Q4_K_M')).toEqual({
+      architecture: detail().architecture,
+      baseModelId: null,
       source: 'hugging_face',
       sourceId: 'acme/model',
       immutableRevision: REVISION,

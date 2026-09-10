@@ -3804,6 +3804,16 @@ const migrations = [
       DROP TABLE command_output_chunks_v82_backup;
     `,
   },
+  {
+    version: 83,
+    checksum: 'managed-local-v83-model-purpose',
+    sql: `
+      ALTER TABLE local_models ADD COLUMN purpose TEXT NOT NULL DEFAULT 'normal'
+        CHECK (purpose IN ('normal', 'draft-dflash'));
+      ALTER TABLE local_models ADD COLUMN base_model_id TEXT
+        CHECK (base_model_id IS NULL OR length(base_model_id) <= 256);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.

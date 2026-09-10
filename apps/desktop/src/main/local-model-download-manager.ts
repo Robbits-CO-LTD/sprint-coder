@@ -23,6 +23,12 @@ import {
   MANAGED_LOCAL_DEFAULT_GPU_LAYERS,
   managedLocalLaunchSettingsMapSchema,
   managedLocalLaunchSettingsSchema,
+  localModelBaseModelIdSchema,
+  managedLocalSpeculativeSettingsSchema,
+  managedLocalSpeculativeSettingsMapSchema,
+  type ManagedLocalSpeculativeSettings,
+  type ManagedLocalSpeculativeSettingsMap,
+  type LocalModelPurpose,
   managedLocalInferenceSettingsMapSchema,
   managedLocalInferenceSettingsSchema,
   localDownloadJobSchema,
@@ -36,6 +42,7 @@ import {
   type ManagedLocalLaunchSettings,
   type LocalVerificationRecord,
 } from '@sprint-coder/contracts';
+import { readGgufModelMetadata } from './gguf-metadata';
 
 const DIGEST = /^[a-f0-9]{64}$/u;
 const REVISION = /^[a-f0-9]{40,64}$/u;
@@ -57,6 +64,9 @@ const DEFAULT_LAUNCH_SETTINGS: ManagedLocalLaunchSettings = Object.freeze({
   batchSize: MANAGED_LOCAL_DEFAULT_BATCH_SIZE,
 });
 const MAX_LAUNCH_SETTINGS_BYTES = 32 * 1024;
+const SPECULATIVE_SETTINGS_KEY = 'managed-local.speculative-settings';
+const MAX_SPECULATIVE_SETTINGS_BYTES = 32 * 1024;
+const OFF_SPECULATIVE_SETTINGS = { type: 'off', draftModelId: null, draftTokensMax: 3 } as const;
 
 export type LocalModelArtifactRole = 'model' | 'mmproj';
 
@@ -75,6 +85,8 @@ export type LocalModelInstallPlan = Readonly<{
   immutableRevision: string;
   quantization: string;
   artifacts: readonly LocalModelInstallArtifact[];
+  architecture?: string | null;
+  baseModelId?: string | null;
 }>;
 
 type ArtifactRow = Readonly<{
@@ -126,6 +138,7 @@ export class LocalModelDownloadError extends Error {
 
 export class LocalModelDownloadRepository {
   private readonly db: Database.Database;
+  private speculativeRecoveryRequired = false;
 
   constructor(databasePath: string) {
     this.db = new Database(databasePath);
@@ -137,10 +150,25 @@ export class LocalModelDownloadRepository {
     const hasArtifactRole = (
       this.db.prepare("PRAGMA table_info('local_model_artifacts')").all() as { name: string }[]
     ).some(({ name }) => name === 'role');
-    if (exists === undefined || !hasArtifactRole) {
+    const columns = this.db.prepare("PRAGMA table_info('local_models')").all() as {
+      name: string;
+    }[];
+    if (
+      exists === undefined ||
+      !hasArtifactRole ||
+      !['purpose', 'base_model_id'].every((column) => columns.some(({ name }) => name === column))
+    ) {
       this.db.close();
-      throw new Error('Managed Local schema migration v77 has not been applied');
+      throw new Error('Managed Local schema migration v83 has not been applied');
     }
+    this.db.transaction(() => {
+      try {
+        this.readSpeculativeSettingsMap();
+      } catch {
+        this.writeSettingsMap(SPECULATIVE_SETTINGS_KEY, {});
+        this.speculativeRecoveryRequired = true;
+      }
+    })();
   }
 
   create(plan: LocalModelInstallPlan, id: string, now: string): LocalDownloadJob {
@@ -220,7 +248,7 @@ export class LocalModelDownloadRepository {
     const rows = this.db
       .prepare(
         `SELECT id, source, source_id, immutable_revision, quantization, artifact_count,
-                total_bytes, state, created_at, updated_at
+                total_bytes, state, created_at, updated_at, purpose, base_model_id
          FROM local_models
          WHERE state IN ('installed', 'deleting', 'delete_failed')
          ORDER BY updated_at DESC, id DESC`,
@@ -236,6 +264,8 @@ export class LocalModelDownloadRepository {
       state: string;
       created_at: string;
       updated_at: string;
+      purpose: string;
+      base_model_id: string | null;
     }>;
     return rows.map((row) =>
       installedLocalModelSchema.parse({
@@ -249,6 +279,8 @@ export class LocalModelDownloadRepository {
         state: row.state,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        purpose: row.purpose,
+        baseModelId: row.base_model_id,
       }),
     );
   }
@@ -386,6 +418,80 @@ export class LocalModelDownloadRepository {
     }
   }
 
+  needsSpeculativeSettingsRecovery(): boolean {
+    return this.speculativeRecoveryRequired;
+  }
+
+  getSpeculativeSettings(modelId: string): ManagedLocalSpeculativeSettings {
+    this.assertInstalledLaunchModel(modelId);
+    return { ...(this.readSpeculativeSettingsMap()[modelId] ?? OFF_SPECULATIVE_SETTINGS) };
+  }
+
+  setSpeculativeSettings(
+    modelId: string,
+    input: ManagedLocalSpeculativeSettings,
+  ): ManagedLocalSpeculativeSettings {
+    const settings = managedLocalSpeculativeSettingsSchema.parse(input);
+    return this.db.transaction(() => {
+      this.assertInstalledLaunchModel(modelId);
+      if (settings.type === 'draft-dflash') {
+        const target = this.listInstalledModels().find(({ id }) => id === modelId)!;
+        const draft = this.listInstalledModels().find(({ id }) => id === settings.draftModelId);
+        if (
+          draft?.state !== 'installed' ||
+          draft.purpose !== 'draft-dflash' ||
+          target.id === draft.id ||
+          target.baseModelId === null ||
+          target.baseModelId !== draft.baseModelId ||
+          this.artifacts(modelId).some(({ role }) => role === 'mmproj')
+        )
+          throw new Error('Draft model is not compatible with the installed target');
+      }
+      const current = this.readSpeculativeSettingsMap();
+      if (settings.type === 'off') delete current[modelId];
+      else current[modelId] = settings;
+      this.writeSpeculativeSettingsMap(current);
+      this.db.prepare('DELETE FROM local_model_verifications WHERE model_id = ?').run(modelId);
+      this.speculativeRecoveryRequired = false;
+      return { ...settings };
+    })();
+  }
+
+  private readSpeculativeSettingsMap(): ManagedLocalSpeculativeSettingsMap {
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(SPECULATIVE_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined) return {};
+    if (Buffer.byteLength(row.value, 'utf8') > MAX_SPECULATIVE_SETTINGS_BYTES)
+      throw new Error('Managed Local speculative settings are too large');
+    return managedLocalSpeculativeSettingsMapSchema.parse(JSON.parse(row.value) as unknown);
+  }
+
+  private writeSpeculativeSettingsMap(input: ManagedLocalSpeculativeSettingsMap): void {
+    const map = managedLocalSpeculativeSettingsMapSchema.parse(input);
+    if (Buffer.byteLength(JSON.stringify(map), 'utf8') > MAX_SPECULATIVE_SETTINGS_BYTES)
+      throw new Error('Managed Local speculative settings are too large');
+    this.writeSettingsMap(SPECULATIVE_SETTINGS_KEY, map);
+  }
+
+  backfillBaseModelId(
+    modelId: string,
+    sourceId: string,
+    immutableRevision: string,
+    baseModelId: string,
+  ): boolean {
+    const valid = localModelBaseModelIdSchema.parse(baseModelId);
+    return (
+      this.db
+        .prepare(
+          `UPDATE local_models SET base_model_id = ?
+      WHERE id = ? AND source = 'hugging_face' AND source_id = ? AND immutable_revision = ?
+        AND state = 'installed' AND purpose = 'normal' AND base_model_id IS NULL`,
+        )
+        .run(valid, modelId, sourceId, immutableRevision).changes === 1
+    );
+  }
+
   setLaunchSettings(
     modelId: string,
     input: ManagedLocalLaunchSettings,
@@ -417,6 +523,7 @@ export class LocalModelDownloadRepository {
   }
 
   private assertInstalledInferenceModel(modelId: string): void {
+    this.assertInstalledLaunchModel(modelId);
     if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
     const row = this.db.prepare('SELECT state FROM local_models WHERE id = ?').get(modelId) as
       { state: string } | undefined;
@@ -431,9 +538,9 @@ export class LocalModelDownloadRepository {
   private assertInstalledLaunchModel(modelId: string): void {
     if (!DIGEST.test(modelId)) throw new Error('Invalid Managed Local model id');
     const row = this.db
-      .prepare('SELECT state, artifact_count FROM local_models WHERE id = ?')
-      .get(modelId) as { state: string; artifact_count: number } | undefined;
-    if (row?.state !== 'installed' || row.artifact_count < 1)
+      .prepare('SELECT state, artifact_count, purpose FROM local_models WHERE id = ?')
+      .get(modelId) as { state: string; artifact_count: number; purpose: string } | undefined;
+    if (row?.state !== 'installed' || row.artifact_count < 1 || row.purpose !== 'normal')
       throw new Error('Managed Local model is not available for launch settings');
   }
 
@@ -536,7 +643,14 @@ export class LocalModelDownloadRepository {
     })();
   }
 
-  markInstalled(jobId: string, now: string): LocalDownloadJob {
+  markInstalled(
+    jobId: string,
+    now: string,
+    metadata: Readonly<{ purpose: LocalModelPurpose; baseModelId: string | null }> = {
+      purpose: 'normal',
+      baseModelId: null,
+    },
+  ): LocalDownloadJob {
     const job = this.getJob(jobId);
     const completeness = this.db
       .prepare(
@@ -570,8 +684,10 @@ export class LocalModelDownloadRepository {
         )
         .run(job.modelId);
       this.db
-        .prepare("UPDATE local_models SET state = 'installed', updated_at = ? WHERE id = ?")
-        .run(now, job.modelId);
+        .prepare(
+          "UPDATE local_models SET state = 'installed', purpose = ?, base_model_id = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(metadata.purpose, metadata.baseModelId, now, job.modelId);
       this.db
         .prepare(
           "UPDATE local_model_download_jobs SET state = 'installed', updated_at = ? WHERE id = ?",
@@ -593,6 +709,11 @@ export class LocalModelDownloadRepository {
 
   removeModel(modelId: string): void {
     this.db.transaction(() => {
+      const speculative = this.readSpeculativeSettingsMap();
+      if (Object.values(speculative).some(({ draftModelId }) => draftModelId === modelId))
+        throw new Error('Draft model is still referenced');
+      delete speculative[modelId];
+      this.writeSpeculativeSettingsMap(speculative);
       this.removeInferenceSettings(modelId);
       this.removeLaunchSettings(modelId);
       this.db.prepare('DELETE FROM local_models WHERE id = ?').run(modelId);
@@ -651,13 +772,21 @@ export class LocalModelDownloadRepository {
   }
 
   beginDelete(modelId: string, now: string): void {
-    const row = this.db.prepare('SELECT state FROM local_models WHERE id = ?').get(modelId) as
-      { state: string } | undefined;
-    if (!['installed', 'deleting', 'delete_failed'].includes(row?.state ?? ''))
-      throw new Error('Model is not deletable');
-    this.db
-      .prepare("UPDATE local_models SET state = 'deleting', updated_at = ? WHERE id = ?")
-      .run(now, modelId);
+    this.db.transaction(() => {
+      const row = this.db.prepare('SELECT state FROM local_models WHERE id = ?').get(modelId) as
+        { state: string } | undefined;
+      if (!['installed', 'deleting', 'delete_failed'].includes(row?.state ?? ''))
+        throw new Error('Model is not deletable');
+      if (
+        Object.values(this.readSpeculativeSettingsMap()).some(
+          ({ draftModelId }) => draftModelId === modelId,
+        )
+      )
+        throw new Error('Draft model is still referenced');
+      this.db
+        .prepare("UPDATE local_models SET state = 'deleting', updated_at = ? WHERE id = ?")
+        .run(now, modelId);
+    })();
   }
 
   close(): void {
@@ -909,8 +1038,31 @@ export class LocalModelDownloadManager {
         this.repository.artifactDownloaded(jobId, row.ordinal, this.now());
       }
       this.repository.transition(jobId, 'verifying', this.now());
+      const modelRows = this.repository
+        .artifacts(job.modelId)
+        .filter(({ role }) => role === 'model');
+      const metadata = await readGgufModelMetadata(
+        this.store.partialPath(job.modelId, modelRows[0]!.ordinal),
+      );
+      const draft = plan.architecture === 'dflash';
+      if (
+        (metadata?.architecture === 'dflash') !== draft ||
+        (draft &&
+          (modelRows.length !== 1 ||
+            plan.artifacts.some(({ role }) => role === 'mmproj') ||
+            metadata?.contextLength === null ||
+            metadata === null ||
+            plan.baseModelId == null))
+      )
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'DFlash metadata or declared compatibility is invalid',
+        );
       await this.store.publish(job.modelId, this.repository.artifacts(job.modelId));
-      return this.repository.markInstalled(jobId, this.now());
+      return this.repository.markInstalled(jobId, this.now(), {
+        purpose: draft ? 'draft-dflash' : 'normal',
+        baseModelId: plan.baseModelId ?? null,
+      });
     } catch (error: unknown) {
       const current = this.repository.getJob(jobId);
       if (current.state === 'paused' || current.state === 'canceled') return current;
@@ -1066,6 +1218,7 @@ async function rejectArtifactResponse(response: Response, error: Error): Promise
 }
 
 function validatePlan(input: LocalModelInstallPlan): LocalModelInstallPlan {
+  if (input.baseModelId != null) localModelBaseModelIdSchema.parse(input.baseModelId);
   if (!['hugging_face', 'localai_gallery'].includes(input.source))
     throw new Error('Invalid source');
   if (input.sourceId.length < 1 || input.sourceId.length > 256)
