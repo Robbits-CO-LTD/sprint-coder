@@ -79,12 +79,10 @@ describe('graph history comparison', () => {
       beforeRenderRevision === 2 ? older : Promise.resolve(difference(1)),
     );
     await mount({
-      history: vi
-        .fn()
-        .mockResolvedValue({
-          versions: [version(3), version(2), version(1)],
-          nextBeforeRenderRevision: null,
-        }),
+      history: vi.fn().mockResolvedValue({
+        versions: [version(3), version(2), version(1)],
+        nextBeforeRenderRevision: null,
+      }),
       compare,
     });
     const select = container.querySelector('select')!;
