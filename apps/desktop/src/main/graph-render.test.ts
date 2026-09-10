@@ -102,6 +102,15 @@ describe('Archify generation boundary', () => {
   );
 
   it('rejects external-resource and output controls before invoking Archify', () => {
+    expect(
+      prepareGraphInput({
+        taskId,
+        diagram: {
+          ...diagram('architecture'),
+          meta: { title: 'Strict graph', quality_profile: 'showcase' },
+        },
+      }).diagram,
+    ).toMatchObject({ meta: { quality_profile: 'showcase' } });
     for (const field of ['output', 'repository', 'brand', 'source']) {
       expect(() =>
         prepareGraphInput({

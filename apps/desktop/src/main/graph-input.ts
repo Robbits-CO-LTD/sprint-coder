@@ -80,6 +80,12 @@ export function prepareGraphInput(input: unknown): PreparedGraphInput {
     edges.some(({ from, to }) => !nodeIds.includes(from) || !nodeIds.includes(to))
   )
     throw new Error('Invalid graph element identities');
-  const diagram = { ...parsed.diagram, meta: { ...meta, quality_profile: 'standard' } };
+  const diagram = {
+    ...parsed.diagram,
+    meta: {
+      ...meta,
+      quality_profile: meta['quality_profile'] === undefined ? 'standard' : meta['quality_profile'],
+    },
+  };
   return { taskId: parsed.taskId, kind, title: meta.title, diagram, nodeIds, edgeIds };
 }
