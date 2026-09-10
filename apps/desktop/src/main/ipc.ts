@@ -603,6 +603,7 @@ import { RetryableActionRegistry } from './retryable-action';
 import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor';
 import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
+import { createGraphToolBoundary } from './graph-tools';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -1500,6 +1501,18 @@ export class IpcRouter {
         this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.providerId,
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
+      ...(this.graphs === null
+        ? {}
+        : {
+            graphs: createGraphToolBoundary(
+              this.graphs,
+              (view) => {
+                if (!this.window.isDestroyed())
+                  this.window.webContents.send(IPC_CHANNELS.graphsUpdated, view);
+              },
+              (action) => this.updateInstallMutationGate.run(action),
+            ),
+          }),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
       recordPlan: (context, items) =>
         this.persistence.recordManagedTurnPlan({

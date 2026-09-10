@@ -63,16 +63,26 @@ export class GraphRenderService {
       ((mode, input, directory, signal) => this.runUtility(mode, input, directory, signal));
   }
 
-  async render(raw: unknown): Promise<GraphView> {
+  async render(
+    raw: unknown,
+    options: { expectedRenderRevision?: number; signal?: AbortSignal } = {},
+  ): Promise<GraphView> {
+    options.signal?.throwIfAborted();
     const input = graphRenderInputSchema.parse(raw);
     const prior = this.options.store.getGraphDocument(input.taskId);
-    return this.generate(input, prior, true);
+    if (
+      options.expectedRenderRevision !== undefined &&
+      (prior?.renderRevision ?? 0) !== options.expectedRenderRevision
+    )
+      throw new Error('Graph version changed; read the current document before proposing again');
+    return this.generate(input, prior, true, options.signal);
   }
 
   private async generate(
     raw: GraphRenderInput,
     priorDocument: GraphDocument | null,
     save: boolean,
+    signal?: AbortSignal,
   ): Promise<GraphView> {
     if (this.closed) throw new Error('Graph renderer is closed');
     const taskId = raw.taskId;
@@ -93,6 +103,16 @@ export class GraphRenderService {
       }),
     };
     this.running.set(taskId, operation);
+    const onAbort = () => {
+      if (this.running.get(taskId) !== operation) return;
+      try {
+        this.cancel(taskId, operation.generationId);
+      } catch {
+        controller.abort();
+      }
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) controller.abort();
     let stage: NonNullable<GraphGeneration['failureStage']> = 'input';
     let directory: string | undefined;
     try {
@@ -211,6 +231,7 @@ export class GraphRenderService {
       }
       throw error;
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       if (directory !== undefined) {
         try {
           await rm(directory, { recursive: true, force: true });
@@ -328,6 +349,11 @@ export class GraphRenderService {
 
   generation(taskId: string): GraphGeneration | null {
     return this.options.store.getGraphGeneration(taskId);
+  }
+  document(taskId: string, renderRevision?: number): GraphDocument | null {
+    return renderRevision === undefined
+      ? this.options.store.getGraphDocument(taskId)
+      : this.options.store.getGraphDocumentVersion(taskId, renderRevision);
   }
   subscribeGeneration(listener: (value: GraphGeneration) => void): () => void {
     this.generationListeners.add(listener);

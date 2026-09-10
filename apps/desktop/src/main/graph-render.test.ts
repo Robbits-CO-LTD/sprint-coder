@@ -135,6 +135,10 @@ describe('Archify generation boundary', () => {
       const service = createService();
       const view = await service.render({ taskId, diagram: diagram(kind) });
       expect(view.nodeIds).toEqual(['client', 'api', 'store']);
+      await expect(
+        service.render({ taskId, diagram: diagram(kind) }, { expectedRenderRevision: 0 }),
+      ).rejects.toThrow('version changed');
+      expect(service.generation(taskId)?.state).toBe('succeeded');
       expect(service.history({ taskId }).versions).toMatchObject([
         { renderRevision: 1, semanticRevision: 1 },
       ]);
@@ -201,16 +205,24 @@ describe('Archify generation boundary', () => {
       };
       const states: string[] = [];
       stopping.subscribeGeneration((value) => states.push(value.state));
-      const result = stopping.render({ taskId, diagram: diagram(kind) }).then(
-        () => 'published',
-        () => 'rejected',
-      );
+      const external = new AbortController();
+      const result = stopping
+        .render(
+          { taskId, diagram: diagram(kind) },
+          { expectedRenderRevision: 1, signal: external.signal },
+        )
+        .then(
+          () => 'published',
+          () => 'rejected',
+        );
       await started;
       const activeId = stopping.generation(taskId)!.id;
       expect(() => stopping.cancel(taskId, '00000000-0000-4000-8000-000000000099')).toThrow(
         'changed',
       );
       expect(stopping.generation(taskId)?.state).toBe('running');
+      external.abort();
+      expect(stopping.generation(taskId)?.state).toBe('canceling');
       let disposed = false;
       const shutdown = stopping.dispose().then(() => {
         disposed = true;

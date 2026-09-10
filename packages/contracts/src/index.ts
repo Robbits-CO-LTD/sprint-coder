@@ -3760,6 +3760,29 @@ export const graphViewSchema = z
   .strict();
 export type GraphView = z.infer<typeof graphViewSchema>;
 export type GraphRenderInput = z.infer<typeof graphRenderInputSchema>;
+export const graphProposeToolInputSchema = z
+  .object({
+    diagram: z.record(z.string(), z.unknown()),
+    expectedRenderRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export const graphReadToolInputSchema = z
+  .object({ renderRevision: z.number().int().positive().optional() })
+  .strict();
+export const GRAPH_PROPOSE_TOOL_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    diagram: { type: 'object' },
+    expectedRenderRevision: { type: 'integer', minimum: 0 },
+  },
+  required: ['diagram', 'expectedRenderRevision'],
+  additionalProperties: false,
+} as const;
+export const GRAPH_READ_TOOL_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: { renderRevision: { type: 'integer', minimum: 1 } },
+  additionalProperties: false,
+} as const;
 export const graphSelectionSchema = z
   .object({
     type: z.literal('sprint-graph-selection'),

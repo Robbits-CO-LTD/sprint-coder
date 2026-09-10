@@ -2,6 +2,44 @@ import { expect, test } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
+test('the model tool path proposes and reads back a draft through the real Main service', async () => {
+  const profile = createUserDataDir('graph-tool-proposal');
+  const app = await launchApp(profile, undefined, {
+    SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+    PATH: '',
+    Path: '',
+  });
+  try {
+    const page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+    await page.getByTestId('composer-textarea').fill('[fixture:graph-proposal]');
+    await page.getByTestId('composer-send-button').click();
+    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
+      timeout: 30000,
+    });
+    await expect(page.getByTestId('team-worker')).toHaveCount(0);
+    const executionState = await page.evaluate(async () => {
+      const task = (await window.sprintCoder!.tasks.list())[0]!;
+      const team = await window.sprintCoder!.teams.get(task.id);
+      return {
+        workers: team?.workers.length ?? 0,
+        missions: team?.missions.length ?? 0,
+        executions: team?.executions.length ?? 0,
+      };
+    });
+    expect(executionState).toEqual({ workers: 0, missions: 0, executions: 0 });
+    await page.getByTestId('graph-toggle').click();
+    const frame = page.frameLocator('[data-testid="graph-frame"]');
+    await expect(frame.locator('svg[role="img"]')).toBeVisible();
+    await expect(page.getByTestId('graph-panel')).toContainText('Graph tool proposal');
+    await expect(frame.locator('[data-node-id="api"]').first()).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath('model-graph-proposal.png') });
+  } finally {
+    await closeApp(app);
+    removeUserDataDir(profile);
+  }
+});
+
 for (const kind of ['architecture', 'workflow'] as const) {
   // Electron owns the browser; Playwright still requires its fixture argument before testInfo.
   // eslint-disable-next-line no-empty-pattern
