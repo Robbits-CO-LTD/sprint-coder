@@ -26,6 +26,9 @@ export function GraphSourcesPanel({
   const [previews, setPreviews] = useState<Record<string, GraphSourcePreview>>({});
   const [loading, setLoading] = useState<string | null>(null);
   const alive = useRef(true);
+  const annotation = view.annotations?.find(
+    (value) => value.elementKind === selection.kind && value.elementId === selection.id,
+  );
   useEffect(() => {
     let active = true;
     alive.current = true;
@@ -69,6 +72,16 @@ export function GraphSourcesPanel({
   }
   return (
     <div className="graph-sources" data-testid="graph-sources">
+      <p data-testid="graph-evidence-kind">
+        {annotation?.basis === 'inferred'
+          ? '推定'
+          : annotation?.basis === 'proposed'
+            ? '追加案'
+            : sources && sources.length > 0
+              ? 'コード参照あり'
+              : '未確認'}
+      </p>
+      {annotation ? <p className="settings-hint">AIの説明: {annotation.rationale}</p> : null}
       <strong>根拠ファイル</strong>
       {error ? <p role="alert">{error}</p> : null}
       {sources?.length === 0 ? (

@@ -56,6 +56,28 @@ export const createGraphToolFixtureSampler =
             toolName: 'graph_propose_document',
             arguments: {
               expectedRenderRevision: before.document?.renderRevision ?? 0,
+              annotations: source
+                ? []
+                : [
+                    {
+                      elementKind: 'node',
+                      elementId: 'api',
+                      basis: 'inferred',
+                      rationale: 'APIの役割は推定です。',
+                    },
+                    {
+                      elementKind: 'node',
+                      elementId: 'store',
+                      basis: 'proposed',
+                      rationale: '保存先の追加を提案します。',
+                    },
+                    {
+                      elementKind: 'edge',
+                      elementId: 'persist',
+                      basis: 'proposed',
+                      rationale: '保存処理を追加する案です。',
+                    },
+                  ],
               sources: source
                 ? [
                     {
@@ -115,6 +137,14 @@ export const createGraphToolFixtureSampler =
           title: z.string(),
           renderRevision: z.number().int().positive(),
           sources: z.array(z.object({ id: z.string().uuid(), path: z.string() })),
+          annotations: z.array(
+            z.object({
+              elementKind: z.enum(['node', 'edge']),
+              elementId: z.string(),
+              basis: z.enum(['inferred', 'proposed']),
+              rationale: z.string(),
+            }),
+          ),
         }),
         sourceEvidence: z.literal(withSource ? 'snapshot-references' : 'unverified'),
         executionStarted: z.literal(false),
@@ -128,6 +158,13 @@ export const createGraphToolFixtureSampler =
       throw new Error('Graph fixture readback did not match the saved proposal');
     if (withSource && !checked.document.sources.some((entry) => entry.path === 'graph-source.ts'))
       throw new Error('Source fixture was not bound');
+    if (
+      !withSource &&
+      !checked.document.annotations.some(
+        (entry) => entry.elementId === 'api' && entry.basis === 'inferred',
+      )
+    )
+      throw new Error('Relationship annotation was not saved');
     return {
       kind: 'final',
       text: 'GRAPH_TOOL_FLOW_OK: 図案を保存しました。グラフから確認できます。実行は開始していません。',

@@ -190,6 +190,7 @@ export function graphDocumentForModel(document: GraphDocument | null): unknown {
         semanticRevision: document.semanticRevision,
         renderRevision: document.renderRevision,
         diagram: document.diagram,
+        annotations: document.annotations,
         createdAt: document.createdAt,
         updatedAt: document.updatedAt,
         sources: document.sources.map(

@@ -288,6 +288,15 @@ if (runsWithElectronAbi)
         task.id,
         { ...diagram, meta: { title: 'Revised plan' } },
         redraw,
+        [],
+        [
+          {
+            elementKind: 'node',
+            elementId: 'service',
+            basis: 'proposed',
+            rationale: 'New service boundary',
+          },
+        ],
       );
       persistence.saveGraphDocument(revised, 2);
       expect(() => persistence.saveGraphDocument(revised, 2)).toThrow('revision conflict');

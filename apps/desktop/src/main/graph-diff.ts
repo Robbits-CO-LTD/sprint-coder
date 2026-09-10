@@ -119,6 +119,15 @@ export function compareGraphDocuments(oldValue: GraphDocument, newValue: GraphDo
     return { ...fields, label: `${source.path}:${source.lineStart}-${source.lineEnd}` };
   };
   compareRecords('source', before.sources.map(sourceRecord), after.sources.map(sourceRecord));
+  const annotationRecord = (value: GraphDocument['annotations'][number]) => ({
+    ...value,
+    id: `${value.elementKind}:${value.elementId}`,
+  });
+  compareRecords(
+    'annotation',
+    before.annotations.map(annotationRecord),
+    after.annotations.map(annotationRecord),
+  );
   const contentChanged = before.semanticDigest !== after.semanticDigest;
   return graphDiffSchema.parse({
     graphId: before.id,

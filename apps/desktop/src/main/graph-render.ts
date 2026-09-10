@@ -9,6 +9,7 @@ import type {
   GraphGeneration,
   GraphRenderInput,
   GraphSourceRef,
+  GraphAnnotation,
 } from '@sprint-coder/contracts';
 import {
   graphHistoryInputSchema,
@@ -70,6 +71,7 @@ export class GraphRenderService {
       expectedRenderRevision?: number;
       signal?: AbortSignal;
       sources?: readonly GraphSourceRef[];
+      annotations?: readonly GraphAnnotation[];
     } = {},
   ): Promise<GraphView> {
     options.signal?.throwIfAborted();
@@ -80,7 +82,7 @@ export class GraphRenderService {
       (prior?.renderRevision ?? 0) !== options.expectedRenderRevision
     )
       throw new Error('Graph version changed; read the current document before proposing again');
-    return this.generate(input, prior, true, options.signal, options.sources);
+    return this.generate(input, prior, true, options.signal, options.sources, options.annotations);
   }
 
   private async generate(
@@ -89,6 +91,7 @@ export class GraphRenderService {
     save: boolean,
     signal?: AbortSignal,
     sources: readonly GraphSourceRef[] = [],
+    annotations: readonly GraphAnnotation[] = [],
   ): Promise<GraphView> {
     if (this.closed) throw new Error('Graph renderer is closed');
     const taskId = raw.taskId;
@@ -137,7 +140,7 @@ export class GraphRenderService {
       controller.signal.throwIfAborted();
       const input = prepareGraphInput(raw);
       const document = save
-        ? nextGraphDocument(taskId, input.diagram, priorDocument, sources)
+        ? nextGraphDocument(taskId, input.diagram, priorDocument, sources, annotations)
         : priorDocument;
       if (!document) throw new Error('Graph document is unavailable');
       stage = 'engine';
@@ -189,6 +192,7 @@ export class GraphRenderService {
         artifactUrl: `app://graph/${instanceId}?theme=dark`,
         nodeIds: [...input.nodeIds],
         edgeIds: [...input.edgeIds],
+        annotations: document.annotations,
       };
       const finalized = view;
       const response = prepareGraphHtml(rawHtml, this.scripts!, {

@@ -46,6 +46,7 @@ test('binds an authorized file read and detects changed source bytes after resta
     const frame = page.frameLocator('[data-testid="graph-frame"]');
     await frame.locator('[data-node-id="api"]').first().click();
     const sources = page.getByTestId('graph-sources');
+    await expect(sources.getByTestId('graph-evidence-kind')).toHaveText('コード参照あり');
     await sources.locator('summary').click();
     await sources.getByRole('button', { name: '現在の内容を確認' }).click();
     await expect(sources.getByTestId('graph-source-status')).toContainText('現在のファイルと一致');
@@ -133,14 +134,20 @@ test('binds an authorized file read and detects changed source bytes after resta
 
 test('the model tool path proposes and reads back a draft through the real Main service', async () => {
   const profile = createUserDataDir('graph-tool-proposal');
-  const app = await launchApp(profile, undefined, {
+  let app = await launchApp(profile, undefined, {
     SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
     PATH: '',
     Path: '',
   });
   try {
     const page = await firstWindow(app);
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
     await page.getByTestId('sidebar-new-task-button').click();
+    const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
     await page.getByTestId('composer-textarea').fill('[fixture:graph-proposal]');
     await page.getByTestId('composer-send-button').click();
     await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
@@ -162,7 +169,51 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await expect(frame.locator('svg[role="img"]')).toBeVisible();
     await expect(page.getByTestId('graph-panel')).toContainText('Graph tool proposal');
     await expect(frame.locator('[data-node-id="api"]').first()).toBeVisible();
+    await frame.locator('[data-node-id="api"]').first().click();
+    await expect(page.getByTestId('graph-evidence-kind')).toHaveText('推定');
+    await expect(page.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
+    await frame.locator('#btn-focus-clear').click();
+    await frame.locator('[data-node-id="store"]').first().click();
+    await expect(page.getByTestId('graph-evidence-kind')).toHaveText('追加案');
+    await frame.locator('#btn-focus-clear').click();
+    await frame.locator('[data-node-id="client"]').first().click();
+    await expect(page.getByTestId('graph-evidence-kind')).toHaveText('未確認');
+    await frame.locator('#btn-focus-clear').click();
+    // Use the viewer's keyboard navigation for its horizontal SVG relationship targets.
+    await frame.locator('.relationship-hit-target[data-relationship-id="request"]').press('End');
+    await expect(
+      frame.locator('.relationship-hit-target[data-relationship-id="persist"]'),
+    ).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(
+      frame.locator('.relationship-hit-target[data-relationship-id="persist"]'),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('graph-selection')).toContainText('persist');
+    await expect(page.getByTestId('graph-evidence-kind')).toHaveText('追加案');
+    await expect(page.getByTestId('graph-sources')).toContainText('保存処理を追加する案です。');
+    await page.getByRole('textbox', { name: 'この箇所への指示' }).fill('この接続は追加案です');
+    await page.getByRole('button', { name: 'チャット入力へ追加' }).click();
+    await expect(page.getByTestId('composer-textarea')).toHaveValue(
+      /persist[\s\S]*この接続は追加案です|この接続は追加案です[\s\S]*persist/u,
+    );
     await page.screenshot({ path: test.info().outputPath('model-graph-proposal.png') });
+    await closeApp(app);
+    app = await launchApp(profile, undefined, { PATH: '', Path: '' });
+    const reopened = await firstWindow(app);
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+    await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
+    await reopened.getByTestId('graph-toggle').click();
+    await reopened
+      .frameLocator('[data-testid="graph-frame"]')
+      .locator('[data-node-id="api"]')
+      .first()
+      .click();
+    await expect(reopened.getByTestId('graph-evidence-kind')).toHaveText('推定');
+    await expect(reopened.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
   } finally {
     await closeApp(app);
     removeUserDataDir(profile);

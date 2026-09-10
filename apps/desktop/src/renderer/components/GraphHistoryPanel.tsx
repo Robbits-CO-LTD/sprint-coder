@@ -9,6 +9,7 @@ const kindLabels = {
   group: 'グループ',
   diagram: '図の情報',
   source: '根拠参照',
+  annotation: '判断の区分',
 };
 const actionLabels = { added: '追加', removed: '削除', changed: '変更' };
 const fieldLabels = new Map(
@@ -37,6 +38,8 @@ const fieldLabels = new Map(
     legend: '凡例',
     engineering_profile: '設計の検査条件',
     views: '表示ガイド',
+    basis: '区分',
+    rationale: '説明',
     excerpt: '参照コード',
     contentHash: 'ファイル内容ハッシュ',
     excerptHash: '参照範囲ハッシュ',

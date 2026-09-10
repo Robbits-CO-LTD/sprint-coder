@@ -16,10 +16,10 @@ const FORBIDDEN_TAGS = new Set([
 const BRIDGE = `(() => {
   const root = document.documentElement;
   const send = (event) => {
-    const element = event.target instanceof Element ? event.target.closest('[data-node-id],[data-edge-id]') : null;
+    const element = event.target instanceof Element ? event.target.closest('[data-node-id],[data-edge-id],[data-relationship-hit-key][data-relationship-id]') : null;
     if (!element) return;
     const kind = element.hasAttribute('data-node-id') ? 'node' : 'edge';
-    const id = element.getAttribute(kind === 'node' ? 'data-node-id' : 'data-edge-id');
+    const id = kind === 'node' ? element.getAttribute('data-node-id') : element.getAttribute('data-edge-id') || element.getAttribute('data-relationship-id');
     if (!id) return;
     parent.postMessage({ type: 'sprint-graph-selection', instanceId: root.dataset.graphInstance,
       graphId: root.dataset.graphId, revision: Number(root.dataset.graphRevision), kind, id }, '*');

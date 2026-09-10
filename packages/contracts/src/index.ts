@@ -3702,6 +3702,15 @@ export const graphSourcePreviewSchema = z
   })
   .strict();
 export type GraphSourcePreview = z.infer<typeof graphSourcePreviewSchema>;
+export const graphAnnotationSchema = z
+  .object({
+    elementKind: z.enum(['node', 'edge']),
+    elementId: graphElementIdSchema,
+    basis: z.enum(['inferred', 'proposed']),
+    rationale: z.string().min(1).max(1000),
+  })
+  .strict();
+export type GraphAnnotation = z.infer<typeof graphAnnotationSchema>;
 export const graphDocumentSchema = z
   .object({
     id: z.string().uuid(),
@@ -3713,6 +3722,7 @@ export const graphDocumentSchema = z
     semanticDigest: digestSchema,
     diagram: z.record(z.string(), z.unknown()),
     sources: z.array(graphSourceRefSchema).max(64).default([]),
+    annotations: z.array(graphAnnotationSchema).max(256).default([]),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
@@ -3782,7 +3792,16 @@ export const graphDiffSchema = z
       .array(
         z
           .object({
-            kind: z.enum(['node', 'edge', 'lane', 'phase', 'group', 'diagram', 'source']),
+            kind: z.enum([
+              'node',
+              'edge',
+              'lane',
+              'phase',
+              'group',
+              'diagram',
+              'source',
+              'annotation',
+            ]),
             id: z.string().max(4000).nullable(),
             action: z.enum(['added', 'removed', 'changed']),
             beforeLabel: z.string().max(4000).nullable(),
@@ -3801,7 +3820,7 @@ export const graphDiffSchema = z
           })
           .strict(),
       )
-      .max(2180),
+      .max(2700),
   })
   .strict();
 export type GraphHistoryInput = z.infer<typeof graphHistoryInputSchema>;
@@ -3823,6 +3842,7 @@ export const graphViewSchema = z
     artifactUrl: z.string().regex(/^app:\/\/graph\/[a-f0-9-]{36}\?theme=dark$/u),
     nodeIds: z.array(graphElementIdSchema).min(1).max(64),
     edgeIds: z.array(graphElementIdSchema).max(192),
+    annotations: z.array(graphAnnotationSchema).max(256).optional(),
   })
   .strict();
 export type GraphView = z.infer<typeof graphViewSchema>;
@@ -3832,6 +3852,7 @@ export const graphProposeToolInputSchema = z
     diagram: z.record(z.string(), z.unknown()),
     expectedRenderRevision: z.number().int().nonnegative(),
     sources: z.array(graphSourceRequestSchema).max(64).default([]),
+    annotations: z.array(graphAnnotationSchema).max(256).default([]),
   })
   .strict();
 export const graphReadToolInputSchema = z
@@ -3842,6 +3863,21 @@ export const GRAPH_PROPOSE_TOOL_INPUT_JSON_SCHEMA = {
   properties: {
     diagram: { type: 'object' },
     expectedRenderRevision: { type: 'integer', minimum: 0 },
+    annotations: {
+      type: 'array',
+      maxItems: 256,
+      items: {
+        type: 'object',
+        properties: {
+          elementKind: { enum: ['node', 'edge'] },
+          elementId: { type: 'string' },
+          basis: { enum: ['inferred', 'proposed'] },
+          rationale: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+        required: ['elementKind', 'elementId', 'basis', 'rationale'],
+        additionalProperties: false,
+      },
+    },
     sources: {
       type: 'array',
       maxItems: 64,

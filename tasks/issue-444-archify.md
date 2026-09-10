@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: read-backed source references
+## Current checkpoint: relationship judgments and source references
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -30,13 +30,17 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 - Source snapshots participate in semantic revisions and differences; read timestamps alone do not change meaning. Existing IDs can be retained or reused on a matching source location, while invalid/deleted element links are refused. Old graph rows without sources remain readable. Model graph reads expose reference metadata, not raw source excerpts, content hashes or their derived semantic digest; new code access must use read_file and its current Provider disclosure boundary.
 - The source inspector shows read-time text separately from an explicit guarded current-file check (current/changed/missing/root-changed/unavailable). Mac packaged E2E covers actual read approval, binding, file modification, restart, authorized reread and source-code differences. Current-file checks are snapshots at the user's request, not continuous verification or proof of a semantic relationship.
 
+- The source-reference checkpoint passed all CI at 2aec740 (run 34541500739), including Mac and Windows packaged acceptance.
+- Inferred/proposed judgments are now typed node/edge annotations with bounded explanations. Main validates element membership and uniqueness, versions their meaning separately from geometry, persists them in the existing JSON history and includes exact annotation differences. Old documents retain their semantic digest. Source references may coexist with a hypothesis; they do not certify the relationship.
+- The source inspector distinguishes inferred/proposed, code-reference-present and unverified elements. Archify relationship hit targets now notify the parent through their actual stable relationship ID, retaining the existing frame/revision/membership guard. Packaged keyboard selection and restart preserve the displayed judgment.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                                |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | AC-1–AC-9  | Graph Mission contracts, DAG/changes/resource gates, integration checkpoints, actor visibility, branch cancellation/recovery and Canvas/List consistency are not implemented. |
 | AC-10      | Real engine display/selection is connected; broader layouts and cross-platform acceptance remain.                                                                             |
-| AC-11      | Read-backed SourceRefs and explicit current-file inspection are connected. Inferred/proposed relationship annotation and automatic freshness triggers still need integration. |
+| AC-11      | Read-backed SourceRefs and explicit current-file inspection are connected. Inferred/proposed annotations are connected; automatic freshness triggers still need integration.  |
 | AC-12      | Typed IR/source history, semantic/render revisions, difference UI and latest generation outcomes are implemented; current-head cross-platform validation remains.             |
 | AC-13      | Human agreement bound to current code/permissions and one-time graph Mission start remain. No graph execution exists yet.                                                     |
 | AC-14      | Saved graph data regenerates on Task access after restart. Persistent selection/view settings and execution state overlays remain.                                            |
@@ -46,6 +50,6 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 
 ## Next action
 
-Verify the source-reference checkpoint's current-head CI. Then complete relationship provenance/freshness triggers and connect explicit agreement to Graph Mission contracts, including a fresh source/permission check before dispatch. Extend differences to Mission declarations when those contracts are added. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Verify the annotation checkpoint on both operating systems. Then complete automatic source freshness triggers and connect explicit agreement to Graph Mission contracts, including a fresh source/permission check before dispatch. Extend differences to Mission declarations when those contracts are added. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.

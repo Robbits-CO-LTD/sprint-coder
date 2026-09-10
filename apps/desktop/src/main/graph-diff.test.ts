@@ -15,6 +15,43 @@ const diagram = {
 };
 
 describe('saved graph comparison', () => {
+  it('shows added, changed and removed relationship judgments as semantic changes', () => {
+    const annotation = {
+      elementKind: 'edge',
+      elementId: 'ab',
+      basis: 'inferred',
+      rationale: 'Possible flow',
+    } as const;
+    const first = nextGraphDocument(taskId, diagram, null);
+    const second = nextGraphDocument(taskId, diagram, first, [], [annotation]);
+    expect(compareGraphDocuments(first, second).changes).toEqual([
+      expect.objectContaining({ kind: 'annotation', id: 'edge:ab', action: 'added' }),
+    ]);
+    const third = nextGraphDocument(
+      taskId,
+      diagram,
+      second,
+      [],
+      [{ ...annotation, basis: 'proposed' }],
+    );
+    expect(compareGraphDocuments(second, third)).toMatchObject({
+      contentChanged: true,
+      presentationOnly: false,
+      changes: [
+        {
+          kind: 'annotation',
+          id: 'edge:ab',
+          action: 'changed',
+          fields: [{ name: 'basis', before: 'inferred', after: 'proposed' }],
+        },
+      ],
+    });
+    const fourth = nextGraphDocument(taskId, diagram, third);
+    expect(compareGraphDocuments(third, fourth).changes).toEqual([
+      expect.objectContaining({ kind: 'annotation', id: 'edge:ab', action: 'removed' }),
+    ]);
+  });
+
   it('reports added/removed IDs, labels, directions and metadata with before/after values', () => {
     const first = nextGraphDocument(taskId, diagram, null);
     const second = nextGraphDocument(

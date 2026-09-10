@@ -152,7 +152,16 @@ describe('Main-owned graph source snapshots', () => {
     );
     const sources = receipts.resolve([request(1), request(3)], context, 'workspace');
     expect(() => receipts.resolve([request(2)], context, 'workspace')).toThrow('disclosed code');
-    const document = nextGraphDocument(context.taskId, diagram, null, sources);
+    const annotations = [
+      {
+        elementKind: 'node',
+        elementId: 'api',
+        basis: 'inferred',
+        rationale: 'The role remains a hypothesis',
+      },
+    ] as const;
+    const document = nextGraphDocument(context.taskId, diagram, null, sources, annotations);
+    expect(graphDocumentForModel(document)).toMatchObject({ annotations });
     const output = JSON.stringify(graphDocumentForModel(document));
     expect(output).not.toContain('excerpt');
     expect(output).not.toContain('contentHash');

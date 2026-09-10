@@ -19,6 +19,65 @@ const architecture = {
 };
 
 describe('graph document semantics', () => {
+  it('versions relationship judgments independently of layout and annotation order', () => {
+    const annotations = [
+      { elementKind: 'node', elementId: 'server', basis: 'proposed', rationale: 'Add a server' },
+      {
+        elementKind: 'edge',
+        elementId: 'request',
+        basis: 'inferred',
+        rationale: 'Likely request flow',
+      },
+    ] as const;
+    const first = nextGraphDocument(taskId, architecture, null, [], annotations);
+    const reordered = nextGraphDocument(
+      taskId,
+      architecture,
+      first,
+      [],
+      [...annotations].reverse(),
+    );
+    expect(reordered.semanticRevision).toBe(first.semanticRevision);
+    const revised = nextGraphDocument(
+      taskId,
+      architecture,
+      reordered,
+      [],
+      [annotations[0], { ...annotations[1], basis: 'proposed', rationale: 'Introduce this flow' }],
+    );
+    expect(revised.semanticRevision).toBe(first.semanticRevision + 1);
+    expect(parseStoredGraphDocument(JSON.parse(JSON.stringify(revised)))).toEqual(revised);
+    expect(() => parseStoredGraphDocument({ ...revised, annotations })).toThrow('content mismatch');
+    expect(nextGraphDocument(taskId, architecture, revised).annotations).toEqual([]);
+    const legacy = nextGraphDocument(taskId, architecture, null);
+    const { annotations: _annotations, ...oldRecord } = legacy;
+    expect(parseStoredGraphDocument(oldRecord)).toEqual(legacy);
+  });
+
+  it('rejects missing, duplicated, incorrectly typed and self-certified relationship bindings', () => {
+    const annotation = {
+      elementKind: 'edge',
+      elementId: 'request',
+      basis: 'inferred',
+      rationale: 'Hypothesis',
+    } as const;
+    for (const annotations of [
+      [annotation, annotation],
+      [{ ...annotation, elementId: 'missing' }],
+      [{ ...annotation, elementKind: 'node' as const }],
+    ])
+      expect(() => nextGraphDocument(taskId, architecture, null, [], annotations)).toThrow(
+        'annotations',
+      );
+    const saved = nextGraphDocument(taskId, architecture, null, [], [annotation]);
+    expect(() =>
+      parseStoredGraphDocument({ ...saved, annotations: [{ ...annotation, basis: 'verified' }] }),
+    ).toThrow();
+    expect(() =>
+      parseStoredGraphDocument({ ...saved, annotations: [{ ...annotation, rationale: '' }] }),
+    ).toThrow();
+  });
+
   it('keeps meaning across geometry, presentation and object/element ordering changes', () => {
     const changed = {
       ...architecture,

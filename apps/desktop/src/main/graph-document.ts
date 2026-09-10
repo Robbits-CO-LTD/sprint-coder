@@ -3,6 +3,8 @@ import {
   graphDocumentSchema,
   graphSourceRefSchema,
   type GraphSourceRef,
+  graphAnnotationSchema,
+  type GraphAnnotation,
   type GraphDocument,
   type GraphGeneration,
 } from '@sprint-coder/contracts';
@@ -139,14 +141,28 @@ export function canonicalGraphJson(value: unknown): string {
 export function graphSemanticDigest(
   diagram: Record<string, unknown>,
   sources: readonly GraphSourceRef[] = [],
+  annotations: readonly GraphAnnotation[] = [],
 ): string {
   const projection = graphSemanticProjection(diagram);
   const content =
-    sources.length === 0
+    sources.length === 0 && annotations.length === 0
       ? projection
       : {
           diagram: projection,
-          sources: byId(sources.map(({ observedAt: _observedAt, ...source }) => source)),
+          ...(sources.length === 0
+            ? {}
+            : { sources: byId(sources.map(({ observedAt: _observedAt, ...source }) => source)) }),
+          ...(annotations.length === 0
+            ? {}
+            : {
+                annotations: [...annotations].sort((a, b) =>
+                  `${a.elementKind}:${a.elementId}` < `${b.elementKind}:${b.elementId}`
+                    ? -1
+                    : `${a.elementKind}:${a.elementId}` > `${b.elementKind}:${b.elementId}`
+                      ? 1
+                      : 0,
+                ),
+              }),
         };
   return createHash('sha256').update(canonicalGraphJson(content)).digest('hex');
 }
@@ -156,11 +172,14 @@ export function nextGraphDocument(
   diagram: Record<string, unknown>,
   prior: GraphDocument | null,
   sourceRefs: readonly GraphSourceRef[] = [],
+  proposedAnnotations: readonly GraphAnnotation[] = [],
 ): GraphDocument {
   const input = prepareGraphInput({ taskId, diagram });
   const sources = sourceRefs.map((source) => graphSourceRefSchema.parse(source));
   validateSources(sources, input.nodeIds, input.edgeIds);
-  const digest = graphSemanticDigest(input.diagram, sources);
+  const annotations = proposedAnnotations.map((value) => graphAnnotationSchema.parse(value));
+  validateAnnotations(annotations, input.nodeIds, input.edgeIds);
+  const digest = graphSemanticDigest(input.diagram, sources, annotations);
   const now = new Date().toISOString();
   return graphDocumentSchema.parse({
     id: prior?.id ?? randomUUID(),
@@ -172,6 +191,7 @@ export function nextGraphDocument(
     semanticDigest: digest,
     diagram: input.diagram,
     sources,
+    annotations,
     createdAt: prior?.createdAt ?? now,
     updatedAt: now,
   });
@@ -183,11 +203,13 @@ export function parseStoredGraphDocument(value: unknown): GraphDocument {
   if (
     document.kind !== input.kind ||
     document.title !== input.title ||
-    document.semanticDigest !== graphSemanticDigest(input.diagram, document.sources) ||
+    document.semanticDigest !==
+      graphSemanticDigest(input.diagram, document.sources, document.annotations) ||
     document.semanticRevision > document.renderRevision
   )
     throw new Error('Graph document content mismatch');
   validateSources(document.sources, input.nodeIds, input.edgeIds);
+  validateAnnotations(document.annotations, input.nodeIds, input.edgeIds);
   return document;
 }
 
@@ -197,7 +219,13 @@ export function validateGraphDocumentWrite(
   expectedRenderRevision: number,
 ): GraphDocument {
   const parsed = graphDocumentSchema.parse(document);
-  const expected = nextGraphDocument(parsed.taskId, parsed.diagram, prior, parsed.sources);
+  const expected = nextGraphDocument(
+    parsed.taskId,
+    parsed.diagram,
+    prior,
+    parsed.sources,
+    parsed.annotations,
+  );
   if (
     (prior?.renderRevision ?? 0) !== expectedRenderRevision ||
     parsed.renderRevision !== expected.renderRevision ||
@@ -226,4 +254,20 @@ function validateSources(
     )
       throw new Error('Invalid graph source binding');
   }
+}
+
+function validateAnnotations(
+  values: readonly GraphAnnotation[],
+  nodes: readonly string[],
+  edges: readonly string[],
+): void {
+  if (
+    values.length > 256 ||
+    new Set(values.map((value) => `${value.elementKind}:${value.elementId}`)).size !==
+      values.length ||
+    values.some(
+      (value) => !(value.elementKind === 'node' ? nodes : edges).includes(value.elementId),
+    )
+  )
+    throw new Error('Invalid graph relationship annotations');
 }
