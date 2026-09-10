@@ -392,10 +392,18 @@ async function signNativeArtifacts(target, artifacts) {
           ['--force', '--options', 'runtime', '--timestamp', '--sign', identity, path],
           { stdio: 'inherit' },
         );
-      else
-        execFileSync('/usr/bin/codesign', ['--force', '--timestamp=none', '--sign', '-', path], {
-          stdio: 'inherit',
+      else {
+        const existing = spawnSync('/usr/bin/codesign', ['--verify', '--strict', path], {
+          encoding: 'utf8',
         });
+        if (existing.status !== 0) {
+          if (!existing.stderr?.includes('code object is not signed at all'))
+            throw new Error('Managed Local upstream signature is invalid');
+          execFileSync('/usr/bin/codesign', ['--force', '--timestamp=none', '--sign', '-', path], {
+            stdio: 'inherit',
+          });
+        }
+      }
       execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', path], {
         stdio: 'inherit',
       });

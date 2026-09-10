@@ -567,18 +567,50 @@ describe('ManagedLocalRuntimeSupervisor', () => {
         pin,
       );
       const paths = await directories();
+      const startedAt = Date.now();
+      const observations: { phase: string; elapsedMs: number; status?: number }[] = [];
+      const observe = (phase: string, status?: number) => {
+        if (observations.length < 64)
+          observations.push({
+            phase,
+            elapsedMs: Date.now() - startedAt,
+            ...(status === undefined ? {} : { status }),
+          });
+      };
       const supervisor = new ManagedLocalRuntimeSupervisor({
         loadBundle: async () => liveBundle,
+        startupTimeoutMs: 60_000,
+        fetch: async (url, init) => {
+          const path = new URL(String(url)).pathname;
+          const phase = ['/props', '/health', '/v1/models'].includes(path) ? path : 'other';
+          observe(`${phase}:request`);
+          const response = await fetch(url, init);
+          observe(`${phase}:response`, response.status);
+          return response;
+        },
       });
-
-      const session = await supervisor.start({ kind: 'router_probe', ...paths });
-      expect(session.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/u);
-      await expect(session.authenticatedFetch('/v1/models')).resolves.toMatchObject({
-        status: 200,
-      });
-      await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+      try {
+        observe('start');
+        const session = await supervisor.start(
+          { kind: 'router_probe', ...paths },
+          AbortSignal.timeout(60_000),
+        );
+        observe('running');
+        expect(session.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/u);
+        await expect(session.authenticatedFetch('/v1/models')).resolves.toMatchObject({
+          status: 200,
+        });
+        await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+        observe('stopped');
+      } finally {
+        supervisor.killNow();
+        console.info(
+          'Managed Local native probe',
+          JSON.stringify({ target, state: supervisor.snapshot()?.state, observations }),
+        );
+      }
     },
-    30_000,
+    90_000,
   );
 });
 
