@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { redactSecrets } from './secret-redactor';
 
-export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v3';
+export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v4';
 
 export type ProviderDisclosureClassification = 'safe' | 'sensitive' | 'uncertain';
 
@@ -62,8 +62,8 @@ function assessDisclosure(
   if (matches(STRUCTURED_CREDENTIAL_FIELD, content)) reasons.add('credential-field');
   if (baselineRedacted !== content) reasons.add('known-secret-pattern');
 
-  const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some(([candidate]) =>
-    isSensitiveEntropyCandidate(candidate, knownWorkspaceRoots),
+  const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some((match) =>
+    isSensitiveEntropyCandidate(match[0], knownWorkspaceRoots, content, match.index),
   );
   if (highEntropy) reasons.add('high-entropy-value');
 
@@ -84,8 +84,8 @@ function assessDisclosure(
       return separator < 0 ? '[REDACTED_CREDENTIAL]' : `${value.slice(0, separator + 1)}[REDACTED]`;
     });
   if (highEntropy)
-    redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate) =>
-      isSensitiveEntropyCandidate(candidate, knownWorkspaceRoots)
+    redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate, offset: number) =>
+      isSensitiveEntropyCandidate(candidate, knownWorkspaceRoots, redactedContent, offset)
         ? '[REDACTED_HIGH_ENTROPY]'
         : candidate,
     );
@@ -141,8 +141,27 @@ function isHighEntropyCandidate(candidate: string): boolean {
 function isSensitiveEntropyCandidate(
   candidate: string,
   knownWorkspaceRoots: readonly string[],
+  content: string,
+  offset: number,
 ): boolean {
   if (!isHighEntropyCandidate(candidate)) return false;
+  // The entropy token excludes the drive prefix. Match the full Windows path against
+  // Main-issued roots before treating separators as structure, never arbitrary tokens.
+  const drive = content.slice(Math.max(0, offset - 2), offset);
+  if (/^[a-z]:$/iu.test(drive) && candidate.startsWith('/')) {
+    const fullPath = `${drive}${candidate}`;
+    const roots = knownWorkspaceRoots.map((root) => root.replaceAll('\\', '/').replace(/\/$/u, ''));
+    if (
+      roots.some(
+        (root) =>
+          /^[a-z]:\//iu.test(root) &&
+          (fullPath.toLowerCase() === root.toLowerCase() ||
+            fullPath.toLowerCase().startsWith(`${root.toLowerCase()}/`)),
+      ) &&
+      !candidate.split('/').some((part) => part === '.' || part === '..')
+    )
+      return candidate.split('/').some((part) => isHighEntropyCandidate(part));
+  }
   if (!candidate.startsWith('/') || !knownWorkspaceRoots.includes(candidate)) return true;
   // A sealed filesystem root has real separators, unlike an arbitrary slash-bearing token.
   // Only split that exact root; descendants, lookalikes, and credential patterns stay checked.

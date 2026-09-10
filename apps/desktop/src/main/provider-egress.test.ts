@@ -35,6 +35,36 @@ afterEach(() => {
 
 if (runsWithElectronAbi)
   describe('Codex provider egress gate', () => {
+    it('allows sealed Windows paths for Ollama while preserving secret denial', () => {
+      const fixture = createFixture(false);
+      const prompt = 'F:/sc-real-ai-20260910/fixtures/qwen38';
+      const input = {
+        broker: new PermissionBroker(fixture.persistence),
+        task: fixture.task,
+        turnId: 'windows-path',
+        prompt,
+        context,
+        now: '2026-09-10T00:00:00.000Z',
+      };
+      expect(authorizeOfficialApiProviderEgress(input, 'ollama', 'trusted-local').allowed).toBe(
+        false,
+      );
+      const bound = { ...input, knownWorkspaceRoots: ['F:\\sc-real-ai-20260910\\fixtures'] };
+      expect(authorizeOfficialApiProviderEgress(bound, 'ollama', 'trusted-local').allowed).toBe(
+        true,
+      );
+      expect(
+        authorizeOfficialApiProviderEgress(
+          {
+            ...bound,
+            prompt: `${prompt}\npassword="not-for-a-provider"`,
+          },
+          'ollama',
+          'trusted-local',
+        ).allowed,
+      ).toBe(false);
+      fixture.persistence.close();
+    });
     it.each([
       { localOnly: true, suffix: '' },
       { localOnly: false, suffix: '\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH' },
