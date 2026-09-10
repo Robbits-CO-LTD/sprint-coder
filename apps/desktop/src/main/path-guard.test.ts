@@ -51,7 +51,12 @@ describe('path guard', () => {
   it.skipIf(process.platform !== 'win32')(
     'canonicalizes an available Windows 8.3 alias',
     async ({ skip }) => {
-      const { workspace } = await fixture();
+      // The checkout volume on Windows CI disables short-name allocation. Probe
+      // an owned fixture on the OS temp volume; this test only canonicalizes paths,
+      // so it does not need the ordinary-workspace permission classification.
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-8dot3-'));
+      temporaryRoots.push(workspace);
+      await mkdir(join(workspace, 'src'));
       const name = 'LongFilenameForCanonicalIdentity.txt';
       const longPath = join(workspace, 'src', name);
       await writeFile(longPath, 'original');
