@@ -1021,8 +1021,55 @@ void CleanupPreparedExecutionImages(void*) {
   prepared_execution_images.clear();
 }
 
+napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string path_utf8, dev, ino;
+  std::wstring path;
+  auto read = [&](const char* name, std::string* output) {
+    napi_value value;
+    return argc == 1 && napi_get_named_property(env, argv[0], name, &value) == napi_ok &&
+           ReadString(env, value, output);
+  };
+  if (!read("path", &path_utf8) || !read("dev", &dev) || !read("ino", &ino) ||
+      !Utf8ToWide(path_utf8, &path)) {
+    napi_throw_error(env, "INVALID_INPUT", "Invalid directory identity");
+    return nullptr;
+  }
+  HANDLE directory = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (directory == INVALID_HANDLE_VALUE) return ThrowWindowsError(env, "Open directory");
+  BY_HANDLE_FILE_INFORMATION observed {};
+  const bool observed_ok = GetFileInformationByHandle(directory, &observed) != FALSE;
+  const uint64_t file_id = (static_cast<uint64_t>(observed.nFileIndexHigh) << 32) |
+                          observed.nFileIndexLow;
+  if (!observed_ok || (observed.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+      (observed.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+      std::to_string(observed.dwVolumeSerialNumber) != dev || std::to_string(file_id) != ino) {
+    CloseHandle(directory);
+    napi_throw_error(env, "ROOT_IDENTITY_CHANGED", "Directory identity changed");
+    return nullptr;
+  }
+  FILE_CASE_SENSITIVE_INFO rules {};
+  const bool queried = GetFileInformationByHandleEx(directory, FileCaseSensitiveInfo,
+      &rules, sizeof(rules)) != FALSE;
+  const DWORD error = GetLastError();
+  CloseHandle(directory);
+  if (!queried) {
+    SetLastError(error);
+    return ThrowWindowsError(env, "Query directory name rules");
+  }
+  napi_value result;
+  napi_get_boolean(env, (rules.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR) != 0, &result);
+  return result;
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+      {"directoryCaseSensitive", nullptr, DirectoryCaseSensitive, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"queryProcessIdentity", nullptr, QueryProcessIdentity, nullptr, nullptr, nullptr,
        napi_default, nullptr},

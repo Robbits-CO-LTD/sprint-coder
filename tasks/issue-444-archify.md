@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: graph readiness before Scheduler admission
+## Current checkpoint: observed directory name rules for missing claims
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -87,6 +87,10 @@ The existing TeamExecutionScheduler now accepts a Main-owned read-only readiness
 
 Validation: a real-SQLite/Scheduler test holds A's resource in another Team, runs independent B with A/C consuming no slots, then wakes A on explicit release and C after both checkpoints. A stale availability observation loses to a later resource owner. Scheduler tests verify exclusion before Connection selection/admission and callback removal. Graph21/Scheduler15/Coordinator65/Connection1 pass (102 total), along with desktop typecheck, scoped lint and formatting. These are scheduling/storage integration checks, not a full Worker runtime or product UI flow.
 
+Missing write-claim bindings now retain the case-sensitivity rule of the existing directory containing their first missing entry. A read-only native query opens that directory, verifies its guarded device/inode identity, and reads its actual setting. macOS uses fpathconf(_PC_CASE_SENSITIVE); Windows uses [FileCaseSensitiveInfo](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ne-minwinbase-file_info_by_handle_class); Linux queries casefold flags only on ext4/F2FS, whose flags define that behavior. Unsupported observations fail instead of assuming platform-wide rules. No probe file is created by product code. This is naming evidence only: canonical equality/containment, Unicode and short-name alias handling, semantic-key conflicts and final dispatch revalidation still need implementation.
+
+Validation: native build and 79 local tests pass (28 existing conditional skips); an empty-directory query agrees with a subsequent test-only filename witness, and replacement identity is rejected. Desktop typecheck/lint/format pass. Fresh hidden Mac package passes four Team/graph cases; the source-read/restart case also passes against that package. Windows validation of these new native rules is pending. Previous 827966c CI failed the first source fixture after approval, with a failed Turn but no concrete exception in its artifact; the other five Windows graph cases passed. A single failed-job rerun is active (run 34563960161, job 103154884788). Do not treat this as an established transient failure or alter product timeouts without evidence.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                                              |
@@ -103,6 +107,6 @@ Validation: a real-SQLite/Scheduler test holds A's resource in another Team, run
 
 ## Next action
 
-Verify the shared integration FIFO on both operating systems. Connect genuine user agreement and the existing runtime dispatcher to the graph-aware Attempt/checkpoint and resource operations, obtaining actual runtime stop acknowledgements, preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish physical claim bindings and connect agreement to Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Resolve the specific Windows source-fixture failure and verify directory name rules on both operating systems. Finish canonical claim equality/containment and aliases, then connect genuine user agreement and the existing runtime dispatcher to graph-aware Attempt/checkpoint and resource operations, obtaining actual runtime stop acknowledgements and preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Agreement needs fresh source/permission checks that do not reuse the viewer monitor as authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.

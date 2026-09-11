@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type {
   EffectiveWorkspaceSet,
@@ -16,6 +16,7 @@ import {
 } from './path-guard';
 import { previewGraphSource } from './graph-source-preview';
 import { canonicalGraphJson } from './graph-document';
+import { directoryCaseSensitive } from './directory-name-rules';
 
 export type GraphMissionReviewContext = {
   workspace: EffectiveWorkspaceSet;
@@ -36,6 +37,8 @@ export type GraphMissionClaimBinding = {
   canonicalPath: string;
   /** Missing suffixes remain explicit: their alias/conflict rules must be resolved at admission. */
   missingSuffix: readonly string[];
+  /** Rules of the existing directory containing the first missing entry; null for existing targets. */
+  missingNameCaseSensitive: boolean | null;
   guard: PathGuard;
   semanticKeys: readonly string[];
 };
@@ -93,6 +96,10 @@ async function bindClaim(
     canonicalPath: join(guard.resolvedPath, ...missingSuffix),
     missingSuffix,
     guard,
+    missingNameCaseSensitive:
+      guard.targetIdentity === null
+        ? directoryCaseSensitive(dirname(guard.resolvedPath), guard.parentIdentity)
+        : null,
   });
   try {
     return bound(await guardFor(path ?? '.'));
