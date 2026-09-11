@@ -165,7 +165,15 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         </p>
       ) : null}
       {view ? <GraphHistoryPanel key={`${view.id}:${view.renderRevision}`} view={view} /> : null}
-      {view?.missionPlan ? <GraphMissionPlanPanel taskId={taskId} plan={view.missionPlan} /> : null}
+      {view?.missionPlan ? (
+        <GraphMissionPlanPanel
+          view={view}
+          plan={view.missionPlan}
+          sourceStamp={
+            sourceState.status?.phase === 'checked' ? sourceState.status.checkedAt : null
+          }
+        />
+      ) : null}
       {sourceState.error ? (
         <p role="status">根拠の現在状態を確認できませんでした。</p>
       ) : sourceState.status ? (

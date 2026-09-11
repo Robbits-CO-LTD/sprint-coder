@@ -24,6 +24,7 @@ import {
   graphSourcePreviewSchema,
   graphSourceCheckInputSchema,
   graphSourceStatusSchema,
+  graphMissionReviewSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -612,6 +613,7 @@ import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
+import { reviewGraphMission } from './graph-mission-review';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -1795,6 +1797,58 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.handle(
+      IPC_CHANNELS.graphsMissionReview,
+      graphSourceCheckInputSchema,
+      graphMissionReviewSchema,
+      async (input) => {
+        this.persistence.getTask(input.taskId);
+        if (!this.graphs) throw new Error('Graph service unavailable');
+        const document = this.graphs.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const result = await reviewGraphMission(input, document, () => {
+          const team = this.persistence.getTeamByTask(input.taskId);
+          return {
+            workspace: this.persistence.getEffectiveWorkspaceSet(input.taskId),
+            rootIdentities: this.persistence.getEffectiveWorkspaceRootIdentities(input.taskId),
+            policyEpoch: this.persistence.getPermissionPolicy(input.taskId).policyEpoch,
+            team: team
+              ? {
+                  id: team.id,
+                  taskId: team.taskId,
+                  state: team.state,
+                  leaderAgentId: team.leaderAgentId,
+                }
+              : null,
+            workers: team
+              ? this.persistence
+                  .getTeamSnapshot(team.id)
+                  .agents.map(({ id, taskId, teamId, kind, state, writeCapable }) => ({
+                    id,
+                    taskId,
+                    teamId,
+                    kind,
+                    state,
+                    writeCapable,
+                  }))
+              : [],
+            busyWorkerIds: team
+              ? this.persistence
+                  .listTeamExecutions(team.id)
+                  .filter(
+                    (execution) => !['completed', 'failed', 'canceled'].includes(execution.state),
+                  )
+                  .map((execution) => execution.assigneeAgentId)
+              : [],
+          };
+        });
+        this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
+        return result.summary;
+      },
+    );
     this.handle(
       IPC_CHANNELS.graphsSourceCheck,
       graphSourceCheckInputSchema,

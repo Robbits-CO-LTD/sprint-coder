@@ -3852,6 +3852,36 @@ export const graphSourceStatusSchema = graphSourceCheckInputSchema
   })
   .strict();
 export type GraphSourceStatus = z.infer<typeof graphSourceStatusSchema>;
+export const graphMissionReviewSchema = graphSourceCheckInputSchema
+  .extend({
+    checkedAt: z.string().datetime(),
+    matched: z.boolean(),
+    issues: z
+      .array(
+        z
+          .object({
+            stepKey: graphMissionKeySchema.nullable(),
+            rootId: idSchema.nullable(),
+            path: z.string().max(1024).nullable(),
+            code: z.enum([
+              'plan_missing',
+              'team_unavailable',
+              'worker_unavailable',
+              'worker_busy',
+              'write_denied',
+              'root_unavailable',
+              'root_changed',
+              'path_unavailable',
+              'source_changed',
+              'state_changed',
+            ]),
+          })
+          .strict(),
+      )
+      .max(1100),
+  })
+  .strict();
+export type GraphMissionReview = z.infer<typeof graphMissionReviewSchema>;
 export const graphAnnotationSchema = z
   .object({
     elementKind: z.enum(['node', 'edge']),
@@ -5539,6 +5569,7 @@ export type ComputerUseApi = {
 export interface SprintCoderApi {
   graphs: {
     checkSources(input: GraphSourceCheckInput): Promise<GraphSourceStatus>;
+    reviewMission(input: GraphSourceCheckInput): Promise<GraphMissionReview>;
     subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
@@ -5876,6 +5907,7 @@ export const IPC_CHANNELS = {
   graphsSourcePreview: 'sprint-coder:graphs:source-preview',
   graphsSourceCheck: 'sprint-coder:graphs:source-check',
   graphsSourceStatus: 'sprint-coder:graphs:source-status',
+  graphsMissionReview: 'sprint-coder:graphs:mission-review',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

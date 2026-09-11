@@ -15,6 +15,7 @@ import {
   graphSourcePreviewSchema,
   graphSourceCheckInputSchema,
   graphSourceStatusSchema,
+  graphMissionReviewSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -285,6 +286,13 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    reviewMission: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsMissionReview,
+        graphSourceCheckInputSchema,
+        graphMissionReviewSchema,
+        input,
+      ),
     checkSources: (input) =>
       invoke(
         IPC_CHANNELS.graphsSourceCheck,

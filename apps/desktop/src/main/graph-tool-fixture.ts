@@ -5,12 +5,16 @@ import type { ModelSampler } from './intelligence-loop';
 export const GRAPH_TOOL_FIXTURE_MARKER = '[fixture:graph-proposal]';
 export const GRAPH_SOURCE_FIXTURE_MARKER = '[fixture:graph-source-proposal]';
 export const GRAPH_MISSION_FIXTURE_MARKER = '[fixture:graph-mission-proposal]';
+export const GRAPH_BOUND_MISSION_FIXTURE_MARKER = '[fixture:graph-bound-mission-proposal]';
 export function isGraphToolFixture(input: string, environment = process.env): boolean {
   return (
     environment['SPRINT_CODER_E2E_GRAPH_FIXTURE'] === '1' &&
-    [GRAPH_TOOL_FIXTURE_MARKER, GRAPH_SOURCE_FIXTURE_MARKER, GRAPH_MISSION_FIXTURE_MARKER].includes(
-      input,
-    )
+    [
+      GRAPH_TOOL_FIXTURE_MARKER,
+      GRAPH_SOURCE_FIXTURE_MARKER,
+      GRAPH_MISSION_FIXTURE_MARKER,
+      GRAPH_BOUND_MISSION_FIXTURE_MARKER,
+    ].includes(input)
   );
 }
 
@@ -39,8 +43,32 @@ export const createGraphToolFixtureSampler =
         ],
       };
     const source = withSource
-      ? z.object({ revision: z.object({ tokenId: z.string().uuid() }) }).parse(file)
+      ? z
+          .object({ rootId: z.string(), revision: z.object({ tokenId: z.string().uuid() }) })
+          .parse(file)
       : null;
+    const rawTeam = withSource && withMission ? result('graph-fixture-team') : null;
+    if (rawTeam === undefined)
+      return {
+        kind: 'tool-calls',
+        calls: [{ callId: 'graph-fixture-team', toolName: 'team_get_status', arguments: {} }],
+      };
+    const workers =
+      rawTeam === null
+        ? []
+        : z
+            .object({
+              team: z.object({
+                workers: z.array(
+                  z.object({
+                    id: z.string(),
+                    role: z.string(),
+                    kind: z.enum(['leader', 'worker']),
+                  }),
+                ),
+              }),
+            })
+            .parse(rawTeam).team.workers;
     const initial = result('graph-fixture-read');
     if (initial === undefined)
       return {
@@ -68,7 +96,10 @@ export const createGraphToolFixtureSampler =
                     steps: ['client', 'api', 'store'].map((key, index) => ({
                       key,
                       nodeId: key,
-                      workerId: `candidate-${key}`,
+                      workerId: withSource
+                        ? workers.find((worker) => worker.role === key && worker.kind === 'worker')
+                            ?.id
+                        : `candidate-${key}`,
                       objective: ['実装A', '実装B', '結合確認'][index],
                       doneCriteria: [
                         index === 1 && before.document
@@ -80,7 +111,13 @@ export const createGraphToolFixtureSampler =
                       writeClaims:
                         index === 2
                           ? []
-                          : [{ rootId: 'draft-root', path: `src/${key}.ts`, semanticKeys: [] }],
+                          : [
+                              {
+                                rootId: source?.rootId ?? 'draft-root',
+                                path: `src/${key}.ts`,
+                                semanticKeys: [],
+                              },
+                            ],
                       resourceClaims:
                         index === 2
                           ? [

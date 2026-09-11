@@ -1,18 +1,43 @@
-import type { GraphMissionPlan } from '@sprint-coder/contracts';
+import type { GraphMissionPlan, GraphView } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
+import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
 
 export function GraphMissionPlanPanel({
-  taskId,
+  view,
   plan,
+  sourceStamp,
 }: {
-  taskId: string;
+  view: GraphView;
   plan: GraphMissionPlan;
+  sourceStamp: string | null;
 }) {
+  const taskId = view.taskId;
   const team = useAppStore((state) => state.teamByTask[taskId]);
+  const workers = plan.steps.map((step) => {
+    const worker = team?.workers.find((worker) => worker.id === step.workerId);
+    return [
+      step.workerId,
+      worker?.state,
+      worker?.writeCapable,
+      team?.executions.some(
+        (execution) =>
+          execution.assigneeAgentId === step.workerId &&
+          !['completed', 'failed', 'canceled'].includes(execution.state),
+      ),
+    ];
+  });
   return (
     <details className="graph-history" data-testid="graph-mission-plan">
       <summary>実行計画案 · {plan.steps.length}工程</summary>
       <div className="graph-history-content">
+        <GraphMissionReviewNotice
+          input={{ taskId, instanceId: view.instanceId, renderRevision: view.renderRevision }}
+          reviewKey={
+            sourceStamp === null
+              ? null
+              : JSON.stringify([view.instanceId, sourceStamp, team?.team.state, workers])
+          }
+        />
         <p className="settings-hint">開始前の確認用の計画案です。</p>
         <strong>{plan.objective}</strong>
         <ul>

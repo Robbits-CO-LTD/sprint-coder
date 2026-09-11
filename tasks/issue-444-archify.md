@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: reviewable Mission declarations
+## Current checkpoint: Mission reference review
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -43,6 +43,11 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 - Mission declarations are saved in graph JSON history, participate in semantic revisions and exact step/plan differences, and are restored in the viewer. The graph tools carry the shared schema and return the saved plan. A review panel shows proposed workers, prerequisites, access, completion conditions, write scopes and shared resources. Empty write claims conservatively mean the entire Workspace for a write step.
 - These remain draft declarations: no Worker/root eligibility or canonical claim identity is granted by proposal, and no Mission/Execution is created. Fresh binding and human agreement must precede the existing Mission execution path. Mac packaged E2E passes propose/revise/diff/restore and verifies zero spawned Missions/Executions/Workers.
 
+- The Mission-declaration checkpoint passed all CI at c0bb44d (run 34546446067), after a bounded retry of the existing Team scenario timeout on macOS; no product/test-runner changes were made for the retry.
+- The viewer now checks declared Worker membership/state/write registration, pending executions, current root identities, guarded write paths and workspace-scoped resources against Main state. New nested paths retain a proven missing entry and suffix without creating directories; internal directory aliases resolve, escaping/dangling aliases are rejected. Write claims and logical resource bindings remain separate.
+- Review results expose only matched/issues metadata, scoped to the current view; physical paths, guards and context digests remain in Main. Source snapshots are freshly compared, path guards are revalidated, and changed policy/workspace/selected-worker state invalidates the result. Unrelated worker progress is excluded from the review fingerprint. The UI refreshes after relevant state/source changes and rejects late/cross-view results.
+- Review is not agreement, a permission grant or a reusable start token. Actual admission still needs full canonical conflict handling (including missing endpoint aliases), current capability/connection/Git eligibility, fresh source/root/permission checks and atomic agreement/Mission creation.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                      |
@@ -59,6 +64,6 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 
 ## Next action
 
-Verify the Mission-declaration checkpoint on both operating systems. Connect explicit agreement to durable Graph Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Verify the Mission reference-review checkpoint on both operating systems. Finish admission bindings and connect explicit agreement to durable Graph Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.

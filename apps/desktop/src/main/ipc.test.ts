@@ -5055,6 +5055,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.graphsGet]: graphGetInputSchema,
   [IPC_CHANNELS.graphsSources]: graphSourcesInputSchema,
   [IPC_CHANNELS.graphsSourceCheck]: graphSourceCheckInputSchema,
+  [IPC_CHANNELS.graphsMissionReview]: graphSourceCheckInputSchema,
   [IPC_CHANNELS.graphsSourcePreview]: graphSourcePreviewInputSchema,
   [IPC_CHANNELS.graphsGeneration]: graphGetInputSchema,
   [IPC_CHANNELS.graphsHistory]: graphHistoryInputSchema,
