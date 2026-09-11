@@ -7,6 +7,7 @@ import { GraphGenerationNotice } from './GraphGenerationNotice';
 import { GraphSourcesPanel } from './GraphSourcesPanel';
 import { acceptGraphGeneration } from '../lib/graph-generation';
 import { useGraphSourceStatus } from '../lib/use-graph-source-status';
+import { GraphMissionPlanPanel } from './GraphMissionPlanPanel';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
@@ -164,6 +165,7 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         </p>
       ) : null}
       {view ? <GraphHistoryPanel key={`${view.id}:${view.renderRevision}`} view={view} /> : null}
+      {view?.missionPlan ? <GraphMissionPlanPanel taskId={taskId} plan={view.missionPlan} /> : null}
       {sourceState.error ? (
         <p role="status">根拠の現在状態を確認できませんでした。</p>
       ) : sourceState.status ? (

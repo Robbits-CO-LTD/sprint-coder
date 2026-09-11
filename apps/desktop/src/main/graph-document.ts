@@ -7,8 +7,10 @@ import {
   type GraphAnnotation,
   type GraphDocument,
   type GraphGeneration,
+  type GraphMissionPlan,
 } from '@sprint-coder/contracts';
 import { prepareGraphInput } from './graph-input';
+import { validateGraphMissionPlan, graphMissionProjection } from './graph-mission-plan';
 
 export interface GraphDocumentStore {
   getGraphDocument(taskId: string): GraphDocument | null;
@@ -142,13 +144,15 @@ export function graphSemanticDigest(
   diagram: Record<string, unknown>,
   sources: readonly GraphSourceRef[] = [],
   annotations: readonly GraphAnnotation[] = [],
+  missionPlan: GraphMissionPlan | null = null,
 ): string {
   const projection = graphSemanticProjection(diagram);
   const content =
-    sources.length === 0 && annotations.length === 0
+    sources.length === 0 && annotations.length === 0 && missionPlan === null
       ? projection
       : {
           diagram: projection,
+          ...(missionPlan === null ? {} : { missionPlan: graphMissionProjection(missionPlan) }),
           ...(sources.length === 0
             ? {}
             : { sources: byId(sources.map(({ observedAt: _observedAt, ...source }) => source)) }),
@@ -173,13 +177,15 @@ export function nextGraphDocument(
   prior: GraphDocument | null,
   sourceRefs: readonly GraphSourceRef[] = [],
   proposedAnnotations: readonly GraphAnnotation[] = [],
+  proposedMissionPlan: GraphMissionPlan | null = null,
 ): GraphDocument {
   const input = prepareGraphInput({ taskId, diagram });
   const sources = sourceRefs.map((source) => graphSourceRefSchema.parse(source));
   validateSources(sources, input.nodeIds, input.edgeIds);
   const annotations = proposedAnnotations.map((value) => graphAnnotationSchema.parse(value));
   validateAnnotations(annotations, input.nodeIds, input.edgeIds);
-  const digest = graphSemanticDigest(input.diagram, sources, annotations);
+  const missionPlan = validateGraphMissionPlan(proposedMissionPlan, input.kind, input.nodeIds);
+  const digest = graphSemanticDigest(input.diagram, sources, annotations, missionPlan);
   const now = new Date().toISOString();
   return graphDocumentSchema.parse({
     id: prior?.id ?? randomUUID(),
@@ -192,6 +198,7 @@ export function nextGraphDocument(
     diagram: input.diagram,
     sources,
     annotations,
+    missionPlan,
     createdAt: prior?.createdAt ?? now,
     updatedAt: now,
   });
@@ -204,12 +211,18 @@ export function parseStoredGraphDocument(value: unknown): GraphDocument {
     document.kind !== input.kind ||
     document.title !== input.title ||
     document.semanticDigest !==
-      graphSemanticDigest(input.diagram, document.sources, document.annotations) ||
+      graphSemanticDigest(
+        input.diagram,
+        document.sources,
+        document.annotations,
+        document.missionPlan,
+      ) ||
     document.semanticRevision > document.renderRevision
   )
     throw new Error('Graph document content mismatch');
   validateSources(document.sources, input.nodeIds, input.edgeIds);
   validateAnnotations(document.annotations, input.nodeIds, input.edgeIds);
+  validateGraphMissionPlan(document.missionPlan, input.kind, input.nodeIds);
   return document;
 }
 
@@ -225,6 +238,7 @@ export function validateGraphDocumentWrite(
     prior,
     parsed.sources,
     parsed.annotations,
+    parsed.missionPlan,
   );
   if (
     (prior?.renderRevision ?? 0) !== expectedRenderRevision ||

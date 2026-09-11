@@ -23,6 +23,7 @@ import {
   createGraphToolFixtureSampler,
   isGraphToolFixture,
   GRAPH_SOURCE_FIXTURE_MARKER,
+  GRAPH_MISSION_FIXTURE_MARKER,
 } from './graph-tool-fixture';
 
 type Publish = (event: TurnEvent) => void;
@@ -302,7 +303,10 @@ export class MockRuntimeAdapter {
         toolCatalogSnapshot,
         sample:
           this.managedHarness !== undefined && isGraphToolFixture(input)
-            ? createGraphToolFixtureSampler(input === GRAPH_SOURCE_FIXTURE_MARKER)
+            ? createGraphToolFixtureSampler(
+                input === GRAPH_SOURCE_FIXTURE_MARKER,
+                input === GRAPH_MISSION_FIXTURE_MARKER,
+              )
             : teamFixtureActive
               ? createTeamScenarioSampler(input)
               : createDeterministicMockSampler(input, mockReply, mockMode),

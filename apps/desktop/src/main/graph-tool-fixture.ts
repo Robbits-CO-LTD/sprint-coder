@@ -1,18 +1,22 @@
 import { z } from 'zod';
+import { graphMissionPlanSchema } from '@sprint-coder/contracts';
 import type { ModelSampler } from './intelligence-loop';
 
 export const GRAPH_TOOL_FIXTURE_MARKER = '[fixture:graph-proposal]';
 export const GRAPH_SOURCE_FIXTURE_MARKER = '[fixture:graph-source-proposal]';
+export const GRAPH_MISSION_FIXTURE_MARKER = '[fixture:graph-mission-proposal]';
 export function isGraphToolFixture(input: string, environment = process.env): boolean {
   return (
     environment['SPRINT_CODER_E2E_GRAPH_FIXTURE'] === '1' &&
-    [GRAPH_TOOL_FIXTURE_MARKER, GRAPH_SOURCE_FIXTURE_MARKER].includes(input)
+    [GRAPH_TOOL_FIXTURE_MARKER, GRAPH_SOURCE_FIXTURE_MARKER, GRAPH_MISSION_FIXTURE_MARKER].includes(
+      input,
+    )
   );
 }
 
 /** An explicit Mock-only model response script; all tool execution remains on the real harness. */
 export const createGraphToolFixtureSampler =
-  (withSource: boolean): ModelSampler =>
+  (withSource: boolean, withMission = false): ModelSampler =>
   ({ transcript }) => {
     const result = (callId: string): unknown => {
       const item = transcript.find(
@@ -56,6 +60,40 @@ export const createGraphToolFixtureSampler =
             toolName: 'graph_propose_document',
             arguments: {
               expectedRenderRevision: before.document?.renderRevision ?? 0,
+              missionPlan: withMission
+                ? {
+                    mode: 'graph',
+                    objective: '独立した実装と結合確認',
+                    doneCriteria: ['結合テストが成功'],
+                    steps: ['client', 'api', 'store'].map((key, index) => ({
+                      key,
+                      nodeId: key,
+                      workerId: `candidate-${key}`,
+                      objective: ['実装A', '実装B', '結合確認'][index],
+                      doneCriteria: [
+                        index === 1 && before.document
+                          ? 'APIの互換性テストが成功'
+                          : '対象のテストが成功',
+                      ],
+                      access: index === 2 ? 'read-only' : 'workspace-write',
+                      dependsOn: index === 2 ? ['client', 'api'] : [],
+                      writeClaims:
+                        index === 2
+                          ? []
+                          : [{ rootId: 'draft-root', path: `src/${key}.ts`, semanticKeys: [] }],
+                      resourceClaims:
+                        index === 2
+                          ? [
+                              {
+                                scope: 'machine',
+                                key: before.document ? 'integration-db-v2' : 'integration-db',
+                                rootId: null,
+                              },
+                            ]
+                          : [],
+                    })),
+                  }
+                : null,
               annotations: source
                 ? []
                 : [
@@ -90,22 +128,41 @@ export const createGraphToolFixtureSampler =
                     },
                   ]
                 : [],
-              diagram: {
-                schema_version: 1,
-                diagram_type: 'architecture',
-                meta: { title: 'Graph tool proposal' },
-                components: ['client', 'api', 'store'].map((id, index) => ({
-                  id,
-                  type: 'backend',
-                  label: id,
-                  pos: [40 + index * 220, 40],
-                })),
-                connections: [
-                  { id: 'request', from: 'client', to: 'api' },
-                  { id: 'persist', from: 'api', to: 'store' },
-                ],
-                cards: [],
-              },
+              diagram: withMission
+                ? {
+                    schema_version: 2,
+                    diagram_type: 'workflow',
+                    meta: { title: 'Graph tool proposal' },
+                    lanes: [{ id: 'work', label: 'Work' }],
+                    nodes: ['client', 'api', 'store'].map((id, index) => ({
+                      id,
+                      type: 'backend',
+                      label: id,
+                      lane: 'work',
+                      col: index,
+                    })),
+                    edges: [
+                      { id: 'request', from: 'client', to: 'store' },
+                      { id: 'persist', from: 'api', to: 'store' },
+                    ],
+                    cards: [],
+                  }
+                : {
+                    schema_version: 1,
+                    diagram_type: 'architecture',
+                    meta: { title: 'Graph tool proposal' },
+                    components: ['client', 'api', 'store'].map((id, index) => ({
+                      id,
+                      type: 'backend',
+                      label: id,
+                      pos: [40 + index * 220, 40],
+                    })),
+                    connections: [
+                      { id: 'request', from: 'client', to: 'api' },
+                      { id: 'persist', from: 'api', to: 'store' },
+                    ],
+                    cards: [],
+                  },
             },
           },
         ],
@@ -137,6 +194,7 @@ export const createGraphToolFixtureSampler =
           title: z.string(),
           renderRevision: z.number().int().positive(),
           sources: z.array(z.object({ id: z.string().uuid(), path: z.string() })),
+          missionPlan: graphMissionPlanSchema.nullable(),
           annotations: z.array(
             z.object({
               elementKind: z.enum(['node', 'edge']),
@@ -158,6 +216,8 @@ export const createGraphToolFixtureSampler =
       throw new Error('Graph fixture readback did not match the saved proposal');
     if (withSource && !checked.document.sources.some((entry) => entry.path === 'graph-source.ts'))
       throw new Error('Source fixture was not bound');
+    if (withMission && checked.document.missionPlan?.steps.length !== 3)
+      throw new Error('Mission plan fixture was not saved');
     if (
       !withSource &&
       !checked.document.annotations.some(

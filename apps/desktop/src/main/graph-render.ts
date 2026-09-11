@@ -10,6 +10,7 @@ import type {
   GraphRenderInput,
   GraphSourceRef,
   GraphAnnotation,
+  GraphMissionPlan,
 } from '@sprint-coder/contracts';
 import {
   graphHistoryInputSchema,
@@ -72,6 +73,7 @@ export class GraphRenderService {
       signal?: AbortSignal;
       sources?: readonly GraphSourceRef[];
       annotations?: readonly GraphAnnotation[];
+      missionPlan?: GraphMissionPlan | null;
     } = {},
   ): Promise<GraphView> {
     options.signal?.throwIfAborted();
@@ -82,7 +84,15 @@ export class GraphRenderService {
       (prior?.renderRevision ?? 0) !== options.expectedRenderRevision
     )
       throw new Error('Graph version changed; read the current document before proposing again');
-    return this.generate(input, prior, true, options.signal, options.sources, options.annotations);
+    return this.generate(
+      input,
+      prior,
+      true,
+      options.signal,
+      options.sources,
+      options.annotations,
+      options.missionPlan,
+    );
   }
 
   private async generate(
@@ -92,6 +102,7 @@ export class GraphRenderService {
     signal?: AbortSignal,
     sources: readonly GraphSourceRef[] = [],
     annotations: readonly GraphAnnotation[] = [],
+    missionPlan: GraphMissionPlan | null = null,
   ): Promise<GraphView> {
     if (this.closed) throw new Error('Graph renderer is closed');
     const taskId = raw.taskId;
@@ -140,7 +151,7 @@ export class GraphRenderService {
       controller.signal.throwIfAborted();
       const input = prepareGraphInput(raw);
       const document = save
-        ? nextGraphDocument(taskId, input.diagram, priorDocument, sources, annotations)
+        ? nextGraphDocument(taskId, input.diagram, priorDocument, sources, annotations, missionPlan)
         : priorDocument;
       if (!document) throw new Error('Graph document is unavailable');
       stage = 'engine';
@@ -193,6 +204,7 @@ export class GraphRenderService {
         nodeIds: [...input.nodeIds],
         edgeIds: [...input.edgeIds],
         annotations: document.annotations,
+        missionPlan: document.missionPlan,
       };
       const finalized = view;
       const response = prepareGraphHtml(rawHtml, this.scripts!, {

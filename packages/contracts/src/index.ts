@@ -726,6 +726,132 @@ export const teamMissionStepInputSchema = z
   })
   .strict();
 export type TeamMissionStepInput = z.infer<typeof teamMissionStepInputSchema>;
+export const graphMissionKeySchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u);
+const graphClaimKeySchema = z.string().regex(/^[a-z][a-z0-9._-]{0,63}$/u);
+export const graphWriteClaimSchema = z
+  .object({
+    rootId: idSchema,
+    path: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine(
+        (value) =>
+          !/[\\:*?[\]{}\0]/u.test(value) &&
+          value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..'),
+      )
+      .nullable(),
+    semanticKeys: z.array(graphClaimKeySchema).max(32),
+  })
+  .strict();
+export const graphResourceClaimSchema = z
+  .object({
+    scope: z.enum(['machine', 'workspace']),
+    key: graphClaimKeySchema,
+    rootId: idSchema.nullable(),
+  })
+  .strict()
+  .refine((value) => (value.scope === 'machine') === (value.rootId === null));
+export const graphMissionStepSchema = teamMissionStepInputSchema
+  .extend({
+    key: graphMissionKeySchema,
+    nodeId: graphMissionKeySchema,
+    dependsOn: z.array(graphMissionKeySchema).max(11),
+    writeClaims: z.array(graphWriteClaimSchema).max(64),
+    resourceClaims: z.array(graphResourceClaimSchema).max(16),
+  })
+  .strict()
+  .refine((step) => step.access !== 'read-only' || step.writeClaims.length === 0);
+export const graphMissionPlanSchema = z
+  .object({
+    mode: z.literal('graph'),
+    objective: z.string().min(1).max(20_000),
+    doneCriteria: z.array(z.string().min(1).max(1000)).min(1).max(64),
+    steps: z.array(graphMissionStepSchema).min(2).max(12),
+  })
+  .strict();
+export type GraphMissionPlan = z.infer<typeof graphMissionPlanSchema>;
+const graphNullableStringJsonSchema = () =>
+  ({
+    allOf: [{ if: { not: { type: 'null' } }, then: { type: 'string' } }],
+  }) as const;
+export const GRAPH_MISSION_PLAN_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    mode: { const: 'graph' },
+    objective: { type: 'string', minLength: 1, maxLength: 20_000 },
+    doneCriteria: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 64,
+      items: { type: 'string', minLength: 1, maxLength: 1000 },
+    },
+    steps: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 12,
+      items: {
+        type: 'object',
+        properties: {
+          key: { type: 'string' },
+          nodeId: { type: 'string' },
+          workerId: { type: 'string' },
+          objective: { type: 'string', minLength: 1, maxLength: 10_000 },
+          doneCriteria: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 20,
+            items: { type: 'string', minLength: 1, maxLength: 1000 },
+          },
+          access: { enum: ['read-only', 'workspace-write'] },
+          dependsOn: { type: 'array', maxItems: 11, items: { type: 'string' } },
+          writeClaims: {
+            type: 'array',
+            maxItems: 64,
+            items: {
+              type: 'object',
+              properties: {
+                rootId: { type: 'string' },
+                path: graphNullableStringJsonSchema(),
+                semanticKeys: { type: 'array', maxItems: 32, items: { type: 'string' } },
+              },
+              required: ['rootId', 'path', 'semanticKeys'],
+              additionalProperties: false,
+            },
+          },
+          resourceClaims: {
+            type: 'array',
+            maxItems: 16,
+            items: {
+              type: 'object',
+              properties: {
+                scope: { enum: ['machine', 'workspace'] },
+                key: { type: 'string' },
+                rootId: graphNullableStringJsonSchema(),
+              },
+              required: ['scope', 'key', 'rootId'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: [
+          'key',
+          'nodeId',
+          'workerId',
+          'objective',
+          'doneCriteria',
+          'access',
+          'dependsOn',
+          'writeClaims',
+          'resourceClaims',
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['mode', 'objective', 'doneCriteria', 'steps'],
+  additionalProperties: false,
+} as const;
 export const teamAssignMissionInputSchema = z
   .object({
     taskId: idSchema,
@@ -3747,6 +3873,7 @@ export const graphDocumentSchema = z
     diagram: z.record(z.string(), z.unknown()),
     sources: z.array(graphSourceRefSchema).max(64).default([]),
     annotations: z.array(graphAnnotationSchema).max(256).default([]),
+    missionPlan: graphMissionPlanSchema.nullable().default(null),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
   })
@@ -3825,6 +3952,8 @@ export const graphDiffSchema = z
               'diagram',
               'source',
               'annotation',
+              'mission',
+              'step',
             ]),
             id: z.string().max(4000).nullable(),
             action: z.enum(['added', 'removed', 'changed']),
@@ -3844,7 +3973,7 @@ export const graphDiffSchema = z
           })
           .strict(),
       )
-      .max(2700),
+      .max(2725),
   })
   .strict();
 export type GraphHistoryInput = z.infer<typeof graphHistoryInputSchema>;
@@ -3867,6 +3996,7 @@ export const graphViewSchema = z
     nodeIds: z.array(graphElementIdSchema).min(1).max(64),
     edgeIds: z.array(graphElementIdSchema).max(192),
     annotations: z.array(graphAnnotationSchema).max(256).optional(),
+    missionPlan: graphMissionPlanSchema.nullable().optional(),
   })
   .strict();
 export type GraphView = z.infer<typeof graphViewSchema>;
@@ -3877,6 +4007,7 @@ export const graphProposeToolInputSchema = z
     expectedRenderRevision: z.number().int().nonnegative(),
     sources: z.array(graphSourceRequestSchema).max(64).default([]),
     annotations: z.array(graphAnnotationSchema).max(256).default([]),
+    missionPlan: graphMissionPlanSchema.nullable().default(null),
   })
   .strict();
 export const graphReadToolInputSchema = z
@@ -3887,6 +4018,9 @@ export const GRAPH_PROPOSE_TOOL_INPUT_JSON_SCHEMA = {
   properties: {
     diagram: { type: 'object' },
     expectedRenderRevision: { type: 'integer', minimum: 0 },
+    missionPlan: {
+      allOf: [{ if: { not: { type: 'null' } }, then: GRAPH_MISSION_PLAN_JSON_SCHEMA }],
+    },
     annotations: {
       type: 'array',
       maxItems: 256,

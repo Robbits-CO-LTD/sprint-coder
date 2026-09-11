@@ -10,6 +10,8 @@ const kindLabels = {
   diagram: '図の情報',
   source: '根拠参照',
   annotation: '判断の区分',
+  mission: '実行計画',
+  step: '工程',
 };
 const actionLabels = { added: '追加', removed: '削除', changed: '変更' };
 const fieldLabels = new Map(
@@ -39,6 +41,17 @@ const fieldLabels = new Map(
     engineering_profile: '設計の検査条件',
     views: '表示ガイド',
     basis: '区分',
+    objective: '目的',
+    doneCriteria: '完了条件',
+    workerId: '担当',
+    access: 'アクセス範囲',
+    dependsOn: '前提工程',
+    writeClaims: '変更範囲',
+    resourceClaims: '共有資源',
+    nodeId: '図のノード',
+    key: '工程ID',
+    ordinal: '工程順',
+    mode: '実行方式',
     rationale: '説明',
     excerpt: '参照コード',
     contentHash: 'ファイル内容ハッシュ',

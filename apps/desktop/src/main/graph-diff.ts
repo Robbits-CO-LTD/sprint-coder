@@ -9,6 +9,7 @@ import {
   graphSemanticProjection,
   parseStoredGraphDocument,
 } from './graph-document';
+import { graphMissionProjection } from './graph-mission-plan';
 
 type Change = GraphDiff['changes'][number];
 
@@ -129,6 +130,18 @@ export function compareGraphDocuments(oldValue: GraphDocument, newValue: GraphDo
     after.annotations.map(annotationRecord),
   );
   const contentChanged = before.semanticDigest !== after.semanticDigest;
+  const oldMission = graphMissionProjection(before.missionPlan);
+  const newMission = graphMissionProjection(after.missionPlan);
+  const missionRecord = (plan: typeof oldMission) =>
+    plan === null
+      ? undefined
+      : { mode: plan.mode, objective: plan.objective, doneCriteria: plan.doneCriteria };
+  add('mission', 'plan', missionRecord(oldMission), missionRecord(newMission));
+  compareRecords(
+    'step',
+    oldMission?.steps.map((step) => ({ ...step, id: step.key })) ?? [],
+    newMission?.steps.map((step) => ({ ...step, id: step.key })) ?? [],
+  );
   return graphDiffSchema.parse({
     graphId: before.id,
     taskId: before.taskId,

@@ -191,6 +191,7 @@ export function graphDocumentForModel(document: GraphDocument | null): unknown {
         renderRevision: document.renderRevision,
         diagram: document.diagram,
         annotations: document.annotations,
+        missionPlan: document.missionPlan,
         createdAt: document.createdAt,
         updatedAt: document.updatedAt,
         sources: document.sources.map(

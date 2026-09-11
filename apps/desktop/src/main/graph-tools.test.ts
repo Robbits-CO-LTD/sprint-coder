@@ -6,6 +6,7 @@ const context = { taskId: 'task-a', turnId: 'turn-a', workspaceId: null, policyE
 const input = {
   sources: [],
   annotations: [],
+  missionPlan: null,
   expectedRenderRevision: 0,
   diagram: {
     schema_version: 1,

@@ -230,6 +230,86 @@ test('the model tool path proposes and reads back a draft through the real Main 
   }
 });
 
+test('reviews and restores a proposed Mission without starting executions', async () => {
+  const profile = createUserDataDir('graph-mission-plan');
+  let app = await launchApp(profile, undefined, {
+    SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+    PATH: '',
+    Path: '',
+  });
+  try {
+    const page = await firstWindow(app);
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+    await page.getByTestId('sidebar-new-task-button').click();
+    const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
+    await page.getByTestId('composer-textarea').fill('[fixture:graph-mission-proposal]');
+    await page.getByTestId('composer-send-button').click();
+    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
+      timeout: 30000,
+    });
+    await page.getByTestId('graph-toggle').click();
+    await expect(
+      page.frameLocator('[data-testid="graph-frame"]').locator('svg[role="img"]'),
+    ).toBeVisible();
+    const plan = page.getByTestId('graph-mission-plan');
+    await plan.locator('summary').click();
+    await expect(plan).toContainText('3工程');
+    await expect(plan).toContainText('前提工程: client・api');
+    await expect(plan).toContainText('src/api.ts');
+    await expect(plan).toContainText('integration-db');
+    await page
+      .getByTestId('graph-panel')
+      .getByRole('button', { name: '閉じる', exact: true })
+      .click();
+    await page.getByTestId('composer-textarea').fill('[fixture:graph-mission-proposal]');
+    await page.getByTestId('composer-send-button').click();
+    await expect(page.getByTestId('assistant-message')).toHaveCount(2);
+    await expect(page.getByTestId('assistant-message').last()).toContainText('GRAPH_TOOL_FLOW_OK', {
+      timeout: 30000,
+    });
+    await page.getByTestId('graph-toggle').click();
+    await page.getByTestId('graph-history').locator('summary').click();
+    await expect(page.getByTestId('graph-diff')).toContainText('完了条件');
+    await expect(page.getByTestId('graph-diff')).toContainText('APIの互換性テストが成功');
+    await expect(page.getByTestId('graph-diff')).toContainText('共有資源');
+    await expect(page.getByTestId('graph-diff')).toContainText('integration-db-v2');
+    expect(
+      await page.evaluate(async (id) => {
+        const team = await window.sprintCoder!.teams.get(id);
+        return {
+          missions: team?.missions.length ?? 0,
+          executions: team?.executions.length ?? 0,
+          workers: team?.workers.length ?? 0,
+        };
+      }, taskId),
+    ).toEqual({ missions: 0, executions: 0, workers: 0 });
+    await page.screenshot({ path: test.info().outputPath('mission-plan-diff.png') });
+    await closeApp(app);
+    app = await launchApp(profile, undefined, { PATH: '', Path: '' });
+    const reopened = await firstWindow(app);
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+    await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
+    await reopened.getByTestId('graph-toggle').click();
+    await reopened.getByTestId('graph-mission-plan').locator('summary').click();
+    await expect(reopened.getByTestId('graph-mission-plan')).toContainText(
+      'APIの互換性テストが成功',
+    );
+    await expect(reopened.getByTestId('graph-mission-plan')).toContainText('integration-db-v2');
+    await reopened.screenshot({ path: test.info().outputPath('mission-plan-restored.png') });
+  } finally {
+    await closeApp(app);
+    removeUserDataDir(profile);
+  }
+});
+
 for (const kind of ['architecture', 'workflow'] as const) {
   // Electron owns the browser; Playwright still requires its fixture argument before testInfo.
   // eslint-disable-next-line no-empty-pattern

@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: automatic source freshness
+## Current checkpoint: reviewable Mission declarations
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -38,22 +38,27 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 - A live graph view now owns a transient source monitor. Native file notifications, saved/committed file events, workspace/permission changes, graph display, element selection and returning to the window trigger guarded comparisons. Only source IDs, outcomes and a check timestamp cross the new IPC path; fresh source text is still an explicit local preview. Matching filesystem events are hints, not evidence.
 - Comparisons coalesce while in flight. An intervening notification or changed workspace/policy binding prevents a stale match from being published. Closing/replacing the view stops its watchers, and expired view IDs cannot initiate checks. Renderer sequence/view guards reject old or cross-Task outcomes, and a newer check invalidates old preview text. Missing native notification support is visible and retains display/focus-based checks.
 
+- The source-monitor checkpoint passed all CI at f35e99f (run 34544925368). The constructor-bypassing IPC lifecycle fixtures now supply the monitor and assert invalidation/disposal explicitly.
+- Workflow drafts can declare a graph-mode Mission plan using the existing worker/objective/doneCriteria/access vocabulary, stable step keys and explicit node mappings. Dependencies are separate from descriptive diagram connections. Shared contracts bound write/resource claims, and the domain validator rejects ambiguous mappings, missing/self/duplicate dependencies and cycles. The complete encoded plan is bounded to 256 KiB.
+- Mission declarations are saved in graph JSON history, participate in semantic revisions and exact step/plan differences, and are restored in the viewer. The graph tools carry the shared schema and return the saved plan. A review panel shows proposed workers, prerequisites, access, completion conditions, write scopes and shared resources. Empty write claims conservatively mean the entire Workspace for a write step.
+- These remain draft declarations: no Worker/root eligibility or canonical claim identity is granted by proposal, and no Mission/Execution is created. Fresh binding and human agreement must precede the existing Mission execution path. Mac packaged E2E passes propose/revise/diff/restore and verifies zero spawned Missions/Executions/Workers.
+
 ## Remaining requirements (not complete)
 
-| Acceptance | Remaining work                                                                                                                                                                |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AC-1–AC-9  | Graph Mission contracts, DAG/changes/resource gates, integration checkpoints, actor visibility, branch cancellation/recovery and Canvas/List consistency are not implemented. |
-| AC-10      | Real engine display/selection is connected; broader layouts and cross-platform acceptance remain.                                                                             |
-| AC-11      | SourceRefs, inferred/proposed judgments and automatic current-file comparison are connected. Full discussion/acceptance and latest OS validation remain.                      |
-| AC-12      | Typed IR/source history, semantic/render revisions, difference UI and latest generation outcomes are implemented; current-head cross-platform validation remains.             |
-| AC-13      | Human agreement bound to current code/permissions and one-time graph Mission start remain. No graph execution exists yet.                                                     |
-| AC-14      | Saved graph data regenerates on Task access after restart. Persistent selection/view settings and execution state overlays remain.                                            |
-| AC-15      | The initial iframe/CSP/message boundary is tested. Source access and execution/approval refusal paths must be extended with their future APIs.                                |
-| AC-16      | Mac and Windows packaged utility/asset/display paths passed. The updated no-external-PATH and responsive layout checks remain required on the latest Windows head.            |
-| AC-17      | The full propose → discuss → diff → agree → parallel execute → resource wait → join → restart flow is not implemented or accepted.                                            |
+| Acceptance | Remaining work                                                                                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AC-1–AC-9  | Draft graph Mission declarations are validated. Durable graph-mode Mission execution, dependency/conflict/resource gates, integration and actor projections remain. |
+| AC-10      | Real engine display/selection is connected; broader layouts and cross-platform acceptance remain.                                                                   |
+| AC-11      | SourceRefs, inferred/proposed judgments and automatic current-file comparison are connected. Full discussion/acceptance and latest OS validation remain.            |
+| AC-12      | Typed IR/source/Mission declaration history, semantic/render revisions and differences are implemented; current-head cross-platform validation remains.             |
+| AC-13      | Human agreement bound to current code/permissions and one-time graph Mission start remain. No graph execution exists yet.                                           |
+| AC-14      | Saved graph data regenerates on Task access after restart. Persistent selection/view settings and execution state overlays remain.                                  |
+| AC-15      | The initial iframe/CSP/message boundary is tested. Source access and execution/approval refusal paths must be extended with their future APIs.                      |
+| AC-16      | Mac and Windows packaged utility/asset/display paths passed. The updated no-external-PATH and responsive layout checks remain required on the latest Windows head.  |
+| AC-17      | The full propose → discuss → diff → agree → parallel execute → resource wait → join → restart flow is not implemented or accepted.                                  |
 
 ## Next action
 
-Verify the freshness checkpoint on both operating systems. Connect explicit agreement to Graph Mission contracts, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Extend differences to Mission declarations when those contracts are added. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Verify the Mission-declaration checkpoint on both operating systems. Connect explicit agreement to durable Graph Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.
