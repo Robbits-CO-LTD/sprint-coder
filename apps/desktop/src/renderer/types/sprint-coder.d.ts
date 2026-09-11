@@ -662,6 +662,8 @@ export type TeamMessageSummary = {
   updatedAt: string;
 };
 export type TeamExecutionSummary = {
+  waitingForWorker?: boolean;
+  workerQueueDepth?: number;
   id: string;
   teamId: string;
   assigneeAgentId: string;

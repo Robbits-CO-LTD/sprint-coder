@@ -3464,6 +3464,79 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('reports Worker admission waits from real queued rows while other Workers run', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Worker admission');
+      const runtime = new BlockingWorkerRuntime();
+      const scheduler = new TeamExecutionScheduler(4);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        scheduler,
+      );
+      const held = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'held',
+        objective: 'held',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const other = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'other',
+        objective: 'other',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      let releaseFence!: () => void;
+      const fence = new Promise<void>((resolve) => {
+        releaseFence = resolve;
+      });
+      // Models a previous run whose durable result is settled but whose scheduler cleanup is not.
+      scheduler.submit({
+        executionId: 'retiring-run',
+        workerId: held.id,
+        teamId: held.teamId,
+        teamLimit: 4,
+        run: () => fence,
+      });
+      const queued = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: held.id,
+        content: 'held work',
+        doneCriteria: ['runtime completes'],
+      });
+      await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: other.id,
+        content: 'other work',
+        doneCriteria: ['runtime completes'],
+      });
+      await waitFor(() => runtime.contents.includes('other work'));
+      expect(runtime.contents).toEqual(['other work']);
+      expect(
+        coordinator.get(task.id)?.executions.find((row) => row.id === queued.executionId),
+      ).toMatchObject({ state: 'queued', waitingForWorker: true, workerQueueDepth: 1 });
+      expect(
+        coordinator
+          .getForAgent(task.id, held.id)
+          ?.executions.find((row) => row.id === queued.executionId)?.waitingForWorker,
+      ).toBe(true);
+      releaseFence();
+      await waitFor(() => runtime.contents.includes('held work'));
+      expect(
+        coordinator.get(task.id)?.executions.find((row) => row.id === queued.executionId),
+      ).toMatchObject({ state: 'running', waitingForWorker: false, workerQueueDepth: 0 });
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(() =>
+        persistence.listTeamExecutions(held.teamId).every((row) => row.state === 'completed'),
+      );
+      persistence.close();
+    });
+
     it('returns durable execution IDs before completion and runs at most eight in parallel', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Eight parallel executions');

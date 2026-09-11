@@ -2075,6 +2075,8 @@ export class TeamCoordinator {
       teamId: input.teamId,
       teamLimit: this.persistence.getTeam(input.teamId).policy.maxConcurrentExecutions,
       ...this.connectionSchedulingFields(waitingExecution, input.taskId, input.teamId),
+      workerId: waitingExecution.assigneeAgentId,
+      onWorkerWaitChanged: () => this.emit(input.taskId, input.teamId),
       notBeforeMs: this.now().getTime() + delayMs,
       run: () =>
         this.runScheduledExecution({
@@ -2151,6 +2153,8 @@ export class TeamCoordinator {
       teamId: input.teamId,
       teamLimit: this.persistence.getTeam(input.teamId).policy.maxConcurrentExecutions,
       ...this.connectionSchedulingFields(queued, input.taskId, input.teamId),
+      workerId: queued.assigneeAgentId,
+      onWorkerWaitChanged: () => this.emit(input.taskId, input.teamId),
       run: () =>
         this.runScheduledExecution({
           ...input,
@@ -2257,6 +2261,8 @@ export class TeamCoordinator {
         teamId: input.teamId,
         teamLimit: this.persistence.getTeam(input.teamId).policy.maxConcurrentExecutions,
         ...this.connectionSchedulingFields(revised, input.taskId, input.teamId),
+        workerId: revised.assigneeAgentId,
+        onWorkerWaitChanged: () => this.emit(input.taskId, input.teamId),
         run: () =>
           this.runScheduledExecution({
             taskId: input.taskId,
@@ -2470,11 +2476,15 @@ export class TeamCoordinator {
     attemptStartReason?: TeamAttemptStartReason;
   }): void {
     const execution = this.persistence.getTeamExecution(input.executionId);
+    if (execution.assigneeAgentId !== input.workerId || execution.teamId !== input.teamId)
+      throw new Error('Scheduled execution Worker/Team mismatch');
     this.executionScheduler.submit({
       executionId: input.executionId,
+      workerId: execution.assigneeAgentId,
       teamId: input.teamId,
       teamLimit: input.teamLimit,
       ...this.connectionSchedulingFields(execution, input.taskId, input.teamId),
+      onWorkerWaitChanged: () => this.emit(input.taskId, input.teamId),
       run: () =>
         this.runScheduledExecution({
           taskId: input.taskId,
@@ -2823,13 +2833,22 @@ export class TeamCoordinator {
 
   private detail(teamId: string): TeamDetail {
     const snapshot = this.persistence.getTeamSnapshot(teamId);
+    const waitingWorkers = new Set(this.executionScheduler.snapshot().waitingWorkerExecutionIds);
+    const executions = this.persistence.listTeamExecutions(teamId);
+    const waitingByWorker = new Map<string, number>();
+    for (const execution of executions)
+      if (waitingWorkers.has(execution.id))
+        waitingByWorker.set(
+          execution.assigneeAgentId,
+          (waitingByWorker.get(execution.assigneeAgentId) ?? 0) + 1,
+        );
     return teamDetailSchema.parse({
       team: snapshot.team,
       workers: snapshot.agents.map((agent) => this.workerSummary(agent)),
       messages: snapshot.messages.map((message) =>
         this.messageSummaryFromSnapshot(snapshot, message.id),
       ),
-      executions: this.persistence.listTeamExecutions(teamId).map((execution) => ({
+      executions: executions.map((execution) => ({
         ...(() => {
           const latestAttempt = this.persistence.listTeamAttempts(execution.id).at(-1) ?? null;
           const mission = this.persistence.getTeamMissionForExecution(execution.id);
@@ -2859,6 +2878,8 @@ export class TeamCoordinator {
         instructionRevision: execution.instruction.revision,
         queueOrdinal: execution.queueOrdinal,
         queueReason: execution.queueReason,
+        waitingForWorker: waitingWorkers.has(execution.id),
+        workerQueueDepth: waitingByWorker.get(execution.assigneeAgentId) ?? 0,
         connectionId: execution.modelSelection.connectionId,
         requestedModel: execution.modelSelection.requestedModel,
         assignedAt: execution.assignedAt,

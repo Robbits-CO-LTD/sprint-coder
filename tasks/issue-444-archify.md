@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: Mission reference review
+## Current checkpoint: Worker admission and queue projection
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -48,6 +48,11 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 - Review results expose only matched/issues metadata, scoped to the current view; physical paths, guards and context digests remain in Main. Source snapshots are freshly compared, path guards are revalidated, and changed policy/workspace/selected-worker state invalidates the result. Unrelated worker progress is excluded from the review fingerprint. The UI refreshes after relevant state/source changes and rejects late/cross-view results.
 - Review is not agreement, a permission grant or a reusable start token. Actual admission still needs full canonical conflict handling (including missing endpoint aliases), current capability/connection/Git eligibility, fresh source/root/permission checks and atomic agreement/Mission creation.
 
+- The reference-review checkpoint passed all CI at 22021c9 (run 34549277064).
+- Scheduled executions now require the persisted Worker ID. Admission excludes Workers with an active run before Connection reservation; queued waiters do not consume execution slots. Cancellation requests retain that fence until the current run settles. Rate-limit retry, automatic retry and steer preserve Worker/Team ownership, and requeue rejects identity changes.
+- Main projects waitingForWorker and workerQueueDepth from the live scheduler into the shared TeamDetail for get/subscriptions/scoped MCP status. Canvas/List use the same display fields, prefer running/unfinished work over newer waiters or terminal history, and show pending work on the active card. The projection is transient; no SQLite queue-reason migration or durable resource-lease claim is introduced.
+- Scheduler/renderer tests, all 63 real-SQLite Coordinator integration cases, IPC/lifecycle cases and focused packaged Team/graph regressions pass locally. Full graph dependency/resource admission and recovery still require durable graph-mode state and ownership.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                      |
@@ -64,6 +69,6 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 
 ## Next action
 
-Verify the Mission reference-review checkpoint on both operating systems. Finish admission bindings and connect explicit agreement to durable Graph Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Verify the Worker-admission checkpoint on both operating systems. Implement durable graph-mode Mission/admission state and explicit agreement ownership, preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish physical claim bindings and connect agreement to Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.

@@ -655,6 +655,8 @@ export type TeamExecutionIsolation = z.infer<typeof teamExecutionIsolationSchema
 
 export const teamExecutionSummarySchema = z
   .object({
+    waitingForWorker: z.boolean().optional(),
+    workerQueueDepth: z.number().int().nonnegative().optional(),
     id: idSchema,
     teamId: idSchema,
     assigneeAgentId: idSchema,

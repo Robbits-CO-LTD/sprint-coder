@@ -2,7 +2,7 @@ import type { TeamExecutionSummary } from '../types/sprint-coder';
 
 // Display facts for the persisted Team execution row that backs a Worker card (Core C1b).
 //
-// Every value here comes from a field the backend actually persists on `TeamExecutionSummary`
+// Values come from durable execution fields plus Main's live Worker-admission projection
 // (see types/sprint-coder.d.ts and TeamDetail.executions). Nothing is inferred from
 // `WorkerSummary.state`, from the requested model name, or from the mere absence of a value: an
 // unknown fact gets its own explicit wording rather than an empty string, a 0, or a `false`.
@@ -106,8 +106,8 @@ function compareTimestamps(a: string, b: string): number {
 }
 
 /**
- * The execution a Worker card should describe: the assignee's row with the newest `updatedAt`.
- * Ties resolve to the later array position so the result stays deterministic. Returns null when
+ * Prefer the running execution, then unfinished work, then completed history. Within a tier,
+ * the newest updatedAt wins; ties resolve to the later array position. Returns null when
  * the Worker has no persisted execution at all — callers keep their existing display in that case
  * rather than inventing one.
  */
@@ -117,9 +117,16 @@ export function latestExecutionForWorker(
 ): TeamExecutionSummary | null {
   if (executions == null) return null;
   let latest: TeamExecutionSummary | null = null;
+  const priority = (execution: TeamExecutionSummary) =>
+    execution.state === 'running' ? 2 : isTerminalExecutionState(execution.state) ? 0 : 1;
   for (const execution of executions) {
     if (execution.assigneeAgentId !== workerId) continue;
-    if (latest === null || compareTimestamps(execution.updatedAt, latest.updatedAt) >= 0) {
+    if (
+      latest === null ||
+      priority(execution) > priority(latest) ||
+      (priority(execution) === priority(latest) &&
+        compareTimestamps(execution.updatedAt, latest.updatedAt) >= 0)
+    ) {
       latest = execution;
     }
   }
@@ -156,8 +163,10 @@ export type TeamExecutionDisplay = {
 };
 
 export function describeExecution(execution: TeamExecutionSummary): TeamExecutionDisplay {
-  const stateLabel = executionStateLabel(execution.state);
   const isWaiting = isWaitingExecutionState(execution.state);
+  const workerWaiting =
+    isWaiting && execution.state !== 'waiting_resume' && execution.waitingForWorker === true;
+  const stateLabel = workerWaiting ? '担当Workerの終了待ち' : executionStateLabel(execution.state);
   const connection = connectionLabel(execution.connectionId);
   const instruction = instructionLabel(execution.instructionPreview);
 
@@ -166,7 +175,9 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
   const waitReasonLabel = isWaiting
     ? execution.state === 'waiting_resume'
       ? '既存変更を確認してから再開'
-      : queueReasonLabel(execution.queueReason)
+      : workerWaiting
+        ? '同じWorkerの先行実行が終了するまで待機'
+        : queueReasonLabel(execution.queueReason)
     : null;
   const queueOrdinalLabel =
     isWaiting && typeof execution.queueOrdinal === 'number'

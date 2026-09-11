@@ -9,6 +9,7 @@ export const TEAM_GLOBAL_EXECUTION_LIMIT = 8;
 
 export type TeamExecutionJob = Readonly<{
   executionId: string;
+  workerId: string;
   teamId: string;
   teamLimit: number;
   connection?: Readonly<{
@@ -18,6 +19,7 @@ export type TeamExecutionJob = Readonly<{
     estimatedTokens: number;
   }>;
   onConnectionWait?(reason: ConnectionWaitReason): void;
+  onWorkerWaitChanged?(waiting: boolean): void;
   notBeforeMs?: number;
   run(): Promise<void>;
 }>;
@@ -26,9 +28,10 @@ export type TeamExecutionSchedulerSnapshot = Readonly<{
   activeCount: number;
   queuedExecutionIds: readonly string[];
   activeExecutionIds: readonly string[];
+  waitingWorkerExecutionIds: readonly string[];
 }>;
 
-type QueuedJob = TeamExecutionJob & { ordinal: number };
+type QueuedJob = TeamExecutionJob & { ordinal: number; waitingForWorker: boolean };
 
 /**
  * Core-only admission control for local Claude/Codex executions.
@@ -60,6 +63,7 @@ export class TeamExecutionScheduler {
 
   submit(job: TeamExecutionJob): void {
     if (job.executionId.trim() === '') throw new Error('Execution ID is required');
+    if (job.workerId.trim() === '') throw new Error('Worker ID is required');
     if (job.teamId.trim() === '') throw new Error('Team ID is required');
     if (!Number.isSafeInteger(job.teamLimit) || job.teamLimit < 1)
       throw new Error('Team execution limit must be a positive integer');
@@ -68,7 +72,7 @@ export class TeamExecutionScheduler {
       this.queued.some(({ executionId }) => executionId === job.executionId)
     )
       throw new Error('Execution is already scheduled');
-    this.queued.push({ ...job, ordinal: this.nextOrdinal });
+    this.queued.push({ ...job, ordinal: this.nextOrdinal, waitingForWorker: false });
     this.nextOrdinal += 1;
     this.schedulePump();
   }
@@ -105,9 +109,12 @@ export class TeamExecutionScheduler {
   }
 
   requeueActive(executionId: string, replacement: TeamExecutionJob): boolean {
-    if (!this.active.has(executionId)) return false;
+    const current = this.active.get(executionId);
+    if (!current) return false;
     if (replacement.executionId !== executionId)
       throw new Error('A resumed job must keep the same execution ID');
+    if (replacement.workerId !== current.workerId || replacement.teamId !== current.teamId)
+      throw new Error('A resumed job must keep its Worker and Team');
     if (this.requeueAfterRun.has(executionId))
       throw new Error('Execution already has a pending resume');
     this.requeueAfterRun.set(executionId, replacement);
@@ -115,12 +122,16 @@ export class TeamExecutionScheduler {
   }
 
   snapshot(): TeamExecutionSchedulerSnapshot {
+    const workers = new Set([...this.active.values()].map((job) => job.workerId));
     return {
       activeCount: this.active.size,
       queuedExecutionIds: [...this.queued]
         .sort((left, right) => left.ordinal - right.ordinal)
         .map(({ executionId }) => executionId),
       activeExecutionIds: [...this.active.keys()],
+      waitingWorkerExecutionIds: this.queued
+        .filter((job) => workers.has(job.workerId))
+        .map((job) => job.executionId),
     };
   }
 
@@ -149,12 +160,23 @@ export class TeamExecutionScheduler {
   }
 
   private nextAdmissibleIndex(): number {
+    const activeWorkers = new Set([...this.active.values()].map((job) => job.workerId));
+    for (const job of this.queued) {
+      const waiting = activeWorkers.has(job.workerId);
+      if (waiting !== job.waitingForWorker) {
+        job.waitingForWorker = waiting;
+        job.onWorkerWaitChanged?.(waiting);
+      }
+    }
     const activeByTeam = new Map<string, number>();
     for (const job of this.active.values())
       activeByTeam.set(job.teamId, (activeByTeam.get(job.teamId) ?? 0) + 1);
     const teamAdmissible = this.queued
       .map((job, index) => ({ job, index }))
-      .filter(({ job }) => (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit);
+      .filter(
+        ({ job }) =>
+          !activeWorkers.has(job.workerId) && (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit,
+      );
     if (teamAdmissible.length === 0) return -1;
     const now = Date.now();
     const timeAdmissible = teamAdmissible.filter(
@@ -193,7 +215,7 @@ export class TeamExecutionScheduler {
       const replacement = this.requeueAfterRun.get(job.executionId);
       if (replacement !== undefined) {
         this.requeueAfterRun.delete(job.executionId);
-        this.queued.push({ ...replacement, ordinal: this.nextOrdinal });
+        this.queued.push({ ...replacement, ordinal: this.nextOrdinal, waitingForWorker: false });
         this.nextOrdinal += 1;
       }
       this.schedulePump();
