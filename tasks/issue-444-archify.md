@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: shared legacy Mission integration FIFO
+## Current checkpoint: Provider Worker stop acknowledgement
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -74,6 +74,10 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 The graph Attempt/checkpoint changes passed all CI at 79ed3e8 (run 34561487786). Task-root legacy Mission integration now uses the same resource-aware FIFO and durable root/repository leases as Project isolation. Repository keys resolve the canonical Git top level without rejecting another integration's temporary working state; the queued legacy job rechecks its saved worktree and root identity before acquiring leases. A deterministic real-Git test holds the first integration while the other arrives, in both orders, and verifies one active integration, both commits/files and cleanup. This closes the legacy integration bypass identified in the canonical plan; it does not connect graph runtime admission or establish process-stop evidence.
 
 Validation: the new mixed-path cases fail against the previous coordinator and pass with the fix. Electron-ABI Coordinator/worktree/FIFO/graph-persistence suites pass 104 tests; desktop typecheck, scoped lint (one pre-existing warning), formatting and diff checks pass. A fresh hidden macOS package passes four normal Team/graph regression cases. These establish integration serialization and compatibility, not full graph execution acceptance.
+
+Provider Worker cancellation now retains ownership from Connection verification through stream/tool/session teardown. Stop aborts that execution, sends the active request's cancellation, then waits for its teardown; cancellation cannot start another provider round or tool. One Worker's stream shutdown does not stop its sibling. Managed tool-session release is awaited, and model-lease/heartbeat cleanup still runs when release fails. Existing CLI success already waits for RuntimeHost's process-tree exit; Worker managed-tool catalogs currently exclude command execution, so there is no Worker command-session path to add or terminate. These observations do not establish graph resource release after crash/unconfirmed stop: the graph controller still needs to bind the observed result to its current Attempt.
+
+Validation: two new cancellation tests fail on the previous Provider adapter. The fixed adapter passes eleven tests including the additional two-Worker stream-finalization case; seventeen CLI Runtime tests and sixty-five Electron-ABI Coordinator tests also pass. Desktop typecheck, scoped lint and formatting pass. These are local runtime/control tests, not real-provider graph acceptance.
 
 ## Remaining requirements (not complete)
 
