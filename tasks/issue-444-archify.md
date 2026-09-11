@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: Provider Worker stop acknowledgement
+## Current checkpoint: graph branch interruption transactions
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -78,6 +78,10 @@ Validation: the new mixed-path cases fail against the previous coordinator and p
 Provider Worker cancellation now retains ownership from Connection verification through stream/tool/session teardown. Stop aborts that execution, sends the active request's cancellation, then waits for its teardown; cancellation cannot start another provider round or tool. One Worker's stream shutdown does not stop its sibling. Managed tool-session release is awaited, and model-lease/heartbeat cleanup still runs when release fails. Existing CLI success already waits for RuntimeHost's process-tree exit; Worker managed-tool catalogs currently exclude command execution, so there is no Worker command-session path to add or terminate. These observations do not establish graph resource release after crash/unconfirmed stop: the graph controller still needs to bind the observed result to its current Attempt.
 
 Validation: two new cancellation tests fail on the previous Provider adapter. The fixed adapter passes eleven tests including the additional two-Worker stream-finalization case; seventeen CLI Runtime tests and sixty-five Electron-ABI Coordinator tests also pass. Desktop typecheck, scoped lint and formatting pass. These are local runtime/control tests, not real-provider graph acceptance.
+
+The internal interruptGraphStep transaction verifies the current Mission/step generation, Execution, Attempt and resource owner, then pauses only that execution. Confirmed stop releases that reservation; unconfirmed stop quarantines it and retains every key even though the invocation is terminal. No checkpoint is created, dependent steps stay blocked, and independent siblings can finish. Later explicit stop confirmation plus manual resume creates a new Attempt; stale interruptions cannot affect its ownership. This operation is not yet called by the runtime dispatcher, so it is storage support for branch failure, not a claim of connected graph execution.
+
+Validation: twenty graph persistence cases pass, including both stop outcomes in A/B→C, sibling progress, cross-Team resource blocking, explicit release/new Attempt resume, stale generation/acknowledgement/owner rejection, pre-dispatch quarantine, and all-row rollback on a release failure. Existing execution persistence13 and Electron-ABI Coordinator65 pass (98 total), with desktop typecheck, scoped lint and formatting.
 
 ## Remaining requirements (not complete)
 

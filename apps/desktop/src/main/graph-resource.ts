@@ -82,6 +82,20 @@ export type GraphStepCompletion = Readonly<{
   now: string;
 }>;
 
+/** Main records a failed/canceled invocation independently of whether its runtime stopped.
+ * An unconfirmed stop retains every lease; terminal Attempt state is not stop evidence. */
+export type GraphStepInterruption = Readonly<{
+  missionId: string;
+  stepKey: string;
+  generation: number;
+  reservationId: string;
+  attemptId: string;
+  outcome: 'failed' | 'canceled';
+  reason: string;
+  confirmation: { kind: 'attempt-stopped'; attemptId: string } | { kind: 'unconfirmed' };
+  now: string;
+}>;
+
 /** Resource namespaces are app-wide or physical-root-wide, never isolated by Team ID. */
 export function graphResourceKeys(graph: GraphMissionRecord, stepKey: string): GraphResourceKey[] {
   const step = graph.plan.steps.find((step) => step.key === stepKey);

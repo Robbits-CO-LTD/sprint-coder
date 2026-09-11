@@ -8,6 +8,7 @@ import {
   type GraphResourceKey,
   type GraphAttemptStart,
   type GraphStepCompletion,
+  type GraphStepInterruption,
 } from './graph-resource';
 import {
   graphGenerationSchema,
@@ -4499,6 +4500,7 @@ export interface PersistenceClient {
     mission: TeamMissionRecord;
     dependencyReadyStepKeys: string[];
   };
+  interruptGraphStep(input: GraphStepInterruption): GraphResourceReservation;
   acquireGraphResources(input: {
     missionId: string;
     stepKey: string;
@@ -9724,6 +9726,88 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .map((step) => step.key);
       return { mission: this.getTeamMission(graph.missionId), dependencyReadyStepKeys };
+    })();
+  }
+
+  /** Pause this invocation only. Independent siblings remain running and no checkpoint is made. */
+  interruptGraphStep(input: GraphStepInterruption): GraphResourceReservation {
+    if (
+      !['failed', 'canceled'].includes(input.outcome) ||
+      input.reason.trim() === '' ||
+      input.reason.length > 2_000 ||
+      !Number.isFinite(Date.parse(input.now)) ||
+      (input.confirmation.kind !== 'unconfirmed' &&
+        (input.confirmation.kind !== 'attempt-stopped' ||
+          input.confirmation.attemptId !== input.attemptId))
+    )
+      throw new Error('Invalid graph interruption');
+    return this.db.transaction(() => {
+      const graph = this.getGraphTeamMission(input.missionId);
+      const step = graph?.steps.find((step) => step.key === input.stepKey);
+      if (!graph || !step || step.generation !== input.generation)
+        throw new Error('Graph interruption generation mismatch');
+      const execution = this.getTeamExecution(step.executionId);
+      const attempt = this.getTeamAttempt(input.attemptId);
+      const reservation = this.db
+        .prepare('SELECT * FROM team_graph_resource_reservations WHERE id=?')
+        .get(input.reservationId) as GraphResourceRow | undefined;
+      if (
+        !reservation ||
+        reservation.state !== 'active' ||
+        reservation.mission_id !== graph.missionId ||
+        reservation.execution_id !== execution.id ||
+        reservation.generation !== step.generation ||
+        reservation.attempt_id !== attempt.id ||
+        attempt.executionId !== execution.id ||
+        !['created', 'running', 'waiting_verification', 'waiting_rate_limit'].includes(
+          attempt.state,
+        ) ||
+        execution.state !== 'running' ||
+        this.getTeamMission(graph.missionId).state !== 'running'
+      )
+        throw new Error('Graph interruption owner mismatch');
+      this.readGraphResourceReservation(reservation);
+      const dispatch = this.getTeamExecutionDispatch(execution.id);
+      const task = this.getTeamTask(dispatch.teamTaskId);
+      this.transitionTeamAttempt({
+        attemptId: attempt.id,
+        to:
+          input.confirmation.kind === 'unconfirmed'
+            ? attempt.state === 'running'
+              ? 'interrupted'
+              : 'canceled'
+            : attempt.state === 'created'
+              ? 'canceled'
+              : input.outcome,
+        terminalReason: input.reason,
+        now: input.now,
+      });
+      this.transitionTeamExecutionWithAdmission(
+        { executionId: execution.id, to: 'waiting_resume', now: input.now },
+        true,
+      );
+      if (task.status === 'running') this.transitionTeamTask(task.id, 'blocked', input.now);
+      else if (['pending', 'assigned', 'accepted'].includes(task.status))
+        this.transitionTeamTask(task.id, 'canceled', input.now);
+      if (input.confirmation.kind === 'attempt-stopped')
+        this.releaseGraphResources({
+          reservationId: reservation.id,
+          executionId: execution.id,
+          generation: step.generation,
+          confirmation: input.confirmation,
+          now: input.now,
+        });
+      else
+        this.db
+          .prepare(
+            "UPDATE team_graph_resource_reservations SET state='quarantined' WHERE id=? AND state='active'",
+          )
+          .run(reservation.id);
+      return this.readGraphResourceReservation(
+        this.db
+          .prepare('SELECT * FROM team_graph_resource_reservations WHERE id=?')
+          .get(reservation.id) as GraphResourceRow,
+      );
     })();
   }
 
