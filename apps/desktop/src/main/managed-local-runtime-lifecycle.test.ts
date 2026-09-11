@@ -341,7 +341,12 @@ describe('ManagedLocalRuntimeLifecycle', () => {
       },
     };
     const { subject, supervisor } = lifecycle();
-    const first = await subject.acquire(paired, false);
+    const verify = vi.fn(async () => {});
+    const signal = new AbortController().signal;
+    const first = await subject.acquire(paired, false, signal, verify);
+    const reused = await subject.acquire(paired, false, signal, verify);
+    expect(verify).toHaveBeenCalledTimes(1);
+    await reused.release();
     expect(() => subject.assertDeletable(draft.id)).toThrow('active');
     await expect(subject.stopModel(draft.id)).rejects.toThrow('active leases');
     expect(subject.snapshot().speculative).toMatchObject({
@@ -352,7 +357,10 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     const second = await subject.acquire(
       { ...paired, draft: { ...draft, draftTokensMax: 8 } },
       false,
+      signal,
+      verify,
     );
+    expect(verify).toHaveBeenCalledTimes(2);
     expect(supervisor.starts).toHaveLength(2);
     expect(supervisor.sessions[0]?.stopCount).toBe(1);
     await second.release();

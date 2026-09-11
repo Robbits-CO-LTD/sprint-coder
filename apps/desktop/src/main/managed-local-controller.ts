@@ -123,6 +123,7 @@ export class ManagedLocalController {
       dependencies.fetch ?? globalThis.fetch,
     );
     manager.recoverInterrupted();
+    await manager.reclassifyInstalledDrafts();
     const candidateBackends = dependencies.bundle?.manifest.candidateBackends ?? [];
     return new ManagedLocalController(
       dependencies.lifecycle,
@@ -208,6 +209,26 @@ export class ManagedLocalController {
       }
       this.repository.getSpeculativeSettings(modelId);
       target = this.listInstalled().find(({ id }) => id === modelId)!;
+    }
+    for (const draft of this.listInstalled().filter(
+      (model) =>
+        model.state === 'installed' &&
+        model.purpose === 'draft-dflash' &&
+        model.baseModelId === null &&
+        model.source === 'hugging_face',
+    )) {
+      try {
+        const id = await this.catalog.resolveBaseModelId(draft.sourceId, draft.immutableRevision);
+        if (id !== null)
+          this.repository.backfillBaseModelId(
+            draft.id,
+            draft.sourceId,
+            draft.immutableRevision,
+            id,
+          );
+      } catch {
+        reason ??= '保存済みの下書きモデル版から互換情報を確認できませんでした。';
+      }
     }
     const runtimeSupported = this.bundle?.manifest.speculativeDflash === true;
     const hasProjector = this.manager
@@ -482,16 +503,13 @@ export class ManagedLocalController {
     const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
     if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1)
       throw new Error('Managed Local model is not startable');
-    const active = this.lifecycle.snapshot();
-    const reusesLoadedModel = managedLocalReusesLoadedModel(active, model.id);
     const hardware = await this.collectHardware();
     const configured = this.manager.getLaunchSettings(modelId);
     const launch = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
     if (launch === null) throw new Error('Managed Local launch settings are unavailable');
     const contextTokens = contextOverride ?? launch.contextTokens;
     const speculative = this.repository.getSpeculativeSettings(modelId);
-    const draft = await this.resolveDraft(modelId, speculative, contextTokens, true);
-    if (draft === null && !reusesLoadedModel) await this.manager.assertInstalledIntegrity(model.id);
+    const draft = await this.resolveDraft(modelId, speculative, contextTokens, false);
     const draftModel =
       draft === null ? null : this.listInstalled().find(({ id }) => id === draft.id)!;
     const draftMetadata = draft === null ? null : await readGgufModelMetadata(draft.modelPath);
@@ -546,6 +564,10 @@ export class ManagedLocalController {
       },
       automaticRelease,
       signal,
+      async () => {
+        await this.manager.assertInstalledIntegrity(model.id, signal);
+        if (draft !== null) await this.manager.assertInstalledIntegrity(draft.id, signal);
+      },
     );
   }
 

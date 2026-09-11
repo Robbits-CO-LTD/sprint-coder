@@ -134,6 +134,28 @@ describe('readGgufModelMetadata', () => {
     );
     expect(duplicate?.kvBytesPerToken).toBeUndefined();
   });
+  it('defaults absent KV heads to MHA but rejects explicit invalid or duplicate values', async () => {
+    const entries = [
+      metadataString('general.architecture', 'llama'),
+      metadataUint32('llama.block_count', 2),
+      metadataUint32('llama.embedding_length', 1024),
+      metadataUint32('llama.attention.head_count', 8),
+    ];
+    expect(await readGgufModelMetadata(await fixture(gguf(entries)))).toMatchObject({
+      kvBytesPerToken: 8192,
+    });
+    for (const extra of [
+      [metadataUint32('llama.attention.head_count_kv', 0)],
+      [
+        metadataUint32('llama.attention.head_count_kv', 2),
+        metadataUint32('llama.attention.head_count_kv', 2),
+      ],
+    ]) {
+      expect(
+        (await readGgufModelMetadata(await fixture(gguf([...entries, ...extra]))))?.kvBytesPerToken,
+      ).toBeUndefined();
+    }
+  });
   it('identifies a DFlash draft and its architecture-bound context from the actual GGUF', async () => {
     const path = await fixture(
       gguf([

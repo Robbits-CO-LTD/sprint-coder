@@ -205,7 +205,9 @@ export async function readGgufModelMetadata(path: string): Promise<GgufModelMeta
     };
     const embedding = dimension('embedding_length');
     const heads = dimension('attention.head_count');
-    const kvHeads = dimension('attention.head_count_kv');
+    const kvHeads = dimensions.has(`${architecture}.attention.head_count_kv`)
+      ? dimension('attention.head_count_kv')
+      : heads;
     const layers = dimension('block_count');
     const fallbackHeadSize =
       embedding !== null && heads !== null && embedding % heads === 0 ? embedding / heads : null;

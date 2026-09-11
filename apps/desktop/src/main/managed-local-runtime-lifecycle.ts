@@ -183,6 +183,7 @@ export class ManagedLocalRuntimeLifecycle {
     descriptor: ManagedLocalModelDescriptor,
     automaticRelease: boolean,
     signal: AbortSignal = new AbortController().signal,
+    verifyBeforeStart?: () => Promise<void>,
   ): Promise<ManagedLocalModelLease> {
     validateDescriptor(descriptor, this.bundle.manifest.candidateBackends);
     for (;;) {
@@ -208,6 +209,8 @@ export class ManagedLocalRuntimeLifecycle {
         const hardware = await this.collectHardware();
         const fit = this.assess(descriptor, hardware);
         this.assertStartable(descriptor, fit);
+        await verifyBeforeStart?.();
+        if (signal.aborted) throw canceled();
         let session: ManagedLocalRuntimeSession;
         try {
           session = await this.supervisor.start(

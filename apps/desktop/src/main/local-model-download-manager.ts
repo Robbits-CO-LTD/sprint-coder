@@ -165,7 +165,7 @@ export class LocalModelDownloadRepository {
       try {
         this.readSpeculativeSettingsMap();
       } catch {
-        this.writeSettingsMap(SPECULATIVE_SETTINGS_KEY, {});
+        this.writeSpeculativeSettingsMap(this.recoverSpeculativeSettingsMap());
         this.speculativeRecoveryRequired = true;
       }
     })();
@@ -457,6 +457,28 @@ export class LocalModelDownloadRepository {
     })();
   }
 
+  private recoverSpeculativeSettingsMap(): ManagedLocalSpeculativeSettingsMap {
+    const row = this.db
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(SPECULATIVE_SETTINGS_KEY) as { value: string } | undefined;
+    if (row === undefined || Buffer.byteLength(row.value, 'utf8') > MAX_SPECULATIVE_SETTINGS_BYTES)
+      return {};
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(row.value) as unknown;
+    } catch {
+      return {};
+    }
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) return {};
+    const recovered: ManagedLocalSpeculativeSettingsMap = {};
+    for (const [target, value] of Object.entries(decoded)) {
+      const entry = managedLocalSpeculativeSettingsMapSchema.safeParse({ [target]: value });
+      if (entry.success) Object.assign(recovered, entry.data);
+      if (Object.keys(recovered).length === 256) break;
+    }
+    return recovered;
+  }
+
   private readSpeculativeSettingsMap(): ManagedLocalSpeculativeSettingsMap {
     const row = this.db
       .prepare('SELECT value FROM settings WHERE key = ?')
@@ -474,6 +496,18 @@ export class LocalModelDownloadRepository {
     this.writeSettingsMap(SPECULATIVE_SETTINGS_KEY, map);
   }
 
+  markInstalledDraft(modelId: string): void {
+    this.db.transaction(() => {
+      const changed = this.db
+        .prepare(
+          "UPDATE local_models SET purpose = 'draft-dflash' WHERE id = ? AND state = 'installed' AND purpose = 'normal'",
+        )
+        .run(modelId).changes;
+      if (changed > 0)
+        this.db.prepare('DELETE FROM local_model_verifications WHERE model_id = ?').run(modelId);
+    })();
+  }
+
   backfillBaseModelId(
     modelId: string,
     sourceId: string,
@@ -486,7 +520,7 @@ export class LocalModelDownloadRepository {
         .prepare(
           `UPDATE local_models SET base_model_id = ?
       WHERE id = ? AND source = 'hugging_face' AND source_id = ? AND immutable_revision = ?
-        AND state = 'installed' AND purpose = 'normal' AND base_model_id IS NULL`,
+        AND state = 'installed' AND base_model_id IS NULL`,
         )
         .run(valid, modelId, sourceId, immutableRevision).changes === 1
     );
@@ -928,6 +962,18 @@ export class LocalModelDownloadManager {
     },
   ) {}
 
+  async reclassifyInstalledDrafts(): Promise<void> {
+    for (const model of this.repository.listInstalledModels()) {
+      if (model.state !== 'installed' || model.purpose !== 'normal') continue;
+      const first = this.repository.artifacts(model.id).find(({ role }) => role === 'model');
+      if (first === undefined) continue;
+      const metadata = await readGgufModelMetadata(
+        this.store.installedPath(model.id, first.ordinal),
+      );
+      if (metadata?.architecture === 'dflash') this.repository.markInstalledDraft(model.id);
+    }
+  }
+
   recoverInterrupted(): number {
     return this.repository.recoverInterrupted(this.now());
   }
@@ -959,7 +1005,7 @@ export class LocalModelDownloadManager {
    * hash check protects the network-to-store transition; this second check protects the later
    * runtime boundary from an on-disk replacement, symlink, or hardlink.
    */
-  async assertInstalledIntegrity(modelId: string): Promise<void> {
+  async assertInstalledIntegrity(modelId: string, signal?: AbortSignal): Promise<void> {
     assertModelId(modelId);
     const rows = this.repository.artifacts(modelId);
     if (rows.length === 0 || rows.some((row) => row.state !== 'installed'))
@@ -984,7 +1030,7 @@ export class LocalModelDownloadManager {
         );
       if (info.size !== row.byte_length)
         throw new LocalModelDownloadError('size_changed', 'Installed model artifact size changed');
-      if ((await sha256File(path)) !== row.sha256)
+      if ((await sha256File(path, signal)) !== row.sha256)
         throw new LocalModelDownloadError(
           'hash_mismatch',
           'Installed model artifact hash mismatch',
@@ -1402,12 +1448,14 @@ async function assertFlatPrivateDirectory(path: string): Promise<void> {
   }
 }
 
-async function sha256File(path: string): Promise<string> {
+async function sha256File(path: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const hash = createHash('sha256');
     const buffer = Buffer.allocUnsafe(1024 * 1024);
     for (;;) {
+      signal?.throwIfAborted();
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, null);
       if (bytesRead === 0) break;
       hash.update(buffer.subarray(0, bytesRead));
