@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { canonicalizeResourcePath, type CanonicalPathIdentity } from './path-guard';
 import { directoryCaseSensitive, windowsCaseInsensitiveNamesEqual } from './directory-name-rules';
+import { foldUnicodeFileName } from './unicode-file-name-fold';
 import type {
   FileRevisionToken,
   FileRevisionRegistry,
@@ -559,7 +560,10 @@ function claimMissingEndpoint(
     // Canonical Unicode aliases also collide on case-sensitive macOS volumes.
     const unicodeAlias =
       process.platform === 'darwin' && previousName.normalize('NFD') === name.normalize('NFD');
-    const folded = (value: string) => value.normalize('NFD').toLowerCase().toUpperCase();
+    const folded =
+      process.platform === 'win32'
+        ? (value: string) => value.normalize('NFD').toLowerCase().toUpperCase()
+        : foldUnicodeFileName;
     if (!unicodeAlias && folded(previousName) !== folded(name)) continue;
     if (process.platform === 'win32' && !windowsCaseInsensitiveNamesEqual(previousName, name))
       continue;

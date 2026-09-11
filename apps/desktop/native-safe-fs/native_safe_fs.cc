@@ -3466,9 +3466,22 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
   // A successful flags ioctl alone does not establish case rules (for example on FAT/NTFS).
   if (fstatfs(fd, &filesystem) == 0 &&
       (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == F2FS_SUPER_MAGIC ||
-       filesystem.f_type == BTRFS_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC) &&
+       filesystem.f_type == BTRFS_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC ||
+       filesystem.f_type == OVERLAYFS_SUPER_MAGIC) &&
       ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0)
     sensitive = (flags & FS_CASEFOLD_FL) == 0 ? 1 : 0;
+  if (filesystem.f_type == XFS_SUPER_MAGIC || filesystem.f_type == OVERLAYFS_SUPER_MAGIC) {
+    // Linux 64-bit XFS_IOC_FSGEOMETRY_V1 has a 112-byte result, flags at byte 92.
+    // Query the opened filesystem rather than assuming all XFS volumes are case-sensitive.
+    // DIRV2CI is legacy ASCII-only folding, which the Unicode comparer cannot represent.
+    alignas(uint64_t) std::array<unsigned char, 112> geometry {};
+    if (sizeof(void*) == 8 && ioctl(fd, _IOC(_IOC_READ, 'X', 100, geometry.size()),
+                                   geometry.data()) == 0) {
+      uint32_t geometry_flags = 0;
+      std::memcpy(&geometry_flags, geometry.data() + 92, sizeof(geometry_flags));
+      sensitive = (geometry_flags & (1u << 12)) == 0 ? 1 : -1;
+    }
+  }
 #endif
   close(fd);
   if (sensitive != 0 && sensitive != 1)

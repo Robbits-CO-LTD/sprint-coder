@@ -739,6 +739,7 @@ const config: ForgeConfig = {
     // files that end in `.so` leaves Sharp's shared library trapped inside app.asar.
     asar: { unpack: NATIVE_ASAR_UNPACK_GLOB },
     extraResource: [
+      resolve(__dirname, '..', '..', 'docs', 'licenses', 'unicode-license.txt'),
       ...bundledNodeResources(),
       ...sandboxRunnerResources(),
       ...computerUseNativeResources(),

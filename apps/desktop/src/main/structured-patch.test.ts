@@ -425,6 +425,25 @@ describe('structured patch preparation', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'keeps dotted and dotless i as distinct new names',
+    async () => {
+      const { workspace, registry } = await fixture();
+      const paths = ['src/i.txt', 'src/ı.txt'];
+      for (const path of paths) await writeFile(join(workspace, path), path, { flag: 'wx' });
+      for (const path of paths) expect(await readFile(join(workspace, path), 'utf8')).toBe(path);
+      for (const path of paths) await rm(join(workspace, path));
+      const patch = await prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: paths.map((path) => ({ kind: 'add' as const, path, content: path })),
+      });
+      expect(patch.operations).toHaveLength(2);
+    },
+  );
+
   it('rejects two differently cased references to the same file before preparing effects', async ({
     skip,
   }) => {
