@@ -3744,7 +3744,6 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
   ]);
 
 export const emptyPayloadSchema = z.object({}).strict();
-export const skillProviderSchema = z.enum(['claude', 'agents']);
 export const skillCatalogItemSchema = z
   .object({
     ref: skillRefSchema,
@@ -3770,84 +3769,12 @@ export const taskSkillSelectionInputSchema = z
     skills: turnSkillSelectionsSchema,
   })
   .strict();
-export const skillCandidateSummarySchema = z
-  .object({
-    provider: skillProviderSchema,
-    skillId: skillIdSchema,
-    valid: z.boolean(),
-    problems: z.array(z.string().max(240)).max(16),
-    imported: z.boolean(),
-    enabled: z.boolean().nullable(),
-    updateAvailable: z.boolean(),
-  })
-  .strict();
-export const skillScanResultSchema = z
-  .object({
-    candidates: z.array(skillCandidateSummarySchema).max(512),
-    claudeDetected: z.number().int().nonnegative().max(512),
-    agentsDetected: z.number().int().nonnegative().max(512),
-    importedCount: z.number().int().nonnegative().max(512),
-    invalidCount: z.number().int().nonnegative().max(512),
-    installed: z
-      .array(
-        z
-          .object({
-            provider: skillProviderSchema,
-            skillId: skillIdSchema,
-            name: z.string().min(1).max(200),
-            enabled: z.boolean(),
-            sourceAvailable: z.boolean(),
-            updateAvailable: z.boolean(),
-          })
-          .strict(),
-      )
-      .max(512),
-  })
-  .strict();
-export const skillCandidateInputSchema = z
-  .object({ provider: skillProviderSchema, skillId: skillIdSchema })
-  .strict();
-export const skillPreviewResultSchema = z
-  .object({
-    previewId: z.string().uuid(),
-    expiresAt: z.string().datetime(),
-    provider: skillProviderSchema,
-    skillId: skillIdSchema,
-    name: z.string().min(1).max(200),
-    description: z.string().min(1).max(2_000),
-    files: z.array(z.string().min(1).max(1_024)).max(256),
-    warnings: z.array(z.string().min(1).max(1_024)).max(256),
-    compatibility: skillCompatibilityReportSchema,
-  })
-  .strict();
-export const skillImportInputSchema = z
-  .object({ previewId: z.string().uuid(), nativeModeConfirmed: z.boolean().default(false) })
-  .strict();
-export const skillInstalledInputSchema = z
-  .object({ provider: skillProviderSchema, skillId: skillIdSchema })
-  .strict();
-export const skillEnabledInputSchema = skillInstalledInputSchema
-  .extend({ enabled: z.boolean() })
-  .strict();
-export const skillImportResultSchema = z
-  .object({
-    provider: skillProviderSchema,
-    skillId: skillIdSchema,
-    status: z.enum(['imported', 'already-imported']),
-    name: z.string().min(1).max(200),
-  })
-  .strict();
-export type SkillProvider = z.infer<typeof skillProviderSchema>;
 export type SkillSource = z.infer<typeof skillSourceSchema>;
 export type SkillKind = z.infer<typeof skillKindSchema>;
 export type SkillRef = z.infer<typeof skillRefSchema>;
 export type TurnSkillSelection = z.infer<typeof turnSkillSelectionSchema>;
 export type SkillCatalogItem = z.infer<typeof skillCatalogItemSchema>;
 export type SkillCatalog = z.infer<typeof skillCatalogSchema>;
-export type SkillCandidateSummary = z.infer<typeof skillCandidateSummarySchema>;
-export type SkillScanResult = z.infer<typeof skillScanResultSchema>;
-export type SkillPreviewResult = z.infer<typeof skillPreviewResultSchema>;
-export type SkillImportResult = z.infer<typeof skillImportResultSchema>;
 export const taskCreateInputSchema = z
   .object({
     title: z.string().trim().min(1).max(200).optional(),

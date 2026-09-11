@@ -1723,16 +1723,23 @@ describe('public contracts', () => {
 
 describe('retired external Skill import surface', () => {
   it('publishes no import IPC channel or settings API method', () => {
-    expect(Object.values(contracts.IPC_CHANNELS)).not.toEqual(
-      expect.arrayContaining([
-        'sprint-coder:settings:skills:scan',
-        'sprint-coder:settings:skills:preview',
-        'sprint-coder:settings:skills:import',
-        'sprint-coder:settings:skills:update',
-        'sprint-coder:settings:skills:remove',
-      ]),
-    );
+    for (const channel of [
+      'sprint-coder:settings:skills:scan',
+      'sprint-coder:settings:skills:preview',
+      'sprint-coder:settings:skills:import',
+      'sprint-coder:settings:skills:update',
+      'sprint-coder:settings:skills:remove',
+    ])
+      expect(Object.values(contracts.IPC_CHANNELS)).not.toContain(channel);
   });
+
+  it.each(['agents', 'claude'] as const)(
+    'retains legacy %s Skill references for stored history',
+    (source) => {
+      const ref = { source, skillId: 'legacy-reviewer', digest: 'a'.repeat(64) };
+      expect(contracts.skillRefSchema.parse(ref)).toEqual(ref);
+    },
+  );
 });
 
 describe('Managed Local download contracts', () => {

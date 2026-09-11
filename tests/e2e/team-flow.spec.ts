@@ -145,6 +145,18 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
         'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。',
         { timeout: 20_000 },
       );
+      await page.getByTestId('team-toggle').click();
+      await expect(page.getByTestId('team-list')).toBeVisible();
+      await page.getByTestId('composer-textarea').fill('やって');
+      await page.getByTestId('composer-send-button').click();
+      // A follow-up must still reach the Team route. Mock truthfully refuses Team execution;
+      // a generic chat reply here would mean the Skill/MCP capability was lost between turns.
+      await expect(page.getByTestId('assistant-message')).toHaveCount(2);
+      await expect(page.getByTestId('assistant-message').nth(1)).toContainText(
+        'この実行環境では組み込みTeam Skillを利用できないため、Team操作を開始できません。',
+        { timeout: 20_000 },
+      );
+      await expect(page.getByTestId('team-worker')).toHaveCount(0);
     } finally {
       await closeApp(intentApp);
       removeUserDataDir(dir);

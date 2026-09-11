@@ -64,7 +64,7 @@ import {
 // body is the one that shipped and stays exactly as it was, so the flag is a real switch back and
 // not a one-way migration.
 
-type SettingsSection = 'models' | 'team' | 'skills' | 'advanced';
+type SettingsSection = 'models' | 'local-ai' | 'team' | 'skills' | 'advanced';
 type SkillCreationRequest = {
   prompt: string;
   builtinSkillId: 'skill-creator';
@@ -87,6 +87,12 @@ export const SETTINGS_SECTIONS: readonly {
     label: 'モデルと接続',
     description: 'モデル・Effort・API',
     eyebrow: 'Models & Connections',
+  },
+  {
+    id: 'local-ai',
+    label: 'ローカルAI',
+    description: '端末内のモデル・実行状態',
+    eyebrow: 'Local AI',
   },
   { id: 'team', label: 'Team', description: '新しいTeamの既定値', eyebrow: 'Team' },
   { id: 'skills', label: 'Skill', description: '読み込みと有効化', eyebrow: 'Skills' },
@@ -278,7 +284,7 @@ export function WorkspaceBody({
       <header className="settings-header">
         <div>
           <h2 id="settings-dialog-title">設定</h2>
-          <p>モデル、接続、Team、Skill、CLIの診断を管理します。</p>
+          <p>モデル、接続、ローカルAI、Team、Skill、CLIの診断を管理します。</p>
         </div>
         <CloseButton onClose={onClose} />
       </header>
@@ -318,9 +324,12 @@ export function WorkspaceBody({
               <ModelGroup />
               <EffortGroup />
               <AccessDefaultGroup />
-              <LocalAiSettingsSection active={open} />
               {/* Unmounting clears the renderer-local plaintext credential state. */}
               {open && <ProviderSettingsSection active={open} />}
+            </WorkspacePage>
+
+            <WorkspacePage {...page('local-ai')} active={current === 'local-ai'}>
+              <LocalAiSettingsSection active={open} />
             </WorkspacePage>
 
             <WorkspacePage {...page('team')} active={current === 'team'}>

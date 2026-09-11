@@ -194,6 +194,57 @@ async function flush(): Promise<void> {
 }
 
 describe('LocalAiSettingsSection', () => {
+  it('keeps search focus during loading and offers a retry after a detail failure', async () => {
+    installApi();
+    const query = vi.mocked(window.sprintCoder!.localAI.query);
+    let finishSearch!: (page: Awaited<ReturnType<typeof query>>) => void;
+    query.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSearch = resolve;
+        }),
+    );
+    const detailApi = vi.mocked(window.sprintCoder!.localAI.detail);
+    detailApi.mockRejectedValueOnce(new Error('offline'));
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    const button = (text: string) =>
+      [...container.querySelectorAll('button')].find((item) => item.textContent === text)!;
+    try {
+      await act(async () => root.render(<LocalAiSettingsSection active />));
+      await act(async () => button('モデルを探す').click());
+      const input = container.querySelector('input.settings-text-input') as HTMLInputElement;
+      input.focus();
+      const form = container.querySelector('form')!;
+      await act(async () =>
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+      );
+      expect(button('検索中…').disabled).toBe(true);
+      expect(container.textContent).toContain('モデルを検索しています');
+      expect(document.activeElement).toBe(input);
+      await act(async () =>
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })),
+      );
+      expect(query).toHaveBeenCalledTimes(1);
+      await act(async () => finishSearch({ items: [detail.item], nextCursor: null, errors: [] }));
+      expect(container.textContent).toContain('検索結果 · 1件');
+      const option = container.querySelector('[role="option"]') as HTMLButtonElement;
+      await act(async () => option.click());
+      expect(container.textContent).toContain('詳細を取得できませんでした');
+      expect(container.textContent).not.toContain('詳細を読み込んでいます');
+      await act(async () => button('再試行').click());
+      expect(container.textContent).toContain('A small code model');
+      expect(detailApi).toHaveBeenCalledTimes(2);
+      query.mockResolvedValueOnce({ items: [], nextCursor: null, errors: [] });
+      await act(async () => button('検索').click());
+      expect(container.textContent).toContain('該当するモデルがありません');
+      expect(container.querySelector('.local-ai-model-detail')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   it('shows truthful device and runtime facts', async () => {
     installApi({
       runtime: {
@@ -228,7 +279,7 @@ describe('LocalAiSettingsSection', () => {
     await act(async () => root.render(<LocalAiSettingsSection active />));
     await flush();
     const button = [...container.querySelectorAll('button')].find(
-      (item) => item.textContent === 'Local AI Selector',
+      (item) => item.textContent === 'モデルを探す',
     )!;
     await act(async () => button.click());
     const search = [...container.querySelectorAll('button')].find(
@@ -308,7 +359,7 @@ describe('LocalAiSettingsSection', () => {
     await flush();
     await act(async () =>
       [...container.querySelectorAll('button')]
-        .find((item) => item.textContent === 'Local AI Selector')!
+        .find((item) => item.textContent === 'モデルを探す')!
         .click(),
     );
     await act(async () =>
