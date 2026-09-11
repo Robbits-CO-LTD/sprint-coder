@@ -33,6 +33,7 @@ import type { RuntimeCanonicalEvent, RuntimeFailureDiagnostic } from './protocol
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -432,7 +433,7 @@ describe('Codex runtime probe', () => {
           `    send({ jsonrpc: '2.0', id: 'managed-call', method: 'item/tool/call', params: { threadId: 'thread-managed', turnId: 'turn-1', callId: 'call-read', namespace: null, tool: ${JSON.stringify(toolName)}, arguments: { path: 'README.md' } } });`,
           '  }',
           "  if (message.id === 'managed-call' && message.result?.success === true) {",
-          "    send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } });",
+          "    setTimeout(() => send({ jsonrpc: '2.0', method: 'turn/completed', params: { turn: { status: 'completed' } } }), 80);",
           '  }',
           '});',
         ].join('\n'),
@@ -465,14 +466,20 @@ describe('Codex runtime probe', () => {
       const calls: unknown[] = [];
       const events: Array<{ type: string; stage?: string }> = [];
       let stagesAtManagedCall: string[] = [];
-      const realSetTimeout = globalThis.setTimeout;
-      // Scale only the production 90-second idle deadline; the fake CLI stays silent during host approval.
-      vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) =>
-        realSetTimeout(callback, ms === 90_000 ? 50 : ms, ...args),
-      );
+      let entered!: () => void;
+      let releaseHost!: () => void;
+      const hostEntered = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const hostApproval = new Promise<void>((resolve) => {
+        releaseHost = resolve;
+      });
+      // Advance the real idle duration only while host approval is held. Scaling it to 50ms
+      // also timed out healthy post-approval IPC on a loaded runner.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       const failures: unknown[] = [];
-      const adapter = new CodexRuntimeAdapter(2_000, process.execPath, [script]);
-      await new Promise<void>((resolve) => {
+      const adapter = new CodexRuntimeAdapter(120_000, process.execPath, [script]);
+      const completed = new Promise<void>((resolve) => {
         adapter.start(
           'managed-tool-turn',
           'request',
@@ -499,11 +506,28 @@ describe('Codex runtime probe', () => {
               event.type === 'stage' && event.stage !== undefined ? [event.stage] : [],
             );
             calls.push(call);
-            await new Promise((resolve) => setTimeout(resolve, 120));
+            entered();
+            await hostApproval;
             return { success: true, output: { content: 'managed' } };
           },
         );
       });
+      try {
+        await Promise.race([
+          hostEntered,
+          completed.then(() => {
+            throw new Error('Turn ended before host approval');
+          }),
+        ]);
+        await vi.advanceTimersByTimeAsync(90_001);
+        expect(failures).toEqual([]);
+        releaseHost();
+        await completed;
+      } finally {
+        releaseHost();
+        vi.useRealTimers();
+        await adapter.cancel('managed-tool-turn');
+      }
       expect(calls).toEqual([
         {
           callId: 'call-read',
