@@ -3465,7 +3465,8 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
   struct statfs filesystem {};
   // A successful flags ioctl alone does not establish case rules (for example on FAT/NTFS).
   if (fstatfs(fd, &filesystem) == 0 &&
-      (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == F2FS_SUPER_MAGIC) &&
+      (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == F2FS_SUPER_MAGIC ||
+       filesystem.f_type == BTRFS_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC) &&
       ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0)
     sensitive = (flags & FS_CASEFOLD_FL) == 0 ? 1 : 0;
 #endif

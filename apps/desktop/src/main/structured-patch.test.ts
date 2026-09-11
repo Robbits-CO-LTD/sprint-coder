@@ -407,6 +407,24 @@ describe('structured patch preparation', () => {
     },
   );
 
+  it.skipIf(process.platform !== 'win32')(
+    'preserves distinct Windows Unicode names for new files',
+    async () => {
+      const { workspace, registry } = await fixture();
+      const paths = ['src/straße.txt', 'src/strasse.txt', 'src/é.txt', 'src/e\u0301.txt'];
+      const patch = await prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: paths.map((path) => ({ kind: 'add' as const, path, content: path })),
+      });
+      expect(patch.operations).toHaveLength(4);
+      for (const path of paths) await writeFile(join(workspace, path), path, { flag: 'wx' });
+      for (const path of paths) expect(await readFile(join(workspace, path), 'utf8')).toBe(path);
+    },
+  );
+
   it('rejects two differently cased references to the same file before preparing effects', async ({
     skip,
   }) => {

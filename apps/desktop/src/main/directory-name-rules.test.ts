@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { directoryCaseSensitive } from './directory-name-rules';
+import { directoryCaseSensitive, windowsCaseInsensitiveNamesEqual } from './directory-name-rules';
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -25,6 +25,27 @@ async function fixture() {
   return { path, identity: { dev: String(info.dev), ino: String(info.ino) } };
 }
 describe('directory name rules', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'uses ordinal Windows casing without Unicode expansion',
+    () => {
+      expect(windowsCaseInsensitiveNamesEqual('New.txt', 'new.txt')).toBe(true);
+      expect(windowsCaseInsensitiveNamesEqual('straße.txt', 'strasse.txt')).toBe(false);
+      expect(windowsCaseInsensitiveNamesEqual('é.txt', 'e\u0301.txt')).toBe(false);
+    },
+  );
+  it.skipIf(process.platform !== 'linux')('reads tmpfs directory rules', async () => {
+    const path = await realpath(await mkdtemp('/dev/shm/sc-directory-rules-'));
+    cleanup.push(path);
+    const info = await stat(path, { bigint: true });
+    const rules = directoryCaseSensitive(path, { dev: String(info.dev), ino: String(info.ino) });
+    await writeFile(join(path, 'CaseWitness'), 'witness');
+    expect(rules).toBe(
+      !(await access(join(path, 'casewitness')).then(
+        () => true,
+        () => false,
+      )),
+    );
+  });
   it('observes the actual directory rules without creating a probe file', async () => {
     const f = await fixture();
     const rules = directoryCaseSensitive(f.path, f.identity);

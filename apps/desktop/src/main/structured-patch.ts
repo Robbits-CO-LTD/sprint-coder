@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { canonicalizeResourcePath, type CanonicalPathIdentity } from './path-guard';
-import { directoryCaseSensitive } from './directory-name-rules';
+import { directoryCaseSensitive, windowsCaseInsensitiveNamesEqual } from './directory-name-rules';
 import type {
   FileRevisionToken,
   FileRevisionRegistry,
@@ -561,6 +561,8 @@ function claimMissingEndpoint(
       process.platform === 'darwin' && previousName.normalize('NFD') === name.normalize('NFD');
     const folded = (value: string) => value.normalize('NFD').toLowerCase().toUpperCase();
     if (!unicodeAlias && folded(previousName) !== folded(name)) continue;
+    if (process.platform === 'win32' && !windowsCaseInsensitiveNamesEqual(previousName, name))
+      continue;
     if (
       unicodeAlias ||
       !directoryCaseSensitive(dirname(candidate.resolvedPath), candidate.parentIdentity)

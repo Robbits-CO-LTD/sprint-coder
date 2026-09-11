@@ -1021,6 +1021,26 @@ void CleanupPreparedExecutionImages(void*) {
   prepared_execution_images.clear();
 }
 
+napi_value CaseInsensitiveNamesEqual(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string left_utf8, right_utf8;
+  std::wstring left, right;
+  if (argc != 2 || !ReadString(env, argv[0], &left_utf8) ||
+      !ReadString(env, argv[1], &right_utf8) || !Utf8ToWide(left_utf8, &left) ||
+      !Utf8ToWide(right_utf8, &right)) {
+    napi_throw_error(env, "INVALID_INPUT", "Invalid endpoint names");
+    return nullptr;
+  }
+  const int comparison = CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()),
+      right.c_str(), static_cast<int>(right.size()), TRUE);
+  if (comparison == 0) return ThrowWindowsError(env, "Compare endpoint names");
+  napi_value result;
+  napi_get_boolean(env, comparison == CSTR_EQUAL, &result);
+  return result;
+}
+
 napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -1068,6 +1088,8 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
 
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+      {"caseInsensitiveNamesEqual", nullptr, CaseInsensitiveNamesEqual, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"directoryCaseSensitive", nullptr, DirectoryCaseSensitive, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
