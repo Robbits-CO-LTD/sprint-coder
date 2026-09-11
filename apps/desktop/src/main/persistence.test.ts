@@ -1577,6 +1577,40 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each(['completed', 'failed', 'canceled'] as const)(
+      'keeps Team capability for a short Japanese go-ahead after a %s Team turn',
+      (state) => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask('team go-ahead');
+        const initial = persistence.startTurn(task.id, 'チーム編成して');
+        persistence.promoteTaskToTeam(task.id);
+        if (state === 'completed') {
+          finishTurn(persistence, task.id, initial.turnId);
+        } else if (state === 'canceled') {
+          persistence.cancelTurn(task.id, initial.turnId);
+        } else {
+          persistence.completeTurn(task.id, initial.turnId, state);
+        }
+
+        const continued = persistence.startTurn(task.id, 'やって');
+        expect(continued.teamTurn).toBe(true);
+        expect(
+          persistence
+            .prepareContext(task.id, continued.turnId)
+            .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+        ).toHaveLength(1);
+        persistence.completeTurn(task.id, continued.turnId, 'failed');
+
+        const ordinary = persistence.startTurn(task.id, '通常の依頼です');
+        expect(ordinary.teamTurn).toBe(false);
+        persistence.completeTurn(task.id, ordinary.turnId, 'failed');
+        expect(persistence.startTurn(task.id, 'やって').teamTurn).toBe(false);
+        const otherTask = persistence.createTask('unrelated task');
+        expect(persistence.startTurn(otherTask.id, 'やって').teamTurn).toBe(false);
+        persistence.close();
+      },
+    );
+
     it('keeps Team guidance for follow-up actions against existing Workers', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team follow-up');
