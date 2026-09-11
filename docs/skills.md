@@ -2,6 +2,8 @@
 
 Sprint Coderは内蔵SkillとSkill Creatorで作成したSkillだけを管理し、内容のdigestをTurnごとに
 固定して実行します。Claude Code／Codexの外部Skillを検出・読み込みする機能はありません。
+`~/.claude/skills`、`~/.agents/skills`、`~/.codex/skills` は走査しません。
+以前取り込んだファイルと履歴は保持しますが、外部由来Skillの実行・設定変更はできません。
 
 ## 互換レベル
 

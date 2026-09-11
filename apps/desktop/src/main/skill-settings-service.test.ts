@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,18 +12,25 @@ async function home(): Promise<string> {
   return root;
 }
 
-async function skill(root: string, provider: 'claude' | 'agents', id: string): Promise<string> {
-  const path = join(root, provider === 'claude' ? '.claude' : '.agents', 'skills', id);
-  await mkdir(path, { recursive: true });
-  await writeFile(
-    join(path, 'SKILL.md'),
-    `---\nname: ${id}\ndescription: ${id} description\n---\n`,
-  );
-  return path;
-}
-
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe('Skill activation source boundary', () => {
+  it.each(['agents', 'claude', 'builtin'] as const)(
+    'rejects activation changes for %s before opening or creating a Skill Store',
+    async (source) => {
+      const root = await home();
+      const service = new SkillSettingsService({ homePath: root });
+      await expect(
+        service.setActivationPolicy(
+          { source, skillId: 'legacy', digest: 'a'.repeat(64) },
+          'auto-allowed',
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
+      await expect(lstat(join(root, '.sprintcoder'))).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
 });
 
 describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
@@ -56,186 +63,6 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
         expect.objectContaining({ enabled: false, availability: 'invalid' }),
       ]),
     );
-  });
-
-  it.skip('scans fixed provider roots and reports imported state', async () => {
-    const root = await home();
-    await skill(root, 'claude', 'writer');
-    await skill(root, 'agents', 'reviewer');
-    const service = new SkillSettingsService({ homePath: root });
-
-    expect(await service.scan()).toMatchObject({
-      claudeDetected: 1,
-      agentsDetected: 1,
-      importedCount: 0,
-      invalidCount: 0,
-    });
-    const preview = await service.preview(7, 'claude', 'writer');
-    await service.import(7, preview.previewId);
-    expect(await service.scan()).toMatchObject({ importedCount: 1 });
-  });
-
-  it.skip('binds a one-use preview to its sender', async () => {
-    const root = await home();
-    await skill(root, 'claude', 'writer');
-    const service = new SkillSettingsService({ homePath: root });
-    const preview = await service.preview(7, 'claude', 'writer');
-
-    await expect(service.import(8, preview.previewId)).rejects.toMatchObject({
-      code: 'PREVIEW_EXPIRED',
-    });
-    await expect(service.import(7, preview.previewId)).rejects.toMatchObject({
-      code: 'PREVIEW_EXPIRED',
-    });
-  });
-
-  it.skip('requires explicit Claude native consent and refuses blocked compatibility', async () => {
-    const root = await home();
-    const nativePath = await skill(root, 'claude', 'native-writer');
-    await writeFile(
-      join(nativePath, 'SKILL.md'),
-      '---\nname: native-writer\ndescription: Native writer\ndisable-model-invocation: true\n---\n',
-    );
-    const blockedPath = await skill(root, 'claude', 'blocked-writer');
-    await writeFile(
-      join(blockedPath, 'SKILL.md'),
-      '---\nname: blocked-writer\ndescription: Blocked writer\nunknown-policy: true\n---\n',
-    );
-    const service = new SkillSettingsService({ homePath: root });
-
-    let preview = await service.preview(7, 'claude', 'native-writer');
-    expect(preview.compatibility).toMatchObject({
-      profile: 'claude-native',
-      nativeModeConsentRequired: true,
-      requiresConversion: false,
-    });
-    await expect(service.import(7, preview.previewId)).rejects.toMatchObject({
-      code: 'INVALID_SKILL',
-    });
-    preview = await service.preview(7, 'claude', 'native-writer');
-    await expect(service.import(7, preview.previewId, true)).resolves.toMatchObject({
-      status: 'imported',
-    });
-    const [nativeItem] = (await service.listCatalog()).items;
-    const [portableProjection] = await service.resolveSelections(
-      [{ kind: nativeItem!.kind, ref: nativeItem!.ref }],
-      'write release notes',
-      'provider',
-    );
-    expect(portableProjection?.content).not.toContain('disable-model-invocation');
-
-    const blocked = await service.preview(7, 'claude', 'blocked-writer');
-    expect(blocked.compatibility.requiresConversion).toBe(true);
-    await expect(service.import(7, blocked.previewId, true)).rejects.toMatchObject({
-      code: 'INVALID_SKILL',
-    });
-  });
-
-  it.skip('expires previews deterministically at the TTL boundary', async () => {
-    const root = await home();
-    await skill(root, 'claude', 'writer');
-    let now = 1_000;
-    const service = new SkillSettingsService({ homePath: root, now: () => now });
-    const preview = await service.preview(7, 'claude', 'writer');
-    now += 5 * 60 * 1_000;
-
-    await expect(service.import(7, preview.previewId)).rejects.toMatchObject({
-      code: 'PREVIEW_EXPIRED',
-    });
-  });
-
-  it.skip('rejects a source changed after preview and consumes the token', async () => {
-    const root = await home();
-    const path = await skill(root, 'claude', 'writer');
-    const service = new SkillSettingsService({ homePath: root });
-    const preview = await service.preview(7, 'claude', 'writer');
-    await writeFile(
-      join(path, 'SKILL.md'),
-      `${await readFile(join(path, 'SKILL.md'), 'utf8')}\nchanged\n`,
-    );
-
-    await expect(service.import(7, preview.previewId)).rejects.toMatchObject({
-      code: 'SOURCE_CHANGED',
-    });
-    await expect(service.import(7, preview.previewId)).rejects.toMatchObject({
-      code: 'PREVIEW_EXPIRED',
-    });
-  });
-
-  it.skip('does not resolve arbitrary provider paths from a skill id', async () => {
-    const root = await home();
-    const service = new SkillSettingsService({ homePath: root });
-    await expect(service.preview(7, 'claude', '../outside')).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-    });
-  });
-
-  it.skip('detects, applies, disables, and removes an imported skill update', async () => {
-    const root = await home();
-    const path = await skill(root, 'claude', 'writer');
-    const service = new SkillSettingsService({ homePath: root });
-    let preview = await service.preview(7, 'claude', 'writer');
-    await service.import(7, preview.previewId);
-    await writeFile(
-      join(path, 'SKILL.md'),
-      '---\nname: writer\ndescription: Updated writer\n---\n',
-    );
-
-    expect((await service.scan()).installed[0]).toMatchObject({ updateAvailable: true });
-    preview = await service.preview(7, 'claude', 'writer');
-    await service.update(7, preview.previewId);
-    expect((await service.scan()).installed[0]).toMatchObject({
-      updateAvailable: false,
-      enabled: true,
-    });
-
-    await service.setEnabled('claude', 'writer', false);
-    expect((await service.scan()).installed[0]).toMatchObject({ enabled: false });
-    await service.remove('claude', 'writer');
-    expect(await service.scan()).toMatchObject({ importedCount: 0, installed: [] });
-  });
-
-  it.skip('returns a catalog and resolves only its pinned enabled revision', async () => {
-    const root = await home();
-    await skill(root, 'agents', 'reviewer');
-    const service = new SkillSettingsService({ homePath: root });
-    const preview = await service.preview(7, 'agents', 'reviewer');
-    await service.import(7, preview.previewId);
-
-    const catalog = await service.listCatalog();
-    expect(catalog.revision).toMatch(/^[a-f0-9]{64}$/);
-    const item = catalog.items[0]!;
-    expect(item).toMatchObject({
-      kind: 'chat',
-      name: 'reviewer',
-      ref: { source: 'agents', skillId: 'reviewer' },
-    });
-    const [resolved] = await service.resolveSelections([{ kind: item.kind, ref: item.ref }]);
-    expect(resolved?.content).toContain('reviewer description');
-    expect(resolved?.packagePath).toContain(item.ref.digest);
-
-    await service.setEnabled('agents', 'reviewer', false);
-    await expect(
-      service.resolveSelections([{ kind: item.kind, ref: item.ref }]),
-    ).rejects.toMatchObject({ code: 'INVALID_SKILL' });
-  });
-
-  it.skip('enables auto selection by exact digest and resolves only approved candidates', async () => {
-    const root = await home();
-    await skill(root, 'agents', 'reviewer');
-    const service = new SkillSettingsService({ homePath: root });
-    const preview = await service.preview(7, 'agents', 'reviewer');
-    await service.import(7, preview.previewId);
-    const [item] = (await service.listCatalog()).items;
-    expect(item).toBeDefined();
-    await service.setActivationPolicy(item!.ref, 'auto-allowed');
-    expect((await service.listCatalog()).items[0]?.activationPolicy).toBe('auto-allowed');
-    const candidates = await service.resolveAutoCandidates('provider');
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toMatchObject({ activationPolicy: 'auto-allowed' });
-    await expect(
-      service.setActivationPolicy({ ...item!.ref, digest: '0'.repeat(64) }, 'manual'),
-    ).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
   });
 
   it('keeps an AI-produced Skill as a Draft until an exact digest is confirmed for install', async () => {
@@ -273,49 +100,18 @@ describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
     expect((await reopened.listCatalog()).items[0]).toMatchObject({
       ref: { source: 'created', skillId: 'review-helper' },
     });
-  });
-
-  it.skip('installs and enables an AI-prepared imported Skill without a Draft', async () => {
-    const root = await home();
-    const service = new SkillSettingsService({ homePath: root });
-    const installed = await service.installPrepared({
-      kind: 'chat',
-      skillId: 'imported-writer',
-      files: [
-        {
-          path: 'SKILL.md',
-          content:
-            '---\nname: Imported Writer\ndescription: Writes with Sprint Coder\n---\n\n# Writer\n',
-        },
-      ],
-    });
-
-    expect(installed).toMatchObject({
-      enabled: true,
-      kind: 'chat',
-      ref: { source: 'created', skillId: 'imported-writer' },
-    });
-    expect((await service.listCatalog()).items).toContainEqual(installed);
-    expect(await service.listDrafts()).toEqual([]);
-  });
-
-  it.skip('reads invalid-frontmatter source text from the selected CLI root for AI repair', async () => {
-    const root = await home();
-    const path = await skill(root, 'claude', 'legacy-writer');
-    await writeFile(
-      join(path, 'SKILL.md'),
-      '---\nname: Legacy Writer\ndescription: Legacy\nallowed-tools: Read\n---\n\n# Legacy\n',
-    );
-    const service = new SkillSettingsService({ homePath: root });
-
-    const source = await service.readImportSource({ cli: 'claude', skillId: 'legacy-writer' });
-
-    expect(source).toMatchObject({
-      cli: 'claude',
-      skillId: 'legacy-writer',
-      files: [{ path: 'SKILL.md', content: expect.stringContaining('allowed-tools: Read') }],
-    });
-    expect(source.digest).toMatch(/^[a-f0-9]{64}$/);
+    await reopened.setActivationPolicy(installed.ref, 'auto-allowed');
+    expect(await reopened.resolveAutoCandidates('provider')).toEqual([
+      expect.objectContaining({
+        activationPolicy: 'auto-allowed',
+        selection: { ref: installed.ref, kind: 'chat' },
+      }),
+    ]);
+    await expect(
+      reopened.setActivationPolicy({ ...installed.ref, digest: '0'.repeat(64) }, 'manual'),
+    ).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
+    await reopened.setActivationPolicy(installed.ref, 'manual');
+    expect(await reopened.resolveAutoCandidates('provider')).toEqual([]);
   });
 
   it('rejects credentials and a Team Draft without a valid Blueprint', async () => {

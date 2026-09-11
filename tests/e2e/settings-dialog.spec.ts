@@ -15,12 +15,14 @@ test.describe('settings dialog', () => {
 
   test.beforeAll(() => {
     userDataDir = createUserDataDir('settings-dialog');
-    const skill = join(userDataDir, '.claude', 'skills', 'e2e-writer');
-    mkdirSync(skill, { recursive: true });
-    writeFileSync(
-      join(skill, 'SKILL.md'),
-      '---\nname: e2e-writer\ndescription: E2E fixture\n---\n',
-    );
+    for (const providerRoot of ['.claude', '.agents', '.codex']) {
+      const skill = join(userDataDir, providerRoot, 'skills', 'e2e-writer');
+      mkdirSync(skill, { recursive: true });
+      writeFileSync(
+        join(skill, 'SKILL.md'),
+        '---\nname: e2e-writer\ndescription: E2E fixture\n---\n',
+      );
+    }
   });
 
   test.afterAll(async () => {
