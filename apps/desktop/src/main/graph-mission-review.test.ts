@@ -118,6 +118,8 @@ describe('graph Mission reference review', () => {
     const f = await fixture();
     const result = await reviewGraphMission(f.input, f.document, () => f.context);
     expect(result.summary).toMatchObject({ matched: true, issues: [] });
+    expect(result.writeFootprints).toHaveLength(2);
+    expect(result.writeConflicts).toEqual([{ leftStepKey: 'a', rightStepKey: 'b' }]);
     expect(result.claims).toHaveLength(2);
     expect(result.claims[0]?.guard.targetIdentity?.kind).toBe('file');
     expect(result.claims[1]).toMatchObject({
@@ -166,6 +168,8 @@ describe('graph Mission reference review', () => {
     ] as const) {
       const result = await reviewGraphMission(f.input, f.document, () => context);
       expect(result.summary.matched).toBe(false);
+      expect(result.writeFootprints).toBeNull();
+      expect(result.writeConflicts).toBeNull();
       expect(result.summary.issues.some((issue) => issue.code === code)).toBe(true);
     }
   });

@@ -12,7 +12,8 @@ import {
   REPO_ROOT,
 } from './helpers';
 
-test('binds an authorized file read and detects changed source bytes after restart', async () => {
+// eslint-disable-next-line no-empty-pattern
+test('binds an authorized file read and detects changed source bytes after restart', async ({}, testInfo) => {
   const profile = createUserDataDir('graph-source-proposal');
   const workspace = await mkdtemp(
     join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-source-'),
@@ -28,6 +29,22 @@ test('binds an authorized file read and detects changed source bytes after resta
   });
   try {
     const page = await firstWindow(app);
+    await page.addInitScript(() => {
+      const clicks = { api: 0, trustedApi: 0 };
+      Object.defineProperty(window, '__graphSourceClicks', { value: clicks });
+      document.addEventListener(
+        'click',
+        (event) => {
+          const target =
+            event.target instanceof Element ? event.target.closest('[data-node-id="api"]') : null;
+          if (target) {
+            clicks.api++;
+            if (event.isTrusted) clicks.trustedApi++;
+          }
+        },
+        true,
+      );
+    });
     await page.getByTestId('sidebar-new-task-button').click();
     await assignCurrentTaskToProjectFolder(page, 'Graph sources', workspace);
     const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
@@ -37,16 +54,49 @@ test('binds an authorized file read and detects changed source bytes after resta
     await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
       timeout: 30000,
     });
-    if (process.env['GITHUB_ACTIONS'] === 'true')
+    if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });
         BrowserWindow.getAllWindows()[0]!.focus();
       });
+      await expect
+        .poll(() =>
+          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
+        )
+        .toBe(true);
+    }
     await page.getByTestId('graph-toggle').click();
     const frame = page.frameLocator('[data-testid="graph-frame"]');
     await frame.locator('[data-node-id="api"]').first().click();
     const sources = page.getByTestId('graph-sources');
-    await expect(sources.getByTestId('graph-evidence-kind')).toHaveText('コード参照あり');
+    await expect(sources.getByTestId('graph-evidence-kind'))
+      .toHaveText('コード参照あり')
+      .catch(async (error: unknown) => {
+        const diagnostics = {
+          nativeFocused: await app.evaluate(
+            ({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isFocused() ?? false,
+          ),
+          frame: await frame
+            .locator('html')
+            .evaluate(() => {
+              const clicks = Reflect.get(window, '__graphSourceClicks');
+              return {
+                readyState: document.readyState,
+                focused: document.hasFocus(),
+                apiClicks: Number.isSafeInteger(clicks?.api) ? clicks.api : null,
+                trustedApiClicks: Number.isSafeInteger(clicks?.trustedApi)
+                  ? clicks.trustedApi
+                  : null,
+              };
+            })
+            .catch(() => null),
+        };
+        await testInfo.attach('graph-source-selection-diagnostics', {
+          contentType: 'application/json',
+          body: Buffer.from(JSON.stringify(diagnostics)),
+        });
+        throw error;
+      });
     await sources.locator('summary').click();
     await expect(page.getByTestId('graph-source-freshness')).toContainText(
       '根拠ファイルの内容は一致',
@@ -76,11 +126,17 @@ test('binds an authorized file read and detects changed source bytes after resta
       Path: '',
     });
     const reopened = await firstWindow(app);
-    if (process.env['GITHUB_ACTIONS'] === 'true')
+    if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });
         BrowserWindow.getAllWindows()[0]!.focus();
       });
+      await expect
+        .poll(() =>
+          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
+        )
+        .toBe(true);
+    }
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
     await reopened.getByTestId('graph-toggle').click();
     await reopened

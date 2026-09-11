@@ -17,6 +17,11 @@ import {
 import { previewGraphSource } from './graph-source-preview';
 import { canonicalGraphJson } from './graph-document';
 import { directoryCaseSensitive } from './directory-name-rules';
+import {
+  prepareGraphWriteFootprint,
+  graphWriteConflictPairs,
+  type GraphWriteFootprint,
+} from './graph-write-conflicts';
 
 export type GraphMissionReviewContext = {
   workspace: EffectiveWorkspaceSet;
@@ -128,12 +133,15 @@ export async function reviewGraphMission(
   claims: GraphMissionClaimBinding[];
   resources: GraphMissionResourceBinding[];
   contextDigest: string;
+  writeFootprints: readonly GraphWriteFootprint[] | null;
+  writeConflicts: readonly { leftStepKey: string; rightStepKey: string }[] | null;
 }> {
   const context = currentContext();
   const workerIds = new Set(document.missionPlan?.steps.map((step) => step.workerId) ?? []);
   const initialDigest = graphMissionContextDigest(context, workerIds);
   const issues: Issue[] = [];
   const claims: GraphMissionClaimBinding[] = [];
+  const writeFootprints: GraphWriteFootprint[] = [];
   const resources: GraphMissionResourceBinding[] = [];
   const resourceGuards: PathGuard[] = [];
   const usedRoots = new Map<string, { path: string; identity: string }>();
@@ -248,7 +256,7 @@ export async function reviewGraphMission(
     }
     for (const claim of claims) {
       try {
-        await revalidatePathGuard(claim.guard);
+        writeFootprints.push(await prepareGraphWriteFootprint(claim));
       } catch {
         add('state_changed', claim.stepKey, claim.rootId);
         break;
@@ -273,6 +281,15 @@ export async function reviewGraphMission(
       }
     }
   }
+  // A later preparation may race an earlier claim; validate the full set before comparison.
+  for (const claim of claims) {
+    try {
+      await revalidatePathGuard(claim.guard);
+    } catch {
+      add('state_changed', claim.stepKey, claim.rootId);
+      break;
+    }
+  }
   if (graphMissionContextDigest(currentContext(), workerIds) !== initialDigest)
     add('state_changed');
   return {
@@ -285,6 +302,8 @@ export async function reviewGraphMission(
     claims,
     resources,
     contextDigest: initialDigest,
+    writeFootprints: issues.length === 0 ? writeFootprints : null,
+    writeConflicts: issues.length === 0 ? graphWriteConflictPairs(writeFootprints) : null,
   };
 }
 
