@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: durable graph resource reservations
+## Current checkpoint: graph Attempt and checkpoint transactions
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -65,6 +65,12 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 - Restart quarantines reserved/active owners while keeping their keys occupied. Deletion/cascade triggers preserve unreleased ownership. Explicit release verifies the stored owner and dispatch/Attempt state, and acquisition/release failures roll back all keys. Released history retains its resource inventory.
 - These are internal Main persistence operations. Actual process-stop acknowledgement must come from the runtime controller; terminal DB state, a model report, or the confirmation input alone is not process evidence. No UI/MCP endpoint currently grants these operations, and runtime/graph admission coupling remains mandatory before Graph start is exposed.
 
+- Resource reservation storage passed all CI at 8ebda52 (run 34559890367).
+- Internal beginGraphAttempt rechecks the reserved owner/generation/dependencies, then atomically records Mission running, Execution admission, a new Attempt and its active resource binding. Manual resume requires waiting_resume and a new released/reacquired reservation, and creates a fresh dispatch/task instead of reusing the old one. Ordinary transition APIs still reject graph admission.
+- Internal completeGraphStep requires the current running Attempt/dispatch, completed report with done evidence, explicit matching Main stop acknowledgement, and confirmed write integration. Report, Attempt/Execution completion, resource release and generation/Attempt-bound checkpoint commit together. It returns dependency-ready keys, not a claim that filesystem/resource/scheduler admission has already passed. The Mission completes only after every step is confirmed.
+- A/B plus join C now pass real-SQLite begin/finish tests without manually seeding execution rows. Transaction-failure, stale owner/acknowledgement, duplicate finish, and crash-before-runtime-acceptance cases pass. Restart cancels non-running graph Attempts, preserves quarantined reservations and prevents automatic dispatch; acknowledged manual resume uses a new Attempt.
+- The runtime dispatcher and genuine user agreement are still not connected to these internal primitives. Main must supply actual stop evidence, not manufacture acknowledgement from a model report or a terminal database state. Final physical write-conflict and capability/connection/Git admission remains required before invoking them.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                                              |
@@ -81,6 +87,6 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 
 ## Next action
 
-Verify the v87 resource-reservation checkpoint on both operating systems. Connect genuine user agreement, graph-aware Attempt/checkpoint transitions, runtime stop acknowledgements and resource reservations to the stored Mission definitions, preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish physical claim bindings and connect agreement to Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Verify the graph Attempt/checkpoint checkpoint on both operating systems. Connect genuine user agreement and the existing runtime dispatcher to the graph-aware Attempt/checkpoint and resource operations, obtaining actual runtime stop acknowledgements, preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish physical claim bindings and connect agreement to Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.

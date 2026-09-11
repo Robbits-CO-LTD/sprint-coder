@@ -20,6 +20,7 @@ const now = '2026-09-11T00:00:00.000Z';
 function fixture(
   existing?: { persistence: SqlitePersistenceClient; path: string },
   writeCapable = false,
+  keys: string[] = ['a', 'b'],
 ) {
   const root = existing ? null : mkdtempSync(join(tmpdir(), 'sc-graph-mission-db-'));
   if (root) roots.push(root);
@@ -30,7 +31,7 @@ function fixture(
   const task = persistence.createTask('Graph Mission');
   const team = persistence.promoteTaskToTeam(task.id);
   persistence.transitionTeamState(team.id, 'forming');
-  const workers = ['a', 'b'].map((role) => {
+  const workers = keys.map((role) => {
     const worker = persistence.registerTeamWorker({
       teamId: team.id,
       role,
@@ -49,8 +50,8 @@ function fixture(
     objective: 'Review',
     doneCriteria: ['Both reviewed'],
     steps: workers.map((worker, index) => ({
-      key: ['a', 'b'][index]!,
-      nodeId: ['a', 'b'][index]!,
+      key: keys[index]!,
+      nodeId: keys[index]!,
       workerId: worker.id,
       objective: worker.role,
       doneCriteria: ['Reviewed'],
@@ -65,7 +66,7 @@ function fixture(
     diagram_type: 'workflow',
     meta: { title: 'Review' },
     lanes: [{ id: 'work', label: 'Work' }],
-    nodes: ['a', 'b'].map((id, col) => ({ id, col, lane: 'work', label: id, type: 'backend' })),
+    nodes: keys.map((id, col) => ({ id, col, lane: 'work', label: id, type: 'backend' })),
     edges: [{ id: 'ab', from: 'a', to: 'b' }],
   };
   const document = nextGraphDocument(task.id, diagram, null, [], [], plan);
@@ -109,9 +110,216 @@ function reserve(f: ReturnType<typeof fixture>, missionId: string, stepKey = 'a'
   if (!result.acquired) throw new Error('Expected resource acquisition');
   return result.reservation;
 }
+function begin(f: ReturnType<typeof fixture>, missionId: string, key: string) {
+  const reservation = reserve(f, missionId, key);
+  const result = f.persistence.beginGraphAttempt({
+    missionId,
+    stepKey: key,
+    generation: 1,
+    reservationId: reservation.id,
+    now,
+  });
+  const dispatch = f.persistence.getTeamExecutionDispatch(result.execution.id);
+  f.persistence.transitionTeamAttempt({ attemptId: result.attempt.id, to: 'running', now });
+  f.persistence.transitionTeamTask(dispatch.teamTaskId, 'running', now);
+  return { ...result, dispatch };
+}
+function completion(missionId: string, key: string, run: ReturnType<typeof begin>) {
+  const doneEvidence = [{ criterion: 'Reviewed', evidence: 'Main fixture verified the result' }];
+  return {
+    missionId,
+    stepKey: key,
+    generation: 1,
+    reservationId: run.reservation.id,
+    attemptId: run.attempt.id,
+    agentId: run.execution.assigneeAgentId,
+    teamTaskId: run.dispatch.teamTaskId,
+    report: {
+      status: 'completed',
+      summary: key,
+      findings: [],
+      changedFiles: [],
+      artifacts: [],
+      verification: [{ name: 'fixture', outcome: 'pass' }],
+      risks: [],
+      nextActions: [],
+      doneEvidence,
+    },
+    doneEvidence,
+    checkpoint: {
+      summary: key,
+      changedFiles: [],
+      gitHead: null,
+      workspaceDigest: null,
+      recordedAt: now,
+    },
+    confirmation: { kind: 'attempt-stopped' as const, attemptId: run.attempt.id },
+    now,
+  };
+}
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('starts independent A/B and confirms the join C only after both complete, without seeded execution rows', () => {
+      const f = fixture(undefined, false, ['a', 'b', 'c']);
+      const plan = structuredClone(f.plan);
+      plan.steps[1]!.dependsOn = [];
+      plan.steps[2]!.dependsOn = ['a', 'b'];
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const mission = f.persistence.createGraphTeamMission({
+        ...f.input,
+        renderRevision: document.renderRevision,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+      });
+      const a = begin(f, mission.id, 'a');
+      const b = begin(f, mission.id, 'b');
+      expect(
+        f.persistence.listTeamExecutions(f.team.id).filter((row) => row.state === 'running'),
+      ).toHaveLength(2);
+      expect(
+        f.persistence.acquireGraphResources({
+          missionId: mission.id,
+          stepKey: 'c',
+          expectedGeneration: 1,
+          now,
+        }),
+      ).toMatchObject({ acquired: false, reason: 'dependencies' });
+      expect(f.persistence.completeGraphStep(completion(mission.id, 'a', a))).toMatchObject({
+        mission: { state: 'running' },
+        dependencyReadyStepKeys: [],
+      });
+      expect(f.persistence.completeGraphStep(completion(mission.id, 'b', b))).toMatchObject({
+        mission: { state: 'running' },
+        dependencyReadyStepKeys: ['c'],
+      });
+      const c = begin(f, mission.id, 'c');
+      expect(f.persistence.completeGraphStep(completion(mission.id, 'c', c))).toMatchObject({
+        mission: { state: 'completed' },
+        dependencyReadyStepKeys: [],
+      });
+      expect(
+        f.persistence
+          .listGraphResourceReservations(mission.id)
+          .every((row) => row.state === 'released'),
+      ).toBe(true);
+      expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      expect(() => f.persistence.completeGraphStep(completion(mission.id, 'c', c))).toThrow(
+        'owner mismatch',
+      );
+      f.persistence.close();
+    });
+
+    it('rolls back Attempt creation and completion as whole transactions', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const reserved = reserve(f, mission.id);
+      const db = new Database(f.path);
+      db.exec(
+        "CREATE TRIGGER fail_graph_attempt BEFORE INSERT ON team_attempts BEGIN SELECT RAISE(ABORT,'attempt insert failed'); END;",
+      );
+      expect(() =>
+        f.persistence.beginGraphAttempt({
+          missionId: mission.id,
+          stepKey: 'a',
+          generation: 1,
+          reservationId: reserved.id,
+          now,
+        }),
+      ).toThrow('attempt insert failed');
+      expect(f.persistence.getTeamMission(mission.id).state).toBe('queued');
+      expect(f.persistence.getTeamExecution(reserved.executionId).state).toBe('assigned');
+      expect(f.persistence.listTeamAttempts(reserved.executionId)).toEqual([]);
+      db.exec('DROP TRIGGER fail_graph_attempt;');
+      const a = begin(f, mission.id, 'a');
+      const input = completion(mission.id, 'a', a);
+      expect(() => f.persistence.completeGraphStep({ ...input, generation: 2 })).toThrow(
+        'generation mismatch',
+      );
+      expect(() =>
+        f.persistence.completeGraphStep({
+          ...input,
+          confirmation: { kind: 'attempt-stopped', attemptId: randomUUID() },
+        }),
+      ).toThrow('acknowledgement mismatch');
+      expect(() =>
+        f.persistence.completeGraphStep({ ...input, agentId: f.workers[1]!.id }),
+      ).toThrow('dispatch mismatch');
+      expect(() => f.persistence.completeGraphStep({ ...input, doneEvidence: [] })).toThrow(
+        'evidence',
+      );
+      db.exec(
+        "CREATE TRIGGER fail_graph_checkpoint BEFORE UPDATE OF checkpoint_generation ON team_graph_mission_steps BEGIN SELECT RAISE(ABORT,'checkpoint failed'); END;",
+      );
+      expect(() => f.persistence.completeGraphStep(input)).toThrow('checkpoint failed');
+      expect(f.persistence.getTeamExecution(a.execution.id).state).toBe('running');
+      expect(f.persistence.getTeamAttempt(a.attempt.id).state).toBe('running');
+      expect(f.persistence.listGraphResourceReservations(mission.id)[0]?.state).toBe('active');
+      expect(db.prepare('SELECT COUNT(*) AS count FROM team_reports').get()).toEqual({ count: 0 });
+      db.exec('DROP TRIGGER fail_graph_checkpoint;');
+      db.close();
+      expect(f.persistence.completeGraphStep(input).dependencyReadyStepKeys).toEqual(['b']);
+      f.persistence.close();
+    });
+
+    it('quarantines a crash before runtime acceptance and resumes with a new Attempt only after release', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const held = reserve(f, mission.id);
+      const first = f.persistence.beginGraphAttempt({
+        missionId: mission.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: held.id,
+        now,
+      });
+      const oldTask = f.persistence.getTeamExecutionDispatch(first.execution.id).teamTaskId;
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      restored.recoverInterruptedTeamExecutions('2026-09-11T00:01:00.000Z');
+      expect(restored.getTeamExecution(first.execution.id).state).toBe('waiting_resume');
+      expect(restored.getTeamAttempt(first.attempt.id).state).toBe('canceled');
+      expect(restored.listGraphResourceReservations(mission.id)[0]?.state).toBe('quarantined');
+      expect(restored.getTeamTask(oldTask).status).toBe('canceled');
+      expect(() =>
+        restored.beginGraphAttempt({
+          missionId: mission.id,
+          stepKey: 'a',
+          generation: 1,
+          reservationId: held.id,
+          reason: 'manual_resume',
+          now,
+        }),
+      ).toThrow('reservation mismatch');
+      restored.releaseGraphResources({
+        reservationId: held.id,
+        executionId: first.execution.id,
+        generation: 1,
+        confirmation: { kind: 'attempt-stopped', attemptId: first.attempt.id },
+        now,
+      });
+      const acquired = restored.acquireGraphResources({
+        missionId: mission.id,
+        stepKey: 'a',
+        expectedGeneration: 1,
+        now,
+      });
+      if (!acquired.acquired) throw new Error('Expected reacquisition');
+      const resumed = restored.beginGraphAttempt({
+        missionId: mission.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: acquired.reservation.id,
+        reason: 'manual_resume',
+        now,
+      });
+      expect(resumed.attempt).toMatchObject({ ordinal: 2, startReason: 'manual_resume' });
+      expect(resumed.attempt.id).not.toBe(first.attempt.id);
+      expect(restored.getTeamExecutionDispatch(resumed.execution.id).teamTaskId).not.toBe(oldTask);
+      expect(restored.checkTeamIntegrity().inconsistencies).toEqual([]);
+      restored.close();
+    });
     it('does not accept a never-dispatched release while an unbound Attempt is still awaiting verification', () => {
       const f = fixture();
       const mission = resourceMission(f);
@@ -176,17 +384,13 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           new Set(f.workers.map((worker) => worker.id)),
         ),
       });
-      const held = reserve(f, mission.id);
+      const run = begin(f, mission.id, 'a');
+      const held = run.reservation;
+      const attempt = run.attempt;
+      expect(() => f.persistence.completeGraphStep(completion(mission.id, 'a', run))).toThrow(
+        'integration is not confirmed',
+      );
       const db = new Database(f.path);
-      db.prepare("UPDATE team_executions SET state='running' WHERE id=?").run(held.executionId);
-      const attempt = f.persistence.createTeamAttempt(held.executionId, now);
-      f.persistence.bindGraphResourcesToAttempt({
-        reservationId: held.id,
-        executionId: held.executionId,
-        generation: 1,
-        attemptId: attempt.id,
-      });
-      f.persistence.transitionTeamAttempt({ attemptId: attempt.id, to: 'running', now });
       f.persistence.transitionTeamAttempt({ attemptId: attempt.id, to: 'completed', now });
       const checkpoint = JSON.stringify({
         summary: 'not integrated',

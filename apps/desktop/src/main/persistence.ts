@@ -6,10 +6,13 @@ import {
   type GraphResourceAcquisition,
   type GraphResourceRelease,
   type GraphResourceKey,
+  type GraphAttemptStart,
+  type GraphStepCompletion,
 } from './graph-resource';
 import {
   graphGenerationSchema,
   graphMissionPlanSchema,
+  teamMissionCheckpointSchema,
   type GraphDocument,
   type GraphGeneration,
 } from '@sprint-coder/contracts';
@@ -4487,6 +4490,15 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  beginGraphAttempt(input: GraphAttemptStart): {
+    execution: TeamExecutionRecord;
+    attempt: TeamAttemptRecord;
+    reservation: GraphResourceReservation;
+  };
+  completeGraphStep(input: GraphStepCompletion): {
+    mission: TeamMissionRecord;
+    dependencyReadyStepKeys: string[];
+  };
   acquireGraphResources(input: {
     missionId: string;
     stepKey: string;
@@ -8813,10 +8825,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     now: string;
     queueReason?: TeamQueueReason | null;
   }): TeamExecutionRecord {
+    return this.transitionTeamExecutionWithAdmission(input, false);
+  }
+
+  private transitionTeamExecutionWithAdmission(
+    input: {
+      executionId: string;
+      to: TeamExecutionState;
+      now: string;
+      queueReason?: TeamQueueReason | null;
+    },
+    graphAdmission: boolean,
+  ): TeamExecutionRecord {
     return this.db.transaction(() => {
       const current = this.getTeamExecution(input.executionId);
       if (current.state === input.to) return current;
       if (
+        !graphAdmission &&
         this.getTeamMissionForExecution(current.id)?.mode === 'graph' &&
         !['canceled', 'failed', 'waiting_resume'].includes(input.to)
       )
@@ -9454,69 +9479,252 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private graphResourcePrerequisites(graph: GraphMissionRecord, stepKey: string): string[] {
     const step = graph.plan.steps.find((step) => step.key === stepKey);
     if (!step) throw new Error('Graph resource step not found');
-    return step.dependsOn.filter((key) => {
-      const predecessor = graph.steps.find((candidate) => candidate.key === key)!;
-      const completed = this.db
+    return step.dependsOn.filter(
+      (key) =>
+        !this.graphStepConfirmed(
+          graph.steps.find((candidate) => candidate.key === key)!.executionId,
+        ),
+    );
+  }
+
+  private graphStepConfirmed(executionId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT e.state,e.access_mode,s.checkpoint_json,s.checkpoint_digest,g.checkpoint_generation,g.checkpoint_attempt_id,g.generation FROM team_graph_mission_steps g
+      JOIN team_mission_steps s ON s.execution_id=g.execution_id JOIN team_executions e ON e.id=g.execution_id WHERE g.execution_id=?`,
+      )
+      .get(executionId) as
+      | {
+          state: string;
+          access_mode: string;
+          checkpoint_json: string | null;
+          checkpoint_digest: string | null;
+          checkpoint_generation: number | null;
+          checkpoint_attempt_id: string | null;
+          generation: number;
+        }
+      | undefined;
+    if (
+      !row ||
+      row.state !== 'completed' ||
+      row.checkpoint_json === null ||
+      row.checkpoint_generation !== row.generation ||
+      createHash('sha256').update(row.checkpoint_json).digest('hex') !== row.checkpoint_digest
+    )
+      return false;
+    const attempt = this.listTeamAttempts(executionId).at(-1);
+    if (!attempt || attempt.id !== row.checkpoint_attempt_id || attempt.state !== 'completed')
+      return false;
+    if (
+      this.db
         .prepare(
-          `SELECT e.state,e.access_mode,s.checkpoint_json,s.checkpoint_digest,g.checkpoint_generation,g.checkpoint_attempt_id,g.generation FROM team_graph_mission_steps g
-        JOIN team_mission_steps s ON s.execution_id=g.execution_id JOIN team_executions e ON e.id=g.execution_id WHERE g.execution_id=?`,
+          "SELECT 1 FROM team_graph_resource_reservations WHERE execution_id=? AND state <> 'released'",
         )
-        .get(predecessor.executionId) as {
-        state: string;
-        access_mode: string;
-        checkpoint_json: string | null;
-        checkpoint_digest: string | null;
-        checkpoint_generation: number | null;
-        checkpoint_attempt_id: string | null;
-        generation: number;
-      };
-      if (
-        completed.state !== 'completed' ||
-        completed.checkpoint_json === null ||
-        completed.checkpoint_generation !== completed.generation ||
-        createHash('sha256').update(completed.checkpoint_json).digest('hex') !==
-          completed.checkpoint_digest
-      )
-        return true;
-      const attempt = this.listTeamAttempts(predecessor.executionId).at(-1);
-      if (
-        !attempt ||
-        attempt.id !== completed.checkpoint_attempt_id ||
-        attempt.state !== 'completed'
-      )
-        return true;
-      if (
-        this.db
-          .prepare(
-            "SELECT 1 FROM team_graph_resource_reservations WHERE execution_id=? AND state <> 'released'",
-          )
-          .get(predecessor.executionId)
-      )
-        return true;
-      if (
-        !this.db
-          .prepare(
-            "SELECT 1 FROM team_graph_resource_reservations WHERE execution_id=? AND generation=? AND attempt_id=? AND state='released'",
-          )
-          .get(predecessor.executionId, completed.generation, attempt.id)
-      )
-        return true;
-      if (completed.access_mode !== 'workspace-write') return false;
-      const isolation = this.getTeamExecutionIsolation(predecessor.executionId);
-      if (isolation !== null)
-        return (
-          isolation.phase !== 'completed' ||
-          isolation.repositories.some(
-            (repository) => !['integrated', 'cleaned'].includes(repository.state),
-          )
-        );
-      const worktree = this.getTeamMissionWorktree(predecessor.executionId);
+        .get(executionId)
+    )
+      return false;
+    if (
+      !this.db
+        .prepare(
+          "SELECT 1 FROM team_graph_resource_reservations WHERE execution_id=? AND generation=? AND attempt_id=? AND state='released'",
+        )
+        .get(executionId, row.generation, attempt.id)
+    )
+      return false;
+    return row.access_mode !== 'workspace-write' || this.graphWriteIntegrated(executionId);
+  }
+
+  private graphWriteIntegrated(executionId: string): boolean {
+    const isolation = this.getTeamExecutionIsolation(executionId);
+    if (isolation !== null)
       return (
-        worktree === null ||
-        worktree.integratedHead === null ||
-        !['integrated', 'cleaned'].includes(worktree.state)
+        isolation.phase === 'completed' &&
+        isolation.repositories.every((repository) =>
+          ['integrated', 'cleaned'].includes(repository.state),
+        )
       );
-    });
+    const worktree = this.getTeamMissionWorktree(executionId);
+    return (
+      worktree !== null &&
+      worktree.integratedHead !== null &&
+      ['integrated', 'cleaned'].includes(worktree.state)
+    );
+  }
+
+  /** Main must first satisfy user consent, filesystem/write claims and scheduler admission.
+   * This only commits execution bookkeeping; no Worker runtime is invoked here. */
+  beginGraphAttempt(input: GraphAttemptStart): {
+    execution: TeamExecutionRecord;
+    attempt: TeamAttemptRecord;
+    reservation: GraphResourceReservation;
+  } {
+    return this.db.transaction(() => {
+      const graph = this.getGraphTeamMission(input.missionId);
+      const step = graph?.steps.find((step) => step.key === input.stepKey);
+      if (!graph || !step || step.generation !== input.generation)
+        throw new Error('Graph Attempt generation mismatch');
+      const execution = this.getTeamExecution(step.executionId);
+      const resuming = input.reason === 'manual_resume';
+      if (
+        resuming
+          ? execution.state !== 'waiting_resume'
+          : !['assigned', 'queued'].includes(execution.state)
+      )
+        throw new Error('Graph Attempt is not ready for initial dispatch');
+      if (this.getTeam(this.getTeamMission(graph.missionId).teamId).state !== 'active')
+        throw new Error('Graph Team is not active');
+      const acquired = this.acquireGraphResources({
+        missionId: graph.missionId,
+        stepKey: step.key,
+        expectedGeneration: step.generation,
+        now: input.now,
+      });
+      if (!acquired.acquired || acquired.reservation.id !== input.reservationId)
+        throw new Error('Graph Attempt reservation mismatch');
+      this.transitionTeamMissionWithAdmission(graph.missionId, 'running', input.now, true);
+      if (resuming) {
+        const dispatch = this.getTeamExecutionDispatch(execution.id);
+        const message = this.createTeamMessage({
+          teamId: execution.teamId,
+          sourceAgentId: execution.createdByAgentId,
+          targetAgentId: execution.assigneeAgentId,
+          content: execution.instruction.content,
+          executionId: execution.id,
+        });
+        this.createTeamTask({
+          teamId: execution.teamId,
+          messageId: message.id,
+          assigneeAgentId: execution.assigneeAgentId,
+          createdByAgentId: execution.createdByAgentId,
+          description: execution.instruction.content,
+          doneCriteria: dispatch.doneCriteria,
+          now: input.now,
+        });
+        this.createTeamDelivery({ messageId: message.id, now: input.now });
+      }
+      if (execution.state === 'assigned' || resuming)
+        this.transitionTeamExecutionWithAdmission(
+          {
+            executionId: execution.id,
+            to: 'queued',
+            queueReason: resuming ? 'recovery' : 'global_concurrency',
+            now: input.now,
+          },
+          true,
+        );
+      this.transitionTeamExecutionWithAdmission(
+        { executionId: execution.id, to: 'running', now: input.now },
+        true,
+      );
+      const attempt = this.createTeamAttempt(
+        execution.id,
+        input.now,
+        resuming ? 'manual_resume' : 'initial',
+      );
+      const reservation = this.bindGraphResourcesToAttempt({
+        reservationId: input.reservationId,
+        executionId: execution.id,
+        generation: step.generation,
+        attemptId: attempt.id,
+      });
+      return { execution: this.getTeamExecution(execution.id), attempt, reservation };
+    })();
+  }
+
+  /** Only after Main has observed the runtime stopped and completed any required integration. */
+  completeGraphStep(input: GraphStepCompletion): {
+    mission: TeamMissionRecord;
+    dependencyReadyStepKeys: string[];
+  } {
+    const checkpoint = teamMissionCheckpointSchema.parse(input.checkpoint);
+    const report = workerReportSchema.parse(input.report);
+    if (
+      input.confirmation.kind !== 'attempt-stopped' ||
+      input.confirmation.attemptId !== input.attemptId
+    )
+      throw new Error('Graph completion stop acknowledgement mismatch');
+    if (report.status !== 'completed')
+      throw new Error('Graph completion requires a completed report');
+    return this.db.transaction(() => {
+      const graph = this.getGraphTeamMission(input.missionId);
+      const step = graph?.steps.find((step) => step.key === input.stepKey);
+      if (!graph || !step || step.generation !== input.generation)
+        throw new Error('Graph completion generation mismatch');
+      const execution = this.getTeamExecution(step.executionId);
+      const attempt = this.getTeamAttempt(input.attemptId);
+      const reservation = this.db
+        .prepare('SELECT * FROM team_graph_resource_reservations WHERE id=?')
+        .get(input.reservationId) as GraphResourceRow | undefined;
+      if (
+        !reservation ||
+        reservation.state !== 'active' ||
+        reservation.execution_id !== execution.id ||
+        reservation.generation !== step.generation ||
+        reservation.attempt_id !== attempt.id ||
+        attempt.executionId !== execution.id ||
+        attempt.state !== 'running' ||
+        execution.state !== 'running'
+      )
+        throw new Error('Graph completion owner mismatch');
+      this.readGraphResourceReservation(reservation);
+      if (
+        this.getTeamMission(graph.missionId).state !== 'running' ||
+        this.graphResourcePrerequisites(graph, step.key).length
+      )
+        throw new Error('Graph completion admission changed');
+      const dispatch = this.getTeamExecutionDispatch(execution.id);
+      if (dispatch.teamTaskId !== input.teamTaskId || execution.assigneeAgentId !== input.agentId)
+        throw new Error('Graph completion dispatch mismatch');
+      if (execution.accessMode === 'workspace-write' && !this.graphWriteIntegrated(execution.id))
+        throw new Error('Graph write integration is not confirmed');
+      this.completeTeamTaskWithReport({
+        teamTaskId: dispatch.teamTaskId,
+        agentId: input.agentId,
+        report,
+        doneEvidence: input.doneEvidence,
+        now: input.now,
+      });
+      this.transitionTeamAttempt({ attemptId: attempt.id, to: 'completed', now: input.now });
+      this.transitionTeamExecutionWithAdmission(
+        { executionId: execution.id, to: 'completed', now: input.now },
+        true,
+      );
+      this.releaseGraphResources({
+        reservationId: reservation.id,
+        executionId: execution.id,
+        generation: step.generation,
+        confirmation: input.confirmation,
+        now: input.now,
+      });
+      const serialized = canonicalGraphJson(checkpoint);
+      const written = this.db
+        .prepare(
+          'UPDATE team_mission_steps SET checkpoint_json=?,checkpoint_digest=?,completed_at=? WHERE execution_id=? AND checkpoint_json IS NULL',
+        )
+        .run(
+          serialized,
+          createHash('sha256').update(serialized).digest('hex'),
+          input.now,
+          execution.id,
+        );
+      if (written.changes !== 1) throw new Error('Graph checkpoint already exists');
+      const bound = this.db
+        .prepare(
+          'UPDATE team_graph_mission_steps SET checkpoint_generation=?,checkpoint_attempt_id=? WHERE execution_id=? AND generation=?',
+        )
+        .run(step.generation, attempt.id, execution.id, step.generation);
+      if (bound.changes !== 1) throw new Error('Graph checkpoint generation changed');
+      if (graph.steps.every((step) => this.graphStepConfirmed(step.executionId)))
+        this.transitionTeamMissionWithAdmission(graph.missionId, 'completed', input.now, true);
+      const dependencyReadyStepKeys = graph.steps
+        .filter(
+          (step) =>
+            this.getTeamExecution(step.executionId).state === 'assigned' &&
+            this.graphResourcePrerequisites(graph, step.key).length === 0,
+        )
+        .map((step) => step.key);
+      return { mission: this.getTeamMission(graph.missionId), dependencyReadyStepKeys };
+    })();
   }
 
   /** Trusted Main commit after consent/FS preparation. No runtime is queued by this transaction. */
@@ -10098,6 +10306,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   transitionTeamMission(missionId: string, to: TeamMissionState, now: string): TeamMissionRecord {
+    return this.transitionTeamMissionWithAdmission(missionId, to, now, false);
+  }
+
+  private transitionTeamMissionWithAdmission(
+    missionId: string,
+    to: TeamMissionState,
+    now: string,
+    graphAdmission: boolean,
+  ): TeamMissionRecord {
     const allowed: Readonly<Record<TeamMissionState, readonly TeamMissionState[]>> = {
       queued: ['running', 'canceled', 'failed'],
       running: ['waiting_resume', 'completed', 'canceled', 'failed'],
@@ -10108,7 +10325,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     };
     const current = this.getTeamMission(missionId);
     if (current.state === to) return current;
-    if (current.mode === 'graph' && !['canceled', 'failed', 'waiting_resume'].includes(to))
+    if (
+      !graphAdmission &&
+      current.mode === 'graph' &&
+      !['canceled', 'failed', 'waiting_resume'].includes(to)
+    )
       throw new Error('Graph Mission requires graph admission');
     if (!allowed[current.state].includes(to))
       throw new Error(`Invalid Team Mission transition: ${current.state} -> ${to}`);
@@ -10324,6 +10545,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
               )`,
         )
         .run(now);
+      const preparingGraphs = this.db
+        .prepare(
+          `SELECT a.id,a.execution_id FROM team_attempts a JOIN team_graph_mission_steps g ON g.execution_id=a.execution_id
+        WHERE a.state IN ('created','waiting_verification','waiting_rate_limit')`,
+        )
+        .all() as { id: string; execution_id: string }[];
+      for (const pending of preparingGraphs) {
+        this.transitionTeamAttempt({
+          attemptId: pending.id,
+          to: 'canceled',
+          terminalReason: 'app_restart',
+          now,
+        });
+        const execution = this.getTeamExecution(pending.execution_id);
+        if (
+          ['running', 'queued', 'waiting_verification', 'waiting_rate_limit'].includes(
+            execution.state,
+          )
+        )
+          this.transitionTeamExecution({ executionId: execution.id, to: 'waiting_resume', now });
+        const mission = this.getTeamMissionForExecution(execution.id);
+        if (mission?.state === 'running')
+          this.transitionTeamMission(mission.id, 'waiting_resume', now);
+        const dispatch = this.getTeamExecutionDispatch(execution.id);
+        const task = this.getTeamTask(dispatch.teamTaskId);
+        if (task.status === 'running') this.transitionTeamTask(task.id, 'blocked', now);
+        else if (['created', 'assigned', 'waiting', 'blocked'].includes(task.status))
+          this.transitionTeamTask(task.id, 'canceled', now);
+      }
       const running = this.db
         .prepare("SELECT id, execution_id, start_reason FROM team_attempts WHERE state = 'running'")
         .all() as {
@@ -10396,7 +10646,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
             queueReason: 'recovery',
           });
       }
-      return running.length;
+      return running.length + preparingGraphs.length;
     })();
   }
 

@@ -1,6 +1,7 @@
 import type { GraphMissionRecord } from './graph-mission-record';
 import { z } from 'zod';
 import { graphMissionStoredContextSchema } from './graph-mission-record';
+import type { TeamMissionCheckpoint } from '@sprint-coder/contracts';
 
 export type GraphResourceKey = Readonly<{
   key: string;
@@ -56,6 +57,29 @@ export type GraphResourceRelease = Readonly<{
   now: string;
   /** Only trusted Main may supply this after observing dispatch/stop state, never a model report. */
   confirmation: { kind: 'not-dispatched' } | { kind: 'attempt-stopped'; attemptId: string };
+}>;
+export type GraphAttemptStart = Readonly<{
+  missionId: string;
+  stepKey: string;
+  generation: number;
+  reservationId: string;
+  now: string;
+  reason?: 'initial' | 'manual_resume';
+}>;
+/** Internal persistence input after Main observes runtime stop and validates completion/integration. */
+export type GraphStepCompletion = Readonly<{
+  missionId: string;
+  stepKey: string;
+  generation: number;
+  reservationId: string;
+  attemptId: string;
+  agentId: string;
+  teamTaskId: string;
+  report: unknown;
+  doneEvidence: readonly { criterion: string; evidence: string }[];
+  checkpoint: TeamMissionCheckpoint;
+  confirmation: { kind: 'attempt-stopped'; attemptId: string };
+  now: string;
 }>;
 
 /** Resource namespaces are app-wide or physical-root-wide, never isolated by Team ID. */
