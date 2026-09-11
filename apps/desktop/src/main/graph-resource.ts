@@ -2,6 +2,7 @@ import type { GraphMissionRecord } from './graph-mission-record';
 import { z } from 'zod';
 import { graphMissionStoredContextSchema } from './graph-mission-record';
 import type { TeamMissionCheckpoint } from '@sprint-coder/contracts';
+import type { GraphWriteFootprint } from './graph-write-conflicts';
 
 export type GraphResourceKey = Readonly<{
   key: string;
@@ -45,15 +46,24 @@ export type GraphResourceReservation = Readonly<{
   createdAt: string;
   releasedAt: string | null;
   resources: readonly GraphResourceKey[];
+  writeFootprints: readonly GraphWriteFootprint[];
 }>;
 export type GraphResourceAcquisition =
   | { acquired: true; reservation: GraphResourceReservation }
-  | { acquired: false; reason: 'dependencies' | 'resources'; blockedKeys: string[] }
+  | {
+      acquired: false;
+      reason: 'dependencies' | 'resources' | 'write-conflicts';
+      blockedKeys: string[];
+    }
   | { acquired: false; reason: 'owner-active'; reservationId: string };
 /** Main-only readiness observation. Acquisition must recheck these facts transactionally. */
 export type GraphResourceAvailability =
   | { available: true; reservation: GraphResourceReservation | null }
-  | { available: false; reason: 'dependencies' | 'resources'; blockedKeys: string[] }
+  | {
+      available: false;
+      reason: 'dependencies' | 'resources' | 'write-conflicts';
+      blockedKeys: string[];
+    }
   | { available: false; reason: 'owner-active'; reservationId: string };
 export type GraphResourceRelease = Readonly<{
   reservationId: string;

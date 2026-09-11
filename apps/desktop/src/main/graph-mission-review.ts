@@ -39,6 +39,7 @@ export type GraphMissionClaimBinding = {
   stepKey: string;
   rootId: string;
   rootIdentityDigest: string;
+  relativePath: string | null;
   canonicalPath: string;
   /** Missing suffixes remain explicit: their alias/conflict rules must be resolved at admission. */
   missingSuffix: readonly string[];
@@ -97,6 +98,7 @@ async function bindClaim(
     });
   const bound = (guard: PathGuard, missingSuffix: readonly string[] = []) => ({
     rootId,
+    relativePath: path,
     rootIdentityDigest: guard.rootIdentityDigest,
     canonicalPath: join(guard.resolvedPath, ...missingSuffix),
     missingSuffix,

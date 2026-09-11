@@ -1,5 +1,12 @@
 import Database from 'better-sqlite3';
 import {
+  graphWriteClaimsConflict,
+  restoreGraphWrites,
+  serializePreparedGraphWrites,
+  type GraphWriteFootprint,
+} from './graph-write-conflicts';
+import { validateGraphWriteInventory } from './graph-write-inventory';
+import {
   graphResourceKeys,
   graphResourceInventorySchema,
   type GraphResourceReservation,
@@ -815,6 +822,8 @@ type GraphResourceRow = {
   created_at: string;
   released_at: string | null;
   resources_json: string;
+  write_claims_json: string;
+  write_claims_digest: string;
 };
 export const teamV2ActivityTypes = [
   'worker_hired',
@@ -3960,6 +3969,19 @@ const migrations = [
         BEGIN SELECT RAISE(ABORT, 'Graph resource ownership is not released'); END;
     `,
   },
+  {
+    version: 88,
+    checksum: 'graph-write-claims-v88-owned-footprints',
+    sql: `
+      ALTER TABLE team_graph_resource_reservations ADD COLUMN write_claims_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE team_graph_resource_reservations ADD COLUMN write_claims_digest TEXT NOT NULL DEFAULT '${createHash('sha256').update('[]').digest('hex')}' CHECK(length(write_claims_digest)=64);
+      UPDATE team_graph_resource_reservations SET state='quarantined'
+        WHERE state <> 'released' AND execution_id IN (SELECT id FROM team_executions WHERE access_mode='workspace-write');
+      CREATE TRIGGER graph_write_inventory_immutable BEFORE UPDATE OF write_claims_json,write_claims_digest ON team_graph_resource_reservations
+        WHEN NEW.write_claims_json <> OLD.write_claims_json OR NEW.write_claims_digest <> OLD.write_claims_digest
+        BEGIN SELECT RAISE(ABORT, 'Graph write inventory is immutable'); END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4506,11 +4528,13 @@ export interface PersistenceClient {
     missionId: string;
     stepKey: string;
     expectedGeneration: number;
+    writeFootprints?: readonly GraphWriteFootprint[];
   }): GraphResourceAvailability;
   acquireGraphResources(input: {
     missionId: string;
     stepKey: string;
     expectedGeneration: number;
+    writeFootprints?: readonly GraphWriteFootprint[];
     now: string;
   }): GraphResourceAcquisition;
   bindGraphResourcesToAttempt(input: {
@@ -9266,10 +9290,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  private graphWriteBlockers(
+    footprints: readonly GraphWriteFootprint[],
+    excludeId?: string,
+  ): string[] {
+    if (footprints.length === 0) return [];
+    const rows = this.db
+      .prepare("SELECT * FROM team_graph_resource_reservations WHERE state <> 'released'")
+      .all() as GraphResourceRow[];
+    const blocked: string[] = [];
+    for (const row of rows) {
+      if (row.id === excludeId) continue;
+      const owner = this.readGraphResourceReservation(row);
+      if (
+        owner.writeFootprints.length === 0 &&
+        this.getTeamExecution(row.execution_id).accessMode === 'workspace-write'
+      )
+        throw new Error('Graph write owner requires recovery');
+      const graph = this.getGraphTeamMission(row.mission_id);
+      const step = graph?.steps.find((step) => step.executionId === row.execution_id);
+      if (!graph || !step) throw new Error('Graph write owner binding is unavailable');
+      validateGraphWriteInventory(graph, step.key, owner.writeFootprints);
+      if (
+        footprints.some((candidate) =>
+          owner.writeFootprints.some((held) => graphWriteClaimsConflict(candidate, held)),
+        )
+      )
+        blocked.push(row.execution_id);
+    }
+    return blocked.sort();
+  }
+
   inspectGraphResources(input: {
     missionId: string;
     stepKey: string;
     expectedGeneration: number;
+    writeFootprints?: readonly GraphWriteFootprint[];
   }): GraphResourceAvailability {
     return this.db.transaction((): GraphResourceAvailability => {
       const graph = this.getGraphTeamMission(input.missionId);
@@ -9300,11 +9356,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
           const reservation = this.readGraphResourceReservation(existing);
           if (canonicalGraphJson(reservation.resources) !== canonicalGraphJson(resources))
             throw new Error('Graph resource declarations changed');
+          validateGraphWriteInventory(graph, step.key, reservation.writeFootprints);
+          if (
+            input.writeFootprints !== undefined &&
+            serializePreparedGraphWrites(input.writeFootprints) !== existing.write_claims_json
+          )
+            throw new Error('Graph reserved write binding changed');
+          const writeBlocked = this.graphWriteBlockers(reservation.writeFootprints, existing.id);
+          if (writeBlocked.length)
+            return { available: false, reason: 'write-conflicts', blockedKeys: writeBlocked };
           return { available: true, reservation };
         }
         return { available: false, reason: 'owner-active', reservationId: existing.id };
       }
       if (!available) throw new Error('Graph execution is not available for reservation');
+      if (execution.accessMode === 'workspace-write' && input.writeFootprints === undefined)
+        throw new Error('Fresh graph write preparation required');
+      const writeJson = serializePreparedGraphWrites(input.writeFootprints ?? []);
+      const writeFootprints = restoreGraphWrites(
+        writeJson,
+        createHash('sha256').update(writeJson).digest('hex'),
+      );
+      validateGraphWriteInventory(graph, step.key, writeFootprints);
+      const writeBlocked = this.graphWriteBlockers(writeFootprints);
+      if (writeBlocked.length)
+        return { available: false, reason: 'write-conflicts', blockedKeys: writeBlocked };
       const occupied = resources.filter((resource) =>
         this.db
           .prepare('SELECT 1 FROM team_graph_resource_leases WHERE resource_key=?')
@@ -9324,6 +9400,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     missionId: string;
     stepKey: string;
     expectedGeneration: number;
+    writeFootprints?: readonly GraphWriteFootprint[];
     now: string;
   }): GraphResourceAcquisition {
     return this.db.transaction((): GraphResourceAcquisition => {
@@ -9341,11 +9418,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const step = graph?.steps.find((step) => step.key === input.stepKey);
       if (!graph || !step) throw new Error('Graph resource binding changed');
       const resources = graphResourceInventorySchema.parse(graphResourceKeys(graph, step.key));
+      const writeJson = serializePreparedGraphWrites(input.writeFootprints ?? []);
+      const writeDigest = createHash('sha256').update(writeJson).digest('hex');
       const id = randomUUID();
       this.db
         .prepare(
-          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json)
-        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?)`,
+          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json,write_claims_json,write_claims_digest)
+        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?,?,?)`,
         )
         .run(
           id,
@@ -9354,6 +9433,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
           step.generation,
           input.now,
           canonicalGraphJson(resources),
+          writeJson,
+          writeDigest,
         );
       for (const resource of resources)
         this.db
@@ -9413,6 +9494,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         canonicalGraphJson(graphResourceKeys(graph, step.key))
       )
         throw new Error('Graph resource declarations changed');
+      validateGraphWriteInventory(graph, step.key, reservation.writeFootprints);
+      if (this.graphWriteBlockers(reservation.writeFootprints, row.id).length)
+        throw new Error('Graph write admission changed');
       this.db
         .prepare(
           "UPDATE team_graph_resource_reservations SET state='active', attempt_id=? WHERE id=? AND state='reserved'",
@@ -9456,6 +9540,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
           !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state)
         )
           throw new Error('Graph resource attempt has not stopped');
+        const execution = this.getTeamExecution(row.execution_id);
+        if (
+          execution.accessMode === 'workspace-write' &&
+          attempt.state === 'completed' &&
+          !['failed', 'canceled'].includes(execution.state) &&
+          !['failed', 'canceled'].includes(this.getTeamMission(row.mission_id).state) &&
+          !this.graphWriteIntegrated(execution.id)
+        )
+          throw new Error('Graph write integration is not confirmed');
       } else throw new Error('Invalid graph resource confirmation');
       this.db
         .prepare(
@@ -9503,6 +9596,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       createdAt: row.created_at,
       releasedAt: row.released_at,
       resources,
+      writeFootprints: restoreGraphWrites(row.write_claims_json, row.write_claims_digest),
     };
   }
 
@@ -9696,7 +9790,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
         execution.state !== 'running'
       )
         throw new Error('Graph completion owner mismatch');
-      this.readGraphResourceReservation(reservation);
+      const ownership = this.readGraphResourceReservation(reservation);
+      validateGraphWriteInventory(graph, step.key, ownership.writeFootprints);
       if (
         this.getTeamMission(graph.missionId).state !== 'running' ||
         this.graphResourcePrerequisites(graph, step.key).length

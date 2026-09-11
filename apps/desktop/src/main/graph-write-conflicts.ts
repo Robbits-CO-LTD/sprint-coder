@@ -1,11 +1,18 @@
 import { stat } from 'node:fs/promises';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import { graphWriteClaimSchema } from '@sprint-coder/contracts';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { directoryCaseSensitive } from './directory-name-rules';
 import type { GraphMissionClaimBinding } from './graph-mission-review';
 import { isIssuedPathGuard, revalidatePathGuard } from './path-guard';
 
 export type GraphWriteFootprint = Readonly<{
   stepKey: string;
+  rootId: string;
+  rootIdentityDigest: string;
+  rootPath: string;
+  relativePath: string | null;
   canonicalPath: string;
   declaredPath: string;
   rootKey: string;
@@ -18,6 +25,96 @@ export type GraphWriteFootprint = Readonly<{
   semanticKeys: readonly string[];
 }>;
 const issued = new WeakSet<object>();
+const prepared = new WeakSet<object>();
+const objectKey = z.string().regex(/^\d{1,20}:\d{1,20}$/u);
+const path = z.string().min(1).max(32_768);
+const footprintSchema = z
+  .object({
+    stepKey: z.string().min(1).max(128),
+    rootId: graphWriteClaimSchema.shape.rootId,
+    rootIdentityDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    rootPath: path,
+    relativePath: graphWriteClaimSchema.shape.path,
+    canonicalPath: path,
+    declaredPath: path,
+    rootKey: objectKey,
+    rootAncestors: z.array(objectKey).max(256),
+    objectKey,
+    ancestors: z.array(objectKey).max(256),
+    directory: z.boolean(),
+    suffix: z
+      .array(
+        z
+          .string()
+          .min(1)
+          .max(1_024)
+          .refine((part) => !['.', '..'].includes(part) && !/[/\\\0]/u.test(part)),
+      )
+      .max(64),
+    caseSensitive: z.boolean().nullable(),
+    semanticKeys: graphWriteClaimSchema.shape.semanticKeys,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const [dev, ino] = value.rootKey.split(':');
+    const digest = createHash('sha256')
+      .update(JSON.stringify(['workspace-root-v2', dev, ino, 'directory']))
+      .digest('hex');
+    if (
+      digest !== value.rootIdentityDigest ||
+      ![value.rootPath, value.canonicalPath, value.declaredPath].every(
+        (path) => isAbsolute(path) && !path.includes('\0'),
+      ) ||
+      (value.objectKey !== value.rootKey && !value.ancestors.includes(value.rootKey)) ||
+      (value.suffix.length === 0) !== (value.caseSensitive === null) ||
+      (value.suffix.length > 0 && !value.directory) ||
+      value.declaredPath !== join(value.rootPath, ...(value.relativePath?.split('/') ?? []))
+    )
+      context.addIssue({ code: 'custom', message: 'Invalid graph write footprint binding' });
+  });
+
+/** Only current Main filesystem preparation can be used for a new acquisition. */
+export function serializePreparedGraphWrites(footprints: readonly GraphWriteFootprint[]): string {
+  if (footprints.some((entry) => !prepared.has(entry)))
+    throw new Error('Fresh graph write preparation required');
+  const parsed = z
+    .array(footprintSchema)
+    .max(64)
+    .parse(footprints)
+    .map((entry) => ({ ...entry, semanticKeys: [...entry.semanticKeys].sort() }))
+    .sort((a, b) => {
+      const left = JSON.stringify(a);
+      const right = JSON.stringify(b);
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
+  const json = JSON.stringify(parsed);
+  if (Buffer.byteLength(json) > 16_777_216) throw new Error('Graph write inventory is too large');
+  return json;
+}
+
+/** Restored inventory describes an existing owner's scope, never fresh admission evidence. */
+export function restoreGraphWrites(json: string, digest: string): readonly GraphWriteFootprint[] {
+  if (
+    Buffer.byteLength(json) > 16_777_216 ||
+    createHash('sha256').update(json).digest('hex') !== digest
+  )
+    throw new Error('Graph write inventory digest mismatch');
+  return z
+    .array(footprintSchema)
+    .max(64)
+    .parse(JSON.parse(json))
+    .map((entry) => {
+      const restored = Object.freeze({
+        ...entry,
+        rootAncestors: Object.freeze(entry.rootAncestors),
+        ancestors: Object.freeze(entry.ancestors),
+        suffix: Object.freeze(entry.suffix),
+        semanticKeys: Object.freeze(entry.semanticKeys),
+      });
+      issued.add(restored);
+      return restored;
+    });
+}
 
 async function identity(path: string) {
   const info = await stat(path, { bigint: true });
@@ -50,6 +147,10 @@ export async function prepareGraphWriteFootprint(
     !isIssuedPathGuard(guard) ||
     claim.rootIdentityDigest !== guard.rootIdentityDigest ||
     claim.rootId !== guard.rootId ||
+    claim.relativePath !==
+      (guard.originalTargetPath === '.'
+        ? null
+        : [...guard.originalTargetPath.split('/'), ...claim.missingSuffix].join('/')) ||
     claim.canonicalPath !== join(guard.resolvedPath, ...claim.missingSuffix) ||
     claim.missingSuffix.some(
       (part) => part === '' || part === '.' || part === '..' || /[/\\\0]/u.test(part),
@@ -68,6 +169,10 @@ export async function prepareGraphWriteFootprint(
     throw new Error('Graph claim name rules changed');
   const footprint: GraphWriteFootprint = Object.freeze({
     stepKey: claim.stepKey,
+    rootId: claim.rootId,
+    rootIdentityDigest: guard.rootIdentityDigest,
+    rootPath: guard.workspacePath,
+    relativePath: claim.relativePath,
     canonicalPath: claim.canonicalPath,
     declaredPath: join(
       resolve(guard.workspacePath, guard.originalTargetPath),
@@ -89,7 +194,9 @@ export async function prepareGraphWriteFootprint(
     (missing && directoryCaseSensitive(anchor, object) !== caseSensitive)
   )
     throw new Error('Graph claim identity changed');
+  footprintSchema.parse(footprint);
   issued.add(footprint);
+  prepared.add(footprint);
   return footprint;
 }
 

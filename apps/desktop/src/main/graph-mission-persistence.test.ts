@@ -1,5 +1,6 @@
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { spawnSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -8,10 +9,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan } from '@sprint-coder/contracts';
 import { SqlitePersistenceClient } from './persistence';
 import { nextGraphDocument } from './graph-document';
-import { graphMissionContextFor, graphMissionContextDigest } from './graph-mission-review';
+import {
+  graphMissionContextFor,
+  graphMissionContextDigest,
+  reviewGraphMission,
+} from './graph-mission-review';
+import type { GraphWriteFootprint } from './graph-write-conflicts';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { workspaceMutationBinding } from './path-guard';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { WorkerWorktreeManager } from './worker-worktree';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -100,19 +107,31 @@ function resourceMission(f: ReturnType<typeof fixture>, key = 'shared-db') {
     semanticDigest: document.semanticDigest,
   });
 }
-function reserve(f: ReturnType<typeof fixture>, missionId: string, stepKey = 'a', generation = 1) {
+function reserve(
+  f: ReturnType<typeof fixture>,
+  missionId: string,
+  stepKey = 'a',
+  generation = 1,
+  writeFootprints?: readonly GraphWriteFootprint[],
+) {
   const result = f.persistence.acquireGraphResources({
     missionId,
     stepKey,
     expectedGeneration: generation,
+    ...(writeFootprints === undefined ? {} : { writeFootprints }),
     now,
   });
   expect(result.acquired).toBe(true);
   if (!result.acquired) throw new Error('Expected resource acquisition');
   return result.reservation;
 }
-function begin(f: ReturnType<typeof fixture>, missionId: string, key: string) {
-  const reservation = reserve(f, missionId, key);
+function begin(
+  f: ReturnType<typeof fixture>,
+  missionId: string,
+  key: string,
+  writeFootprints?: readonly GraphWriteFootprint[],
+) {
+  const reservation = reserve(f, missionId, key, 1, writeFootprints);
   const result = f.persistence.beginGraphAttempt({
     missionId,
     stepKey: key,
@@ -159,8 +178,349 @@ function completion(missionId: string, key: string, run: ReturnType<typeof begin
   };
 }
 
+async function writeMission(
+  f: ReturnType<typeof fixture>,
+  workspace: string,
+  paths: (string | null)[] = ['shared.ts'],
+  resource?: string,
+) {
+  mkdirSync(workspace, { recursive: true });
+  const binding = await workspaceMutationBinding(workspace);
+  f.persistence.setWorkspaceBinding(f.task.id, {
+    path: binding.canonicalPath,
+    workspaceKey: binding.workspaceKey,
+    rootIdentityDigest: binding.rootIdentityDigest,
+  });
+  const context = graphMissionContextFor(f.persistence, f.task.id);
+  const plan = structuredClone(f.plan);
+  plan.steps[0]!.access = 'workspace-write';
+  plan.steps[0]!.writeClaims = paths.map((path) => ({
+    rootId: context.workspace.primaryRootId!,
+    path,
+    semanticKeys: [],
+  }));
+  plan.steps[0]!.resourceClaims = resource
+    ? [{ scope: 'machine', key: resource, rootId: null }]
+    : [];
+  const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+  f.persistence.saveGraphDocument(document, 1);
+  const review = await reviewGraphMission(
+    { taskId: f.task.id, instanceId: randomUUID(), renderRevision: document.renderRevision },
+    document,
+    () => graphMissionContextFor(f.persistence, f.task.id),
+  );
+  if (!review.summary.matched || review.writeFootprints === null)
+    throw new Error('Expected prepared write Mission');
+  const mission = f.persistence.createGraphTeamMission({
+    ...f.input,
+    renderRevision: document.renderRevision,
+    semanticRevision: document.semanticRevision,
+    semanticDigest: document.semanticDigest,
+    workspaceDigest: context.workspace.digest,
+    contextDigest: graphMissionContextDigest(
+      context,
+      new Set(f.workers.map((worker) => worker.id)),
+    ),
+  });
+  const acquisition = {
+    missionId: mission.id,
+    stepKey: 'a',
+    expectedGeneration: 1,
+    writeFootprints: review.writeFootprints,
+    now,
+  };
+  return { mission, acquisition, review, workspace: binding.canonicalPath };
+}
+
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('acquires physical writes and resources atomically across Teams while allowing disjoint writers', async () => {
+      const f = fixture(undefined, true);
+      const second = fixture({ persistence: f.persistence, path: f.path }, true);
+      const third = fixture({ persistence: f.persistence, path: f.path }, true);
+      const workspace = join(dirname(f.path), 'workspace');
+      const a = await writeMission(f, workspace, ['shared.ts'], 'first-device');
+      const b = await writeMission(second, workspace, ['shared.ts'], 'second-device');
+      const c = await writeMission(third, workspace, ['independent.ts'], 'second-device');
+      const first = f.persistence.acquireGraphResources(a.acquisition);
+      if (!first.acquired) throw new Error('Expected first write owner');
+      expect(f.persistence.acquireGraphResources(b.acquisition)).toMatchObject({
+        acquired: false,
+        reason: 'write-conflicts',
+        blockedKeys: [a.mission.steps[0]!.executionId],
+      });
+      expect(f.persistence.listGraphResourceReservations(b.mission.id)).toEqual([]);
+      const independent = f.persistence.acquireGraphResources(c.acquisition);
+      if (!independent.acquired) throw new Error('Independent write/resource should remain free');
+      const running = begin(f, a.mission.id, 'a');
+      f.persistence.interruptGraphStep({
+        missionId: a.mission.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: running.reservation.id,
+        attemptId: running.attempt.id,
+        outcome: 'failed',
+        reason: 'runtime_stop_unconfirmed',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe(
+        'quarantined',
+      );
+      expect(f.persistence.acquireGraphResources(b.acquisition)).toMatchObject({
+        acquired: false,
+        reason: 'write-conflicts',
+      });
+      expect(first.reservation.writeFootprints).toHaveLength(1);
+      const db = new Database(f.path);
+      expect(() =>
+        db
+          .prepare("UPDATE team_graph_resource_reservations SET write_claims_json='[]' WHERE id=?")
+          .run(first.reservation.id),
+      ).toThrow('immutable');
+      expect(() =>
+        db
+          .prepare('DELETE FROM team_graph_resource_reservations WHERE id=?')
+          .run(first.reservation.id),
+      ).toThrow('not released');
+      db.close();
+      f.persistence.releaseGraphResources({
+        reservationId: first.reservation.id,
+        executionId: first.reservation.executionId,
+        generation: 1,
+        confirmation: { kind: 'attempt-stopped', attemptId: running.attempt.id },
+        now,
+      });
+      expect(f.persistence.acquireGraphResources(b.acquisition)).toMatchObject({
+        acquired: false,
+        reason: 'resources',
+      });
+      expect(f.persistence.listGraphResourceReservations(b.mission.id)).toEqual([]);
+      f.persistence.releaseGraphResources({
+        reservationId: independent.reservation.id,
+        executionId: independent.reservation.executionId,
+        generation: 1,
+        confirmation: { kind: 'not-dispatched' },
+        now,
+      });
+      expect(f.persistence.acquireGraphResources(b.acquisition).acquired).toBe(true);
+      expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      f.persistence.close();
+    });
+
+    it('retains write ownership after restart and target creation without promoting stored evidence to fresh admission', async () => {
+      const f = fixture(undefined, true);
+      const workspace = join(dirname(f.path), 'workspace');
+      const a = await writeMission(f, workspace);
+      const held = f.persistence.acquireGraphResources(a.acquisition);
+      if (!held.acquired) throw new Error('Expected write owner');
+      f.persistence.close();
+      writeFileSync(join(workspace, 'shared.ts'), 'created after reservation');
+      const restored = new SqlitePersistenceClient(f.path);
+      restored.recoverInterruptedTeamExecutions('2026-09-11T00:01:00.000Z');
+      const saved = restored.listGraphResourceReservations(a.mission.id)[0]!;
+      expect(saved.state).toBe('quarantined');
+      expect(saved.writeFootprints).toHaveLength(1);
+      const second = fixture({ persistence: restored, path: f.path }, true);
+      const b = await writeMission(second, workspace);
+      expect(restored.acquireGraphResources(b.acquisition)).toMatchObject({
+        acquired: false,
+        reason: 'write-conflicts',
+      });
+      restored.releaseGraphResources({
+        reservationId: held.reservation.id,
+        executionId: held.reservation.executionId,
+        generation: 1,
+        confirmation: { kind: 'not-dispatched' },
+        now,
+      });
+      expect(() =>
+        restored.acquireGraphResources({
+          ...b.acquisition,
+          writeFootprints: saved.writeFootprints,
+        }),
+      ).toThrow('Fresh graph write preparation');
+      expect(restored.acquireGraphResources(b.acquisition).acquired).toBe(true);
+      expect(restored.checkTeamIntegrity().inconsistencies).toEqual([]);
+      restored.close();
+    });
+
+    it('rejects missing claims and rolls write ownership back with resource insertion failure', async () => {
+      const f = fixture(undefined, true);
+      const a = await writeMission(
+        f,
+        join(dirname(f.path), 'workspace'),
+        ['a.ts', 'b.ts'],
+        'device',
+      );
+      expect(() =>
+        f.persistence.acquireGraphResources({
+          missionId: a.mission.id,
+          stepKey: 'a',
+          expectedGeneration: 1,
+          now,
+        }),
+      ).toThrow('Fresh graph write preparation');
+      expect(() =>
+        f.persistence.acquireGraphResources({
+          ...a.acquisition,
+          writeFootprints: a.acquisition.writeFootprints.slice(0, 1),
+        }),
+      ).toThrow('declarations do not match');
+      const db = new Database(f.path);
+      db.exec(
+        "CREATE TRIGGER fail_write_acquisition BEFORE INSERT ON team_graph_resource_leases WHEN NEW.scope='worker' BEGIN SELECT RAISE(ABORT,'simulated acquisition failure'); END;",
+      );
+      expect(() => f.persistence.acquireGraphResources(a.acquisition)).toThrow(
+        'simulated acquisition failure',
+      );
+      expect(f.persistence.listGraphResourceReservations(a.mission.id)).toEqual([]);
+      expect(db.prepare('SELECT COUNT(*) AS count FROM team_graph_resource_leases').get()).toEqual({
+        count: 0,
+      });
+      db.exec('DROP TRIGGER fail_write_acquisition');
+      db.close();
+      expect(f.persistence.acquireGraphResources(a.acquisition).acquired).toBe(true);
+      f.persistence.close();
+    });
+
+    it('holds a write scope until real Git integration and its durable checkpoint complete', async () => {
+      const f = fixture(undefined, true);
+      const workspace = join(dirname(f.path), 'workspace');
+      mkdirSync(workspace);
+      expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+      writeFileSync(join(workspace, 'shared.ts'), 'base\n');
+      expect(spawnSync('git', ['-C', workspace, 'add', 'shared.ts']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          workspace,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit',
+          '-qm',
+          'base',
+        ]).status,
+      ).toBe(0);
+      const a = await writeMission(f, workspace);
+      const run = begin(f, a.mission.id, 'a', a.acquisition.writeFootprints);
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot: join(dirname(f.path), 'worktrees'),
+      });
+      const worker = {
+        agentId: run.execution.assigneeAgentId,
+        worktreeId: run.execution.id,
+        repoPath: a.workspace,
+      };
+      const worktree = await manager.create(worker);
+      f.persistence.recordTeamMissionWorktree({
+        ...worktree,
+        executionId: run.execution.id,
+        agentId: worker.agentId,
+        repoPath: a.workspace,
+        now,
+      });
+      f.persistence.updateTeamMissionWorktree({ executionId: run.execution.id, to: 'active', now });
+      writeFileSync(join(worktree.path, 'shared.ts'), 'integrated\n');
+      const sealed = await manager.finalizeChanges({
+        ...worker,
+        baseHead: worktree.baseHead,
+        commitMessage: 'write shared file',
+      });
+      f.persistence.updateTeamMissionWorktree({
+        executionId: run.execution.id,
+        to: 'ready',
+        workerHead: sealed.workerHead,
+        changedFiles: sealed.changedFiles,
+        now,
+      });
+      expect(() => f.persistence.completeGraphStep(completion(a.mission.id, 'a', run))).toThrow(
+        'integration is not confirmed',
+      );
+      const integrated = await manager.integrate({
+        repoPath: a.workspace,
+        baseHead: worktree.baseHead,
+        workerHead: sealed.workerHead,
+      });
+      expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('integrated\n');
+      const second = fixture({ persistence: f.persistence, path: f.path }, true);
+      const b = await writeMission(second, workspace);
+      expect(f.persistence.acquireGraphResources(b.acquisition)).toMatchObject({
+        acquired: false,
+        reason: 'write-conflicts',
+      });
+      expect(() => f.persistence.completeGraphStep(completion(a.mission.id, 'a', run))).toThrow(
+        'integration is not confirmed',
+      );
+      f.persistence.updateTeamMissionWorktree({
+        executionId: run.execution.id,
+        to: 'integrated',
+        integratedHead: integrated.integratedHead,
+        now,
+      });
+      const complete = completion(a.mission.id, 'a', run);
+      f.persistence.completeGraphStep({
+        ...complete,
+        checkpoint: {
+          ...complete.checkpoint,
+          gitHead: integrated.integratedHead,
+          changedFiles: [...sealed.changedFiles],
+          workspaceDigest: f.persistence.getEffectiveWorkspaceSet(f.task.id).digest,
+        },
+      });
+      expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('released');
+      expect(f.persistence.acquireGraphResources(b.acquisition).acquired).toBe(true);
+      expect(await manager.cleanup(worker)).toMatchObject({ outcome: 'removed' });
+      f.persistence.updateTeamMissionWorktree({
+        executionId: run.execution.id,
+        to: 'cleaned',
+        now,
+      });
+      expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      f.persistence.close();
+    });
+
+    it('migrates older write reservations to recovery without inferring an empty write scope', async () => {
+      const f = fixture(undefined, true);
+      const workspace = join(dirname(f.path), 'workspace');
+      const a = await writeMission(f, workspace);
+      const held = f.persistence.acquireGraphResources(a.acquisition);
+      if (!held.acquired) throw new Error('Expected write reservation');
+      f.persistence.close();
+      const old = new Database(f.path);
+      old.exec(
+        'DROP TRIGGER graph_write_inventory_immutable; ALTER TABLE team_graph_resource_reservations DROP COLUMN write_claims_digest; ALTER TABLE team_graph_resource_reservations DROP COLUMN write_claims_json; DELETE FROM schema_migrations WHERE version=88;',
+      );
+      old.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      expect(restored.listGraphResourceReservations(a.mission.id)[0]).toMatchObject({
+        state: 'quarantined',
+        writeFootprints: [],
+      });
+      const second = fixture({ persistence: restored, path: f.path }, true);
+      const b = await writeMission(second, workspace);
+      expect(() => restored.acquireGraphResources(b.acquisition)).toThrow(
+        'write owner requires recovery',
+      );
+      const reader = fixture({ persistence: restored, path: f.path });
+      const readMission = resourceMission(reader);
+      expect(reserve(reader, readMission.id).state).toBe('reserved');
+      restored.releaseGraphResources({
+        reservationId: held.reservation.id,
+        executionId: held.reservation.executionId,
+        generation: 1,
+        confirmation: { kind: 'not-dispatched' },
+        now,
+      });
+      expect(restored.acquireGraphResources(b.acquisition).acquired).toBe(true);
+      restored.close();
+      const again = new SqlitePersistenceClient(f.path);
+      expect(again.checkTeamIntegrity().inconsistencies).toEqual([]);
+      again.close();
+    });
+
     it('uses real graph ownership to keep resource and dependency waiters out of Scheduler slots', async () => {
       const f = fixture(undefined, false, ['a', 'b', 'c']);
       const plan = structuredClone(f.plan);
@@ -658,6 +1018,12 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       ];
       const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
       f.persistence.saveGraphDocument(document, 1);
+      const review = await reviewGraphMission(
+        { taskId: f.task.id, instanceId: randomUUID(), renderRevision: document.renderRevision },
+        document,
+        () => graphMissionContextFor(f.persistence, f.task.id),
+      );
+      if (!review.writeFootprints) throw new Error('Expected prepared writes');
       const mission = f.persistence.createGraphTeamMission({
         ...f.input,
         renderRevision: document.renderRevision,
@@ -669,7 +1035,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           new Set(f.workers.map((worker) => worker.id)),
         ),
       });
-      const run = begin(f, mission.id, 'a');
+      const run = begin(f, mission.id, 'a', review.writeFootprints);
       const held = run.reservation;
       const attempt = run.attempt;
       expect(() => f.persistence.completeGraphStep(completion(mission.id, 'a', run))).toThrow(
@@ -692,13 +1058,15 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         'UPDATE team_graph_mission_steps SET checkpoint_generation=generation,checkpoint_attempt_id=? WHERE execution_id=?',
       ).run(attempt.id, held.executionId);
       db.close();
-      f.persistence.releaseGraphResources({
-        reservationId: held.id,
-        executionId: held.executionId,
-        generation: 1,
-        confirmation: { kind: 'attempt-stopped', attemptId: attempt.id },
-        now,
-      });
+      expect(() =>
+        f.persistence.releaseGraphResources({
+          reservationId: held.id,
+          executionId: held.executionId,
+          generation: 1,
+          confirmation: { kind: 'attempt-stopped', attemptId: attempt.id },
+          now,
+        }),
+      ).toThrow('integration is not confirmed');
       expect(
         f.persistence.acquireGraphResources({
           missionId: mission.id,
@@ -1160,12 +1528,15 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       f.persistence.close();
       const old = new Database(f.path);
       old.exec(
-        'DROP TABLE team_graph_resource_leases; DROP TABLE team_graph_resource_reservations; DROP TABLE team_graph_mission_steps; DROP TABLE team_graph_missions; ALTER TABLE team_missions DROP COLUMN mode; DELETE FROM schema_migrations WHERE version IN (86, 87);',
+        'DROP TABLE team_graph_resource_leases; DROP TABLE team_graph_resource_reservations; DROP TABLE team_graph_mission_steps; DROP TABLE team_graph_missions; ALTER TABLE team_missions DROP COLUMN mode; DELETE FROM schema_migrations WHERE version IN (86, 87, 88);',
       );
       old.close();
       const migrated = new SqlitePersistenceClient(f.path);
       expect(migrated.getTeamMission(legacy.id).mode).toBe('sequential');
       expect(migrated.getGraphTeamMission(legacy.id)).toBeNull();
+      const added = fixture({ persistence: migrated, path: f.path });
+      const graphMission = migrated.createGraphTeamMission(added.input);
+      expect(reserve(added, graphMission.id).writeFootprints).toEqual([]);
       expect(migrated.checkTeamIntegrity().inconsistencies).toEqual([]);
       migrated.close();
       const clean = fixture();
@@ -1191,8 +1562,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   });
 else
   describe('graph Mission persistence Electron ABI bridge', () => {
-    it('runs the graph Mission transaction suite with Electron', () => {
-      const result = spawnSync(
+    it('runs the graph Mission transaction suite with Electron', async () => {
+      await promisify(execFile)(
         electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -1204,8 +1575,8 @@ else
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
           timeout: 60_000,
+          maxBuffer: 10 * 1024 * 1024,
         },
       );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     }, 65_000);
   });

@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   existsSync,
   mkdtempSync,
@@ -7823,8 +7824,10 @@ if (runsWithElectronAbi)
         { version: 85 },
         { version: 86 },
         { version: 87 },
+        { version: 88 },
       ]);
       for (const [table, columns] of [
+        ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
         [
           'turns',
           [
@@ -8200,8 +8203,10 @@ else
   describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
     it(
       'runs the SQLite integration suite with the bundled Electron Node ABI',
-      () => {
-        const result = spawnSync(
+      async () => {
+        // The Windows child can exceed Vitest's 60s RPC deadline. Keep this worker's event loop
+        // available to receive reporting acknowledgements while SQLite tests run in Electron.
+        await promisify(execFile)(
           electronTestExecutablePath(),
           [
             join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -8213,9 +8218,9 @@ else
             encoding: 'utf8',
             env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
             timeout: persistenceBridgeTimeoutMs,
+            maxBuffer: 10 * 1024 * 1024,
           },
         );
-        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       },
       persistenceBridgeTimeoutMs + 5_000,
     );

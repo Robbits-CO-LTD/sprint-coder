@@ -44,6 +44,7 @@ async function bind(root: string, path: string | null, semanticKeys: string[] = 
   const missingSuffix = parts.slice(count);
   return {
     stepKey: randomUUID(),
+    relativePath: path,
     rootId: guard.rootId,
     rootIdentityDigest: binding.rootIdentityDigest,
     canonicalPath: join(guard.resolvedPath, ...missingSuffix),
