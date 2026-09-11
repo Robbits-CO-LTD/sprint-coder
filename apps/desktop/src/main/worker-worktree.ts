@@ -147,10 +147,7 @@ export class WorkerWorktreeManager {
     if (rootPaths.length === 0) throw new WorktreeError('invalid_input', 'Workspace has no roots');
     const rootsByRepository = new Map<string, string[]>();
     for (const rootPath of rootPaths) {
-      const result = await this.runGit(rootPath, ['rev-parse', '--show-toplevel'], 'create_failed');
-      const repoPath = await realpath(resolve(result.stdout.trim()));
-      if (!isAbsolute(repoPath))
-        throw new WorktreeError('create_failed', 'Git returned an invalid repository path');
+      const repoPath = await this.resolveRepositoryPath(rootPath);
       const roots = rootsByRepository.get(repoPath) ?? [];
       roots.push(await realpath(resolve(rootPath)));
       rootsByRepository.set(repoPath, roots);
@@ -194,6 +191,15 @@ export class WorkerWorktreeManager {
       );
     }
     return Object.freeze(repositories);
+  }
+
+  /** Resolve the lock namespace without rejecting another integration's temporary working state. */
+  async resolveRepositoryPath(rootPath: string): Promise<string> {
+    const result = await this.runGit(rootPath, ['rev-parse', '--show-toplevel'], 'create_failed');
+    const repoPath = await realpath(resolve(result.stdout.trim()));
+    if (!isAbsolute(repoPath))
+      throw new WorktreeError('create_failed', 'Git returned an invalid repository path');
+    return repoPath;
   }
 
   /** Deterministic worktree directory for an execution or agent. */

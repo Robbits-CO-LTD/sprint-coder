@@ -1641,18 +1641,7 @@ export class TeamCoordinator {
             now: this.isoNow(),
           });
         else {
-          const integrated = await this.worktreeManager.integrate({
-            repoPath: missionWorktree.repoPath,
-            baseHead: missionWorktree.baseHead,
-            workerHead: finalized.workerHead,
-          });
-          missionWorktree = this.persistence.updateTeamMissionWorktree({
-            executionId: input.executionId,
-            to: 'integrated',
-            integratedHead: integrated.integratedHead,
-            reason: null,
-            now: this.isoNow(),
-          });
+          missionWorktree = await this.queueMissionWorktreeIntegration(missionWorktree);
         }
       }
       if (executionIsolation !== null) {
@@ -3334,6 +3323,70 @@ export class TeamCoordinator {
     return integrated;
   }
 
+  private async queueMissionWorktreeIntegration(
+    initial: TeamMissionWorktreeRecord,
+  ): Promise<TeamMissionWorktreeRecord> {
+    if (!this.worktreeManager) throw new Error('Mission worktree manager is unavailable');
+    const manager = this.worktreeManager;
+    const repository = await manager.resolveRepositoryPath(initial.repoPath);
+    const root = await workspaceMutationBinding(initial.repoPath);
+    const roots = [
+      {
+        rootId: 'legacy-primary',
+        mutationKey: root.workspaceKey,
+        identity: root.rootIdentityDigest,
+      },
+      repositoryLeaseBinding(repository, 1),
+    ];
+    let integrated: TeamMissionWorktreeRecord | null = null;
+    await this.integrationScheduler.submit({
+      executionId: initial.executionId,
+      mutationKeys: roots.map((root) => root.mutationKey),
+      run: async () => {
+        const current = this.persistence.getTeamMissionWorktree(initial.executionId);
+        if (
+          !current ||
+          current.state !== 'ready' ||
+          current.workerHead === null ||
+          current.workerHead !== initial.workerHead ||
+          current.baseHead !== initial.baseHead ||
+          current.agentId !== initial.agentId ||
+          current.repoPath !== initial.repoPath
+        )
+          throw new Error('Queued Mission integration changed');
+        const freshRoot = await workspaceMutationBinding(current.repoPath);
+        if (
+          freshRoot.rootIdentityDigest !== root.rootIdentityDigest ||
+          (await manager.resolveRepositoryPath(current.repoPath)) !== repository
+        )
+          throw new Error('Queued Mission repository identity changed');
+        this.persistence.acquireTeamIntegrationRootLeases({
+          executionId: current.executionId,
+          roots,
+          now: this.isoNow(),
+        });
+        try {
+          const result = await manager.integrate({
+            repoPath: repository,
+            baseHead: current.baseHead,
+            workerHead: current.workerHead,
+          });
+          integrated = this.persistence.updateTeamMissionWorktree({
+            executionId: current.executionId,
+            to: 'integrated',
+            integratedHead: result.integratedHead,
+            reason: null,
+            now: this.isoNow(),
+          });
+        } finally {
+          this.persistence.releaseTeamIntegrationRootLeases(current.executionId);
+        }
+      },
+    });
+    if (integrated === null) throw new Error('Mission integration completed without a result');
+    return integrated;
+  }
+
   private async revalidateIntegratedIsolation(
     initial: TeamExecutionIsolationRecord,
   ): Promise<TeamExecutionIsolationRecord> {
@@ -3922,20 +3975,24 @@ function isolationLeaseBindings(
 }[] {
   // Root keys preserve the existing mutation boundary, while the canonical repository key is
   // shared by sibling roots so two jobs can never cherry-pick into the same parent checkout.
-  const repositories = isolation.repositories.map(({ ordinal, repoPath }) => {
-    const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
-    const mutationKey = createHash('sha256')
-      .update(`team-repository\0${canonicalKey}`)
-      .digest('hex');
-    return {
-      rootId: `repository-${ordinal}`,
-      mutationKey,
-      identity: createHash('sha256')
-        .update(`team-repository-identity\0${canonicalKey}`)
-        .digest('hex'),
-    };
-  });
+  const repositories = isolation.repositories.map(({ ordinal, repoPath }) =>
+    repositoryLeaseBinding(repoPath, ordinal),
+  );
   return [...isolation.roots, ...repositories];
+}
+
+function repositoryLeaseBinding(
+  repoPath: string,
+  ordinal: number,
+): { rootId: string; mutationKey: string; identity: string } {
+  const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
+  return {
+    rootId: `repository-${ordinal}`,
+    mutationKey: createHash('sha256').update(`team-repository\0${canonicalKey}`).digest('hex'),
+    identity: createHash('sha256')
+      .update(`team-repository-identity\0${canonicalKey}`)
+      .digest('hex'),
+  };
 }
 
 function replaceIsolationRepository(

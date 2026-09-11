@@ -1531,6 +1531,167 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each(['legacy', 'project'] as const)(
+      'serializes legacy Mission and Project integration with %s arriving first',
+      async (firstArrival) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Legacy Task Mission');
+        const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        const projectRoot = join(realpathSync(workspace), 'project');
+        mkdirSync(projectRoot);
+        writeFileSync(join(projectRoot, 'README.md'), 'project base\n');
+        expect(spawnSync('git', ['-C', workspace, 'add', 'project']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'project root',
+          ]).status,
+        ).toBe(0);
+        const project = persistence.createProject({
+          name: 'Nested Project root',
+          folders: [
+            {
+              id: '50000000-0000-4000-8000-000000000003',
+              path: projectRoot,
+              canonicalPath: projectRoot,
+              label: 'project',
+              role: 'primary',
+              workspaceKey: 'd'.repeat(64),
+              rootIdentityDigest: 'e'.repeat(64),
+            },
+          ],
+        });
+        const projectTask = persistence.createTask('Project writer', false, project.id);
+        const runtime = new BlockingDistinctFileRuntime();
+        const execute = runtime.execute.bind(runtime);
+        vi.spyOn(runtime, 'execute').mockImplementation((input) =>
+          input.worker.writeCapable
+            ? execute(input)
+            : TestWorkerRuntime.prototype.execute.call(runtime, input),
+        );
+        const manager = new TrackingIntegrationManager({ worktreesRoot });
+        const scheduler = new TeamIntegrationScheduler();
+        let releaseIntegration!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          releaseIntegration = resolve;
+        });
+        const integrate = manager.integrate.bind(manager);
+        const integrationCalls = vi
+          .spyOn(manager, 'integrate')
+          .mockImplementation(async (input) => {
+            await barrier;
+            return integrate(input);
+          });
+        const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, scheduler);
+        const writer = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'legacy writer',
+          objective: 'write legacy output',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        const reader = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'reader',
+          objective: 'verify legacy output',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const projectWriter = await coordinator.hireWorker({
+          taskId: projectTask.id,
+          role: 'project writer',
+          objective: 'write project output',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        const mission = await coordinator.assignMission({
+          taskId: task.id,
+          objective: 'legacy Mission concurrent with Project',
+          doneCriteria: ['output verified'],
+          steps: [
+            {
+              workerId: writer.id,
+              objective: 'legacy',
+              doneCriteria: ['legacy.txt exists'],
+              access: 'workspace-write',
+            },
+            {
+              workerId: reader.id,
+              objective: 'verify',
+              doneCriteria: ['verified'],
+              access: 'read-only',
+            },
+          ],
+        });
+        await waitFor(() => runtime.releases.length === 1);
+        const projectExecution = await coordinator.assignTask({
+          taskId: projectTask.id,
+          targetAgentId: projectWriter.id,
+          content: 'project',
+          doneCriteria: ['project.txt exists'],
+          accessMode: 'workspace-write',
+        });
+        await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+        const legacyExecutionId = mission.steps[0]!.executionId;
+        expect(persistence.getTeamExecutionIsolation(legacyExecutionId)).toBeNull();
+        expect(persistence.getTeamMissionWorktree(legacyExecutionId)?.state).toBe('active');
+        expect(persistence.getTeamExecutionIsolation(projectExecution.executionId)?.phase).toBe(
+          'running',
+        );
+        const firstIndex = firstArrival === 'legacy' ? 0 : 1;
+        const executionIds = [legacyExecutionId, projectExecution.executionId];
+        try {
+          runtime.releases[firstIndex]!();
+          await waitFor(() => integrationCalls.mock.calls.length === 1);
+          runtime.releases[1 - firstIndex]!();
+          await waitFor(
+            () =>
+              scheduler.snapshot().queuedExecutionIds.length === 1 ||
+              integrationCalls.mock.calls.length === 2,
+          );
+          expect(scheduler.snapshot()).toEqual({
+            activeExecutionIds: [executionIds[firstIndex]],
+            queuedExecutionIds: [executionIds[1 - firstIndex]],
+          });
+          expect(integrationCalls).toHaveBeenCalledTimes(1);
+        } finally {
+          releaseIntegration();
+        }
+        await waitFor(
+          () =>
+            persistence.getTeamMission(mission.id).state === 'completed' &&
+            persistence.getTeamExecution(projectExecution.executionId).state === 'completed',
+          15_000,
+        );
+        expect(integrationCalls).toHaveBeenCalledTimes(2);
+        expect(manager.maxActiveIntegrations).toBe(1);
+        expect(readFileSync(join(workspace, 'legacy.txt'), 'utf8')).toBe('legacy\n');
+        expect(readFileSync(join(projectRoot, 'project.txt'), 'utf8')).toBe('project\n');
+        expect(spawnSync('git', ['-C', workspace, 'status', '--porcelain']).stdout.toString()).toBe(
+          '',
+        );
+        expect(
+          spawnSync('git', ['-C', workspace, 'rev-list', '--count', 'HEAD']).stdout.toString(),
+        ).toBe('4\n');
+        await waitFor(
+          () =>
+            persistence.getTeamExecutionIsolation(projectExecution.executionId)?.repositories[0]
+              ?.state === 'cleaned' &&
+            persistence.getTeamMissionWorktree(legacyExecutionId)?.state === 'cleaned',
+        );
+        persistence.close();
+      },
+      30_000,
+    );
+
     it('runs concurrent writers whose distinct roots share one repository', async () => {
       const persistence = createPersistence();
       const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-concurrent-repo-')));

@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: graph Attempt and checkpoint transactions
+## Current checkpoint: shared legacy Mission integration FIFO
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -71,6 +71,10 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 - A/B plus join C now pass real-SQLite begin/finish tests without manually seeding execution rows. Transaction-failure, stale owner/acknowledgement, duplicate finish, and crash-before-runtime-acceptance cases pass. Restart cancels non-running graph Attempts, preserves quarantined reservations and prevents automatic dispatch; acknowledged manual resume uses a new Attempt.
 - The runtime dispatcher and genuine user agreement are still not connected to these internal primitives. Main must supply actual stop evidence, not manufacture acknowledgement from a model report or a terminal database state. Final physical write-conflict and capability/connection/Git admission remains required before invoking them.
 
+The graph Attempt/checkpoint changes passed all CI at 79ed3e8 (run 34561487786). Task-root legacy Mission integration now uses the same resource-aware FIFO and durable root/repository leases as Project isolation. Repository keys resolve the canonical Git top level without rejecting another integration's temporary working state; the queued legacy job rechecks its saved worktree and root identity before acquiring leases. A deterministic real-Git test holds the first integration while the other arrives, in both orders, and verifies one active integration, both commits/files and cleanup. This closes the legacy integration bypass identified in the canonical plan; it does not connect graph runtime admission or establish process-stop evidence.
+
+Validation: the new mixed-path cases fail against the previous coordinator and pass with the fix. Electron-ABI Coordinator/worktree/FIFO/graph-persistence suites pass 104 tests; desktop typecheck, scoped lint (one pre-existing warning), formatting and diff checks pass. A fresh hidden macOS package passes four normal Team/graph regression cases. These establish integration serialization and compatibility, not full graph execution acceptance.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                                              |
@@ -87,6 +91,6 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 
 ## Next action
 
-Verify the graph Attempt/checkpoint checkpoint on both operating systems. Connect genuine user agreement and the existing runtime dispatcher to the graph-aware Attempt/checkpoint and resource operations, obtaining actual runtime stop acknowledgements, preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish physical claim bindings and connect agreement to Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
+Verify the shared integration FIFO on both operating systems. Connect genuine user agreement and the existing runtime dispatcher to the graph-aware Attempt/checkpoint and resource operations, obtaining actual runtime stop acknowledgements, preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish physical claim bindings and connect agreement to Mission creation, including a fresh source/permission check before dispatch that does not reuse the viewer monitor as an authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84/v85 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.
