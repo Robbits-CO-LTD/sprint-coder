@@ -31,6 +31,23 @@ export function directoryCaseSensitive(
   path: string,
   identity: Pick<FileIdentity, 'dev' | 'ino'>,
 ): boolean {
+  return directoryRule('directoryCaseSensitive', path, identity);
+}
+
+export function directoryCanonicalUnicode(
+  path: string,
+  identity: Pick<FileIdentity, 'dev' | 'ino'>,
+): boolean {
+  if (process.platform !== 'darwin')
+    throw new NativeSafeFsError('INVALID_INPUT', 'Darwin directory required');
+  return directoryRule('directoryCanonicalUnicode', path, identity);
+}
+
+function directoryRule(
+  method: 'directoryCaseSensitive' | 'directoryCanonicalUnicode',
+  path: string,
+  identity: Pick<FileIdentity, 'dev' | 'ino'>,
+): boolean {
   if (
     !isAbsolute(path) ||
     path.includes('\0') ||
@@ -41,14 +58,11 @@ export function directoryCaseSensitive(
     throw new NativeSafeFsError('INVALID_INPUT', 'Invalid directory identity');
   const require = createRequire(join(__dirname, 'directory-name-rules-loader.cjs'));
   const addon: unknown = require(nativeSafeFsAddonPath());
-  if (
-    typeof addon !== 'object' ||
-    addon === null ||
-    !('directoryCaseSensitive' in addon) ||
-    typeof addon.directoryCaseSensitive !== 'function'
-  )
+  const query: unknown =
+    typeof addon === 'object' && addon !== null ? Reflect.get(addon, method) : null;
+  if (typeof query !== 'function')
     throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'Directory name rules are unavailable');
-  const result: unknown = addon.directoryCaseSensitive({
+  const result: unknown = query({
     path,
     dev: identity.dev,
     ino: identity.ino,

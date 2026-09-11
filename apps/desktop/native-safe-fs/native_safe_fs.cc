@@ -14,6 +14,7 @@
 #include <libproc.h>
 #include <sys/stdio.h>
 #include <sys/un.h>
+#include <sys/mount.h>
 #elif defined(__linux__)
 #include <linux/fs.h>
 #include <linux/memfd.h>
@@ -3440,7 +3441,7 @@ void Cleanup(void*) {
   state.closing_workspaces.clear();
 }
 
-napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
+napi_value DirectoryNameRule(napi_env env, napi_callback_info info, bool canonical_unicode) {
   size_t argc = 1;
   napi_value argv[1];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -3458,7 +3459,25 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
     return ThrowFailure(env, "ROOT_IDENTITY_CHANGED", "Directory identity changed");
   }
   int sensitive = -1;
+#if !defined(__APPLE__)
+  if (canonical_unicode) {
+    close(fd);
+    return ThrowFailure(env, "INVALID_INPUT", "Darwin directory required");
+  }
+#endif
 #if defined(__APPLE__)
+  if (canonical_unicode) {
+    struct statfs filesystem {};
+    if (fstatfs(fd, &filesystem) != 0) {
+      close(fd);
+      return ThrowFailure(env, "NATIVE_FAILURE", "Directory filesystem is unavailable");
+    }
+    const bool canonical = std::strcmp(filesystem.f_fstypename, "apfs") == 0;
+    close(fd);
+    napi_value result;
+    napi_get_boolean(env, canonical, &result);
+    return result;
+  }
   sensitive = static_cast<int>(fpathconf(fd, _PC_CASE_SENSITIVE));
 #elif defined(__linux__) && defined(FS_CASEFOLD_FL)
   int flags = 0;
@@ -3491,8 +3510,17 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
+  return DirectoryNameRule(env, info, false);
+}
+napi_value DirectoryCanonicalUnicode(napi_env env, napi_callback_info info) {
+  return DirectoryNameRule(env, info, true);
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+      {"directoryCanonicalUnicode", nullptr, DirectoryCanonicalUnicode, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"directoryCaseSensitive", nullptr, DirectoryCaseSensitive, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},

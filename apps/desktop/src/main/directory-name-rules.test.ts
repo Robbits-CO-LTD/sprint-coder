@@ -12,7 +12,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { directoryCaseSensitive, windowsCaseInsensitiveNamesEqual } from './directory-name-rules';
+import {
+  directoryCaseSensitive,
+  directoryCanonicalUnicode,
+  windowsCaseInsensitiveNamesEqual,
+} from './directory-name-rules';
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -65,6 +69,10 @@ describe('directory name rules', () => {
     await rename(f.path, previous);
     await mkdir(f.path);
     expect(() => directoryCaseSensitive(f.path, f.identity)).toThrow('Directory identity changed');
+    if (process.platform === 'darwin')
+      expect(() => directoryCanonicalUnicode(f.path, f.identity)).toThrow(
+        'Directory identity changed',
+      );
     expect(() => directoryCaseSensitive('../relative', f.identity)).toThrow(
       'Invalid directory identity',
     );

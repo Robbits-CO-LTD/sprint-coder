@@ -48,6 +48,26 @@ async function fixture() {
 }
 
 describe('path guard', () => {
+  it.each(['src/\uD800.txt', 'src/\uDC00.txt'])(
+    'rejects unpaired surrogate path %s before UTF-8 conversion',
+    async (targetPath) => {
+      const { workspace } = await fixture();
+      await expect(
+        canonicalizeResourcePath({ workspacePath: workspace, targetPath, operation: 'write' }),
+      ).rejects.toMatchObject({ code: 'INVALID_PATH' });
+    },
+  );
+  it('preserves valid supplementary Unicode path characters', async () => {
+    const { workspace } = await fixture();
+    await writeFile(join(workspace, 'src/😀.txt'), 'valid');
+    await expect(
+      canonicalizeResourcePath({
+        workspacePath: workspace,
+        targetPath: 'src/😀.txt',
+        operation: 'read',
+      }),
+    ).resolves.toMatchObject({ targetIdentity: { kind: 'file' } });
+  });
   it.skipIf(process.platform !== 'win32')(
     'canonicalizes an available Windows 8.3 alias',
     async ({ skip }) => {

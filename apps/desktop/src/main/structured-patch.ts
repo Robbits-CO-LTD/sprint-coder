@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { canonicalizeResourcePath, type CanonicalPathIdentity } from './path-guard';
-import { directoryCaseSensitive, windowsCaseInsensitiveNamesEqual } from './directory-name-rules';
+import {
+  directoryCaseSensitive,
+  directoryCanonicalUnicode,
+  windowsCaseInsensitiveNamesEqual,
+} from './directory-name-rules';
 import { foldUnicodeFileName } from './unicode-file-name-fold';
 import type {
   FileRevisionToken,
@@ -557,14 +561,22 @@ function claimMissingEndpoint(
     )
       continue;
     const previousName = basename(previous.resolvedPath);
-    // Canonical Unicode aliases also collide on case-sensitive macOS volumes.
-    const unicodeAlias =
-      process.platform === 'darwin' && previousName.normalize('NFD') === name.normalize('NFD');
     const folded =
       process.platform === 'win32'
         ? (value: string) => value.normalize('NFD').toLowerCase().toUpperCase()
         : foldUnicodeFileName;
-    if (!unicodeAlias && folded(previousName) !== folded(name)) continue;
+    if (folded(previousName) !== folded(name)) continue;
+    const canonicalUnicode =
+      process.platform === 'darwin' &&
+      directoryCanonicalUnicode(dirname(candidate.resolvedPath), candidate.parentIdentity);
+    // HFS+ and network filesystems have different Unicode rules. Do not infer them from Darwin.
+    if (process.platform === 'darwin' && !canonicalUnicode) {
+      const asciiCaseKey = (value: string) =>
+        value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+      if (asciiCaseKey(previousName) !== asciiCaseKey(name)) continue;
+    }
+    const unicodeAlias =
+      canonicalUnicode && previousName.normalize('NFD') === name.normalize('NFD');
     if (process.platform === 'win32' && !windowsCaseInsensitiveNamesEqual(previousName, name))
       continue;
     if (

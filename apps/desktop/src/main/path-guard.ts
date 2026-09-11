@@ -397,6 +397,8 @@ const MAX_TOTAL_PATH_LENGTH = 4_096;
 function validateInput(targetPath: string): void {
   if (targetPath.length === 0 || targetPath.includes('\0'))
     throw new PathGuardError('INVALID_PATH', 'Invalid target path');
+  if (/[\uD800-\uDFFF]/u.test(targetPath))
+    throw new PathGuardError('INVALID_PATH', 'Target path contains an unpaired surrogate');
   if (targetPath.length > MAX_TOTAL_PATH_LENGTH)
     throw new PathGuardError('INVALID_PATH', 'Target path exceeds the maximum supported length');
   if (targetPath.split(/[\\/]+/).some((segment) => segment.length > MAX_PATH_SEGMENT_LENGTH))
