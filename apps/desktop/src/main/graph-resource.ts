@@ -83,6 +83,7 @@ export type GraphAttemptStart = Readonly<{
 }>;
 /** Internal persistence input after Main observes runtime stop and validates completion/integration. */
 export type GraphStepCompletion = Readonly<{
+  integrationResumeOrdinal?: number;
   missionId: string;
   stepKey: string;
   generation: number;

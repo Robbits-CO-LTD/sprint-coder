@@ -885,6 +885,19 @@ export const teamMissionCheckpointSchema = z
 export type TeamMissionCheckpoint = z.infer<typeof teamMissionCheckpointSchema>;
 export const teamMissionStepSummarySchema = z
   .object({
+    graph: z
+      .object({
+        key: z.string().min(1).max(128),
+        nodeId: z.string().min(1).max(128),
+        generation: z.number().int().positive(),
+        resourceState: z.enum(['reserved', 'active', 'quarantined', 'released']).nullable(),
+        waitReason: z
+          .enum(['dependencies', 'resources', 'write-conflicts', 'owner-active'])
+          .nullable(),
+        integrationResumeAvailable: z.boolean(),
+      })
+      .strict()
+      .optional(),
     ordinal: z.number().int().min(1).max(12),
     executionId: idSchema,
     workerId: idSchema,
@@ -910,6 +923,10 @@ export type TeamMissionStepSummary = z.infer<typeof teamMissionStepSummarySchema
 export const teamMissionSummarySchema = z
   .object({
     mode: z.enum(['sequential', 'graph']).optional(),
+    graph: z
+      .object({ id: z.string().uuid(), semanticRevision: z.number().int().positive() })
+      .strict()
+      .optional(),
     id: idSchema,
     teamId: idSchema,
     createdByAgentId: idSchema,
@@ -3855,8 +3872,21 @@ export const graphSourceStatusSchema = graphSourceCheckInputSchema
   })
   .strict();
 export type GraphSourceStatus = z.infer<typeof graphSourceStatusSchema>;
+export const graphMissionResumeInputSchema = graphSourceCheckInputSchema
+  .extend({
+    missionId: idSchema,
+    stepKey: graphMissionKeySchema,
+    generation: z.number().int().positive(),
+  })
+  .strict();
+export type GraphMissionResumeInput = z.infer<typeof graphMissionResumeInputSchema>;
+export const graphMissionStartInputSchema = graphSourceCheckInputSchema
+  .extend({ contextDigest: digestSchema })
+  .strict();
+export type GraphMissionStartInput = z.infer<typeof graphMissionStartInputSchema>;
 export const graphMissionReviewSchema = graphSourceCheckInputSchema
   .extend({
+    contextDigest: digestSchema,
     checkedAt: z.string().datetime(),
     matched: z.boolean(),
     issues: z
@@ -5573,6 +5603,8 @@ export interface SprintCoderApi {
   graphs: {
     checkSources(input: GraphSourceCheckInput): Promise<GraphSourceStatus>;
     reviewMission(input: GraphSourceCheckInput): Promise<GraphMissionReview>;
+    startMission(input: GraphMissionStartInput): Promise<TeamMissionSummary>;
+    resumeIntegration(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
     subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
@@ -5911,6 +5943,8 @@ export const IPC_CHANNELS = {
   graphsSourceCheck: 'sprint-coder:graphs:source-check',
   graphsSourceStatus: 'sprint-coder:graphs:source-status',
   graphsMissionReview: 'sprint-coder:graphs:mission-review',
+  graphsMissionStart: 'sprint-coder:graphs:mission-start',
+  graphsMissionResumeIntegration: 'sprint-coder:graphs:mission-resume-integration',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

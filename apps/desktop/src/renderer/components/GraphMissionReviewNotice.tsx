@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { graphStartActivationIntent } from '../../graph-activation-intent';
 import type { GraphMissionReview, GraphSourceCheckInput } from '@sprint-coder/contracts';
 
 const messages: Record<GraphMissionReview['issues'][number]['code'], string> = {
@@ -21,7 +22,13 @@ export function GraphMissionReviewNotice({
   reviewKey: string | null;
 }) {
   const { taskId, instanceId, renderRevision } = input;
-  const scopeKey = JSON.stringify([taskId, instanceId, renderRevision, reviewKey]);
+  const [retry, setRetry] = useState(0);
+  const [start, setStart] = useState<{
+    key: string;
+    state: 'starting' | 'started' | 'failed';
+    error?: string;
+  } | null>(null);
+  const scopeKey = JSON.stringify([taskId, instanceId, renderRevision, reviewKey, retry]);
   const [result, setResult] = useState<{ key: string; value: GraphMissionReview | null } | null>(
     null,
   );
@@ -49,6 +56,26 @@ export function GraphMissionReviewNotice({
     };
   }, [instanceId, taskId, renderRevision, reviewKey, scopeKey]);
   const current = reviewKey !== null && result?.key === scopeKey ? result : null;
+  const action = start?.key === scopeKey ? start : null;
+  const startInput = current?.value?.matched
+    ? { taskId, instanceId, renderRevision, contextDigest: current.value.contextDigest }
+    : null;
+  const begin = async () => {
+    if (startInput === null || action?.state === 'starting' || action?.state === 'started') return;
+    setStart({ key: scopeKey, state: 'starting' });
+    try {
+      const api = window.sprintCoder?.graphs;
+      if (!api) throw new Error('アプリとの接続を確認できませんでした。');
+      await api.startMission(startInput);
+      setStart({ key: scopeKey, state: 'started' });
+    } catch (error) {
+      setStart({
+        key: scopeKey,
+        state: 'failed',
+        error: error instanceof Error ? error.message : '開始できませんでした。',
+      });
+    }
+  };
   return (
     <div data-testid="graph-mission-review" aria-live="polite">
       {current === null ? (
@@ -71,6 +98,29 @@ export function GraphMissionReviewNotice({
           </ul>
         </>
       )}
+      {startInput !== null && action?.state !== 'failed' ? (
+        <button
+          type="button"
+          className="button button-primary"
+          data-computer-use-activation="graph-start"
+          data-computer-use-intent={graphStartActivationIntent(startInput)}
+          disabled={action?.state === 'starting' || action?.state === 'started'}
+          onClick={() => void begin()}
+        >
+          {action?.state === 'starting'
+            ? '開始しています…'
+            : action?.state === 'started'
+              ? '開始しました'
+              : 'この計画で開始'}
+        </button>
+      ) : null}
+      {action?.state === 'failed' ? <p role="alert">{action.error}</p> : null}
+      {current !== null &&
+      (current.value === null || !current.value.matched || action?.state === 'failed') ? (
+        <button type="button" className="button" onClick={() => setRetry((value) => value + 1)}>
+          もう一度確認
+        </button>
+      ) : null}
     </div>
   );
 }

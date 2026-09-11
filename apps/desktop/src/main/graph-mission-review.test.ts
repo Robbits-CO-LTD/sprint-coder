@@ -140,8 +140,9 @@ describe('graph Mission reference review', () => {
       rootIdentityDigest: null,
     });
     await expect(stat(join(f.path, 'new'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(result.summary.contextDigest).toBe(result.contextDigest);
     expect(JSON.stringify(result.summary)).not.toMatch(
-      /canonicalPath|contentHash|rootIdentityDigest|contextDigest/u,
+      /canonicalPath|contentHash|rootIdentityDigest/u,
     );
   });
 

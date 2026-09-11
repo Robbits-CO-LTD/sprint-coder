@@ -12,7 +12,7 @@ export type ComputerUseActivationPermit = Readonly<{
   frameRoutingId: number;
   windowId: number;
   inputKind: 'mouse' | 'keyboard';
-  pickerKind: 'application' | 'window' | 'start' | 'approval';
+  pickerKind: 'application' | 'window' | 'start' | 'approval' | 'graph-start' | 'graph-resume';
   intent: string | null;
   issuedAtMs: number;
 }>;

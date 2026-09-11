@@ -24,6 +24,29 @@ const BRIDGE = `(() => {
     parent.postMessage({ type: 'sprint-graph-selection', instanceId: root.dataset.graphInstance,
       graphId: root.dataset.graphId, revision: Number(root.dataset.graphRevision), kind, id }, '*');
   };
+  const labels = { assigned: '開始待ち', queued: '待機中', waiting_verification: '確認待ち', waiting_rate_limit: '接続待ち', running: '実行中', waiting_resume: '再開待ち', completed: '完了', failed: '失敗', canceled: '中止' };
+  const saved = new Map();
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (event.source !== parent || !data || data.type !== 'sprint-graph-execution' || data.instanceId !== root.dataset.graphInstance || data.graphId !== root.dataset.graphId || data.revision !== Number(root.dataset.graphRevision) || !Array.isArray(data.nodes) || data.nodes.length > 64) return;
+    if (data.nodes.some((node) => !node || typeof node.id !== 'string' || node.id.length > 128 || !Object.hasOwn(labels, node.state))) return;
+    for (const [element, previous] of saved) {
+      element.style.filter = previous.filter;
+      if (previous.label === null) element.removeAttribute('aria-label'); else element.setAttribute('aria-label', previous.label);
+      delete element.dataset.executionState;
+    }
+    saved.clear();
+    for (const node of data.nodes) {
+      const element = document.querySelector('[data-node-id="' + CSS.escape(node.id) + '"]');
+      if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue;
+      const label = element.getAttribute('aria-label');
+      saved.set(element, { filter: element.style.filter, label });
+      element.dataset.executionState = node.state;
+      element.setAttribute('aria-label', (label || node.id) + ' · ' + labels[node.state]);
+      const color = node.state === 'completed' ? '#22c55e' : node.state === 'running' ? '#38bdf8' : ['failed','canceled'].includes(node.state) ? '#f87171' : '#fbbf24';
+      element.style.filter = 'drop-shadow(0 0 4px ' + color + ')';
+    }
+  });
   document.addEventListener('click', send, true);
   document.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') send(event); }, true);
 })();`;

@@ -22,6 +22,7 @@ import {
   graphWriteConflictPairs,
   type GraphWriteFootprint,
 } from './graph-write-conflicts';
+import { graphMissionStoredContextSchema, type GraphMissionRecord } from './graph-mission-record';
 
 export type GraphMissionReviewContext = {
   workspace: EffectiveWorkspaceSet;
@@ -297,6 +298,7 @@ export async function reviewGraphMission(
   return {
     summary: {
       ...input,
+      contextDigest: initialDigest,
       matched: issues.length === 0,
       checkedAt: new Date().toISOString(),
       issues,
@@ -307,6 +309,66 @@ export async function reviewGraphMission(
     writeFootprints: issues.length === 0 ? writeFootprints : null,
     writeConflicts: issues.length === 0 ? graphWriteConflictPairs(writeFootprints) : null,
   };
+}
+
+/** Fresh per-step admission. Worker activity is checked by the shared Scheduler; authority and
+ * root bindings must still match the agreed plan after filesystem preparation completes. */
+export async function prepareGraphStepWriteFootprints(
+  graph: GraphMissionRecord,
+  stepKey: string,
+  currentContext: () => GraphMissionReviewContext,
+): Promise<readonly GraphWriteFootprint[]> {
+  const step = graph.plan.steps.find((step) => step.key === stepKey);
+  if (!step) throw new Error('Graph step not found');
+  const agreed = graphMissionStoredContextSchema.parse(JSON.parse(graph.contextJson));
+  const validate = () => {
+    const context = currentContext();
+    const worker = context.workers.find((worker) => worker.id === step.workerId);
+    const previous = agreed.workers.find((worker) => worker.id === step.workerId);
+    if (
+      context.policyEpoch !== graph.policyEpoch ||
+      context.workspace.digest !== graph.workspaceDigest ||
+      context.team?.id !== agreed.team.id ||
+      context.team.state !== 'active' ||
+      !worker ||
+      !previous ||
+      worker.authorityDigest !== previous.authorityDigest ||
+      worker.taskId !== graph.taskId ||
+      worker.teamId !== agreed.team.id ||
+      worker.kind !== 'worker' ||
+      (step.access === 'workspace-write' && !worker.writeCapable)
+    )
+      throw new Error('Graph step authority changed');
+    return context;
+  };
+  const context = validate();
+  const rootFor = (id: string) => {
+    const root = context.workspace.roots.find(
+      (root) => root.rootId === (id === 'legacy-primary' ? context.workspace.primaryRootId : id),
+    );
+    if (!root || root.status !== 'available') throw new Error('Graph root is unavailable');
+    const expected = agreed.roots.find(([key]) => key === root.rootId)?.[1];
+    if (!expected || context.rootIdentities.get(root.rootId) !== expected)
+      throw new Error('Graph root binding changed');
+    return { root, expected };
+  };
+  const footprints: GraphWriteFootprint[] = [];
+  for (const claim of step.writeClaims) {
+    const { root, expected } = rootFor(claim.rootId);
+    const bound = await bindClaim(root.rootId, root.path, expected, claim.path);
+    footprints.push(
+      await prepareGraphWriteFootprint({ ...bound, stepKey, semanticKeys: claim.semanticKeys }),
+    );
+  }
+  for (const resource of step.resourceClaims) {
+    if (resource.scope !== 'workspace') continue;
+    if (resource.rootId === null) throw new Error('Graph resource root is missing');
+    const { root, expected } = rootFor(resource.rootId);
+    if ((await workspaceMutationBinding(root.path)).rootIdentityDigest !== expected)
+      throw new Error('Graph resource root changed');
+  }
+  validate();
+  return footprints;
 }
 
 export function graphMissionContextFor(

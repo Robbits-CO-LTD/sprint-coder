@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { expect, test } from '@playwright/test';
 import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -378,73 +380,149 @@ test('reviews and restores a proposed Mission without starting executions', asyn
   }
 });
 
-test('checks real Task workers and workspace claims before agreement, then invalidates changed evidence', async () => {
-  const profile = createUserDataDir('graph-mission-review');
-  const workspace = await mkdtemp(
-    join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-review-'),
-  );
-  await writeFile(
-    join(workspace, 'graph-source.ts'),
-    'export const ready = true;\nexport const version = 1;\n',
-  );
-  const app = await launchApp(profile, undefined, {
-    SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
-    PATH: '',
-    Path: '',
-  });
-  try {
-    const page = await firstWindow(app);
-    await page.getByTestId('sidebar-new-task-button').click();
-    await assignCurrentTaskToProjectFolder(page, 'Mission review', workspace);
-    const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
-    await page.evaluate(async (id) => {
-      for (const role of ['client', 'api', 'store'])
-        await window.sprintCoder!.teams.hireWorker({
-          taskId: id,
-          role,
-          objective: 'Review fixture worker',
-          contextInheritancePolicy: 'summary',
-          writeCapable: true,
-        });
-    }, taskId);
-    await page.getByTestId('composer-textarea').fill('[fixture:graph-bound-mission-proposal]');
-    await page.getByTestId('composer-send-button').click();
-    await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
-    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
-      timeout: 30000,
-    });
-    if (process.env['GITHUB_ACTIONS'] === 'true')
-      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
-        nativeApp.focus({ steal: true });
-        BrowserWindow.getAllWindows()[0]!.focus();
-      });
-    await page.getByTestId('team-back').click();
-    await expect(page.getByTestId('team-list')).toHaveCount(0);
-    await page.getByTestId('graph-toggle').click();
-    await page.getByTestId('graph-mission-plan').locator('summary').click();
-    await expect(page.getByTestId('graph-mission-review')).toContainText('参照先を確認しました');
-    expect(
-      await page.evaluate(async (id) => {
-        const team = await window.sprintCoder!.teams.get(id);
-        return {
-          workers: team?.workers.filter((worker) => worker.kind === 'worker').length,
-          missions: team?.missions.length,
-          executions: team?.executions.length,
-        };
-      }, taskId),
-    ).toEqual({ workers: 3, missions: 0, executions: 0 });
+for (const starts of [false, true])
+  test(`checks real Task agreement and ${starts ? 'starts only from a trusted control' : 'invalidates changed evidence'}`, async () => {
+    const profile = createUserDataDir('graph-mission-review');
+    const workspace = await mkdtemp(
+      join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-review-'),
+    );
     await writeFile(
       join(workspace, 'graph-source.ts'),
-      'export const ready = false;\nexport const version = 2;\n',
+      'export const ready = true;\nexport const version = 1;\n',
     );
-    await expect(page.getByTestId('graph-mission-review')).toContainText('根拠ファイルが変わった');
-    await page.screenshot({ path: test.info().outputPath('mission-review-stale.png') });
-  } finally {
-    await closeApp(app);
-    removeUserDataDir(profile);
-    await rm(workspace, { recursive: true, force: true });
-  }
-});
+    if (starts) {
+      const git = promisify(execFile);
+      await git('git', ['init', workspace]);
+      await git('git', ['-C', workspace, 'add', 'graph-source.ts']);
+      await git('git', [
+        '-C',
+        workspace,
+        '-c',
+        'user.name=Graph test',
+        '-c',
+        'user.email=graph-test@example.invalid',
+        'commit',
+        '-m',
+        'fixture',
+      ]);
+    }
+    const app = await launchApp(profile, undefined, {
+      SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+      ...(starts ? {} : { PATH: '', Path: '' }),
+    });
+    try {
+      const page = await firstWindow(app);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await assignCurrentTaskToProjectFolder(page, 'Mission review', workspace);
+      const taskId = await page.evaluate(
+        async () => (await window.sprintCoder!.tasks.list())[0]!.id,
+      );
+      await page.evaluate(async (id) => {
+        for (const role of ['client', 'api', 'store'])
+          await window.sprintCoder!.teams.hireWorker({
+            taskId: id,
+            role,
+            objective: 'Review fixture worker',
+            contextInheritancePolicy: 'summary',
+            writeCapable: true,
+          });
+      }, taskId);
+      await page.getByTestId('composer-textarea').fill('[fixture:graph-bound-mission-proposal]');
+      await page.getByTestId('composer-send-button').click();
+      await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
+      await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
+        timeout: 30000,
+      });
+      if (process.env['GITHUB_ACTIONS'] === 'true')
+        await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+          nativeApp.focus({ steal: true });
+          BrowserWindow.getAllWindows()[0]!.focus();
+        });
+      await page.getByTestId('team-back').click();
+      await expect(page.getByTestId('team-list')).toHaveCount(0);
+      await page.getByTestId('graph-toggle').click();
+      await page.getByTestId('graph-mission-plan').locator('summary').click();
+      await expect(page.getByTestId('graph-mission-review')).toContainText('参照先を確認しました');
+      expect(
+        await page.evaluate(async (id) => {
+          const team = await window.sprintCoder!.teams.get(id);
+          return {
+            workers: team?.workers.filter((worker) => worker.kind === 'worker').length,
+            missions: team?.missions.length,
+            executions: team?.executions.length,
+          };
+        }, taskId),
+      ).toEqual({ workers: 3, missions: 0, executions: 0 });
+      if (starts) {
+        const rejected = await page.evaluate(async (id) => {
+          const button = document.querySelector<HTMLElement>(
+            '[data-computer-use-activation="graph-start"]',
+          );
+          const input = JSON.parse(button!.dataset['computerUseIntent']!);
+          delete input.operation;
+          if (input.taskId !== id) throw new Error('Task mismatch');
+          return window.sprintCoder!.graphs.startMission(input).then(
+            () => false,
+            () => true,
+          );
+        }, taskId);
+        expect(rejected).toBe(true);
+        await page.getByRole('button', { name: 'この計画で開始', exact: true }).click();
+        await expect
+          .poll(
+            async () => {
+              const failure = await page
+                .getByTestId('graph-mission-review')
+                .locator('[role=alert]')
+                .allTextContents();
+              if (failure.length) throw new Error(failure.join(' '));
+              return page.evaluate(
+                async (id) => (await window.sprintCoder!.teams.get(id))?.missions.length,
+                taskId,
+              );
+            },
+            { timeout: 10000 },
+          )
+          .toBe(1);
+        await expect
+          .poll(
+            async () =>
+              page.evaluate(async (id) => {
+                const team = await window.sprintCoder!.teams.get(id);
+                return team?.missions[0]?.state;
+              }, taskId),
+            { timeout: 30000 },
+          )
+          .toBe('completed');
+        const result = await page.evaluate(async (id) => {
+          const team = await window.sprintCoder!.teams.get(id);
+          return {
+            missions: team?.missions.length,
+            states: team?.executions.map(({ state }) => state),
+          };
+        }, taskId);
+        expect(result).toEqual({ missions: 1, states: ['completed', 'completed', 'completed'] });
+        await expect(page.getByTestId('graph-mission-state')).toContainText('すべての工程が完了');
+        await expect(
+          page.frameLocator('[data-testid="graph-frame"]').locator('g[data-node-id="client"]'),
+        ).toHaveAttribute('data-execution-state', 'completed');
+        await page.screenshot({ path: test.info().outputPath('mission-start-completed.png') });
+      } else {
+        await writeFile(
+          join(workspace, 'graph-source.ts'),
+          'export const ready = false;\nexport const version = 2;\n',
+        );
+        await expect(page.getByTestId('graph-mission-review')).toContainText(
+          '根拠ファイルが変わった',
+        );
+        await page.screenshot({ path: test.info().outputPath('mission-review-stale.png') });
+      }
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(profile);
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
 
 for (const kind of ['architecture', 'workflow'] as const) {
   // Electron owns the browser; Playwright still requires its fixture argument before testInfo.

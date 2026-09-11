@@ -1,5 +1,10 @@
 import Database from 'better-sqlite3';
 import {
+  graphIntegrationPayloadSchema,
+  type GraphIntegrationHold,
+  type GraphIntegrationHoldInput,
+} from './graph-integration-hold';
+import {
   graphWriteClaimsConflict,
   restoreGraphWrites,
   serializePreparedGraphWrites,
@@ -3982,6 +3987,25 @@ const migrations = [
         BEGIN SELECT RAISE(ABORT, 'Graph write inventory is immutable'); END;
     `,
   },
+  {
+    version: 89,
+    checksum: 'graph-integration-v89-confirmed-stop-holds',
+    sql: `
+      CREATE TABLE team_graph_integration_holds (
+        reservation_id TEXT PRIMARY KEY REFERENCES team_graph_resource_reservations(id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        attempt_id TEXT NOT NULL REFERENCES team_attempts(id), generation INTEGER NOT NULL CHECK(generation>0),
+        payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64),
+        stopped_at TEXT NOT NULL, reason TEXT NOT NULL,
+        integration_active INTEGER NOT NULL DEFAULT 0 CHECK(integration_active IN (0,1)),
+        resume_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(resume_ordinal>=0)
+      );
+      CREATE INDEX graph_integration_execution ON team_graph_integration_holds(execution_id);
+      CREATE TRIGGER graph_integration_hold_immutable BEFORE UPDATE OF payload_json,payload_digest,stopped_at ON team_graph_integration_holds
+        WHEN NEW.payload_json<>OLD.payload_json OR NEW.payload_digest<>OLD.payload_digest OR NEW.stopped_at<>OLD.stopped_at
+        BEGIN SELECT RAISE(ABORT, 'Graph integration result is immutable'); END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4514,6 +4538,24 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  holdGraphIntegration(input: GraphIntegrationHoldInput): GraphIntegrationHold;
+  queueGraphStep(
+    missionId: string,
+    stepKey: string,
+    generation: number,
+    now: string,
+  ): TeamExecutionRecord;
+  hasGraphResourceOwnerForWorker(workerId: string): boolean;
+  getGraphDocument(taskId: string): GraphDocument | null;
+  getGraphIntegrationHold(reservationId: string): GraphIntegrationHold | null;
+  prepareGraphIntegrationResume(reservationId: string, now: string): GraphIntegrationHold;
+  pauseGraphIntegrationResume(
+    reservationId: string,
+    resumeOrdinal: number,
+    reason: string,
+    now: string,
+  ): void;
+  deleteGraphIntegrationHold(reservationId: string): void;
   beginGraphAttempt(input: GraphAttemptStart): {
     execution: TeamExecutionRecord;
     attempt: TeamAttemptRecord;
@@ -9290,6 +9332,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  queueGraphStep(
+    missionId: string,
+    stepKey: string,
+    generation: number,
+    now: string,
+  ): TeamExecutionRecord {
+    return this.db.transaction(() => {
+      const graph = this.getGraphTeamMission(missionId);
+      const step = graph?.steps.find((step) => step.key === stepKey);
+      if (
+        !graph ||
+        !step ||
+        step.generation !== generation ||
+        ['completed', 'failed', 'canceled'].includes(this.getTeamMission(missionId).state)
+      )
+        throw new Error('Graph queue binding changed');
+      const execution = this.getTeamExecution(step.executionId);
+      if (execution.state === 'queued') return execution;
+      if (execution.state !== 'assigned')
+        throw new Error('Graph step is not awaiting initial dispatch');
+      return this.transitionTeamExecutionWithAdmission(
+        { executionId: execution.id, to: 'queued', queueReason: 'global_concurrency', now },
+        true,
+      );
+    })();
+  }
+
+  hasGraphResourceOwnerForWorker(workerId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          "SELECT 1 FROM team_graph_resource_reservations r JOIN team_executions e ON e.id=r.execution_id WHERE e.assignee_agent_id=? AND r.state<>'released' LIMIT 1",
+        )
+        .get(workerId) !== undefined
+    );
+  }
+
   private graphWriteBlockers(
     footprints: readonly GraphWriteFootprint[],
     excludeId?: string,
@@ -9519,6 +9598,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (!row || row.execution_id !== input.executionId || row.generation !== input.generation)
         throw new Error('Graph resource owner mismatch');
       if (row.state === 'released') return false;
+      if (
+        this.db
+          .prepare(
+            'SELECT 1 FROM team_graph_integration_holds WHERE reservation_id=? AND integration_active=1',
+          )
+          .get(row.id)
+      )
+        throw new Error('Graph integration stop is unconfirmed');
       if (!Number.isFinite(Date.parse(input.now)))
         throw new Error('Invalid graph resource timestamp');
       if (input.confirmation.kind === 'not-dispatched') {
@@ -9688,6 +9775,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (!graph || !step || step.generation !== input.generation)
         throw new Error('Graph Attempt generation mismatch');
       const execution = this.getTeamExecution(step.executionId);
+      const latest = this.listTeamAttempts(execution.id).at(-1);
+      if (
+        latest &&
+        this.db
+          .prepare(
+            'SELECT 1 FROM team_graph_integration_holds WHERE execution_id=? AND generation=? AND attempt_id=?',
+          )
+          .get(execution.id, step.generation, latest.id)
+      )
+        throw new Error('Graph integration must resume without a new Worker Attempt');
       const resuming = input.reason === 'manual_resume';
       if (
         resuming
@@ -9755,6 +9852,318 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  private graphSealedRepositories(executionId: string): GraphIntegrationHold['repositories'] {
+    const isolation = this.getTeamExecutionIsolation(executionId);
+    if (isolation !== null) {
+      if (
+        !['waiting_integration', 'completed'].includes(isolation.phase) &&
+        !(isolation.phase === 'waiting_resume' && isolation.resumeKind === 'integration')
+      )
+        throw new Error('Graph integration isolation is not sealed');
+      if (
+        !isolation.repositories.length ||
+        isolation.repositories.some(
+          (repo) =>
+            repo.workerHead === null || !['ready', 'integrated', 'cleaned'].includes(repo.state),
+        )
+      )
+        throw new Error('Graph integration requires every repository to be sealed');
+      return isolation.repositories.map((repo) => ({
+        repoPath: repo.repoPath,
+        worktreePath: repo.worktreePath,
+        baseHead: repo.baseHead,
+        workerHead: repo.workerHead!,
+      }));
+    }
+    const worktree = this.getTeamMissionWorktree(executionId);
+    if (
+      !worktree ||
+      worktree.workerHead === null ||
+      !['ready', 'integrated', 'cleaned'].includes(worktree.state)
+    )
+      throw new Error('Graph integration requires a sealed worktree');
+    return [
+      {
+        repoPath: worktree.repoPath,
+        worktreePath: worktree.path,
+        baseHead: worktree.baseHead,
+        workerHead: worktree.workerHead,
+      },
+    ];
+  }
+
+  getGraphIntegrationHold(reservationId: string): GraphIntegrationHold | null {
+    const row = this.db
+      .prepare('SELECT * FROM team_graph_integration_holds WHERE reservation_id=?')
+      .get(reservationId) as
+      | {
+          reservation_id: string;
+          execution_id: string;
+          attempt_id: string;
+          generation: number;
+          payload_json: string;
+          payload_digest: string;
+          stopped_at: string;
+          reason: string;
+          integration_active: number;
+          resume_ordinal: number;
+        }
+      | undefined;
+    if (!row) return null;
+    if (
+      Buffer.byteLength(row.payload_json) > 1_048_576 ||
+      createHash('sha256').update(row.payload_json).digest('hex') !== row.payload_digest ||
+      !Number.isFinite(Date.parse(row.stopped_at))
+    )
+      throw new Error('Graph integration hold is corrupt');
+    const payload = graphIntegrationPayloadSchema.parse(JSON.parse(row.payload_json));
+    if (
+      payload.reservationId !== row.reservation_id ||
+      payload.executionId !== row.execution_id ||
+      payload.attemptId !== row.attempt_id ||
+      payload.generation !== row.generation
+    )
+      throw new Error('Graph integration hold binding mismatch');
+    return {
+      ...payload,
+      stoppedAt: row.stopped_at,
+      reason: row.reason,
+      integrationActive: row.integration_active === 1,
+      resumeOrdinal: row.resume_ordinal,
+    };
+  }
+
+  holdGraphIntegration(input: GraphIntegrationHoldInput): GraphIntegrationHold {
+    if (
+      input.confirmation.kind !== 'attempt-stopped' ||
+      input.confirmation.attemptId !== input.attemptId ||
+      !Number.isFinite(Date.parse(input.now)) ||
+      input.reason.trim() === '' ||
+      input.reason.length > 2_000
+    )
+      throw new Error('Graph integration requires matching stop confirmation');
+    return this.db.transaction(() => {
+      const graph = this.getGraphTeamMission(input.missionId);
+      const step = graph?.steps.find((step) => step.key === input.stepKey);
+      if (!graph || !step || step.generation !== input.generation)
+        throw new Error('Graph integration generation mismatch');
+      const execution = this.getTeamExecution(step.executionId);
+      const attempt = this.getTeamAttempt(input.attemptId);
+      const owner = this.listGraphResourceReservations(graph.missionId).find(
+        (row) => row.id === input.reservationId,
+      );
+      const existing = this.getGraphIntegrationHold(input.reservationId);
+      if (
+        execution.accessMode !== 'workspace-write' ||
+        !['running', 'waiting_resume'].includes(execution.state) ||
+        !owner ||
+        owner.state !== 'active' ||
+        owner.executionId !== execution.id ||
+        owner.generation !== step.generation ||
+        owner.attemptId !== attempt.id ||
+        attempt.executionId !== execution.id ||
+        this.listTeamAttempts(execution.id).at(-1)?.id !== attempt.id ||
+        (attempt.state !== 'running' && !(attempt.state === 'completed' && existing !== null))
+      )
+        throw new Error('Graph integration hold owner mismatch');
+      const dispatch = this.getTeamExecutionDispatch(execution.id);
+      if (dispatch.teamTaskId !== input.teamTaskId || execution.assigneeAgentId !== input.agentId)
+        throw new Error('Graph integration hold dispatch mismatch');
+      if (!['running', 'blocked'].includes(this.getTeamTask(dispatch.teamTaskId).status))
+        throw new Error('Graph integration task is not pending completion');
+      const payload = graphIntegrationPayloadSchema.parse({
+        missionId: graph.missionId,
+        stepKey: step.key,
+        executionId: execution.id,
+        reservationId: owner.id,
+        generation: step.generation,
+        attemptId: attempt.id,
+        agentId: input.agentId,
+        teamTaskId: input.teamTaskId,
+        report: input.report,
+        doneEvidence: input.doneEvidence,
+        repositories: this.graphSealedRepositories(execution.id),
+      });
+      const evidence = new Map(
+        payload.doneEvidence.map((entry) => [entry.criterion, entry.evidence]),
+      );
+      if (
+        payload.report.status !== 'completed' ||
+        dispatch.doneCriteria.some((criterion) => !evidence.get(criterion)?.trim())
+      )
+        throw new Error('Graph integration hold requires a completed result and evidence');
+      validateGraphWriteInventory(graph, step.key, owner.writeFootprints);
+      const json = canonicalGraphJson(payload);
+      const digest = createHash('sha256').update(json).digest('hex');
+      if (existing) {
+        const saved = graphIntegrationPayloadSchema.strip().parse(existing);
+        if (canonicalGraphJson(saved) !== json)
+          throw new Error('Graph integration result is immutable');
+        if (existing.integrationActive || execution.state !== 'waiting_resume')
+          throw new Error('Graph integration is already resuming');
+        return existing;
+      } else
+        this.db
+          .prepare(
+            'INSERT INTO team_graph_integration_holds(reservation_id,execution_id,attempt_id,generation,payload_json,payload_digest,stopped_at,reason) VALUES (?,?,?,?,?,?,?,?)',
+          )
+          .run(
+            owner.id,
+            execution.id,
+            attempt.id,
+            step.generation,
+            json,
+            digest,
+            input.now,
+            input.reason,
+          );
+      if (attempt.state === 'running')
+        this.transitionTeamAttempt({ attemptId: attempt.id, to: 'completed', now: input.now });
+      if (execution.state === 'running')
+        this.transitionTeamExecutionWithAdmission(
+          { executionId: execution.id, to: 'waiting_resume', now: input.now },
+          true,
+        );
+      const task = this.getTeamTask(dispatch.teamTaskId);
+      if (task.status === 'running') this.transitionTeamTask(task.id, 'blocked', input.now);
+      return this.getGraphIntegrationHold(owner.id)!;
+    })();
+  }
+
+  prepareGraphIntegrationResume(reservationId: string, now: string): GraphIntegrationHold {
+    return this.db.transaction(() => {
+      const hold = this.getGraphIntegrationHold(reservationId);
+      if (!hold) throw new Error('Graph integration has no confirmed stop record');
+      if (hold.integrationActive) throw new Error('Prior graph integration stop is unconfirmed');
+      const graph = this.getGraphTeamMission(hold.missionId);
+      const step = graph?.steps.find((step) => step.key === hold.stepKey);
+      const execution = this.getTeamExecution(hold.executionId);
+      const owner = this.listGraphResourceReservations(hold.missionId).find(
+        (row) => row.id === reservationId,
+      );
+      const dispatch = this.getTeamExecutionDispatch(execution.id);
+      if (
+        !graph ||
+        !step ||
+        step.executionId !== execution.id ||
+        step.generation !== hold.generation ||
+        execution.state !== 'waiting_resume' ||
+        !owner ||
+        !['active', 'quarantined'].includes(owner.state) ||
+        owner.attemptId !== hold.attemptId ||
+        owner.generation !== hold.generation ||
+        this.listTeamAttempts(execution.id).at(-1)?.id !== hold.attemptId ||
+        this.getTeamAttempt(hold.attemptId).state !== 'completed' ||
+        dispatch.teamTaskId !== hold.teamTaskId ||
+        execution.assigneeAgentId !== hold.agentId ||
+        this.getTeam(execution.teamId).state !== 'active' ||
+        this.getPermissionPolicy(graph.taskId).policyEpoch !== graph.policyEpoch ||
+        this.getEffectiveWorkspaceSet(graph.taskId).digest !== graph.workspaceDigest ||
+        this.graphResourcePrerequisites(graph, step.key).length
+      )
+        throw new Error('Graph integration resume binding changed');
+      if (
+        canonicalGraphJson(this.graphSealedRepositories(execution.id)) !==
+        canonicalGraphJson(hold.repositories)
+      )
+        throw new Error('Graph sealed repository binding changed');
+      validateGraphWriteInventory(graph, step.key, owner.writeFootprints);
+      if (this.graphWriteBlockers(owner.writeFootprints, owner.id).length)
+        throw new Error('Graph write admission changed');
+      this.db
+        .prepare(
+          'UPDATE team_graph_integration_holds SET integration_active=1,resume_ordinal=resume_ordinal+1 WHERE reservation_id=?',
+        )
+        .run(reservationId);
+      this.transitionTeamMissionWithAdmission(graph.missionId, 'running', now, true);
+      this.db
+        .prepare("UPDATE team_graph_resource_reservations SET state='active' WHERE id=?")
+        .run(owner.id);
+      // Integration is queued and admitted atomically; no new Worker Attempt is dispatched.
+      this.transitionTeamExecutionWithAdmission(
+        { executionId: execution.id, to: 'queued', queueReason: 'recovery', now },
+        true,
+      );
+      this.transitionTeamExecutionWithAdmission(
+        { executionId: execution.id, to: 'running', now },
+        true,
+      );
+      if (this.getTeamTask(hold.teamTaskId).status === 'blocked')
+        this.transitionTeamTask(hold.teamTaskId, 'running', now);
+      return this.getGraphIntegrationHold(reservationId)!;
+    })();
+  }
+
+  /** Main calls this only after the integration runner has settled; timeouts are not stop proof. */
+  pauseGraphIntegrationResume(
+    reservationId: string,
+    resumeOrdinal: number,
+    reason: string,
+    now: string,
+  ): void {
+    this.db.transaction(() => {
+      const hold = this.db
+        .prepare(
+          'SELECT execution_id,attempt_id,generation,integration_active,resume_ordinal FROM team_graph_integration_holds WHERE reservation_id=?',
+        )
+        .get(reservationId) as
+        | {
+            execution_id: string;
+            attempt_id: string;
+            generation: number;
+            integration_active: number;
+            resume_ordinal: number;
+          }
+        | undefined;
+      if (
+        !hold ||
+        hold.integration_active !== 1 ||
+        hold.resume_ordinal !== resumeOrdinal ||
+        reason.trim() === '' ||
+        reason.length > 2_000 ||
+        !Number.isFinite(Date.parse(now))
+      )
+        throw new Error('Graph integration operation mismatch');
+      this.db
+        .prepare(
+          'UPDATE team_graph_integration_holds SET integration_active=0,reason=? WHERE reservation_id=? AND resume_ordinal=?',
+        )
+        .run(reason, reservationId, resumeOrdinal);
+      const step = this.db
+        .prepare('SELECT generation FROM team_graph_mission_steps WHERE execution_id=?')
+        .get(hold.execution_id) as { generation: number } | undefined;
+      const execution = this.getTeamExecution(hold.execution_id);
+      if (
+        step?.generation === hold.generation &&
+        this.listTeamAttempts(execution.id).at(-1)?.id === hold.attempt_id
+      ) {
+        if (execution.state === 'running')
+          this.transitionTeamExecutionWithAdmission(
+            { executionId: execution.id, to: 'waiting_resume', now },
+            true,
+          );
+        const dispatch = this.getTeamExecutionDispatch(execution.id);
+        if (this.getTeamTask(dispatch.teamTaskId).status === 'running')
+          this.transitionTeamTask(dispatch.teamTaskId, 'blocked', now);
+      }
+    })();
+  }
+
+  deleteGraphIntegrationHold(reservationId: string): void {
+    const owner = this.db
+      .prepare('SELECT execution_id,state FROM team_graph_resource_reservations WHERE id=?')
+      .get(reservationId) as { execution_id: string; state: string } | undefined;
+    if (
+      !owner ||
+      owner.state !== 'released' ||
+      !['completed', 'failed', 'canceled'].includes(this.getTeamExecution(owner.execution_id).state)
+    )
+      throw new Error('Graph integration ownership is not terminal');
+    this.db
+      .prepare('DELETE FROM team_graph_integration_holds WHERE reservation_id=?')
+      .run(reservationId);
+  }
+
   /** Only after Main has observed the runtime stopped and completed any required integration. */
   completeGraphStep(input: GraphStepCompletion): {
     mission: TeamMissionRecord;
@@ -9786,10 +10195,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
         reservation.generation !== step.generation ||
         reservation.attempt_id !== attempt.id ||
         attempt.executionId !== execution.id ||
-        attempt.state !== 'running' ||
+        !['running', 'completed'].includes(attempt.state) ||
         execution.state !== 'running'
       )
         throw new Error('Graph completion owner mismatch');
+      if (attempt.state === 'completed') {
+        const hold = this.getGraphIntegrationHold(reservation.id);
+        if (
+          !hold ||
+          !hold.integrationActive ||
+          hold.resumeOrdinal !== input.integrationResumeOrdinal ||
+          hold.generation !== step.generation ||
+          hold.attemptId !== attempt.id ||
+          canonicalGraphJson(hold.report) !== canonicalGraphJson(report) ||
+          canonicalGraphJson(hold.doneEvidence) !== canonicalGraphJson(input.doneEvidence) ||
+          canonicalGraphJson(hold.repositories) !==
+            canonicalGraphJson(this.graphSealedRepositories(execution.id))
+        )
+          throw new Error('Graph completion requires its sealed integration result');
+      }
       const ownership = this.readGraphResourceReservation(reservation);
       validateGraphWriteInventory(graph, step.key, ownership.writeFootprints);
       if (
@@ -9814,6 +10238,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
         { executionId: execution.id, to: 'completed', now: input.now },
         true,
       );
+      if (attempt.state === 'completed')
+        this.db
+          .prepare(
+            'UPDATE team_graph_integration_holds SET integration_active=0 WHERE reservation_id=?',
+          )
+          .run(reservation.id);
       this.releaseGraphResources({
         reservationId: reservation.id,
         executionId: execution.id,
@@ -10853,7 +11283,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
             queueReason: 'recovery',
           });
       }
-      return running.length + preparingGraphs.length;
+      const interruptedIntegrations = this.db
+        .prepare(
+          `SELECT h.execution_id FROM team_graph_integration_holds h
+        JOIN team_executions e ON e.id=h.execution_id JOIN team_attempts a ON a.id=h.attempt_id
+        WHERE h.integration_active=1 AND e.state='running' AND a.state='completed'
+        AND NOT EXISTS (SELECT 1 FROM team_attempts newer WHERE newer.execution_id=e.id AND newer.ordinal>a.ordinal)`,
+        )
+        .all() as { execution_id: string }[];
+      for (const held of interruptedIntegrations) {
+        this.transitionTeamExecutionWithAdmission(
+          { executionId: held.execution_id, to: 'waiting_resume', now },
+          true,
+        );
+        const dispatch = this.getTeamExecutionDispatch(held.execution_id);
+        if (this.getTeamTask(dispatch.teamTaskId).status === 'running')
+          this.transitionTeamTask(dispatch.teamTaskId, 'blocked', now);
+      }
+      // A prior Worker stop does not prove an interrupted Git runner stopped.
+      return running.length + preparingGraphs.length + interruptedIntegrations.length;
     })();
   }
 

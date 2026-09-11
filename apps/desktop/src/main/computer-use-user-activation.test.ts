@@ -83,18 +83,21 @@ describe('ComputerUseUserActivationGate', () => {
     gate.dispose();
   });
 
-  it('binds approval input independently from start and picker intents', () => {
-    vi.stubEnv('NODE_ENV', 'test');
-    const { gate, event } = fixture(() => 100);
-    gate.recordForTest('mouse');
-    expect(gate.bindIntent(event, 'approval', 'deny-bound')).toBe(true);
-    expect(gate.consume(event, 'start')).toBeNull();
-    gate.recordForTest('mouse');
-    expect(gate.bindIntent(event, 'approval', 'allow-once-bound')).toBe(true);
-    expect(gate.consume(event, 'approval')).toMatchObject({
-      pickerKind: 'approval',
-      intent: 'allow-once-bound',
-    });
-    gate.dispose();
-  });
+  it.each(['approval', 'graph-start', 'graph-resume'] as const)(
+    'binds %s independently from Computer Use start and picker intents',
+    (kind) => {
+      vi.stubEnv('NODE_ENV', 'test');
+      const { gate, event } = fixture(() => 100);
+      gate.recordForTest('mouse');
+      expect(gate.bindIntent(event, kind, 'deny-bound')).toBe(true);
+      expect(gate.consume(event, 'start')).toBeNull();
+      gate.recordForTest('mouse');
+      expect(gate.bindIntent(event, kind, 'allow-once-bound')).toBe(true);
+      expect(gate.consume(event, kind)).toMatchObject({
+        pickerKind: kind,
+        intent: 'allow-once-bound',
+      });
+      gate.dispose();
+    },
+  );
 });

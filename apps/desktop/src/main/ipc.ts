@@ -1,4 +1,8 @@
 import {
+  graphStartActivationIntent,
+  graphResumeActivationIntent,
+} from '../graph-activation-intent';
+import {
   app,
   clipboard,
   dialog,
@@ -25,6 +29,8 @@ import {
   graphSourceCheckInputSchema,
   graphSourceStatusSchema,
   graphMissionReviewSchema,
+  graphMissionStartInputSchema,
+  graphMissionResumeInputSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -1797,6 +1803,80 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.handle(
+      IPC_CHANNELS.graphsMissionResumeIntegration,
+      graphMissionResumeInputSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-resume');
+        if (!activation || activation.intent !== graphResumeActivationIntent(input))
+          throw new Error('計画の統合再開ボタンから操作してください。');
+        const document = this.graphs?.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const graph = this.persistence.getGraphTeamMission(input.missionId);
+        const step = graph?.steps.find((step) => step.key === input.stepKey);
+        if (
+          !document ||
+          !graph ||
+          graph.taskId !== input.taskId ||
+          graph.graphId !== document.id ||
+          graph.semanticRevision !== document.semanticRevision ||
+          step?.generation !== input.generation
+        )
+          throw new Error('Graph integration agreement changed');
+        return this.teamCoordinator.resumeGraphIntegration(
+          input.taskId,
+          input.missionId,
+          input.stepKey,
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsMissionStart,
+      graphMissionStartInputSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
+        if (activation === null || activation.intent !== graphStartActivationIntent(input))
+          throw new Error('計画の開始ボタンから操作してください。');
+        return this.teamCoordinator.startGraphMission(input.taskId, async () => {
+          if (!this.graphs) throw new Error('Graph service unavailable');
+          const document = this.graphs.liveDocument(
+            input.taskId,
+            input.instanceId,
+            input.renderRevision,
+          );
+          const review = await reviewGraphMission(
+            {
+              taskId: input.taskId,
+              instanceId: input.instanceId,
+              renderRevision: input.renderRevision,
+            },
+            document,
+            () => graphMissionContextFor(this.persistence, input.taskId),
+          );
+          this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
+          if (!review.summary.matched || review.contextDigest !== input.contextDigest)
+            throw new Error('計画または実行条件が変わりました。もう一度確認してください。');
+          const context = graphMissionContextFor(this.persistence, input.taskId);
+          return {
+            taskId: input.taskId,
+            graphId: document.id,
+            renderRevision: document.renderRevision,
+            semanticRevision: document.semanticRevision,
+            semanticDigest: document.semanticDigest,
+            contextDigest: review.contextDigest,
+            workspaceDigest: context.workspace.digest,
+            policyEpoch: context.policyEpoch,
+            consentId: activation.token,
+            now: new Date().toISOString(),
+          };
+        });
+      },
+    );
     this.handle(
       IPC_CHANNELS.graphsMissionReview,
       graphSourceCheckInputSchema,
@@ -4265,7 +4345,14 @@ export class IpcRouter {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return;
     const rawKind = (raw as Record<string, unknown>)['kind'];
     const rawIntent = (raw as Record<string, unknown>)['intent'];
-    if (rawKind !== 'application' && rawKind !== 'start' && rawKind !== 'approval') return;
+    if (
+      rawKind !== 'application' &&
+      rawKind !== 'start' &&
+      rawKind !== 'approval' &&
+      rawKind !== 'graph-start' &&
+      rawKind !== 'graph-resume'
+    )
+      return;
     if (rawIntent !== null && typeof rawIntent !== 'string') return;
     this.computerUseActivationGate.bindIntent(event, rawKind, rawIntent);
   };

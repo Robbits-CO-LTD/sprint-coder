@@ -1,3 +1,7 @@
+import {
+  graphStartActivationIntent,
+  graphResumeActivationIntent,
+} from '../graph-activation-intent';
 import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
@@ -16,6 +20,8 @@ import {
   graphSourceCheckInputSchema,
   graphSourceStatusSchema,
   graphMissionReviewSchema,
+  graphMissionStartInputSchema,
+  graphMissionResumeInputSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -286,6 +292,30 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    resumeIntegration: async (input) => {
+      const parsed = graphMissionResumeInputSchema.parse(input);
+      const activation = trustedComputerUseActivation.consume('graph-resume');
+      if (activation?.intent !== graphResumeActivationIntent(parsed))
+        throw new Error('計画の統合再開ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsMissionResumeIntegration,
+        graphMissionResumeInputSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
+    startMission: async (input) => {
+      const parsed = graphMissionStartInputSchema.parse(input);
+      const activation = trustedComputerUseActivation.consume('graph-start');
+      if (activation?.intent !== graphStartActivationIntent(parsed))
+        throw new Error('計画の開始ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsMissionStart,
+        graphMissionStartInputSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
     reviewMission: (input) =>
       invoke(
         IPC_CHANNELS.graphsMissionReview,

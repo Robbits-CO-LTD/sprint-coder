@@ -800,30 +800,7 @@ export type TeamExecutionIsolation = {
   }>;
   reason: string | null;
 };
-export type TeamMissionSummary = {
-  mode?: 'sequential' | 'graph';
-  id: string;
-  teamId: string;
-  createdByAgentId: string;
-  state: 'queued' | 'running' | 'waiting_resume' | 'completed' | 'failed' | 'canceled';
-  objective: string;
-  doneCriteria: string[];
-  currentStepOrdinal: number;
-  steps: {
-    ordinal: number;
-    executionId: string;
-    workerId: string;
-    objective: string;
-    doneCriteria: string[];
-    access: 'read-only' | 'workspace-write';
-    state: TeamExecutionSummary['state'];
-    checkpoint: TeamMissionCheckpoint | null;
-    worktree: TeamMissionWorktreeSummary | null;
-  }[];
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-};
+export type TeamMissionSummary = import('@sprint-coder/contracts').TeamMissionSummary;
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];

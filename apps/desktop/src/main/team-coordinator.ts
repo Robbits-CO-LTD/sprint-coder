@@ -1,4 +1,7 @@
 import { assertGraphWriteCoverage } from './graph-write-coverage';
+import { graphMissionContextFor, prepareGraphStepWriteFootprints } from './graph-mission-review';
+import type { GraphMissionCommitInput, GraphMissionRecord } from './graph-mission-record';
+import type { GraphResourceReservation } from './graph-resource';
 import {
   teamDetailSchema,
   teamActivitySummarySchema,
@@ -256,6 +259,12 @@ const executionEstimate = Object.freeze({
 });
 
 export class TeamCoordinator {
+  private readonly graphIntegrationWorkers = new Set<string>();
+  private readonly graphScheduledExecutions = new Set<string>();
+  private readonly graphWaitReasons = new Map<
+    string,
+    'dependencies' | 'resources' | 'write-conflicts' | 'owner-active'
+  >();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly executionInterruptions = new Map<string, ExecutionInterruptionControl>();
   private readonly transientWorkerActivity = new Map<
@@ -1016,6 +1025,544 @@ export class TeamCoordinator {
     });
   }
 
+  /** Only the trusted IPC admission callback can supply a freshly confirmed plan. */
+  async startGraphMission(
+    taskId: string,
+    prepare: () => Promise<GraphMissionCommitInput>,
+  ): Promise<TeamMissionSummary> {
+    return this.enqueue(taskId, async () => {
+      const document = this.persistence.getGraphDocument(taskId);
+      if (document?.missionPlan?.steps.some((step) => step.access === 'workspace-write'))
+        await this.requireWorkspaceWriteEligibility(taskId);
+      await this.verifyWorkspace?.(taskId);
+      const input = await prepare();
+      if (input.taskId !== taskId) throw new Error('Graph admission Task mismatch');
+      const mission = this.persistence.createGraphTeamMission(input);
+      await this.scheduleGraphMission(taskId, mission.id);
+      this.emit(taskId, mission.teamId);
+      return this.missionSummary(this.persistence.getTeamMission(mission.id));
+    });
+  }
+
+  private async scheduleGraphMission(taskId: string, missionId: string): Promise<void> {
+    const graph = this.persistence.getGraphTeamMission(missionId);
+    if (!graph || graph.taskId !== taskId) throw new Error('Graph Mission binding mismatch');
+    const team = this.persistence.getTeam(this.persistence.getTeamMission(missionId).teamId);
+    for (const step of graph.steps) {
+      const current = this.persistence.getTeamExecution(step.executionId);
+      if (current.state !== 'assigned' || this.graphScheduledExecutions.has(current.id)) continue;
+      this.graphScheduledExecutions.add(current.id);
+      try {
+        let footprints = await prepareGraphStepWriteFootprints(graph, step.key, () =>
+          graphMissionContextFor(this.persistence, taskId),
+        );
+        const execution = this.persistence.queueGraphStep(
+          missionId,
+          step.key,
+          step.generation,
+          this.isoNow(),
+        );
+        const fields = this.connectionSchedulingFields(execution, taskId, team.id);
+        const job: TeamExecutionJob = {
+          executionId: execution.id,
+          workerId: execution.assigneeAgentId,
+          teamId: team.id,
+          teamLimit: team.policy.maxConcurrentExecutions,
+          ...fields,
+          onConnectionWait: () => this.emit(taskId, team.id),
+          onWorkerWaitChanged: () => this.emit(taskId, team.id),
+          isReady: () => {
+            const availability = this.persistence.inspectGraphResources({
+              missionId,
+              stepKey: step.key,
+              expectedGeneration: step.generation,
+              writeFootprints: footprints,
+            });
+            if (availability.available) this.graphWaitReasons.delete(execution.id);
+            else this.graphWaitReasons.set(execution.id, availability.reason);
+            return (
+              !this.graphIntegrationWorkers.has(execution.assigneeAgentId) && availability.available
+            );
+          },
+          onReadinessError: (error) => {
+            this.executionScheduler.cancelQueued(execution.id);
+            this.graphScheduledExecutions.delete(execution.id);
+            this.persistence.transitionTeamExecution({
+              executionId: execution.id,
+              to: 'waiting_resume',
+              now: this.isoNow(),
+            });
+            this.persistence.setWorkerCurrentActivity(
+              execution.assigneeAgentId,
+              (error instanceof Error ? error.message : 'Graph admission changed').slice(0, 2000),
+              this.isoNow(),
+            );
+            this.emit(taskId, team.id);
+          },
+          run: async () => {
+            try {
+              footprints = await prepareGraphStepWriteFootprints(graph, step.key, () =>
+                graphMissionContextFor(this.persistence, taskId),
+              );
+              const acquired = this.persistence.acquireGraphResources({
+                missionId,
+                stepKey: step.key,
+                expectedGeneration: step.generation,
+                writeFootprints: footprints,
+                now: this.isoNow(),
+              });
+              if (!acquired.acquired) {
+                this.executionScheduler.requeueActive(execution.id, job);
+                return;
+              }
+              await this.runGraphExecution(graph, step.key, acquired.reservation);
+            } catch (error) {
+              const latest = this.persistence.getTeamExecution(execution.id);
+              if (latest.state === 'queued')
+                this.persistence.transitionTeamExecution({
+                  executionId: execution.id,
+                  to: 'waiting_resume',
+                  now: this.isoNow(),
+                });
+              this.persistence.setWorkerCurrentActivity(
+                execution.assigneeAgentId,
+                (error instanceof Error ? error.message : 'Graph admission failed').slice(0, 2000),
+                this.isoNow(),
+              );
+              this.emit(taskId, team.id);
+            } finally {
+              if (this.persistence.getTeamExecution(execution.id).state !== 'queued')
+                this.graphScheduledExecutions.delete(execution.id);
+            }
+          },
+        };
+        this.executionScheduler.submit(job);
+      } catch (error) {
+        this.graphScheduledExecutions.delete(current.id);
+        this.persistence.transitionTeamExecution({
+          executionId: current.id,
+          to: 'waiting_resume',
+          now: this.isoNow(),
+        });
+        throw error;
+      }
+    }
+  }
+
+  private async runGraphExecution(
+    graph: GraphMissionRecord,
+    stepKey: string,
+    owner: GraphResourceReservation,
+  ): Promise<void> {
+    const step = graph.steps.find((step) => step.key === stepKey)!;
+    const execution = this.persistence.getTeamExecution(step.executionId);
+    const dispatch = this.persistence.getTeamExecutionDispatch(execution.id);
+    const snapshot = this.persistence.getTeamSnapshot(execution.teamId);
+    const leader = snapshot.agents.find((agent) => agent.id === execution.createdByAgentId)!;
+    const storedWorker = snapshot.agents.find((agent) => agent.id === execution.assigneeAgentId)!;
+    const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
+    let attemptId: string | null = null;
+    let budgets: readonly TeamBudgetReservationRecord[] = [];
+    let worktree: TeamMissionWorktreeRecord | null = null;
+    let isolation: TeamExecutionIsolationRecord | null = null;
+    let report: ReturnType<typeof workerReportSchema.parse> | null = null;
+    let runtimeSettled = false;
+    try {
+      if (!leader || !storedWorker || !['ready', 'waiting'].includes(storedWorker.state))
+        throw new Error('Graph Worker is not ready');
+      await this.verifyWorkspace?.(graph.taskId);
+      this.persistence.sealTeamExecutionContext({
+        taskId: graph.taskId,
+        executionId: execution.id,
+      });
+      if (execution.accessMode === 'workspace-write') {
+        await this.requireWorkspaceWriteEligibility(graph.taskId);
+        if (this.persistence.getEffectiveWorkspaceSet(graph.taskId).source === 'task')
+          worktree = await this.prepareMissionWorktree(graph.taskId, execution.id, worker.id);
+        else
+          isolation = await this.prepareExecutionIsolation(graph.taskId, execution.id, worker.id);
+      }
+      const fresh = await prepareGraphStepWriteFootprints(graph, stepKey, () =>
+        graphMissionContextFor(this.persistence, graph.taskId),
+      );
+      const acquired = this.persistence.acquireGraphResources({
+        missionId: graph.missionId,
+        stepKey,
+        expectedGeneration: step.generation,
+        writeFootprints: fresh,
+        now: this.isoNow(),
+      });
+      if (!acquired.acquired || acquired.reservation.id !== owner.id)
+        throw new Error('Graph admission changed during preflight');
+      budgets = this.persistence.reserveTeamBudget({
+        teamId: execution.teamId,
+        entries: [
+          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
+            scope: 'team' as const,
+            kind: kind as keyof typeof executionEstimate,
+            amount,
+          })),
+          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
+            scope: 'worker' as const,
+            kind: kind as keyof typeof executionEstimate,
+            amount,
+            agentId: worker.id,
+          })),
+        ],
+        purpose: `team-execution:${execution.id}`,
+        now: this.isoNow(),
+      });
+      if (!this.executionScheduler.tryFinishPreflight(execution.id))
+        throw new Error('Graph execution canceled before dispatch');
+      const started = this.persistence.beginGraphAttempt({
+        missionId: graph.missionId,
+        stepKey,
+        generation: step.generation,
+        reservationId: owner.id,
+        now: this.isoNow(),
+      });
+      attemptId = started.attempt.id;
+      this.persistence.transitionTeamAttempt({ attemptId, to: 'running', now: this.isoNow() });
+      this.persistence.transitionWorkerState(worker.id, 'busy');
+      this.persistence.setWorkerCurrentActivity(
+        worker.id,
+        execution.instruction.content,
+        this.isoNow(),
+      );
+      this.emit(graph.taskId, execution.teamId);
+      const result = await this.dispatchWithRetry(
+        execution.teamId,
+        leader,
+        worker,
+        dispatch.messageId,
+        dispatch.messageSeq,
+        execution.instruction.content,
+        dispatch.teamTaskId,
+        execution.id,
+        attemptId,
+        worktree?.path ?? isolation?.roots.find((root) => root.role === 'primary')?.isolatedPath,
+        execution.accessMode,
+        isolation
+          ? this.runtimeWorkspaceForIsolation(isolation)
+          : worktree
+            ? undefined
+            : this.runtimeWorkspaceForTask(graph.taskId),
+      );
+      runtimeSettled = true;
+      if (this.executionInterruptions.has(execution.id))
+        throw new Error('Graph execution interrupted');
+      this.persistence.transitionTeamMessageState(dispatch.messageId, 'delivered');
+      this.persistence.transitionTeamDelivery({
+        messageId: dispatch.messageId,
+        to: 'acked',
+        now: this.isoNow(),
+      });
+      this.settleExecution(budgets, result.usage);
+      budgets = [];
+      if (result.resolution || result.providerUsage)
+        this.persistence.recordTeamAttemptProviderResult(
+          attemptId,
+          result.resolution,
+          result.providerUsage,
+        );
+      const doneEvidence = dispatch.doneCriteria.map((criterion) => ({
+        criterion,
+        evidence: result.value.summary,
+      }));
+      let changedFiles = [...result.changedFiles];
+      if (result.value.status !== 'succeeded') throw new Error(result.value.summary);
+      if (worktree) {
+        const sealed = await this.worktreeManager!.finalizeChanges({
+          agentId: worker.id,
+          worktreeId: execution.id,
+          repoPath: worktree.repoPath,
+          baseHead: worktree.baseHead,
+          commitMessage: `Graph Mission ${graph.missionId} step ${stepKey}`,
+        });
+        changedFiles = [...sealed.changedFiles];
+        worktree = this.persistence.updateTeamMissionWorktree({
+          executionId: execution.id,
+          to: 'ready',
+          workerHead: sealed.workerHead,
+          changedFiles,
+          now: this.isoNow(),
+        });
+      }
+      if (isolation) {
+        const finalized = await this.finalizeIsolation({
+          isolation,
+          agentId: worker.id,
+          missionId: graph.missionId,
+          stepOrdinal: this.persistence
+            .getTeamMission(graph.missionId)
+            .steps.find((step) => step.executionId === execution.id)!.ordinal,
+        });
+        isolation = finalized.isolation;
+        changedFiles = [...finalized.changedFiles];
+      }
+      report = workerReportSchema.parse({
+        status: 'completed',
+        summary: result.value.summary,
+        findings: [],
+        changedFiles,
+        artifacts: result.value.artifacts,
+        verification: result.value.verification,
+        risks: result.value.risks,
+        nextActions: [],
+        doneEvidence,
+      });
+      if (worktree) worktree = await this.queueMissionWorktreeIntegration(worktree);
+      if (isolation) isolation = await this.queueIsolationIntegration(isolation);
+      const complete = this.persistence.completeGraphStep({
+        missionId: graph.missionId,
+        stepKey,
+        generation: step.generation,
+        reservationId: owner.id,
+        attemptId,
+        agentId: worker.id,
+        teamTaskId: dispatch.teamTaskId,
+        report,
+        doneEvidence,
+        checkpoint: this.captureMissionCheckpoint(graph.taskId, report.summary, changedFiles),
+        confirmation: { kind: 'attempt-stopped', attemptId },
+        now: this.isoNow(),
+      });
+      this.persistWorkerResult(
+        execution.teamId,
+        worker,
+        leader,
+        result.value,
+        execution.id,
+        attemptId,
+      );
+      this.persistence.transitionWorkerState(
+        worker.id,
+        complete.mission.state === 'completed' ? 'done' : 'waiting',
+      );
+      if (worktree) await this.cleanupIntegratedMissionWorktree(worktree, worker.id);
+      if (isolation) await this.cleanupIntegratedExecutionIsolation(isolation, worker.id);
+      if (complete.mission.state === 'completed') {
+        for (const agent of this.persistence.getTeamSnapshot(execution.teamId).agents) {
+          if (
+            graph.plan.steps.some((step) => step.workerId === agent.id) &&
+            ['ready', 'waiting'].includes(agent.state)
+          )
+            this.persistence.transitionWorkerState(agent.id, 'done');
+        }
+        this.finalizeTeamIfWorkersTerminal(execution.teamId);
+      }
+      this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+    } catch (error) {
+      const reason = (error instanceof Error ? error.message : 'Graph execution failed').slice(
+        0,
+        2000,
+      );
+      if (attemptId === null) {
+        this.persistence.releaseGraphResources({
+          reservationId: owner.id,
+          executionId: execution.id,
+          generation: step.generation,
+          confirmation: { kind: 'not-dispatched' },
+          now: this.isoNow(),
+        });
+        const current = this.persistence.getTeamExecution(execution.id);
+        if (!['completed', 'failed', 'canceled'].includes(current.state))
+          this.persistence.transitionTeamExecution({
+            executionId: execution.id,
+            to: 'waiting_resume',
+            now: this.isoNow(),
+          });
+      } else if (report !== null && execution.accessMode === 'workspace-write' && runtimeSettled) {
+        this.persistence.holdGraphIntegration({
+          missionId: graph.missionId,
+          stepKey,
+          generation: step.generation,
+          reservationId: owner.id,
+          attemptId,
+          agentId: worker.id,
+          teamTaskId: dispatch.teamTaskId,
+          report,
+          doneEvidence: report.doneEvidence,
+          reason,
+          confirmation: { kind: 'attempt-stopped', attemptId },
+          now: this.isoNow(),
+        });
+      } else {
+        if (
+          !runtimeSettled &&
+          !(error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed')
+        ) {
+          try {
+            await this.runtime.stop(worker.id);
+            runtimeSettled = true;
+          } catch {
+            runtimeSettled = false;
+          }
+        }
+        this.persistence.interruptGraphStep({
+          missionId: graph.missionId,
+          stepKey,
+          generation: step.generation,
+          reservationId: owner.id,
+          attemptId,
+          outcome: this.executionInterruptions.has(execution.id) ? 'canceled' : 'failed',
+          reason,
+          confirmation: runtimeSettled
+            ? { kind: 'attempt-stopped', attemptId }
+            : { kind: 'unconfirmed' },
+          now: this.isoNow(),
+        });
+        if (worktree) this.quarantineMissionWorktree(execution.id, error);
+        if (isolation) this.quarantineExecutionIsolation(execution.id, error);
+      }
+      const currentWorker = this.persistence
+        .getTeamSnapshot(execution.teamId)
+        .agents.find((agent) => agent.id === worker.id);
+      if (currentWorker?.state === 'busy')
+        this.persistence.transitionWorkerState(worker.id, 'waiting');
+      this.persistence.setWorkerCurrentActivity(worker.id, reason, this.isoNow());
+      const control = this.executionInterruptions.get(execution.id);
+      if (control?.kind === 'cancel' && runtimeSettled)
+        this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+      if (control) {
+        this.executionInterruptions.delete(execution.id);
+        control.resolve({
+          executionId: execution.id,
+          state: this.persistence.getTeamExecution(execution.id).state,
+        });
+      }
+    } finally {
+      this.releaseReservations(budgets);
+      this.executionScheduler.notifyReadinessChanged();
+      this.emit(graph.taskId, execution.teamId);
+    }
+  }
+
+  /** Main-only graph continuation. The agreed result and stop record are reused, never a new Worker run. */
+  async resumeGraphIntegration(
+    taskId: string,
+    missionId: string,
+    stepKey: string,
+  ): Promise<TeamMissionSummary> {
+    return this.enqueue(taskId, async () => {
+      const team = this.persistence.getTeamByTask(taskId);
+      const graph = this.persistence.getGraphTeamMission(missionId);
+      const mission = this.persistence.getTeamMission(missionId);
+      const step = graph?.steps.find((step) => step.key === stepKey);
+      if (!team || !graph || graph.taskId !== taskId || mission.teamId !== team.id || !step)
+        throw new Error('Graph integration does not belong to Task');
+      const execution = this.persistence.getTeamExecution(step.executionId);
+      const reservations = this.persistence.listGraphResourceReservations(missionId);
+      if (
+        execution.state === 'completed' &&
+        !reservations.some((row) => row.executionId === execution.id && row.state !== 'released')
+      )
+        return this.missionSummary(mission);
+      const owner = reservations.find(
+        (row) => row.executionId === execution.id && row.state !== 'released',
+      );
+      if (!owner) throw new Error('Graph integration ownership is missing');
+      if (
+        this.graphIntegrationWorkers.has(execution.assigneeAgentId) ||
+        this.persistence
+          .listTeamExecutions(team.id)
+          .some(
+            (other) =>
+              other.id !== execution.id &&
+              other.assigneeAgentId === execution.assigneeAgentId &&
+              other.state === 'running',
+          )
+      )
+        throw new Error('Graph integration Worker is busy');
+      this.graphIntegrationWorkers.add(execution.assigneeAgentId);
+      try {
+        await this.verifyWorkspace?.(taskId);
+        await prepareGraphStepWriteFootprints(graph, stepKey, () =>
+          graphMissionContextFor(this.persistence, taskId),
+        );
+        const hold = this.persistence.prepareGraphIntegrationResume(owner.id, this.isoNow());
+        this.emit(taskId, team.id);
+        let isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+        let worktree = this.persistence.getTeamMissionWorktree(execution.id);
+        try {
+          if (isolation !== null) {
+            await this.assertGraphIntegrationScope(execution.id, isolation.repositories);
+            isolation =
+              isolation.phase === 'completed'
+                ? await this.revalidateIntegratedIsolation(isolation)
+                : await this.queueIsolationIntegration(isolation);
+          } else if (worktree !== null && this.worktreeManager !== undefined) {
+            if (worktree.state === 'ready')
+              worktree = await this.queueMissionWorktreeIntegration(worktree);
+            else {
+              if (
+                !worktree.workerHead ||
+                !worktree.integratedHead ||
+                !['integrated', 'cleaned'].includes(worktree.state)
+              )
+                throw new Error('Graph worktree has no resumable integration');
+              await this.assertGraphIntegrationScope(execution.id, [
+                {
+                  repoPath: worktree.repoPath,
+                  baseHead: worktree.baseHead,
+                  workerHead: worktree.workerHead,
+                },
+              ]);
+              const verified = await this.worktreeManager.revalidateIntegration({
+                repoPath: worktree.repoPath,
+                baseHead: worktree.baseHead,
+                workerHead: worktree.workerHead,
+                integratedHead: worktree.integratedHead,
+              });
+              if (verified.integratedHead !== worktree.integratedHead)
+                throw new Error('Graph integrated HEAD changed');
+            }
+          } else throw new Error('Graph integration worktree is missing');
+          const result = this.persistence.completeGraphStep({
+            missionId,
+            stepKey,
+            generation: hold.generation,
+            reservationId: hold.reservationId,
+            attemptId: hold.attemptId,
+            agentId: hold.agentId,
+            teamTaskId: hold.teamTaskId,
+            report: hold.report,
+            doneEvidence: hold.doneEvidence,
+            integrationResumeOrdinal: hold.resumeOrdinal,
+            confirmation: { kind: 'attempt-stopped', attemptId: hold.attemptId },
+            checkpoint: this.captureMissionCheckpoint(
+              taskId,
+              hold.report.summary,
+              hold.report.changedFiles,
+            ),
+            now: this.isoNow(),
+          });
+          if (isolation !== null)
+            await this.cleanupIntegratedExecutionIsolation(isolation, hold.agentId);
+          else if (worktree !== null)
+            await this.cleanupIntegratedMissionWorktree(worktree, hold.agentId);
+          this.persistence.deleteGraphIntegrationHold(owner.id);
+          this.executionScheduler.notifyReadinessChanged();
+          this.emit(taskId, team.id);
+          return this.missionSummary(result.mission);
+        } catch (error) {
+          if (this.persistence.getTeamExecution(execution.id).state !== 'completed')
+            this.persistence.pauseGraphIntegrationResume(
+              owner.id,
+              hold.resumeOrdinal,
+              (error instanceof Error ? error.message : 'Graph integration failed').slice(0, 2000),
+              this.isoNow(),
+            );
+          this.emit(taskId, team.id);
+          throw error;
+        }
+      } finally {
+        this.graphIntegrationWorkers.delete(execution.assigneeAgentId);
+        this.executionScheduler.notifyReadinessChanged();
+      }
+    });
+  }
+
   async resumeExecutionIntegration(taskId: string, executionId: string): Promise<TeamDetail> {
     return this.enqueue(taskId, async () => {
       const team = this.persistence.getTeamByTask(taskId);
@@ -1215,6 +1762,8 @@ export class TeamCoordinator {
       if (team === null) throw new Error('Team not found');
       const execution = this.persistence.getTeamExecution(executionId);
       if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
+      if (this.persistence.getTeamMissionForExecution(execution.id)?.mode === 'graph')
+        throw new Error('Graph Mission changes require agreement');
       if (requesterAgentId !== null && execution.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only steer executions it assigned');
       if (
@@ -1255,6 +1804,8 @@ export class TeamCoordinator {
       if (execution.teamId !== team.id) throw new Error('Execution does not belong to Task Team');
       if (requesterAgentId !== null && execution.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only cancel executions it assigned');
+      if (this.persistence.getTeamMissionForExecution(execution.id)?.mode === 'graph')
+        return this.cancelGraphExecution(execution);
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'cancel', null);
       if (execution.state === 'waiting_resume') {
@@ -1270,6 +1821,41 @@ export class TeamCoordinator {
       this.emit(taskId, team.id);
       return { executionId: canceled.id, state: canceled.state };
     });
+  }
+
+  private async cancelGraphExecution(
+    execution: ReturnType<PersistenceClient['getTeamExecution']>,
+  ): Promise<TeamExecutionSubmission> {
+    const mission = this.persistence.getTeamMissionForExecution(execution.id);
+    if (!mission || mission.mode !== 'graph') throw new Error('Graph execution required');
+    if (execution.state === 'running')
+      return this.interruptRunningExecution(execution, 'cancel', null);
+    const owners = this.persistence
+      .listGraphResourceReservations(mission.id)
+      .filter((owner) => owner.executionId === execution.id && owner.state !== 'released');
+    if (
+      owners.some((owner) => this.persistence.getGraphIntegrationHold(owner.id)?.integrationActive)
+    )
+      throw new Error('Graph integration stop is unconfirmed');
+    if (owners.some((owner) => owner.attemptId !== null))
+      await this.runtime.stop(execution.assigneeAgentId);
+    this.executionScheduler.cancelQueued(execution.id);
+    const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+    for (const owner of owners)
+      this.persistence.releaseGraphResources({
+        reservationId: owner.id,
+        executionId: execution.id,
+        generation: owner.generation,
+        confirmation:
+          owner.attemptId === null
+            ? { kind: 'not-dispatched' }
+            : { kind: 'attempt-stopped', attemptId: owner.attemptId },
+        now: this.isoNow(),
+      });
+    this.graphScheduledExecutions.delete(execution.id);
+    this.executionScheduler.notifyReadinessChanged();
+    this.emit(this.persistence.getTeam(execution.teamId).taskId, execution.teamId);
+    return { executionId: canceled.id, state: canceled.state };
   }
 
   private async interruptRunningExecution(
@@ -2286,7 +2872,12 @@ export class TeamCoordinator {
     terminalState: 'canceled' | 'failed' = 'canceled',
   ): void {
     const mission = this.persistence.getTeamMissionForExecution(currentExecutionId);
-    if (mission === null || ['completed', 'failed', 'canceled'].includes(mission.state)) return;
+    if (
+      mission === null ||
+      mission.mode === 'graph' ||
+      ['completed', 'failed', 'canceled'].includes(mission.state)
+    )
+      return;
     for (const step of mission.steps) {
       if (step.executionId === currentExecutionId) continue;
       const execution = this.persistence.getTeamExecution(step.executionId);
@@ -2352,6 +2943,10 @@ export class TeamCoordinator {
     for (const pendingExecution of pending) {
       const execution = this.persistence.getTeamExecution(pendingExecution.id);
       if (['completed', 'failed', 'canceled'].includes(execution.state)) continue;
+      if (this.persistence.getTeamMissionForExecution(execution.id)?.mode === 'graph') {
+        await this.cancelGraphExecution(execution);
+        continue;
+      }
       if (execution.state === 'running') {
         await this.interruptRunningExecution(execution, 'cancel', null);
         stoppedRunningRuntime = true;
@@ -2375,6 +2970,7 @@ export class TeamCoordinator {
       if (team === null) continue;
       for (const queued of this.persistence.listQueuedTeamExecutions(team.id)) {
         const mission = this.persistence.getTeamMissionForExecution(queued.id);
+        if (mission?.mode === 'graph') continue;
         const missionStep = mission?.steps.find(({ executionId }) => executionId === queued.id);
         const previousCheckpoint =
           missionStep === undefined
@@ -2476,6 +3072,9 @@ export class TeamCoordinator {
       teamId: input.teamId,
       teamLimit: input.teamLimit,
       ...this.connectionSchedulingFields(execution, input.taskId, input.teamId),
+      isReady: () =>
+        !this.graphIntegrationWorkers.has(execution.assigneeAgentId) &&
+        !this.persistence.hasGraphResourceOwnerForWorker(execution.assigneeAgentId),
       onWorkerWaitChanged: () => this.emit(input.taskId, input.teamId),
       run: () =>
         this.runScheduledExecution({
@@ -2891,8 +3490,12 @@ export class TeamCoordinator {
   }
 
   private missionSummary(mission: TeamMissionRecord): TeamMissionSummary {
+    const graph =
+      mission.mode === 'graph' ? this.persistence.getGraphTeamMission(mission.id) : null;
+    const resources = graph ? this.persistence.listGraphResourceReservations(mission.id) : [];
     return {
       mode: mission.mode,
+      ...(graph ? { graph: { id: graph.graphId, semanticRevision: graph.semanticRevision } } : {}),
       id: mission.id,
       teamId: mission.teamId,
       createdByAgentId: mission.createdByAgentId,
@@ -2903,7 +3506,31 @@ export class TeamCoordinator {
       steps: mission.steps.map((step) => {
         const execution = this.persistence.getTeamExecution(step.executionId);
         const dispatch = this.persistence.getTeamExecutionDispatch(step.executionId);
+        const mapping = graph?.steps.find((item) => item.executionId === step.executionId);
+        const owner =
+          resources.find(
+            (item) => item.executionId === step.executionId && item.state !== 'released',
+          ) ?? resources.filter((item) => item.executionId === step.executionId).at(-1);
+        const hold = owner ? this.persistence.getGraphIntegrationHold(owner.id) : null;
         return {
+          ...(mapping
+            ? {
+                graph: {
+                  key: mapping.key,
+                  nodeId: mapping.nodeId,
+                  generation: mapping.generation,
+                  resourceState: owner?.state ?? null,
+                  waitReason:
+                    execution.state === 'queued'
+                      ? (this.graphWaitReasons.get(execution.id) ?? null)
+                      : null,
+                  integrationResumeAvailable:
+                    execution.state === 'waiting_resume' &&
+                    hold !== null &&
+                    !hold.integrationActive,
+                },
+              }
+            : {}),
           ordinal: step.ordinal,
           executionId: step.executionId,
           workerId: execution.assigneeAgentId,

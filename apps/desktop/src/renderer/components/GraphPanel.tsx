@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import type { GraphSelection, GraphView, GraphGeneration } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { acceptGraphSelection } from '../lib/graph-selection';
@@ -18,6 +18,31 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
   const [cancelError, setCancelError] = useState<string | null>(null);
   const generationSequence = useRef(0);
   const frame = useRef<HTMLIFrameElement>(null);
+  const team = useAppStore((state) => state.teamByTask[taskId]);
+  const graphMission = team?.missions.find(
+    (mission) =>
+      view !== null &&
+      mission.graph !== undefined &&
+      mission.graph.id === view.id &&
+      mission.graph.semanticRevision === view.revision,
+  );
+  const sendExecutionState = useCallback(() => {
+    if (!view) return;
+    frame.current?.contentWindow?.postMessage(
+      {
+        type: 'sprint-graph-execution',
+        instanceId: view.instanceId,
+        graphId: view.id,
+        revision: view.revision,
+        nodes:
+          graphMission?.steps.flatMap((step) =>
+            step.graph ? [{ id: step.graph.nodeId, state: step.state }] : [],
+          ) ?? [],
+      },
+      '*',
+    );
+  }, [view, graphMission]);
+  useEffect(sendExecutionState, [sendExecutionState]);
   const currentView = useRef<GraphView | null>(null);
   const sourceState = useGraphSourceStatus(
     view,
@@ -153,6 +178,7 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
           sandbox="allow-scripts"
           title={`${view.title} — Archify`}
           data-testid="graph-frame"
+          onLoad={sendExecutionState}
         />
       ) : (
         <p className="settings-hint">

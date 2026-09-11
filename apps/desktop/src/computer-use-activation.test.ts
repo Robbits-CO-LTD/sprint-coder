@@ -1,3 +1,4 @@
+import { graphStartActivationIntent } from './graph-activation-intent';
 import { describe, expect, it } from 'vitest';
 import { createTrustedComputerUseUiActivationGate } from './computer-use-activation';
 import { approvalActivationIntent, startActivationIntent } from './computer-use-activation-intent';
@@ -5,7 +6,7 @@ import { approvalActivationIntent, startActivationIntent } from './computer-use-
 class ActivationElement {
   readonly dataset: Record<string, string>;
 
-  constructor(kind: 'application' | 'start' | 'approval', intent?: string) {
+  constructor(kind: 'application' | 'start' | 'approval' | 'graph-start', intent?: string) {
     this.dataset = {
       computerUseActivation: kind,
       ...(intent === undefined ? {} : { computerUseIntent: intent }),
@@ -18,6 +19,34 @@ class ActivationElement {
 }
 
 describe('trusted Computer Use UI activation', () => {
+  it('keeps graph agreement separate from Computer Use and rejects synthetic start gestures', () => {
+    const previous = globalThis.Element;
+    Object.assign(globalThis, { Element: ActivationElement });
+    try {
+      const input = {
+        taskId: 'task',
+        instanceId: 'view',
+        renderRevision: 1,
+        contextDigest: 'a'.repeat(64),
+      };
+      const intent = graphStartActivationIntent(input);
+      expect(graphStartActivationIntent({ ...input, contextDigest: 'b'.repeat(64) })).not.toBe(
+        intent,
+      );
+      const gate = createTrustedComputerUseUiActivationGate(() => 100);
+      const target = new ActivationElement('graph-start', intent) as unknown as Element;
+      expect(gate.observe({ isTrusted: false, target })).toBe(false);
+      expect(gate.consume('graph-start')).toBeNull();
+      gate.observe({ isTrusted: true, target });
+      expect(gate.consume('start')).toBeNull();
+      gate.observe({ isTrusted: true, target });
+      expect(gate.consume('graph-start')).toEqual({ intent });
+      expect(gate.consume('graph-start')).toBeNull();
+    } finally {
+      Object.assign(globalThis, { Element: previous });
+    }
+  });
+
   it('changes the bound intent when an authority-bearing choice changes', () => {
     const input = {
       taskId: 'task-1',

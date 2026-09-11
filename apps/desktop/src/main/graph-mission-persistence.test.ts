@@ -246,8 +246,255 @@ async function writeMission(
   return { mission, acquisition, review, workspace: binding.canonicalPath };
 }
 
+async function sealedWriteFixture() {
+  const f = fixture(undefined, true);
+  const workspace = join(dirname(f.path), 'workspace');
+  mkdirSync(workspace);
+  expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+  writeFileSync(join(workspace, 'shared.ts'), 'base\n');
+  expect(spawnSync('git', ['-C', workspace, 'add', 'shared.ts']).status).toBe(0);
+  expect(
+    spawnSync('git', [
+      '-C',
+      workspace,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-qm',
+      'base',
+    ]).status,
+  ).toBe(0);
+  const a = await writeMission(f, workspace);
+  const run = begin(f, a.mission.id, 'a', a.acquisition.writeFootprints);
+  const manager = new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') });
+  const worker = {
+    agentId: run.execution.assigneeAgentId,
+    worktreeId: run.execution.id,
+    repoPath: a.workspace,
+  };
+  const worktree = await manager.create(worker);
+  f.persistence.recordTeamMissionWorktree({
+    ...worktree,
+    executionId: run.execution.id,
+    agentId: worker.agentId,
+    repoPath: a.workspace,
+    now,
+  });
+  f.persistence.updateTeamMissionWorktree({ executionId: run.execution.id, to: 'active', now });
+  writeFileSync(join(worktree.path, 'shared.ts'), 'integrated\n');
+  const sealed = await manager.finalizeChanges({
+    ...worker,
+    baseHead: worktree.baseHead,
+    commitMessage: 'write shared file',
+  });
+  f.persistence.updateTeamMissionWorktree({
+    executionId: run.execution.id,
+    to: 'ready',
+    workerHead: sealed.workerHead,
+    changedFiles: sealed.changedFiles,
+    now,
+  });
+  return { f, a, run, manager, worker, worktree, sealed };
+}
+
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it.each([false, true])(
+      'dispatches independent graph steps without serializing siblings (cancel first: %s)',
+      async (cancelFirst) => {
+        const f = fixture(undefined, false, ['a', 'b', 'c']);
+        const plan = structuredClone(f.plan);
+        plan.steps[1]!.dependsOn = [];
+        plan.steps[2]!.dependsOn = ['a', 'b'];
+        const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(document, 1);
+        const scheduler = new TeamExecutionScheduler(2);
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = runtime.execute.bind(runtime);
+        const started: string[] = [];
+        const releases = new Map<string, () => void>();
+        vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+          started.push(input.worker.role);
+          await new Promise<void>((resolve) => releases.set(input.worker.role, resolve));
+          return execute(input);
+        });
+        vi.spyOn(runtime, 'stop').mockImplementation(async (workerId) => {
+          const worker = f.workers.find(({ id }) => id === workerId);
+          if (worker) releases.get(worker.role)?.();
+        });
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+        );
+        try {
+          const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+            ...f.input,
+            renderRevision: document.renderRevision,
+            semanticRevision: document.semanticRevision,
+            semanticDigest: document.semanticDigest,
+          }));
+          await vi.waitFor(() => expect(started).toEqual(['a', 'b']));
+          await expect(
+            coordinator.steerExecution(f.task.id, mission.steps[0]!.executionId, 'different'),
+          ).rejects.toThrow('require agreement');
+          expect(runtime.stop).not.toHaveBeenCalled();
+          if (cancelFirst) {
+            await expect(
+              coordinator.cancelExecution(f.task.id, mission.steps[0]!.executionId),
+            ).resolves.toMatchObject({ state: 'canceled' });
+          } else releases.get('a')!();
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(1));
+          expect(started).toEqual(['a', 'b']);
+          releases.get('b')!();
+          if (cancelFirst) {
+            await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+            expect(started).toEqual(['a', 'b']);
+            expect(f.persistence.getTeamExecution(mission.steps[1]!.executionId).state).toBe(
+              'completed',
+            );
+            await coordinator.cancelExecution(f.task.id, mission.steps[2]!.executionId);
+            return;
+          }
+          await vi.waitFor(() => expect(started).toEqual(['a', 'b', 'c']));
+          releases.get('c')!();
+          await vi.waitFor(() =>
+            expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+          );
+          expect(
+            f.persistence
+              .listGraphResourceReservations(mission.id)
+              .every(({ state }) => state === 'released'),
+          ).toBe(true);
+          expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+        } finally {
+          for (const release of releases.values()) release();
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          f.persistence.close();
+        }
+      },
+    );
+
+    it('resumes a sealed graph integration without starting another Worker attempt', async () => {
+      const { f, a, run, manager } = await sealedWriteFixture();
+      const input = { ...completion(a.mission.id, 'a', run), reason: 'Integration requires retry' };
+      const hold = f.persistence.holdGraphIntegration(input);
+      expect(hold).toMatchObject({ integrationActive: false, resumeOrdinal: 0 });
+      expect(f.persistence.getTeamAttempt(run.attempt.id).state).toBe('completed');
+      expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('waiting_resume');
+      expect(() =>
+        f.persistence.holdGraphIntegration({
+          ...input,
+          report: { ...input.report, summary: 'different result' },
+        }),
+      ).toThrow('immutable');
+      const prepared = f.persistence.prepareGraphIntegrationResume(hold.reservationId, now);
+      expect(prepared.resumeOrdinal).toBe(1);
+      expect(() => f.persistence.prepareGraphIntegrationResume(hold.reservationId, now)).toThrow(
+        'unconfirmed',
+      );
+      f.persistence.pauseGraphIntegrationResume(
+        hold.reservationId,
+        1,
+        'Runner settled with a conflict',
+        now,
+      );
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        manager,
+      );
+      vi.spyOn(manager, 'integrate').mockRejectedValueOnce(new Error('Integration conflict'));
+      await expect(
+        coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a'),
+      ).rejects.toThrow('Integration conflict');
+      expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toMatchObject({
+        integrationActive: false,
+        resumeOrdinal: 2,
+      });
+      expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('waiting_resume');
+      expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('base\n');
+      await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+      expect(execute).not.toHaveBeenCalled();
+      expect(f.persistence.listTeamAttempts(run.execution.id)).toHaveLength(1);
+      expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed');
+      expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toBeNull();
+      expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('released');
+      expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('integrated\n');
+      await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+      expect(execute).not.toHaveBeenCalled();
+      expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      f.persistence.close();
+    });
+
+    it('does not treat restart as proof that an interrupted integration runner stopped', async () => {
+      const { f, a, run } = await sealedWriteFixture();
+      const hold = f.persistence.holdGraphIntegration({
+        ...completion(a.mission.id, 'a', run),
+        reason: 'Waiting integration',
+      });
+      f.persistence.prepareGraphIntegrationResume(hold.reservationId, now);
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      restored.recoverInterruptedTeamExecutions('2026-09-11T00:01:00.000Z');
+      expect(restored.getGraphIntegrationHold(hold.reservationId)).toMatchObject({
+        integrationActive: true,
+        resumeOrdinal: 1,
+      });
+      expect(restored.getTeamExecution(run.execution.id).state).toBe('waiting_resume');
+      expect(() => restored.prepareGraphIntegrationResume(hold.reservationId, now)).toThrow(
+        'unconfirmed',
+      );
+      expect(() =>
+        restored.pauseGraphIntegrationResume(hold.reservationId, 0, 'stale stop', now),
+      ).toThrow('mismatch');
+      restored.pauseGraphIntegrationResume(
+        hold.reservationId,
+        1,
+        'Main observed the runner stopped',
+        now,
+      );
+      expect(restored.prepareGraphIntegrationResume(hold.reservationId, now).resumeOrdinal).toBe(2);
+      restored.close();
+    });
+
+    it('retains ownership when an active integration execution is marked canceled', async () => {
+      const { f, a, run } = await sealedWriteFixture();
+      const hold = f.persistence.holdGraphIntegration({
+        ...completion(a.mission.id, 'a', run),
+        reason: 'Waiting integration',
+      });
+      f.persistence.prepareGraphIntegrationResume(hold.reservationId, now);
+      f.persistence.transitionTeamExecution({ executionId: run.execution.id, to: 'canceled', now });
+      expect(() =>
+        f.persistence.releaseGraphResources({
+          reservationId: hold.reservationId,
+          executionId: run.execution.id,
+          generation: 1,
+          confirmation: { kind: 'attempt-stopped', attemptId: run.attempt.id },
+          now,
+        }),
+      ).toThrow();
+      expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('active');
+      expect(f.persistence.getGraphIntegrationHold(hold.reservationId)?.integrationActive).toBe(
+        true,
+      );
+      f.persistence.close();
+    });
+
     it.each([false, true])(
       'checks sealed rename endpoints in the actual integration queue (declared=%s)',
       async (declared) => {
