@@ -1,5 +1,13 @@
 import Database from 'better-sqlite3';
 import {
+  graphResourceKeys,
+  graphResourceInventorySchema,
+  type GraphResourceReservation,
+  type GraphResourceAcquisition,
+  type GraphResourceRelease,
+  type GraphResourceKey,
+} from './graph-resource';
+import {
   graphGenerationSchema,
   graphMissionPlanSchema,
   type GraphDocument,
@@ -791,6 +799,17 @@ type GraphMissionRow = {
   consent_id: string;
   approved_at: string;
   definition_json: string;
+};
+type GraphResourceRow = {
+  id: string;
+  mission_id: string;
+  execution_id: string;
+  generation: number;
+  attempt_id: string | null;
+  state: GraphResourceReservation['state'];
+  created_at: string;
+  released_at: string | null;
+  resources_json: string;
 };
 export const teamV2ActivityTypes = [
   'worker_hired',
@@ -3905,6 +3924,37 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 87,
+    checksum: 'graph-resources-v87-owned-reservations',
+    sql: `
+      ALTER TABLE team_graph_mission_steps ADD COLUMN checkpoint_generation INTEGER CHECK (checkpoint_generation > 0);
+      ALTER TABLE team_graph_mission_steps ADD COLUMN checkpoint_attempt_id TEXT REFERENCES team_attempts(id);
+      CREATE TABLE team_graph_resource_reservations (
+        id TEXT PRIMARY KEY,
+        mission_id TEXT NOT NULL REFERENCES team_graph_missions(mission_id) ON DELETE CASCADE,
+        execution_id TEXT NOT NULL REFERENCES team_executions(id) ON DELETE CASCADE,
+        generation INTEGER NOT NULL CHECK (generation > 0),
+        attempt_id TEXT REFERENCES team_attempts(id),
+        state TEXT NOT NULL CHECK (state IN ('reserved','active','quarantined','released')),
+        created_at TEXT NOT NULL, released_at TEXT, resources_json TEXT NOT NULL,
+        CHECK ((state = 'released') = (released_at IS NOT NULL))
+      );
+      CREATE UNIQUE INDEX graph_resource_execution_owner ON team_graph_resource_reservations(execution_id) WHERE state <> 'released';
+      CREATE TABLE team_graph_resource_leases (
+        resource_key TEXT PRIMARY KEY,
+        reservation_id TEXT NOT NULL REFERENCES team_graph_resource_reservations(id) ON DELETE CASCADE,
+        scope TEXT NOT NULL CHECK (scope IN ('worker','machine','workspace')),
+        logical_name TEXT NOT NULL, root_identity_digest TEXT,
+        CHECK ((scope = 'workspace') = (root_identity_digest IS NOT NULL))
+      );
+      CREATE TRIGGER graph_resource_preserve_owner BEFORE DELETE ON team_graph_resource_reservations
+        WHEN OLD.state <> 'released' BEGIN SELECT RAISE(ABORT, 'Graph resource ownership is not released'); END;
+      CREATE TRIGGER graph_resource_preserve_lease BEFORE DELETE ON team_graph_resource_leases
+        WHEN EXISTS (SELECT 1 FROM team_graph_resource_reservations r WHERE r.id=OLD.reservation_id AND r.state <> 'released')
+        BEGIN SELECT RAISE(ABORT, 'Graph resource ownership is not released'); END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4437,6 +4487,20 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  acquireGraphResources(input: {
+    missionId: string;
+    stepKey: string;
+    expectedGeneration: number;
+    now: string;
+  }): GraphResourceAcquisition;
+  bindGraphResourcesToAttempt(input: {
+    reservationId: string;
+    executionId: string;
+    generation: number;
+    attemptId: string;
+  }): GraphResourceReservation;
+  releaseGraphResources(input: GraphResourceRelease): boolean;
+  listGraphResourceReservations(missionId: string): readonly GraphResourceReservation[];
   createGraphTeamMission(input: GraphMissionCommitInput): TeamMissionRecord;
   getGraphTeamMission(missionId: string): GraphMissionRecord | null;
   setSkillCatalogContextProvider?(
@@ -9169,6 +9233,292 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  acquireGraphResources(input: {
+    missionId: string;
+    stepKey: string;
+    expectedGeneration: number;
+    now: string;
+  }): GraphResourceAcquisition {
+    return this.db.transaction((): GraphResourceAcquisition => {
+      const graph = this.getGraphTeamMission(input.missionId);
+      if (!graph) throw new Error('Graph Mission required');
+      const mission = this.getTeamMission(input.missionId);
+      if (['completed', 'failed', 'canceled'].includes(mission.state))
+        throw new Error('Graph Mission is terminal');
+      const step = graph.steps.find((step) => step.key === input.stepKey);
+      const definition = graph.plan.steps.find((step) => step.key === input.stepKey);
+      if (!step || !definition || step.generation !== input.expectedGeneration)
+        throw new Error('Graph resource generation mismatch');
+      if (!Number.isFinite(Date.parse(input.now)))
+        throw new Error('Invalid graph resource timestamp');
+      const blocked = this.graphResourcePrerequisites(graph, input.stepKey);
+      if (blocked.length) return { acquired: false, reason: 'dependencies', blockedKeys: blocked };
+      const execution = this.getTeamExecution(step.executionId);
+      const available =
+        ['assigned', 'queued', 'waiting_resume'].includes(execution.state) &&
+        !this.listTeamAttempts(execution.id).some(
+          (attempt) => !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state),
+        );
+      const resources = graphResourceInventorySchema.parse(graphResourceKeys(graph, input.stepKey));
+      const existing = this.db
+        .prepare(
+          "SELECT * FROM team_graph_resource_reservations WHERE execution_id=? AND state <> 'released'",
+        )
+        .get(step.executionId) as GraphResourceRow | undefined;
+      if (existing) {
+        if (existing.state === 'reserved' && existing.generation === step.generation && available) {
+          const reservation = this.readGraphResourceReservation(existing);
+          if (canonicalGraphJson(reservation.resources) !== canonicalGraphJson(resources))
+            throw new Error('Graph resource declarations changed');
+          return { acquired: true, reservation };
+        }
+        return { acquired: false, reason: 'owner-active', reservationId: existing.id };
+      }
+      if (!available) throw new Error('Graph execution is not available for reservation');
+      const occupied = resources.filter((resource) =>
+        this.db
+          .prepare('SELECT 1 FROM team_graph_resource_leases WHERE resource_key=?')
+          .get(resource.key),
+      );
+      if (occupied.length)
+        return {
+          acquired: false,
+          reason: 'resources',
+          blockedKeys: occupied.map((resource) => resource.key),
+        };
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json)
+        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?)`,
+        )
+        .run(
+          id,
+          graph.missionId,
+          step.executionId,
+          step.generation,
+          input.now,
+          canonicalGraphJson(resources),
+        );
+      for (const resource of resources)
+        this.db
+          .prepare(
+            'INSERT INTO team_graph_resource_leases(resource_key,reservation_id,scope,logical_name,root_identity_digest) VALUES (?,?,?,?,?)',
+          )
+          .run(resource.key, id, resource.scope, resource.name, resource.rootIdentityDigest);
+      return {
+        acquired: true,
+        reservation: this.readGraphResourceReservation(
+          this.db
+            .prepare('SELECT * FROM team_graph_resource_reservations WHERE id=?')
+            .get(id) as GraphResourceRow,
+        ),
+      };
+    })();
+  }
+
+  bindGraphResourcesToAttempt(input: {
+    reservationId: string;
+    executionId: string;
+    generation: number;
+    attemptId: string;
+  }): GraphResourceReservation {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare('SELECT * FROM team_graph_resource_reservations WHERE id=?')
+        .get(input.reservationId) as GraphResourceRow | undefined;
+      if (
+        !row ||
+        row.execution_id !== input.executionId ||
+        row.generation !== input.generation ||
+        row.state !== 'reserved' ||
+        row.attempt_id !== null
+      )
+        throw new Error('Graph resource owner mismatch');
+      const reservation = this.readGraphResourceReservation(row);
+      const graph = this.getGraphTeamMission(row.mission_id);
+      const step = graph?.steps.find((step) => step.executionId === input.executionId);
+      const attempt = this.getTeamAttempt(input.attemptId);
+      if (
+        step?.generation !== input.generation ||
+        attempt.executionId !== input.executionId ||
+        !['created', 'running'].includes(attempt.state)
+      )
+        throw new Error('Graph resource attempt mismatch');
+      if (
+        !graph ||
+        !step ||
+        ['completed', 'failed', 'canceled'].includes(this.getTeamMission(row.mission_id).state) ||
+        this.getTeamExecution(input.executionId).state !== 'running' ||
+        this.graphResourcePrerequisites(graph, step.key).length
+      )
+        throw new Error('Graph resource admission changed');
+      if (
+        canonicalGraphJson(reservation.resources) !==
+        canonicalGraphJson(graphResourceKeys(graph, step.key))
+      )
+        throw new Error('Graph resource declarations changed');
+      this.db
+        .prepare(
+          "UPDATE team_graph_resource_reservations SET state='active', attempt_id=? WHERE id=? AND state='reserved'",
+        )
+        .run(input.attemptId, row.id);
+      return this.readGraphResourceReservation({
+        ...row,
+        attempt_id: input.attemptId,
+        state: 'active',
+      });
+    })();
+  }
+
+  /** DB validates ownership and attempt state. Main must separately observe actual stop acknowledgement. */
+  releaseGraphResources(input: GraphResourceRelease): boolean {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare('SELECT * FROM team_graph_resource_reservations WHERE id=?')
+        .get(input.reservationId) as GraphResourceRow | undefined;
+      if (!row || row.execution_id !== input.executionId || row.generation !== input.generation)
+        throw new Error('Graph resource owner mismatch');
+      if (row.state === 'released') return false;
+      if (!Number.isFinite(Date.parse(input.now)))
+        throw new Error('Invalid graph resource timestamp');
+      if (input.confirmation.kind === 'not-dispatched') {
+        if (
+          row.attempt_id !== null ||
+          this.getTeamExecution(row.execution_id).state === 'running' ||
+          this.listTeamAttempts(row.execution_id).some(
+            (attempt) =>
+              !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state),
+          )
+        )
+          throw new Error('Graph resource stop acknowledgement required');
+      } else if (input.confirmation.kind === 'attempt-stopped') {
+        if (row.attempt_id !== input.confirmation.attemptId)
+          throw new Error('Graph resource attempt mismatch');
+        const attempt = this.getTeamAttempt(input.confirmation.attemptId);
+        if (
+          attempt.executionId !== row.execution_id ||
+          !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state)
+        )
+          throw new Error('Graph resource attempt has not stopped');
+      } else throw new Error('Invalid graph resource confirmation');
+      this.db
+        .prepare(
+          "UPDATE team_graph_resource_reservations SET state='released', released_at=? WHERE id=?",
+        )
+        .run(input.now, row.id);
+      this.db.prepare('DELETE FROM team_graph_resource_leases WHERE reservation_id=?').run(row.id);
+      return true;
+    })();
+  }
+
+  listGraphResourceReservations(missionId: string): readonly GraphResourceReservation[] {
+    this.getTeamMission(missionId);
+    return (
+      this.db
+        .prepare(
+          'SELECT * FROM team_graph_resource_reservations WHERE mission_id=? ORDER BY created_at,id',
+        )
+        .all(missionId) as GraphResourceRow[]
+    ).map((row) => this.readGraphResourceReservation(row));
+  }
+
+  private readGraphResourceReservation(row: GraphResourceRow): GraphResourceReservation {
+    if (Buffer.byteLength(row.resources_json) > 32 * 1024)
+      throw new Error('Graph resource inventory too large');
+    const resources = graphResourceInventorySchema.parse(JSON.parse(row.resources_json));
+    const leases = this.db
+      .prepare(
+        'SELECT resource_key AS key,scope,logical_name AS name,root_identity_digest AS rootIdentityDigest FROM team_graph_resource_leases WHERE reservation_id=? ORDER BY resource_key',
+      )
+      .all(row.id) as GraphResourceKey[];
+    if (
+      row.state === 'released'
+        ? leases.length !== 0
+        : canonicalGraphJson(leases) !== canonicalGraphJson(resources)
+    )
+      throw new Error('Graph resource inventory mismatch');
+    return {
+      id: row.id,
+      missionId: row.mission_id,
+      executionId: row.execution_id,
+      generation: row.generation,
+      attemptId: row.attempt_id,
+      state: row.state,
+      createdAt: row.created_at,
+      releasedAt: row.released_at,
+      resources,
+    };
+  }
+
+  private graphResourcePrerequisites(graph: GraphMissionRecord, stepKey: string): string[] {
+    const step = graph.plan.steps.find((step) => step.key === stepKey);
+    if (!step) throw new Error('Graph resource step not found');
+    return step.dependsOn.filter((key) => {
+      const predecessor = graph.steps.find((candidate) => candidate.key === key)!;
+      const completed = this.db
+        .prepare(
+          `SELECT e.state,e.access_mode,s.checkpoint_json,s.checkpoint_digest,g.checkpoint_generation,g.checkpoint_attempt_id,g.generation FROM team_graph_mission_steps g
+        JOIN team_mission_steps s ON s.execution_id=g.execution_id JOIN team_executions e ON e.id=g.execution_id WHERE g.execution_id=?`,
+        )
+        .get(predecessor.executionId) as {
+        state: string;
+        access_mode: string;
+        checkpoint_json: string | null;
+        checkpoint_digest: string | null;
+        checkpoint_generation: number | null;
+        checkpoint_attempt_id: string | null;
+        generation: number;
+      };
+      if (
+        completed.state !== 'completed' ||
+        completed.checkpoint_json === null ||
+        completed.checkpoint_generation !== completed.generation ||
+        createHash('sha256').update(completed.checkpoint_json).digest('hex') !==
+          completed.checkpoint_digest
+      )
+        return true;
+      const attempt = this.listTeamAttempts(predecessor.executionId).at(-1);
+      if (
+        !attempt ||
+        attempt.id !== completed.checkpoint_attempt_id ||
+        attempt.state !== 'completed'
+      )
+        return true;
+      if (
+        this.db
+          .prepare(
+            "SELECT 1 FROM team_graph_resource_reservations WHERE execution_id=? AND state <> 'released'",
+          )
+          .get(predecessor.executionId)
+      )
+        return true;
+      if (
+        !this.db
+          .prepare(
+            "SELECT 1 FROM team_graph_resource_reservations WHERE execution_id=? AND generation=? AND attempt_id=? AND state='released'",
+          )
+          .get(predecessor.executionId, completed.generation, attempt.id)
+      )
+        return true;
+      if (completed.access_mode !== 'workspace-write') return false;
+      const isolation = this.getTeamExecutionIsolation(predecessor.executionId);
+      if (isolation !== null)
+        return (
+          isolation.phase !== 'completed' ||
+          isolation.repositories.some(
+            (repository) => !['integrated', 'cleaned'].includes(repository.state),
+          )
+        );
+      const worktree = this.getTeamMissionWorktree(predecessor.executionId);
+      return (
+        worktree === null ||
+        worktree.integratedHead === null ||
+        !['integrated', 'cleaned'].includes(worktree.state)
+      );
+    });
+  }
+
   /** Trusted Main commit after consent/FS preparation. No runtime is queued by this transaction. */
   createGraphTeamMission(raw: GraphMissionCommitInput): TeamMissionRecord {
     const input = graphMissionCommitSchema.parse(raw);
@@ -9952,6 +10302,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   recoverInterruptedTeamExecutions(now: string): number {
     return this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE team_graph_resource_reservations SET state='quarantined' WHERE state IN ('reserved','active')",
+        )
+        .run();
       this.db.prepare('DELETE FROM team_integration_root_leases').run();
       this.db
         .prepare(
@@ -10934,6 +11289,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         this.getGraphTeamMission(id);
       } catch {
         inconsistencies.push(`graph_mission_snapshot:${id}`);
+      }
+    }
+    const resourceRows = this.db
+      .prepare('SELECT * FROM team_graph_resource_reservations')
+      .all() as GraphResourceRow[];
+    for (const row of resourceRows) {
+      try {
+        this.readGraphResourceReservation(row);
+      } catch {
+        inconsistencies.push(`graph_resource_inventory:${row.id}`);
       }
     }
     return {
