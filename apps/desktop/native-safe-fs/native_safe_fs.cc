@@ -17,6 +17,9 @@
 #elif defined(__linux__)
 #include <linux/fs.h>
 #include <linux/memfd.h>
+#include <linux/magic.h>
+#include <sys/ioctl.h>
+#include <sys/vfs.h>
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
@@ -3437,8 +3440,47 @@ void Cleanup(void*) {
   state.closing_workspaces.clear();
 }
 
+napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string path, dev, ino;
+  if (argc != 1 || !ReadString(env, argv[0], "path", &path) ||
+      !ReadString(env, argv[0], "dev", &dev) || !ReadString(env, argv[0], "ino", &ino))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid directory identity");
+  NativeFailure failure;
+  const int fd = OpenDirectoryChain(path, &failure, "UNSAFE_PATH");
+  if (fd < 0) return ThrowFailure(env, failure.code, failure.message);
+  struct stat observed {};
+  if (fstat(fd, &observed) != 0 || !S_ISDIR(observed.st_mode) ||
+      std::to_string(observed.st_dev) != dev || std::to_string(observed.st_ino) != ino) {
+    close(fd);
+    return ThrowFailure(env, "ROOT_IDENTITY_CHANGED", "Directory identity changed");
+  }
+  int sensitive = -1;
+#if defined(__APPLE__)
+  sensitive = static_cast<int>(fpathconf(fd, _PC_CASE_SENSITIVE));
+#elif defined(__linux__) && defined(FS_CASEFOLD_FL)
+  int flags = 0;
+  struct statfs filesystem {};
+  // A successful flags ioctl alone does not establish case rules (for example on FAT/NTFS).
+  if (fstatfs(fd, &filesystem) == 0 &&
+      (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == F2FS_SUPER_MAGIC) &&
+      ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0)
+    sensitive = (flags & FS_CASEFOLD_FL) == 0 ? 1 : 0;
+#endif
+  close(fd);
+  if (sensitive != 0 && sensitive != 1)
+    return ThrowFailure(env, "NATIVE_FAILURE", "Directory name rules are unavailable");
+  napi_value result;
+  napi_get_boolean(env, sensitive == 1, &result);
+  return result;
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+      {"directoryCaseSensitive", nullptr, DirectoryCaseSensitive, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"queryProcessIdentity", nullptr, QueryProcessIdentity, nullptr, nullptr, nullptr,
        napi_default, nullptr},

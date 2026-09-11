@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -379,6 +379,33 @@ describe('structured patch preparation', () => {
       ),
     ).toBe('alpha beta gamma\n');
   });
+
+  it.each(['add', 'mkdir', 'rename'] as const)(
+    'checks missing %s endpoints using the parent directory case rules before any effect',
+    async (kind) => {
+      const { workspace, registry, a } = await fixture();
+      const insensitive = (await stat(join(workspace, 'src/A.txt')).catch(() => null)) !== null;
+      const before = await readdir(join(workspace, 'src'));
+      const patch = prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: [
+          kind === 'rename'
+            ? { kind, path: 'src/a.txt', destination: 'src/New.txt', revision: a.reference }
+            : kind === 'mkdir'
+              ? { kind, path: 'src/New.txt' }
+              : { kind, path: 'src/New.txt', content: 'first' },
+          { kind: 'add', path: 'src/new.txt', content: 'second' },
+        ],
+      });
+      if (insensitive) await expect(patch).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+      else await expect(patch).resolves.toMatchObject({ operations: [{}, {}] });
+      expect(await readdir(join(workspace, 'src'))).toEqual(before);
+      expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe('alpha beta gamma\n');
+    },
+  );
 
   it('rejects two differently cased references to the same file before preparing effects', async ({
     skip,

@@ -97,6 +97,35 @@ async function harness(content = SOURCE) {
 }
 
 describe('the agent edit tool', () => {
+  it('rejects colliding new names before starting any Edit Saga', async ({ skip }) => {
+    const { workspace, identity, deps, applied, createGuard } = await harness();
+    if (!(await stat(join(workspace, 'src/A.txt')).catch(() => null)))
+      return skip('The fixture filesystem is case-sensitive');
+    const alternateGuard = await createPathGuard({
+      rootId: 'root-a',
+      workspacePath: workspace,
+      expectedRootIdentityDigest: identity.rootIdentityDigest,
+      targetPath: 'src/New.txt',
+      operation: 'write',
+    });
+    await expect(
+      executeWorkspacePatchBatch(
+        {
+          operations: [
+            { kind: 'add', path: 'src/new.txt', content: 'first' },
+            { kind: 'add', path: 'src/New.txt', content: 'second' },
+          ],
+        },
+        context,
+        deps,
+        [createGuard, alternateGuard],
+      ),
+    ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+    expect(applied).toEqual([]);
+    await expect(stat(join(workspace, 'src/new.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe(SOURCE);
+  });
+
   it('rejects case-alias batches before starting any Edit Saga', async ({ skip }) => {
     const { workspace, identity, deps, applied, patchWriteGuard, patchReadGuard } = await harness();
     if (!(await stat(join(workspace, 'src/A.txt')).catch(() => null)))

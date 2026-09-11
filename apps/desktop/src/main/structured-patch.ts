@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { canonicalizeResourcePath } from './path-guard';
+import { basename, dirname } from 'node:path';
+import { canonicalizeResourcePath, type CanonicalPathIdentity } from './path-guard';
+import { directoryCaseSensitive } from './directory-name-rules';
 import type {
   FileRevisionToken,
   FileRevisionRegistry,
@@ -139,6 +141,7 @@ export async function prepareStructuredPatch(input: {
 
   const prepared: PreparedPatchOperation[] = [];
   const claimedPaths = new Set<string>();
+  const missingEndpoints: CanonicalPathIdentity[] = [];
   for (const operation of input.operations) {
     const sourceGuard = await canonicalizeResourcePath({
       rootId: input.rootId,
@@ -148,6 +151,7 @@ export async function prepareStructuredPatch(input: {
       operation: operation.kind === 'add' || operation.kind === 'mkdir' ? 'write' : 'read',
     });
     claimPath(claimedPaths, sourceGuard.resolvedPath);
+    claimMissingEndpoint(missingEndpoints, sourceGuard);
 
     if (operation.kind === 'add' || operation.kind === 'mkdir') {
       if (sourceGuard.targetIdentity !== null)
@@ -234,6 +238,7 @@ export async function prepareStructuredPatch(input: {
       operation: 'write',
     });
     claimPath(claimedPaths, destinationGuard.resolvedPath);
+    claimMissingEndpoint(missingEndpoints, destinationGuard);
     if (destinationGuard.targetIdentity !== null)
       throw new PatchValidationError('DESTINATION_EXISTS', 'Rename destination already exists');
     prepared.push(
@@ -534,6 +539,38 @@ function claimPath(paths: Set<string>, path: string): void {
   if (paths.has(path))
     throw new PatchValidationError('PATH_COLLISION', 'Patch contains colliding path endpoints');
   paths.add(path);
+}
+
+/** Missing names cannot be realpathed. Compare only siblings, using the guarded parent's
+ * actual rules when spellings may alias; never assume case rules from the operating system. */
+function claimMissingEndpoint(
+  endpoints: CanonicalPathIdentity[],
+  candidate: CanonicalPathIdentity,
+): void {
+  if (candidate.targetIdentity !== null) return;
+  const name = basename(candidate.resolvedPath);
+  for (const previous of endpoints) {
+    if (
+      previous.parentIdentity.dev !== candidate.parentIdentity.dev ||
+      previous.parentIdentity.ino !== candidate.parentIdentity.ino
+    )
+      continue;
+    const previousName = basename(previous.resolvedPath);
+    // Canonical Unicode aliases also collide on case-sensitive macOS volumes.
+    const unicodeAlias =
+      process.platform === 'darwin' && previousName.normalize('NFD') === name.normalize('NFD');
+    const folded = (value: string) => value.normalize('NFD').toLowerCase().toUpperCase();
+    if (!unicodeAlias && folded(previousName) !== folded(name)) continue;
+    if (
+      unicodeAlias ||
+      !directoryCaseSensitive(dirname(candidate.resolvedPath), candidate.parentIdentity)
+    )
+      throw new PatchValidationError(
+        'PATH_COLLISION',
+        'Patch contains colliding missing endpoints',
+      );
+  }
+  endpoints.push(candidate);
 }
 
 function validatePostImage(content: string): void {
