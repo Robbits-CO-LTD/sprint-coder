@@ -41,7 +41,7 @@ test('shows draft-only models and gates DFlash settings on bundled support and a
     app = await launchApp(userDataDir);
     const page = await firstWindow(app);
     await page.getByTestId('sidebar-settings-button').click();
-    await page.getByTestId('settings-nav-models').click();
+    await page.getByTestId('settings-nav-local-ai').click();
     const draft = page.getByText('fixture/draft', { exact: true }).locator('xpath=ancestor::li');
     await expect(draft).toContainText('下書き専用');
     await expect(draft.getByRole('button', { name: '動作確認', exact: true })).toBeDisabled();
@@ -94,7 +94,9 @@ test('shows draft-only models and gates DFlash settings on bundled support and a
       contentType: 'image/png',
     });
     await target.getByRole('button', { name: '下書きモデルを探す' }).click();
-    await expect(page.getByPlaceholder('モデルを検索')).toHaveValue('DFlash2');
+    await expect(page.getByRole('textbox', { name: 'モデル名', exact: true })).toHaveValue(
+      'DFlash2',
+    );
   } finally {
     await closeApp(app);
     removeUserDataDir(userDataDir);
