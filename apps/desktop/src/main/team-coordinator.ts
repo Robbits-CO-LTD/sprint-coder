@@ -1,3 +1,4 @@
+import { assertGraphWriteCoverage } from './graph-write-coverage';
 import {
   teamDetailSchema,
   teamActivitySummarySchema,
@@ -3233,6 +3234,7 @@ export class TeamCoordinator {
         roots: isolationLeaseBindings(isolation),
         now: this.isoNow(),
       });
+      await this.assertGraphIntegrationScope(isolation.executionId, isolation.repositories);
       isolation = this.persistence.updateTeamExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'integrating',
@@ -3366,6 +3368,9 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
         try {
+          await this.assertGraphIntegrationScope(current.executionId, [
+            { repoPath: repository, baseHead: current.baseHead, workerHead: current.workerHead },
+          ]);
           const result = await manager.integrate({
             repoPath: repository,
             baseHead: current.baseHead,
@@ -3385,6 +3390,62 @@ export class TeamCoordinator {
     });
     if (integrated === null) throw new Error('Mission integration completed without a result');
     return integrated;
+  }
+
+  private async assertGraphIntegrationScope(
+    executionId: string,
+    repositories: readonly { repoPath: string; baseHead: string; workerHead: string | null }[],
+  ): Promise<void> {
+    if (this.persistence.getTeamMissionForExecution(executionId)?.mode !== 'graph') return;
+    if (!this.worktreeManager) throw new Error('Graph worktree manager is unavailable');
+    const readOwner = () => {
+      const mission = this.persistence.getTeamMissionForExecution(executionId);
+      if (!mission || mission.mode !== 'graph' || mission.state !== 'running')
+        throw new Error('Graph integration is not active');
+      const graph = this.persistence.getGraphTeamMission(mission.id);
+      const step = graph?.steps.find((step) => step.executionId === executionId);
+      const owner = this.persistence
+        .listGraphResourceReservations(mission.id)
+        .find((row) => row.executionId === executionId && row.state === 'active');
+      if (
+        !graph ||
+        !step ||
+        !owner ||
+        owner.generation !== step.generation ||
+        owner.attemptId === null ||
+        owner.attemptId !== this.persistence.listTeamAttempts(executionId).at(-1)?.id ||
+        graph.policyEpoch !== this.persistence.getPermissionPolicy(graph.taskId).policyEpoch ||
+        graph.workspaceDigest !== this.persistence.getEffectiveWorkspaceSet(graph.taskId).digest
+      )
+        throw new Error('Graph integration ownership or authority changed');
+      return { graph, step, owner };
+    };
+    const initial = readOwner();
+    // Check every repository before the first parent checkout can be changed.
+    for (const repository of repositories) {
+      if (repository.workerHead === null) throw new Error('Graph Worker commit is not sealed');
+      const changes = await this.worktreeManager.readSealedChanges({
+        ...repository,
+        workerHead: repository.workerHead,
+      });
+      await assertGraphWriteCoverage(
+        initial.graph,
+        initial.step.key,
+        initial.owner.writeFootprints,
+        repository.repoPath,
+        changes,
+      );
+    }
+    const current = readOwner();
+    if (
+      current.owner.id !== initial.owner.id ||
+      current.owner.attemptId !== initial.owner.attemptId ||
+      current.step.generation !== initial.step.generation ||
+      current.graph.semanticDigest !== initial.graph.semanticDigest ||
+      current.graph.contextDigest !== initial.graph.contextDigest ||
+      current.graph.consentId !== initial.graph.consentId
+    )
+      throw new Error('Graph integration changed during validation');
   }
 
   private async revalidateIntegratedIsolation(

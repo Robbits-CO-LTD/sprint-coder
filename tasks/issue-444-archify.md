@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: durable write ownership with resource reservations
+## Current checkpoint: sealed-diff enforcement before integration
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -101,6 +101,12 @@ Validation: real-SQLite cross-Team conflicts/disjoint paths, all-or-nothing reso
 
 At c15a26d, Windows shard3 reported 744 passing tests followed by Vitest's onTaskUpdate RPC timeout. The log shows an 80-second synchronous Electron SQLite bridge; RPC uses a 60-second control deadline, and the affected shard did not contain the newly changed Codex test. Persistence and graph SQLite bridges now await asynchronous child processes, preserving worker event-loop responsiveness and existing child timeouts. The prior failed-job retry completed successfully; newest-head CI must still be checked.
 
+Graph integration now checks the immutable sealed Git diff against the owned declared scopes inside the existing integration lease/FIFO path. Task-root and Project isolation both use it; all Project repositories are checked before any parent repository is changed. The gate rechecks current reservation/Attempt/generation, policy/workspace bindings and agreement identity, and reads every changed path from Git instead of trusting reported changedFiles. Renames are inspected as deletion plus addition, with quoted path decoding that preserves Unicode/control/BOM bytes and refuses invalid UTF-8. Sealed commits must have the expected direct parent. Safe Git ignores replacement refs and retains the host platform's repository-metadata protections so object inspection and application use the same objects.
+
+Coverage uses containment, not conflict overlap: a claimed file does not grant its parent or another hard-link name, semantic keys do not broaden file permission, and speculative Unicode/short-name collision groups do not authorize unknown paths. Existing entry aliases need filesystem proof; uncertain changes stay in the isolated worktree for review. Root identity drift, traversal and repository-control changes are refused. Integration failures preserve the commit and resource ownership; Project isolation becomes waiting_resume. Actual graph runtime admission and user agreement remain unconnected.
+
+Validation: actual Coordinator FIFO tests reject an undeclared rename source despite an incomplete report, allow an in-scope rename, and preserve both parent HEADs when the later integration target has an undeclared change. Sealed Git/coverage/Coordinator regression passes 121 tests (one Linux-only case skipped locally), types/lint/format pass, and a fresh hidden Mac package passes six Source/Graph/Team cases. At 80210bf, CI failed on a detail overlay intercepting the next node click and a Windows temporary-directory EPERM during teardown; the tests now verify that focus details are hidden before continuing and use asynchronous bounded deletion retries. Current Windows confirmation remains required.
+
 ## Remaining requirements (not complete)
 
 | Acceptance | Remaining work                                                                                                                                                                              |
@@ -117,6 +123,6 @@ At c15a26d, Windows shard3 reported 744 passing tests followed by Vitest's onTas
 
 ## Next action
 
-Verify v88 and the asynchronous test bridges on both operating systems. Connect the resource/write acquisition to the existing dispatcher, including fresh filesystem/capability/Connection eligibility and enforcement of declared changes before integration. Connect genuine user agreement and graph-aware Attempt/checkpoint/resource operations, obtaining actual runtime stop acknowledgements and preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Agreement needs fresh source/permission checks that do not reuse the viewer monitor as authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84–v88 must remain distinct from pending #453's v83 through merge.
+Verify v88, sealed-diff enforcement and the test fixes on both operating systems. Connect resource/write acquisition to the existing dispatcher with fresh filesystem/capability/Connection eligibility. Connect genuine user agreement and graph-aware Attempt/checkpoint/resource operations, obtaining actual runtime stop acknowledgements and preventing graph-start/legacy-dispatch bypasses while preserving ordinary sequential Tasks. Finish graph-specific hold/update/integration-resume behavior without rerunning a completed Worker. Agreement needs fresh source/permission checks that do not reuse the viewer monitor as authorization proof. Keep agreement and Mission dispatch out of proposal/render operations. Render revisions/view lease generations remain separate from agreement-bearing semantic revisions. Graph v84–v88 must remain distinct from pending #453's v83 through merge.
 
 Keep this PR draft until all mandatory gates, independent review and full product acceptance are satisfied. Do not close #444 based on this rendering checkpoint.

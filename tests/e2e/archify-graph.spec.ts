@@ -207,11 +207,17 @@ test('the model tool path proposes and reads back a draft through the real Main 
   });
   try {
     const page = await firstWindow(app);
-    if (process.env['GITHUB_ACTIONS'] === 'true')
+    if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });
         BrowserWindow.getAllWindows()[0]!.focus();
       });
+      await expect
+        .poll(() =>
+          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
+        )
+        .toBe(true);
+    }
     await page.getByTestId('sidebar-new-task-button').click();
     const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
     await page.getByTestId('composer-textarea').fill('[fixture:graph-proposal]');
@@ -239,12 +245,15 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await expect(page.getByTestId('graph-evidence-kind')).toHaveText('推定');
     await expect(page.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
     await frame.locator('#btn-focus-clear').click();
+    await expect(frame.locator('#focus-chip')).toBeHidden();
     await frame.locator('[data-node-id="store"]').first().click();
     await expect(page.getByTestId('graph-evidence-kind')).toHaveText('追加案');
     await frame.locator('#btn-focus-clear').click();
+    await expect(frame.locator('#focus-chip')).toBeHidden();
     await frame.locator('[data-node-id="client"]').first().click();
     await expect(page.getByTestId('graph-evidence-kind')).toHaveText('未確認');
     await frame.locator('#btn-focus-clear').click();
+    await expect(frame.locator('#focus-chip')).toBeHidden();
     // Use the viewer's keyboard navigation for its horizontal SVG relationship targets.
     await frame.locator('.relationship-hit-target[data-relationship-id="request"]').press('End');
     await expect(

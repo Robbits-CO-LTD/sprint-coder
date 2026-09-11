@@ -1,6 +1,15 @@
 import { spawnSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  renameSync,
+  existsSync,
+  linkSync,
+} from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -19,16 +28,21 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { workspaceMutationBinding } from './path-guard';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { WorkerWorktreeManager } from './worker-worktree';
+import { TeamCoordinator, DeterministicTeamWorkerRuntime } from './team-coordinator';
+import { assertGraphWriteCoverage } from './graph-write-coverage';
 
 const roots: string[] = [];
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 3 })),
+  );
 });
 const now = '2026-09-11T00:00:00.000Z';
 function fixture(
   existing?: { persistence: SqlitePersistenceClient; path: string },
   writeCapable = false,
   keys: string[] = ['a', 'b'],
+  projectId?: string,
 ) {
   const root = existing ? null : mkdtempSync(join(tmpdir(), 'sc-graph-mission-db-'));
   if (root) roots.push(root);
@@ -36,7 +50,7 @@ function fixture(
   const persistence = existing?.persistence ?? new SqlitePersistenceClient(path);
   persistence.setRuntime('codex');
   persistence.setModel('gpt-5.6-terra');
-  const task = persistence.createTask('Graph Mission');
+  const task = persistence.createTask('Graph Mission', false, projectId);
   const team = persistence.promoteTaskToTeam(task.id);
   persistence.transitionTeamState(team.id, 'forming');
   const workers = keys.map((role) => {
@@ -234,6 +248,277 @@ async function writeMission(
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it.each([false, true])(
+      'checks sealed rename endpoints in the actual integration queue (declared=%s)',
+      async (declared) => {
+        const f = fixture(undefined, true);
+        const workspace = join(dirname(f.path), 'workspace');
+        mkdirSync(join(workspace, 'allowed'), { recursive: true });
+        writeFileSync(join(workspace, 'outside.ts'), 'outside\n');
+        writeFileSync(join(workspace, 'allowed/original.ts'), 'inside\n');
+        expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+        expect(spawnSync('git', ['-C', workspace, 'add', '.']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ]).status,
+        ).toBe(0);
+        const a = await writeMission(f, workspace, ['allowed']);
+        const run = begin(f, a.mission.id, 'a', a.acquisition.writeFootprints);
+        const manager = new WorkerWorktreeManager({
+          worktreesRoot: join(dirname(f.path), 'worktrees'),
+        });
+        const worker = {
+          agentId: run.execution.assigneeAgentId,
+          worktreeId: run.execution.id,
+          repoPath: a.workspace,
+        };
+        const worktree = await manager.create(worker);
+        f.persistence.recordTeamMissionWorktree({
+          ...worktree,
+          executionId: run.execution.id,
+          agentId: worker.agentId,
+          repoPath: a.workspace,
+          now,
+        });
+        f.persistence.updateTeamMissionWorktree({
+          executionId: run.execution.id,
+          to: 'active',
+          now,
+        });
+        renameSync(
+          join(worktree.path, declared ? 'allowed/original.ts' : 'outside.ts'),
+          join(worktree.path, 'allowed/moved.ts'),
+        );
+        const sealed = await manager.finalizeChanges({
+          ...worker,
+          baseHead: worktree.baseHead,
+          commitMessage: 'rename',
+        });
+        const record = f.persistence.updateTeamMissionWorktree({
+          executionId: run.execution.id,
+          to: 'ready',
+          workerHead: sealed.workerHead,
+          // A incomplete report must not hide the undeclared deletion from the integration gate.
+          changedFiles: ['allowed/moved.ts'],
+          now,
+        });
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          new DeterministicTeamWorkerRuntime(),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+        const integration = coordinator['queueMissionWorktreeIntegration'](record);
+        if (declared) {
+          await expect(integration).resolves.toMatchObject({ state: 'integrated' });
+          expect(readFileSync(join(a.workspace, 'allowed/moved.ts'), 'utf8')).toBe('inside\n');
+        } else {
+          await expect(integration).rejects.toMatchObject({
+            name: 'GraphWriteScopeError',
+            undeclaredPaths: ['outside.ts'],
+          });
+          expect(
+            spawnSync('git', ['-C', a.workspace, 'rev-parse', 'HEAD']).stdout.toString().trim(),
+          ).toBe(worktree.baseHead);
+          expect(existsSync(join(a.workspace, 'allowed/moved.ts'))).toBe(false);
+          expect(f.persistence.getTeamMissionWorktree(run.execution.id)).toMatchObject({
+            state: 'ready',
+            workerHead: sealed.workerHead,
+          });
+        }
+        expect(readFileSync(join(a.workspace, 'outside.ts'), 'utf8')).toBe('outside\n');
+        expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('active');
+        f.persistence.close();
+      },
+    );
+
+    it('checks every Project repository before integrating any of them', async () => {
+      const base = fixture();
+      const rootPaths = ['primary', 'secondary'].map((name) => join(dirname(base.path), name));
+      const bindings = [];
+      for (const root of rootPaths) {
+        mkdirSync(join(root, 'allowed'), { recursive: true });
+        writeFileSync(join(root, 'allowed/file.ts'), 'base\n');
+        writeFileSync(join(root, 'outside.ts'), 'outside\n');
+        expect(spawnSync('git', ['init', '-q', root]).status).toBe(0);
+        expect(spawnSync('git', ['-C', root, 'add', '.']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            root,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ]).status,
+        ).toBe(0);
+        bindings.push(await workspaceMutationBinding(root));
+      }
+      const project = base.persistence.createProject({
+        name: 'Two repositories',
+        folders: bindings.map((binding, i) => ({
+          id: randomUUID(),
+          path: binding.canonicalPath,
+          canonicalPath: binding.canonicalPath,
+          label: `root-${i}`,
+          role: i === 0 ? ('primary' as const) : ('secondary' as const),
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        })),
+      });
+      const f = fixture(
+        { persistence: base.persistence, path: base.path },
+        true,
+        ['a', 'b'],
+        project.id,
+      );
+      const context = graphMissionContextFor(f.persistence, f.task.id);
+      const plan = structuredClone(f.plan);
+      plan.steps[0]!.access = 'workspace-write';
+      plan.steps[0]!.writeClaims = context.workspace.roots.map((root) => ({
+        rootId: root.rootId,
+        path: 'allowed',
+        semanticKeys: [],
+      }));
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const review = await reviewGraphMission(
+        { taskId: f.task.id, instanceId: randomUUID(), renderRevision: document.renderRevision },
+        document,
+        () => graphMissionContextFor(f.persistence, f.task.id),
+      );
+      if (!review.writeFootprints) throw new Error('Expected Project claims');
+      const mission = f.persistence.createGraphTeamMission({
+        ...f.input,
+        renderRevision: document.renderRevision,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+      });
+      const run = begin(f, mission.id, 'a', review.writeFootprints);
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot: join(dirname(f.path), 'worktrees'),
+      });
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        new DeterministicTeamWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        manager,
+      );
+      const isolation = await coordinator['prepareExecutionIsolation'](
+        f.task.id,
+        run.execution.id,
+        run.execution.assigneeAgentId,
+      );
+      for (const repository of isolation.repositories) {
+        const primary = isolation.roots.some(
+          (root) => root.role === 'primary' && root.repositoryOrdinal === repository.ordinal,
+        );
+        writeFileSync(
+          join(repository.worktreePath, primary ? 'outside.ts' : 'allowed/file.ts'),
+          'worker\n',
+        );
+      }
+      const sealed = await coordinator['finalizeIsolation']({
+        isolation,
+        agentId: run.execution.assigneeAgentId,
+        missionId: mission.id,
+        stepOrdinal: 1,
+      });
+      await expect(coordinator['queueIsolationIntegration'](sealed.isolation)).rejects.toThrow(
+        'outside the declared write scope',
+      );
+      for (const repository of isolation.repositories)
+        expect(
+          spawnSync('git', ['-C', repository.repoPath, 'rev-parse', 'HEAD'])
+            .stdout.toString()
+            .trim(),
+        ).toBe(repository.baseHead);
+      expect(f.persistence.getTeamExecutionIsolation(run.execution.id)?.phase).toBe(
+        'waiting_resume',
+      );
+      expect(f.persistence.listGraphResourceReservations(mission.id)[0]?.state).toBe('active');
+      f.persistence.close();
+    });
+
+    it('requires containment rather than mere overlap or hard-link identity for write permission', async () => {
+      const f = fixture(undefined, true);
+      const workspace = join(dirname(f.path), 'workspace');
+      mkdirSync(workspace);
+      writeFileSync(join(workspace, 'first.ts'), 'shared inode');
+      linkSync(join(workspace, 'first.ts'), join(workspace, 'second.ts'));
+      const a = await writeMission(f, workspace, ['first.ts']);
+      const graph = f.persistence.getGraphTeamMission(a.mission.id);
+      if (!graph) throw new Error('Expected graph');
+      await expect(
+        assertGraphWriteCoverage(graph, 'a', a.acquisition.writeFootprints, a.workspace, [
+          { status: 'M', path: 'first.ts' },
+        ]),
+      ).resolves.toBeUndefined();
+      for (const path of ['first.ts/child', 'second.ts'])
+        await expect(
+          assertGraphWriteCoverage(graph, 'a', a.acquisition.writeFootprints, a.workspace, [
+            { status: 'M', path },
+          ]),
+        ).rejects.toMatchObject({ undeclaredPaths: [path] });
+      f.persistence.close();
+    });
+
+    it('does not promote prospective case-expansion collisions to write permission', async () => {
+      const f = fixture(undefined, true);
+      const a = await writeMission(f, join(dirname(f.path), 'workspace'), ['\u00df.ts']);
+      const graph = f.persistence.getGraphTeamMission(a.mission.id);
+      if (!graph) throw new Error('Expected graph');
+      await expect(
+        assertGraphWriteCoverage(graph, 'a', a.acquisition.writeFootprints, a.workspace, [
+          { status: 'A', path: 'SS.ts' },
+        ]),
+      ).rejects.toMatchObject({ undeclaredPaths: ['SS.ts'] });
+      f.persistence.close();
+    });
+
+    it('rejects traversal, repository control data and replaced roots even under a whole-root claim', async () => {
+      const f = fixture(undefined, true);
+      const a = await writeMission(f, join(dirname(f.path), 'workspace'), [null]);
+      const graph = f.persistence.getGraphTeamMission(a.mission.id);
+      if (!graph) throw new Error('Expected graph');
+      for (const path of ['../outside.ts', '.git/config', '.\u200cgit/config'])
+        await expect(
+          assertGraphWriteCoverage(graph, 'a', a.acquisition.writeFootprints, a.workspace, [
+            { status: 'A', path },
+          ]),
+        ).rejects.toThrow();
+      renameSync(a.workspace, `${a.workspace}-old`);
+      mkdirSync(a.workspace);
+      await expect(
+        assertGraphWriteCoverage(graph, 'a', a.acquisition.writeFootprints, a.workspace, [
+          { status: 'A', path: 'file.ts' },
+        ]),
+      ).rejects.toThrow('root changed');
+      f.persistence.close();
+    });
+
     it('acquires physical writes and resources atomically across Teams while allowing disjoint writers', async () => {
       const f = fixture(undefined, true);
       const second = fixture({ persistence: f.persistence, path: f.path }, true);
