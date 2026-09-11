@@ -6,8 +6,14 @@ import type {
   GraphMissionReview,
   GraphSourceCheckInput,
 } from '@sprint-coder/contracts';
-import type { AgentRecord, TeamRecord } from './persistence';
-import { createPathGuard, revalidatePathGuard, PathGuardError, type PathGuard } from './path-guard';
+import type { AgentRecord, TeamRecord, PersistenceClient } from './persistence';
+import {
+  createPathGuard,
+  revalidatePathGuard,
+  workspaceMutationBinding,
+  PathGuardError,
+  type PathGuard,
+} from './path-guard';
 import { previewGraphSource } from './graph-source-preview';
 import { canonicalGraphJson } from './graph-document';
 
@@ -16,10 +22,10 @@ export type GraphMissionReviewContext = {
   rootIdentities: ReadonlyMap<string, string>;
   policyEpoch: number;
   team: Pick<TeamRecord, 'id' | 'taskId' | 'state' | 'leaderAgentId'> | null;
-  workers: readonly Pick<
+  workers: readonly (Pick<
     AgentRecord,
     'id' | 'taskId' | 'teamId' | 'kind' | 'state' | 'writeCapable'
-  >[];
+  > & { authorityDigest?: string })[];
   busyWorkerIds: readonly string[];
 };
 type Issue = GraphMissionReview['issues'][number];
@@ -40,20 +46,27 @@ export type GraphMissionResourceBinding = {
   rootIdentityDigest: string | null;
 };
 
-function contextDigest(context: GraphMissionReviewContext, workerIds: ReadonlySet<string>): string {
+export function graphMissionContextSnapshot(
+  context: GraphMissionReviewContext,
+  workerIds: ReadonlySet<string>,
+) {
+  return {
+    workspace: context.workspace,
+    roots: [...context.rootIdentities].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    policyEpoch: context.policyEpoch,
+    team: context.team,
+    workers: context.workers
+      .filter((worker) => workerIds.has(worker.id))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+    busyWorkerIds: context.busyWorkerIds.filter((id) => workerIds.has(id)).sort(),
+  };
+}
+export function graphMissionContextDigest(
+  context: GraphMissionReviewContext,
+  workerIds: ReadonlySet<string>,
+): string {
   return createHash('sha256')
-    .update(
-      canonicalGraphJson({
-        workspace: context.workspace,
-        roots: [...context.rootIdentities].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-        policyEpoch: context.policyEpoch,
-        team: context.team,
-        workers: context.workers
-          .filter((worker) => workerIds.has(worker.id))
-          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-        busyWorkerIds: context.busyWorkerIds.filter((id) => workerIds.has(id)).sort(),
-      }),
-    )
+    .update(canonicalGraphJson(graphMissionContextSnapshot(context, workerIds)))
     .digest('hex');
 }
 
@@ -82,7 +95,7 @@ async function bindClaim(
     guard,
   });
   try {
-    return bound(await guardFor(path ?? workspacePath));
+    return bound(await guardFor(path ?? '.'));
   } catch (error) {
     if (!(error instanceof PathGuardError) || error.code !== 'PATH_NOT_FOUND' || path === null)
       throw error;
@@ -111,11 +124,12 @@ export async function reviewGraphMission(
 }> {
   const context = currentContext();
   const workerIds = new Set(document.missionPlan?.steps.map((step) => step.workerId) ?? []);
-  const initialDigest = contextDigest(context, workerIds);
+  const initialDigest = graphMissionContextDigest(context, workerIds);
   const issues: Issue[] = [];
   const claims: GraphMissionClaimBinding[] = [];
   const resources: GraphMissionResourceBinding[] = [];
   const resourceGuards: PathGuard[] = [];
+  const usedRoots = new Map<string, { path: string; identity: string }>();
   const add = (
     code: Issue['code'],
     stepKey: string | null = null,
@@ -165,6 +179,7 @@ export async function reviewGraphMission(
           add('root_unavailable', step.key, claim.rootId, claim.path);
           continue;
         }
+        usedRoots.set(root.rootId, { path: root.path, identity });
         try {
           claims.push({
             stepKey: step.key,
@@ -198,6 +213,7 @@ export async function reviewGraphMission(
           add('root_unavailable', step.key, resource.rootId);
           continue;
         }
+        usedRoots.set(root.rootId, { path: root.path, identity });
         try {
           const bound = await bindClaim(root.rootId, root.path, identity, null);
           resourceGuards.push(bound.guard);
@@ -214,6 +230,12 @@ export async function reviewGraphMission(
     }
     for (const source of document.sources) {
       const root = resolveRoot(source.rootId);
+      const identity = root ? context.rootIdentities.get(root.rootId) : undefined;
+      if (!root || !identity || identity !== source.rootIdentityDigest) {
+        add('source_changed', null, source.rootId, source.path);
+        continue;
+      }
+      usedRoots.set(root.rootId, { path: root.path, identity });
       const result = await previewGraphSource(source, root?.path ?? null, context.policyEpoch);
       if (result.status !== 'current') add('source_changed', null, source.rootId, source.path);
     }
@@ -233,8 +255,19 @@ export async function reviewGraphMission(
         break;
       }
     }
+    // Recheck the configured spelling too: a Workspace alias may have been redirected since
+    // its guard captured the canonical root, without changing the saved Workspace row.
+    for (const [rootId, root] of usedRoots) {
+      try {
+        if ((await workspaceMutationBinding(root.path)).rootIdentityDigest !== root.identity)
+          add('root_changed', null, rootId);
+      } catch {
+        add('root_unavailable', null, rootId);
+      }
+    }
   }
-  if (contextDigest(currentContext(), workerIds) !== initialDigest) add('state_changed');
+  if (graphMissionContextDigest(currentContext(), workerIds) !== initialDigest)
+    add('state_changed');
   return {
     summary: {
       ...input,
@@ -245,5 +278,56 @@ export async function reviewGraphMission(
     claims,
     resources,
     contextDigest: initialDigest,
+  };
+}
+
+export function graphMissionContextFor(
+  persistence: Pick<
+    PersistenceClient,
+    | 'getTeamByTask'
+    | 'getEffectiveWorkspaceSet'
+    | 'getEffectiveWorkspaceRootIdentities'
+    | 'getPermissionPolicy'
+    | 'getTeamSnapshot'
+    | 'listTeamExecutions'
+  >,
+  taskId: string,
+): GraphMissionReviewContext {
+  const team = persistence.getTeamByTask(taskId);
+  return {
+    workspace: persistence.getEffectiveWorkspaceSet(taskId),
+    rootIdentities: persistence.getEffectiveWorkspaceRootIdentities(taskId),
+    policyEpoch: persistence.getPermissionPolicy(taskId).policyEpoch,
+    team: team
+      ? { id: team.id, taskId: team.taskId, state: team.state, leaderAgentId: team.leaderAgentId }
+      : null,
+    workers: team
+      ? persistence.getTeamSnapshot(team.id).agents.map((worker) => ({
+          id: worker.id,
+          taskId: worker.taskId,
+          teamId: worker.teamId,
+          kind: worker.kind,
+          state: worker.state,
+          writeCapable: worker.writeCapable,
+          authorityDigest: createHash('sha256')
+            .update(
+              canonicalGraphJson({
+                model: worker.modelSelection,
+                runtime: worker.runtimeKind,
+                parent: worker.parentAgentId,
+                ceiling: worker.parentCapabilityCeiling,
+                inheritance: worker.contextInheritancePolicy,
+                teamPolicy: team.policy,
+              }),
+            )
+            .digest('hex'),
+        }))
+      : [],
+    busyWorkerIds: team
+      ? persistence
+          .listTeamExecutions(team.id)
+          .filter((execution) => !['completed', 'failed', 'canceled'].includes(execution.state))
+          .map((execution) => execution.assigneeAgentId)
+      : [],
   };
 }

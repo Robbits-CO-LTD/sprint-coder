@@ -1,10 +1,26 @@
 import Database from 'better-sqlite3';
 import {
   graphGenerationSchema,
+  graphMissionPlanSchema,
   type GraphDocument,
   type GraphGeneration,
 } from '@sprint-coder/contracts';
-import { parseStoredGraphDocument, validateGraphDocumentWrite } from './graph-document';
+import {
+  parseStoredGraphDocument,
+  validateGraphDocumentWrite,
+  canonicalGraphJson,
+} from './graph-document';
+import {
+  graphMissionContextFor,
+  graphMissionContextDigest,
+  graphMissionContextSnapshot,
+} from './graph-mission-review';
+import {
+  graphMissionCommitSchema,
+  graphMissionStoredContextSchema,
+  type GraphMissionCommitInput,
+  type GraphMissionRecord,
+} from './graph-mission-record';
 import {
   beginGraphGeneration as makeGraphGeneration,
   cancelGraphGeneration as markGraphCanceling,
@@ -739,6 +755,7 @@ type TeamAttemptRow = {
   updated_at: string;
 };
 type TeamMissionRow = {
+  mode: 'sequential' | 'graph';
   id: string;
   team_id: string;
   created_by_agent_id: string;
@@ -759,6 +776,21 @@ type TeamMissionStepRow = {
   checkpoint_json: string | null;
   checkpoint_digest: string | null;
   completed_at: string | null;
+};
+type GraphMissionRow = {
+  mission_id: string;
+  task_id: string;
+  graph_id: string;
+  render_revision: number;
+  semantic_revision: number;
+  semantic_digest: string;
+  policy_epoch: number;
+  workspace_digest: string;
+  context_digest: string;
+  context_json: string;
+  consent_id: string;
+  approved_at: string;
+  definition_json: string;
 };
 export const teamV2ActivityTypes = [
   'worker_hired',
@@ -3843,6 +3875,36 @@ const migrations = [
       status_json TEXT NOT NULL
     );`,
   },
+  {
+    version: 86,
+    checksum: 'graph-mission-v86-bound-definition',
+    sql: `
+      ALTER TABLE team_missions ADD COLUMN mode TEXT NOT NULL DEFAULT 'sequential' CHECK (mode IN ('sequential', 'graph'));
+      CREATE TABLE team_graph_missions (
+        mission_id TEXT PRIMARY KEY REFERENCES team_missions(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        graph_id TEXT NOT NULL, render_revision INTEGER NOT NULL,
+        semantic_revision INTEGER NOT NULL CHECK (semantic_revision > 0),
+        semantic_digest TEXT NOT NULL CHECK (length(semantic_digest) = 64),
+        policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+        workspace_digest TEXT NOT NULL CHECK (length(workspace_digest) = 64),
+        context_digest TEXT NOT NULL CHECK (length(context_digest) = 64),
+        context_json TEXT NOT NULL,
+        consent_id TEXT NOT NULL UNIQUE,
+        approved_at TEXT NOT NULL,
+        definition_json TEXT NOT NULL,
+        UNIQUE (graph_id, semantic_revision),
+        FOREIGN KEY (task_id, render_revision) REFERENCES graph_document_versions(task_id, render_revision) ON DELETE CASCADE
+      );
+      CREATE TABLE team_graph_mission_steps (
+        mission_id TEXT NOT NULL REFERENCES team_graph_missions(mission_id) ON DELETE CASCADE,
+        step_key TEXT NOT NULL, node_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL UNIQUE REFERENCES team_executions(id) ON DELETE CASCADE,
+        generation INTEGER NOT NULL DEFAULT 1 CHECK (generation > 0),
+        PRIMARY KEY (mission_id, step_key), UNIQUE (mission_id, node_id)
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4328,6 +4390,7 @@ export type TeamExecutionIsolationCompletionRecord = Readonly<{
   createdAt: string;
 }>;
 export type TeamMissionRecord = Readonly<{
+  mode: 'sequential' | 'graph';
   id: string;
   teamId: string;
   createdByAgentId: string;
@@ -4374,6 +4437,8 @@ export type TeamSnapshot = Readonly<{
 export type NativeMutationSagaCoordinator = 'native-intent' | 'edit-saga-executor';
 
 export interface PersistenceClient {
+  createGraphTeamMission(input: GraphMissionCommitInput): TeamMissionRecord;
+  getGraphTeamMission(missionId: string): GraphMissionRecord | null;
   setSkillCatalogContextProvider?(
     provider: (
       selections: readonly TurnSkillSelection[],
@@ -8687,6 +8752,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db.transaction(() => {
       const current = this.getTeamExecution(input.executionId);
       if (current.state === input.to) return current;
+      if (
+        this.getTeamMissionForExecution(current.id)?.mode === 'graph' &&
+        !['canceled', 'failed', 'waiting_resume'].includes(input.to)
+      )
+        throw new Error('Graph Mission execution requires graph admission');
       transitionTeamExecution(current.state, input.to);
       const queueReason =
         input.to === 'waiting_verification'
@@ -8773,6 +8843,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }): TeamExecutionRecord {
     return this.db.transaction(() => {
       const current = this.getTeamExecution(input.executionId);
+      if (this.getTeamMissionForExecution(current.id)?.mode === 'graph')
+        throw new Error('Graph Mission changes require agreement');
       const creator = this.getAgent(input.createdByAgentId);
       if (creator.teamId !== current.teamId)
         throw new Error('Instruction author must belong to the execution Team');
@@ -9097,10 +9169,238 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  /** Trusted Main commit after consent/FS preparation. No runtime is queued by this transaction. */
+  createGraphTeamMission(raw: GraphMissionCommitInput): TeamMissionRecord {
+    const input = graphMissionCommitSchema.parse(raw);
+    return this.db.transaction(() => {
+      const approved = this.getGraphDocumentVersion(input.taskId, input.renderRevision);
+      const current = this.getGraphDocument(input.taskId);
+      if (
+        !approved?.missionPlan ||
+        !current ||
+        approved.id !== input.graphId ||
+        current.id !== input.graphId ||
+        approved.semanticRevision !== input.semanticRevision ||
+        current.semanticRevision !== input.semanticRevision ||
+        approved.semanticDigest !== input.semanticDigest ||
+        current.semanticDigest !== input.semanticDigest
+      )
+        throw new Error('Graph agreement version changed');
+      const context = graphMissionContextFor(this, input.taskId);
+      const workerIds = new Set(approved.missionPlan.steps.map((step) => step.workerId));
+      if (
+        context.policyEpoch !== input.policyEpoch ||
+        context.workspace.digest !== input.workspaceDigest ||
+        graphMissionContextDigest(context, workerIds) !== input.contextDigest
+      )
+        throw new Error('Graph agreement context changed');
+      if (!context.team || context.team.state !== 'active')
+        throw new Error('Graph Mission Team must be active');
+      const team = this.getTeam(context.team.id);
+      const creator = this.getAgent(team.leaderAgentId);
+      if (creator.taskId !== input.taskId || creator.teamId !== team.id)
+        throw new Error('Graph Mission owner mismatch');
+      const plan = approved.missionPlan;
+      const rootFor = (id: string) =>
+        context.workspace.roots.find(
+          (root) =>
+            root.rootId === (id === 'legacy-primary' ? context.workspace.primaryRootId : id),
+        );
+      for (const step of plan.steps) {
+        const worker = this.getAgent(step.workerId);
+        if (
+          worker.kind !== 'worker' ||
+          worker.taskId !== input.taskId ||
+          worker.teamId !== team.id ||
+          !['ready', 'waiting'].includes(worker.state) ||
+          context.busyWorkerIds.includes(worker.id)
+        )
+          throw new Error('Graph Mission Worker is unavailable');
+        if (
+          step.access === 'workspace-write' &&
+          (!worker.writeCapable || context.workspace.roots.length === 0)
+        )
+          throw new Error('Graph Mission write scope unavailable');
+        const roots = [
+          ...step.writeClaims.map((claim) => claim.rootId),
+          ...step.resourceClaims.flatMap((claim) => (claim.rootId === null ? [] : [claim.rootId])),
+          ...(step.access === 'workspace-write' && step.writeClaims.length === 0
+            ? context.workspace.roots.map((root) => root.rootId)
+            : []),
+        ];
+        for (const id of roots) {
+          const root = rootFor(id);
+          if (!root || !context.rootIdentities.has(root.rootId))
+            throw new Error('Graph Mission root is not bound');
+        }
+      }
+      for (const source of approved.sources) {
+        const root = rootFor(source.rootId);
+        if (!root || context.rootIdentities.get(root.rootId) !== source.rootIdentityDigest)
+          throw new Error('Graph Mission source root changed');
+      }
+      if (
+        this.db
+          .prepare(
+            'SELECT 1 FROM team_graph_missions WHERE consent_id = ? OR (graph_id = ? AND semantic_revision = ?)',
+          )
+          .get(input.consentId, input.graphId, input.semanticRevision)
+      )
+        throw new Error('Graph agreement was already committed');
+      const contextJson = canonicalGraphJson(graphMissionContextSnapshot(context, workerIds));
+      if (Buffer.byteLength(contextJson) > 256 * 1024)
+        throw new Error('Graph agreement context is too large');
+      const mission = this.createTeamMission({
+        teamId: team.id,
+        createdByAgentId: creator.id,
+        objective: plan.objective,
+        doneCriteria: plan.doneCriteria,
+        steps: plan.steps,
+        now: input.now,
+      });
+      this.db.prepare("UPDATE team_missions SET mode = 'graph' WHERE id = ?").run(mission.id);
+      this.db
+        .prepare(
+          `INSERT INTO team_graph_missions(mission_id,task_id,graph_id,render_revision,semantic_revision,semantic_digest,policy_epoch,workspace_digest,context_digest,context_json,consent_id,approved_at,definition_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          mission.id,
+          input.taskId,
+          input.graphId,
+          input.renderRevision,
+          input.semanticRevision,
+          input.semanticDigest,
+          input.policyEpoch,
+          input.workspaceDigest,
+          input.contextDigest,
+          contextJson,
+          input.consentId,
+          input.now,
+          canonicalGraphJson(plan),
+        );
+      for (const [index, step] of plan.steps.entries())
+        this.db
+          .prepare(
+            'INSERT INTO team_graph_mission_steps(mission_id,step_key,node_id,execution_id,generation) VALUES (?,?,?,?,1)',
+          )
+          .run(mission.id, step.key, step.nodeId, mission.steps[index]!.executionId);
+      this.getGraphTeamMission(mission.id);
+      return this.getTeamMission(mission.id);
+    })();
+  }
+
+  getGraphTeamMission(missionId: string): GraphMissionRecord | null {
+    const base = this.db
+      .prepare('SELECT team_id, mode FROM team_missions WHERE id = ?')
+      .get(missionId) as { team_id: string; mode: string } | undefined;
+    if (!base) throw new NotFoundError('Team Mission not found');
+    const row = this.db
+      .prepare('SELECT * FROM team_graph_missions WHERE mission_id = ?')
+      .get(missionId) as GraphMissionRow | undefined;
+    if (!row) {
+      if (base.mode === 'graph') throw new Error('Graph Mission definition missing');
+      return null;
+    }
+    if (base.mode !== 'graph' || this.getTeam(base.team_id).taskId !== row.task_id)
+      throw new Error('Graph Mission ownership mismatch');
+    if (
+      Buffer.byteLength(row.definition_json) > 256 * 1024 ||
+      Buffer.byteLength(row.context_json) > 256 * 1024
+    )
+      throw new Error('Graph Mission record too large');
+    const plan = graphMissionPlanSchema.parse(JSON.parse(row.definition_json));
+    const storedContext = graphMissionStoredContextSchema.parse(JSON.parse(row.context_json));
+    graphMissionCommitSchema.parse({
+      taskId: row.task_id,
+      graphId: row.graph_id,
+      renderRevision: row.render_revision,
+      semanticRevision: row.semantic_revision,
+      semanticDigest: row.semantic_digest,
+      policyEpoch: row.policy_epoch,
+      workspaceDigest: row.workspace_digest,
+      contextDigest: row.context_digest,
+      consentId: row.consent_id,
+      now: row.approved_at,
+    });
+    const version = this.getGraphDocumentVersion(row.task_id, row.render_revision);
+    if (
+      !version ||
+      version.id !== row.graph_id ||
+      version.semanticRevision !== row.semantic_revision ||
+      version.semanticDigest !== row.semantic_digest ||
+      canonicalGraphJson(version.missionPlan) !== canonicalGraphJson(plan) ||
+      storedContext.policyEpoch !== row.policy_epoch ||
+      storedContext.workspace.digest !== row.workspace_digest ||
+      storedContext.team.id !== base.team_id ||
+      storedContext.team.taskId !== row.task_id ||
+      createHash('sha256').update(row.context_json).digest('hex') !== row.context_digest
+    )
+      throw new Error('Graph Mission snapshot mismatch');
+    const mappings = this.db
+      .prepare(
+        `SELECT g.step_key,g.node_id,g.execution_id,g.generation,s.ordinal,s.mission_id,e.team_id,e.assignee_agent_id,e.access_mode
+      FROM team_graph_mission_steps g JOIN team_mission_steps s ON s.execution_id=g.execution_id JOIN team_executions e ON e.id=g.execution_id
+      WHERE g.mission_id=? ORDER BY s.ordinal`,
+      )
+      .all(missionId) as {
+      step_key: string;
+      node_id: string;
+      execution_id: string;
+      generation: number;
+      ordinal: number;
+      mission_id: string;
+      team_id: string;
+      assignee_agent_id: string;
+      access_mode: string;
+    }[];
+    if (
+      mappings.length !== plan.steps.length ||
+      mappings.some((mapping, index) => {
+        const step = plan.steps[index]!;
+        return (
+          mapping.mission_id !== missionId ||
+          mapping.team_id !== base.team_id ||
+          mapping.ordinal !== index + 1 ||
+          mapping.step_key !== step.key ||
+          mapping.node_id !== step.nodeId ||
+          mapping.assignee_agent_id !== step.workerId ||
+          mapping.access_mode !== step.access ||
+          mapping.generation < 1
+        );
+      })
+    )
+      throw new Error('Graph Mission step binding mismatch');
+    return {
+      missionId,
+      taskId: row.task_id,
+      graphId: row.graph_id,
+      renderRevision: row.render_revision,
+      semanticRevision: row.semantic_revision,
+      semanticDigest: row.semantic_digest,
+      policyEpoch: row.policy_epoch,
+      workspaceDigest: row.workspace_digest,
+      contextDigest: row.context_digest,
+      contextJson: row.context_json,
+      consentId: row.consent_id,
+      approvedAt: row.approved_at,
+      plan,
+      steps: mappings.map((mapping) => ({
+        key: mapping.step_key,
+        nodeId: mapping.node_id,
+        executionId: mapping.execution_id,
+        generation: mapping.generation,
+      })),
+    };
+  }
+
   getTeamMission(missionId: string): TeamMissionRecord {
     const row = this.db.prepare('SELECT * FROM team_missions WHERE id = ?').get(missionId) as
       TeamMissionRow | undefined;
     if (row === undefined) throw new NotFoundError('Team Mission not found');
+    if (!['sequential', 'graph'].includes(row.mode)) throw new Error('Invalid Mission mode');
+    // Base state remains readable for cancellation/diagnosis even if graph metadata is damaged.
+    // Graph admission and definition consumers must use getGraphTeamMission's full validation.
     const steps = this.db
       .prepare('SELECT * FROM team_mission_steps WHERE mission_id = ? ORDER BY ordinal')
       .all(missionId) as TeamMissionStepRow[];
@@ -9458,6 +9758,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     };
     const current = this.getTeamMission(missionId);
     if (current.state === to) return current;
+    if (current.mode === 'graph' && !['canceled', 'failed', 'waiting_resume'].includes(to))
+      throw new Error('Graph Mission requires graph admission');
     if (!allowed[current.state].includes(to))
       throw new Error(`Invalid Team Mission transition: ${current.state} -> ${to}`);
     const terminal = ['completed', 'failed', 'canceled'].includes(to);
@@ -9480,6 +9782,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }): TeamExecutionRecord {
     return this.db.transaction(() => {
       const mission = this.getTeamMission(input.missionId);
+      if (mission.mode === 'graph')
+        throw new Error('Graph Mission resume requires graph admission');
       const step = mission.steps.find(({ executionId }) => executionId === input.executionId);
       if (mission.state !== 'waiting_resume' || step?.ordinal !== mission.currentStepOrdinal)
         throw new Error('Mission is not waiting on this execution');
@@ -9525,6 +9829,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .prepare('SELECT * FROM team_mission_steps WHERE execution_id = ?')
         .get(input.executionId) as TeamMissionStepRow | undefined;
       if (step === undefined) throw new NotFoundError('Team Mission step not found');
+      if (this.getTeamMission(step.mission_id).mode === 'graph')
+        throw new Error('Graph Mission checkpoint requires graph admission');
       if (step.checkpoint_json !== null) {
         const mission = this.getTeamMission(step.mission_id);
         const next = mission.steps.find(({ ordinal }) => ordinal === step.ordinal + 1);
@@ -9579,6 +9885,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     now: string;
   }): { mission: TeamMissionRecord; nextExecutionId: string | null } {
     return this.db.transaction(() => {
+      if (this.getTeamMissionForExecution(input.executionId)?.mode === 'graph')
+        throw new Error('Graph Mission completion requires graph admission');
       const attempt = this.getTeamAttempt(input.attemptId);
       if (attempt.executionId !== input.executionId)
         throw new Error('Mission Attempt does not belong to execution');
@@ -9700,6 +10008,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
         const execution = this.getTeamExecution(attempt.execution_id);
         if (execution.state !== 'running') continue;
         const mission = this.getTeamMissionForExecution(execution.id);
+        if (mission?.mode === 'graph') {
+          this.transitionTeamExecution({ executionId: execution.id, to: 'waiting_resume', now });
+          if (mission.state === 'running')
+            this.transitionTeamMission(mission.id, 'waiting_resume', now);
+          const dispatch = this.getTeamExecutionDispatch(execution.id);
+          if (this.getTeamTask(dispatch.teamTaskId).status === 'running')
+            this.transitionTeamTask(dispatch.teamTaskId, 'blocked', now);
+          continue;
+        }
         const writable = execution.accessMode === 'workspace-write';
         const automaticRestartExhausted = attempt.start_reason === 'app_restart';
         if (writable || (automaticRestartExhausted && mission !== null)) {
@@ -10568,7 +10885,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
                   SELECT 1 FROM team_mission_steps s
                   JOIN team_executions e ON e.id = s.execution_id
                   WHERE s.mission_id = m.id
-                    AND s.ordinal = m.current_step_ordinal
+                    AND (m.mode = 'graph' OR s.ordinal = m.current_step_ordinal)
                     AND e.state = 'waiting_resume'
                 )`,
       },
@@ -10586,7 +10903,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         sql: `SELECT COUNT(*) AS count
               FROM team_missions m
               JOIN team_mission_steps s ON s.mission_id = m.id
-              WHERE s.ordinal < m.current_step_ordinal AND s.checkpoint_json IS NULL`,
+              WHERE m.mode = 'sequential' AND s.ordinal < m.current_step_ordinal AND s.checkpoint_json IS NULL`,
       },
       {
         name: 'completed_write_without_integrated_head',
@@ -10606,6 +10923,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
     for (const check of checks) {
       const row = this.db.prepare(check.sql).get() as { count: number };
       if (row.count > 0) inconsistencies.push(`${check.name}:${row.count}`);
+    }
+    const graphMissions = this.db
+      .prepare(
+        "SELECT id FROM team_missions WHERE mode = 'graph' UNION SELECT mission_id AS id FROM team_graph_missions",
+      )
+      .all() as { id: string }[];
+    for (const { id } of graphMissions) {
+      try {
+        this.getGraphTeamMission(id);
+      } catch {
+        inconsistencies.push(`graph_mission_snapshot:${id}`);
+      }
     }
     return {
       sqlite: inconsistencies.some((issue) => issue.startsWith('sqlite_integrity:'))
@@ -18764,6 +19093,7 @@ function toTeamMission(
   steps: readonly TeamMissionStepRow[],
 ): TeamMissionRecord {
   return {
+    mode: row.mode,
     id: row.id,
     teamId: row.team_id,
     createdByAgentId: row.created_by_agent_id,

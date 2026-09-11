@@ -613,7 +613,7 @@ import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
-import { reviewGraphMission } from './graph-mission-review';
+import { reviewGraphMission, graphMissionContextFor } from './graph-mission-review';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -1809,42 +1809,9 @@ export class IpcRouter {
           input.instanceId,
           input.renderRevision,
         );
-        const result = await reviewGraphMission(input, document, () => {
-          const team = this.persistence.getTeamByTask(input.taskId);
-          return {
-            workspace: this.persistence.getEffectiveWorkspaceSet(input.taskId),
-            rootIdentities: this.persistence.getEffectiveWorkspaceRootIdentities(input.taskId),
-            policyEpoch: this.persistence.getPermissionPolicy(input.taskId).policyEpoch,
-            team: team
-              ? {
-                  id: team.id,
-                  taskId: team.taskId,
-                  state: team.state,
-                  leaderAgentId: team.leaderAgentId,
-                }
-              : null,
-            workers: team
-              ? this.persistence
-                  .getTeamSnapshot(team.id)
-                  .agents.map(({ id, taskId, teamId, kind, state, writeCapable }) => ({
-                    id,
-                    taskId,
-                    teamId,
-                    kind,
-                    state,
-                    writeCapable,
-                  }))
-              : [],
-            busyWorkerIds: team
-              ? this.persistence
-                  .listTeamExecutions(team.id)
-                  .filter(
-                    (execution) => !['completed', 'failed', 'canceled'].includes(execution.state),
-                  )
-                  .map((execution) => execution.assigneeAgentId)
-              : [],
-          };
-        });
+        const result = await reviewGraphMission(input, document, () =>
+          graphMissionContextFor(this.persistence, input.taskId),
+        );
         this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
         return result.summary;
       },

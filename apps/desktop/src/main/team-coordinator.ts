@@ -917,6 +917,8 @@ export class TeamCoordinator {
       if (team === null) throw new Error('Team not found');
       const mission = this.persistence.getTeamMission(missionId);
       if (mission.teamId !== team.id) throw new Error('Mission does not belong to Task Team');
+      if (mission.mode === 'graph')
+        throw new Error('Graph Mission resume requires agreed graph admission');
       if (mission.state !== 'waiting_resume') throw new Error('Mission is not waiting to resume');
       if (requesterAgentId !== null && mission.createdByAgentId !== requesterAgentId)
         throw new Error('Manager may only resume a Mission it created');
@@ -2900,6 +2902,7 @@ export class TeamCoordinator {
 
   private missionSummary(mission: TeamMissionRecord): TeamMissionSummary {
     return {
+      mode: mission.mode,
       id: mission.id,
       teamId: mission.teamId,
       createdByAgentId: mission.createdByAgentId,

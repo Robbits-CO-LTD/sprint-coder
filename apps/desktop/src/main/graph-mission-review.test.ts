@@ -93,6 +93,27 @@ async function fixture() {
 }
 
 describe('graph Mission reference review', () => {
+  it('anchors whole-root declarations at the canonical workspace without guarding unrelated parents', async () => {
+    const f = await fixture();
+    const alias = await mkdtemp(join(tmpdir(), 'sc-root-alias-'));
+    cleanup.push(alias);
+    const link = join(alias, 'workspace');
+    await symlink(f.path, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const plan = structuredClone(f.plan);
+    plan.steps[0]!.writeClaims[0]!.path = null;
+    const document = nextGraphDocument('task', f.diagram, null, [], [], plan);
+    const context = {
+      ...f.context,
+      workspace: {
+        ...f.context.workspace,
+        roots: f.context.workspace.roots.map((root) => ({ ...root, path: link })),
+      },
+    };
+    const result = await reviewGraphMission(f.input, document, () => context);
+    expect(result.summary.matched).toBe(true);
+    expect(result.claims[0]?.guard.chain).toEqual([]);
+    expect(result.claims[0]?.canonicalPath).toBe(f.binding.canonicalPath);
+  });
   it('binds existing and missing paths without writing, and keeps write/resource identities separate', async () => {
     const f = await fixture();
     const result = await reviewGraphMission(f.input, f.document, () => f.context);

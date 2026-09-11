@@ -909,6 +909,7 @@ export const teamMissionStepSummarySchema = z
 export type TeamMissionStepSummary = z.infer<typeof teamMissionStepSummarySchema>;
 export const teamMissionSummarySchema = z
   .object({
+    mode: z.enum(['sequential', 'graph']).optional(),
     id: idSchema,
     teamId: idSchema,
     createdByAgentId: idSchema,

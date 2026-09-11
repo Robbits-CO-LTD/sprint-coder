@@ -801,6 +801,7 @@ export type TeamExecutionIsolation = {
   reason: string | null;
 };
 export type TeamMissionSummary = {
+  mode?: 'sequential' | 'graph';
   id: string;
   teamId: string;
   createdByAgentId: string;
