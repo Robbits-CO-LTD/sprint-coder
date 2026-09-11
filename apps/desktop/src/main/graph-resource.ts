@@ -50,6 +50,11 @@ export type GraphResourceAcquisition =
   | { acquired: true; reservation: GraphResourceReservation }
   | { acquired: false; reason: 'dependencies' | 'resources'; blockedKeys: string[] }
   | { acquired: false; reason: 'owner-active'; reservationId: string };
+/** Main-only readiness observation. Acquisition must recheck these facts transactionally. */
+export type GraphResourceAvailability =
+  | { available: true; reservation: GraphResourceReservation | null }
+  | { available: false; reason: 'dependencies' | 'resources'; blockedKeys: string[] }
+  | { available: false; reason: 'owner-active'; reservationId: string };
 export type GraphResourceRelease = Readonly<{
   reservationId: string;
   executionId: string;

@@ -4,13 +4,14 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan } from '@sprint-coder/contracts';
 import { SqlitePersistenceClient } from './persistence';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextFor, graphMissionContextDigest } from './graph-mission-review';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { workspaceMutationBinding } from './path-guard';
+import { TeamExecutionScheduler } from './team-execution-scheduler';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -160,6 +161,99 @@ function completion(missionId: string, key: string, run: ReturnType<typeof begin
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('uses real graph ownership to keep resource and dependency waiters out of Scheduler slots', async () => {
+      const f = fixture(undefined, false, ['a', 'b', 'c']);
+      const plan = structuredClone(f.plan);
+      plan.steps[0]!.resourceClaims = [{ scope: 'machine', key: 'shared-db', rootId: null }];
+      plan.steps[1]!.dependsOn = [];
+      plan.steps[2]!.dependsOn = ['a', 'b'];
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const mission = f.persistence.createGraphTeamMission({
+        ...f.input,
+        renderRevision: document.renderRevision,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+      });
+      const other = fixture({ persistence: f.persistence, path: f.path });
+      const ownerMission = resourceMission(other);
+      expect(
+        f.persistence.inspectGraphResources({
+          missionId: mission.id,
+          stepKey: 'a',
+          expectedGeneration: 1,
+        }),
+      ).toEqual({ available: true, reservation: null });
+      expect(f.persistence.listGraphResourceReservations(mission.id)).toEqual([]);
+      const owner = begin(other, ownerMission.id, 'a');
+      // Readiness is only an observation: acquisition must see the newly occupied resource.
+      expect(
+        f.persistence.acquireGraphResources({
+          missionId: mission.id,
+          stepKey: 'a',
+          expectedGeneration: 1,
+          now,
+        }),
+      ).toMatchObject({ acquired: false, reason: 'resources' });
+      const scheduler = new TeamExecutionScheduler(2);
+      const started: string[] = [];
+      const release = new Map<string, () => void>();
+      const failures: unknown[] = [];
+      for (const [index, step] of mission.steps.entries()) {
+        const key = ['a', 'b', 'c'][index]!;
+        scheduler.submit({
+          executionId: step.executionId,
+          workerId: plan.steps[index]!.workerId,
+          teamId: f.team.id,
+          teamLimit: 2,
+          isReady: () =>
+            f.persistence.inspectGraphResources({
+              missionId: mission.id,
+              stepKey: key,
+              expectedGeneration: 1,
+            }).available,
+          onReadinessError: (error) => failures.push(error),
+          run: async () => {
+            try {
+              const run = begin(f, mission.id, key);
+              started.push(key);
+              await new Promise<void>((resolve) => release.set(key, resolve));
+              f.persistence.completeGraphStep(completion(mission.id, key, run));
+            } catch (error) {
+              failures.push(error);
+            }
+          },
+        });
+      }
+      await vi.waitFor(() => expect(started).toEqual(['b']));
+      expect(scheduler.snapshot().activeCount).toBe(1);
+      expect(f.persistence.listGraphResourceReservations(mission.id)).toHaveLength(1);
+      release.get('b')!();
+      await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+      expect(started).toEqual(['b']);
+      f.persistence.interruptGraphStep({
+        missionId: ownerMission.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: owner.reservation.id,
+        attemptId: owner.attempt.id,
+        outcome: 'canceled',
+        reason: 'user_canceled',
+        confirmation: { kind: 'attempt-stopped', attemptId: owner.attempt.id },
+        now,
+      });
+      scheduler.notifyReadinessChanged();
+      await vi.waitFor(() => expect(started).toEqual(['b', 'a']));
+      release.get('a')!();
+      await vi.waitFor(() => expect(started).toEqual(['b', 'a', 'c']));
+      release.get('c')!();
+      await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+      expect(f.persistence.getTeamMission(mission.id).state).toBe('completed');
+      expect(failures).toEqual([]);
+      expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      f.persistence.close();
+    });
+
     it.each([true, false])('pauses only the failed branch, with stop confirmed=%s', (stopped) => {
       const f = fixture(undefined, false, ['a', 'b', 'c']);
       const plan = structuredClone(f.plan);

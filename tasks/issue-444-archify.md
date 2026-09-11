@@ -3,7 +3,7 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
-## Current checkpoint: graph branch interruption transactions
+## Current checkpoint: graph readiness before Scheduler admission
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.
 - Main bounds input and excludes output paths, remote brand resources and repository/source lookup. Native Archify schema/geometry validation remains authoritative for rendering.
@@ -82,6 +82,10 @@ Validation: two new cancellation tests fail on the previous Provider adapter. Th
 The internal interruptGraphStep transaction verifies the current Mission/step generation, Execution, Attempt and resource owner, then pauses only that execution. Confirmed stop releases that reservation; unconfirmed stop quarantines it and retains every key even though the invocation is terminal. No checkpoint is created, dependent steps stay blocked, and independent siblings can finish. Later explicit stop confirmation plus manual resume creates a new Attempt; stale interruptions cannot affect its ownership. This operation is not yet called by the runtime dispatcher, so it is storage support for branch failure, not a claim of connected graph execution.
 
 Validation: twenty graph persistence cases pass, including both stop outcomes in A/B→C, sibling progress, cross-Team resource blocking, explicit release/new Attempt resume, stale generation/acknowledgement/owner rejection, pre-dispatch quarantine, and all-row rollback on a release failure. Existing execution persistence13 and Electron-ABI Coordinator65 pass (98 total), with desktop typecheck, scoped lint and formatting.
+
+The existing TeamExecutionScheduler now accepts a Main-owned read-only readiness predicate before slot/Connection selection and can wake on an external state change. Invalid candidates can be removed by their error callback without skipping independent jobs. Persistence inspectGraphResources reports current dependency/owner/resource availability without reserving anything; acquireGraphResources repeats the same checks inside its transaction, so a prior observation grants no ownership. The predicate must eventually combine this with physical write claims and the rest of graph eligibility. Production graph dispatch and the agreement endpoint are still unconnected.
+
+Validation: a real-SQLite/Scheduler test holds A's resource in another Team, runs independent B with A/C consuming no slots, then wakes A on explicit release and C after both checkpoints. A stale availability observation loses to a later resource owner. Scheduler tests verify exclusion before Connection selection/admission and callback removal. Graph21/Scheduler15/Coordinator65/Connection1 pass (102 total), along with desktop typecheck, scoped lint and formatting. These are scheduling/storage integration checks, not a full Worker runtime or product UI flow.
 
 ## Remaining requirements (not complete)
 

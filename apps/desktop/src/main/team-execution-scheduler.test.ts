@@ -53,6 +53,89 @@ const providerConnection = (
 });
 
 describe('TeamExecutionScheduler', () => {
+  it('excludes blocked graph candidates before slots and Connection admission, waking on state change', async () => {
+    const admission = new ConnectionAdmissionController(() =>
+      Date.parse('2026-07-28T00:00:01.000Z'),
+    );
+    admission.configure(providerConnection('openai:primary', 'official_api', 1));
+    const select = vi.spyOn(admission, 'selectNext');
+    const admit = vi.spyOn(admission, 'admit');
+    const scheduler = new TeamExecutionScheduler(1, admission);
+    let ready = false;
+    const blocked = deferred();
+    const independent = deferred();
+    const starts: string[] = [];
+    for (const [index, executionId] of ['blocked', 'independent'].entries())
+      scheduler.submit({
+        executionId,
+        workerId: executionId,
+        teamId: 'team',
+        teamLimit: 1,
+        isReady: () => executionId === 'independent' || ready,
+        connection: {
+          connectionId: 'openai:primary',
+          queueOrdinal: index + 1,
+          queuedAt: '2026-07-28T00:00:00.000Z',
+          estimatedTokens: 1,
+        },
+        run: async () => {
+          starts.push(executionId);
+          await (executionId === 'blocked' ? blocked.promise : independent.promise);
+        },
+      });
+    await settleScheduler();
+    expect(starts).toEqual(['independent']);
+    expect(
+      select.mock.calls.flatMap(([candidates]) => candidates.map(({ executionId }) => executionId)),
+    ).not.toContain('blocked');
+    independent.resolve();
+    await settleScheduler();
+    expect(scheduler.snapshot()).toMatchObject({ activeCount: 0, queuedExecutionIds: ['blocked'] });
+    expect(admit).toHaveBeenCalledTimes(1);
+    const selectsBefore = select.mock.calls.length;
+    await settleScheduler();
+    expect(select).toHaveBeenCalledTimes(selectsBefore);
+    ready = true;
+    scheduler.notifyReadinessChanged();
+    await settleScheduler();
+    expect(starts).toEqual(['independent', 'blocked']);
+    blocked.resolve();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(0);
+  });
+
+  it('allows an invalid readiness candidate to be removed without skipping independent work', async () => {
+    const scheduler = new TeamExecutionScheduler(2);
+    const error = new Error('Graph generation changed');
+    const errors: unknown[] = [];
+    scheduler.submit({
+      executionId: 'invalid',
+      workerId: 'a',
+      teamId: 'team',
+      teamLimit: 2,
+      isReady: () => {
+        throw error;
+      },
+      onReadinessError: (error) => {
+        errors.push(error);
+        scheduler.cancelQueued('invalid');
+      },
+      run: vi.fn(),
+    });
+    const run = vi.fn(async () => undefined);
+    scheduler.submit({
+      executionId: 'independent',
+      workerId: 'b',
+      teamId: 'team',
+      teamLimit: 2,
+      run,
+    });
+    await settleScheduler();
+    expect(errors).toEqual([error]);
+    expect(run).toHaveBeenCalledOnce();
+    expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+  });
+
   it('holds a Worker through preflight cancellation until its run settles while unrelated work proceeds', async () => {
     const scheduler = new TeamExecutionScheduler(4);
     const first = deferred();

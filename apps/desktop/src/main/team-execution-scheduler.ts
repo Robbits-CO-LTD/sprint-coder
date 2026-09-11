@@ -20,6 +20,10 @@ export type TeamExecutionJob = Readonly<{
   }>;
   onConnectionWait?(reason: ConnectionWaitReason): void;
   onWorkerWaitChanged?(waiting: boolean): void;
+  /** Main checks graph dependencies, physical claims and durable resource owners before slots.
+   * This read-only observation never replaces the transaction immediately before dispatch. */
+  isReady?(): boolean;
+  onReadinessError?(error: unknown): void;
   notBeforeMs?: number;
   run(): Promise<void>;
 }>;
@@ -59,6 +63,11 @@ export class TeamExecutionScheduler {
 
   configureConnection(connection: ProviderConnection): void {
     this.connectionAdmission?.configure(connection);
+  }
+
+  /** State changes outside an active run (for example confirmed recovery) can unblock work. */
+  notifyReadinessChanged(): void {
+    this.schedulePump();
   }
 
   submit(job: TeamExecutionJob): void {
@@ -171,11 +180,15 @@ export class TeamExecutionScheduler {
     const activeByTeam = new Map<string, number>();
     for (const job of this.active.values())
       activeByTeam.set(job.teamId, (activeByTeam.get(job.teamId) ?? 0) + 1);
+    // A readiness error callback may remove its invalid job. Compute indices after callbacks.
+    const ready = new Set([...this.queued].filter((job) => this.isJobReady(job)));
     const teamAdmissible = this.queued
       .map((job, index) => ({ job, index }))
       .filter(
         ({ job }) =>
-          !activeWorkers.has(job.workerId) && (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit,
+          !activeWorkers.has(job.workerId) &&
+          (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit &&
+          ready.has(job),
       );
     if (teamAdmissible.length === 0) return -1;
     const now = Date.now();
@@ -202,6 +215,15 @@ export class TeamExecutionScheduler {
     }
     this.scheduleRetry(250);
     return -1;
+  }
+
+  private isJobReady(job: QueuedJob): boolean {
+    try {
+      return job.isReady?.() ?? true;
+    } catch (error) {
+      job.onReadinessError?.(error);
+      return false;
+    }
   }
 
   private async run(job: QueuedJob): Promise<void> {

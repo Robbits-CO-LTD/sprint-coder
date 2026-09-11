@@ -4,6 +4,7 @@ import {
   graphResourceInventorySchema,
   type GraphResourceReservation,
   type GraphResourceAcquisition,
+  type GraphResourceAvailability,
   type GraphResourceRelease,
   type GraphResourceKey,
   type GraphAttemptStart,
@@ -4501,6 +4502,11 @@ export interface PersistenceClient {
     dependencyReadyStepKeys: string[];
   };
   interruptGraphStep(input: GraphStepInterruption): GraphResourceReservation;
+  inspectGraphResources(input: {
+    missionId: string;
+    stepKey: string;
+    expectedGeneration: number;
+  }): GraphResourceAvailability;
   acquireGraphResources(input: {
     missionId: string;
     stepKey: string;
@@ -9260,13 +9266,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
-  acquireGraphResources(input: {
+  inspectGraphResources(input: {
     missionId: string;
     stepKey: string;
     expectedGeneration: number;
-    now: string;
-  }): GraphResourceAcquisition {
-    return this.db.transaction((): GraphResourceAcquisition => {
+  }): GraphResourceAvailability {
+    return this.db.transaction((): GraphResourceAvailability => {
       const graph = this.getGraphTeamMission(input.missionId);
       if (!graph) throw new Error('Graph Mission required');
       const mission = this.getTeamMission(input.missionId);
@@ -9276,10 +9281,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const definition = graph.plan.steps.find((step) => step.key === input.stepKey);
       if (!step || !definition || step.generation !== input.expectedGeneration)
         throw new Error('Graph resource generation mismatch');
-      if (!Number.isFinite(Date.parse(input.now)))
-        throw new Error('Invalid graph resource timestamp');
       const blocked = this.graphResourcePrerequisites(graph, input.stepKey);
-      if (blocked.length) return { acquired: false, reason: 'dependencies', blockedKeys: blocked };
+      if (blocked.length) return { available: false, reason: 'dependencies', blockedKeys: blocked };
       const execution = this.getTeamExecution(step.executionId);
       const available =
         ['assigned', 'queued', 'waiting_resume'].includes(execution.state) &&
@@ -9297,9 +9300,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
           const reservation = this.readGraphResourceReservation(existing);
           if (canonicalGraphJson(reservation.resources) !== canonicalGraphJson(resources))
             throw new Error('Graph resource declarations changed');
-          return { acquired: true, reservation };
+          return { available: true, reservation };
         }
-        return { acquired: false, reason: 'owner-active', reservationId: existing.id };
+        return { available: false, reason: 'owner-active', reservationId: existing.id };
       }
       if (!available) throw new Error('Graph execution is not available for reservation');
       const occupied = resources.filter((resource) =>
@@ -9309,10 +9312,35 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
       if (occupied.length)
         return {
-          acquired: false,
+          available: false,
           reason: 'resources',
           blockedKeys: occupied.map((resource) => resource.key),
         };
+      return { available: true, reservation: null };
+    })();
+  }
+
+  acquireGraphResources(input: {
+    missionId: string;
+    stepKey: string;
+    expectedGeneration: number;
+    now: string;
+  }): GraphResourceAcquisition {
+    return this.db.transaction((): GraphResourceAcquisition => {
+      if (!Number.isFinite(Date.parse(input.now)))
+        throw new Error('Invalid graph resource timestamp');
+      const available = this.inspectGraphResources(input);
+      if (!available.available) {
+        return available.reason === 'owner-active'
+          ? { acquired: false, reason: available.reason, reservationId: available.reservationId }
+          : { acquired: false, reason: available.reason, blockedKeys: available.blockedKeys };
+      }
+      if (available.reservation !== null)
+        return { acquired: true, reservation: available.reservation };
+      const graph = this.getGraphTeamMission(input.missionId);
+      const step = graph?.steps.find((step) => step.key === input.stepKey);
+      if (!graph || !step) throw new Error('Graph resource binding changed');
+      const resources = graphResourceInventorySchema.parse(graphResourceKeys(graph, step.key));
       const id = randomUUID();
       this.db
         .prepare(
