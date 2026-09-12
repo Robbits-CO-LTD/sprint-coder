@@ -38,7 +38,29 @@ function walk(suite, file, titles) {
 }
 for (const s of report.suites ?? []) walk(s, s.file ?? s.title, []);
 
-const ENV_RE = /Packaged app not found|did not become ready|electron-forge package|ECONNREFUSED[^\n]*5173|NODE_MODULE_VERSION|Sprint Coder API unavailable|does not provide an export named|Outdated Optimize Dep/i;
+const ENV_RE = /Packaged app not found|did not become ready|electron-forge package|ECONNREFUSED[^\n]*5173|NODE_MODULE_VERSION|Sprint Coder API unavailable/i;
+// "does not provide an export named" is only environmental when Vite's optimize cache is provably
+// older than the workspace package sources; the same SyntaxError is a real regression when an export
+// was removed/renamed without updating its importer. Evidence: --stale-vite-cache (operator observed
+// it) or the cache/source mtimes at triage time.
+const STALE_CACHE_RE = /does not provide an export named|Outdated Optimize Dep/i;
+const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', '..');
+function newestMtime(dir) {
+  let newest = 0;
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.ts$/.test(e.name)) newest = Math.max(newest, fs.statSync(p).mtimeMs); } };
+  try { walk(dir); } catch { /* missing dir */ }
+  return newest;
+}
+function viteCacheStale() {
+  try {
+    const deps = path.join(repoRoot, 'apps', 'desktop', 'node_modules', '.vite', 'deps');
+    const files = fs.readdirSync(deps).filter((f) => /^@sprint-coder_.*\.js$/.test(f));
+    if (files.length === 0) return false;
+    const cache = Math.max(...files.map((f) => fs.statSync(path.join(deps, f)).mtimeMs));
+    return newestMtime(path.join(repoRoot, 'packages', 'contracts', 'src')) > cache || newestMtime(path.join(repoRoot, 'packages', 'domain', 'src')) > cache;
+  } catch { return false; }
+}
+const staleCache = argv.includes('--stale-vite-cache') || viteCacheStale();
 const FIRSTWINDOW_RE = /firstWindow|Timeout \d+ms exceeded[^\n]*firstWindow/i;
 const OPTIN_FILE_RE = /leader-mcp-smoke|leader-mcp-codex-smoke|cli-workspace-egress/;
 const failures = tests.filter((t) => t.status === 'unexpected' || t.status === 'flaky');
@@ -74,6 +96,7 @@ function classify(t) {
   if (t.status === 'expected') return 'pass';
   if (wholesaleEnv && FIRSTWINDOW_RE.test(msg)) return 'env_wholesale';
   if (ENV_RE.test(msg)) return 'env';
+  if (STALE_CACHE_RE.test(msg)) return staleCache ? 'env_stale_vite_cache' : 'real_candidate';
   if (/command-runner-flow\.spec\.ts$/.test(t.file) && /toBeFocused|focus/i.test(msg)) return 'known_flake';
   if (t.status === 'flaky') return 'flaky_in_run';
   return 'real_candidate';
@@ -88,7 +111,7 @@ const rows = tests.map((t) => {
 const perf = rows.filter((r) => /perf-budgets/.test(r.file)).flatMap((r) => r.stdout.filter((l) => /startup|p95|fps|ms/i.test(l)).map((l) => l.trim()));
 const stats = report.stats ?? {};
 const summary = {
-  report: reportPath, repo, generated_at: new Date().toISOString(),
+  report: reportPath, repo, generated_at: new Date().toISOString(), stale_vite_cache_evidence: staleCache,
   totals: { tests: tests.length, expected: stats.expected ?? 0, unexpected: stats.unexpected ?? 0, flaky: stats.flaky ?? 0, skipped: stats.skipped ?? 0, duration_ms: stats.duration ?? null },
   wholesale_env: wholesaleEnv,
   by_class: rows.reduce((a, r) => ((a[r.classification] = (a[r.classification] ?? 0) + 1), a), {}),

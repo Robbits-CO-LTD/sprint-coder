@@ -36,6 +36,7 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
       const ta = document.querySelector('[data-testid="composer-textarea"]'); const send = document.querySelector('[data-testid="composer-send-button"]');
       return {
         wizard: !!document.querySelector('[data-testid="setup-wizard"]'),
+        runCount: cards.length,
         lastRun: cards.length ? cards[cards.length - 1].getAttribute('data-run-status') : null,
         approval: c ? { text: c.innerText.replace(/\s+/g, ' ').slice(0, 300), allowOnce: btn('今回のみ許可'), allowTask: btn('Task中許可'), deny: btn('拒否') } : null,
         audit: q('[data-testid="auto-decision-audit"]').map((e) => e.textContent.trim().slice(0, 100)),
@@ -48,11 +49,22 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
         composer: { at: center(ta), sendAt: center(send), sendLabel: send?.getAttribute('aria-label') ?? null, value: ta?.value?.slice(0, 40) ?? null },
       };
     });
+    // The first read can still show the PREVIOUS turn's terminal card (the new one is not in the DOM
+    // yet right after 送信). A terminal state therefore counts only after a new turn was observed:
+    // the card count grew, or the last card was seen running.
+    const TERMINAL = ['completed', 'failed', 'canceled', 'interrupted'];
     let last = await read();
+    const initialCount = last.runCount;
+    let newTurnObserved = last.lastRun === 'running';
     const deadline = Date.now() + poll * 1000;
-    while (poll > 0 && Date.now() < deadline && !last.approval && !['completed', 'failed', 'canceled', 'interrupted'].includes(last.lastRun)) {
+    while (poll > 0 && Date.now() < deadline) {
+      if (last.runCount > initialCount || last.lastRun === 'running') newTurnObserved = true;
+      if (last.approval) break;
+      if (newTurnObserved && TERMINAL.includes(last.lastRun)) break;
       await new Promise((r) => setTimeout(r, 4000)); last = await read();
     }
+    if (last.runCount > initialCount || last.lastRun === 'running') newTurnObserved = true;
+    last.newTurnObserved = newTurnObserved;
     if (out) await page.screenshot({ path: out });
     console.log(JSON.stringify(last));
   } finally { await browser.close().catch(() => {}); }

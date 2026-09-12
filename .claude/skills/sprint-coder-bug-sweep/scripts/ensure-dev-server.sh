@@ -27,7 +27,19 @@ if [ -n "$pid" ]; then
   cwd="$(lsof -p "$pid" -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
   have="$( [ -n "$cwd" ] && cd "$cwd" 2>/dev/null && pwd -P || echo '')"
   if [ "$have" = "$want" ]; then
-    printf '{"owned":false,"pid":%s,"cwd":"%s","status":"reused"}\n' "$pid" "$cwd"; exit 0
+    lcmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    case "$lcmd" in
+      *electron-forge*) lmode="forge" ;;
+      *vite*) lmode="renderer-only" ;;
+      *) lmode="unknown" ;;
+    esac
+    if [ "$RENDERER_ONLY" = 1 ] && [ "$lmode" != "renderer-only" ]; then
+      # A forge `npm start` keeps its own Electron window alive; reusing it would leave a second
+      # com.github.Electron process and the lane window would be unreachable for app_* tools.
+      printf '{"owned":false,"pid":%s,"cwd":"%s","mode":"%s","status":"blocked_artifact","reason":"an existing %s dev server holds :5173; renderer-only needs it stopped first (stop-dev-instance.sh --dev-server if this run owns it, otherwise ask the user)"}\n' "$pid" "$cwd" "$lmode" "$lmode"
+      exit 3
+    fi
+    printf '{"owned":false,"pid":%s,"cwd":"%s","mode":"%s","status":"reused"}\n' "$pid" "$cwd" "$lmode"; exit 0
   fi
   printf '{"owned":false,"pid":%s,"cwd":"%s","status":"blocked_artifact","reason":"dev server on :5173 belongs to another checkout; not killed"}\n' "$pid" "${cwd:-unknown}"
   exit 3
