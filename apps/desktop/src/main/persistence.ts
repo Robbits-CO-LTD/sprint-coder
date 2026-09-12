@@ -464,6 +464,9 @@ function toGeneratedImage(row: GeneratedImageRow): GeneratedImage {
 /** A single generated icon is tens of KB; this is a sanity ceiling, not a target. */
 const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
 
+/** Matches the workspace read tool's ceiling: a post-image Main cannot read stays unverified. */
+const MAX_VERIFIABLE_POST_IMAGE_BYTES = 4 * 1024 * 1024;
+
 /**
  * The 8-byte PNG signature.
  *
@@ -5345,6 +5348,11 @@ export interface PersistenceClient {
     content: string;
     createdAt: string;
   }): AssuranceRound | null;
+  verifyCommittedEditSagaPostImages(input: {
+    taskId: string;
+    turnId: string;
+    createdAt: string;
+  }): readonly string[];
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -16317,6 +16325,72 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  /**
+   * Deterministic verification of every committed Edit Saga in the Turn, run by Main once the
+   * Turn's write activity has stopped. Returns the criterion ids that are still unverified.
+   *
+   * `verification:<sagaId>` evidence used to exist only as a side effect of a model-initiated
+   * `read_file`, so whether a correct edit could complete its Turn depended on whether the model
+   * happened to read the file back: Codex does, Claude Code often does not, and the Turn then died
+   * on `AcceptanceEvidenceMissingError` (issue #466). Main owns the check instead, exactly as the
+   * Assurance design requires — "完了前はwrite activityを止め、対象hashを再確認して" — by re-reading
+   * each Saga's sealed post-image and handing the observed bytes to the same trusted-read path.
+   *
+   * This is not a weaker gate: the evidence is still Main-observed and still requires the bytes on
+   * disk to hash to the sealed plan's post hash, so a write that was reverted, clobbered or
+   * superseded records nothing and keeps its criterion open. Only the dependency on the model's
+   * behaviour is removed.
+   */
+  verifyCommittedEditSagaPostImages(input: {
+    taskId: string;
+    turnId: string;
+    createdAt: string;
+  }): readonly string[] {
+    return this.db.transaction(() => {
+      const sagas = (
+        this.db
+          .prepare(
+            `SELECT * FROM edit_sagas
+             WHERE task_id = ? AND turn_id = ? AND state = 'committed'
+             ORDER BY updated_at DESC, id DESC`,
+          )
+          .all(input.taskId, input.turnId) as EditSagaRow[]
+      ).map(toEditSaga);
+      for (const saga of sagas) {
+        if (this.hasVerificationEvidence(input.taskId, input.turnId, saga.id)) continue;
+        for (const { operation } of saga.steps) {
+          // Renames and deletions have no surviving post-image to re-read, and a directory has no
+          // content hash — a mkdir Saga is verified through its descendant file read instead.
+          if (operation.destination !== null || operation.postHash === null) continue;
+          const content = readVerifiablePostImage(operation.canonicalPath);
+          if (content === null) continue;
+          this.recordWorkspaceReadVerification({
+            taskId: input.taskId,
+            turnId: input.turnId,
+            rootId: saga.rootId ?? 'legacy-primary',
+            path: operation.path,
+            content,
+            createdAt: input.createdAt,
+          });
+          if (this.hasVerificationEvidence(input.taskId, input.turnId, saga.id)) break;
+        }
+      }
+      return Object.freeze(
+        decideCompletion(
+          this.getAcceptanceContract(input.taskId, input.turnId),
+          this.listEvidenceRecords(input.taskId, input.turnId),
+        ).openCriterionIds,
+      );
+    })();
+  }
+
+  private hasVerificationEvidence(taskId: string, turnId: string, sagaId: string): boolean {
+    return this.listEvidenceRecords(taskId, turnId).some(
+      (record) =>
+        record.kind === 'verification_passed' && record.criterionId === `verification:${sagaId}`,
+    );
+  }
+
   private insertAcceptanceContract(contract: AcceptanceContract): void {
     this.db
       .prepare(
@@ -19759,6 +19833,24 @@ function displayTurnDiffPath(
     return value;
   const relativePath = normalizeWorkspaceDisplayRelativePath(candidate, process.platform);
   return relativePath === null ? value : formatWorkspaceDisplayPath(label, relativePath);
+}
+
+/**
+ * Reads a committed Edit Saga's post-image back for deterministic verification, or null when the
+ * entry on disk is not a plain file Main may read. `lstatSync` keeps a symlink that replaced the
+ * path from being followed, and the size ceiling matches the workspace read tool so an unbounded
+ * file cannot be pulled into memory at completion time. Every caller still compares the bytes
+ * against the sealed post hash, so an unreadable or changed path simply records no evidence.
+ */
+function readVerifiablePostImage(canonicalPath: string): string | null {
+  try {
+    const stat = lstatSync(canonicalPath, { throwIfNoEntry: false });
+    if (stat === undefined || !stat.isFile() || stat.size > MAX_VERIFIABLE_POST_IMAGE_BYTES)
+      return null;
+    return readFileSync(canonicalPath, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 function mkdirSagaVerifiedByDescendantRead(
