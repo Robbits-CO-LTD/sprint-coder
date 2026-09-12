@@ -31,7 +31,7 @@
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/managed-harness/" />
     <meta
       property="og:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
     <meta property="og:image:width" content="1600" />
     <meta property="og:image:height" content="1000" />
@@ -47,9 +47,14 @@
     />
     <meta
       name="twitter:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
-    <link rel="stylesheet" href="/styles.css?v=20260912-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260912-2" />
+    <script>
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        document.documentElement.classList.add('js');
+      }
+    </script>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -172,6 +177,118 @@
               </div>
             </dl>
           </div>
+        </div>
+      </section>
+
+      <section
+        class="scene scene-sub"
+        data-scene="harness"
+        aria-label="tool callが実行されるまでの経路"
+      >
+        <div class="scene-stage">
+          <div class="shell control-layout">
+            <div class="control-copy">
+              <p class="section-label">ONE PATH FOR EVERY PROVIDER</p>
+              <h2>生成から実行まで、<br />同じ経路を通る。</h2>
+              <ol class="control-steps">
+                <li data-range="0,0.2">
+                  <strong>Providerがtool callを生成</strong
+                  ><span>modelがファイル操作やCommandを要求します</span>
+                </li>
+                <li data-range="0.2,0.42">
+                  <strong>Runtimeが正規化</strong><span>Provider固有の形式をcanonical eventへ</span>
+                </li>
+                <li data-range="0.42,0.66">
+                  <strong>Tool Brokerがpolicyを評価</strong
+                  ><span>Access、Workspace範囲、capability、承認</span>
+                </li>
+                <li data-range="0.66,0.84">
+                  <strong>管理された実行器が操作</strong
+                  ><span>許可された範囲だけで副作用を実行</span>
+                </li>
+                <li data-range="0.84,1.01">
+                  <strong>結果と証拠をTaskへ</strong><span>差分、出力、承認履歴を同じTurnへ</span>
+                </li>
+              </ol>
+            </div>
+
+            <div class="sub-panel" aria-hidden="true">
+              <div class="sub-bar">
+                <span>MANAGED HARNESS</span
+                ><b data-on="approve" class="swap"
+                  ><span>Tool Broker · evaluating</span><span>Tool Broker · allowed</span></b
+                ><span>Task / local</span>
+              </div>
+              <div class="hx-body">
+                <div class="hx-track">
+                  <div class="hx-packet"></div>
+                  <div class="hx-stage">
+                    <i></i><small>PROVIDER</small><strong>Claude Code</strong>
+                  </div>
+                  <div class="hx-stage" data-on="t1">
+                    <i></i><small>RUNTIME</small><strong>Normalize</strong>
+                  </div>
+                  <div class="hx-stage" data-on="t2">
+                    <i></i><small>BROKER</small><strong>Policy</strong>
+                  </div>
+                  <div class="hx-stage" data-on="t3">
+                    <i></i><small>EXECUTOR</small><strong>Sandbox</strong>
+                  </div>
+                  <div class="hx-stage" data-on="t4">
+                    <i></i><small>TASK</small><strong>Evidence</strong>
+                  </div>
+                </div>
+                <div class="hx-details">
+                  <div class="hx-detail" data-range="0,0.2">
+                    <small>TOOL CALL · PROVIDER-NATIVE</small>
+                    <pre>{ "type": "tool_use", "name": "Bash",
+  "input": { "command": "npm test -- auth" } }
+<span class="hx-dim">// Claude Code形式。Codex CLIやAPIでは別の形</span></pre>
+                  </div>
+                  <div class="hx-detail" data-range="0.2,0.42">
+                    <small>CANONICAL EVENT</small>
+                    <pre>tool.request
+  tool: exec_command
+  cwd:  &lt;workspace&gt;
+  argv: ["npm", "test", "--", "auth"]
+<span class="hx-dim">// Providerを変えてもここから先は同じ</span></pre>
+                  </div>
+                  <div class="hx-detail" data-range="0.42,0.66">
+                    <small>POLICY EVALUATION</small>
+                    <div class="hx-check">
+                      <div><span>Access preset</span><b>確認する</b></div>
+                      <div><span>Workspace scope</span><b>✓ inside</b></div>
+                      <div><span>Command sandbox</span><b>✓ os-sandbox</b></div>
+                      <div>
+                        <span>承認</span
+                        ><b class="swap" data-on="approve"
+                          ><span>待ち · ユーザーへ表示</span><span>✓ 許可 19:47</span></b
+                        >
+                      </div>
+                    </div>
+                  </div>
+                  <div class="hx-detail" data-range="0.66,0.84">
+                    <small>SANDBOXED EXECUTION</small>
+                    <pre>$ npm test -- auth
+✓ refresh extends expiresAt by SESSION_TTL_MS
+✓ refresh persists the new expiry
+✓ expired session is rejected
+<span class="hx-dim">Tests 12 passed · 0 failed · 1.8s</span></pre>
+                  </div>
+                  <div class="hx-detail" data-range="0.84,1.01">
+                    <small>EVIDENCE · SAME TURN</small>
+                    <div class="hx-check">
+                      <div><span>差分</span><b>src/auth/session.ts +4 −2</b></div>
+                      <div><span>出力</span><b>12 passed</b></div>
+                      <div><span>承認履歴</span><b>19:47 許可 · npm test -- auth</b></div>
+                      <div><span>結果</span><b>success</b></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="scene-progress" aria-hidden="true"><b></b></div>
         </div>
       </section>
 
@@ -333,5 +450,9 @@
         © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
       </div>
     </footer>
+    <script
+      src="/story.js?v=20260912-2"
+      onerror="document.documentElement.classList.remove('js')"
+    ></script>
   </body>
 </html>

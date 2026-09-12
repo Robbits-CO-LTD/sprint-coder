@@ -50,6 +50,32 @@
     providers: {
       roll: [0.06, 0.92],
     },
+    /* Subpage scenes */
+    team: {
+      brief: [0, 0.12],
+      hire1: [0.2, 0.28],
+      hire2: [0.26, 0.34],
+      hire3: [0.32, 0.4],
+      w1: [0.45, 0.6],
+      w2: [0.47, 0.68],
+      w3: [0.55, 0.72],
+      report: [0.72, 0.82],
+      merge: [0.84, 0.94],
+    },
+    harness: {
+      t1: [0.14, 0.24],
+      t2: [0.36, 0.46],
+      approve: [0.56, 0.62],
+      t3: [0.64, 0.72],
+      t4: [0.8, 0.88],
+    },
+    boundary: {
+      fill: [0, 0.2],
+      send: [0.28, 0.42],
+      back: [0.44, 0.54],
+      lock: [0.58, 0.7],
+      local: [0.82, 0.94],
+    },
   };
 
   var header = document.querySelector('.site-header');
@@ -98,6 +124,7 @@
         node: node,
         target: parseInt(node.getAttribute('data-count'), 10),
         phase: node.getAttribute('data-phase'),
+        suffix: node.getAttribute('data-suffix') || '',
         value: -1,
       });
     });
@@ -150,7 +177,7 @@
       var value = Math.round(v * c.target);
       if (value !== c.value) {
         c.value = value;
-        c.node.textContent = formatCount(value);
+        c.node.textContent = formatCount(value) + c.suffix;
       }
     });
 

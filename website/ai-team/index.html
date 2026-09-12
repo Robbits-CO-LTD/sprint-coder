@@ -28,7 +28,7 @@
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/ai-team/" />
     <meta
       property="og:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
     <meta property="og:image:width" content="1600" />
     <meta property="og:image:height" content="1000" />
@@ -41,9 +41,14 @@
     />
     <meta
       name="twitter:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
-    <link rel="stylesheet" href="/styles.css?v=20260912-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260912-2" />
+    <script>
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        document.documentElement.classList.add('js');
+      }
+    </script>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -166,6 +171,110 @@
               </div>
             </dl>
           </div>
+        </div>
+      </section>
+
+      <section class="scene scene-sub" data-scene="team" aria-label="LeaderがWorkerへ分担する流れ">
+        <div class="scene-stage">
+          <div class="shell control-layout">
+            <div class="control-copy">
+              <p class="section-label">HOW A TEAM RUNS</p>
+              <h2>Leaderが分け、<br />Workerが進め、<br />Taskへ戻る。</h2>
+              <ol class="control-steps">
+                <li data-range="0,0.2">
+                  <strong>Chatで目的を伝える</strong
+                  ><span>Team構成を最初から考える必要はありません</span>
+                </li>
+                <li data-range="0.2,0.45">
+                  <strong>LeaderがWorkerを雇う</strong
+                  ><span>並行化する意味がある役割だけを分けます</span>
+                </li>
+                <li data-range="0.45,0.72">
+                  <strong>Workerが進行を報告する</strong
+                  ><span>状態と成果はLeaderとあなたへ戻ります</span>
+                </li>
+                <li data-range="0.72,1.01">
+                  <strong>Leaderが統合する</strong><span>分散した回答を一つの成果としてTaskへ</span>
+                </li>
+              </ol>
+            </div>
+
+            <div class="sub-panel" aria-hidden="true">
+              <div class="sub-bar">
+                <span>← Chatに戻る</span>
+                <b class="swap" data-on="merge"
+                  ><span>active · Worker 3人</span><span>completed · Worker 3人</span></b
+                >
+                <span>Canvas表示</span>
+              </div>
+              <div class="tc-board">
+                <svg
+                  class="tc-lines"
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    class="tc-line"
+                    data-i="0"
+                    data-on="report"
+                    pathLength="1"
+                    d="M50 46 C50 54 20 50 20 60"
+                  />
+                  <path
+                    class="tc-line"
+                    data-i="1"
+                    data-on="report"
+                    pathLength="1"
+                    d="M50 46 L50 60"
+                  />
+                  <path
+                    class="tc-line"
+                    data-i="2"
+                    data-on="report"
+                    pathLength="1"
+                    d="M50 46 C50 54 80 50 80 60"
+                  />
+                </svg>
+                <div class="tc-brief">
+                  <small>USER</small
+                  >ログイン後にセッションが切れるバグを直して。調査・修正・レビューまで。
+                </div>
+                <div class="tc-node tc-leader">
+                  <small>LEADER</small><strong>Claude Code</strong>
+                  <em class="swap" data-on="merge"
+                    ><span>Workerを編成中（3人）</span><span>成果を統合しました</span></em
+                  >
+                </div>
+                <div class="tc-node tc-worker" data-i="0" data-state-phase="w1">
+                  <small>WORKER · 調査</small><strong>Codex CLI</strong>
+                  <em class="wk-status"
+                    ><i></i><span>ready</span><span>running</span><span>done</span></em
+                  >
+                  <div class="wk-bar"><b></b></div>
+                </div>
+                <div class="tc-node tc-worker" data-i="1" data-state-phase="w2">
+                  <small>WORKER · 実装</small><strong>Claude Code</strong>
+                  <em class="wk-status"
+                    ><i></i><span>ready</span><span>running</span><span>done</span></em
+                  >
+                  <div class="wk-bar"><b></b></div>
+                </div>
+                <div class="tc-node tc-worker" data-i="2" data-state-phase="w3">
+                  <small>WORKER · レビュー</small><strong>Gemini</strong>
+                  <em class="wk-status"
+                    ><i></i><span>ready</span><span>running</span><span>done</span></em
+                  >
+                  <div class="wk-bar"><b></b></div>
+                </div>
+                <div class="tc-result">
+                  <small>RESULT → TASK</small>2 files changed · 12 tests passed · レビュー: 問題なし
+                  · 提案 1件
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="scene-progress" aria-hidden="true"><b></b></div>
         </div>
       </section>
 
@@ -351,5 +460,9 @@
         © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
       </div>
     </footer>
+    <script
+      src="/story.js?v=20260912-2"
+      onerror="document.documentElement.classList.remove('js')"
+    ></script>
   </body>
 </html>

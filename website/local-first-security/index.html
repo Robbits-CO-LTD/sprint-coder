@@ -28,7 +28,7 @@
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/local-first-security/" />
     <meta
       property="og:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
     <meta property="og:image:width" content="1600" />
     <meta property="og:image:height" content="1000" />
@@ -41,9 +41,14 @@
     />
     <meta
       name="twitter:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
-    <link rel="stylesheet" href="/styles.css?v=20260912-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260912-2" />
+    <script>
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        document.documentElement.classList.add('js');
+      }
+    </script>
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -168,6 +173,77 @@
               </div>
             </dl>
           </div>
+        </div>
+      </section>
+
+      <section
+        class="scene scene-sub"
+        data-scene="boundary"
+        aria-label="端末内に残る情報と送信される情報"
+      >
+        <div class="scene-stage">
+          <div class="shell control-layout">
+            <div class="control-copy">
+              <p class="section-label">WHERE YOUR DATA LIVES</p>
+              <h2>境界を越えるのは、<br />選んだTurnの<br />promptだけ。</h2>
+              <ol class="control-steps">
+                <li data-range="0,0.25">
+                  <strong>端末内に保存する</strong><span>Task履歴、設定、実行状態、API key</span>
+                </li>
+                <li data-range="0.25,0.55">
+                  <strong>クラウドProviderを選んだTurnだけ送る</strong
+                  ><span>生成に必要なpromptとcontext</span>
+                </li>
+                <li data-range="0.55,0.8">
+                  <strong>API keyとWorkspaceは越えない</strong
+                  ><span>keyはMain processのsafeStorageに</span>
+                </li>
+                <li data-range="0.8,1.01">
+                  <strong>ローカルLLMなら端末内で完結</strong
+                  ><span>Ollama、LM Studio、LocalAI</span>
+                </li>
+              </ol>
+            </div>
+
+            <div class="sub-panel" aria-hidden="true">
+              <div class="sub-bar">
+                <span>DATA BOUNDARY</span
+                ><b class="swap" data-on="local"
+                  ><span>Provider · Anthropic</span><span>Provider · Ollama (local)</span></b
+                ><span>Task / local</span>
+              </div>
+              <div class="bd-board">
+                <div class="bd-device">
+                  <small>YOUR MACHINE</small>
+                  <div class="bd-item" data-i="0" data-on="lock">
+                    <span>Task履歴・実行状態</span><i></i>
+                  </div>
+                  <div class="bd-item" data-i="1" data-on="lock">
+                    <span>設定・Access</span><i></i>
+                  </div>
+                  <div class="bd-item" data-i="2" data-on="lock">
+                    <span>API key · safeStorage</span><i></i>
+                  </div>
+                  <div class="bd-item" data-i="3" data-on="lock">
+                    <span>Workspaceファイル</span><i></i>
+                  </div>
+                  <div class="bd-item" data-i="4"><span>prompt · 生成context</span><i></i></div>
+                  <div class="bd-local" data-on="local">
+                    <small>LOCAL LLM</small><strong>Ollama · qwen2.5-coder</strong>
+                  </div>
+                  <div class="bd-packet-local">prompt + context</div>
+                </div>
+                <div class="bd-cloud">
+                  <small>CLOUD PROVIDER</small><strong>Anthropic API</strong>
+                  <p>受け取るのは、そのTurnの生成に必要なpromptとcontextだけ。</p>
+                </div>
+                <div class="bd-packet swap" data-on="back">
+                  <span>prompt + context →</span><span>← response</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="scene-progress" aria-hidden="true"><b></b></div>
         </div>
       </section>
 
@@ -357,5 +433,9 @@
         © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
       </div>
     </footer>
+    <script
+      src="/story.js?v=20260912-2"
+      onerror="document.documentElement.classList.remove('js')"
+    ></script>
   </body>
 </html>
