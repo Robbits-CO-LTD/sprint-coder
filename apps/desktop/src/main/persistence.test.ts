@@ -7854,6 +7854,7 @@ if (runsWithElectronAbi)
         { version: 80 },
         { version: 81 },
         { version: 82 },
+        { version: 83 },
         { version: 84 },
         { version: 85 },
         { version: 86 },

@@ -298,11 +298,11 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     }
   });
 
-  it('reports the loaded session settings when a same-model lease requests a different context', async () => {
+  it('drains same-model leases before starting a different context', async () => {
     const model = await descriptor('2');
     const { subject, supervisor } = lifecycle();
     const first = await subject.acquire(model, false);
-    const second = await subject.acquire(
+    const next = subject.acquire(
       {
         ...model,
         contextTokens: 8_192,
@@ -314,7 +314,58 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     expect(supervisor.starts).toHaveLength(1);
     expect(subject.snapshot()).toMatchObject({ contextTokens: 4_096 });
     await first.release();
+    const second = await next;
+    expect(supervisor.starts).toHaveLength(2);
+    expect(supervisor.starts[1]).toMatchObject({ contextTokens: 8_192 });
+    expect(supervisor.sessions[0]?.stopCount).toBe(1);
     await second.release();
+  });
+
+  it('owns the draft as well as the target and restarts when the draft settings change', async () => {
+    const model = await descriptor('a');
+    const draft = {
+      id: 'b'.repeat(64),
+      modelRoot: '/fixture/draft',
+      modelPath: '/fixture/draft/model.gguf',
+      baseModelId: 'owner/base',
+      artifactHashes: ['c'.repeat(64)],
+      draftTokensMax: 3,
+    };
+    const paired = {
+      ...model,
+      draft,
+      baseModelId: 'owner/base',
+      fit: {
+        ...model.fit,
+        draft: { weightsBytes: 1024, kvBytesPerToken: 1024, scratchBytes: 1024 },
+      },
+    };
+    const { subject, supervisor } = lifecycle();
+    const verify = vi.fn(async () => {});
+    const signal = new AbortController().signal;
+    const first = await subject.acquire(paired, false, signal, verify);
+    const reused = await subject.acquire(paired, false, signal, verify);
+    expect(verify).toHaveBeenCalledTimes(1);
+    await reused.release();
+    expect(() => subject.assertDeletable(draft.id)).toThrow('active');
+    await expect(subject.stopModel(draft.id)).rejects.toThrow('active leases');
+    expect(subject.snapshot().speculative).toMatchObject({
+      draftModelId: draft.id,
+      draftTokensMax: 3,
+    });
+    await first.release();
+    const second = await subject.acquire(
+      { ...paired, draft: { ...draft, draftTokensMax: 8 } },
+      false,
+      signal,
+      verify,
+    );
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(supervisor.starts).toHaveLength(2);
+    expect(supervisor.sessions[0]?.stopCount).toBe(1);
+    await second.release();
+    await subject.stopModel(draft.id);
+    expect(() => subject.assertDeletable(draft.id)).not.toThrow();
   });
 
   it('accepts a bounded verification fallback when batch is reduced with context', async () => {

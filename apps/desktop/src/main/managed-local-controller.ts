@@ -6,6 +6,10 @@ import {
   managedLocalLaunchSettingsViewSchema,
   managedLocalInferenceSettingsViewSchema,
   managedLocalRuntimeSnapshotSchema,
+  managedLocalSpeculativeSettingsSchema,
+  managedLocalSpeculativeSettingsViewSchema,
+  type ManagedLocalSpeculativeSettings,
+  type ManagedLocalSpeculativeSettingsView,
   type ManagedLocalEffectiveLaunchSettings,
   type ManagedLocalInferenceSettings,
   type ManagedLocalInferenceSettingsView,
@@ -32,7 +36,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { collectLocalHardwareSnapshot } from './local-hardware-inventory';
-import { readGgufBlockCount } from './gguf-metadata';
+import { readGgufBlockCount, readGgufModelMetadata } from './gguf-metadata';
+import {
+  managedLocalDraftBinding,
+  type ManagedLocalDraftModel,
+} from './managed-local-runtime-supervisor';
 import { applyReusableLocalVerification, estimateLocalModelFit } from './local-fit-estimator';
 import {
   LocalModelDownloadManager,
@@ -115,6 +123,7 @@ export class ManagedLocalController {
       dependencies.fetch ?? globalThis.fetch,
     );
     manager.recoverInterrupted();
+    await manager.reclassifyInstalledDrafts();
     const candidateBackends = dependencies.bundle?.manifest.candidateBackends ?? [];
     return new ManagedLocalController(
       dependencies.lifecycle,
@@ -175,6 +184,159 @@ export class ManagedLocalController {
     return this.manager.listInstalledModels();
   }
 
+  getSpeculativeSettings(modelId: string): Promise<ManagedLocalSpeculativeSettingsView> {
+    return this.modelOperations.run(modelId, () => this.speculativeSettingsView(modelId));
+  }
+
+  private async speculativeSettingsView(
+    modelId: string,
+  ): Promise<ManagedLocalSpeculativeSettingsView> {
+    const configured = this.repository.getSpeculativeSettings(modelId);
+    let target = this.listInstalled().find(({ id }) => id === modelId)!;
+    let reason: string | null = null;
+    if (target.baseModelId === null && target.source === 'hugging_face') {
+      try {
+        const id = await this.catalog.resolveBaseModelId(target.sourceId, target.immutableRevision);
+        if (id !== null)
+          this.repository.backfillBaseModelId(
+            modelId,
+            target.sourceId,
+            target.immutableRevision,
+            id,
+          );
+      } catch {
+        reason = '保存済みのモデル版から互換情報を確認できませんでした。';
+      }
+      this.repository.getSpeculativeSettings(modelId);
+      target = this.listInstalled().find(({ id }) => id === modelId)!;
+    }
+    for (const draft of this.listInstalled().filter(
+      (model) =>
+        model.state === 'installed' &&
+        model.purpose === 'draft-dflash' &&
+        model.baseModelId === null &&
+        model.source === 'hugging_face',
+    )) {
+      try {
+        const id = await this.catalog.resolveBaseModelId(draft.sourceId, draft.immutableRevision);
+        if (id !== null)
+          this.repository.backfillBaseModelId(
+            draft.id,
+            draft.sourceId,
+            draft.immutableRevision,
+            id,
+          );
+      } catch {
+        reason ??= '保存済みの下書きモデル版から互換情報を確認できませんでした。';
+      }
+    }
+    const runtimeSupported = this.bundle?.manifest.speculativeDflash === true;
+    const hasProjector = this.manager
+      .artifactExpectations(modelId)
+      .some(({ role }) => role === 'mmproj');
+    const supported = runtimeSupported && !hasProjector;
+    const eligibleDrafts =
+      target.baseModelId === null
+        ? []
+        : this.listInstalled()
+            .filter(
+              (model) =>
+                model.state === 'installed' &&
+                model.purpose === 'draft-dflash' &&
+                model.baseModelId === target.baseModelId,
+            )
+            .slice(0, 256)
+            .map(({ id, sourceId, quantization, baseModelId }) => ({
+              id,
+              sourceId,
+              quantization,
+              baseModelId: baseModelId!,
+            }));
+    if (!runtimeSupported) reason = '同梱RuntimeはDFlash2に対応していません。';
+    else if (hasProjector) reason = '画像対応モデルとDFlash2は併用できません。';
+    else if (target.baseModelId === null) reason ??= 'モデルの互換情報が未確認です。';
+    else if (eligibleDrafts.length === 0)
+      reason = '同じbase model用のDFlash2下書きモデルを取得してください。';
+    return managedLocalSpeculativeSettingsViewSchema.parse({
+      modelId,
+      configured,
+      baseModelId: target.baseModelId,
+      supported,
+      reason,
+      recoveryRequired: this.repository.needsSpeculativeSettingsRecovery(),
+      eligibleDrafts,
+    });
+  }
+
+  setSpeculativeSettings(
+    modelId: string,
+    input: ManagedLocalSpeculativeSettings,
+  ): Promise<ManagedLocalSpeculativeSettingsView> {
+    const settings = managedLocalSpeculativeSettingsSchema.parse(input);
+    return this.modelOperations.run(modelId, async () => {
+      await this.prepareLaunchSettingsEdit(modelId);
+      if (settings.type === 'draft-dflash') {
+        await this.speculativeSettingsView(modelId);
+        const context = this.manager.getLaunchSettings(modelId).contextTokens;
+        await this.resolveDraft(modelId, settings, context, true);
+      }
+      this.repository.setSpeculativeSettings(modelId, settings);
+      return this.speculativeSettingsView(modelId);
+    });
+  }
+
+  private async resolveDraft(
+    modelId: string,
+    settings: ManagedLocalSpeculativeSettings,
+    contextTokens: number,
+    verifyIntegrity: boolean,
+  ): Promise<ManagedLocalDraftModel | null> {
+    if (settings.type === 'off') return null;
+    if (this.bundle?.manifest.speculativeDflash !== true)
+      throw new Error('Bundled runtime does not support DFlash');
+    const target = this.listInstalled().find(({ id }) => id === modelId);
+    const draft = this.listInstalled().find(({ id }) => id === settings.draftModelId);
+    if (
+      target?.state !== 'installed' ||
+      target.purpose !== 'normal' ||
+      target.baseModelId === null ||
+      draft?.state !== 'installed' ||
+      draft.purpose !== 'draft-dflash' ||
+      target.id === draft.id ||
+      target.baseModelId !== draft.baseModelId ||
+      this.manager.artifactExpectations(modelId).some(({ role }) => role === 'mmproj')
+    )
+      throw new Error('Draft model is not compatible with the installed target');
+    if (verifyIntegrity)
+      await Promise.all([
+        this.manager.assertInstalledIntegrity(modelId),
+        this.manager.assertInstalledIntegrity(draft.id),
+      ]);
+    const targetPath = this.store.installedPath(modelId, this.artifactOrdinal(modelId, 'model'));
+    const modelPath = this.store.installedPath(draft.id, this.artifactOrdinal(draft.id, 'model'));
+    const [targetMetadata, draftMetadata] = await Promise.all([
+      readGgufModelMetadata(targetPath),
+      readGgufModelMetadata(modelPath),
+    ]);
+    if (
+      targetMetadata?.architecture === 'dflash' ||
+      draftMetadata?.architecture !== 'dflash' ||
+      targetMetadata?.contextLength == null ||
+      draftMetadata.contextLength === null ||
+      contextTokens > targetMetadata.contextLength ||
+      contextTokens > draftMetadata.contextLength
+    )
+      throw new Error('DFlash context limit is unavailable or exceeded');
+    return {
+      id: draft.id,
+      modelRoot: join(this.store.rootPath, 'models', draft.id),
+      modelPath,
+      baseModelId: draft.baseModelId!,
+      artifactHashes: this.manager.artifactExpectations(draft.id).map(({ sha256 }) => sha256),
+      draftTokensMax: settings.draftTokensMax,
+    };
+  }
+
   getInferenceSettings(modelId: string): ManagedLocalInferenceSettingsView {
     return managedLocalInferenceSettingsView(modelId, this.manager.getInferenceSettings(modelId));
   }
@@ -212,6 +374,12 @@ export class ManagedLocalController {
       const effective = resolveManagedLocalLaunchSettings(settings, hardware, this.bundle);
       if (effective === null)
         throw new Error('Managed Local backend is unavailable on this device and runtime bundle');
+      await this.resolveDraft(
+        modelId,
+        this.repository.getSpeculativeSettings(modelId),
+        settings.contextTokens,
+        true,
+      );
       const configured = this.manager.setLaunchSettings(modelId, settings);
       return managedLocalLaunchSettingsView(
         modelId,
@@ -232,7 +400,7 @@ export class ManagedLocalController {
     const models = await Promise.all(
       this.manager
         .listInstalledModels()
-        .filter(({ state }) => state === 'installed')
+        .filter(({ state, purpose }) => state === 'installed' && purpose !== 'draft-dflash')
         .map(async (model): Promise<ProviderModel | null> => {
           const artifacts = this.manager.artifactExpectations(model.id);
           const imageInputCapability = managedLocalImageInputCapability(artifacts);
@@ -298,7 +466,10 @@ export class ManagedLocalController {
   imageInputCapability(modelId: string): boolean | null {
     const installed = this.manager
       .listInstalledModels()
-      .find((model) => model.id === modelId && model.state === 'installed');
+      .find(
+        (model) =>
+          model.id === modelId && model.state === 'installed' && model.purpose !== 'draft-dflash',
+      );
     if (installed === undefined) return null;
     return managedLocalImageInputCapability(this.manager.artifactExpectations(modelId));
   }
@@ -325,24 +496,28 @@ export class ManagedLocalController {
     const model = this.manager
       .listInstalledModels()
       .find((candidate) => candidate.id === modelId && candidate.state === 'installed');
-    if (model === undefined) throw new Error('Managed Local model is not startable');
+    if (model === undefined || model.purpose === 'draft-dflash')
+      throw new Error('Managed Local model is not startable');
     const artifacts = this.manager.artifactExpectations(model.id);
     const modelArtifacts = artifacts.filter(({ role }) => role === 'model');
     const mmprojArtifacts = artifacts.filter(({ role }) => role === 'mmproj');
     if (modelArtifacts.length !== 1 || mmprojArtifacts.length > 1)
       throw new Error('Managed Local model is not startable');
-    const active = this.lifecycle.snapshot();
-    const reusesLoadedModel = managedLocalReusesLoadedModel(active, model.id);
-    if (!reusesLoadedModel) await this.manager.assertInstalledIntegrity(model.id);
     const hardware = await this.collectHardware();
     const configured = this.manager.getLaunchSettings(modelId);
     const launch = resolveManagedLocalLaunchSettings(configured, hardware, this.bundle);
     if (launch === null) throw new Error('Managed Local launch settings are unavailable');
     const contextTokens = contextOverride ?? launch.contextTokens;
+    const speculative = this.repository.getSpeculativeSettings(modelId);
+    const draft = await this.resolveDraft(modelId, speculative, contextTokens, false);
+    const draftModel =
+      draft === null ? null : this.listInstalled().find(({ id }) => id === draft.id)!;
+    const draftMetadata = draft === null ? null : await readGgufModelMetadata(draft.modelPath);
     // Verification may deliberately probe a lower context than the saved setting. Keep that
     // temporary probe valid without mutating the user's configured batch size.
     const batchSize = managedLocalProbeBatchSize(launch.batchSize, contextTokens);
     const modelPath = this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'model'));
+    const targetMetadata = draft === null ? null : await readGgufModelMetadata(modelPath);
     const gpuOffloadRatio = await this.installedGpuOffloadRatio(modelPath, launch);
     if (gpuOffloadRatio === null)
       throw new Error('Managed Local model layer metadata is unavailable for GPU fit');
@@ -351,6 +526,10 @@ export class ManagedLocalController {
         id: model.id,
         modelRoot: join(this.store.rootPath, 'models', model.id),
         modelPath,
+        modelsRoot: join(this.store.rootPath, 'models'),
+        baseModelId: model.baseModelId,
+        artifactHashes: artifacts.map(({ sha256 }) => sha256),
+        draft,
         mmprojPath: managedLocalMultimodal(artifacts)
           ? this.store.installedPath(model.id, this.artifactOrdinal(model.id, 'mmproj'))
           : null,
@@ -360,9 +539,22 @@ export class ManagedLocalController {
         contextTokens,
         batchSize,
         fit: {
+          ...(draftModel === null
+            ? {}
+            : {
+                draft: {
+                  weightsBytes: draftModel.totalBytes,
+                  kvBytesPerToken: draftMetadata?.kvBytesPerToken ?? null,
+                  scratchBytes:
+                    draftMetadata?.hiddenBytesPerToken === undefined
+                      ? null
+                      : Math.max(256 * 1024 ** 2, Math.ceil(draftModel.totalBytes * 0.1)) +
+                        draftMetadata.hiddenBytesPerToken * contextTokens,
+                },
+              }),
           weightsBytes: model.totalBytes,
           contextTokens,
-          kvBytesPerToken: 128 * 1_024,
+          kvBytesPerToken: draft === null ? 128 * 1_024 : (targetMetadata?.kvBytesPerToken ?? null),
           scratchBytes: Math.max(256 * 1_024 * 1_024, Math.ceil(model.totalBytes * 0.1)),
           runtimeReserveBytes: 768 * 1_024 * 1_024,
           safetyFactor: 1.15,
@@ -372,6 +564,10 @@ export class ManagedLocalController {
       },
       automaticRelease,
       signal,
+      async () => {
+        await this.manager.assertInstalledIntegrity(model.id, signal);
+        if (draft !== null) await this.manager.assertInstalledIntegrity(draft.id, signal);
+      },
     );
   }
 
@@ -418,6 +614,7 @@ export class ManagedLocalController {
         scratchRoot: join(this.store.rootPath, 'scratch'),
         nonce: randomUUID(),
         onLoaded: () => void save('loaded'),
+        requireDraft: binding.speculative !== undefined,
       });
       const record = save('tools');
       return applyReusableLocalVerification(snapshot.fit, binding, record);
@@ -428,6 +625,14 @@ export class ManagedLocalController {
 
   async fit(input: LocalModelFitInput): Promise<LocalFitAssessment> {
     const detail = await this.catalog.detail({ source: input.source, sourceId: input.sourceId });
+    if (detail.architecture === 'dflash')
+      return {
+        state: 'unknown',
+        label: '組み合わせで確認',
+        detail: '下書き専用モデルです。通常モデルと組み合わせてメモリと動作を確認してください。',
+        breakdown: null,
+        verification: null,
+      };
     const artifact = detail.artifacts.find(({ id }) => id === input.artifactId);
     if (artifact === undefined || artifact.role !== 'model')
       throw new Error('Public model artifact was not found');
@@ -507,11 +712,23 @@ export class ManagedLocalController {
     const modelPath = this.store.installedPath(modelId, this.artifactOrdinal(modelId, 'model'));
     const gpuOffloadRatio = await this.installedGpuOffloadRatio(modelPath, launch);
     if (gpuOffloadRatio === null) return null;
+    let draft: ManagedLocalDraftModel | null;
+    try {
+      draft = await this.resolveDraft(
+        modelId,
+        this.repository.getSpeculativeSettings(modelId),
+        launch.contextTokens,
+        false,
+      );
+    } catch {
+      return null;
+    }
     return {
       hostCapabilityFingerprint: hardwareFingerprint(hardware),
       modelRepo: model.sourceId,
       immutableRevision: model.immutableRevision,
       artifactHashes: this.manager.artifactExpectations(modelId).map(({ sha256 }) => sha256),
+      ...(draft === null ? {} : { speculative: managedLocalDraftBinding(draft) }),
       quantization: model.quantization,
       contextTokens: launch.contextTokens,
       kvCacheType: 'f16',
@@ -562,8 +779,11 @@ export class ManagedLocalController {
   }
 
   async delete(modelId: string): Promise<void> {
-    await this.lifecycle?.stopModel(modelId);
-    await this.manager.deleteInstalled(modelId);
+    return this.modelOperations.run(modelId, async () => {
+      this.repository.assertModelUnreferenced(modelId);
+      await this.lifecycle?.stopModel(modelId);
+      await this.manager.deleteInstalled(modelId);
+    });
   }
 
   async dispose(): Promise<void> {
@@ -728,6 +948,8 @@ export function installPlan(
     immutableRevision: revision,
     quantization,
     artifacts: ordered,
+    architecture: detail.architecture,
+    baseModelId: detail.baseModelId ?? null,
   };
 }
 

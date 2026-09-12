@@ -2307,6 +2307,14 @@ export const localFitStateSchema = z.enum([
 export type LocalFitState = z.infer<typeof localFitStateSchema>;
 export const localFitMemoryBreakdownSchema = z
   .object({
+    draft: z
+      .object({
+        weightsBytes: localHardwareByteCountSchema,
+        kvCacheBytes: localHardwareByteCountSchema,
+        scratchBytes: localHardwareByteCountSchema,
+      })
+      .strict()
+      .optional(),
     weightsBytes: localHardwareByteCountSchema,
     kvCacheBytes: localHardwareByteCountSchema,
     scratchBytes: localHardwareByteCountSchema,
@@ -2317,6 +2325,16 @@ export const localFitMemoryBreakdownSchema = z
   })
   .strict()
   .superRefine((breakdown, context) => {
+    if (
+      breakdown.draft !== undefined &&
+      (breakdown.draft.weightsBytes > breakdown.weightsBytes ||
+        breakdown.draft.kvCacheBytes > breakdown.kvCacheBytes ||
+        breakdown.draft.scratchBytes > breakdown.scratchBytes)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Draft costs must be included in the total memory breakdown',
+      });
     const expected =
       breakdown.weightsBytes +
       breakdown.kvCacheBytes +
@@ -2330,12 +2348,26 @@ export const localFitMemoryBreakdownSchema = z
       context.addIssue({ code: 'custom', message: 'Inconsistent local fit memory breakdown' });
   });
 export type LocalFitMemoryBreakdown = z.infer<typeof localFitMemoryBreakdownSchema>;
+export const managedLocalDraftBindingSchema = z
+  .object({
+    type: z.literal('draft-dflash'),
+    draftModelId: digestSchema,
+    draftArtifactHashes: z.array(digestSchema).min(1).max(256),
+    draftTokensMax: z.number().int().min(1).max(64),
+  })
+  .strict()
+  .superRefine((binding, context) => {
+    if (new Set(binding.draftArtifactHashes).size !== binding.draftArtifactHashes.length)
+      context.addIssue({ code: 'custom', message: 'Duplicate draft artifact hash' });
+  });
+export type ManagedLocalDraftBinding = z.infer<typeof managedLocalDraftBindingSchema>;
 export const localVerificationBindingSchema = z
   .object({
     hostCapabilityFingerprint: digestSchema,
     modelRepo: z.string().min(1).max(256),
     immutableRevision: z.string().regex(/^[a-f0-9]{40,64}$/),
     artifactHashes: z.array(digestSchema).min(1).max(256),
+    speculative: managedLocalDraftBindingSchema.optional(),
     quantization: z.string().min(1).max(64),
     contextTokens: z.number().int().positive().max(1_048_576),
     kvCacheType: z.string().min(1).max(64),
@@ -2519,11 +2551,19 @@ export const publicModelArtifactSchema = z
   })
   .strict();
 export type PublicModelArtifact = z.infer<typeof publicModelArtifactSchema>;
+export const localModelPurposeSchema = z.enum(['normal', 'draft-dflash']);
+export type LocalModelPurpose = z.infer<typeof localModelPurposeSchema>;
+export const localModelBaseModelIdSchema = z
+  .string()
+  .max(256)
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u);
 export const publicModelCatalogDetailSchema = z
   .object({
     item: publicModelCatalogItemSchema,
     description: z.string().max(4_000),
     architecture: z.string().min(1).max(128).nullable(),
+    /** Declared compatibility only; actual GGUF metadata and pair verification remain required. */
+    baseModelId: localModelBaseModelIdSchema.nullable().optional(),
     parameterCount: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
     contextTokens: z.number().int().positive().max(1_048_576).nullable(),
     toolTemplate: z.enum(['available', 'unavailable', 'unknown']),
@@ -2605,6 +2645,8 @@ export const localDownloadJobSchema = z
 export type LocalDownloadJob = z.infer<typeof localDownloadJobSchema>;
 export const installedLocalModelSchema = z
   .object({
+    purpose: localModelPurposeSchema.default('normal'),
+    baseModelId: localModelBaseModelIdSchema.nullable().default(null),
     id: z.string().regex(/^[a-f0-9]{64}$/u),
     source: z.enum(['hugging_face', 'localai_gallery']),
     sourceId: z.string().min(1).max(256),
@@ -2683,6 +2725,81 @@ export const managedLocalLaunchSettingsMapSchema = z
       context.addIssue({ code: 'custom', message: 'Too many Managed Local launch settings' });
   });
 export type ManagedLocalLaunchSettingsMap = z.infer<typeof managedLocalLaunchSettingsMapSchema>;
+export const MANAGED_LOCAL_DEFAULT_DRAFT_TOKENS = 3;
+export const MANAGED_LOCAL_MAX_DRAFT_TOKENS = 64;
+export const managedLocalDflashSettingsSchema = z
+  .object({
+    type: z.literal('draft-dflash'),
+    draftModelId: digestSchema,
+    draftTokensMax: z.number().int().min(1).max(MANAGED_LOCAL_MAX_DRAFT_TOKENS),
+  })
+  .strict();
+export const managedLocalSpeculativeSettingsSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('off'),
+      draftModelId: z.null(),
+      draftTokensMax: z.literal(MANAGED_LOCAL_DEFAULT_DRAFT_TOKENS),
+    })
+    .strict(),
+  managedLocalDflashSettingsSchema,
+]);
+export type ManagedLocalSpeculativeSettings = z.infer<typeof managedLocalSpeculativeSettingsSchema>;
+/** Off is represented by an absent entry, keeping this separate from legacy launch settings. */
+export const managedLocalSpeculativeSettingsMapSchema = z
+  .record(digestSchema, managedLocalDflashSettingsSchema)
+  .superRefine((settings, context) => {
+    if (Object.keys(settings).length > 256)
+      context.addIssue({ code: 'custom', message: 'Too many Managed Local speculative settings' });
+    for (const [targetModelId, draft] of Object.entries(settings)) {
+      if (targetModelId === draft.draftModelId)
+        context.addIssue({
+          code: 'custom',
+          path: [targetModelId, 'draftModelId'],
+          message: 'Draft model must differ from target',
+        });
+    }
+  });
+export type ManagedLocalSpeculativeSettingsMap = z.infer<
+  typeof managedLocalSpeculativeSettingsMapSchema
+>;
+export const managedLocalSpeculativeSettingsGetInputSchema = z
+  .object({ modelId: digestSchema })
+  .strict();
+export const managedLocalSpeculativeSettingsSetInputSchema =
+  managedLocalSpeculativeSettingsGetInputSchema
+    .extend({
+      settings: managedLocalSpeculativeSettingsSchema,
+    })
+    .strict();
+export type ManagedLocalSpeculativeSettingsSetInput = z.infer<
+  typeof managedLocalSpeculativeSettingsSetInputSchema
+>;
+export const managedLocalSpeculativeSettingsViewSchema = z
+  .object({
+    modelId: digestSchema,
+    configured: managedLocalSpeculativeSettingsSchema,
+    baseModelId: localModelBaseModelIdSchema.nullable(),
+    supported: z.boolean(),
+    reason: z.string().max(500).nullable(),
+    recoveryRequired: z.boolean(),
+    eligibleDrafts: z
+      .array(
+        z
+          .object({
+            id: digestSchema,
+            sourceId: z.string().min(1).max(256),
+            quantization: z.string().min(1).max(64),
+            baseModelId: localModelBaseModelIdSchema,
+          })
+          .strict(),
+      )
+      .max(256),
+  })
+  .strict();
+export type ManagedLocalSpeculativeSettingsView = z.infer<
+  typeof managedLocalSpeculativeSettingsViewSchema
+>;
 export const managedLocalLaunchSettingsGetInputSchema = z
   .object({ modelId: z.string().regex(/^[a-f0-9]{64}$/u) })
   .strict();
@@ -2852,6 +2969,7 @@ export const managedLocalRuntimeSnapshotSchema = z
     contextTokens: z.number().int().min(256).max(1_048_576).nullable(),
     batchSize: z.number().int().positive().max(1_048_576).nullable(),
     activeLeaseCount: z.number().int().nonnegative().max(10_000),
+    speculative: managedLocalDraftBindingSchema.nullable().optional(),
     fit: localFitAssessmentSchema.nullable(),
     failureCode: managedLocalRuntimeFailureCodeSchema.nullable(),
     recovery: managedLocalRuntimeRecoverySchema.nullable(),
@@ -5798,6 +5916,10 @@ export interface SprintCoderApi {
     hardware(): Promise<LocalHardwareSnapshot>;
     runtime(): Promise<ManagedLocalRuntimeSnapshot>;
     launchSettings(modelId: string): Promise<ManagedLocalLaunchSettingsView>;
+    speculativeSettings(modelId: string): Promise<ManagedLocalSpeculativeSettingsView>;
+    setSpeculativeSettings(
+      input: ManagedLocalSpeculativeSettingsSetInput,
+    ): Promise<ManagedLocalSpeculativeSettingsView>;
     setLaunchSettings(
       input: ManagedLocalLaunchSettingsSetInput,
     ): Promise<ManagedLocalLaunchSettingsView>;
@@ -6002,6 +6124,8 @@ export const IPC_CHANNELS = {
   localAIHardware: 'sprint-coder:local-ai:hardware',
   localAIRuntime: 'sprint-coder:local-ai:runtime',
   localAILaunchSettings: 'sprint-coder:local-ai:launch-settings',
+  localAISpeculativeSettings: 'sprint-coder:local-ai:speculative-settings',
+  localAISetSpeculativeSettings: 'sprint-coder:local-ai:set-speculative-settings',
   localAISetLaunchSettings: 'sprint-coder:local-ai:set-launch-settings',
   localAIInferenceSettings: 'sprint-coder:local-ai:inference-settings',
   localAISetInferenceSettings: 'sprint-coder:local-ai:set-inference-settings',

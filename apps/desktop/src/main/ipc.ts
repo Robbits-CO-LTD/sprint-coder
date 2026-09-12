@@ -105,6 +105,9 @@ import {
   installedLocalModelInputSchema,
   installedLocalModelSchema,
   managedLocalLaunchSettingsGetInputSchema,
+  managedLocalSpeculativeSettingsGetInputSchema,
+  managedLocalSpeculativeSettingsSetInputSchema,
+  managedLocalSpeculativeSettingsViewSchema,
   managedLocalLaunchSettingsSetInputSchema,
   managedLocalLaunchSettingsViewSchema,
   managedLocalInferenceSettingsGetInputSchema,
@@ -2555,6 +2558,18 @@ export class IpcRouter {
       managedLocalLaunchSettingsGetInputSchema,
       managedLocalLaunchSettingsViewSchema,
       (input) => this.managedLocal!.getLaunchSettings(input.modelId),
+    );
+    this.handle(
+      IPC_CHANNELS.localAISpeculativeSettings,
+      managedLocalSpeculativeSettingsGetInputSchema,
+      managedLocalSpeculativeSettingsViewSchema,
+      (input) => this.managedLocal!.getSpeculativeSettings(input.modelId),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.localAISetSpeculativeSettings,
+      managedLocalSpeculativeSettingsSetInputSchema,
+      managedLocalSpeculativeSettingsViewSchema,
+      (input) => this.managedLocal!.setSpeculativeSettings(input.modelId, input.settings),
     );
     this.handleMutation(
       IPC_CHANNELS.localAISetLaunchSettings,

@@ -1841,6 +1841,39 @@ describe('Managed Local inference settings contracts', () => {
 });
 
 describe('Managed Local launch settings contracts', () => {
+  it('keeps speculative settings separate, strict, and bounded', () => {
+    const off = { type: 'off', draftModelId: null, draftTokensMax: 3 };
+    const on = { type: 'draft-dflash', draftModelId: 'b'.repeat(64), draftTokensMax: 3 };
+    expect(contracts.managedLocalSpeculativeSettingsSchema.parse(off)).toEqual(off);
+    expect(contracts.managedLocalSpeculativeSettingsSchema.parse(on)).toEqual(on);
+    for (const invalid of [
+      { ...off, draftModelId: on.draftModelId },
+      { ...on, type: 'draft' },
+      { ...on, draftModelId: '/tmp/draft.gguf' },
+      { ...on, draftTokensMax: 0 },
+      { ...on, draftTokensMax: 65 },
+      { ...on, draftTokensMax: 1.5 },
+      { ...on, draftPath: '/tmp/draft.gguf' },
+    ])
+      expect(contracts.managedLocalSpeculativeSettingsSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+    expect(
+      contracts.managedLocalSpeculativeSettingsMapSchema.parse({ ['a'.repeat(64)]: on }),
+    ).toEqual({ ['a'.repeat(64)]: on });
+    for (const invalid of [
+      { ['b'.repeat(64)]: on },
+      { ['a'.repeat(64)]: off },
+      { target: on },
+      Object.fromEntries(
+        Array.from({ length: 257 }, (_, i) => [i.toString(16).padStart(64, '0'), on]),
+      ),
+    ])
+      expect(contracts.managedLocalSpeculativeSettingsMapSchema.safeParse(invalid).success).toBe(
+        false,
+      );
+  });
+
   it('derives the physical micro batch from the effective logical batch', () => {
     expect(managedLocalMicroBatchSize(511)).toBe(511);
     expect(managedLocalMicroBatchSize(512)).toBe(512);

@@ -3886,8 +3886,19 @@ const migrations = [
     `,
   },
   {
-    // v83 is reserved by the independent DFlash migration in PR #453. Migration
-    // application tracks each version individually, so this gap cannot skip v83.
+    version: 83,
+    checksum: 'managed-local-v83-model-purpose',
+    sql: `
+      ALTER TABLE local_models ADD COLUMN purpose TEXT NOT NULL DEFAULT 'normal'
+        CHECK (purpose IN ('normal', 'draft-dflash'));
+      ALTER TABLE local_models ADD COLUMN base_model_id TEXT
+        CHECK (base_model_id IS NULL OR length(base_model_id) <= 256);
+    `,
+  },
+  {
+    // v83 was reserved for the independent DFlash migration in PR #453 and landed with it above.
+    // Migration application tracks each version individually, so interleaved branches cannot skip
+    // a lower version an already-migrated database has not recorded yet.
     version: 84,
     checksum: 'graph-documents-v84-typed-render-history',
     sql: `

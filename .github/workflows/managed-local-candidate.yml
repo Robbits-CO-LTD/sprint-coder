@@ -1,0 +1,70 @@
+name: Managed Local candidate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/managed-local-candidate.yml'
+      - 'apps/desktop/managed-local-release.candidate.json'
+      - 'build-managed-local-sidecar.mjs'
+      - 'apps/desktop/src/main/managed-local-runtime-supervisor*'
+      - 'apps/desktop/src/main/managed-local-sidecar-bundle*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-local-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-probe:
+    name: Candidate native ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+            architecture: arm64
+          - target: darwin-x64
+            runner: macos-15-intel
+            architecture: x64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+          - target: linux-x64
+            runner: ubuntu-24.04
+            architecture: x64
+          - target: win32-arm64
+            runner: windows-11-arm
+            architecture: arm64
+          - target: win32-x64
+            runner: windows-2022
+            architecture: x64
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          architecture: ${{ matrix.architecture }}
+          cache: npm
+      - name: Install test dependencies without application install hooks
+        run: npm ci --ignore-scripts
+      - name: Verify candidate hashes, native version and DFlash help
+        run: node build-managed-local-sidecar.mjs ${{ matrix.target }} apps/desktop/managed-local-release.candidate.json
+      - name: Verify native loopback authentication and owned shutdown
+        env:
+          SPRINT_CODER_MANAGED_LOCAL_LIVE: '1'
+        run: npm run test --workspace @sprint-coder/desktop -- src/main/managed-local-runtime-supervisor.test.ts -t "starts the pinned real sidecar"
+      - name: Keep candidate manifests and generated pins
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: managed-local-candidate-${{ matrix.target }}
+          path: |
+            apps/desktop/managed-local/build/managed-local-sidecar-pins.json
+            apps/desktop/managed-local/build/managed-local/${{ matrix.target }}/managed-local-manifest.json
+          if-no-files-found: ignore

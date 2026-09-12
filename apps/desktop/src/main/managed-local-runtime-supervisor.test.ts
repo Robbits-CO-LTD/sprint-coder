@@ -9,6 +9,7 @@ import {
   ManagedLocalRuntimeError,
   ManagedLocalRuntimeSupervisor,
   managedLocalEnvironment,
+  type ManagedLocalRuntimeStartInput,
 } from './managed-local-runtime-supervisor';
 import {
   managedLocalTargetKey,
@@ -91,6 +92,7 @@ function harness(
     fetch?: typeof globalThis.fetch;
     startupTimeoutMs?: number;
     ignoreTerm?: boolean;
+    speculativeDflash?: boolean;
   } = {},
 ) {
   const child = new FakeChild(input.ignoreTerm);
@@ -110,7 +112,10 @@ function harness(
       return new Response('{}', { status: 404 });
     });
   const supervisor = new ManagedLocalRuntimeSupervisor({
-    loadBundle: async () => bundle(),
+    loadBundle: async () => ({
+      ...bundle(),
+      manifest: { ...bundle().manifest, speculativeDflash: input.speculativeDflash },
+    }),
     spawnProcess: (_command, args, options) => {
       spawnArgs = [...args];
       spawnOptions = options;
@@ -135,6 +140,45 @@ function harness(
 }
 
 describe('ManagedLocalRuntimeSupervisor', () => {
+  it('starts DFlash only from separate identity-bound bundles and redacts both paths', async () => {
+    const input = await dflashInput();
+    const env = harness({ speculativeDflash: true });
+    const session = await env.supervisor.start(input);
+    expect(env.spawnArgs().slice(-6)).toEqual([
+      '-md',
+      input.draft!.modelPath,
+      '--spec-type',
+      'draft-dflash',
+      '--spec-draft-n-max',
+      '3',
+    ]);
+    env.child.stderr.write(`${input.modelPath} ${input.draft!.modelPath}`);
+    expect(session.diagnostics()).not.toContain(input.modelPath);
+    expect(session.diagnostics()).not.toContain(input.draft!.modelPath);
+    await session.stop();
+  });
+
+  it('rejects unsupported, incompatible and escaped DFlash input before spawning', async () => {
+    const input = await dflashInput();
+    const unsupported = harness();
+    await expect(unsupported.supervisor.start(input)).rejects.toThrow('support DFlash');
+    expect(unsupported.spawnArgs()).toEqual([]);
+    const draft = input.draft!;
+    for (const invalid of [
+      { ...input, modelsRoot: '' },
+      { ...input, baseModelId: 'other/base' },
+      { ...input, mmprojPath: input.modelPath },
+      { ...input, contextTokens: 65536 },
+      { ...input, draft: { ...draft, draftTokensMax: 65 } },
+      { ...input, draft: { ...draft, id: input.modelAlias } },
+      { ...input, draft: { ...draft, modelRoot: input.modelRoot } },
+      { ...input, draft: { ...draft, modelPath: input.modelPath } },
+    ]) {
+      const env = harness({ speculativeDflash: true });
+      await expect(env.supervisor.start(invalid)).rejects.toThrow();
+      expect(env.spawnArgs()).toEqual([]);
+    }
+  });
   it('terminates its real owned child synchronously during fatal-exit cleanup', async () => {
     let child: ChildProcess | undefined;
     const supervisor = new ManagedLocalRuntimeSupervisor({
@@ -523,17 +567,109 @@ describe('ManagedLocalRuntimeSupervisor', () => {
         pin,
       );
       const paths = await directories();
+      const startedAt = Date.now();
+      const observations: { phase: string; elapsedMs: number; status?: number }[] = [];
+      const observe = (phase: string, status?: number) => {
+        if (observations.length < 64)
+          observations.push({
+            phase,
+            elapsedMs: Date.now() - startedAt,
+            ...(status === undefined ? {} : { status }),
+          });
+      };
       const supervisor = new ManagedLocalRuntimeSupervisor({
         loadBundle: async () => liveBundle,
+        startupTimeoutMs: 60_000,
+        fetch: async (url, init) => {
+          const path = new URL(String(url)).pathname;
+          const phase = ['/props', '/health', '/v1/models'].includes(path) ? path : 'other';
+          observe(`${phase}:request`);
+          const response = await fetch(url, init);
+          observe(`${phase}:response`, response.status);
+          return response;
+        },
       });
-
-      const session = await supervisor.start({ kind: 'router_probe', ...paths });
-      expect(session.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/u);
-      await expect(session.authenticatedFetch('/v1/models')).resolves.toMatchObject({
-        status: 200,
-      });
-      await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+      try {
+        observe('start');
+        const session = await supervisor.start(
+          { kind: 'router_probe', ...paths },
+          AbortSignal.timeout(60_000),
+        );
+        observe('running');
+        expect(session.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/u);
+        await expect(session.authenticatedFetch('/v1/models')).resolves.toMatchObject({
+          status: 200,
+        });
+        await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+        observe('stopped');
+      } finally {
+        supervisor.killNow();
+        console.info(
+          'Managed Local native probe',
+          JSON.stringify({ target, state: supervisor.snapshot()?.state, observations }),
+        );
+      }
     },
-    30_000,
+    90_000,
   );
 });
+
+async function dflashInput(): Promise<Extract<ManagedLocalRuntimeStartInput, { kind: 'model' }>> {
+  const paths = await directories();
+  const modelsRoot = paths.modelRoot;
+  const targetId = 'a'.repeat(64);
+  const draftId = 'b'.repeat(64);
+  const modelRoot = join(modelsRoot, targetId);
+  const draftRoot = join(modelsRoot, draftId);
+  await mkdir(modelRoot);
+  await mkdir(draftRoot);
+  const modelPath = join(modelRoot, '001.gguf');
+  const draftPath = join(draftRoot, '001.gguf');
+  const u32 = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n);
+    return b;
+  };
+  const u64 = (n: number) => {
+    const b = Buffer.alloc(8);
+    b.writeBigUInt64LE(BigInt(n));
+    return b;
+  };
+  const str = (s: string) => Buffer.concat([u64(Buffer.byteLength(s)), Buffer.from(s)]);
+  const metadata = (architecture: string) =>
+    Buffer.concat([
+      Buffer.from('GGUF'),
+      u32(3),
+      u64(0),
+      u64(2),
+      str('general.architecture'),
+      u32(8),
+      str(architecture),
+      str(`${architecture}.context_length`),
+      u32(4),
+      u32(32768),
+    ]);
+  await writeFile(modelPath, metadata('llama'));
+  await writeFile(draftPath, metadata('dflash'));
+  return {
+    kind: 'model',
+    modelsRoot,
+    modelRoot,
+    modelPath,
+    modelAlias: targetId,
+    baseModelId: 'owner/base',
+    scratchRoot: paths.scratchRoot,
+    backend: 'cpu',
+    gpuLayers: 0,
+    contextTokens: 1024,
+    batchSize: 512,
+    draft: {
+      id: draftId,
+      modelRoot: draftRoot,
+      modelPath: draftPath,
+      baseModelId: 'owner/base',
+      artifactHashes: ['c'.repeat(64)],
+      draftTokensMax: 3,
+    },
+  };
+}

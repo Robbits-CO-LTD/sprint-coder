@@ -426,6 +426,8 @@ describe('LocalAiSettingsSection', () => {
 
   it('edits a model-specific request setting and shows the effective Managed Local fields', async () => {
     const model: InstalledLocalModel = {
+      purpose: 'normal',
+      baseModelId: null,
       id: HASH,
       source: 'hugging_face',
       sourceId: 'acme/model',

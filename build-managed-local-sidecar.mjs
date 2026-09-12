@@ -57,7 +57,8 @@ export function readManagedLocalReleaseConfig(path = releaseConfigPath) {
     parsed.licenseSize > 128 * 1024 ||
     !SHA256.test(parsed.licenseSha256) ||
     typeof parsed.targets !== 'object' ||
-    parsed.targets === null
+    parsed.targets === null ||
+    (parsed.speculativeDflash !== undefined && typeof parsed.speculativeDflash !== 'boolean')
   )
     throw new Error('Invalid Managed Local release configuration');
   for (const [target, value] of Object.entries(parsed.targets)) {
@@ -152,6 +153,7 @@ export function createManagedLocalManifest({
     architecture,
     candidateBackends,
     artifacts,
+    ...(release.speculativeDflash === true ? { speculativeDflash: true } : {}),
   };
 }
 
@@ -390,6 +392,18 @@ async function signNativeArtifacts(target, artifacts) {
           ['--force', '--options', 'runtime', '--timestamp', '--sign', identity, path],
           { stdio: 'inherit' },
         );
+      else {
+        const existing = spawnSync('/usr/bin/codesign', ['--verify', '--strict', path], {
+          encoding: 'utf8',
+        });
+        if (existing.status !== 0) {
+          if (!existing.stderr?.includes('code object is not signed at all'))
+            throw new Error('Managed Local upstream signature is invalid');
+          execFileSync('/usr/bin/codesign', ['--force', '--timestamp=none', '--sign', '-', path], {
+            stdio: 'inherit',
+          });
+        }
+      }
       execFileSync('/usr/bin/codesign', ['--verify', '--strict', '--verbose=2', path], {
         stdio: 'inherit',
       });
@@ -451,16 +465,36 @@ function probeServer(server, release, target) {
   const build = release.runtimeVersion.slice(1);
   if (!output.includes(`build ${build}`) || !output.includes(release.upstreamRevision.slice(0, 9)))
     throw new Error('Managed Local launch probe returned an unexpected version');
+  if (release.speculativeDflash === true) {
+    const help = spawnSync(server.path, ['--help'], {
+      cwd: dirname(server.path),
+      encoding: 'utf8',
+      timeout: 15_000,
+      windowsHide: true,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    if (
+      help.status !== 0 ||
+      help.error !== undefined ||
+      !['-md', '--spec-type', '--spec-draft-n-max', 'draft-dflash'].every((flag) =>
+        `${help.stdout}\n${help.stderr}`.includes(flag),
+      )
+    )
+      throw new Error('Managed Local DFlash capability probe failed');
+  }
 }
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-export async function prepareManagedLocalSidecar(target = hostTarget()) {
+export async function prepareManagedLocalSidecar(
+  target = hostTarget(),
+  configPath = releaseConfigPath,
+) {
   if (target !== hostTarget())
     throw new Error('Managed Local cross-target preparation is forbidden');
-  const release = readManagedLocalReleaseConfig();
+  const release = readManagedLocalReleaseConfig(configPath);
   const targetConfig = release.targets[target];
   if (targetConfig === undefined) throw new Error(`No Managed Local release asset for ${target}`);
   const archivePath = await downloadPinnedArchive(release, targetConfig);
@@ -501,6 +535,7 @@ export async function prepareManagedLocalSidecar(target = hostTarget()) {
       runtimeVersion: release.runtimeVersion,
       upstreamRevision: release.upstreamRevision,
       manifestSha256,
+      ...(manifest.speculativeDflash === true ? { speculativeDflash: true } : {}),
     };
     writeFileSync(generatedPinsPath, `${JSON.stringify({ [target]: pin }, null, 2)}\n`, {
       mode: 0o600,
@@ -513,7 +548,10 @@ export async function prepareManagedLocalSidecar(target = hostTarget()) {
 
 async function main() {
   const requestedTarget = process.argv[2] ?? hostTarget();
-  const result = await prepareManagedLocalSidecar(requestedTarget);
+  const result = await prepareManagedLocalSidecar(
+    requestedTarget,
+    process.argv[3] === undefined ? releaseConfigPath : resolve(process.argv[3]),
+  );
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

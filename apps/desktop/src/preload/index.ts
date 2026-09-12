@@ -63,6 +63,9 @@ import {
   installedLocalModelInputSchema,
   installedLocalModelSchema,
   managedLocalLaunchSettingsGetInputSchema,
+  managedLocalSpeculativeSettingsGetInputSchema,
+  managedLocalSpeculativeSettingsSetInputSchema,
+  managedLocalSpeculativeSettingsViewSchema,
   managedLocalLaunchSettingsSetInputSchema,
   managedLocalLaunchSettingsViewSchema,
   managedLocalInferenceSettingsGetInputSchema,
@@ -1183,6 +1186,20 @@ const api: SprintCoderApi = {
         IPC_CHANNELS.localAISetLaunchSettings,
         managedLocalLaunchSettingsSetInputSchema,
         managedLocalLaunchSettingsViewSchema,
+        input,
+      ),
+    speculativeSettings: (modelId) =>
+      invoke(
+        IPC_CHANNELS.localAISpeculativeSettings,
+        managedLocalSpeculativeSettingsGetInputSchema,
+        managedLocalSpeculativeSettingsViewSchema,
+        { modelId },
+      ),
+    setSpeculativeSettings: (input) =>
+      invoke(
+        IPC_CHANNELS.localAISetSpeculativeSettings,
+        managedLocalSpeculativeSettingsSetInputSchema,
+        managedLocalSpeculativeSettingsViewSchema,
         input,
       ),
     inferenceSettings: (modelId) =>

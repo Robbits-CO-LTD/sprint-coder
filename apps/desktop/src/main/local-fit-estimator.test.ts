@@ -42,6 +42,25 @@ function hardware(overrides: Partial<LocalHardwareSnapshot>): LocalHardwareSnaps
 }
 
 describe('local fit estimator', () => {
+  it('accounts for draft weights, KV and scratch without silently dropping unknown draft costs', () => {
+    const base = { ...baseInput, gpuOffloadRatio: 0 };
+    const result = estimateLocalModelFit(
+      { ...base, draft: { weightsBytes: GiB, kvBytesPerToken: 65536, scratchBytes: GiB } },
+      hardware({}),
+    );
+    expect(result.breakdown).toMatchObject({
+      weightsBytes: 5 * GiB,
+      kvCacheBytes: GiB,
+      scratchBytes: 1.5 * GiB,
+      draft: { weightsBytes: GiB, kvCacheBytes: 0.5 * GiB, scratchBytes: GiB },
+    });
+    expect(
+      estimateLocalModelFit(
+        { ...base, draft: { weightsBytes: GiB, kvBytesPerToken: null, scratchBytes: GiB } },
+        hardware({}),
+      ).state,
+    ).toBe('unknown');
+  });
   it('reports an honest comfortable estimate for Apple unified memory', () => {
     const result = estimateLocalModelFit(
       { ...baseInput, gpuOffloadRatio: 1 },
@@ -162,6 +181,38 @@ describe('local fit estimator', () => {
     );
 
     expect(applyReusableLocalVerification(estimate, binding, record).state).toBe('verified_tools');
+    const speculative = {
+      type: 'draft-dflash',
+      draftModelId: 'd'.repeat(64),
+      draftArtifactHashes: ['e'.repeat(64)],
+      draftTokensMax: 3,
+    } as const;
+    const paired: LocalVerificationBinding = {
+      ...binding,
+      speculative: { ...speculative, draftArtifactHashes: [...speculative.draftArtifactHashes] },
+    };
+    const pairedRecord = { ...record, binding: paired };
+    expect(applyReusableLocalVerification(estimate, paired, record).state).toBe(estimate.state);
+    expect(applyReusableLocalVerification(estimate, paired, pairedRecord).state).toBe(
+      'verified_tools',
+    );
+    expect(
+      applyReusableLocalVerification(
+        estimate,
+        { ...paired, speculative: { ...paired.speculative!, draftTokensMax: 8 } },
+        pairedRecord,
+      ).state,
+    ).toBe(estimate.state);
+    expect(
+      applyReusableLocalVerification(
+        estimate,
+        {
+          ...paired,
+          speculative: { ...paired.speculative!, draftArtifactHashes: ['f'.repeat(64)] },
+        },
+        pairedRecord,
+      ).state,
+    ).toBe(estimate.state);
     expect(
       applyReusableLocalVerification(estimate, binding, { ...record, level: 'loaded' }).state,
     ).toBe('verified_loaded');

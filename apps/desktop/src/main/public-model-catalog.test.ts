@@ -25,6 +25,56 @@ function response(body: unknown, init: ResponseInit = {}): Response {
 
 describe('PublicModelCatalogService', () => {
   it.each([
+    ['acme/target', 'acme/target'],
+    [['acme/target', 'acme/target'], 'acme/target'],
+    [['acme/target', 'other/target'], null],
+    [['acme/target', 42], null],
+    [null, null],
+    [[], null],
+    ['https://huggingface.co/acme/target', null],
+    ['../target', null],
+    [Array.from({ length: 33 }, () => 'acme/target'), null],
+  ])(
+    'bounds a unique declared base model without inferring compatibility: %j',
+    async (declared, expected) => {
+      const service = new PublicModelCatalogService(async () =>
+        response(
+          hfModel('acme/draft', {
+            cardData: { base_model: declared },
+            gguf: { architecture: 'dflash' },
+          }),
+        ),
+      );
+      const detail = await service.detail({ source: 'hugging_face', sourceId: 'acme/draft' });
+      expect(detail.baseModelId).toBe(expected);
+      expect(detail.architecture).toBe('dflash');
+    },
+  );
+
+  it('backfills only from the stored immutable revision rather than the current repository head', async () => {
+    const fetch = vi.fn<PublicCatalogFetch>(async () =>
+      response(hfModel('acme/target', { cardData: { base_model: 'acme/base' } })),
+    );
+    const service = new PublicModelCatalogService(fetch);
+    expect(await service.resolveBaseModelId('acme/target', REVISION)).toBe('acme/base');
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      `https://huggingface.co/api/models/acme/target/revision/${REVISION}?blobs=true`,
+    );
+    await expect(service.resolveBaseModelId('acme/target', 'main')).rejects.toThrow('immutable');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([hfModel('acme/target', { sha: 'c'.repeat(40) }), hfModel('other/target')])(
+    'rejects revision metadata from a different identity',
+    async (model) => {
+      const service = new PublicModelCatalogService(async () => response(model));
+      await expect(service.resolveBaseModelId('acme/target', REVISION)).rejects.toThrow(
+        'revision changed',
+      );
+    },
+  );
+
+  it.each([
     ['declared Content-Length', true],
     ['streamed bytes', false],
   ])('cancels a catalog body that exceeds the %s limit', async (_name, declared) => {

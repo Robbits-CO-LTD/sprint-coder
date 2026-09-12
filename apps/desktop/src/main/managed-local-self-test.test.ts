@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runManagedLocalSelfTest } from './managed-local-self-test';
+import { runManagedLocalSelfTest, hasManagedLocalDraftEvidence } from './managed-local-self-test';
 import type { ManagedLocalRuntimeSession } from './managed-local-runtime-supervisor';
 
 function json(value: unknown): Response {
@@ -18,57 +18,117 @@ afterEach(async () => {
 });
 
 describe('runManagedLocalSelfTest', () => {
-  it('separates load evidence from an isolated nonce tool round-trip', async () => {
-    const scratchRoot = await mkdtemp(join(tmpdir(), 'managed-local-self-test-'));
-    roots.push(scratchRoot);
-    const nonce = '11111111-1111-4111-8111-111111111111';
-    const requests: unknown[] = [];
-    const authenticatedFetch = vi.fn(async (_path: string, init?: RequestInit) => {
-      requests.push(JSON.parse(String(init?.body)) as unknown);
-      if (requests.length === 1)
-        return json({ choices: [{ message: { role: 'assistant', content: 'READY' } }] });
-      if (requests.length === 2)
-        return json({
-          choices: [
-            {
-              message: {
-                role: 'assistant',
-                content: null,
-                tool_calls: [
-                  {
-                    id: 'call-1',
-                    type: 'function',
-                    function: {
-                      name: 'sprint_self_test',
-                      arguments: JSON.stringify({ nonce }),
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        });
-      return json({ choices: [{ message: { role: 'assistant', content: 'DONE' } }] });
+  it('cancels an oversized streamed response before recording load evidence', async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < 3; i++) controller.enqueue(new Uint8Array(512 * 1024));
+      },
+      cancel,
     });
     const onLoaded = vi.fn();
-    const session = { authenticatedFetch } as unknown as ManagedLocalRuntimeSession;
-
-    await runManagedLocalSelfTest({
-      session,
-      modelId: 'a'.repeat(64),
-      scratchRoot,
-      nonce,
-      onLoaded,
-    });
-
-    expect(onLoaded).toHaveBeenCalledOnce();
-    expect(authenticatedFetch).toHaveBeenCalledTimes(3);
-    expect(requests[2]).toMatchObject({
-      messages: [{}, { tool_calls: [{ id: 'call-1' }] }, { role: 'tool', tool_call_id: 'call-1' }],
-    });
+    const session = {
+      authenticatedFetch: async () => new Response(body),
+    } as unknown as ManagedLocalRuntimeSession;
     await expect(
-      readFile(join(scratchRoot, `self-test-${nonce}`, 'nonce.txt')),
-    ).rejects.toMatchObject({ code: 'ENOENT' });
+      runManagedLocalSelfTest({
+        session,
+        modelId: 'a'.repeat(64),
+        scratchRoot: '/unused',
+        nonce: 'unused',
+        onLoaded,
+        requireDraft: true,
+      }),
+    ).rejects.toThrow('too large');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(onLoaded).not.toHaveBeenCalled();
+  });
+  it.each([false, true])(
+    'separates load evidence from an isolated nonce tool round-trip (draft=%s)',
+    async (requireDraft) => {
+      const scratchRoot = await mkdtemp(join(tmpdir(), 'managed-local-self-test-'));
+      roots.push(scratchRoot);
+      const nonce = '11111111-1111-4111-8111-111111111111';
+      const requests: unknown[] = [];
+      const authenticatedFetch = vi.fn(async (_path: string, init?: RequestInit) => {
+        requests.push(JSON.parse(String(init?.body)) as unknown);
+        if (requests.length === 1)
+          return json({
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: requireDraft
+                    ? 'one two three four five six seven eight nine ten'
+                    : 'READY',
+                },
+              },
+            ],
+            ...(requireDraft ? { timings: { draft_n: 12, draft_n_accepted: 9 } } : {}),
+          });
+        if (requests.length === 2)
+          return json({
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: 'call-1',
+                      type: 'function',
+                      function: {
+                        name: 'sprint_self_test',
+                        arguments: JSON.stringify({ nonce }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+        return json({ choices: [{ message: { role: 'assistant', content: 'DONE' } }] });
+      });
+      const onLoaded = vi.fn();
+      const session = { authenticatedFetch } as unknown as ManagedLocalRuntimeSession;
+
+      await runManagedLocalSelfTest({
+        session,
+        modelId: 'a'.repeat(64),
+        scratchRoot,
+        nonce,
+        onLoaded,
+        requireDraft,
+      });
+
+      expect(onLoaded).toHaveBeenCalledOnce();
+      expect(authenticatedFetch).toHaveBeenCalledTimes(3);
+      expect(requests[2]).toMatchObject({
+        messages: [
+          {},
+          { tool_calls: [{ id: 'call-1' }] },
+          { role: 'tool', tool_call_id: 'call-1' },
+        ],
+      });
+      await expect(
+        readFile(join(scratchRoot, `self-test-${nonce}`, 'nonce.txt')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it('does not accept absent, zero, fractional or contradictory structured draft counts', () => {
+    for (const timings of [
+      null,
+      {},
+      { draft_n: 0, draft_n_accepted: 0 },
+      { draft_n: 1.5, draft_n_accepted: 1 },
+      { draft_n: 5, draft_n_accepted: 6 },
+      { draft_n: '5', draft_n_accepted: 1 },
+    ])
+      expect(hasManagedLocalDraftEvidence({ timings })).toBe(false);
+    expect(hasManagedLocalDraftEvidence({ timings: { draft_n: 5, draft_n_accepted: 0 } })).toBe(
+      true,
+    );
   });
 
   it('rejects a model that substitutes the nonce before touching the witness workspace', async () => {

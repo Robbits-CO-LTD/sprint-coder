@@ -43,6 +43,7 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [selectorQuery, setSelectorQuery] = useState('');
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [fitByModel, setFitByModel] = useState<Record<string, LocalFitAssessment>>({});
   const mounted = useRef(true);
@@ -142,6 +143,7 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
         <p className="settings-hint">この環境ではManaged Local AI APIを利用できません。</p>
       ) : selectorOpen ? (
         <LocalAiSelector
+          initialQuery={selectorQuery}
           onInstalled={async () => {
             await refresh();
             setStatus('モデルのダウンロードを開始しました。');
@@ -166,6 +168,10 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
             }
           />
           <InstalledModelList
+            onFindDraft={() => {
+              setSelectorQuery('DFlash2');
+              setSelectorOpen(true);
+            }}
             models={installed}
             runtime={runtime}
             verifyingId={verifyingId}
@@ -369,6 +375,7 @@ function LocalDownloadList({
 }
 
 function InstalledModelList({
+  onFindDraft,
   models,
   runtime,
   verifyingId,
@@ -376,6 +383,7 @@ function InstalledModelList({
   onVerify,
   onDelete,
 }: {
+  onFindDraft: () => void;
   models: readonly InstalledLocalModel[];
   runtime: ManagedLocalRuntimeSnapshot | null;
   verifyingId: string | null;
@@ -398,6 +406,9 @@ function InstalledModelList({
             <li key={model.id}>
               <div>
                 <strong>{model.sourceId}</strong>
+                {model.purpose === 'draft-dflash' ? (
+                  <small>DFlash2 下書き専用 · 単独実行不可</small>
+                ) : null}
                 <small>
                   {model.quantization} · {formatLocalBytes(model.totalBytes)}
                 </small>
@@ -407,7 +418,7 @@ function InstalledModelList({
                 <button
                   type="button"
                   className="settings-secondary-button"
-                  disabled={verifyingId !== null}
+                  disabled={verifyingId !== null || model.purpose === 'draft-dflash'}
                   onClick={() => onVerify(model.id)}
                 >
                   {verifyingId === model.id ? '確認中…' : '動作確認'}
@@ -445,11 +456,15 @@ function InstalledModelList({
                   </button>
                 )}
               </div>
-              {model.state === 'installed' && (
+              {model.state === 'installed' && model.purpose !== 'draft-dflash' && (
                 <ManagedLocalInferenceSettingsCard modelId={model.id} />
               )}
-              {model.state === 'installed' && (
-                <ManagedLocalLaunchSettingsCard modelId={model.id} runtime={runtime} />
+              {model.state === 'installed' && model.purpose !== 'draft-dflash' && (
+                <ManagedLocalLaunchSettingsCard
+                  modelId={model.id}
+                  runtime={runtime}
+                  onFindDraft={onFindDraft}
+                />
               )}
             </li>
           ))}
@@ -626,11 +641,17 @@ function ManagedLocalInferenceSettingsCard({ modelId }: { modelId: string }) {
   );
 }
 
-function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) {
+function LocalAiSelector({
+  onInstalled,
+  initialQuery = '',
+}: {
+  onInstalled: () => Promise<void>;
+  initialQuery?: string;
+}) {
   const [query, setQuery] = useState<PublicModelCatalogQuery>({
-    text: '',
-    source: 'all',
-    purpose: 'code',
+    text: initialQuery,
+    source: initialQuery ? 'hugging_face' : 'all',
+    purpose: initialQuery ? 'all' : 'code',
     compatibility: 'compatible',
     sort: 'downloads',
     direction: 'descending',
@@ -1063,6 +1084,11 @@ function ModelDetail({
         {detail.item.source === 'hugging_face' ? 'HUGGING FACE' : 'LOCALAI GALLERY'}
       </span>
       <h4>{detail.item.name}</h4>
+      {detail.architecture === 'dflash' ? (
+        <p className="settings-hint">
+          DFlash2 下書きモデルです。取得後、互換性のある通常モデルの投機的デコード設定で選択します。
+        </p>
+      ) : null}
       <p>{detail.description || '説明は提供されていません。'}</p>
       <dl>
         <div>

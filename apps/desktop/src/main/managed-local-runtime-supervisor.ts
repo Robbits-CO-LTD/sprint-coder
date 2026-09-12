@@ -1,9 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { lstat, realpath } from 'node:fs/promises';
-import { dirname, extname, isAbsolute, relative } from 'node:path';
+import { basename, dirname, extname, isAbsolute, relative } from 'node:path';
 import type { Readable } from 'node:stream';
-import { managedLocalMicroBatchSize } from '@sprint-coder/contracts';
+import {
+  localModelBaseModelIdSchema,
+  managedLocalDraftBindingSchema,
+  managedLocalMicroBatchSize,
+  type ManagedLocalDraftBinding,
+} from '@sprint-coder/contracts';
+import { readGgufModelMetadata } from './gguf-metadata';
 import {
   loadBundledManagedLocalSidecar,
   type ManagedLocalBackend,
@@ -24,11 +30,32 @@ type SpawnProcess = (
   options: SpawnOptions,
 ) => ChildProcess;
 
+export type ManagedLocalDraftModel = Readonly<{
+  id: string;
+  modelRoot: string;
+  modelPath: string;
+  baseModelId: string;
+  artifactHashes: readonly string[];
+  draftTokensMax: number;
+}>;
+
+export function managedLocalDraftBinding(draft: ManagedLocalDraftModel): ManagedLocalDraftBinding {
+  return managedLocalDraftBindingSchema.parse({
+    type: 'draft-dflash',
+    draftModelId: draft.id,
+    draftArtifactHashes: draft.artifactHashes,
+    draftTokensMax: draft.draftTokensMax,
+  });
+}
+
 export type ManagedLocalRuntimeStartInput =
   | Readonly<{
       kind: 'model';
       modelRoot: string;
       modelPath: string;
+      modelsRoot?: string;
+      baseModelId?: string | null;
+      draft?: ManagedLocalDraftModel | null;
       /** Optional multimodal projector, validated inside the same model store. */
       mmprojPath?: string;
       modelAlias: string;
@@ -174,6 +201,7 @@ export class ManagedLocalRuntimeSupervisor {
       prepared.modelRoot,
       ...(prepared.modelPath === null ? [] : [prepared.modelPath]),
       ...(prepared.mmprojPath === null ? [] : [prepared.mmprojPath]),
+      ...(prepared.draftPath === null ? [] : [prepared.draftPath, dirname(prepared.draftPath)]),
     ]);
     const args = runtimeArguments(input, prepared, settings);
     let child: ChildProcess;
@@ -421,6 +449,7 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
     modelRoot: string;
     modelPath: string | null;
     mmprojPath: string | null;
+    draftPath: string | null;
     scratchRoot: string;
   }>
 > {
@@ -429,7 +458,7 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
   if (pathsOverlap(modelRoot, scratchRoot))
     throw new ManagedLocalRuntimeError('invalid_input', 'Model and scratch roots must be disjoint');
   if (input.kind === 'router_probe')
-    return { modelRoot, modelPath: null, mmprojPath: null, scratchRoot };
+    return { modelRoot, modelPath: null, mmprojPath: null, draftPath: null, scratchRoot };
   if (!MODEL_ALIAS.test(input.modelAlias))
     throw new ManagedLocalRuntimeError('invalid_input', 'Invalid Managed Local model settings');
   const modelPath = await validateModelArtifactPath(input.modelPath, modelRoot, 'model');
@@ -442,13 +471,59 @@ async function prepareStartInput(input: ManagedLocalRuntimeStartInput): Promise<
       'invalid_input',
       'Managed Local model and mmproj must differ',
     );
-  return { modelRoot, modelPath, mmprojPath, scratchRoot };
+  let draftPath: string | null = null;
+  if (input.draft != null) {
+    const draft = input.draft;
+    managedLocalDraftBinding(draft);
+    if (
+      input.modelsRoot === undefined ||
+      input.modelAlias === draft.id ||
+      mmprojPath !== null ||
+      !localModelBaseModelIdSchema.safeParse(input.baseModelId).success ||
+      input.baseModelId !== draft.baseModelId
+    )
+      throw new ManagedLocalRuntimeError('invalid_input', 'Invalid DFlash model pair');
+    const modelsRoot = await canonicalDirectory(input.modelsRoot, 'models root');
+    const draftRoot = await canonicalDirectory(draft.modelRoot, 'draft root');
+    if (
+      dirname(modelRoot) !== modelsRoot ||
+      basename(modelRoot) !== input.modelAlias ||
+      dirname(draftRoot) !== modelsRoot ||
+      basename(draftRoot) !== draft.id ||
+      pathsOverlap(modelsRoot, scratchRoot)
+    )
+      throw new ManagedLocalRuntimeError('invalid_input', 'DFlash model bundle identity mismatch');
+    draftPath = await validateModelArtifactPath(draft.modelPath, draftRoot, 'draft');
+    if (
+      dirname(modelPath) !== modelRoot ||
+      dirname(draftPath) !== draftRoot ||
+      draftPath === modelPath
+    )
+      throw new ManagedLocalRuntimeError('invalid_input', 'Invalid DFlash artifact containment');
+    const [targetMetadata, draftMetadata] = await Promise.all([
+      readGgufModelMetadata(modelPath),
+      readGgufModelMetadata(draftPath),
+    ]);
+    if (
+      targetMetadata?.architecture === 'dflash' ||
+      draftMetadata?.architecture !== 'dflash' ||
+      targetMetadata?.contextLength == null ||
+      draftMetadata.contextLength === null ||
+      input.contextTokens > targetMetadata.contextLength ||
+      input.contextTokens > draftMetadata.contextLength
+    )
+      throw new ManagedLocalRuntimeError(
+        'invalid_input',
+        'DFlash model context is unavailable or exceeded',
+      );
+  }
+  return { modelRoot, modelPath, mmprojPath, draftPath, scratchRoot };
 }
 
 async function validateModelArtifactPath(
   inputPath: string,
   modelRoot: string,
-  label: 'model' | 'mmproj',
+  label: 'model' | 'mmproj' | 'draft',
 ): Promise<string> {
   const lexicalInfo = await lstat(inputPath, { bigint: true }).catch(() => null);
   if (
@@ -504,6 +579,7 @@ function runtimeArguments(
     modelRoot: string;
     modelPath: string | null;
     mmprojPath: string | null;
+    draftPath: string | null;
     scratchRoot: string;
   }>,
   settings: EffectiveModelSettings | null,
@@ -544,6 +620,15 @@ function runtimeArguments(
     '--jinja',
   ];
   if (prepared.mmprojPath !== null) args.push('--mmproj', prepared.mmprojPath);
+  if (input.draft != null && prepared.draftPath !== null)
+    args.push(
+      '-md',
+      prepared.draftPath,
+      '--spec-type',
+      'draft-dflash',
+      '--spec-draft-n-max',
+      String(input.draft.draftTokensMax),
+    );
   return args;
 }
 
@@ -552,6 +637,8 @@ function validateModelSettings(
   bundle: VerifiedManagedLocalSidecarBundle,
 ): EffectiveModelSettings {
   const validBackend = ['cpu', 'metal', 'cuda', 'vulkan'].includes(input.backend);
+  if (input.draft != null && bundle.manifest.speculativeDflash !== true)
+    throw new ManagedLocalRuntimeError('invalid_input', 'Bundled runtime does not support DFlash');
   if (
     !validBackend ||
     !bundle.manifest.candidateBackends.includes(input.backend) ||

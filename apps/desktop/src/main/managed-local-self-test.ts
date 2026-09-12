@@ -12,17 +12,26 @@ export async function runManagedLocalSelfTest(
     scratchRoot: string;
     nonce: string;
     onLoaded(): void | Promise<void>;
+    requireDraft?: boolean;
   }>,
 ): Promise<void> {
-  const baseMessages = [{ role: 'user', content: 'Reply with exactly: READY' }];
+  const expected =
+    input.requireDraft === true ? 'one two three four five six seven eight nine ten' : 'READY';
+  const baseMessages = [{ role: 'user', content: `Reply with exactly: ${expected}` }];
   const loaded = await completion(input.session, {
     model: input.modelId,
     stream: false,
     messages: baseMessages,
-    max_tokens: 16,
+    max_tokens: input.requireDraft === true ? 64 : 16,
+    ...(input.requireDraft === true ? { temperature: 0, seed: 0 } : {}),
   });
   if (messageContent(loaded).trim().length === 0)
     throw new Error('Managed Local chat self-test returned no text');
+  if (
+    input.requireDraft === true &&
+    (messageContent(loaded).trim() !== expected || !hasManagedLocalDraftEvidence(loaded))
+  )
+    throw new Error('DFlash self-test did not prove deterministic draft generation');
   await input.onLoaded();
 
   const toolName = 'sprint_self_test';
@@ -82,6 +91,23 @@ export async function runManagedLocalSelfTest(
     throw new Error('Managed Local tool self-test did not complete after the tool result');
 }
 
+export function hasManagedLocalDraftEvidence(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const timings = (value as Record<string, unknown>)['timings'];
+  if (timings === null || typeof timings !== 'object') return false;
+  const { draft_n: draft, draft_n_accepted: accepted } = timings as Record<string, unknown>;
+  return (
+    typeof draft === 'number' &&
+    Number.isSafeInteger(draft) &&
+    draft > 0 &&
+    draft <= 1_000_000 &&
+    typeof accepted === 'number' &&
+    Number.isSafeInteger(accepted) &&
+    accepted >= 0 &&
+    accepted <= draft
+  );
+}
+
 async function completion(
   session: ManagedLocalRuntimeSession,
   body: Record<string, unknown>,
@@ -100,10 +126,27 @@ async function completion(
   const declared = Number(response.headers.get('content-length'));
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES)
     throw new Error('Managed Local self-test response is too large');
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_RESPONSE_BYTES)
-    throw new Error('Managed Local self-test response is too large');
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+  if (response.body === null) throw new Error('Managed Local self-test response is empty');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error('Managed Local self-test response is too large');
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return JSON.parse(
+    new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)),
+  ) as unknown;
 }
 
 function message(value: unknown): Record<string, unknown> {

@@ -13,8 +13,9 @@ describe('Managed Local native build input', () => {
 
     expect(release).toMatchObject({
       runtime: 'llama.cpp',
-      runtimeVersion: 'b10516',
-      upstreamRevision: 'b95502ba9aa0eb73a2f4fc8878d7fbe6a847a0b9',
+      runtimeVersion: 'b10809',
+      upstreamRevision: '5266f24da75dc449bd56cbed7addb9c8e4a6a73e',
+      speculativeDflash: true,
       licenseSize: 1078,
       licenseSha256: '94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d',
     });

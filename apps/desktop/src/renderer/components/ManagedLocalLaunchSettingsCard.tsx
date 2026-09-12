@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ManagedLocalSpeculativeSettingsCard } from './ManagedLocalSpeculativeSettingsCard';
 import type {
   ManagedLocalEffectiveLaunchSettings,
   ManagedLocalLaunchBackend,
@@ -73,9 +74,11 @@ function runtimeEffectiveSettings(
 export function ManagedLocalLaunchSettingsCard({
   modelId,
   runtime,
+  onFindDraft,
 }: {
   modelId: string;
   runtime: ManagedLocalRuntimeSnapshot | null;
+  onFindDraft?: () => void;
 }) {
   const [view, setView] = useState<ManagedLocalLaunchSettingsView | null>(null);
   const [backend, setBackend] = useState<ManagedLocalLaunchBackend>('auto');
@@ -328,6 +331,11 @@ export function ManagedLocalLaunchSettingsCard({
           </div>
         </>
       )}
+      <ManagedLocalSpeculativeSettingsCard
+        modelId={modelId}
+        runtime={runtime}
+        {...(onFindDraft === undefined ? {} : { onFindDraft })}
+      />
       {error !== null && (
         <p className="settings-provider-error" role="alert">
           {error}
