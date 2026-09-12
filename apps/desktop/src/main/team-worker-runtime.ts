@@ -448,10 +448,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           context,
           // The prompt and the guidance both name the roots Main prepared for this Worker. Declare
           // them so the egress secret scan reads them as workspace structure, not as opaque values.
-          canonicalWorkspaceRoots([
-            ...normalizedWorkspace.roots.map(({ path }) => path),
-            workspacePath,
-          ]),
+          // The primary root already carries `workspacePath` in canonical form; declaring the raw
+          // spelling too would only add a second, non-canonical entry on Windows.
+          canonicalWorkspaceRoots(normalizedWorkspace.roots.map(({ path }) => path)),
         )
       )
         throw new Error(`${choice.kind} Team Worker egress was denied`);

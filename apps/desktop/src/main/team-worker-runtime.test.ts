@@ -114,6 +114,7 @@ import {
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
 
 afterEach(() => {
@@ -548,7 +549,9 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
           expect.objectContaining({ id: 'project:one:reference:one' }),
         ],
       }),
-      ['/workspace'],
+      // The declared root is the canonical spelling Main derives from the legacy path, which on
+      // Windows resolves onto the current drive rather than staying `/workspace`.
+      runtimeWorkspaceSetFromLegacyPath('/workspace').roots.map(({ path }) => path),
     );
     expect(runtimeHostMock.starts[0]?.args[6]).toMatchObject({
       projectItems: [{ id: 'project:one:instruction' }, { id: 'project:one:reference:one' }],
