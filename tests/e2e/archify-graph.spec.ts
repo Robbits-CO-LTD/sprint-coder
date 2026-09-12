@@ -524,6 +524,193 @@ for (const starts of [false, true])
     }
   });
 
+// Electron owns the browser; Playwright still requires its fixture argument before testInfo.
+// eslint-disable-next-line no-empty-pattern
+test('resumes one interrupted graph step by hand after a relaunch', async ({}, testInfo) => {
+  const profile = createUserDataDir('graph-mission-relaunch');
+  const workspace = await mkdtemp(
+    join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-relaunch-'),
+  );
+  await writeFile(
+    join(workspace, 'graph-source.ts'),
+    'export const ready = true;\nexport const version = 1;\n',
+  );
+  const git = promisify(execFile);
+  await git('git', ['init', workspace]);
+  await git('git', ['-C', workspace, 'add', 'graph-source.ts']);
+  await git('git', [
+    '-C',
+    workspace,
+    '-c',
+    'user.name=Graph test',
+    '-c',
+    'user.email=graph-test@example.invalid',
+    'commit',
+    '-m',
+    'fixture',
+  ]);
+  // Only the read-only integration step ("store") is held. The two independent steps write to the
+  // Workspace, and an interrupted write step keeps its worktree/isolation on purpose: Main refuses
+  // to re-run it ("Interrupted write work requires review of its preserved workspace") and the
+  // panel therefore never offers 「この工程を再開」 for it. The step this control can finish after
+  // a restart is the one that owns no preserved workspace, so that is the one interrupted here.
+  let app = await launchApp(profile, undefined, {
+    SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+    SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT: 'store',
+  });
+  try {
+    const page = await firstWindow(app);
+    await page.getByTestId('sidebar-new-task-button').click();
+    await assignCurrentTaskToProjectFolder(page, 'Mission relaunch', workspace);
+    const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
+    await page.evaluate(async (id) => {
+      for (const role of ['client', 'api', 'store'])
+        await window.sprintCoder!.teams.hireWorker({
+          taskId: id,
+          role,
+          objective: 'Relaunch fixture worker',
+          contextInheritancePolicy: 'summary',
+          writeCapable: true,
+        });
+    }, taskId);
+    const readMission = (
+      target: typeof page,
+    ): Promise<{
+      mission: string | null;
+      executions: number;
+      workers: number;
+      steps: [string, string][];
+    }> =>
+      target.evaluate(async (id) => {
+        const team = await window.sprintCoder!.teams.get(id);
+        return {
+          mission: team?.missions[0]?.state ?? null,
+          executions: team?.executions.length ?? 0,
+          workers: team?.workers.filter((worker) => worker.kind === 'worker').length ?? 0,
+          steps: (team?.missions[0]?.steps ?? []).map(
+            (step) => [step.graph?.key ?? '?', step.state] as [string, string],
+          ),
+        };
+      }, taskId);
+    await page.getByTestId('composer-textarea').fill('[fixture:graph-bound-mission-proposal]');
+    await page.getByTestId('composer-send-button').click();
+    await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
+    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
+      timeout: 30000,
+    });
+    if (process.env['GITHUB_ACTIONS'] === 'true')
+      await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
+        nativeApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+    await page.getByTestId('team-back').click();
+    await expect(page.getByTestId('team-list')).toHaveCount(0);
+    await page.getByTestId('graph-toggle').click();
+    await page.getByTestId('graph-mission-plan').locator('summary').click();
+    await expect(page.getByTestId('graph-mission-review')).toContainText('参照先を確認しました');
+    await page.getByRole('button', { name: 'この計画で開始', exact: true }).click();
+    await expect
+      .poll(async () => (await readMission(page)).steps, { timeout: 60000 })
+      .toEqual([
+        ['client', 'completed'],
+        ['api', 'completed'],
+        ['store', 'running'],
+      ]);
+    // The held Worker must not finish on its own while the app is still up: without this the
+    // relaunch below would be observing an already-completed Mission.
+    await page.waitForTimeout(2000);
+    expect((await readMission(page)).steps).toEqual([
+      ['client', 'completed'],
+      ['api', 'completed'],
+      ['store', 'running'],
+    ]);
+    // `closeApp` asks Electron to quit first and only escalates to SIGKILL when that stalls, so
+    // both endings are exercised by whichever the shutdown takes. Either way Main records no
+    // completion for the held step: the interruption path parks it on `waiting_resume`, and a
+    // killed process leaves the running Attempt for restart recovery to park.
+    await closeApp(app);
+    // The resumed step still records a Workspace checkpoint, so git must stay reachable here; the
+    // hold flag is deliberately absent so a step that did restart by itself would be visible.
+    app = await launchApp(profile, undefined, {});
+    const restarted = await firstWindow(app);
+    if (process.env['GITHUB_ACTIONS'] === 'true') {
+      await app.evaluate(({ app: electronApp, BrowserWindow }) => {
+        electronApp.focus({ steal: true });
+        BrowserWindow.getAllWindows()[0]!.focus();
+      });
+      await expect
+        .poll(() =>
+          app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isFocused()),
+        )
+        .toBe(true);
+    }
+    await restarted.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
+    await expect
+      .poll(async () => (await readMission(restarted)).steps, { timeout: 30000 })
+      .toEqual([
+        ['client', 'completed'],
+        ['api', 'completed'],
+        ['store', 'waiting_resume'],
+      ]);
+    // Nothing may move on its own after the relaunch: no dispatch, no extra Worker, no Mission
+    // completion.
+    await restarted.waitForTimeout(3000);
+    const parked = await readMission(restarted);
+    expect(parked).toEqual({
+      mission: parked.mission,
+      executions: 3,
+      workers: 3,
+      steps: [
+        ['client', 'completed'],
+        ['api', 'completed'],
+        ['store', 'waiting_resume'],
+      ],
+    });
+    expect(parked.mission).not.toBe('completed');
+    await restarted.getByTestId('graph-toggle').click();
+    await restarted.getByTestId('graph-mission-plan').locator('summary').click();
+    await expect(restarted.getByTestId('graph-step-state').nth(2)).toHaveText('再開待ち');
+    const resumeStep = restarted.getByRole('button', { name: 'この工程を再開', exact: true });
+    await expect(resumeStep).toHaveCount(1);
+    // The already-rendered view owns the instance/render revision; re-reading the document through
+    // `graphs.get` would invalidate the viewer that is on screen.
+    const rejected = await restarted.evaluate(async (id) => {
+      const button = document.querySelector<HTMLElement>(
+        '[data-computer-use-activation="graph-resume-step"]',
+      );
+      const input = JSON.parse(button!.dataset['computerUseIntent']!);
+      delete input.operation;
+      if (input.taskId !== id) throw new Error('Task mismatch');
+      return window.sprintCoder!.graphs.resumeStep(input).then(
+        () => false,
+        () => true,
+      );
+    }, taskId);
+    expect(rejected).toBe(true);
+    expect((await readMission(restarted)).steps[2]).toEqual(['store', 'waiting_resume']);
+    await resumeStep.click();
+    await expect
+      .poll(async () => (await readMission(restarted)).mission, { timeout: 60000 })
+      .toBe('completed');
+    expect(await readMission(restarted)).toEqual({
+      mission: 'completed',
+      executions: 3,
+      workers: 3,
+      steps: [
+        ['client', 'completed'],
+        ['api', 'completed'],
+        ['store', 'completed'],
+      ],
+    });
+    await expect(restarted.getByTestId('graph-mission-state')).toContainText('すべての工程が完了');
+    await restarted.screenshot({ path: testInfo.outputPath('mission-relaunch-resumed.png') });
+  } finally {
+    await closeApp(app);
+    removeUserDataDir(profile);
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 for (const kind of ['architecture', 'workflow'] as const) {
   // Electron owns the browser; Playwright still requires its fixture argument before testInfo.
   // eslint-disable-next-line no-empty-pattern

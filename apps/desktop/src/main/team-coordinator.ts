@@ -181,6 +181,41 @@ export interface TeamWorkerRuntime {
   stop(agentId: string): Promise<void>;
 }
 
+const E2E_HOLD_TEAM_WORKER_FLAG = 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT';
+
+/**
+ * E2E 専用のフック。`DeterministicTeamWorkerRuntime`（シミュレーション runtime）限定で、実
+ * runtime 経路や packaged 動作には一切関与しない。`'1'` は全 Worker を、それ以外の値は同じ
+ * role の Worker だけを保留する。Graph Mission の1工程だけを実行中のまま止め、そこでアプリを
+ * 再起動する E2E がこの値を使う。
+ */
+function e2eTeamWorkerHeld(role: string): boolean {
+  const flag = process.env[E2E_HOLD_TEAM_WORKER_FLAG];
+  return flag !== undefined && flag !== '' && (flag === '1' || flag === role);
+}
+
+/**
+ * E2E 専用、`DeterministicTeamWorkerRuntime` 限定。`MockRuntimeAdapter` のチャット保留
+ * （`waitForMockStreamRelease`）と同型の100msポーリングだが、abort は「完了扱い」ではなく
+ * 失敗として伝える必要があるため reject する。フラグが下りれば通常どおり完了する。
+ */
+function waitForE2ETeamWorkerRelease(role: string, signal?: AbortSignal): Promise<void> {
+  if (!e2eTeamWorkerHeld(role)) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(new Error('Worker execution stopped'));
+  return new Promise<void>((resolve, reject) => {
+    const settle = (finish: () => void): void => {
+      clearInterval(timer);
+      signal?.removeEventListener('abort', onAbort);
+      finish();
+    };
+    const onAbort = (): void => settle(() => reject(new Error('Worker execution stopped')));
+    const timer = setInterval(() => {
+      if (!e2eTeamWorkerHeld(role)) settle(resolve);
+    }, 100);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly pids = new Map<string, number>();
 
@@ -198,6 +233,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
     onEvent?: (event: WorkerActivityEvent) => void;
+    signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
     input.onEvent?.({
@@ -206,6 +242,9 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
       label: '依頼を処理中',
       at: new Date().toISOString(),
     });
+    // E2E 専用、DeterministicTeamWorkerRuntime 限定の保留点。フラグが立っていない通常運転では
+    // 即座に解決するので、製品の挙動は変わらない。
+    await waitForE2ETeamWorkerRelease(input.worker.role, input.signal);
     const result = {
       claims: {
         deliveryId: input.envelope.deliveryId,

@@ -16,6 +16,7 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord, TeamSnapshot } from './persistence';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
+  DeterministicTeamWorkerRuntime,
   TeamCoordinator,
   captureGitWorkspaceFingerprint,
   executeWithWatchdog,
@@ -58,7 +59,82 @@ function removeTemporaryDirectory(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   for (const directory of cleanup.splice(0)) removeTemporaryDirectory(directory);
+});
+
+describe('DeterministicTeamWorkerRuntime E2E hold', () => {
+  const HOLD = 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT';
+  const run = (
+    runtime: DeterministicTeamWorkerRuntime,
+    events: string[],
+    signal?: AbortSignal,
+  ): Promise<WorkerRuntimeResult> =>
+    runtime.execute({
+      worker: { id: 'worker-store', role: 'store' } as unknown as AgentRecord,
+      envelope: {
+        deliveryId: 'delivery-1',
+        sourceAgentId: 'leader',
+        targetAgentId: 'worker-store',
+      } as unknown as TeamEnvelope,
+      content: '結合確認',
+      onEvent: (event) => events.push(event.type),
+      ...(signal === undefined ? {} : { signal }),
+    });
+
+  it('completes normally while the flag is unset', async () => {
+    const events: string[] = [];
+    await expect(run(new DeterministicTeamWorkerRuntime(), events)).resolves.toMatchObject({
+      completion: { status: 'succeeded' },
+    });
+    expect(events).toEqual(['accepted', 'activity', 'completed']);
+  });
+
+  it('holds after the first activity event and completes once the flag is cleared', async () => {
+    vi.stubEnv(HOLD, '1');
+    const events: string[] = [];
+    const pending = run(new DeterministicTeamWorkerRuntime(), events);
+    await vi.waitFor(() => expect(events).toEqual(['accepted', 'activity']));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(events).toEqual(['accepted', 'activity']);
+    vi.stubEnv(HOLD, '');
+    await expect(pending).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+    expect(events).toEqual(['accepted', 'activity', 'completed']);
+  });
+
+  it('holds only the named role so other Workers still finish', async () => {
+    vi.stubEnv(HOLD, 'store');
+    const other: string[] = [];
+    const runtime = new DeterministicTeamWorkerRuntime();
+    await expect(
+      runtime.execute({
+        worker: { id: 'worker-api', role: 'api' } as unknown as AgentRecord,
+        envelope: {
+          deliveryId: 'delivery-2',
+          sourceAgentId: 'leader',
+          targetAgentId: 'worker-api',
+        } as unknown as TeamEnvelope,
+        content: '実装B',
+        onEvent: (event) => other.push(event.type),
+      }),
+    ).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+    expect(other).toEqual(['accepted', 'activity', 'completed']);
+    const held: string[] = [];
+    const controller = new AbortController();
+    const pending = run(runtime, held, controller.signal);
+    await vi.waitFor(() => expect(held).toEqual(['accepted', 'activity']));
+    controller.abort();
+    await expect(pending).rejects.toThrow('Worker execution stopped');
+    // An aborted hold records no completion: the caller must treat it as an interruption.
+    expect(held).toEqual(['accepted', 'activity']);
+  });
+
+  it('refuses immediately when the signal was already aborted', async () => {
+    vi.stubEnv(HOLD, '1');
+    await expect(
+      run(new DeterministicTeamWorkerRuntime(), [], AbortSignal.abort()),
+    ).rejects.toThrow('Worker execution stopped');
+  });
 });
 
 describe('removeTemporaryDirectory', () => {
