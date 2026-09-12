@@ -52,10 +52,11 @@
       content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
     />
 
-    <link rel="preload" href="/assets/sprint-coder-team.png" as="image" fetchpriority="high" />
     <link rel="stylesheet" href="/styles.css?v=20260912-1" />
     <script>
-      document.documentElement.classList.add('js');
+      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        document.documentElement.classList.add('js');
+      }
     </script>
 
     <script type="application/ld+json">
@@ -202,11 +203,11 @@
               </div>
             </div>
 
-            <div class="story-window" aria-label="Sprint CoderでChatからAI Teamへ展開する流れ">
+            <div class="story-window" aria-hidden="true">
               <div class="sw-bar">
                 <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
                 <span>新しいタスク · sprint-coder</span>
-                <b class="sw-mode" data-on="leader"><span>Chat</span><span>Team</span></b>
+                <b class="sw-mode swap" data-on="leader"><span>Chat</span><span>Team</span></b>
               </div>
 
               <div class="sw-body">
@@ -229,33 +230,33 @@
                     >
                   </div>
                   <div class="sw-thread">
-                    <div class="msg msg-user" data-on="send">
+                    <div class="msg msg-user">
                       ログイン後にセッションが切れるバグを直して。原因の調査、修正、レビューまでお願い。
                     </div>
 
-                    <div class="msg msg-ai" data-on="leader">
+                    <div class="msg msg-ai">
                       <small>LEADER · Claude Code</small>
                       調査・修正・レビューを分けたほうが確実です。この会話のままAI
                       Teamへ展開します。
                     </div>
 
-                    <div class="log" data-on="hire1">
+                    <div class="log" data-log="hire1">
                       <time>19:45</time>leaderが「調査」を雇いました<span
                         >選定理由 親Agentのmodel selectionを継承</span
                       >
                     </div>
-                    <div class="log" data-on="hire2">
+                    <div class="log" data-log="hire2">
                       <time>19:45</time>leaderが「実装」を雇いました<span
                         >選定理由 親Agentのmodel selectionを継承</span
                       >
                     </div>
-                    <div class="log" data-on="hire3">
+                    <div class="log" data-log="hire3">
                       <time>19:45</time>leaderが「レビュー」を雇いました<span
                         >選定理由 差分の独立確認</span
                       >
                     </div>
 
-                    <div class="diff" data-on="diff">
+                    <div class="diff">
                       <div class="diff-head"><span>src/auth/session.ts</span><b>+2 −1</b></div>
                       <div class="diff-line diff-del" data-i="0">
                         <i>−</i>const expiresAt = session.expiresAt;
@@ -268,7 +269,7 @@
                       </div>
                     </div>
 
-                    <div class="approval" data-on="ask">
+                    <div class="approval">
                       <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M12 3 5 6v5c0 4.4 3 8.3 7 9.5 4-1.2 7-5.1 7-9.5V6l-7-3Z" />
                       </svg>
@@ -276,12 +277,12 @@
                         <small>COMMAND · 承認待ち</small>
                         <code>npm test -- auth</code>
                       </div>
-                      <b class="approval-state" data-on="ok"
+                      <b class="approval-state swap" data-on="ok"
                         ><span>許可する</span><span>許可済み</span></b
                       >
                     </div>
 
-                    <div class="msg msg-ai msg-done" data-on="done">
+                    <div class="msg msg-ai msg-done">
                       <small>LEADER · 完了</small>
                       2 files changed · 12 tests passed · レビュー:
                       問題なし。差分と承認の履歴はこのTaskに残っています。
@@ -310,12 +311,12 @@
                   </div>
                 </div>
 
-                <aside class="sw-team" data-on="team" aria-label="AI TeamのWorker">
+                <aside class="sw-team">
                   <div class="sw-team-head">
                     <span>active · Worker 3人</span><b data-on="done">すべて完了</b>
                   </div>
 
-                  <div class="worker" data-on="hire1" data-state-phase="w1">
+                  <div class="worker" data-state-phase="w1">
                     <div class="wk-top">
                       <strong>調査</strong
                       ><em class="wk-status"
@@ -330,16 +331,16 @@
                     <dl>
                       <div>
                         <dt>TOKENS</dt>
-                        <dd data-count="4812" data-phase="w1">0</dd>
+                        <dd data-count="4812" data-phase="w1">4,812</dd>
                       </div>
                       <div>
                         <dt>TOOLS</dt>
-                        <dd data-count="7" data-phase="w1">0</dd>
+                        <dd data-count="7" data-phase="w1">7</dd>
                       </div>
                     </dl>
                   </div>
 
-                  <div class="worker" data-on="hire2" data-state-phase="w2">
+                  <div class="worker" data-state-phase="w2">
                     <div class="wk-top">
                       <strong>実装</strong
                       ><em class="wk-status"
@@ -354,16 +355,16 @@
                     <dl>
                       <div>
                         <dt>TOKENS</dt>
-                        <dd data-count="12304" data-phase="w2">0</dd>
+                        <dd data-count="12304" data-phase="w2">12,304</dd>
                       </div>
                       <div>
                         <dt>TOOLS</dt>
-                        <dd data-count="19" data-phase="w2">0</dd>
+                        <dd data-count="19" data-phase="w2">19</dd>
                       </div>
                     </dl>
                   </div>
 
-                  <div class="worker" data-on="hire3" data-state-phase="w3">
+                  <div class="worker" data-state-phase="w3">
                     <div class="wk-top">
                       <strong>レビュー</strong
                       ><em class="wk-status"
@@ -378,11 +379,11 @@
                     <dl>
                       <div>
                         <dt>TOKENS</dt>
-                        <dd data-count="3177" data-phase="w3">0</dd>
+                        <dd data-count="3177" data-phase="w3">3,177</dd>
                       </div>
                       <div>
                         <dt>TOOLS</dt>
-                        <dd data-count="4" data-phase="w3">0</dd>
+                        <dd data-count="4" data-phase="w3">4</dd>
                       </div>
                     </dl>
                   </div>
@@ -425,7 +426,7 @@
               </a>
             </div>
 
-            <div class="control-panel" aria-label="ファイル差分とCommand承認の画面">
+            <div class="control-panel" aria-hidden="true">
               <div class="cp-bar">
                 <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
                 <span>LIVE WORKSPACE · Task / local</span>
@@ -466,7 +467,7 @@
                     <div class="diff-line" data-i="7"><i> </i>}</div>
                   </div>
 
-                  <div class="cp-command" data-on="cmd">
+                  <div class="cp-command">
                     <div class="cp-cmd-head">
                       <small>COMMAND REQUEST</small>
                       <code>npm test -- auth</code>
@@ -480,7 +481,7 @@
                       <span class="cp-btn">許可して実行</span>
                       <b><i></i>許可済み · 19:47</b>
                     </div>
-                    <pre class="cp-out" data-on="out"><span data-i="0">$ npm test -- auth</span>
+                    <pre class="cp-out"><span data-i="0">$ npm test -- auth</span>
 <span data-i="1">✓ refresh extends expiresAt by SESSION_TTL_MS</span>
 <span data-i="2">✓ refresh persists the new expiry</span>
 <span data-i="3">✓ refresh records an audit entry</span>
@@ -525,7 +526,7 @@
               </div>
             </div>
 
-            <div class="picker" aria-label="対応する主なProviderとRuntime">
+            <div class="picker" role="group" aria-label="対応する主なProviderとRuntime">
               <div class="picker-bar"><small>MODEL</small><span>Taskごとに選択</span></div>
               <div class="picker-viewport">
                 <ul class="picker-list" role="list">
@@ -808,6 +809,9 @@
       </div>
     </footer>
 
-    <script src="/story.js?v=20260912-1"></script>
+    <script
+      src="/story.js?v=20260912-1"
+      onerror="document.documentElement.classList.remove('js')"
+    ></script>
   </body>
 </html>

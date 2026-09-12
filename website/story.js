@@ -53,9 +53,7 @@
   };
 
   var header = document.querySelector('.site-header');
-  function headerHeight() {
-    return header ? header.offsetHeight : 0;
-  }
+  var headerH = 0;
 
   function parseRange(el) {
     var parts = (el.getAttribute('data-range') || '0,1').split(',');
@@ -193,11 +191,18 @@
     }
   }
 
+  /* Geometry that only changes on resize: read once, not per frame. */
+  function layout() {
+    headerH = header ? header.offsetHeight : 0;
+    scenes.forEach(function (scene) {
+      scene.travel = scene.el.offsetHeight - scene.stage.offsetHeight;
+    });
+  }
+
   function measure(scene) {
-    var rect = scene.el.getBoundingClientRect();
-    var travel = scene.el.offsetHeight - scene.stage.offsetHeight;
-    if (travel <= 0) return 1;
-    return clamp((headerHeight() - rect.top) / travel, 0, 1);
+    if (scene.travel <= 0) return 1;
+    var top = scene.el.getBoundingClientRect().top;
+    return clamp((headerH - top) / scene.travel, 0, 1);
   }
 
   var scenes = Array.prototype.map.call(document.querySelectorAll('[data-scene]'), buildScene);
@@ -226,17 +231,18 @@
   }
 
   if (reduceMotion) {
-    scenes.forEach(function (scene) {
-      applyScene(scene, 1);
-    });
+    /* Static final-state layout; see the html:not(.js) rules in styles.css. */
+    document.documentElement.classList.remove('js');
     return;
   }
 
   var ticking = false;
   function frame() {
     ticking = false;
-    scenes.forEach(function (scene) {
-      applyScene(scene, measure(scene));
+    /* All layout reads first, then all style writes: one reflow per frame. */
+    var progress = scenes.map(measure);
+    scenes.forEach(function (scene, i) {
+      applyScene(scene, progress[i]);
     });
   }
   function schedule() {
@@ -246,8 +252,14 @@
     }
   }
 
+  function relayout() {
+    layout();
+    schedule();
+  }
+
   window.addEventListener('scroll', schedule, { passive: true });
-  window.addEventListener('resize', schedule);
-  window.addEventListener('load', schedule);
+  window.addEventListener('resize', relayout);
+  window.addEventListener('load', relayout);
+  layout();
   frame();
 })();

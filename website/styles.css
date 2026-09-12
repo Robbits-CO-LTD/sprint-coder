@@ -29,6 +29,7 @@
   --space-10: 128px;
   --header-height: 72px;
   --shell: min(1184px, calc(100vw - 48px));
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family:
     Inter,
     ui-sans-serif,
@@ -1776,13 +1777,10 @@ footer {
   --s-w3: 1;
   --s-diff: 1;
   --s-ask: 1;
-  --s-ok: 1;
   --s-done: 1;
   --s-cmd: 1;
-  --s-policy: 1;
   --s-out: 1;
   --roll: 0;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   position: sticky;
   top: var(--header-height);
   height: calc(100svh - var(--header-height));
@@ -1804,10 +1802,8 @@ html.js .scene-stage {
   --s-w3: 0;
   --s-diff: 0;
   --s-ask: 0;
-  --s-ok: 0;
   --s-done: 0;
   --s-cmd: 0;
-  --s-policy: 0;
   --s-out: 0;
 }
 
@@ -1875,13 +1871,15 @@ html.js .scene-stage {
   max-width: 880px;
   margin-inline: auto;
   text-align: center;
+}
+
+html.js .story-hero {
   opacity: calc(1 - var(--s-rise));
   translate: 0 calc(var(--s-rise) * -40px);
   scale: calc(1 - var(--s-rise) * 0.03);
 }
 
-.story-hero.is-on {
-  visibility: hidden;
+html.js .story-hero.is-on {
   pointer-events: none;
 }
 
@@ -1936,15 +1934,19 @@ html.js .scene-stage {
   top: 50%;
   right: 0;
   left: 0;
-  translate: 0 calc(-50% + 22px);
-  opacity: 0;
+  translate: 0 -50%;
   transition:
     opacity 0.45s ease,
     translate 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
   pointer-events: none;
 }
 
-.story-caption.is-active {
+html.js .story-caption {
+  translate: 0 calc(-50% + 22px);
+  opacity: 0;
+}
+
+html.js .story-caption.is-active {
   translate: 0 -50%;
   opacity: 1;
 }
@@ -1975,22 +1977,26 @@ html.js .scene-stage {
   line-height: 1.75;
 }
 
-.story-window {
-  position: relative;
-  display: grid;
-  min-height: 0;
-  grid-template-rows: 44px minmax(0, 1fr);
+.story-window,
+.control-panel,
+.picker {
   overflow: hidden;
   border: 1px solid #3a433a;
   border-radius: var(--radius-md);
   background: #0c0f0c;
   box-shadow: var(--shadow-stage);
+}
+
+.story-window {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  grid-template-rows: 44px minmax(0, 1fr);
   font-size: 12.5px;
   line-height: 1.55;
   translate: 0 calc((1 - var(--s-rise)) * (100% - 64px));
   scale: calc(0.965 + var(--s-rise) * 0.035);
   transform-origin: 50% 0;
-  will-change: translate;
 }
 
 .sw-bar,
@@ -2032,19 +2038,19 @@ html.js .scene-stage {
     background 0.3s;
 }
 
-.sw-mode span:nth-child(2),
-.sw-mode.is-on span:nth-child(1) {
+.swap span:nth-child(2),
+.swap.is-on span:nth-child(1) {
   display: none;
+}
+
+.swap.is-on span:nth-child(2) {
+  display: inline;
 }
 
 .sw-mode.is-on {
   border-color: rgba(206, 255, 82, 0.4);
   background: rgba(206, 255, 82, 0.08);
   color: var(--color-accent);
-}
-
-.sw-mode.is-on span:nth-child(2) {
-  display: inline;
 }
 
 .cp-bar b {
@@ -2200,13 +2206,13 @@ html.js .scene-stage {
 .sw-thread .msg-ai:not(.msg-done) {
   --v: var(--s-leader);
 }
-.sw-thread .log[data-on='hire1'] {
+.sw-thread .log[data-log='hire1'] {
   --v: var(--s-hire1);
 }
-.sw-thread .log[data-on='hire2'] {
+.sw-thread .log[data-log='hire2'] {
   --v: var(--s-hire2);
 }
-.sw-thread .log[data-on='hire3'] {
+.sw-thread .log[data-log='hire3'] {
   --v: var(--s-hire3);
 }
 .sw-thread .diff {
@@ -2390,19 +2396,10 @@ html.js .scene-stage {
     color 0.3s;
 }
 
-.approval-state span:nth-child(2),
-.approval-state.is-on span:nth-child(1) {
-  display: none;
-}
-
 .approval-state.is-on {
   border: 1px solid rgba(206, 255, 82, 0.4);
   background: transparent;
   color: var(--color-accent);
-}
-
-.approval-state.is-on span:nth-child(2) {
-  display: inline;
 }
 
 .sw-composer {
@@ -2703,11 +2700,6 @@ html.js .scene-stage {
   display: grid;
   max-height: calc(100svh - var(--header-height) - 88px);
   grid-template-rows: 44px minmax(0, 1fr);
-  overflow: hidden;
-  border: 1px solid #3a433a;
-  border-radius: var(--radius-md);
-  background: #0c0f0c;
-  box-shadow: var(--shadow-stage);
   font-size: 12.5px;
   translate: 0 calc((1 - var(--s-diff)) * 20px);
   opacity: calc(0.35 + var(--s-diff) * 0.65);
@@ -2903,14 +2895,17 @@ html.js .scene-stage {
   top: var(--space-5);
   right: 0;
   left: 0;
-  opacity: 0;
-  translate: 0 14px;
   transition:
     opacity 0.4s ease,
     translate 0.55s cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
-.provider-kind.is-active {
+html.js .provider-kind {
+  opacity: 0;
+  translate: 0 14px;
+}
+
+html.js .provider-kind.is-active {
   opacity: 1;
   translate: 0 0;
 }
@@ -2939,11 +2934,6 @@ html.js .scene-stage {
 
 .picker {
   --row: 56px;
-  overflow: hidden;
-  border: 1px solid #3a433a;
-  border-radius: var(--radius-md);
-  background: #0c0f0c;
-  box-shadow: var(--shadow-stage);
 }
 
 .picker-bar {
@@ -3037,7 +3027,8 @@ html.js [data-reveal] {
   transition-delay: calc(var(--i, 0) * 80ms);
 }
 
-html.js [data-reveal].in {
+html.js [data-reveal].in,
+html.js [data-reveal]:focus-within {
   opacity: 1;
   translate: 0 0;
 }
@@ -3068,7 +3059,7 @@ html.js [data-reveal].in {
   }
 }
 
-.terminal .tl {
+html.js .terminal .tl {
   display: inline-block;
   clip-path: inset(0 100% 0 0);
 }
@@ -3359,120 +3350,130 @@ html.js [data-reveal].in {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .scene {
-    height: auto;
-    padding: var(--space-9) 0;
+@media (max-height: 520px) {
+  .story-hero {
+    top: 14px;
   }
 
-  .scene-stage,
-  html.js .scene-stage {
-    --p: 1;
-    --s-rise: 1;
-    --s-type: 1;
-    --s-send: 1;
-    --s-leader: 1;
-    --s-team: 1;
-    --s-hire1: 1;
-    --s-hire2: 1;
-    --s-hire3: 1;
-    --s-w1: 1;
-    --s-w2: 1;
-    --s-w3: 1;
-    --s-diff: 1;
-    --s-ask: 1;
-    --s-ok: 1;
-    --s-done: 1;
-    --s-cmd: 1;
-    --s-policy: 1;
-    --s-out: 1;
-    position: relative;
-    top: auto;
-    height: auto;
-  }
-
-  .scene-hint,
-  .scene-progress {
+  .story-hero .eyebrow {
     display: none;
   }
 
-  .story-hero,
-  .story-layout {
-    position: relative;
-    inset: auto;
-    opacity: 1;
-    translate: none;
-    scale: none;
+  .story-hero h1 {
+    margin-bottom: var(--space-3);
+    font-size: clamp(28px, 8vh, 40px);
   }
 
-  .story-hero.is-on {
-    visibility: visible;
-    pointer-events: auto;
-  }
-
-  .story-layout {
-    margin-top: var(--space-8);
+  .story-hero .hero-actions {
+    margin-top: var(--space-3);
   }
 
   .story-captions {
-    display: grid;
-    gap: var(--space-6);
-    align-content: center;
+    min-height: 56px;
   }
 
-  .story-caption,
-  .story-caption.is-active {
-    position: static;
-    opacity: 1;
-    translate: none;
+  .story-caption h2 {
+    font-size: 18px;
   }
+}
 
-  .story-window {
-    min-height: 560px;
-    translate: none;
-    scale: none;
-  }
+/* Without JS (or with reduced motion, where story.js does not opt in),
+   the scenes render unpinned in their final state. */
+html:not(.js) .scene {
+  height: auto;
+  padding: var(--space-9) 0;
+}
 
-  .sw-thread > * {
-    max-height: none;
-  }
+html:not(.js) .scene-stage {
+  position: relative;
+  top: auto;
+  height: auto;
+}
 
-  .control-panel,
-  .cp-command {
-    translate: none;
-    opacity: 1;
-  }
+html:not(.js) .scene-hint,
+html:not(.js) .scene-progress {
+  display: none;
+}
 
-  .provider-kinds {
-    display: grid;
-    min-height: 0;
-    gap: var(--space-5);
-    padding-top: var(--space-5);
-  }
+html:not(.js) .story-hero,
+html:not(.js) .story-layout {
+  position: relative;
+  inset: auto;
+  opacity: 1;
+  translate: none;
+  scale: none;
+}
 
-  .provider-kind,
-  .provider-kind.is-active {
-    position: static;
-    opacity: 1;
-    translate: none;
-  }
+html:not(.js) .story-layout {
+  margin-top: var(--space-8);
+}
 
-  .sw-caret,
-  .scene-hint i,
-  .worker[data-state='running'] .wk-status i,
-  .local-graphic.in .orbit-one,
-  .local-graphic.in .orbit-two {
-    animation: none;
-  }
+html:not(.js) .story-captions {
+  display: grid;
+  gap: var(--space-6);
+  align-content: center;
+}
 
-  html.js [data-reveal] {
-    opacity: 1;
-    translate: none;
-    transition: none;
-  }
+html:not(.js) .story-caption,
+html:not(.js) .story-caption.is-active {
+  position: static;
+  opacity: 1;
+  translate: none;
+}
 
-  .terminal .tl {
-    clip-path: none;
-    animation: none;
-  }
+html:not(.js) .story-window {
+  min-height: 560px;
+  translate: none;
+  scale: none;
+}
+
+html:not(.js) .sw-thread > * {
+  max-height: none;
+}
+
+html:not(.js) .control-panel,
+html:not(.js) .cp-command {
+  translate: none;
+  opacity: 1;
+}
+
+html:not(.js) .provider-kinds {
+  display: grid;
+  min-height: 0;
+  gap: var(--space-5);
+  padding-top: var(--space-5);
+}
+
+html:not(.js) .provider-kind,
+html:not(.js) .provider-kind.is-active {
+  position: static;
+  opacity: 1;
+  translate: none;
+}
+
+html:not(.js) .picker-viewport {
+  height: auto;
+  mask-image: none;
+}
+
+html:not(.js) .picker-list {
+  translate: none;
+}
+
+html:not(.js) .picker-cursor {
+  display: none;
+}
+
+html:not(.js) .picker-list li.is-active {
+  background: rgba(206, 255, 82, 0.06);
+}
+
+html:not(.js) [data-reveal] {
+  opacity: 1;
+  translate: none;
+  transition: none;
+}
+
+html:not(.js) .terminal .tl {
+  clip-path: none;
 }
