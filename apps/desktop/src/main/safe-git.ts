@@ -89,6 +89,9 @@ export function safeGitInvocationArgs(
     ]);
   return [
     '--no-pager',
+    '--no-replace-objects',
+    ...(process.platform === 'win32' ? ['-c', 'core.protectNTFS=true'] : []),
+    ...(process.platform === 'darwin' ? ['-c', 'core.protectHFS=true'] : []),
     '-c',
     'core.hooksPath=',
     '-c',

@@ -721,10 +721,51 @@ jobs:
             test "${SMOKE_RESULT}" = 'success'
           fi
 
+  archify-packaged:
+    name: Archify packaged (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-2022]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Initialize MSVC for packaged graph workers
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+      - name: Prepare packaged native dependencies
+        run: npm run prepare:desktop --workspace @sprint-coder/desktop
+      - name: Exercise the real bundled Archify worker and sandboxed viewer
+        env:
+          SPRINT_CODER_E2E_MODE: packaged
+          # A dedicated runner exercises normal window presentation. Hidden CI windows
+          # can pass DOM hit tests while dropping native mouse delivery into the iframe.
+          # Local E2E retains its independently configured hidden/non-focus mode.
+          SPRINT_CODER_E2E_HIDDEN: '0'
+          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
+        run: npm run e2e -- tests/e2e/archify-graph.spec.ts
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: archify-packaged-${{ matrix.os }}
+          path: test-results
+          if-no-files-found: ignore
+
   required:
     name: CI required
     if: always()
-    needs: [quality-result, macos-result, windows-result, computer-use-native-gate]
+    needs:
+      [quality-result, macos-result, windows-result, computer-use-native-gate, archify-packaged]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -734,8 +775,10 @@ jobs:
           MACOS_RESULT: ${{ needs.macos-result.result }}
           WINDOWS_RESULT: ${{ needs.windows-result.result }}
           COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
+          ARCHIFY_RESULT: ${{ needs.archify-packaged.result }}
         run: |
           test "${QUALITY_RESULT}" = 'success'
           test "${MACOS_RESULT}" = 'success'
           test "${WINDOWS_RESULT}" = 'success'
           test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'
+          test "${ARCHIFY_RESULT}" = 'success'

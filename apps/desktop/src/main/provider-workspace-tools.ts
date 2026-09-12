@@ -14,6 +14,8 @@ import {
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
 import { FileRevisionRegistry } from './file-revision';
+import { GraphReadReceipts } from './graph-sources';
+import { GRAPH_TOOLS, registerGraphTools, type GraphToolBoundary } from './graph-tools';
 import {
   createPathGuard,
   openGuardedExistingFile,
@@ -348,6 +350,9 @@ const descriptions = new Map([
   [PROJECT_MEMORY_TOOL.providerName, PROJECT_MEMORY_TOOL.description],
   [SKILL_DRAFT_TOOL.providerName, SKILL_DRAFT_TOOL.description],
   [SKILL_ACTIVATE_TOOL.providerName, SKILL_ACTIVATE_TOOL.description],
+  ...GRAPH_TOOLS.map(
+    (tool) => [tool.providerName, tool.description] as [string, string | undefined],
+  ),
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -361,6 +366,7 @@ type WorkspaceToolDeps = Readonly<{
   providerFor?(turnId: string, callId: string): string | undefined;
   policyEpochFor(taskId: string): number;
   authorizer: ToolAuthorizer;
+  graphs?: GraphToolBoundary;
   lifecycle?: (event: ManagedToolLifecycleEvent) => void;
   command?: CommandToolBoundary;
   workspaceEdit?: WorkspacePatchDeps;
@@ -410,6 +416,7 @@ type PreparedWorkspaceInput = Readonly<{
 const issuedPreparedInputs = new WeakSet<object>();
 
 export class ManagedCodingHarness {
+  private readonly graphReads = new GraphReadReceipts();
   readonly broker: ToolBroker;
   private readonly revisions: FileRevisionRegistry;
   private readonly providersByTurn = new Map<string, string>();
@@ -427,6 +434,7 @@ export class ManagedCodingHarness {
     registry.register(UPDATE_PLAN_TOOL);
     registry.register(REQUEST_USER_INPUT_TOOL);
     registry.register(APPROVAL_PROBE_TOOL);
+    if (deps.graphs) for (const tool of GRAPH_TOOLS) registry.register(tool);
     if (deps.command !== undefined) registry.register(COMMAND_RUNNER_TOOL);
     if (deps.command !== undefined)
       for (const definition of [
@@ -448,6 +456,14 @@ export class ManagedCodingHarness {
         registry.register(definition);
     this.broker = new ToolBroker(registry, deps.policyEpochFor, deps.authorizer, deps.lifecycle);
     registerApprovalProbeTool(this.broker);
+    if (deps.graphs)
+      registerGraphTools(this.broker, deps.graphs, (requests, context, control) =>
+        this.graphReads.resolve(
+          requests,
+          context,
+          deps.workspaceFor(context.taskId, context.turnId, control.callId)?.digest ?? null,
+        ),
+      );
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
       this.commandSessions = sessions;
@@ -619,6 +635,7 @@ export class ManagedCodingHarness {
       VIEW_IMAGE_TOOL.toolId,
       UPDATE_PLAN_TOOL.toolId,
       REQUEST_USER_INPUT_TOOL.toolId,
+      ...(this.deps.graphs ? GRAPH_TOOLS.map((tool) => tool.toolId) : []),
       ...(mockFixture === 'approval' ? [APPROVAL_PROBE_TOOL.toolId] : []),
       ...(mockFixture === 'command' && this.commandSandboxAvailable
         ? [COMMAND_RUNNER_TOOL.toolId]
@@ -666,6 +683,7 @@ export class ManagedCodingHarness {
   }
 
   async policyEpochChanged(taskId: string): Promise<void> {
+    this.deps.graphs?.policyEpochChanged?.(taskId);
     await this.commandSessions?.terminateTask(taskId);
   }
 
@@ -675,6 +693,8 @@ export class ManagedCodingHarness {
   }
 
   finishTurn(taskId: string, turnId: string): void {
+    this.graphReads.finishTurn(taskId, turnId);
+    this.deps.graphs?.finishTurn?.(taskId, turnId);
     this.broker.finishTurn(taskId, turnId);
     this.revisions.finishTurn({ taskId, turnId });
     this.providersByTurn.delete(JSON.stringify([taskId, turnId]));
@@ -821,6 +841,21 @@ export class ManagedCodingHarness {
       assessed.redactedContent,
       input.raw as ReturnType<typeof parseWorkspaceInput>,
     );
+    if (this.deps.graphs)
+      this.graphReads.record({
+        context,
+        workspaceDigest: input.workspace.digest,
+        guard: input.guard,
+        observed: this.revisions.observed({
+          owner: context,
+          reference: read.reference,
+          policyEpoch: context.policyEpoch,
+        }),
+        disclosed: assessed.redactedContent,
+        returned: ranged.content,
+        range: ranged.range,
+        observedAt: new Date().toISOString(),
+      });
     return {
       rootId: input.rootId,
       rootLabel: input.rootLabel,

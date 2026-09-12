@@ -1,6 +1,30 @@
+import {
+  graphStartActivationIntent,
+  graphResumeActivationIntent,
+  graphResumeStepActivationIntent,
+} from '../graph-activation-intent';
 import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
 import {
+  graphRenderInputSchema,
+  graphGetInputSchema,
+  graphCancelInputSchema,
+  graphHistoryInputSchema,
+  graphHistorySchema,
+  graphCompareInputSchema,
+  graphDiffSchema,
+  graphGenerationSchema,
+  graphSourceRefSchema,
+  graphSourcesInputSchema,
+  graphSourcePreviewInputSchema,
+  graphSourcePreviewSchema,
+  graphSourceCheckInputSchema,
+  graphSourceStatusSchema,
+  graphMissionReviewSchema,
+  graphMissionStartInputSchema,
+  graphMissionResumeInputSchema,
+  graphReleaseInputSchema,
+  graphViewSchema,
   IPC_CHANNELS,
   anthropicConnectionCreateInputSchema,
   appInfoSchema,
@@ -271,6 +295,118 @@ window.addEventListener(
 );
 
 const api: SprintCoderApi = {
+  graphs: {
+    resumeStep: async (input) => {
+      const parsed = graphMissionResumeInputSchema.parse(input);
+      const activation = trustedComputerUseActivation.consume('graph-resume-step');
+      if (activation?.intent !== graphResumeStepActivationIntent(parsed))
+        throw new Error('計画の工程再開ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsMissionResumeStep,
+        graphMissionResumeInputSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
+    resumeIntegration: async (input) => {
+      const parsed = graphMissionResumeInputSchema.parse(input);
+      const activation = trustedComputerUseActivation.consume('graph-resume');
+      if (activation?.intent !== graphResumeActivationIntent(parsed))
+        throw new Error('計画の統合再開ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsMissionResumeIntegration,
+        graphMissionResumeInputSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
+    startMission: async (input) => {
+      const parsed = graphMissionStartInputSchema.parse(input);
+      const activation = trustedComputerUseActivation.consume('graph-start');
+      if (activation?.intent !== graphStartActivationIntent(parsed))
+        throw new Error('計画の開始ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsMissionStart,
+        graphMissionStartInputSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
+    reviewMission: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsMissionReview,
+        graphSourceCheckInputSchema,
+        graphMissionReviewSchema,
+        input,
+      ),
+    checkSources: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsSourceCheck,
+        graphSourceCheckInputSchema,
+        graphSourceStatusSchema,
+        input,
+      ),
+    subscribeSources: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        const parsed = graphSourceStatusSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.graphsSourceStatus, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.graphsSourceStatus, handler);
+    },
+    sources: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsSources,
+        graphSourcesInputSchema,
+        z.array(graphSourceRefSchema).max(64),
+        input,
+      ),
+    previewSource: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsSourcePreview,
+        graphSourcePreviewInputSchema,
+        graphSourcePreviewSchema,
+        input,
+      ),
+    render: (input) =>
+      invoke(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, input),
+    get: (taskId) =>
+      invoke(IPC_CHANNELS.graphsGet, graphGetInputSchema, graphViewSchema.nullable(), { taskId }),
+    generation: (taskId) =>
+      invoke(IPC_CHANNELS.graphsGeneration, graphGetInputSchema, graphGenerationSchema.nullable(), {
+        taskId,
+      }),
+    subscribeGeneration: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        const parsed = graphGenerationSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.graphsGenerationUpdated, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.graphsGenerationUpdated, handler);
+    },
+    history: (input) =>
+      invoke(IPC_CHANNELS.graphsHistory, graphHistoryInputSchema, graphHistorySchema, input),
+    compare: (input) =>
+      invoke(IPC_CHANNELS.graphsCompare, graphCompareInputSchema, graphDiffSchema, input),
+    cancel: (taskId, generationId) =>
+      invoke(IPC_CHANNELS.graphsCancel, graphCancelInputSchema, z.undefined(), {
+        taskId,
+        generationId,
+      }),
+    release: (taskId, instanceId) =>
+      invoke(IPC_CHANNELS.graphsRelease, graphReleaseInputSchema, z.undefined(), {
+        taskId,
+        instanceId,
+      }),
+    subscribe: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        const parsed = graphViewSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.graphsUpdated, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.graphsUpdated, handler);
+    },
+  },
   app: { getInfo: () => invoke(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, {}) },
   computerUse: {
     availability: () =>

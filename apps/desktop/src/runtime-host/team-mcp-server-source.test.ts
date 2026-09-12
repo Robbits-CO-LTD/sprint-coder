@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { TEAM_HIRE_WORKER_TOOL } from '../main/team-tools';
+import { GRAPH_TOOLS } from '../main/graph-tools';
 import { WORKER_TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 // Exercises the exact script string the Claude adapter writes to disk and hands to the real
@@ -358,6 +359,42 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     harness.send({ jsonrpc: '2.0', id: 32, method: 'tools/list' });
     const reply = await harness.nextMessage();
     expect(reply['result']).toEqual({ tools: [] });
+  });
+
+  it('publishes graph tools from the sealed managed inventory and forwards their draft arguments', async () => {
+    const managedTools = GRAPH_TOOLS.map((tool) => {
+      const inputSchema = tool.inputSchema;
+      if (inputSchema === null || typeof inputSchema !== 'object' || Array.isArray(inputSchema))
+        throw new Error('Graph input schema must be an object');
+      return { name: tool.providerName, description: tool.description ?? '', inputSchema };
+    });
+    const harness = await startHarness({ allowedTools: [], managedTools });
+    harness.send({ jsonrpc: '2.0', id: 60, method: 'tools/list' });
+    const listed = await harness.nextMessage();
+    expect((listed['result'] as { tools: unknown[] }).tools).toEqual(managedTools);
+    const args = {
+      expectedRenderRevision: 0,
+      diagram: { diagram_type: 'architecture', meta: { title: 'Draft' } },
+    };
+    harness.send({
+      jsonrpc: '2.0',
+      id: 61,
+      method: 'tools/call',
+      params: { name: 'graph_propose_document', arguments: args },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 1);
+    expect(harness.bridgeReceived[0]).toMatchObject({
+      token: 'test-bridge-token-0123456789',
+      tool: 'graph_propose_document',
+      args,
+    });
+    harness.bridgeRespond({ ok: true, result: { phase: 'draft', executionStarted: false } });
+    const reply = await harness.nextMessage();
+    expect(reply['result']).toMatchObject({
+      content: [
+        { type: 'text', text: JSON.stringify({ phase: 'draft', executionStarted: false }) },
+      ],
+    });
   });
 
   it('deduplicates a static capability when the same tool comes from the managed catalog', async () => {

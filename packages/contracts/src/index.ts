@@ -655,6 +655,8 @@ export type TeamExecutionIsolation = z.infer<typeof teamExecutionIsolationSchema
 
 export const teamExecutionSummarySchema = z
   .object({
+    waitingForWorker: z.boolean().optional(),
+    workerQueueDepth: z.number().int().nonnegative().optional(),
     id: idSchema,
     teamId: idSchema,
     assigneeAgentId: idSchema,
@@ -726,6 +728,132 @@ export const teamMissionStepInputSchema = z
   })
   .strict();
 export type TeamMissionStepInput = z.infer<typeof teamMissionStepInputSchema>;
+export const graphMissionKeySchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u);
+const graphClaimKeySchema = z.string().regex(/^[a-z][a-z0-9._-]{0,63}$/u);
+export const graphWriteClaimSchema = z
+  .object({
+    rootId: idSchema,
+    path: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine(
+        (value) =>
+          !/[\\:*?[\]{}\0]/u.test(value) &&
+          value.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..'),
+      )
+      .nullable(),
+    semanticKeys: z.array(graphClaimKeySchema).max(32),
+  })
+  .strict();
+export const graphResourceClaimSchema = z
+  .object({
+    scope: z.enum(['machine', 'workspace']),
+    key: graphClaimKeySchema,
+    rootId: idSchema.nullable(),
+  })
+  .strict()
+  .refine((value) => (value.scope === 'machine') === (value.rootId === null));
+export const graphMissionStepSchema = teamMissionStepInputSchema
+  .extend({
+    key: graphMissionKeySchema,
+    nodeId: graphMissionKeySchema,
+    dependsOn: z.array(graphMissionKeySchema).max(11),
+    writeClaims: z.array(graphWriteClaimSchema).max(64),
+    resourceClaims: z.array(graphResourceClaimSchema).max(16),
+  })
+  .strict()
+  .refine((step) => step.access !== 'read-only' || step.writeClaims.length === 0);
+export const graphMissionPlanSchema = z
+  .object({
+    mode: z.literal('graph'),
+    objective: z.string().min(1).max(20_000),
+    doneCriteria: z.array(z.string().min(1).max(1000)).min(1).max(64),
+    steps: z.array(graphMissionStepSchema).min(2).max(12),
+  })
+  .strict();
+export type GraphMissionPlan = z.infer<typeof graphMissionPlanSchema>;
+const graphNullableStringJsonSchema = () =>
+  ({
+    allOf: [{ if: { not: { type: 'null' } }, then: { type: 'string' } }],
+  }) as const;
+export const GRAPH_MISSION_PLAN_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    mode: { const: 'graph' },
+    objective: { type: 'string', minLength: 1, maxLength: 20_000 },
+    doneCriteria: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 64,
+      items: { type: 'string', minLength: 1, maxLength: 1000 },
+    },
+    steps: {
+      type: 'array',
+      minItems: 2,
+      maxItems: 12,
+      items: {
+        type: 'object',
+        properties: {
+          key: { type: 'string' },
+          nodeId: { type: 'string' },
+          workerId: { type: 'string' },
+          objective: { type: 'string', minLength: 1, maxLength: 10_000 },
+          doneCriteria: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 20,
+            items: { type: 'string', minLength: 1, maxLength: 1000 },
+          },
+          access: { enum: ['read-only', 'workspace-write'] },
+          dependsOn: { type: 'array', maxItems: 11, items: { type: 'string' } },
+          writeClaims: {
+            type: 'array',
+            maxItems: 64,
+            items: {
+              type: 'object',
+              properties: {
+                rootId: { type: 'string' },
+                path: graphNullableStringJsonSchema(),
+                semanticKeys: { type: 'array', maxItems: 32, items: { type: 'string' } },
+              },
+              required: ['rootId', 'path', 'semanticKeys'],
+              additionalProperties: false,
+            },
+          },
+          resourceClaims: {
+            type: 'array',
+            maxItems: 16,
+            items: {
+              type: 'object',
+              properties: {
+                scope: { enum: ['machine', 'workspace'] },
+                key: { type: 'string' },
+                rootId: graphNullableStringJsonSchema(),
+              },
+              required: ['scope', 'key', 'rootId'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: [
+          'key',
+          'nodeId',
+          'workerId',
+          'objective',
+          'doneCriteria',
+          'access',
+          'dependsOn',
+          'writeClaims',
+          'resourceClaims',
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['mode', 'objective', 'doneCriteria', 'steps'],
+  additionalProperties: false,
+} as const;
 export const teamAssignMissionInputSchema = z
   .object({
     taskId: idSchema,
@@ -757,6 +885,22 @@ export const teamMissionCheckpointSchema = z
 export type TeamMissionCheckpoint = z.infer<typeof teamMissionCheckpointSchema>;
 export const teamMissionStepSummarySchema = z
   .object({
+    graph: z
+      .object({
+        key: z.string().min(1).max(128),
+        nodeId: z.string().min(1).max(128),
+        generation: z.number().int().positive(),
+        resourceState: z.enum(['reserved', 'active', 'quarantined', 'released']).nullable(),
+        waitReason: z
+          .enum(['dependencies', 'resources', 'write-conflicts', 'owner-active'])
+          .nullable(),
+        integrationResumeAvailable: z.boolean(),
+        stepResumeAvailable: z.boolean(),
+        /** Already resumed by hand and waiting on the scheduler (dependencies, resources). */
+        stepResumePending: z.boolean(),
+      })
+      .strict()
+      .optional(),
     ordinal: z.number().int().min(1).max(12),
     executionId: idSchema,
     workerId: idSchema,
@@ -781,6 +925,11 @@ export const teamMissionStepSummarySchema = z
 export type TeamMissionStepSummary = z.infer<typeof teamMissionStepSummarySchema>;
 export const teamMissionSummarySchema = z
   .object({
+    mode: z.enum(['sequential', 'graph']).optional(),
+    graph: z
+      .object({ id: z.string().uuid(), semanticRevision: z.number().int().positive() })
+      .strict()
+      .optional(),
     id: idSchema,
     teamId: idSchema,
     createdByAgentId: idSchema,
@@ -3743,6 +3892,394 @@ export const commandResultSchema = <T extends z.ZodType>(value: T) =>
     z.object({ ok: z.literal(false), requestId: idSchema, error: publicErrorSchema }).strict(),
   ]);
 
+export const graphRenderInputSchema = z
+  .object({ taskId: idSchema, diagram: z.record(z.string(), z.unknown()) })
+  .strict();
+export const graphGetInputSchema = z.object({ taskId: idSchema }).strict();
+export const graphCancelInputSchema = graphGetInputSchema
+  .extend({ generationId: z.string().uuid().optional() })
+  .strict();
+export const graphReleaseInputSchema = graphGetInputSchema
+  .extend({ instanceId: z.string().uuid() })
+  .strict();
+export const graphElementIdSchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/u);
+export const graphSourceRequestSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('read'),
+      tokenId: z.string().uuid(),
+      elementKind: z.enum(['node', 'edge']),
+      elementId: graphElementIdSchema,
+      lineStart: z.number().int().positive(),
+      lineEnd: z.number().int().positive(),
+    })
+    .strict(),
+  z.object({ kind: z.literal('saved'), sourceId: z.string().uuid() }).strict(),
+]);
+export type GraphSourceRequest = z.infer<typeof graphSourceRequestSchema>;
+export const graphSourceRefSchema = z
+  .object({
+    id: z.string().uuid(),
+    elementKind: z.enum(['node', 'edge']),
+    elementId: graphElementIdSchema,
+    rootId: idSchema,
+    rootIdentityDigest: digestSchema,
+    path: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine(
+        (value) =>
+          !value.startsWith('/') &&
+          !value.includes('\\') &&
+          !value.includes('\0') &&
+          value.split('/').every((part) => part !== '..' && part !== '.' && part.length > 0),
+      ),
+    lineStart: z.number().int().positive(),
+    lineEnd: z.number().int().positive(),
+    contentHash: digestSchema,
+    excerptHash: digestSchema,
+    excerpt: z.string().max(16384),
+    observedAt: z.string().datetime(),
+  })
+  .strict()
+  .refine((value) => value.lineStart <= value.lineEnd);
+export type GraphSourceRef = z.infer<typeof graphSourceRefSchema>;
+export const graphSourcesInputSchema = z
+  .object({
+    taskId: idSchema,
+    renderRevision: z.number().int().positive(),
+    elementKind: z.enum(['node', 'edge']),
+    elementId: graphElementIdSchema,
+  })
+  .strict();
+export const graphSourcePreviewInputSchema = z
+  .object({
+    taskId: idSchema,
+    renderRevision: z.number().int().positive(),
+    sourceId: z.string().uuid(),
+  })
+  .strict();
+export const graphSourcePreviewSchema = z
+  .object({
+    source: graphSourceRefSchema,
+    status: z.enum(['current', 'changed', 'root_changed', 'missing', 'unavailable']),
+    currentExcerpt: z.string().max(16384).nullable(),
+    truncated: z.boolean(),
+  })
+  .strict();
+export type GraphSourcePreview = z.infer<typeof graphSourcePreviewSchema>;
+export const graphSourceCheckInputSchema = z
+  .object({
+    taskId: idSchema,
+    renderRevision: z.number().int().positive(),
+    instanceId: z.string().uuid(),
+  })
+  .strict();
+export type GraphSourceCheckInput = z.infer<typeof graphSourceCheckInputSchema>;
+export const graphSourceStatusSchema = graphSourceCheckInputSchema
+  .extend({
+    sequence: z.number().int().positive(),
+    phase: z.enum(['checking', 'checked']),
+    checkedAt: z.string().datetime().nullable(),
+    monitoring: z.boolean(),
+    sources: z
+      .array(
+        z
+          .object({ sourceId: z.string().uuid(), status: graphSourcePreviewSchema.shape.status })
+          .strict(),
+      )
+      .max(64),
+  })
+  .strict();
+export type GraphSourceStatus = z.infer<typeof graphSourceStatusSchema>;
+export const graphMissionResumeInputSchema = graphSourceCheckInputSchema
+  .extend({
+    missionId: idSchema,
+    stepKey: graphMissionKeySchema,
+    generation: z.number().int().positive(),
+  })
+  .strict();
+export type GraphMissionResumeInput = z.infer<typeof graphMissionResumeInputSchema>;
+export const graphMissionStartInputSchema = graphSourceCheckInputSchema
+  .extend({ contextDigest: digestSchema })
+  .strict();
+export type GraphMissionStartInput = z.infer<typeof graphMissionStartInputSchema>;
+export const graphMissionReviewSchema = graphSourceCheckInputSchema
+  .extend({
+    contextDigest: digestSchema,
+    checkedAt: z.string().datetime(),
+    matched: z.boolean(),
+    issues: z
+      .array(
+        z
+          .object({
+            stepKey: graphMissionKeySchema.nullable(),
+            rootId: idSchema.nullable(),
+            path: z.string().max(1024).nullable(),
+            code: z.enum([
+              'plan_missing',
+              'team_unavailable',
+              'worker_unavailable',
+              'worker_busy',
+              'write_denied',
+              'root_unavailable',
+              'root_changed',
+              'path_unavailable',
+              'source_changed',
+              'state_changed',
+            ]),
+          })
+          .strict(),
+      )
+      .max(1100),
+  })
+  .strict();
+export type GraphMissionReview = z.infer<typeof graphMissionReviewSchema>;
+export const graphAnnotationSchema = z
+  .object({
+    elementKind: z.enum(['node', 'edge']),
+    elementId: graphElementIdSchema,
+    basis: z.enum(['inferred', 'proposed']),
+    rationale: z.string().min(1).max(1000),
+  })
+  .strict();
+export type GraphAnnotation = z.infer<typeof graphAnnotationSchema>;
+export const graphDocumentSchema = z
+  .object({
+    id: z.string().uuid(),
+    taskId: idSchema,
+    kind: z.enum(['architecture', 'workflow']),
+    title: z.string().min(1).max(160),
+    semanticRevision: z.number().int().positive(),
+    renderRevision: z.number().int().positive(),
+    semanticDigest: digestSchema,
+    diagram: z.record(z.string(), z.unknown()),
+    sources: z.array(graphSourceRefSchema).max(64).default([]),
+    annotations: z.array(graphAnnotationSchema).max(256).default([]),
+    missionPlan: graphMissionPlanSchema.nullable().default(null),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type GraphDocument = z.infer<typeof graphDocumentSchema>;
+export const graphGenerationSchema = z
+  .object({
+    id: z.string().uuid(),
+    taskId: idSchema,
+    sequence: z.number().int().positive(),
+    state: z.enum(['running', 'canceling', 'succeeded', 'failed', 'canceled', 'interrupted']),
+    proposedTitle: z.string().min(1).max(160).nullable(),
+    baseRenderRevision: z.number().int().nonnegative(),
+    resultRenderRevision: z.number().int().positive().nullable(),
+    failureStage: z.enum(['input', 'engine', 'render', 'check', 'publish']).nullable(),
+    startedAt: z.string().datetime(),
+    finishedAt: z.string().datetime().nullable(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const active = value.state === 'running' || value.state === 'canceling';
+    if (
+      active !== (value.finishedAt === null) ||
+      (value.state === 'succeeded') !== (value.resultRenderRevision !== null) ||
+      (value.state === 'failed') !== (value.failureStage !== null)
+    )
+      context.addIssue({ code: 'custom', message: 'Inconsistent graph generation state' });
+  });
+export type GraphGeneration = z.infer<typeof graphGenerationSchema>;
+export const graphHistoryInputSchema = graphGetInputSchema
+  .extend({
+    beforeRenderRevision: z.number().int().positive().optional(),
+  })
+  .strict();
+export const graphVersionSummarySchema = graphDocumentSchema.pick({
+  id: true,
+  taskId: true,
+  kind: true,
+  title: true,
+  semanticRevision: true,
+  renderRevision: true,
+  updatedAt: true,
+});
+export const graphHistorySchema = z
+  .object({
+    versions: z.array(graphVersionSummarySchema).max(25),
+    nextBeforeRenderRevision: z.number().int().positive().nullable(),
+  })
+  .strict();
+export const graphCompareInputSchema = z
+  .object({
+    taskId: idSchema,
+    beforeRenderRevision: z.number().int().positive(),
+    afterRenderRevision: z.number().int().positive(),
+  })
+  .strict()
+  .refine((value) => value.beforeRenderRevision < value.afterRenderRevision);
+export const graphDiffSchema = z
+  .object({
+    graphId: z.string().uuid(),
+    taskId: idSchema,
+    before: graphVersionSummarySchema,
+    after: graphVersionSummarySchema,
+    contentChanged: z.boolean(),
+    presentationOnly: z.boolean(),
+    changes: z
+      .array(
+        z
+          .object({
+            kind: z.enum([
+              'node',
+              'edge',
+              'lane',
+              'phase',
+              'group',
+              'diagram',
+              'source',
+              'annotation',
+              'mission',
+              'step',
+            ]),
+            id: z.string().max(4000).nullable(),
+            action: z.enum(['added', 'removed', 'changed']),
+            beforeLabel: z.string().max(4000).nullable(),
+            afterLabel: z.string().max(4000).nullable(),
+            fields: z
+              .array(
+                z
+                  .object({
+                    name: z.string().max(256),
+                    before: z.string().max(262144).nullable(),
+                    after: z.string().max(262144).nullable(),
+                  })
+                  .strict(),
+              )
+              .max(64),
+          })
+          .strict(),
+      )
+      .max(2725),
+  })
+  .strict();
+export type GraphHistoryInput = z.infer<typeof graphHistoryInputSchema>;
+export type GraphHistory = z.infer<typeof graphHistorySchema>;
+export type GraphVersionSummary = z.infer<typeof graphVersionSummarySchema>;
+export type GraphCompareInput = z.infer<typeof graphCompareInputSchema>;
+export type GraphDiff = z.infer<typeof graphDiffSchema>;
+export const graphViewSchema = z
+  .object({
+    id: z.string().uuid(),
+    taskId: idSchema,
+    revision: z.number().int().positive(),
+    renderRevision: z.number().int().positive(),
+    title: z.string().min(1).max(160),
+    kind: z.enum(['architecture', 'workflow']),
+    digest: digestSchema,
+    instanceId: z.string().uuid(),
+    viewRevision: z.number().int().positive(),
+    artifactUrl: z.string().regex(/^app:\/\/graph\/[a-f0-9-]{36}\?theme=dark$/u),
+    nodeIds: z.array(graphElementIdSchema).min(1).max(64),
+    edgeIds: z.array(graphElementIdSchema).max(192),
+    annotations: z.array(graphAnnotationSchema).max(256).optional(),
+    missionPlan: graphMissionPlanSchema.nullable().optional(),
+  })
+  .strict();
+export type GraphView = z.infer<typeof graphViewSchema>;
+export type GraphRenderInput = z.infer<typeof graphRenderInputSchema>;
+export const graphProposeToolInputSchema = z
+  .object({
+    diagram: z.record(z.string(), z.unknown()),
+    expectedRenderRevision: z.number().int().nonnegative(),
+    sources: z.array(graphSourceRequestSchema).max(64).default([]),
+    annotations: z.array(graphAnnotationSchema).max(256).default([]),
+    missionPlan: graphMissionPlanSchema.nullable().default(null),
+  })
+  .strict();
+export const graphReadToolInputSchema = z
+  .object({ renderRevision: z.number().int().positive().optional() })
+  .strict();
+export const GRAPH_PROPOSE_TOOL_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    diagram: { type: 'object' },
+    expectedRenderRevision: { type: 'integer', minimum: 0 },
+    missionPlan: {
+      allOf: [{ if: { not: { type: 'null' } }, then: GRAPH_MISSION_PLAN_JSON_SCHEMA }],
+    },
+    annotations: {
+      type: 'array',
+      maxItems: 256,
+      items: {
+        type: 'object',
+        properties: {
+          elementKind: { enum: ['node', 'edge'] },
+          elementId: { type: 'string' },
+          basis: { enum: ['inferred', 'proposed'] },
+          rationale: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+        required: ['elementKind', 'elementId', 'basis', 'rationale'],
+        additionalProperties: false,
+      },
+    },
+    sources: {
+      type: 'array',
+      maxItems: 64,
+      items: {
+        type: 'object',
+        properties: {
+          kind: { enum: ['read', 'saved'] },
+          tokenId: { type: 'string' },
+          sourceId: { type: 'string' },
+          elementKind: { enum: ['node', 'edge'] },
+          elementId: { type: 'string' },
+          lineStart: { type: 'integer', minimum: 1 },
+          lineEnd: { type: 'integer', minimum: 1 },
+        },
+        required: ['kind'],
+        additionalProperties: false,
+        allOf: [
+          {
+            if: { properties: { kind: { const: 'read' } }, required: ['kind'] },
+            then: {
+              required: ['tokenId', 'elementKind', 'elementId', 'lineStart', 'lineEnd'],
+              not: { required: ['sourceId'] },
+            },
+          },
+          {
+            if: { properties: { kind: { const: 'saved' } }, required: ['kind'] },
+            then: {
+              required: ['sourceId'],
+              allOf: [
+                { not: { required: ['tokenId'] } },
+                { not: { required: ['elementKind'] } },
+                { not: { required: ['elementId'] } },
+                { not: { required: ['lineStart'] } },
+                { not: { required: ['lineEnd'] } },
+              ],
+            },
+          },
+        ],
+      },
+    },
+  },
+  required: ['diagram', 'expectedRenderRevision'],
+  additionalProperties: false,
+} as const;
+export const GRAPH_READ_TOOL_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: { renderRevision: { type: 'integer', minimum: 1 } },
+  additionalProperties: false,
+} as const;
+export const graphSelectionSchema = z
+  .object({
+    type: z.literal('sprint-graph-selection'),
+    instanceId: z.string().uuid(),
+    graphId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    kind: z.enum(['node', 'edge']),
+    id: graphElementIdSchema,
+  })
+  .strict();
+export type GraphSelection = z.infer<typeof graphSelectionSchema>;
 export const emptyPayloadSchema = z.object({}).strict();
 export const skillCatalogItemSchema = z
   .object({
@@ -5111,6 +5648,27 @@ export type ComputerUseApi = {
 };
 
 export interface SprintCoderApi {
+  graphs: {
+    checkSources(input: GraphSourceCheckInput): Promise<GraphSourceStatus>;
+    reviewMission(input: GraphSourceCheckInput): Promise<GraphMissionReview>;
+    startMission(input: GraphMissionStartInput): Promise<TeamMissionSummary>;
+    resumeIntegration(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
+    resumeStep(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
+    subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
+    render(input: GraphRenderInput): Promise<GraphView>;
+    get(taskId: string): Promise<GraphView | null>;
+    generation(taskId: string): Promise<GraphGeneration | null>;
+    sources(input: z.infer<typeof graphSourcesInputSchema>): Promise<GraphSourceRef[]>;
+    previewSource(
+      input: z.infer<typeof graphSourcePreviewInputSchema>,
+    ): Promise<GraphSourcePreview>;
+    subscribeGeneration(listener: (generation: GraphGeneration) => void): () => void;
+    history(input: GraphHistoryInput): Promise<GraphHistory>;
+    compare(input: GraphCompareInput): Promise<GraphDiff>;
+    cancel(taskId: string, generationId?: string): Promise<void>;
+    release(taskId: string, instanceId: string): Promise<void>;
+    subscribe(listener: (view: GraphView) => void): () => void;
+  };
   /** Optional until the gated Computer Use capability is exposed by Main/Preload. */
   computerUse?: ComputerUseApi;
   app: { getInfo(): Promise<AppInfo> };
@@ -5430,6 +5988,23 @@ export interface SprintCoderApi {
 }
 
 export const IPC_CHANNELS = {
+  graphsRender: 'sprint-coder:graphs:render',
+  graphsGet: 'sprint-coder:graphs:get',
+  graphsGeneration: 'sprint-coder:graphs:generation',
+  graphsSources: 'sprint-coder:graphs:sources',
+  graphsSourcePreview: 'sprint-coder:graphs:source-preview',
+  graphsSourceCheck: 'sprint-coder:graphs:source-check',
+  graphsSourceStatus: 'sprint-coder:graphs:source-status',
+  graphsMissionReview: 'sprint-coder:graphs:mission-review',
+  graphsMissionStart: 'sprint-coder:graphs:mission-start',
+  graphsMissionResumeIntegration: 'sprint-coder:graphs:mission-resume-integration',
+  graphsMissionResumeStep: 'sprint-coder:graphs:mission-resume-step',
+  graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
+  graphsHistory: 'sprint-coder:graphs:history',
+  graphsCompare: 'sprint-coder:graphs:compare',
+  graphsCancel: 'sprint-coder:graphs:cancel',
+  graphsRelease: 'sprint-coder:graphs:release',
+  graphsUpdated: 'sprint-coder:graphs:updated',
   appGetInfo: 'sprint-coder:app:get-info',
   tasksList: 'sprint-coder:tasks:list',
   /** Push-only (webContents.send), never bound to an ipcMain.handle input schema. */

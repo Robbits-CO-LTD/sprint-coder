@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   existsSync,
   mkdtempSync,
@@ -41,6 +42,8 @@ import {
   validateCanvasNodePositions,
 } from './persistence';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
+import { nextGraphDocument } from './graph-document';
+import { GraphRenderService } from './graph-render';
 import { BUILTIN_TEAM_SKILL_FRAGMENT_ID } from './team-skill';
 import { modelSelectionForRuntime } from './connection-identity';
 import { PROVIDER_STREAM_LIMITS, ProviderQuotaExceededError } from './provider-stream-budget';
@@ -135,6 +138,277 @@ function bindMutationWorkspace(
 
 if (runsWithElectronAbi)
   describe('provider connections', () => {
+    it('preserves source snapshots and reads legacy graph rows that predate sources', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Graph source storage');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Source storage' },
+        components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+        connections: [],
+      };
+      const first = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(first, 0);
+      const source = {
+        id: randomUUID(),
+        elementKind: 'node' as const,
+        elementId: 'api',
+        rootId: 'root-a',
+        rootIdentityDigest: 'a'.repeat(64),
+        path: 'code.ts',
+        lineStart: 1,
+        lineEnd: 1,
+        contentHash: 'b'.repeat(64),
+        excerpt: 'const value = 1;',
+        excerptHash: createHash('sha256').update('const value = 1;').digest('hex'),
+        observedAt: '2026-09-11T00:00:00Z',
+      };
+      const second = nextGraphDocument(task.id, diagram, first, [source]);
+      persistence.saveGraphDocument(second, 1);
+      persistence.close();
+      const raw = new Database(path);
+      const { sources: _sources, ...legacy } = first;
+      raw
+        .prepare(
+          'UPDATE graph_document_versions SET document_json = ? WHERE task_id = ? AND render_revision = 1',
+        )
+        .run(JSON.stringify(legacy), task.id);
+      raw.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphDocumentVersion(task.id, 1)).toEqual(first);
+      expect(reopened.getGraphDocument(task.id)).toEqual(second);
+      reopened.close();
+    });
+    it('persists graph failures and recovers only unfinished generation attempts', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Generation lifecycle');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Saved' },
+        components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+        connections: [],
+      };
+      const first = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(first, 0);
+      const canceled = persistence.beginGraphGeneration(task.id, 'Canceled', 1);
+      persistence.cancelGraphGeneration(task.id, canceled.id);
+      const candidate = nextGraphDocument(
+        task.id,
+        { ...diagram, meta: { title: 'Replacement' } },
+        first,
+      );
+      expect(() => persistence.saveGraphDocument(candidate, 1, canceled.id)).toThrow();
+      expect(persistence.getGraphDocument(task.id)).toEqual(first);
+      persistence.finishGraphGeneration(task.id, canceled.id, 'canceled', null);
+      const rejected = persistence.beginGraphGeneration(task.id, 'Rejected', 1);
+      expect(() =>
+        persistence.finishGraphGeneration(task.id, canceled.id, 'failed', 'publish'),
+      ).toThrow();
+      const failed = persistence.finishGraphGeneration(task.id, rejected.id, 'failed', 'check');
+      persistence.close();
+      let reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphGeneration(task.id)).toEqual(failed);
+      expect(reopened.getGraphDocument(task.id)).toEqual(first);
+      const unfinished = reopened.beginGraphGeneration(task.id, 'Unfinished', 1);
+      reopened.close();
+      reopened = new SqlitePersistenceClient(path);
+      const interrupted = reopened.getGraphGeneration(task.id)!;
+      expect(interrupted).toMatchObject({
+        id: unfinished.id,
+        state: 'interrupted',
+        sequence: unfinished.sequence + 1,
+      });
+      reopened.close();
+      reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphGeneration(task.id)).toEqual(interrupted);
+      const successful = reopened.beginGraphGeneration(task.id, 'Replacement', 1);
+      reopened.saveGraphDocument(candidate, 1, successful.id);
+      reopened.close();
+      reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphGeneration(task.id)).toMatchObject({
+        id: successful.id,
+        state: 'succeeded',
+        resultRenderRevision: 2,
+      });
+      expect(reopened.getGraphDocument(task.id)).toEqual(candidate);
+      reopened.close();
+    });
+
+    it('adds generation state to a v84 graph database without changing saved versions', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Existing graph');
+      const document = nextGraphDocument(
+        task.id,
+        {
+          schema_version: 1,
+          diagram_type: 'architecture',
+          meta: { title: 'Existing' },
+          components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+          connections: [],
+        },
+        null,
+      );
+      persistence.saveGraphDocument(document, 0);
+      persistence.close();
+      const old = new Database(path);
+      old.exec(
+        'DROP TABLE graph_generation_status; DELETE FROM schema_migrations WHERE version = 85;',
+      );
+      old.close();
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getGraphDocument(task.id)).toEqual(document);
+      expect(migrated.getGraphGeneration(task.id)).toBeNull();
+      migrated.close();
+    });
+
+    it('persists graph history, rejects stale writes and restores semantic revisions', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Graph owner');
+      const other = persistence.createTask('Other graph');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Plan' },
+        components: [{ id: 'service', type: 'backend', label: 'Service', pos: [40, 40] }],
+        connections: [],
+      };
+      const first = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(first, 0);
+      const redraw = nextGraphDocument(
+        task.id,
+        {
+          ...diagram,
+          components: [{ ...diagram.components[0]!, pos: [200, 100] }],
+        },
+        first,
+      );
+      persistence.saveGraphDocument(redraw, 1);
+      const revised = nextGraphDocument(
+        task.id,
+        { ...diagram, meta: { title: 'Revised plan' } },
+        redraw,
+        [],
+        [
+          {
+            elementKind: 'node',
+            elementId: 'service',
+            basis: 'proposed',
+            rationale: 'New service boundary',
+          },
+        ],
+      );
+      persistence.saveGraphDocument(revised, 2);
+      expect(() => persistence.saveGraphDocument(revised, 2)).toThrow('revision conflict');
+      expect(persistence.getGraphDocument(other.id)).toBeNull();
+      expect(persistence.getGraphDocumentVersion(task.id, 1)).toEqual(first);
+      expect(persistence.getGraphDocumentVersion(other.id, 1)).toBeNull();
+      expect(persistence.getGraphDocumentVersion(task.id, 999)).toBeNull();
+      expect(persistence.listGraphDocumentVersions(task.id, 1, 3)).toEqual([redraw]);
+      expect(() => persistence.listGraphDocumentVersions(task.id, 25, -1)).toThrow('cursor');
+      expect(
+        persistence
+          .listGraphDocumentVersions(task.id)
+          .map((doc) => [doc.renderRevision, doc.semanticRevision]),
+      ).toEqual([
+        [3, 2],
+        [2, 1],
+        [1, 1],
+      ]);
+      expect(() =>
+        persistence.saveGraphDocument({ ...revised, taskId: 'missing-task' }, 0),
+      ).toThrow();
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphDocument(task.id)).toEqual(revised);
+      expect(reopened.listGraphDocumentVersions(task.id)).toHaveLength(3);
+      reopened.close();
+      const db = new Database(path);
+      db.pragma('foreign_keys = ON');
+      db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+      expect(db.prepare('SELECT COUNT(*) AS count FROM graph_document_versions').get()).toEqual({
+        count: 0,
+      });
+      expect(db.pragma('foreign_key_check')).toEqual([]);
+      db.close();
+    });
+
+    it('pages saved graph history without skipping or repeating versions', async () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('History pages');
+      const diagram = {
+        schema_version: 1,
+        diagram_type: 'architecture',
+        meta: { title: 'Version 1' },
+        components: [{ id: 'api', type: 'backend', label: 'API', pos: [40, 40] }],
+        connections: [],
+      };
+      let document = nextGraphDocument(task.id, diagram, null);
+      persistence.saveGraphDocument(document, 0);
+      for (let revision = 2; revision <= 30; revision++) {
+        document = nextGraphDocument(
+          task.id,
+          { ...diagram, meta: { title: `Version ${revision}` } },
+          document,
+        );
+        persistence.saveGraphDocument(document, revision - 1);
+      }
+      const run = vi.fn(async () => '');
+      const service = new GraphRenderService({
+        store: persistence,
+        vendorRoot: '/unused',
+        workRoot: '/unused',
+        workerPath: '/unused',
+        parentOrigin: 'app://bundle',
+        run,
+      });
+      const first = service.history({ taskId: task.id });
+      expect(first.versions).toHaveLength(25);
+      expect(first.nextBeforeRenderRevision).toBe(6);
+      const second = service.history({
+        taskId: task.id,
+        beforeRenderRevision: first.nextBeforeRenderRevision,
+      });
+      expect(second.nextBeforeRenderRevision).toBeNull();
+      expect([...first.versions, ...second.versions].map((entry) => entry.renderRevision)).toEqual(
+        Array.from({ length: 30 }, (_, index) => 30 - index),
+      );
+      expect(
+        service.compare({ taskId: task.id, beforeRenderRevision: 1, afterRenderRevision: 30 })
+          .changes[0]?.fields,
+      ).toEqual([{ name: 'title', before: 'Version 1', after: 'Version 30' }]);
+      expect(run).not.toHaveBeenCalled();
+      await service.dispose();
+      persistence.close();
+    });
+
+    it('adds graph storage to the v82 database without changing existing tasks', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('Before graph storage');
+      persistence.close();
+      const old = new Database(path);
+      old.exec(
+        'DROP TABLE graph_generation_status; DROP TABLE graph_document_versions; DELETE FROM schema_migrations WHERE version IN (84, 85);',
+      );
+      old.close();
+      const migrated = new SqlitePersistenceClient(path);
+      expect(migrated.getTask(task.id).title).toBe('Before graph storage');
+      expect(migrated.getGraphDocument(task.id)).toBeNull();
+      migrated.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getGraphDocument(task.id)).toBeNull();
+      reopened.close();
+      const verified = new Database(path);
+      expect(
+        verified
+          .prepare('SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 84')
+          .get(),
+      ).toEqual({ count: 1 });
+      expect(verified.pragma('foreign_key_check')).toEqual([]);
+      verified.close();
+    });
+
     it('migrates and owns image attachment drafts by Task', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('attachment owner');
@@ -7581,8 +7855,15 @@ if (runsWithElectronAbi)
         { version: 81 },
         { version: 82 },
         { version: 83 },
+        { version: 84 },
+        { version: 85 },
+        { version: 86 },
+        { version: 87 },
+        { version: 88 },
+        { version: 89 },
       ]);
       for (const [table, columns] of [
+        ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
         [
           'turns',
           [
@@ -7958,8 +8239,10 @@ else
   describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
     it(
       'runs the SQLite integration suite with the bundled Electron Node ABI',
-      () => {
-        const result = spawnSync(
+      async () => {
+        // The Windows child can exceed Vitest's 60s RPC deadline. Keep this worker's event loop
+        // available to receive reporting acknowledgements while SQLite tests run in Electron.
+        await promisify(execFile)(
           electronTestExecutablePath(),
           [
             join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -7971,9 +8254,9 @@ else
             encoding: 'utf8',
             env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
             timeout: persistenceBridgeTimeoutMs,
+            maxBuffer: 10 * 1024 * 1024,
           },
         );
-        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       },
       persistenceBridgeTimeoutMs + 5_000,
     );

@@ -142,6 +142,29 @@ export class FileRevisionRegistry {
     return Object.freeze({ content: record.content, token: record.token });
   }
 
+  /** Previously observed bytes only: this performs no I/O and makes no freshness claim. */
+  observed(input: {
+    owner: FileRevisionOwner;
+    reference: FileRevisionReference;
+    policyEpoch: number;
+  }): RevisionBoundFile {
+    validateOwner(input.owner);
+    const record = this.records.get(input.reference.tokenId);
+    if (!record || input.reference.version !== 1)
+      throw new FileRevisionError('FORGED_TOKEN', 'Unknown read reference');
+    if (record.owner.taskId !== input.owner.taskId || record.owner.turnId !== input.owner.turnId)
+      throw new FileRevisionError(
+        'TOKEN_SCOPE_MISMATCH',
+        'Read reference belongs to another Task or Turn',
+      );
+    if (record.token.policyEpoch !== input.policyEpoch)
+      throw new FileRevisionError(
+        'POLICY_EPOCH_CHANGED',
+        'Read reference belongs to an earlier policy',
+      );
+    return Object.freeze({ content: record.content, token: record.token });
+  }
+
   finishTurn(owner: FileRevisionOwner): number {
     validateOwner(owner);
     let removed = 0;

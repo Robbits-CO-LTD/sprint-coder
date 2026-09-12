@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -36,6 +36,83 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
 
     expect(result.baseHead).toBe(head);
     expect((await stat(result.path)).isDirectory()).toBe(true);
+  });
+
+  it('reads both rename endpoints and preserves quoted Unicode and control characters from sealed commits', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktree = await manager.create({ agentId: 'scope-test', repoPath });
+    await mkdir(join(worktree.path, 'allowed'));
+    await rename(join(worktree.path, 'README.md'), join(worktree.path, 'allowed', 'moved.md'));
+    const names = [
+      '日本語.txt',
+      '\ufeffname.txt',
+      ...(process.platform === 'win32' ? [] : ['tab\tname.txt', 'line\nname.txt']),
+    ];
+    for (const name of names) await writeFile(join(worktree.path, name), 'new');
+    const finalized = await manager.finalizeChanges({
+      agentId: 'scope-test',
+      repoPath,
+      baseHead: head,
+      commitMessage: 'sealed changes',
+    });
+    expect(finalized.changedFiles).toContain('README.md');
+    const changes = await manager.readSealedChanges({
+      repoPath,
+      baseHead: head,
+      workerHead: finalized.workerHead,
+    });
+    expect(changes).toContainEqual({ status: 'D', path: 'README.md' });
+    expect(changes).toContainEqual({ status: 'A', path: 'allowed/moved.md' });
+    for (const path of names) expect(changes).toContainEqual({ status: 'A', path });
+    expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(head);
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'refuses an undecodable Git filename before integration',
+    async () => {
+      const { repoPath, head, manager } = await fixture();
+      const worktree = await manager.create({ agentId: 'invalid-name', repoPath });
+      await writeFile(
+        Buffer.concat([Buffer.from(`${worktree.path}/`), Buffer.from([255])]),
+        'invalid name',
+      );
+      const finalized = await manager.finalizeChanges({
+        agentId: 'invalid-name',
+        repoPath,
+        baseHead: head,
+        commitMessage: 'invalid UTF-8',
+      });
+      await expect(
+        manager.readSealedChanges({ repoPath, baseHead: head, workerHead: finalized.workerHead }),
+      ).rejects.toThrow('not valid UTF-8');
+      expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(head);
+    },
+  );
+
+  it('inspects and integrates the sealed object even when replacement refs exist', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktree = await manager.create({ agentId: 'replace-ref', repoPath });
+    await writeFile(join(worktree.path, 'README.md'), 'sealed\n');
+    const sealed = await manager.finalizeChanges({
+      agentId: 'replace-ref',
+      repoPath,
+      baseHead: head,
+      commitMessage: 'sealed',
+    });
+    await writeFile(join(worktree.path, 'outside.txt'), 'replacement-only\n');
+    const replacement = await manager.finalizeChanges({
+      agentId: 'replace-ref',
+      repoPath,
+      baseHead: head,
+      commitMessage: 'replacement',
+    });
+    await git(['-C', repoPath, 'replace', sealed.workerHead, replacement.workerHead]);
+    expect(
+      await manager.readSealedChanges({ repoPath, baseHead: head, workerHead: sealed.workerHead }),
+    ).toEqual([{ status: 'M', path: 'README.md' }]);
+    await manager.integrate({ repoPath, baseHead: head, workerHead: sealed.workerHead });
+    expect(await readFile(join(repoPath, 'README.md'), 'utf8')).toBe('sealed\n');
+    await expect(stat(join(repoPath, 'outside.txt'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('groups multiple roots from the same clean repository', async () => {
