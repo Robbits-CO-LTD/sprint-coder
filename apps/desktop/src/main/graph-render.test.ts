@@ -281,9 +281,9 @@ describe('Archify generation boundary', () => {
   it('registers the selection bridge before the diagram the user can click', async () => {
     // Issue #464: the bridge used to be appended as the last child of <body>, behind the pinned
     // viewer's single ~9,400-line inline script, which the parser only reaches after the diagram's
-    // <svg>. The diagram was therefore painted and hit-testable while no click listener existed
-    // yet, and a click in that window was delivered to the frame and silently dropped. Its script
-    // must come first in the document, ahead of the viewer scripts and of any clickable markup.
+    // <svg> — so the diagram was painted while no click listener existed yet. Coming first in the
+    // document closes that window (the routing half of #464 is handled by the forwarded-click
+    // replay, covered in graph-html.test.ts).
     const template = await readFile(join(vendorRoot, 'assets/template.html'), 'utf8');
     const scripts = trustedArchifyScripts(template);
     const { html, csp } = prepareGraphHtml(template, scripts, {

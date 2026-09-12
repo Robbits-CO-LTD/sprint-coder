@@ -115,6 +115,35 @@ function displayedFrame(): HTMLIFrameElement {
   return frame;
 }
 
+/**
+ * jsdom has no layout, so give the iframe element a box the forwarded coordinates can be measured
+ * against, and watch what the panel posts into the artifact's window.
+ */
+function instrumentFrame(box: { left: number; top: number }): () => unknown[] {
+  const frame = displayedFrame();
+  frame.getBoundingClientRect = () =>
+    ({ left: box.left, top: box.top, width: 600, height: 400 }) as DOMRect;
+  const posted = vi.spyOn(frame.contentWindow!, 'postMessage');
+  // Execution state goes down the same channel, so keep only the forwarded clicks.
+  return () =>
+    posted.mock.calls
+      .map(([message]) => message)
+      .filter(
+        (message): message is Record<string, unknown> =>
+          typeof message === 'object' &&
+          message !== null &&
+          Reflect.get(message, 'type') === 'sprint-graph-click',
+      );
+}
+
+/** A click the parent renderer received on the iframe element instead of the frame consuming it. */
+async function clickIframeElement(at: { clientX: number; clientY: number }): Promise<void> {
+  const frame = displayedFrame();
+  await act(async () => {
+    frame.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, ...at }));
+  });
+}
+
 /** The instance the displayed artifact was served with, or null if that URL answers 404. */
 function servedInstance(): string | null {
   const url = new URL(displayedFrame().getAttribute('src')!);
@@ -172,6 +201,36 @@ it('refuses pointer input until the displayed artifact announces its listeners',
   await announceReady();
   expect(displayedFrame().getAttribute('data-graph-ready')).toBe('1');
   expect(container.querySelector('[data-testid="graph-frame-pending"]')).toBeNull();
+});
+
+// Issue #464's routing half: the artifact runs out of process, and until Chromium has registered
+// its hit-test region a click aimed at the diagram is delivered to the parent renderer, arriving
+// as a click on the iframe element. The panel forwards those so the artifact can replay them.
+it('forwards a click the iframe element received into the displayed artifact', async () => {
+  await mount(false);
+  await announceReady();
+  const forwarded = instrumentFrame({ left: 300, top: 100 });
+  await clickIframeElement({ clientX: 956, clientY: 315 });
+  expect(forwarded()).toEqual([
+    {
+      type: 'sprint-graph-click',
+      instanceId: service.minted[0],
+      graphId,
+      revision: 1,
+      x: 656,
+      y: 215,
+    },
+  ]);
+});
+
+it('does not forward a click before the displayed artifact can handle it', async () => {
+  await mount(false);
+  const forwarded = instrumentFrame({ left: 300, top: 100 });
+  await clickIframeElement({ clientX: 956, clientY: 315 });
+  expect(forwarded()).toEqual([]);
+  await announceReady();
+  await clickIframeElement({ clientX: 956, clientY: 315 });
+  expect(forwarded()).toHaveLength(1);
 });
 
 it('ignores a readiness announcement for an artifact that is not displayed', async () => {

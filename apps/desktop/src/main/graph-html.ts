@@ -15,12 +15,18 @@ const FORBIDDEN_TAGS = new Set([
 ]);
 // Injected as the FIRST child of <head> — see prepareGraphHtml. The pinned viewer is a single
 // ~9,400-line inline script that the parser only reaches AFTER the diagram's <svg>, so appending
-// this bridge to the end of <body> left a window in which the diagram was painted and
-// hit-testable while no click listener existed yet: the click was delivered to the frame and
-// silently dropped (issue #464). Registering from <head> puts the listeners in place before the
-// SVG element is even parsed, and the readiness announcement lets the panel refuse to present the
-// frame as interactive until then.
-const BRIDGE = `(() => {
+// this bridge to the end of <body> left a window in which the diagram was painted while no click
+// listener existed yet. Registering from <head> puts the listeners in place before the SVG element
+// is even parsed, and `sprint-graph-ready` tells the panel that much.
+//
+// Readiness is only about this document's listeners. It does not mean Chromium will route a click
+// here: the graph artifact runs out of process, and for roughly the first 100ms of the frame's life
+// a click aimed at it is delivered to the PARENT renderer, where it surfaces as a click on the
+// iframe element (issue #464 — measured with per-process listeners: 0 events in the frame, the
+// pointer sequence in the parent with `target` = the iframe). The parent forwards those as
+// `sprint-graph-click` and this bridge replays them, which is the only part that actually closes
+// the hole.
+export const GRAPH_BRIDGE_SCRIPT = `(() => {
   const root = document.documentElement;
   const send = (event) => {
     const element = event.target instanceof Element ? event.target.closest('[data-node-id],[data-edge-id],[data-relationship-hit-key][data-relationship-id]') : null;
@@ -37,7 +43,24 @@ const BRIDGE = `(() => {
   const saved = new Map();
   window.addEventListener('message', (event) => {
     const data = event.data;
-    if (event.source !== parent || !data || data.type !== 'sprint-graph-execution' || data.instanceId !== root.dataset.graphInstance || data.graphId !== root.dataset.graphId || data.revision !== Number(root.dataset.graphRevision) || !Array.isArray(data.nodes) || data.nodes.length > 64) return;
+    // Only the embedding renderer, and only for the artifact this document actually is.
+    if (event.source !== parent || !data || data.instanceId !== root.dataset.graphInstance || data.graphId !== root.dataset.graphId || data.revision !== Number(root.dataset.graphRevision)) return;
+    if (data.type === 'sprint-graph-click') {
+      // A click Chromium delivered to the parent instead of to this out-of-process frame. Replaying
+      // it on the element under the point puts it back on its normal path, so this bridge's own
+      // capture listener and the viewer's handlers both run exactly as they would have. This grants
+      // no capability the click did not already have: selecting an element only fills in the
+      // panel, and every privileged Graph action is gated on a real click in the parent document.
+      const x = data.x;
+      const y = data.y;
+      if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return;
+      const target = document.elementFromPoint(x, y);
+      // No \`view\`: the pinned viewer never reads \`event.view\` (its 85 \`.view\` accesses are all its
+      // own \`Archify.view\` state), and leaving it out keeps this replay constructible everywhere.
+      if (target) target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      return;
+    }
+    if (data.type !== 'sprint-graph-execution' || !Array.isArray(data.nodes) || data.nodes.length > 64) return;
     // The parent posts execution state for this exact artifact on every load, so answering it
     // re-announces readiness: the handshake cannot deadlock if the parent attached its own
     // listener after the announcements below.
@@ -177,10 +200,10 @@ export function prepareGraphHtml(
   // First child of <head>, ahead of the pinned viewer scripts and of the diagram markup, so the
   // selection listeners exist before anything the user can click has been parsed. Also wins the
   // capture phase over any viewer listener on `document`, whatever order those register in.
-  const adapter = parseFragment(`<script>${BRIDGE}</script>`).childNodes[0]!;
+  const adapter = parseFragment(`<script>${GRAPH_BRIDGE_SCRIPT}</script>`).childNodes[0]!;
   head.childNodes.unshift(adapter);
   adapter.parentNode = head;
-  const hashes = [...scripts, BRIDGE]
+  const hashes = [...scripts, GRAPH_BRIDGE_SCRIPT]
     .map((script) => `'sha256-${createHash('sha256').update(script).digest('base64')}'`)
     .join(' ');
   return {
