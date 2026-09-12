@@ -62,8 +62,15 @@ redaction="$(node -e '
     ["hex string >= 40", /\b[0-9a-f]{40,}\b/i],
   ];
   const hits = rules.filter(([, re]) => re.test(text)).map(([name]) => name);
-  for (const tok of text.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? [])
-    if (/[a-z]/.test(tok) && /[A-Z]/.test(tok) && /\d/.test(tok)) { hits.push("long mixed-case token"); break; }
+  // Long mixed-case alphanumeric tokens look like secrets. A "/" does NOT exempt a token (Base64
+  // and URL-embedded secrets contain "/"): the token is judged per path component, so a relative
+  // evidence path like evidence/claude/stray-tee-from-RA-05 passes (short components) while a
+  // 32+ char mixed-case component, or any 32+ char token carrying Base64 padding/plus, is flagged.
+  const suspiciousComponent = (t) => t.length >= 32 && /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && !t.includes(".");
+  for (const tok of text.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? []) {
+    if (/[+=]/.test(tok) && /[A-Za-z]/.test(tok) && /\d/.test(tok)) { hits.push("base64-like token"); break; }
+    if (tok.split("/").some(suspiciousComponent)) { hits.push("long mixed-case token"); break; }
+  }
   process.stdout.write(hits.join("; "));
 ' "$TITLE_FILE" "$BODY_FILE")"
 [ -z "$redaction" ] || errors+=("redaction_failed: $redaction")
