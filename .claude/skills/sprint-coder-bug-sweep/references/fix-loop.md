@@ -32,6 +32,14 @@ cd "$HOME/sprint-coder-fix-<n>" && npm ci && npm run prepare:desktop --workspace
 
 fresh worktree は native を build しないと E2E がアプリのバグのように落ちる（memory: sprint-coder-native-prereqs）。`npm ci` が install script を skip したら `node node_modules/electron/install.js` も要る。
 
+E2E を流す前に **その worktree を対象に** preflight を通す（`REPO_ROOT` を省くと skill が入っている checkout を見る）:
+
+```bash
+REPO_ROOT="$HOME/sprint-coder-fix-<n>" .claude/skills/sprint-coder-bug-sweep/scripts/preflight.sh
+```
+
+worker が worktree で `npm install` / `npm rebuild` を叩くと `better-sqlite3` が **Node ABI** で組み直され、main プロセスの初期化が `NODE_MODULE_VERSION` 不一致で落ちて全 spec が `firstWindow: Timeout` になる（2026-09-13 に #464 の検証で発生）。preflight の `better-sqlite3 target=… but Electron=…` BLOCK がそれで、直すのは `npm run prepare:desktop --workspace @sprint-coder/desktop`（または main checkout の Electron ABI 版 `.node` をコピー）。
+
 ## 3. 実装（Opus worker）
 
 - 最小修正 + 原因に隣接する回帰テスト（vitest。E2E で守るべきものなら該当 spec の追加/修正）。
