@@ -382,6 +382,10 @@ test('reviews and restores a proposed Mission without starting executions', asyn
 
 for (const starts of [false, true])
   test(`checks real Task agreement and ${starts ? 'starts only from a trusted control' : 'invalidates changed evidence'}`, async () => {
+    // Opt-in real Workers (SPRINT_CODER_REAL_WORKERS=1 reaches Main through launchApp's env):
+    // three real CLI turns plus integration take minutes, not the seconds the mock path needs.
+    const realWorkers = starts && process.env['SPRINT_CODER_REAL_WORKERS'] === '1';
+    if (realWorkers) test.setTimeout(900_000);
     const profile = createUserDataDir('graph-mission-review');
     const workspace = await mkdtemp(
       join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-review-'),
@@ -491,7 +495,7 @@ for (const starts of [false, true])
                 const team = await window.sprintCoder!.teams.get(id);
                 return team?.missions[0]?.state;
               }, taskId),
-            { timeout: 60000 },
+            { timeout: realWorkers ? 600_000 : 60000 },
           )
           .toBe('completed');
         const result = await page.evaluate(async (id) => {

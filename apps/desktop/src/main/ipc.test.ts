@@ -131,6 +131,8 @@ import {
   fileEditTrackingKey,
   IpcRouter,
   authorizationTurnIsActive,
+  workerManagedCatalogOwner,
+  isGraphMissionSessionTurn,
   invalidModelUserMessage,
   isCommittedProviderWorkspaceChange,
   isCommittedProviderWorkspaceMutation,
@@ -2438,6 +2440,107 @@ describe('Main image attachment dispatch boundary', () => {
     expect(authorizationTurnIsActive(null, 'task-worker', 'turn-parent', workers)).toBe(true);
     expect(authorizationTurnIsActive(null, 'task-worker', 'turn-other', workers)).toBe(false);
     expect(authorizationTurnIsActive(null, 'task-worker', 'turn-parent', [])).toBe(false);
+  });
+
+  describe('managed Worker catalog owner', () => {
+    const graphMissionContextForStub = (() => ({
+      workspace: { digest: 'w'.repeat(64) },
+      policyEpoch: 7,
+    })) as unknown as Parameters<typeof workerManagedCatalogOwner>[1];
+    const basePersistence: Record<string, () => unknown> = {
+      getActiveTurnId: () => null,
+      getTeamMissionForExecution: () => null,
+      getGraphTeamMission: () => null,
+      ensureGraphMissionSessionTurn: () => 'graph-mission:mission-1',
+      readTurnWorkspaceSetForTask: () => null,
+      getPermissionPolicy: () => ({ policyEpoch: 3 }),
+    };
+    const persistenceFor = (overrides: Partial<typeof basePersistence>) =>
+      ({ ...basePersistence, ...overrides }) as unknown as Parameters<
+        typeof workerManagedCatalogOwner
+      >[0];
+
+    it('binds a graph Mission Execution to the Mission session Turn without a chat Turn', () => {
+      const ensureGraphMissionSessionTurn = vi.fn(() => 'graph-mission:mission-1');
+      const owner = workerManagedCatalogOwner(
+        persistenceFor({
+          getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'graph' }) as never,
+          getGraphTeamMission: () => ({ contextDigest: 'c'.repeat(64) }) as never,
+          ensureGraphMissionSessionTurn,
+        }),
+        graphMissionContextForStub,
+        'task-1',
+        'execution-1',
+      );
+
+      expect(ensureGraphMissionSessionTurn).toHaveBeenCalledWith('task-1', 'mission-1');
+      expect(owner.parentTurnId).toBe('graph-mission:mission-1');
+      expect(isGraphMissionSessionTurn(owner.parentTurnId)).toBe(true);
+      expect(owner.policyEpoch).toBe(7);
+      expect(owner.workspaceId).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('reuses the same Mission workspace identity for every step of the Mission', () => {
+      const persistence = persistenceFor({
+        getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'graph' }) as never,
+        getGraphTeamMission: () => ({ contextDigest: 'c'.repeat(64) }) as never,
+      });
+      const first = workerManagedCatalogOwner(
+        persistence,
+        graphMissionContextForStub,
+        'task-1',
+        'execution-1',
+      );
+      const second = workerManagedCatalogOwner(
+        persistence,
+        graphMissionContextForStub,
+        'task-1',
+        'execution-2',
+      );
+
+      expect(second).toEqual(first);
+    });
+
+    it('still refuses a sequential Team Worker that has no active parent Turn', () => {
+      expect(() =>
+        workerManagedCatalogOwner(
+          persistenceFor({
+            getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'sequential' }) as never,
+          }),
+          graphMissionContextForStub,
+          'task-1',
+          'execution-1',
+        ),
+      ).toThrow('no active parent Turn');
+      expect(() =>
+        workerManagedCatalogOwner(
+          persistenceFor({}),
+          graphMissionContextForStub,
+          'task-1',
+          undefined,
+        ),
+      ).toThrow('no active parent Turn');
+    });
+
+    it('keeps the chat Turn binding when one is active', () => {
+      const owner = workerManagedCatalogOwner(
+        persistenceFor({
+          getActiveTurnId: () => 'turn-active',
+          getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'sequential' }) as never,
+          readTurnWorkspaceSetForTask: () => ({ digest: 'd'.repeat(64) }) as never,
+        }),
+        graphMissionContextForStub,
+        'task-1',
+        'execution-1',
+      );
+
+      expect(owner).toEqual({
+        parentTurnId: 'turn-active',
+        workspaceId: 'd'.repeat(64),
+        policyEpoch: 3,
+      });
+      expect(isGraphMissionSessionTurn(owner.parentTurnId)).toBe(false);
+    });
   });
 });
 

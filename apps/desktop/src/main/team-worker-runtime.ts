@@ -69,6 +69,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     workspace: RuntimeWorkspaceSet,
     worker: AgentRecord,
     writeScope: RuntimeWriteScope,
+    /** Present for Team Execution dispatches; Main resolves the owning Mission from it. */
+    executionId?: string,
   ) => unknown | Promise<unknown>;
   /** Provider egress gate; returns false when policy denies the dispatch. */
   authorizeEgress: (
@@ -370,6 +372,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       normalizedWorkspace,
       input.worker,
       writeScope,
+      input.executionId,
     );
     const promptToolCatalog: ToolCatalogSnapshot = isToolCatalogSnapshot(toolCatalog)
       ? toolCatalog

@@ -830,6 +830,8 @@ type GraphResourceRow = {
   write_claims_json: string;
   write_claims_digest: string;
 };
+/** Namespace for the session Turn a Graph Mission owns; never a chat Turn id. */
+export const GRAPH_MISSION_SESSION_TURN_PREFIX = 'graph-mission:';
 export const teamV2ActivityTypes = [
   'worker_hired',
   'task_assigned',
@@ -4808,6 +4810,7 @@ export interface PersistenceClient {
   getTeamMission(missionId: string): TeamMissionRecord;
   listTeamMissions(teamId: string): readonly TeamMissionRecord[];
   getTeamMissionForExecution(executionId: string): TeamMissionRecord | null;
+  ensureGraphMissionSessionTurn(taskId: string, missionId: string): string;
   recordTeamMissionWorktree(input: {
     executionId: string;
     agentId: string;
@@ -10627,6 +10630,48 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('SELECT mission_id FROM team_mission_steps WHERE execution_id = ?')
       .get(executionId) as { mission_id: string } | undefined;
     return row === undefined ? null : this.getTeamMission(row.mission_id);
+  }
+
+  /**
+   * A Graph Mission runs from a trusted control, not from a chat Turn, so its Workers have no
+   * active parent Turn to borrow. The managed tool ledger, approvals and Turn plans are all keyed
+   * on `turns(id)` with enforced foreign keys, so the Mission owns one durable session Turn of its
+   * own instead. It is created terminal (never `getActiveTurnId`, never in the chat composer's
+   * way) and anchored to a `system` notice, which every history/context query already excludes.
+   * Its Worker authorizations stay alive through `authorizationTurnIsActive`, exactly as a chat
+   * Turn's durable Workers do.
+   */
+  ensureGraphMissionSessionTurn(taskId: string, missionId: string): string {
+    const turnId = `${GRAPH_MISSION_SESSION_TURN_PREFIX}${missionId}`;
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT task_id FROM turns WHERE id = ?').get(turnId) as
+        { task_id: string } | undefined;
+      if (existing !== undefined) {
+        if (existing.task_id !== taskId)
+          throw new Error('Graph Mission session Turn is bound to another Task');
+        return turnId;
+      }
+      const mission = this.getTeamMission(missionId);
+      if (mission.mode !== 'graph') throw new Error('Mission session Turns are graph-only');
+      if (this.getTeam(mission.teamId).taskId !== taskId)
+        throw new Error('Graph Mission session Turn Task mismatch');
+      const now = new Date().toISOString();
+      const messageId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+           VALUES (?, ?, ?, 'system', ?, ?)`,
+        )
+        .run(messageId, taskId, turnId, 'Graph Missionの工程をWorkerへ割り当てました。', now);
+      this.db
+        .prepare(
+          `INSERT INTO turns(
+             id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
+           ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
+        )
+        .run(turnId, taskId, messageId, now, now);
+      return turnId;
+    })();
   }
 
   recordTeamMissionWorktree(input: {
