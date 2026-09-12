@@ -170,7 +170,11 @@ import {
   canonicalizeProviderToolImage,
   ImageAttachmentValidationError,
 } from './image-attachment-store';
-import { ImageAttachmentAcceptanceError, ImageAttachmentLimitError } from './persistence';
+import {
+  AcceptanceEvidenceMissingError,
+  ImageAttachmentAcceptanceError,
+  ImageAttachmentLimitError,
+} from './persistence';
 import {
   buildImageAttachmentSelectionIdentity,
   buildProviderImageAttachmentSelectionIdentity,
@@ -5963,4 +5967,141 @@ describe('Ollama empty-round integration', () => {
       }
     },
   );
+});
+
+describe('Turn completion when Edit Saga verification evidence is missing', () => {
+  function createCompletionHarness(openCriterionIds: readonly string[]) {
+    const publish = vi.fn();
+    const pushRuntimeStatus = vi.fn();
+    const handleRuntimeFailure = vi.fn();
+    // Mirrors `completeTurnInTransaction`: only `completed` consults the Acceptance Contract, so a
+    // refused completion must still be able to terminalize the Turn as `failed`.
+    const completeTurnAndFinishGoal = vi.fn((_taskId: string, _turnId: string, state: string) => {
+      if (state === 'completed' && openCriterionIds.length > 0)
+        throw new AcceptanceEvidenceMissingError(openCriterionIds);
+      return { event: { type: 'turn.completed', state }, task: null };
+    });
+    const verifyCommittedEditSagaPostImages = vi.fn(() => openCriterionIds);
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      mailbox: { run: (_taskId: string, action: () => unknown) => Promise.resolve(action()) },
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map<string, string>([['turn-466', 'claude']]),
+      teamRequiredTurns: new Set<string>(),
+      teamCoordinator: { get: () => undefined },
+      pendingTaskTitles: new Map(),
+      managedCodingHarness: { finishTurn: vi.fn() },
+      attachmentCapabilityByTurn: new Map(),
+      attachmentCustodyByTurn: new Map(),
+      attachmentCustodyStore: { release: vi.fn() },
+      reasoningByTurn: new Map(),
+      reasoningRedactorByTurn: new Map(),
+      workspaceWatchByTurn: new Map(),
+      turnWorkspaceByTurn: new Map(),
+      baselinesByTurn: new Map(),
+      fileEditByKey: new Map(),
+      codexThreadByTurn: new Map(),
+      teamMcpBridge: { unregister: vi.fn() },
+      teamSkillExpectedTurns: new Set<string>(),
+      teamSkillResolutionByTurn: new Map(),
+      resolvedModelByTurn: new Map(),
+      resolvedProviderByTurn: new Map(),
+      runtimeDiagnosticContextByTurn: new Map(),
+      pendingProjectMemoriesByTurn: new Map(),
+      managedWorkerTurn: new Map(),
+      approvalCoordinator: { turnEnded: vi.fn() },
+      pushRuntimeStatus,
+      publish,
+      persistence: {
+        completeTurnAndFinishGoal,
+        verifyCommittedEditSagaPostImages,
+        startNextQueued: vi.fn(() => null),
+        getActiveTurnId: vi.fn(() => 'turn-466'),
+      },
+      handleRuntimeFailure,
+    });
+    return {
+      router,
+      publish,
+      pushRuntimeStatus,
+      handleRuntimeFailure,
+      completeTurnAndFinishGoal,
+      verifyCommittedEditSagaPostImages,
+    };
+  }
+
+  const handleRuntimeEvent = Reflect.get(IpcRouter.prototype, 'handleRuntimeEvent') as (
+    this: unknown,
+    kind: 'codex' | 'claude',
+    taskId: string,
+    turnId: string,
+    runtimeEvent: unknown,
+  ) => void;
+
+  async function settleCompletedEvent(harness: ReturnType<typeof createCompletionHarness>) {
+    const log = vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined);
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    try {
+      handleRuntimeEvent.call(harness.router, 'claude', 'task-466', 'turn-466', {
+        type: 'completed',
+        finalText: 'ファイルを作成しました',
+      });
+      await vi.waitFor(() => expect(harness.completeTurnAndFinishGoal).toHaveBeenCalled());
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  }
+
+  it('verifies the committed Edit Saga post-images before the Turn is finalised', async () => {
+    const harness = createCompletionHarness([]);
+
+    await settleCompletedEvent(harness);
+
+    expect(harness.verifyCommittedEditSagaPostImages).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-466', turnId: 'turn-466' }),
+    );
+    expect(harness.verifyCommittedEditSagaPostImages.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.completeTurnAndFinishGoal.mock.invocationCallOrder[0]!,
+    );
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledWith(
+      'task-466',
+      'turn-466',
+      'completed',
+      'ファイルを作成しました',
+    );
+    expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+    expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'idle', errorCode: null }),
+    );
+  });
+
+  it('never blames the Runtime Host for a completion its own Acceptance Contract refused', async () => {
+    const harness = createCompletionHarness(['verification:saga-466']);
+
+    await settleCompletedEvent(harness);
+
+    // The event was valid: `RUNTIME_PROTOCOL_ERROR` would tell the user the Runtime Host misbehaved
+    // when it was Main's completion gate that refused (issue #466).
+    expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenLastCalledWith(
+      'task-466',
+      'turn-466',
+      'failed',
+      'ファイルを作成しました',
+    );
+    expect(harness.publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'turn.completed', state: 'failed' }),
+    );
+    const status = harness.pushRuntimeStatus.mock.calls.at(-1)?.[0] as {
+      state: string;
+      errorCode: string | null;
+      userMessage: string | null;
+    };
+    expect(status.state).toBe('failed');
+    expect(status.errorCode).toBe('ACCEPTANCE_EVIDENCE_MISSING');
+    expect(status.userMessage).not.toBeNull();
+    expect(status.userMessage).not.toContain('無効なイベント');
+  });
 });
