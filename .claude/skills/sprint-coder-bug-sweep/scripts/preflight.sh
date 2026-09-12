@@ -47,8 +47,19 @@ addon="$DESKTOP_ROOT/native-safe-fs/build/Release/sprint_coder_native_safe_fs.no
 runner="$DESKTOP_ROOT/sandbox-runner/build/Release/sprint-coder-sandbox-runner"
 sqlite="$REPO_ROOT/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
 gypi="$REPO_ROOT/node_modules/better-sqlite3/build/config.gypi"
-[ -f "$addon" ]  && ok "native-safe-fs addon present" || block "native-safe-fs addon missing (manual file editor cannot save) — fix: $fix"
-[ -x "$runner" ] && ok "sandbox-runner present"       || block "sandbox-runner missing (run_command approvals never appear) — fix: $fix"
+if [ -f "$addon" ]; then
+  # A present but STALE addon is worse than a missing one: it loads, probes fine, and only fails when a
+  # newer export is called (2026-09-12: directoryCaseSensitive missing => every Graph Mission review
+  # reported path_unavailable in dev mode while packaged CI passed). Compare against its sources.
+  stale_src="$(find "$DESKTOP_ROOT/native-safe-fs" -type f \( -name '*.cc' -o -name '*.h' -o -name '*.gyp' -o -name '*.json' \) ! -path '*/build/*' ! -path '*/node_modules/*' -newer "$addon" 2>/dev/null | head -1)"
+  if [ -n "$stale_src" ]; then block "native-safe-fs addon is OLDER than its source (${stale_src#$REPO_ROOT/}) — stale exports fail only when called (path_unavailable etc.). Fix: node build-native-safe-fs.mjs (or $fix)"
+  else ok "native-safe-fs addon present and newer than its sources"; fi
+else block "native-safe-fs addon missing (manual file editor cannot save) — fix: $fix"; fi
+if [ -x "$runner" ]; then
+  stale_rs="$(find "$DESKTOP_ROOT/sandbox-runner/src" -type f -name '*.rs' -newer "$runner" 2>/dev/null | head -1)"
+  if [ -n "$stale_rs" ]; then warn "sandbox-runner binary is older than ${stale_rs#$REPO_ROOT/} — rebuild with node build-sandbox-runner.mjs if sandbox behaviour matters for this run"
+  else ok "sandbox-runner present and newer than its sources"; fi
+else block "sandbox-runner missing (run_command approvals never appear) — fix: $fix"; fi
 if [ -f "$sqlite" ]; then
   ev="$(node -p "require('$REPO_ROOT/node_modules/electron/package.json').version" 2>/dev/null || echo '')"
   if [ -f "$gypi" ]; then
