@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
+import { assessProviderEgressDisclosure } from './provider-disclosure-classifier';
 
 const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex'; args: unknown[] }>,
@@ -528,10 +529,49 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
           expect.objectContaining({ id: 'project:one:reference:one' }),
         ],
       }),
+      ['/workspace'],
     );
     expect(runtimeHostMock.starts[0]?.args[6]).toMatchObject({
       projectItems: [{ id: 'project:one:instruction' }, { id: 'project:one:reference:one' }],
     });
+  });
+
+  it('declares the execution isolation worktree root to the egress gate', async () => {
+    runtimeHostMock.starts.length = 0;
+    const isolationRoot =
+      '/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/worktree-3f1c9a7e-5b2d-4e8a-9c04-7d6b1f2a8e35-1';
+    const authorizeEgress = vi.fn(() => true);
+    const subject = runtime({ authorizeEgress });
+
+    await subject.execute({
+      worker: { ...worker(false), writeCapable: true },
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      executionId: 'execution-isolated-1',
+      accessMode: 'workspace-write',
+      workspacePath: isolationRoot,
+      workspaceSet: {
+        primaryRootId: 'root-1',
+        digest: 'f'.repeat(64),
+        roots: [
+          { rootId: 'root-1', path: isolationRoot, label: 'workspace', role: 'primary' as const },
+        ],
+      },
+      content: '実装する',
+    });
+
+    const [, , , prompt, , knownWorkspaceRoots] = authorizeEgress.mock.calls[0] as unknown as [
+      string,
+      string,
+      string,
+      string,
+      unknown,
+      readonly string[],
+    ];
+    expect(knownWorkspaceRoots).toEqual([isolationRoot]);
+    expect(prompt).toContain(isolationRoot);
+    // The Worker cannot work without naming that directory, so the scan must read it as clean.
+    expect(assessProviderEgressDisclosure(prompt).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(prompt, knownWorkspaceRoots).classification).toBe('safe');
   });
 
   it('fails explicitly before dispatch rather than silently subsetting oversized Project items', async () => {

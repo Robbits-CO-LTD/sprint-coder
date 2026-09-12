@@ -43,7 +43,6 @@ describe('sealed Workspace root egress classification', () => {
   });
 
   it.each([
-    `${root}/child`,
     `${root}-other`,
     `${root}/${opaque}`,
     opaque,
@@ -56,7 +55,7 @@ describe('sealed Workspace root egress classification', () => {
     expect(assessment.redactedContent).not.toBe(content);
   });
 
-  it.each([opaque, 'sk-proj-abcdefghijklmnopqrstuvwxyz1234', 'AKIAIOSFODNN7EXAMPLE'])(
+  it.each(['sk-proj-abcdefghijklmnopqrstuvwxyz1234', 'AKIAIOSFODNN7EXAMPLE'])(
     'still blocks a secret-bearing root (%#)',
     (value) => {
       const secretRoot = `/private/tmp/${value}/workspace`;
@@ -66,8 +65,53 @@ describe('sealed Workspace root egress classification', () => {
     },
   );
 
+  it('does not treat an ordinary name under a Main-issued root as a secret', () => {
+    expect(assessProviderEgressDisclosure(`${root}/child`, [root])).toMatchObject({
+      classification: 'safe',
+      redactedContent: `${root}/child`,
+    });
+  });
+
   it('cannot exempt an opaque value just by supplying it as a root', () => {
     expect(assessProviderEgressDisclosure(opaque, [opaque]).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(`x/${opaque}`, [`x/${opaque}`]).classification).toBe(
+      'sensitive',
+    );
+  });
+});
+
+describe('Worker isolation worktree egress classification', () => {
+  const executionId = '3f1c9a7e-5b2d-4e8a-9c04-7d6b1f2a8e35';
+  const worktreeDirectory = `worktree-${executionId}-1`;
+  const isolationRoot = `/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/${worktreeDirectory}`;
+  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+
+  it('lets a Worker name the isolation worktree Main generated for it', () => {
+    const prompt = JSON.stringify({
+      request: `隔離worktree: ${isolationRoot}（このディレクトリ内だけを変更してください）`,
+    });
+    expect(assessProviderEgressDisclosure(prompt).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(prompt, [isolationRoot])).toMatchObject({
+      classification: 'safe',
+      redactedContent: prompt,
+    });
+    expect(
+      assessProviderEgressDisclosure(`${isolationRoot}/apps/desktop/src/main/ipc.ts`, [
+        isolationRoot,
+      ]).classification,
+    ).toBe('safe');
+  });
+
+  it.each([
+    ['the same execution directory named outside the root', `直前の作業: ${worktreeDirectory}`],
+    ['an API key read from a file under the root', `${isolationRoot}/.env\nAPI_KEY=${opaque}`],
+    ['a longer token that merely starts with the root', `${isolationRoot}${opaque}`],
+    ['an opaque descendant of the root', `${isolationRoot}/${opaque}`],
+  ])('still blocks %s', (_label, content) => {
+    const assessment = assessProviderEgressDisclosure(content, [isolationRoot]);
+    expect(assessment.classification).toBe('sensitive');
+    expect(assessment.reasons).toContain('high-entropy-value');
+    expect(assessment.redactedContent).not.toBe(content);
   });
 });
 

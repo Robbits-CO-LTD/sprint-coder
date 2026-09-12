@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isAbsolute, resolve } from 'node:path';
 import type {
   ChatMessage,
   PublicError,
@@ -79,6 +80,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     turnId: string,
     prompt: string,
     context: PreparedContext,
+    /** Canonical Main-issued roots this dispatch may name: the isolation worktree included. */
+    knownWorkspaceRoots: readonly string[],
   ) => boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
@@ -435,7 +438,21 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       })),
       ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
     });
-    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, serializedPayload.text, context)) {
+    if (
+      !this.deps.authorizeEgress(
+        choice.kind,
+        taskId,
+        turnId,
+        serializedPayload.text,
+        context,
+        // The prompt and the guidance both name the roots Main prepared for this Worker. Declare
+        // them so the egress secret scan reads them as workspace structure, not as opaque values.
+        canonicalWorkspaceRoots([
+          ...normalizedWorkspace.roots.map(({ path }) => path),
+          workspacePath,
+        ]),
+      )
+    ) {
       if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
       this.deps.releaseManagedTurn?.(turnId);
       throw new Error(`${choice.kind} Team Worker egress was denied`);
@@ -561,6 +578,23 @@ function uniqueRuntimeChoices(choices: readonly RealRuntimeChoice[]): RealRuntim
     seen.add(kind);
     return true;
   });
+}
+
+/**
+ * Canonical, deduplicated absolute roots for the egress secret scan. Only Main-issued paths (the
+ * Task Workspace and the execution isolation worktree) belong here — never Provider-supplied text.
+ */
+export function canonicalWorkspaceRoots(
+  paths: readonly (string | null | undefined)[],
+): readonly string[] {
+  return [
+    ...new Set(
+      paths
+        .filter((path): path is string => typeof path === 'string' && path !== '')
+        .filter((path) => isAbsolute(path))
+        .map((path) => resolve(path)),
+    ),
+  ];
 }
 
 function isRuntimeAvailabilityError(error: unknown): error is TeamRuntimeExecutionError {
