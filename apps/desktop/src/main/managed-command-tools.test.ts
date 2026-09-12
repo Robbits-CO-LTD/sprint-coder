@@ -209,29 +209,50 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       });
 
       // Providers repeat the executable as argv[0] although the tool contract forbids it (#467).
-      // The repetition must never reach the process as its first argument.
-      const repeated = (await broker.dispatch({
+      // The call is refused before any process starts, and the provider can resend the same work.
+      const commandRowsBeforeRejection = commandRows.size;
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'exec-repeated-executable',
+          providerName: 'exec_command',
+          input: {
+            executable: '/bin/sh',
+            argv: ['/bin/sh', '-c', 'printf rejected'],
+            purpose: 'repeated executable contract',
+            background: true,
+          },
+        }),
+      ).rejects.toMatchObject({
+        name: 'CommandRunnerError',
+        code: 'ARGV_REPEATS_EXECUTABLE',
+        message: expect.stringContaining('resend without it'),
+      });
+      // Nothing was sealed: no command row, and therefore no approval card and no process.
+      expect(commandRows.size).toBe(commandRowsBeforeRejection);
+      // The Turn survives the rejection: the corrected call runs in the same Turn.
+      const resent = (await broker.dispatch({
         ...owner,
-        callId: 'exec-repeated-executable',
+        callId: 'exec-resent-executable',
         providerName: 'exec_command',
         input: {
           executable: '/bin/sh',
-          argv: ['/bin/sh', '-c', 'printf normalized'],
+          argv: ['-c', 'printf resent'],
           purpose: 'repeated executable contract',
           background: true,
         },
       })) as { sessionId: string };
-      await expect(sessions.wait(repeated.sessionId, owner)).resolves.toMatchObject({
+      await expect(sessions.wait(resent.sessionId, owner)).resolves.toMatchObject({
         state: 'exited',
         result: { exitCode: 0 },
       });
-      const repeatedSnapshot = (await broker.dispatch({
+      const resentSnapshot = (await broker.dispatch({
         ...owner,
-        callId: 'poll-repeated-executable',
+        callId: 'poll-resent-executable',
         providerName: 'poll_command',
-        input: { sessionId: repeated.sessionId },
+        input: { sessionId: resent.sessionId },
       })) as typeof snapshot;
-      expect(repeatedSnapshot.chunks.map(({ text }) => text).join('')).toBe('normalized');
+      expect(resentSnapshot.chunks.map(({ text }) => text).join('')).toBe('resent');
       await broker.dispose();
     });
   },

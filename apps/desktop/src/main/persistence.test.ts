@@ -7352,17 +7352,17 @@ if (runsWithElectronAbi)
     );
 
     commandExecutionIt(
-      'authorizes and runs one executable when the provider repeats it in argv',
+      'refuses a command whose argv repeats the executable without asking for approval',
       async () => {
         const { persistence, path } = createPersistence();
         const task = persistence.createTask();
         persistence.setWorkspace(task.id, join(path, '..'));
         const started = startExecutingTurn(persistence, task.id);
-        let authorizedInput: unknown;
+        let authorizations = 0;
         const broker = createDefaultToolBroker(
           () => persistence.getPermissionPolicy(task.id).policyEpoch,
-          (request) => {
-            authorizedInput = request.input;
+          () => {
+            authorizations += 1;
             return { decision: 'allow', reason: 'integration_test' };
           },
           { persistence, publish: () => undefined },
@@ -7374,46 +7374,58 @@ if (runsWithElectronAbi)
           policyEpoch: 0,
         });
 
-        let result: { exitCode: number };
         try {
-          result = (await broker.dispatch({
+          // Providers repeat the executable even though the tool contract forbids it (#467).
+          await expect(
+            broker.dispatch({
+              taskId: task.id,
+              turnId: started.turnId,
+              callId: 'command-repeated-executable',
+              providerName: 'run_command',
+              input: {
+                executable: '/usr/bin/printf',
+                argv: ['printf', 'command-ok\\n'],
+                cwd: '.',
+                purpose: '実行ファイル名の重複を確認します',
+              },
+            }),
+          ).rejects.toMatchObject({
+            name: 'CommandRunnerError',
+            code: 'ARGV_REPEATS_EXECUTABLE',
+          });
+          // Nothing was sealed, so no approval was requested and no command row exists to run,
+          // cancel, or replay.
+          expect(authorizations).toBe(0);
+          expect(persistence.listCommands(task.id)).toEqual([]);
+          expect(persistence.listEventsAfter(task.id, 0).map(({ type }) => type)).not.toContain(
+            'command.started',
+          );
+
+          // The Turn stays usable: the provider resends the same work with a correct argv.
+          const result = (await broker.dispatch({
             taskId: task.id,
             turnId: started.turnId,
-            callId: 'command-repeated-executable',
+            callId: 'command-resent-executable',
             providerName: 'run_command',
             input: {
               executable: '/usr/bin/printf',
-              // Providers repeat the executable even though the tool contract forbids it (#467).
-              argv: ['printf', 'command-ok\\n'],
+              argv: ['command-ok\\n'],
               cwd: '.',
               purpose: '実行ファイル名の重複を確認します',
             },
           })) as { exitCode: number };
-        } catch (error) {
+          expect(result.exitCode).toBe(0);
+          expect(persistence.listCommands(task.id)).toEqual([
+            expect.objectContaining({
+              callId: 'command-resent-executable',
+              executable: '/usr/bin/printf',
+              argv: ['command-ok\\n'],
+              state: 'exited',
+            }),
+          ]);
+        } finally {
           persistence.close();
-          throw error;
         }
-
-        expect(result.exitCode).toBe(0);
-        // The approval card is rendered from this sealed spec, so it must already be the argv that
-        // is spawned: one `/usr/bin/printf`, never `printf printf command-ok`.
-        expect(authorizedInput).toMatchObject({
-          absoluteExecutable: '/usr/bin/printf',
-          argv: ['command-ok\\n'],
-        });
-        const [command] = persistence.listCommands(task.id);
-        expect(command).toMatchObject({
-          executable: '/usr/bin/printf',
-          argv: ['command-ok\\n'],
-          state: 'exited',
-        });
-        expect(
-          persistence
-            .listCommandOutput(command!.id)
-            .map(({ text }) => text)
-            .join(''),
-        ).toBe('command-ok\n');
-        persistence.close();
       },
     );
 

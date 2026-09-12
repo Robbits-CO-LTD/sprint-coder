@@ -183,6 +183,7 @@ import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failu
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
+import { CommandRunnerError } from './command-runner';
 import { ToolImageBridge } from './tool-image-bridge';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
@@ -221,6 +222,27 @@ describe('Provider Skill Draft failures', () => {
       new SkillSettingsError('INVALID_SKILL', 'token=FAKE_PRIVATE_CANARY'),
     );
     expect(redacted).not.toContain('FAKE_PRIVATE_CANARY');
+  });
+
+  it('hands a repeated-executable refusal to the provider so it can resend argv', () => {
+    // The refusal must arrive as a tool result the model can act on, not as a Turn failure.
+    expect(
+      JSON.parse(
+        providerWorkspaceToolFailure(
+          new CommandRunnerError(
+            'ARGV_REPEATS_EXECUTABLE',
+            'argv must contain arguments only; the executable "tee" was repeated as argv[0] — resend without it.',
+          ),
+        ),
+      ),
+    ).toEqual({
+      ok: false,
+      error: {
+        code: 'ARGV_REPEATS_EXECUTABLE',
+        message:
+          'argv must contain arguments only; the executable "tee" was repeated as argv[0] — resend without it.',
+      },
+    });
   });
 
   it('keeps unexpected validation failures generic', () => {

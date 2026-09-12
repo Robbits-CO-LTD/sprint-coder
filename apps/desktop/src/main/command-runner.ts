@@ -119,6 +119,7 @@ export class CommandRunnerError extends Error {
   constructor(
     readonly code:
       | 'EXECUTION_SPEC_INVALID'
+      | 'ARGV_REPEATS_EXECUTABLE'
       | 'EXECUTION_IDENTITY_CHANGED'
       | 'SPAWN_FAILED'
       | 'OUTPUT_OVERFLOW'
@@ -138,6 +139,7 @@ export async function prepareExecutionSpec(
     ? input.executable
     : await resolveBareExecutable(input.executable, controlledEnvironment);
   const executableCanonicalPath = await realpath(executablePath);
+  rejectArgvRepeatingExecutable(input.executable, executableCanonicalPath, input.argv);
   const executableStats = await stat(executableCanonicalPath, { bigint: true });
   if (!executableStats.isFile())
     throw new CommandRunnerError('EXECUTION_SPEC_INVALID', 'Executable must be a regular file');
@@ -166,32 +168,13 @@ export async function prepareExecutionSpec(
     executableCanonicalPath,
     allowSourceHardlinks,
   );
-  const requestedArgv = normalizeRepeatedExecutableArgv(
-    input.executable,
-    executableCanonicalPath,
-    input.argv,
-  );
-  if (requestedArgv.removedExecutableArgv !== undefined)
-    secureLogger.warn(
-      'Command argv repeated the executable and was normalized before approval',
-      {
-        requestedExecutable: input.executable,
-        canonicalExecutable: executableCanonicalPath,
-        // Only the dropped executable spelling is recorded. The remaining arguments can carry
-        // caller-supplied values, and the approval record already keeps the authorized argv.
-        removedArgv0: requestedArgv.removedExecutableArgv,
-        argvLengthBefore: input.argv.length,
-        argvLengthAfter: requestedArgv.argv.length,
-      },
-      { event: 'command_argv_executable_normalized' },
-    );
   const spec = createExecutionSpec({
     absoluteExecutable: executableCanonicalPath,
     executionIdentityDigest: sealedExecutableIdentityDigest(executableIdentity),
     argv: normalizeTrustedWindowsCmdArgv(
       executableCanonicalPath,
       trustedWindowsSystemDirectory,
-      requestedArgv.argv,
+      input.argv,
     ),
     cwdIdentity: {
       canonicalPath: pathGuard.resolvedPath,
@@ -262,33 +245,33 @@ async function isTrustedWindowsMultiLinkExecutable(
   return childPath !== '' && !childPath.startsWith('..') && !isAbsolute(childPath);
 }
 
-export type RepeatedExecutableArgv = Readonly<{
-  argv: readonly string[];
-  removedExecutableArgv: string | undefined;
-}>;
-
 // Providers repeat the executable as argv[0] even though the managed tool contract requires
 // arguments only. CommandRunner spawns `[launchPath, ...argvPrefix, ...spec.argv]`, so the repeated
-// spelling would reach the process as its first real argument: `/usr/bin/tee` with
-// `["tee", "out"]` created a file literally named `tee`, and `/bin/echo` with `["/bin/echo", "x"]`
-// printed the executable back. Dropping the one leading repetition here — before the ExecutionSpec
-// (and therefore its digest, the approval card, and the persisted command row) exists — keeps the
-// approved argv identical to the argv that is spawned.
+// spelling reaches the process as its first real argument: `/usr/bin/tee` with `["tee", "out"]`
+// created a file literally named `tee`, and `/bin/echo` with `["/bin/echo", "x"]` printed the
+// executable back.
 //
-// Only argv[0] is examined, and only when it spells this executable. A different leading
-// executable name (`env`-style wrappers, or an executable passed deliberately as a later argument)
-// is left untouched.
-export function normalizeRepeatedExecutableArgv(
+// A repetition cannot be told apart from a first operand that legitimately carries the
+// executable's own name — `/usr/bin/find` with `["find", "-delete"]` means the `find` directory,
+// and silently dropping it would widen the deletion to the whole cwd — so the call is refused
+// rather than rewritten. Nothing is sealed, no approval is raised, and the provider gets an error
+// it can correct by resending argv.
+//
+// Only argv[0] is examined, and only when it spells this executable: a different leading
+// executable name (`env`-style wrappers) and a repetition in a later position both stay legal.
+export function argvRepeatsExecutable(
   requestedExecutable: string,
   canonicalExecutable: string,
   argv: readonly string[],
   platform: NodeJS.Platform = process.platform,
-): RepeatedExecutableArgv {
+): boolean {
   const first = argv[0];
-  if (first === undefined || first.length < 1) return { argv, removedExecutableArgv: undefined };
+  if (first === undefined || first.length < 1) return false;
   const paths = platform === 'win32' ? windowsPath : posixPath;
+  // Windows spellings differ only by case and separator. Nothing else is folded — `./name` stays
+  // distinct from `name` on both platforms, so a first operand can always be spelled unambiguously.
   const fold = (value: string): string =>
-    platform === 'win32' ? windowsPath.normalize(value).toLowerCase() : value;
+    platform === 'win32' ? value.toLowerCase().replaceAll('/', '\\') : value;
   const spellings = new Set<string>();
   for (const executable of [requestedExecutable, canonicalExecutable]) {
     if (executable.length < 1) continue;
@@ -297,15 +280,39 @@ export function normalizeRepeatedExecutableArgv(
     if (base.length < 1) continue;
     spellings.add(fold(base));
     // A bare Windows name resolves through PATH with `.exe`/`.com` appended, so the provider's
-    // extension-less spelling is the same repetition as the sealed `node.exe`.
-    if (platform === 'win32') {
-      const extension = windowsPath.extname(base);
-      if (extension.length > 0 && extension.length < base.length)
-        spellings.add(fold(base.slice(0, -extension.length)));
-    }
+    // extension-less spelling is the same repetition as the sealed `node.exe`. No other suffix
+    // is an implicit Windows executable extension here, so `runner.bin` never matches `runner`.
+    if (platform === 'win32' && /\.(?:exe|com)$/iu.test(base))
+      spellings.add(fold(base.slice(0, -4)));
   }
-  if (!spellings.has(fold(first))) return { argv, removedExecutableArgv: undefined };
-  return { argv: argv.slice(1), removedExecutableArgv: first };
+  return spellings.has(fold(first));
+}
+
+function rejectArgvRepeatingExecutable(
+  requestedExecutable: string,
+  canonicalExecutable: string,
+  argv: readonly string[],
+): void {
+  if (!argvRepeatsExecutable(requestedExecutable, canonicalExecutable, argv)) return;
+  const name = (process.platform === 'win32' ? windowsPath : posixPath).basename(
+    requestedExecutable,
+  );
+  secureLogger.warn(
+    'Command argv repeated the executable and was rejected before approval',
+    {
+      requestedExecutable,
+      canonicalExecutable,
+      // Only the offending executable spelling and the argv length are recorded; the remaining
+      // arguments can carry caller-supplied values and no spec or command row exists to hold them.
+      repeatedArgv0: argv[0],
+      argvLength: argv.length,
+    },
+    { event: 'command_argv_executable_rejected' },
+  );
+  throw new CommandRunnerError(
+    'ARGV_REPEATS_EXECUTABLE',
+    `argv must contain arguments only; the executable "${name}" was repeated as argv[0] — resend without it. If that first argument is genuinely meant for the program, spell it so it cannot be read as the executable (for example "./${name}").`,
+  );
 }
 
 export function normalizeTrustedWindowsCmdArgv(

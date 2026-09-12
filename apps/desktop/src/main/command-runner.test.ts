@@ -26,7 +26,7 @@ import {
   executionSpecPathGuard,
   posixSupervisorCommand,
   posixGroupSignalIsAuthorized,
-  normalizeRepeatedExecutableArgv,
+  argvRepeatsExecutable,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
@@ -281,30 +281,20 @@ describe('CommandRunner', () => {
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
-  it('drops one argv entry that repeats the executable so approval and execution agree', () => {
+  it('detects an argv entry that repeats the executable', () => {
     expect(
-      normalizeRepeatedExecutableArgv(
-        '/usr/bin/tee',
-        '/usr/bin/tee',
-        ['/usr/bin/tee', 'out'],
-        'darwin',
-      ),
-    ).toEqual({ argv: ['out'], removedExecutableArgv: '/usr/bin/tee' });
-    expect(
-      normalizeRepeatedExecutableArgv('/usr/bin/tee', '/usr/bin/tee', ['tee', 'out'], 'darwin'),
-    ).toEqual({ argv: ['out'], removedExecutableArgv: 'tee' });
-    // A bare request resolves to an absolute path; both spellings count as the repetition.
-    expect(normalizeRepeatedExecutableArgv('tee', '/usr/bin/tee', ['tee'], 'linux')).toEqual({
-      argv: [],
-      removedExecutableArgv: 'tee',
-    });
+      argvRepeatsExecutable('/usr/bin/tee', '/usr/bin/tee', ['/usr/bin/tee', 'out'], 'darwin'),
+    ).toBe(true);
+    expect(argvRepeatsExecutable('/usr/bin/tee', '/usr/bin/tee', ['tee', 'out'], 'darwin')).toBe(
+      true,
+    );
+    // A bare request resolves to an absolute path; both spellings are the repetition.
+    expect(argvRepeatsExecutable('tee', '/usr/bin/tee', ['tee'], 'linux')).toBe(true);
     // A symlinked request keeps its own spelling, which the canonical path no longer carries.
-    expect(
-      normalizeRepeatedExecutableArgv('/bin/sh', '/bin/dash', ['sh', '-c', 'true'], 'linux'),
-    ).toEqual({ argv: ['-c', 'true'], removedExecutableArgv: 'sh' });
+    expect(argvRepeatsExecutable('/bin/sh', '/bin/dash', ['sh', '-c', 'true'], 'linux')).toBe(true);
   });
 
-  it('leaves argv untouched when the first entry is not this executable', () => {
+  it('accepts argv whose first entry is not this executable', () => {
     for (const argv of [
       [],
       ['-c', 'echo hi'],
@@ -313,18 +303,17 @@ describe('CommandRunner', () => {
       ['-S', '/bin/echo', 'hi'],
       // A later repetition is a real argument (`/bin/echo /bin/echo` prints the path).
       ['hi', '/bin/echo'],
-      // Another executable's name is ambiguous, so it stays.
+      // Another executable's name is unrelated to this one.
       ['printf', 'hi'],
       // POSIX paths are case sensitive.
       ['/BIN/ECHO', 'hi'],
+      // A first operand can always be spelled so it cannot be read as the executable.
+      ['./echo', 'hi'],
     ])
-      expect(normalizeRepeatedExecutableArgv('/bin/echo', '/bin/echo', argv, 'darwin')).toEqual({
-        argv,
-        removedExecutableArgv: undefined,
-      });
+      expect(argvRepeatsExecutable('/bin/echo', '/bin/echo', argv, 'darwin')).toBe(false);
   });
 
-  it('folds Windows executable spellings before dropping a repeated argv entry', () => {
+  it('folds only case and separators when comparing Windows executable spellings', () => {
     const canonical = 'C:\\Program Files\\nodejs\\node.exe';
     for (const first of [
       canonical,
@@ -333,26 +322,43 @@ describe('CommandRunner', () => {
       'node.exe',
       'Node',
     ])
-      expect(
-        normalizeRepeatedExecutableArgv('node', canonical, [first, '--version'], 'win32'),
-      ).toEqual({ argv: ['--version'], removedExecutableArgv: first });
-    expect(
-      normalizeRepeatedExecutableArgv('node', canonical, ['npm.cmd', 'install'], 'win32'),
-    ).toEqual({ argv: ['npm.cmd', 'install'], removedExecutableArgv: undefined });
+      expect(argvRepeatsExecutable('node', canonical, [first, '--version'], 'win32')).toBe(true);
+    for (const [requested, sealed, first] of [
+      ['node', canonical, 'npm.cmd'],
+      // Only `.exe`/`.com` are implicit Windows executable extensions, so `runner` is a real
+      // first operand for `runner.bin`, not a repetition.
+      ['C:\\tools\\runner.bin', 'C:\\tools\\runner.bin', 'runner'],
+      ['C:\\tools\\runner.bat', 'C:\\tools\\runner.bat', 'runner'],
+      ['C:\\tools\\runner.exe', 'C:\\tools\\runner.exe', '.\\runner'],
+    ] as const)
+      expect(argvRepeatsExecutable(requested, sealed, [first, 'x'], 'win32')).toBe(false);
   });
 
   it.skipIf(process.platform === 'win32')(
-    'seals argv without the repeated executable so the spawned argv matches the approved argv',
+    'refuses to seal a command whose argv repeats the executable',
     async () => {
       const root = await workspace();
+      await expect(
+        prepareExecutionSpec({
+          workspacePath: root,
+          executable: '/bin/sh',
+          argv: ['sh', '-c', 'printf rejected'],
+          cwd: '.',
+        }),
+      ).rejects.toMatchObject({
+        name: 'CommandRunnerError',
+        code: 'ARGV_REPEATS_EXECUTABLE',
+        message: expect.stringContaining('argv must contain arguments only'),
+      });
+
+      // The same argv without the repetition still seals and runs unchanged.
       const spec = await prepareExecutionSpec({
         workspacePath: root,
         executable: '/bin/sh',
-        argv: ['sh', '-c', 'printf normalized'],
+        argv: ['-c', 'printf accepted'],
         cwd: '.',
       });
-
-      expect(spec.argv).toEqual(['-c', 'printf normalized']);
+      expect(spec.argv).toEqual(['-c', 'printf accepted']);
       const chunks: CommandOutputChunk[] = [];
       const result = await new CommandRunner().run(spec, {
         onChunk: (chunk) => {
@@ -360,16 +366,29 @@ describe('CommandRunner', () => {
         },
       });
       expect(result.exitCode).toBe(0);
-      // Before the fix this spawned `/bin/sh sh -c ...`, which read `sh` as a script path.
-      expect(chunks.map(({ text }) => text).join('')).toBe('normalized');
+      expect(chunks.map(({ text }) => text).join('')).toBe('accepted');
+    },
+  );
 
-      const untouched = await prepareExecutionSpec({
-        workspacePath: root,
-        executable: '/bin/sh',
-        argv: ['-c', 'printf untouched'],
-        cwd: '.',
-      });
-      expect(untouched.argv).toEqual(['-c', 'printf untouched']);
+  it.skipIf(process.platform === 'win32')(
+    'never turns a repeated `find` operand into a cwd-wide deletion',
+    async () => {
+      const root = await workspace();
+      await mkdir(join(root, 'find'));
+      await writeFile(join(root, 'keep.txt'), 'keep');
+
+      // `/usr/bin/find find -delete` deletes one directory; dropping argv[0] would make GNU find
+      // default to `.` and delete the whole Workspace cwd, so the call must never be rewritten.
+      await expect(
+        prepareExecutionSpec({
+          workspacePath: root,
+          executable: '/usr/bin/find',
+          argv: ['find', '-delete'],
+          cwd: '.',
+        }),
+      ).rejects.toMatchObject({ code: 'ARGV_REPEATS_EXECUTABLE' });
+      await expect(access(join(root, 'keep.txt'))).resolves.toBeUndefined();
+      await expect(access(join(root, 'find'))).resolves.toBeUndefined();
     },
   );
 
@@ -391,13 +410,14 @@ describe('CommandRunner', () => {
       });
       expect(nativeSpec.argv).toEqual(['/d', '/K', 'echo persistent']);
 
-      // A provider that repeats the executable still reaches the mandatory guard switches.
-      const repeatedSpec = await prepareExecutionSpec({
-        workspacePath: root,
-        executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
-        argv: ['cmd.exe', '/c', 'echo ollama-ok'],
-      });
-      expect(repeatedSpec.argv).toEqual(['/d', '/s', '/c', 'echo ollama-ok']);
+      // A provider that repeats the executable is refused before anything is sealed.
+      await expect(
+        prepareExecutionSpec({
+          workspacePath: root,
+          executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+          argv: ['cmd.exe', '/c', 'echo ollama-ok'],
+        }),
+      ).rejects.toMatchObject({ code: 'ARGV_REPEATS_EXECUTABLE' });
     },
   );
 
