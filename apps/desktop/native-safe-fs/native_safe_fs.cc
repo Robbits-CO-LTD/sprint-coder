@@ -3498,6 +3498,8 @@ napi_value DirectoryNameRule(napi_env env, napi_callback_info info, bool canonic
                                    geometry.data()) == 0) {
       uint32_t geometry_flags = 0;
       std::memcpy(&geometry_flags, geometry.data() + 92, sizeof(geometry_flags));
+      // fs/xfs/libxfs/xfs_fs.h: XFS_FSOP_GEOM_FLAGS_DIRV2CI (1 << 12). The neighbouring bits are
+      // LOGV2 (1 << 8) and LAZYSB (1 << 14), neither of which says anything about name folding.
       sensitive = (geometry_flags & (1u << 12)) == 0 ? 1 : -1;
     }
   }

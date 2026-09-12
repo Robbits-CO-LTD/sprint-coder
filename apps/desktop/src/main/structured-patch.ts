@@ -569,14 +569,15 @@ function claimMissingEndpoint(
     const canonicalUnicode =
       process.platform === 'darwin' &&
       directoryCanonicalUnicode(dirname(candidate.resolvedPath), candidate.parentIdentity);
-    // HFS+ and network filesystems have different Unicode rules. Do not infer them from Darwin.
-    if (process.platform === 'darwin' && !canonicalUnicode) {
-      const asciiCaseKey = (value: string) =>
-        value.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-      if (asciiCaseKey(previousName) !== asciiCaseKey(name)) continue;
-    }
+    // APFS canonicalizes Unicode, so NFD equality names one file there. Other Darwin volumes
+    // (HFS+, network mounts) store Apple's modified NFD instead, so compare under that rule
+    // rather than shortcutting: a volume whose Unicode rule we cannot read still has to answer
+    // for its case rule below, never pass unchecked.
     const unicodeAlias =
-      canonicalUnicode && previousName.normalize('NFD') === name.normalize('NFD');
+      process.platform === 'darwin' &&
+      (canonicalUnicode
+        ? previousName.normalize('NFD') === name.normalize('NFD')
+        : hfsPlusNamesAlias(previousName, name));
     if (process.platform === 'win32' && !windowsCaseInsensitiveNamesEqual(previousName, name))
       continue;
     if (
@@ -589,6 +590,31 @@ function claimMissingEndpoint(
       );
   }
   endpoints.push(candidate);
+}
+
+/** Apple's modified NFD (TN1150) leaves these ranges undecomposed, which is why an HFS+ volume
+ * holds U+FA10 and U+585A as two names even though plain NFD folds them into one. */
+function hfsPlusUndecomposed(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x2000 && codePoint <= 0x2fff) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0x2f800 && codePoint <= 0x2faff)
+  );
+}
+
+/** True when a non-APFS Darwin volume stores both spellings under one name. NFD equality covers
+ * canonical aliases including combining-mark reordering, and the undecomposed code points must
+ * match too because HFS+ keeps those apart. This only decides aliasing; spellings it cannot prove
+ * identical still face the directory's own case rule, so the check never widens what is allowed. */
+function hfsPlusNamesAlias(left: string, right: string): boolean {
+  return (
+    left.normalize('NFD') === right.normalize('NFD') &&
+    hfsPlusUndecomposedKey(left) === hfsPlusUndecomposedKey(right)
+  );
+}
+
+function hfsPlusUndecomposedKey(value: string): string {
+  return [...value].filter((character) => hfsPlusUndecomposed(character.codePointAt(0)!)).join('');
 }
 
 function validatePostImage(content: string): void {
