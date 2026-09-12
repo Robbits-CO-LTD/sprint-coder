@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # File ONE GitHub Issue for a verified finding, with mechanical gates and a read-back check.
 #   --run-dir DIR --title-file F --body-file F [--label bug] [--max 5] [--dry-run] [--repo owner/repo]
-# Gates (any failure => nothing is created): title prefix/length/no #N/no 。, exactly one
-# <!-- bug-sweep:fingerprint=<64hex> --> marker, privacy patterns, fingerprint already on GitHub,
-# per-run cap from issues/index.json. Semantic duplicate checking is the operator's job; the script
-# prints open bug titles to help. --dry-run runs every gate and the dedup search but creates nothing.
+# The target repository comes from $RUN_DIR/manifest.json (a --repo that differs is refused), and
+# live filing needs manifest filing_mode=live. Gates (any failure => nothing is created): title
+# prefix/length/no #N/no 。, exactly one <!-- bug-sweep:fingerprint=<64hex> --> marker, structured
+# redaction scan (known token formats, absolute paths on every platform, e-mail, nonce markers, long
+# mixed tokens/hashes) => redaction_failed, label existence, fingerprint already on GitHub, per-run cap.
+# Semantic duplicate checking is the operator's job; open bug titles are printed to help.
 set -uo pipefail
-RUN_DIR=""; TITLE_FILE=""; BODY_FILE=""; LABEL="bug"; MAX=5; DRY=0; REPO=""
+RUN_DIR=""; TITLE_FILE=""; BODY_FILE=""; LABEL="bug"; MAX=5; DRY=0; REPO_ARG=""
 while [ $# -gt 0 ]; do case "$1" in
   --run-dir) RUN_DIR="$2"; shift 2;;
   --title-file) TITLE_FILE="$2"; shift 2;;
@@ -14,11 +16,14 @@ while [ $# -gt 0 ]; do case "$1" in
   --label) LABEL="$2"; shift 2;;
   --max) MAX="$2"; shift 2;;
   --dry-run) DRY=1; shift;;
-  --repo) REPO="$2"; shift 2;;
+  --repo) REPO_ARG="$2"; shift 2;;
   *) echo "unknown arg: $1" >&2; exit 64;; esac; done
 [ -n "$RUN_DIR" ] && [ -f "$TITLE_FILE" ] && [ -f "$BODY_FILE" ] || { echo "--run-dir, --title-file, --body-file are required" >&2; exit 64; }
-[ -n "$REPO" ] || REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
-[ -n "$REPO" ] || { echo "cannot resolve repository (gh repo view)" >&2; exit 2; }
+[ -f "$RUN_DIR/manifest.json" ] || { echo "manifest.json missing in $RUN_DIR" >&2; exit 64; }
+REPO="$(node -p "JSON.parse(require('fs').readFileSync('$RUN_DIR/manifest.json','utf8')).repository || ''")"
+FILING="$(node -p "JSON.parse(require('fs').readFileSync('$RUN_DIR/manifest.json','utf8')).filing_mode || 'report-only'")"
+case "$REPO" in */*) ;; *) echo "manifest repository is not owner/repo: '$REPO'" >&2; exit 2;; esac
+[ -z "$REPO_ARG" ] || [ "$REPO_ARG" = "$REPO" ] || { echo "--repo $REPO_ARG differs from manifest repository $REPO — refusing" >&2; exit 2; }
 INDEX="$RUN_DIR/issues/index.json"; mkdir -p "$RUN_DIR/issues"; [ -f "$INDEX" ] || echo '[]' > "$INDEX"
 
 title="$(head -1 "$TITLE_FILE" | tr -d '\r')"
@@ -32,23 +37,54 @@ n="$(grep -c '<!-- bug-sweep:fingerprint=' "$BODY_FILE")"
 [ "$n" -eq 1 ] || errors+=("body must contain exactly one fingerprint marker (found $n)")
 fp="$(sed -n 's/.*<!-- bug-sweep:fingerprint=\([0-9a-f]*\) -->.*/\1/p' "$BODY_FILE" | head -1)"
 [ "${#fp}" -eq 64 ] || errors+=("fingerprint must be 64 hex chars (got '${fp}')")
-for pat in 'sk-ant-' 'ghp_[A-Za-z0-9]' 'gho_[A-Za-z0-9]' 'Bearer [A-Za-z0-9._-]' 'api[_-]?key *[:=]' '/Users/[A-Za-z0-9._-]+/' 'AKIA[0-9A-Z]{12}' 'xox[baprs]-' 'SC_[A-Z_]+:[a-z]+:[0-9a-f]{6,}' '-----BEGIN'; do
-  grep -Eiq -- "$pat" "$BODY_FILE" "$TITLE_FILE" && errors+=("privacy pattern matched in title/body: $pat")
-done
+# structured redaction scan (fail closed: any hit => redaction_failed)
+redaction="$(node -e '
+  const fs = require("fs");
+  const title = fs.readFileSync(process.argv[1], "utf8");
+  const body = fs.readFileSync(process.argv[2], "utf8").split("\n").filter((l) => !l.includes("bug-sweep:fingerprint=")).join("\n");
+  const text = title + "\n" + body;
+  const rules = [
+    ["anthropic key", /sk-ant-[A-Za-z0-9_-]{8,}/],
+    ["openai key", /\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{16,}/],
+    ["github token", /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/],
+    ["slack token", /\bxox[baprs]-[A-Za-z0-9-]{10,}/],
+    ["aws access key", /\bAKIA[0-9A-Z]{16}\b/],
+    ["google api key", /\bAIza[0-9A-Za-z_-]{30,}\b/],
+    ["jwt", /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/],
+    ["bearer header", /\bBearer\s+[A-Za-z0-9._-]{8,}/i],
+    ["private key block", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+    ["credential assignment", /\b(?:api[_-]?key|secret|token|password|passwd)\s*[:=]\s*["\x27]?[A-Za-z0-9_\-\/+=]{8,}/i],
+    ["absolute path (unix)", /(?:^|[\s(`\x27"=])\/(?:Users|home|root|private|tmp|var|opt|etc|Volumes|mnt|srv)\//m],
+    ["home path", /(?:^|[\s(`\x27"=])~\//m],
+    ["absolute path (windows)", /\b[A-Za-z]:\\[^\s`\x27"]+/],
+    ["e-mail address", /[\w.+-]+@[\w-]+\.[\w.-]+/],
+    ["nonce-bearing marker", /SC_[A-Z_]+:[a-z]+:[0-9a-f]{6,}/],
+    ["hex string >= 40", /\b[0-9a-f]{40,}\b/i],
+  ];
+  const hits = rules.filter(([, re]) => re.test(text)).map(([name]) => name);
+  for (const tok of text.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? [])
+    if (/[a-z]/.test(tok) && /[A-Z]/.test(tok) && /\d/.test(tok)) { hits.push("long mixed-case token"); break; }
+  process.stdout.write(hits.join("; "));
+' "$TITLE_FILE" "$BODY_FILE")"
+[ -z "$redaction" ] || errors+=("redaction_failed: $redaction")
+if [ -n "$LABEL" ]; then
+  labels="$(gh label list --repo "$REPO" --limit 200 --json name --jq '.[].name' 2>/dev/null || true)"
+  printf '%s\n' "$labels" | grep -qx -- "$LABEL" || errors+=("label '$LABEL' does not exist in $REPO (create it or pass --label '')")
+fi
 count="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).length)' "$INDEX")"
 [ "$count" -lt "$MAX" ] || errors+=("per-run cap reached ($count/$MAX issues already created)")
 if [ "${#errors[@]}" -gt 0 ]; then printf 'GATE FAILED:\n'; printf ' - %s\n' "${errors[@]}"; exit 2; fi
 
-# fingerprint collision on GitHub (marker match = collision candidate, operator decides)
 existing="$(gh issue list --repo "$REPO" --state all --limit 20 --search "bug-sweep:fingerprint=$fp" --json number,state,title,url 2>/dev/null)"
-if [ -z "$existing" ]; then echo "dedup_incomplete: gh issue list failed" >&2; exit 3; fi
+[ -n "$existing" ] || { echo "dedup_incomplete: gh issue list failed" >&2; exit 3; }
 if [ "$(node -e 'console.log(JSON.parse(process.argv[1]).length)' "$existing")" != "0" ]; then
   echo "COLLISION: an issue with this fingerprint marker already exists — not filing"; echo "$existing"; exit 3
 fi
-echo "open bugs (semantic duplicate check is yours):"
-gh issue list --repo "$REPO" --state open --label "$LABEL" --limit 50 --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null || true
+echo "open bugs in $REPO (semantic duplicate check is yours):"
+gh issue list --repo "$REPO" --state open --label "${LABEL:-bug}" --limit 50 --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null || true
 
-if [ "$DRY" = 1 ]; then echo "DRY RUN OK: title='$title' fingerprint=$fp (nothing created)"; exit 0; fi
+if [ "$DRY" = 1 ]; then echo "DRY RUN OK: repo=$REPO filing_mode=$FILING title='$title' fingerprint=$fp (nothing created)"; exit 0; fi
+[ "$FILING" = "live" ] || { echo "blocked_authorization: manifest filing_mode=$FILING — live filing needs new-run.sh --filing live --authorized-by \"<request wording>\"" >&2; exit 6; }
 
 url="$(gh issue create --repo "$REPO" --title "$title" --body-file "$BODY_FILE" ${LABEL:+--label "$LABEL"} 2>&1 | tail -1)"
 num="${url##*/}"

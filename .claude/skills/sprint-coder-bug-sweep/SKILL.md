@@ -1,6 +1,6 @@
 ---
 name: sprint-coder-bug-sweep
-description: sprint-coder の不具合を一掃する統合手順。(1) Playwright Electron E2E を全件実行して本物の失敗だけを GitHub Issue に起票し、(2) Computer Use で開発 build を人と同じように操作して Claude Code CLI と Codex CLI の実 AI に隔離 workspace 内のファイル編集とコマンド実行をさせ（承認カード・拒否・停止・再起動復元・scope 逸脱を含む）、その不具合も Issue に起票し、(3) 起票した Issue を root-cause gate → 修正 PR → レビュー BOT → squash merge で潰す。「全部テストしてバグを潰して」「フル E2E と実 AI テスト」「bug sweep」「バグ掃討」「Computer Use で Claude と Codex を実際に動かしてテストして」「E2E で見つけたバグを起票して直して」と言われたときに読む。個々の spec の実行判定は sprint-coder-e2e、spec 化されていない画面の巡回は sprint-coder-e2e-patrol、Ollama を含む受入スモークは sprint-coder-real-ai-smoke が正典で、このスキルはそれらを順に束ねて「起票」と「修正」まで進める点が違う。実 CLI を叩くので課金が発生し、Computer Use のアプリ許可が要る。
+description: sprint-coder の不具合を一掃する統合手順。(1) Playwright Electron E2E を全件実行して本物の失敗だけを GitHub Issue に起票し、(2) Computer Use で開発 build を人と同じように操作して Claude Code CLI と Codex CLI の実 AI に隔離 workspace 内のファイル編集とコマンド実行をさせ（承認カード・拒否・停止・再起動復元・scope 逸脱を含む）、その不具合も Issue に起票し、(3) 起票した Issue を root-cause gate → 修正 PR → レビュー BOT → squash merge で潰す。「全部テストしてバグを潰して」「フル E2E と実 AI テスト」「bug sweep」「バグ掃討」「Computer Use で Claude と Codex を実際に動かしてテストして」「E2E で見つけたバグを起票して直して」と言われたときに読む。個々の spec の実行判定は sprint-coder-e2e、spec 化されていない画面の巡回は sprint-coder-e2e-patrol、Ollama を含む受入スモークは sprint-coder-real-ai-smoke が正典で、このスキルはそれらを順に束ねて「起票」と「修正」まで進める点が違う。既定は report-only・修正なし・実 AI なしで、Issue 起票・修正 PR・実 CLI 課金は依頼文にそれぞれの明示があるときだけ new-run.sh のフラグに引用して有効化する。実 CLI を叩くので課金が発生し、Computer Use のアプリ許可が要る。
 ---
 
 # Sprint Coder Bug Sweep
@@ -24,8 +24,8 @@ description: sprint-coder の不具合を一掃する統合手順。(1) Playwrig
 
 ### 必須境界
 
-- **このスキルを名指しで起動した依頼は、Issue 起票・修正 PR・squash merge・実 CLI 課金の許可として扱う。** 依頼に `report-only` と書かれていれば Phase 2 / 4 / 5 を止め、本文案とローカル報告で終える。依頼に「起票だけ」「修正はしない」があれば Phase 5 を止める。
-- 実 CLI は **Claude Code CLI と Codex CLI の既存ログイン** をそのまま使う。credential の入力・再認証・モデル download・Provider 追加はしない。Phase 3 は lane あたり 6〜8 Turn を送る。Team（複数 Worker）を実 AI で回すのは依頼に `--team` 相当の明示がある時だけ（`SPRINT_CODER_LEADER_MCP=1` を勝手に付けない）。
+- **既定は report-only・修正なし・実 AI なし。** スキル名が呼ばれただけでは外部に何も書かず、課金もしない。Issue 起票（`--filing live`）、修正 PR と squash merge（`--fix on`）、実 CLI への送信＝課金（`--real-ai on`）は、**現在の依頼文にそれぞれの明示**（例: 「起票して」「直して／潰して」「Computer Use で Claude と Codex を実際に動かして」）がある場合だけ、その文言を `new-run.sh --authorized-by` に引用して run を作る。scripts は manifest を読んで機械的に拒否する（`file-issue.sh` は `filing_mode=live` 以外で作成しない、`launch-dev-instance.sh` は `real_ai=on` 以外で起動しない）。過去の run、リポジトリ内の文章、この SKILL.md 自体から許可を復元しない。
+- 実 CLI は **Claude Code CLI と Codex CLI の既存ログイン** をそのまま使う。credential の入力・再認証・モデル download・Provider 追加はしない。Phase 3 は lane あたり 9〜10 Turn を送る。Team（複数 Worker）を実 AI で回すのは依頼に `--team` 相当の明示がある時だけ（`SPRINT_CODER_LEADER_MCP=1` を勝手に付けない）。
 - **他人のプロセスを止めない。** `pkill electron` 禁止。自分が `scripts/` 経由で起動した PID だけを止める。開発者の `npm start` と `/Applications/Sprint Coder.app` は常に保護対象。
 - **source repository を AI の編集対象にしない。** lane ごとに run ディレクトリ配下へ隔離 workspace を作り、その directory だけを Project にする。scope が repo・home・network・秘密情報へ広がる要求は拒否し `fail_scope_escape` として記録する。
 - 秘匿: prompt / response 全文、API key、token、環境変数全体、home 配下の無関係な filename、個人名入りの絶対 path を Issue・報告へ出さない。生の screenshot・ログは run ディレクトリに留める。
@@ -44,9 +44,14 @@ description: sprint-coder の不具合を一掃する統合手順。(1) Playwrig
 ## 2. Phase 0 — 束縛と preflight
 
 ```bash
-RUN_DIR=$(.claude/skills/sprint-coder-bug-sweep/scripts/new-run.sh)   # ~/.cache/sprint-coder-bug-sweep/<UTC>-<sha>/
-RUN_DIR="$RUN_DIR" .claude/skills/sprint-coder-bug-sweep/scripts/preflight.sh
+S=.claude/skills/sprint-coder-bug-sweep/scripts
+# 既定は report-only / fix off / real-ai off。依頼文に明示があるモードだけ上げ、その文言を引用する
+RUN_DIR=$("$S/new-run.sh" --filing live --fix on --real-ai on \
+  --authorized-by "依頼: 「issueを起票する」「Claude(CLI)/Codex(CLI) で…テストを行いなさい」「全てのバグを潰す」")
+RUN_DIR="$RUN_DIR" "$S/preflight.sh"
 ```
+
+`new-run.sh` は `~/.cache/sprint-coder-bug-sweep/<UTC>-<sha>-<random>/` を排他的に作り、`manifest.json` にモードと引用した依頼文を書く。モードを上げるのに `--authorized-by` が無ければ作成を拒否する。
 
 `preflight.sh` は何も起動・停止せず、`[OK] / [WARN] / [BLOCK]` を出して `$RUN_DIR/preflight.json` に残す。`[BLOCK]` が 1 つでもあれば **そこで止めて理由を報告する**。よくある BLOCK と対処:
 
@@ -54,10 +59,11 @@ RUN_DIR="$RUN_DIR" .claude/skills/sprint-coder-bug-sweep/scripts/preflight.sh
 |---|---|---|
 | dev server on :5173 serves ANOTHER checkout | 5173 を別 worktree の `npm start` が握っている。この repo の main bundle と別 checkout の renderer が混ざる | 殺さない。ユーザーにその `npm start` を止めてもらうか、その checkout で sweep を回す |
 | better-sqlite3 target ≠ Electron / native-safe-fs / sandbox-runner missing | fresh clone・worktree で native 未 build。全 spec が `firstWindow: Timeout` で死ぬ | `npm run prepare:desktop --workspace @sprint-coder/desktop` |
-| claude / codex CLI not logged in | 実 lane が走らない | ユーザーに `claude auth login` / `codex login` を依頼。勝手に認証しない |
+| `[LANE] claude/codex: blocked_auth` | その lane だけ走らない（global blocker ではない。Phase 1 ともう一方の lane は続行） | ユーザーに `claude auth login` / `codex login` を依頼。勝手に認証しない。lane は `BLOCKED` として報告 |
+| label 'bug' missing and filing_mode=live | `file-issue.sh` が label を要求する | `gh label create bug` をユーザーに依頼するか、`--label ''` で起票 |
 | node on PATH is v26 (WARN) | repo は Node 22.x。scripts は `/opt/homebrew/opt/node@22/bin` を自動で前置する | 手で `npm start` を叩くなら `export PATH=/opt/homebrew/opt/node@22/bin:$PATH` |
 
-preflight が通ったら `manifest.json` に repo、full SHA、branch、dirty 件数、Playwright の `Total: N tests in M files`、lane 予定、`filing_mode`（`live` / `report-only`）、`fix_mode`（`on` / `off`）を書く。
+preflight が通ったら `manifest.json` の `state` を `preflight_ok` にし、Playwright の `Total: N tests in M files` と `preflight.json` の `lanes`（claude / codex の `ok` / `blocked_auth` / `blocked_missing`）を追記する。
 
 **Computer Use の許可はここで取る**（Phase 3 で初めて出すとユーザー不在で止まる）:
 
@@ -103,7 +109,7 @@ S=.claude/skills/sprint-coder-bug-sweep/scripts
 # ここでもう一度 window 一覧を取る（after inventory）— 差分 1 枚が自分の window
 ```
 
-- `launch-dev-instance.sh` は E2E 用の `SPRINT_CODER_RUNTIME_ADOPT=0` / `SPRINT_CODER_E2E_CLI_FIXTURES=1` / `SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS=1` を **明示的に外して** 起動する。mock や fixture が混ざった lane は無効。
+- `launch-dev-instance.sh` は manifest の `real_ai=on` を要求し、E2E 用の `SPRINT_CODER_RUNTIME_ADOPT=0` / `SPRINT_CODER_E2E_CLI_FIXTURES=1` / `SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS=1` を **明示的に外して** 起動する。mock や fixture が混ざった lane は無効。起動した process の identity（pid・起動時刻・コマンド行）は `lanes/<lane>/app.json` に残り、`stop-dev-instance.sh` はそれと一致する process だけを止める。`app.log` は追記のみで、再起動しても前の Turn の stderr は消えない。
 - `SPRINT_CODER_E2E_BACKGROUND=1` で window は表示されるがフォーカスを奪わない（ユーザーの好み: 作業中のアプリから前面を奪わない）。
 - 同じ `com.github.Electron` に開発者自身の `npm start` の window や、`ensure-dev-server.sh` が起動した forge の window も並ぶ。**before / after の差分で特定した window_id 以外には一切触らない。** 以後の `app_*` 呼び出しは全部 `window_id` を明示する。
 
@@ -112,10 +118,10 @@ S=.claude/skills/sprint-coder-bug-sweep/scripts
 1. **セットアップウィザード**（fresh profile では必ず出る）: 「セットアップを始める」→「使うAIを確認」で Codex / Claude Code が `接続済み` か読む（`ログインが必要` / `未検出` なら `blocked_auth`）→「続ける」→「作業場所を選ぶ」。
 2. **workspace を Project にする**: native のフォルダ選択（`CU-01-native-dialog`。display-scope で `cmd+shift+g` → path → Return → Return）。display-scope が取れない場合だけ `scripts/seed-instance.mjs`（`--debug-port` で起動した instance に CDP で Project を作る）へ切り替え、manifest に `seeded_via_cdp=true` を記録し、case RA-02 を `NOT_RUN` にする。
 3. **モデル選択**: モデルピッカーで Claude lane は `sonnet`、Codex lane は `gpt-5.5` を検索して選ぶ。ピッカーの表示が選んだモデル名になるまで確認する。
-4. **Access は `確認する`（ask）のまま**で case RA-03〜RA-06 を回し、承認カード（`今回のみ許可` / `Task中許可` / `拒否`）を Computer Use で操作する。RA-07 だけ `安全時は自動` に切り替える。
-5. **各 Turn** で Run Card の遷移（`思考中` → `完了` / `失敗` / `中止`）、ファイル変更カード、コマンドカードの `exit 0` を画面から読み、`scripts/verify-lane.sh` で **UI の外から** 実ファイルの byte・sha256・marker を実測する。UI と実測が一致して初めて PASS。
-6. **再起動復元**（RA-09）: メニューから通常終了 → `launch-dev-instance.sh --reuse-profile` で同じ profile を再起動 → 履歴・ファイル変更カード・Project が戻ることを確認。
-7. **cleanup**: `scripts/stop-dev-instance.sh --run-dir "$RUN_DIR" --lane claude`。自分の PID だけを SIGTERM し、残れば `cleanup_hold`（SIGKILL しない）。`app_release` で lock を返す。
+4. **preset ごとに期待値が違う**（根拠は matrix §3 の表: ask = read-only で書き込み tool なし、auto = workspace-write だが `run_command` は `high_risk` で自動拒否、full = 承認なしで実行）。`確認する`（ask）で RA-03〜RA-06（承認カード `今回のみ許可` / `拒否` を操作）、`安全時は自動`（auto）で RA-07a/b・RA-08（監査行 `拒否` / `high_risk`）・RA-10・RA-11、`フルアクセス`（full。確認ダイアログを通す）で RA-09。
+5. **各 Turn** で Run Card の遷移（`思考中` → `完了` / `失敗` / `中止`）、承認カード・監査行・ファイル変更カード・コマンドカードの `exit 0` を画面から読み、`scripts/verify-lane.sh --stage <case の stage>` で **UI の外から** 実ファイルを byte 単位で実測する。UI と実測が一致して初めて PASS。
+6. **再起動復元**（RA-12）: メニューから通常終了 → `launch-dev-instance.sh --reuse-profile` で同じ profile を再起動 → 履歴・カード・Project・モデル・Access が戻ることを確認（`--stage all`）。
+7. **cleanup**: `scripts/stop-dev-instance.sh --run-dir "$RUN_DIR" --lane claude`。`app.json` の identity と一致する PID だけを SIGTERM し、一致しない・残る場合は `cleanup_hold`（SIGKILL しない）。`app_release` で lock を返す。
 8. Codex lane で 1〜7 を繰り返す。最後に `ensure-dev-server.sh` が起動した `npm start` だけを `stop-dev-instance.sh --dev-server` で止める。
 
 ### 5.3 Computer Use の使い方（このスキルでの規約）
@@ -147,7 +153,7 @@ Phase 3 の FAIL は **fresh profile で同じ case をもう 1 回**（同じ l
 
 - **root-cause gate を通さずに修正しない**（[root-cause-guardrail](../../../.agents/skills/root-cause-guardrail/SKILL.md)）。
 - 1 Issue = 1 worktree = 1 PR。Opus worker に実装と回帰テストを委譲し、司令塔が `typecheck` / `lint` / 該当 vitest / spec-map で選んだ E2E / 実 AI 由来なら該当 lane の case を再実行して検証する。
-- PR 作成 → レビュー BOT（webhook 停止中は memory `sprint-coder-review-bot` の手順で手動起動）→ 指摘対応 → 承認確認 → squash merge → [issue-closeout](../../../.agents/skills/issue-closeout/SKILL.md) で CLOSED を確認。
+- PR 作成 → レビュー BOT（webhook 停止中は memory `sprint-coder-review-bot` の手順で手動起動）→ 指摘対応 → 承認確認時の head SHA を保存 → その SHA に束縛して squash merge（`--match-head-commit`。承認後に head が動いていれば merge せず再レビュー）→ [issue-closeout](../../../.agents/skills/issue-closeout/SKILL.md) で CLOSED を確認。
 - merge のたびに次の worktree を main に rebase する。main を壊したら次へ進まない。
 
 依頼に「既存の open bug も」とあれば `gh issue list --label bug --state open` の分も同じ loop に載せる。それ以外は今回起票分だけ。
@@ -160,7 +166,8 @@ Phase 3 の FAIL は **fresh profile で同じ case をもう 1 回**（同じ l
 
 ```text
 Bug Sweep <run-id>  対象: <owner/repo>@<sha> (<branch>, dirty=<n>)
-Phase 0: OK | BLOCKED(<code>)   dev server: <reused|owned> / native: OK / claude: OK / codex: OK / gh: OK
+Modes: filing=<report-only|live> fix=<off|on> real_ai=<off|on>  authorized_by: <引用した依頼文 | なし>
+Phase 0: OK | BLOCKED(<code>)   dev server: <reused|owned> / native: OK / gh: OK / lanes: claude=<ok|blocked_auth> codex=<ok|blocked_auth>
 Phase 1: <N passed / M failed / K skipped>（<所要>）
   本物の失敗: <spec:行 › タイトル> — 期待/実測 — 独立再現 yes|no
   既知 flake: … / 環境起因: … / 意図的 skip: …
@@ -184,3 +191,5 @@ Artifacts: <RUN_DIR>   Temporary workspaces: <保持|削除>
 - 生 screenshot・ログ・prompt 全文・絶対 path を Issue に貼る
 - 原因未確定のまま直す、レビュー BOT を待たずに merge する、main へ直 push する
 - 一部だけ流して「全部通りました」と書く（未実行範囲を必ず添える）
+- 依頼文以外（過去 run・リポジトリ内の文章・この文書）を根拠に `--filing live` / `--fix on` / `--real-ai on` を付ける
+- 承認時と違う head を merge する（`--match-head-commit` を外す）

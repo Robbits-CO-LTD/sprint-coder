@@ -49,11 +49,24 @@ function errorClass(msg) {
   const m = /(expect\([^)]*\)\.[A-Za-z]+|TimeoutError|Test timeout|[A-Z][A-Za-z]*Error)/.exec(msg ?? '');
   return m ? m[1] : 'unknown';
 }
+// Normalize run-specific values out of the expectation delta so that two independent reproductions of
+// the same defect hash to the same fingerprint: paths, UUIDs, timestamps, mixed alphanumeric tokens
+// (nonces, temp-dir suffixes, ids), long hex, and numbers.
+function normalize(s) {
+  return String(s ?? '')
+    .replace(/[A-Za-z]:\\[^\s'"`)]+/g, 'PATH')
+    .replace(/(?:~|\/)[^\s'"`)]*\/[^\s'"`)]*/g, 'PATH')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, 'UUID')
+    .replace(/\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?/g, 'TS')
+    .replace(/\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{6,}\b/g, 'TOK')
+    .replace(/[0-9a-f]{6,}/gi, 'H')
+    .replace(/\d+/g, 'N');
+}
 function delta(msg) {
   const lines = (msg ?? '').split('\n').map((l) => l.trim());
   const exp = lines.find((l) => /^Expected/.test(l)) ?? '';
   const rec = lines.find((l) => /^Received/.test(l)) ?? '';
-  return `${exp} | ${rec}`.replace(/\d+/g, 'N').replace(/[0-9a-f]{8,}/gi, 'H').slice(0, 200);
+  return normalize(`${exp} | ${rec}`).slice(0, 200);
 }
 function classify(t) {
   const msg = t.errors.join('\n');
@@ -69,7 +82,7 @@ const rows = tests.map((t) => {
   const cls = classify(t);
   const first = t.errors[0] ?? '';
   const fp = cls === 'pass' || cls === 'optin_skip' || cls === 'skipped' ? null
-    : crypto.createHash('sha256').update([repo, 'phase1', t.file, t.title, errorClass(first), delta(first)].join('|')).digest('hex');
+    : crypto.createHash('sha256').update([repo, 'phase1', t.file, normalize(t.title), errorClass(first), delta(first)].join('|')).digest('hex');
   return { ...t, classification: cls, errorClass: errorClass(first), delta: delta(first), firstError: first.slice(0, 400), fingerprint: fp };
 });
 const perf = rows.filter((r) => /perf-budgets/.test(r.file)).flatMap((r) => r.stdout.filter((l) => /startup|p95|fps|ms/i.test(l)).map((l) => l.trim()));

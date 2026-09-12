@@ -11,7 +11,7 @@
 - 環境起因（native 未 build、dev server 不一致、CLI 未認証、quota）と driver 起因（Computer Use の `unsupported`、stale window）を除外した
 - open / closed Issue と open PR の **意味的** 重複を自分で読んで確認した
 - redact 済みのタイトルと本文だけで第三者が再現できる
-- `filing_mode=live`
+- manifest の `filing_mode=live`（`new-run.sh --filing live --authorized-by "<依頼文の該当語>"` で作った run だけ。`file-issue.sh` は manifest を読み、`report-only` なら `--dry-run` 以外を拒否する）
 
 severity は並び順に使うだけで、証拠不足を補わない。
 
@@ -97,7 +97,9 @@ fingerprint は `sha256(repo | phase | spec or case | 安定した要素名 | �
 "$S/file-issue.sh" --run-dir "$RUN_DIR" --title-file "$RUN_DIR/issues/<fp>.title" --body-file "$RUN_DIR/issues/<fp>.md" [--label bug] [--max 5] [--dry-run]
 ```
 
-script は次を機械チェックし、1 つでも落ちれば作成しない: タイトル prefix と文字数、`#\d+` の混入、marker がちょうど 1 個、秘匿パターン（`sk-ant-`、`ghp_`/`gho_`、`Bearer `、`api_key=`、`/Users/<name>/`、`nonce`）、fingerprint 一致の既存 Issue、`--max` 超過。作成後は `gh issue view --json` で OPEN・タイトル一致・marker 1 個・label を確認し、`issues/index.json` に追記する。read-back に失敗した Issue は成功に数えず、以後の起票を止める。
+対象 repository は manifest の `repository` から取り、`--repo` が食い違えば拒否する（cwd の `gh repo view` には依存しない）。script は次を機械チェックし、1 つでも落ちれば作成しない: タイトル prefix と文字数、`#\d+` の混入、marker がちょうど 1 個、**構造化した秘匿スキャン**（Anthropic / OpenAI / GitHub / Slack / AWS / Google の既知 token 形式、JWT、Bearer、秘密鍵ブロック、`api_key=` 型の代入、Unix / Windows / `~` の絶対 path、メールアドレス、nonce 入り marker、40 桁以上の hex、32 文字以上の大小英数混在 token）→ 1 つでも当たれば `redaction_failed`、label の存在、fingerprint 一致の既存 Issue、`--max` 超過。作成後は `gh issue view --json` で OPEN・タイトル一致・marker 1 個・label を確認し、`issues/index.json` に追記する。read-back に失敗した Issue は成功に数えず、以後の起票を止める。
+
+秘匿スキャンは deny-list であって完全ではない。スキャンを通っても、本文に「第三者が特定できる値」「run 固有の値」が残っていないか自分で読み直す。判断に迷う値は削る（fail closed）。
 
 ## 秘匿
 

@@ -9,10 +9,16 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 DESKTOP_ROOT="$REPO_ROOT/apps/desktop"
 RUN_DIR="${RUN_DIR:-}"
 LINES=()
-blockers=0; warnings=0
+blockers=0; warnings=0; lane_claude="unknown"; lane_codex="unknown"
 ok()    { LINES+=("[OK]    $*");    printf '[OK]    %s\n' "$*"; }
 warn()  { LINES+=("[WARN]  $*");    printf '[WARN]  %s\n' "$*"; warnings=$((warnings+1)); }
 block() { LINES+=("[BLOCK] $*");    printf '[BLOCK] %s\n' "$*"; blockers=$((blockers+1)); }
+lane()  { LINES+=("[LANE]  $*");    printf '[LANE]  %s\n' "$*"; }   # per-lane availability; never a global blocker
+filing_mode="report-only"; real_ai="off"
+if [ -n "$RUN_DIR" ] && [ -f "$RUN_DIR/manifest.json" ]; then
+  filing_mode="$(node -p "JSON.parse(require('fs').readFileSync('$RUN_DIR/manifest.json','utf8')).filing_mode || 'report-only'")"
+  real_ai="$(node -p "JSON.parse(require('fs').readFileSync('$RUN_DIR/manifest.json','utf8')).real_ai || 'off'")"
+fi
 
 # 1. repository
 if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -75,19 +81,23 @@ else
   else block "dev server pid=$pid on :5173 serves ANOTHER checkout: ${cwd:-unknown} — E2E dev mode and launch-dev-instance.sh would mix this repo's main bundle with that renderer. Do not kill it; ask the user to stop it, or run the sweep from that checkout."; fi
 fi
 
-# 6. CLIs (read-only probes; no billing)
+# 6. CLIs (read-only probes; no billing). A missing/unauthenticated CLI blocks only ITS lane
+#    (Phase 1 mock E2E and the other lane still run) — recorded as [LANE], not [BLOCK].
 if command -v claude >/dev/null 2>&1; then
   cv="$(claude --version 2>/dev/null | head -1)"
   cauth="$(claude auth status 2>/dev/null || true)"
-  if printf '%s' "$cauth" | grep -q '"loggedIn": *true'; then ok "claude CLI $cv logged in"
-  else block "claude CLI ($cv) is not logged in — the user must run: claude auth login"; fi
-else block "claude CLI not on PATH"; fi
+  if printf '%s' "$cauth" | grep -q '"loggedIn": *true'; then lane_claude="ok"; lane "claude: ok ($cv logged in)"
+  else lane_claude="blocked_auth"; lane "claude: blocked_auth ($cv not logged in — the user must run: claude auth login)"; fi
+else lane_claude="blocked_missing"; lane "claude: blocked_missing (claude CLI not on PATH)"; fi
 if command -v codex >/dev/null 2>&1; then
   cxv="$(codex --version 2>/dev/null | head -1)"
   cxauth="$(codex login status 2>&1 || true)"
-  if printf '%s' "$cxauth" | grep -qi 'logged in'; then ok "codex CLI $cxv logged in"
-  else block "codex CLI ($cxv) is not logged in — the user must run: codex login"; fi
-else block "codex CLI not on PATH"; fi
+  if printf '%s' "$cxauth" | grep -qi 'logged in'; then lane_codex="ok"; lane "codex: ok ($cxv logged in)"
+  else lane_codex="blocked_auth"; lane "codex: blocked_auth ($cxv not logged in — the user must run: codex login)"; fi
+else lane_codex="blocked_missing"; lane "codex: blocked_missing (codex CLI not on PATH)"; fi
+if [ "$real_ai" = "on" ] && [ "$lane_claude" != "ok" ] && [ "$lane_codex" != "ok" ]; then
+  warn "real_ai=on but neither CLI lane is available — Phase 3 will be BLOCKED for both lanes (Phase 1 still runs)"
+fi
 
 # 7. GitHub
 if gh auth status >/dev/null 2>&1; then
@@ -95,7 +105,8 @@ if gh auth status >/dev/null 2>&1; then
   ok "gh authenticated; repo $repo"
   labels="$(gh label list --limit 200 --json name --jq '.[].name' 2>/dev/null || true)"
   if printf '%s\n' "$labels" | grep -qx bug; then ok "label 'bug' exists"
-  else warn "label 'bug' missing; issues will be filed without labels"; fi
+  elif [ "$filing_mode" = "live" ]; then block "label 'bug' missing and filing_mode=live — file-issue.sh requires it; create the label (gh label create bug) or file with --label ''"
+  else warn "label 'bug' missing (filing_mode=$filing_mode; would block a live run)"; fi
 else
   block "gh is not authenticated (gh auth login)"
 fi
@@ -117,14 +128,15 @@ fi
 other="$(pgrep -fl 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron' 2>/dev/null | grep -v "$REPO_ROOT" | wc -l | tr -d ' ')"
 [ "$other" != "0" ] && warn "$other dev Electron process(es) from other checkouts are running — they share bundle id com.github.Electron; use the before/after window inventory to find the owned window"
 
-printf '\nblockers=%s warnings=%s\n' "$blockers" "$warnings"
+printf '\nblockers=%s warnings=%s lanes: claude=%s codex=%s\n' "$blockers" "$warnings" "$lane_claude" "$lane_codex"
 if [ -n "$RUN_DIR" ]; then
   mkdir -p "$RUN_DIR"
   printf '%s\n' "${LINES[@]}" > "$RUN_DIR/preflight.txt"
   node -e '
     const fs=require("fs"); const lines=fs.readFileSync(process.argv[1],"utf8").trim().split("\n");
     const items=lines.map(l=>{const m=/^\[(OK|WARN|BLOCK)\]\s+(.*)$/.exec(l); return m?{level:m[1],message:m[2]}:{level:"?",message:l};});
-    fs.writeFileSync(process.argv[2], JSON.stringify({checked_at:new Date().toISOString(), blockers:Number(process.argv[3]), warnings:Number(process.argv[4]), items},null,2)+"\n");
-  ' "$RUN_DIR/preflight.txt" "$RUN_DIR/preflight.json" "$blockers" "$warnings"
+    fs.writeFileSync(process.argv[2], JSON.stringify({checked_at:new Date().toISOString(), blockers:Number(process.argv[3]), warnings:Number(process.argv[4]),
+      filing_mode:process.argv[5], real_ai:process.argv[6], lanes:{claude:process.argv[7], codex:process.argv[8]}, items},null,2)+"\n");
+  ' "$RUN_DIR/preflight.txt" "$RUN_DIR/preflight.json" "$blockers" "$warnings" "$filing_mode" "$real_ai" "$lane_claude" "$lane_codex"
 fi
 [ "$blockers" -eq 0 ] && exit 0 || exit 2

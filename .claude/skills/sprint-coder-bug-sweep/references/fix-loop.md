@@ -61,12 +61,22 @@ gh pr create --base main --title "fix: <症状が消える日本語タイトル>
 
 ## 6. レビュー BOT
 
-CLAUDE.md の手順どおり BOT の結果を待つ。2026-09 時点で webhook は停止しており、memory `sprint-coder-review-bot` の手順で `ssh yusei2` から手動起動する（20〜40 分。`usageLimitExceeded` で落ちたら Claude fallback を待ち、それでも駄目なら `review_hold`）。指摘は同じ branch へ commit して再レビュー。承認（approve / actionable finding 0）を `gh pr view --json reviews,reviewDecision` で確認する。unverified の finding は一次資料で自分で確かめてから直す。
+CLAUDE.md の手順どおり BOT の結果を待つ。2026-09 時点で webhook は停止しており、memory `sprint-coder-review-bot` の手順でホストから手動起動する（`ssh yusei` / `ssh yusei2` のどちらが通るかは日によって変わる。20〜40 分。`usageLimitExceeded` で落ちたら Claude fallback を待ち、それでも駄目なら `review_hold`）。指摘は同じ branch へ commit して再レビューし、対応済み thread は GraphQL `resolveReviewThread` で解決する（未解決の古い thread は verdict に数えられる）。承認（approve / actionable finding 0）を確認したら、**その時点の head SHA を保存する**:
+
+```bash
+APPROVED_HEAD="$(gh pr view <pr> --json headRefOid --jq .headRefOid)"
+gh pr view <pr> --json reviewDecision,reviews --jq '{reviewDecision, last: (.reviews | map(select(.author.login=="sprintreviewer[bot]")) | last | {state, submittedAt})}'
+```
+
+unverified の finding は一次資料で自分で確かめてから直す。
 
 ## 7. merge と close
 
+merge は **承認を確認した head にだけ** 行う。承認後に worker や他の collaborator が push していれば、`--match-head-commit` が拒否するので、再レビューへ戻る（黙って最新 head を merge しない）。
+
 ```bash
-gh pr merge <pr> --squash --delete-branch
+[ "$(gh pr view <pr> --json headRefOid --jq .headRefOid)" = "$APPROVED_HEAD" ] || { echo "head moved after approval → review_hold"; exit 1; }
+gh pr merge <pr> --squash --delete-branch --match-head-commit "$APPROVED_HEAD"
 ```
 
 merge 後に [issue-closeout](../../../../.agents/skills/issue-closeout/SKILL.md) の Close Gate を当て、`gh issue view <n> --json state` で `CLOSED` を確認する（`Closes #n` で自動 close されなければ `gh issue close <n> --comment "<PR URL> で修正"`）。次の worktree を `git rebase origin/main` してから続ける。

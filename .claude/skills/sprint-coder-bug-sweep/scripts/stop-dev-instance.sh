@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Stop only what this run launched.
-#   --run-dir DIR --lane NAME      stop the lane's app instance (SIGTERM; no SIGKILL unless --force)
-#   --run-dir DIR --dev-server     stop the `npm start` recorded in dev-server.pid (whole process tree)
-# A PID is only signalled if its command line still looks like the process we started; otherwise the
-# script reports cleanup_hold and leaves it alone. Never touches other checkouts' processes.
+# Stop only what this run launched, and only after proving the PID is still the same process.
+#   --run-dir DIR --lane NAME      stop the lane's app instance recorded in lanes/<lane>/app.json
+#   --run-dir DIR --dev-server     stop the `npm start` recorded in dev-server.json (whole tree)
+# Identity = pid + process start time (ps lstart) + full command line, all captured at launch. A
+# reused PID or a different command line yields cleanup_hold and no signal. SIGTERM only; --force
+# (SIGKILL) still requires the identity match. Never touches other checkouts' processes.
 set -uo pipefail
 RUN_DIR=""; LANE=""; DEV=0; FORCE=0; WAIT=20
 while [ $# -gt 0 ]; do case "$1" in
@@ -15,39 +16,31 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "unknown arg: $1" >&2; exit 64;; esac; done
 [ -n "$RUN_DIR" ] || { echo "--run-dir is required" >&2; exit 64; }
 
-term_tree() { # SIGTERM children first, then the pid
-  local p="$1" c
-  for c in $(pgrep -P "$p" 2>/dev/null); do term_tree "$c"; done
-  kill -TERM "$p" 2>/dev/null || true
-}
+term_tree() { local p="$1" c; for c in $(pgrep -P "$p" 2>/dev/null); do term_tree "$c"; done; kill -TERM "$p" 2>/dev/null || true; }
 wait_gone() { local p="$1" i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt "$WAIT" ]; do sleep 1; i=$((i+1)); done; ! kill -0 "$p" 2>/dev/null; }
-
+identity_matches() { # json-file pid → 0 if ps lstart+command equal the recorded ones
+  local file="$1" pid="$2" now
+  now="$(ps -p "$pid" -o lstart=,command= 2>/dev/null || true)"
+  [ -n "$now" ] || return 2
+  node -e '
+    const rec = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const now = process.argv[2]; const lstart = now.slice(0, 24).trim(); const command = now.slice(24).trim();
+    process.exit(rec.lstart === lstart && rec.command === command ? 0 : 1);
+  ' "$file" "$now"
+}
+stop_one() { # label json-file tree(0|1)
+  local label="$1" file="$2" tree="$3" pid rc
+  [ -f "$file" ] || { echo "{\"$label\":\"no_record\"}"; return 0; }
+  pid="$(node -p "JSON.parse(require('fs').readFileSync('$file','utf8')).pid")"
+  identity_matches "$file" "$pid"; rc=$?
+  if [ "$rc" = 2 ]; then echo "{\"$label\":\"already_gone\",\"pid\":$pid}"; return 0; fi
+  if [ "$rc" != 0 ]; then echo "{\"$label\":\"cleanup_hold\",\"pid\":$pid,\"reason\":\"pid identity (start time / command) differs from the recorded launch; not signalled\"}"; return 5; fi
+  if [ "$tree" = 1 ]; then term_tree "$pid"; else kill -TERM "$pid" 2>/dev/null || true; fi
+  if wait_gone "$pid"; then echo "{\"$label\":\"cleanup_complete\",\"pid\":$pid}"; return 0; fi
+  if [ "$FORCE" = 1 ] && identity_matches "$file" "$pid"; then kill -KILL "$pid" 2>/dev/null; sleep 1; echo "{\"$label\":\"force_killed\",\"pid\":$pid}"; return 0; fi
+  echo "{\"$label\":\"cleanup_hold\",\"pid\":$pid,\"reason\":\"still alive ${WAIT}s after SIGTERM; not force-killed\"}"; return 5
+}
 status=0
-if [ -n "$LANE" ]; then
-  f="$RUN_DIR/lanes/$LANE/app.pid"
-  if [ -f "$f" ]; then
-    p="$(cat "$f")"
-    cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
-    if [ -z "$cmd" ]; then echo "{\"lane\":\"$LANE\",\"result\":\"already_gone\",\"pid\":$p}"
-    elif [[ "$cmd" == *"node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"* ]]; then
-      kill -TERM "$p" 2>/dev/null || true
-      if wait_gone "$p"; then echo "{\"lane\":\"$LANE\",\"result\":\"cleanup_complete\",\"pid\":$p}"
-      elif [ "$FORCE" = 1 ]; then kill -KILL "$p" 2>/dev/null; sleep 1; echo "{\"lane\":\"$LANE\",\"result\":\"force_killed\",\"pid\":$p}"
-      else echo "{\"lane\":\"$LANE\",\"result\":\"cleanup_hold\",\"pid\":$p,\"reason\":\"still alive ${WAIT}s after SIGTERM; not force-killed\"}"; status=5; fi
-    else echo "{\"lane\":\"$LANE\",\"result\":\"cleanup_hold\",\"pid\":$p,\"reason\":\"pid no longer looks like our Electron instance; left alone\"}"; status=5; fi
-  else echo "{\"lane\":\"$LANE\",\"result\":\"no_pid_file\"}"; fi
-fi
-if [ "$DEV" = 1 ]; then
-  f="$RUN_DIR/dev-server.pid"
-  if [ -f "$f" ]; then
-    p="$(cat "$f")"
-    cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
-    if [ -z "$cmd" ]; then echo "{\"dev_server\":\"already_gone\",\"pid\":$p}"
-    elif [[ "$cmd" == *"npm start"* || "$cmd" == *"electron-forge"* ]]; then
-      term_tree "$p"
-      if wait_gone "$p"; then echo "{\"dev_server\":\"cleanup_complete\",\"pid\":$p}"
-      else echo "{\"dev_server\":\"cleanup_hold\",\"pid\":$p}"; status=5; fi
-    else echo "{\"dev_server\":\"cleanup_hold\",\"pid\":$p,\"reason\":\"pid does not look like our npm start; left alone\"}"; status=5; fi
-  else echo "{\"dev_server\":\"not_owned\"}"; fi
-fi
+if [ -n "$LANE" ]; then stop_one "lane_$LANE" "$RUN_DIR/lanes/$LANE/app.json" 0 || status=$?; fi
+if [ "$DEV" = 1 ]; then stop_one "dev_server" "$RUN_DIR/dev-server.json" 1 || status=$?; fi
 exit $status
