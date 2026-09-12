@@ -150,6 +150,20 @@ export async function preparePackagedAppForPlaywright(): Promise<PreparedPackage
     removeUserDataDir(temporaryRoot);
     throw error;
   }
+  if (process.platform === 'darwin') {
+    // The fuse flip re-signs only the Electron Framework ad hoc. A Developer ID-signed bundle
+    // (a published release) keeps its hardened-runtime main executable, whose library validation
+    // then refuses the ad-hoc framework at dyld time. Re-sign the whole temporary copy ad hoc so
+    // every Mach-O shares one identity; for an already ad-hoc package this is a no-op in effect.
+    try {
+      execFileSync('codesign', ['--force', '--deep', '--sign', '-', targetRoot], {
+        stdio: 'pipe',
+      });
+    } catch (error) {
+      removeUserDataDir(temporaryRoot);
+      throw error;
+    }
+  }
   const productionFusesAfter = await getCurrentFuseWire(sourceFuseTarget);
   if (
     productionFusesAfter[FuseV1Options.EnableNodeCliInspectArguments] !== productionInspectState
@@ -583,7 +597,14 @@ export async function assignCurrentTaskToProjectFolder(
  * each test owns its own isolated userData dir/process. */
 export async function closeApp(app: ElectronApplication | null | undefined): Promise<void> {
   if (!app) return;
-  const child = app.process();
+  let child: ReturnType<ElectronApplication['process']>;
+  try {
+    child = app.process();
+  } catch {
+    // Already closed by an earlier closeApp: Playwright has dropped the underlying object. A
+    // second close in a `finally` must not replace the error that actually failed the test.
+    return;
+  }
   const gracefulClose = app.close().then(
     () => undefined,
     () => undefined,

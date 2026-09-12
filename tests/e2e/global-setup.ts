@@ -67,11 +67,17 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   console.log(`[e2e globalSetup] mode=${mode}`);
 
   if (mode === 'packaged') {
-    packageFresh();
+    // A preset executable path means "test this already-built package" (for example a published
+    // release artifact), so nothing is packaged here; the prepared copy still gets the inspector
+    // fuse and the source bundle is left untouched, exactly as for a fresh package.
+    const presetExecutable = process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'];
+    if (presetExecutable === undefined) packageFresh();
+    else console.log(`[e2e globalSetup] Using prebuilt executable: ${presetExecutable}`);
     const prepared = await preparePackagedAppForPlaywright();
     process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'] = prepared.executablePath;
     return async () => {
-      delete process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'];
+      if (presetExecutable === undefined) delete process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'];
+      else process.env['SPRINT_CODER_E2E_EXECUTABLE_PATH'] = presetExecutable;
       removeUserDataDir(prepared.temporaryRoot);
     };
   }
