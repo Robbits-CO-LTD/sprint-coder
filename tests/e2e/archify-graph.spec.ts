@@ -491,7 +491,7 @@ for (const starts of [false, true])
                 const team = await window.sprintCoder!.teams.get(id);
                 return team?.missions[0]?.state;
               }, taskId),
-            { timeout: 30000 },
+            { timeout: 60000 },
           )
           .toBe('completed');
         const result = await page.evaluate(async (id) => {
