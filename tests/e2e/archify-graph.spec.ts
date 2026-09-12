@@ -69,6 +69,10 @@ test('binds an authorized file read and detects changed source bytes after resta
     }
     await page.getByTestId('graph-toggle').click();
     const frame = page.frameLocator('[data-testid="graph-frame"]');
+    // The diagram paints before the artifact's bridge script has registered its selection
+    // listeners; clicking in that window delivers the click to a document that drops it. Wait for
+    // the readiness the panel itself waits for before presenting the frame as interactive.
+    await expect(page.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     await frame.locator('[data-node-id="api"]').first().click();
     const sources = page.getByTestId('graph-sources');
     await expect(sources.getByTestId('graph-evidence-kind'))
@@ -141,6 +145,7 @@ test('binds an authorized file read and detects changed source bytes after resta
     }
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
     await reopened.getByTestId('graph-toggle').click();
+    await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     await reopened
       .frameLocator('[data-testid="graph-frame"]')
       .locator('[data-node-id="api"]')
@@ -243,6 +248,9 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await expect(frame.locator('svg[role="img"]')).toBeVisible();
     await expect(page.getByTestId('graph-panel')).toContainText('Graph tool proposal');
     await expect(frame.locator('[data-node-id="api"]').first()).toBeVisible();
+    // A painted diagram is not yet a selectable one — the artifact announces when its bridge
+    // script has registered the selection listeners.
+    await expect(page.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     await frame.locator('[data-node-id="api"]').first().click();
     await expect(page.getByTestId('graph-evidence-kind')).toHaveText('推定');
     await expect(page.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
@@ -284,6 +292,7 @@ test('the model tool path proposes and reads back a draft through the real Main 
       });
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
     await reopened.getByTestId('graph-toggle').click();
+    await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     await reopened
       .frameLocator('[data-testid="graph-frame"]')
       .locator('[data-node-id="api"]')

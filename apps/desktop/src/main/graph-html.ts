@@ -13,7 +13,20 @@ const FORBIDDEN_TAGS = new Set([
   'template',
   'foreignObject',
 ]);
-const BRIDGE = `(() => {
+// Injected as the FIRST child of <head> — see prepareGraphHtml. The pinned viewer is a single
+// ~9,400-line inline script that the parser only reaches AFTER the diagram's <svg>, so appending
+// this bridge to the end of <body> left a window in which the diagram was painted while no click
+// listener existed yet. Registering from <head> puts the listeners in place before the SVG element
+// is even parsed, and `sprint-graph-ready` tells the panel that much.
+//
+// Readiness is only about this document's listeners. It does not mean Chromium will route a click
+// here: the graph artifact runs out of process, and for roughly the first 100ms of the frame's life
+// a click aimed at it is delivered to the PARENT renderer, where it surfaces as a click on the
+// iframe element (issue #464 — measured with per-process listeners: 0 events in the frame, the
+// pointer sequence in the parent with `target` = the iframe). The parent forwards those as
+// `sprint-graph-click` and this bridge replays them, which is the only part that actually closes
+// the hole.
+export const GRAPH_BRIDGE_SCRIPT = `(() => {
   const root = document.documentElement;
   const send = (event) => {
     const element = event.target instanceof Element ? event.target.closest('[data-node-id],[data-edge-id],[data-relationship-hit-key][data-relationship-id]') : null;
@@ -24,11 +37,34 @@ const BRIDGE = `(() => {
     parent.postMessage({ type: 'sprint-graph-selection', instanceId: root.dataset.graphInstance,
       graphId: root.dataset.graphId, revision: Number(root.dataset.graphRevision), kind, id }, '*');
   };
+  const announce = () => parent.postMessage({ type: 'sprint-graph-ready', instanceId: root.dataset.graphInstance,
+    graphId: root.dataset.graphId, revision: Number(root.dataset.graphRevision) }, '*');
   const labels = { assigned: '開始待ち', queued: '待機中', waiting_verification: '確認待ち', waiting_rate_limit: '接続待ち', running: '実行中', waiting_resume: '再開待ち', completed: '完了', failed: '失敗', canceled: '中止' };
   const saved = new Map();
   window.addEventListener('message', (event) => {
     const data = event.data;
-    if (event.source !== parent || !data || data.type !== 'sprint-graph-execution' || data.instanceId !== root.dataset.graphInstance || data.graphId !== root.dataset.graphId || data.revision !== Number(root.dataset.graphRevision) || !Array.isArray(data.nodes) || data.nodes.length > 64) return;
+    // Only the embedding renderer, and only for the artifact this document actually is.
+    if (event.source !== parent || !data || data.instanceId !== root.dataset.graphInstance || data.graphId !== root.dataset.graphId || data.revision !== Number(root.dataset.graphRevision)) return;
+    if (data.type === 'sprint-graph-click') {
+      // A click Chromium delivered to the parent instead of to this out-of-process frame. Replaying
+      // it on the element under the point puts it back on its normal path, so this bridge's own
+      // capture listener and the viewer's handlers both run exactly as they would have. This grants
+      // no capability the click did not already have: selecting an element only fills in the
+      // panel, and every privileged Graph action is gated on a real click in the parent document.
+      const x = data.x;
+      const y = data.y;
+      if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return;
+      const target = document.elementFromPoint(x, y);
+      // No \`view\`: the pinned viewer never reads \`event.view\` (its 85 \`.view\` accesses are all its
+      // own \`Archify.view\` state), and leaving it out keeps this replay constructible everywhere.
+      if (target) target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+      return;
+    }
+    if (data.type !== 'sprint-graph-execution' || !Array.isArray(data.nodes) || data.nodes.length > 64) return;
+    // The parent posts execution state for this exact artifact on every load, so answering it
+    // re-announces readiness: the handshake cannot deadlock if the parent attached its own
+    // listener after the announcements below.
+    announce();
     if (data.nodes.some((node) => !node || typeof node.id !== 'string' || node.id.length > 128 || !Object.hasOwn(labels, node.state))) return;
     for (const [element, previous] of saved) {
       element.style.filter = previous.filter;
@@ -49,6 +85,10 @@ const BRIDGE = `(() => {
   });
   document.addEventListener('click', send, true);
   document.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') send(event); }, true);
+  // Announced twice on purpose: the immediate one is what normally unblocks the panel, and the
+  // load one cannot lose the race against the parent registering its own message listener.
+  announce();
+  window.addEventListener('load', announce);
 })();`;
 
 function walk(node: Node, visit: (element: Element) => void): void {
@@ -83,6 +123,7 @@ export function prepareGraphHtml(
   const doc = parse(html);
   const counts = new Map(scripts.map((script) => [script, 0]));
   let root: Element | undefined;
+  let head: Element | undefined;
   let body: Element | undefined;
   walk(doc, (element) => {
     const tag = element.tagName;
@@ -93,6 +134,7 @@ export function prepareGraphHtml(
     }
     if (FORBIDDEN_TAGS.has(tag)) throw new Error('Graph contains an unsafe HTML element');
     if (tag === 'html') root = element;
+    if (tag === 'head') head = element;
     if (tag === 'body') body = element;
     for (const attr of element.attrs) {
       if (
@@ -143,17 +185,25 @@ export function prepareGraphHtml(
       else element.attrs.push({ name: 'style', value: 'display:none!important' });
     }
   });
-  if (root === undefined || body === undefined || [...counts.values()].some((count) => count !== 1))
+  if (
+    root === undefined ||
+    head === undefined ||
+    body === undefined ||
+    [...counts.values()].some((count) => count !== 1)
+  )
     throw new Error('Graph viewer inventory is incomplete');
   root.attrs.push(
     { name: 'data-graph-id', value: binding.graphId },
     { name: 'data-graph-instance', value: binding.instanceId },
     { name: 'data-graph-revision', value: String(binding.revision) },
   );
-  const adapter = parseFragment(`<script>${BRIDGE}</script>`).childNodes[0]!;
-  body.childNodes.push(adapter);
-  adapter.parentNode = body;
-  const hashes = [...scripts, BRIDGE]
+  // First child of <head>, ahead of the pinned viewer scripts and of the diagram markup, so the
+  // selection listeners exist before anything the user can click has been parsed. Also wins the
+  // capture phase over any viewer listener on `document`, whatever order those register in.
+  const adapter = parseFragment(`<script>${GRAPH_BRIDGE_SCRIPT}</script>`).childNodes[0]!;
+  head.childNodes.unshift(adapter);
+  adapter.parentNode = head;
+  const hashes = [...scripts, GRAPH_BRIDGE_SCRIPT]
     .map((script) => `'sha256-${createHash('sha256').update(script).digest('base64')}'`)
     .join(' ');
   return {

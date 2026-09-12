@@ -4280,6 +4280,38 @@ export const graphSelectionSchema = z
   })
   .strict();
 export type GraphSelection = z.infer<typeof graphSelectionSchema>;
+/**
+ * Announced by the artifact's bridge script once its click/keyboard listeners are registered.
+ * This says the frame's document can handle a click — it says nothing about whether Chromium will
+ * route one to it, which is a separate problem (see graphClickSchema).
+ */
+export const graphReadySchema = z
+  .object({
+    type: z.literal('sprint-graph-ready'),
+    instanceId: z.string().uuid(),
+    graphId: z.string().uuid(),
+    revision: z.number().int().positive(),
+  })
+  .strict();
+export type GraphReady = z.infer<typeof graphReadySchema>;
+/**
+ * A click the parent received on the graph `<iframe>` element itself, forwarded to the artifact in
+ * frame-relative coordinates. The graph artifact runs out of process, and until Chromium has
+ * registered that frame's hit-test region a click aimed at it is delivered to the parent renderer
+ * instead — where it surfaces as a click on the iframe element, which never happens once routing
+ * works. Replaying it inside the frame is what stops those clicks from being lost.
+ */
+export const graphClickSchema = z
+  .object({
+    type: z.literal('sprint-graph-click'),
+    instanceId: z.string().uuid(),
+    graphId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    x: z.number().finite().nonnegative(),
+    y: z.number().finite().nonnegative(),
+  })
+  .strict();
+export type GraphClick = z.infer<typeof graphClickSchema>;
 export const emptyPayloadSchema = z.object({}).strict();
 export const skillCatalogItemSchema = z
   .object({

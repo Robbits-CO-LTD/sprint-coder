@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import type { GraphSelection, GraphView, GraphGeneration } from '@sprint-coder/contracts';
+import { useEffect, useRef, useState, useCallback, type MouseEvent } from 'react';
+import type {
+  GraphClick,
+  GraphSelection,
+  GraphView,
+  GraphGeneration,
+} from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
-import { acceptGraphSelection } from '../lib/graph-selection';
+import { acceptGraphReady, acceptGraphSelection } from '../lib/graph-selection';
 import { GraphHistoryPanel } from './GraphHistoryPanel';
 import { GraphGenerationNotice } from './GraphGenerationNotice';
 import { GraphSourcesPanel } from './GraphSourcesPanel';
@@ -12,6 +17,11 @@ import { GraphMissionPlanPanel } from './GraphMissionPlanPanel';
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
   const [selection, setSelection] = useState<GraphSelection | null>(null);
+  // The artifact's diagram is painted before its bridge script has registered the selection
+  // listeners, so the panel waits for the artifact to say those listeners exist before presenting
+  // the frame as interactive. This is not the same thing as the click reaching it — see
+  // forwardFrameClick for the routing half of issue #464.
+  const [ready, setReady] = useState(false);
   const [comment, setComment] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GraphGeneration | null>(null);
@@ -43,6 +53,28 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
     );
   }, [view, graphMission]);
   useEffect(sendExecutionState, [sendExecutionState]);
+  // The graph artifact runs out of process. Until Chromium has registered that frame's hit-test
+  // region — roughly the first 100ms of its life — a click aimed at the diagram is delivered to
+  // THIS renderer instead, and arrives here as a click on the iframe element. That never happens
+  // once routing works (the frame consumes the event), so receiving one is itself the evidence
+  // that the click was not delivered: forward it in frame-relative coordinates so the artifact can
+  // replay it on the element the user aimed at (issue #464).
+  const forwardFrameClick = useCallback(
+    (event: MouseEvent<HTMLIFrameElement>) => {
+      if (view === null || !ready) return;
+      const box = event.currentTarget.getBoundingClientRect();
+      const forwarded: GraphClick = {
+        type: 'sprint-graph-click',
+        instanceId: view.instanceId,
+        graphId: view.id,
+        revision: view.revision,
+        x: event.clientX - box.left,
+        y: event.clientY - box.top,
+      };
+      frame.current?.contentWindow?.postMessage(forwarded, '*');
+    },
+    [view, ready],
+  );
   const currentView = useRef<GraphView | null>(null);
   const sourceState = useGraphSourceStatus(
     view,
@@ -86,6 +118,7 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         currentView.current = next;
         setView(next);
         setSelection(null);
+        setReady(false);
         setError(null);
       }
     };
@@ -109,12 +142,9 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
   useEffect(() => {
     if (view === null) return;
     const listener = (event: MessageEvent) => {
-      const accepted = acceptGraphSelection(
-        event.data,
-        event.source,
-        frame.current?.contentWindow ?? null,
-        view,
-      );
+      const expected = frame.current?.contentWindow ?? null;
+      if (acceptGraphReady(event.data, event.source, expected, view)) setReady(true);
+      const accepted = acceptGraphSelection(event.data, event.source, expected, view);
       if (accepted !== null) setSelection(accepted);
     };
     window.addEventListener('message', listener);
@@ -171,15 +201,24 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         </p>
       ) : null}
       {view ? (
-        <iframe
-          key={view.instanceId}
-          ref={frame}
-          src={view.artifactUrl}
-          sandbox="allow-scripts"
-          title={`${view.title} — Archify`}
-          data-testid="graph-frame"
-          onLoad={sendExecutionState}
-        />
+        <>
+          <iframe
+            key={view.instanceId}
+            ref={frame}
+            src={view.artifactUrl}
+            sandbox="allow-scripts"
+            title={`${view.title} — Archify`}
+            data-testid="graph-frame"
+            data-graph-ready={ready ? '1' : '0'}
+            onLoad={sendExecutionState}
+            onClick={forwardFrameClick}
+          />
+          {ready ? null : (
+            <p className="settings-hint" role="status" data-testid="graph-frame-pending">
+              図を操作できるように準備しています…
+            </p>
+          )}
+        </>
       ) : (
         <p className="settings-hint">
           作成した図をここで確認できます。図の表示だけでは作業を開始しません。

@@ -1753,6 +1753,13 @@ button {
   min-height: 220px;
   border: 0;
 }
+/* The diagram is painted before the artifact's bridge script has registered its selection
+   listeners, so hold pointer input back until the artifact says they exist. Readiness does not
+   also guarantee that Chromium routes the click to this out-of-process frame; clicks it delivers
+   here instead are forwarded by GraphPanel (issue #464). */
+.graph-panel iframe[data-graph-ready='0'] {
+  pointer-events: none;
+}
 .graph-panel > .graph-generation {
   flex-shrink: 0;
   padding: 10px 12px;
