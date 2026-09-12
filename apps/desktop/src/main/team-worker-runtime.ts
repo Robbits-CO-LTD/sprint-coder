@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { posix, win32 } from 'node:path';
 import type {
   ChatMessage,
   PublicError,
@@ -69,6 +70,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     workspace: RuntimeWorkspaceSet,
     worker: AgentRecord,
     writeScope: RuntimeWriteScope,
+    /** Present for Team Execution dispatches; Main resolves the owning Mission from it. */
+    executionId?: string,
   ) => unknown | Promise<unknown>;
   /** Provider egress gate; returns false when policy denies the dispatch. */
   authorizeEgress: (
@@ -77,6 +80,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     turnId: string,
     prompt: string,
     context: PreparedContext,
+    /** Canonical Main-issued roots this dispatch may name: the isolation worktree included. */
+    knownWorkspaceRoots: readonly string[],
   ) => boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
@@ -370,79 +375,86 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       normalizedWorkspace,
       input.worker,
       writeScope,
+      input.executionId,
     );
-    const promptToolCatalog: ToolCatalogSnapshot = isToolCatalogSnapshot(toolCatalog)
-      ? toolCatalog
-      : {
-          revision: 0,
-          providerId: choice.kind,
-          workspaceId: null,
-          entries: [],
-          digest: 'unavailable',
-        };
+    // `catalogFor` has now registered this Turn with Main, so every exit below — including a
+    // guidance or serialization throw before the CLI ever starts — must run the release. A Graph
+    // Mission session Turn is closed by that release, so skipping it strands the whole Mission.
     let teamMcp: RuntimeTeamMcpOption | undefined;
-    try {
-      teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
-    } catch (error) {
-      this.deps.releaseManagedTurn?.(turnId);
-      throw error;
-    }
-    if (input.worker.canDelegate === true && teamMcp === undefined) {
-      this.deps.releaseManagedTurn?.(turnId);
-      throw new Error('Manager Team MCP is unavailable');
-    }
-    const contextFragments = injectPromptGuidance(
-      context.fragments
-        .filter(({ source }) => choice.kind !== 'codex' || source !== 'skill')
-        .map((fragment) => ({
-          id: fragment.id,
-          source: fragment.source,
-          trust: fragment.trust,
-          authority:
-            fragment.source === 'system'
-              ? ('system' as const)
-              : fragment.source === 'goal' ||
-                  (fragment.source === 'history' && fragment.trust === 'user')
-                ? ('user' as const)
-                : ('none' as const),
-          content: fragment.content,
-        })),
-      compilePromptGuidance({
-        workspace: normalizedWorkspace,
-        toolCatalog: promptToolCatalog,
-        writeScope,
-        agent: {
-          role: 'subagent',
-          mode: writeScope === 'read-only' ? 'read-only' : 'write-capable',
-        },
-        teamMcpEnabled: teamMcp !== undefined,
-      }),
-    );
-    const serializedPayload = serializeCliExecutionPayload({
-      kind: choice.kind,
-      request: prompt,
-      contextFragments,
-      projectItems: context.projectItems.map((item) => ({
-        id: item.id,
-        kind: item.kind,
-        authority: item.authority,
-        localOnly: item.localOnly,
-        sealedDigest: item.sealedDigest,
-        content: item.content,
-      })),
-      ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
-    });
-    if (!this.deps.authorizeEgress(choice.kind, taskId, turnId, serializedPayload.text, context)) {
-      if (teamMcp !== undefined) this.deps.releaseTeamMcp?.(turnId);
-      this.deps.releaseManagedTurn?.(turnId);
-      throw new Error(`${choice.kind} Team Worker egress was denied`);
-    }
+    let runtimeStarted = false;
     const abort = (): void => {
       void this.stop(input.worker.id).catch(() => undefined);
     };
-    input.signal?.addEventListener('abort', abort, { once: true });
-    let runtimeStarted = false;
     try {
+      const promptToolCatalog: ToolCatalogSnapshot = isToolCatalogSnapshot(toolCatalog)
+        ? toolCatalog
+        : {
+            revision: 0,
+            providerId: choice.kind,
+            workspaceId: null,
+            entries: [],
+            digest: 'unavailable',
+          };
+      teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
+      if (input.worker.canDelegate === true && teamMcp === undefined)
+        throw new Error('Manager Team MCP is unavailable');
+      const contextFragments = injectPromptGuidance(
+        context.fragments
+          .filter(({ source }) => choice.kind !== 'codex' || source !== 'skill')
+          .map((fragment) => ({
+            id: fragment.id,
+            source: fragment.source,
+            trust: fragment.trust,
+            authority:
+              fragment.source === 'system'
+                ? ('system' as const)
+                : fragment.source === 'goal' ||
+                    (fragment.source === 'history' && fragment.trust === 'user')
+                  ? ('user' as const)
+                  : ('none' as const),
+            content: fragment.content,
+          })),
+        compilePromptGuidance({
+          workspace: normalizedWorkspace,
+          toolCatalog: promptToolCatalog,
+          writeScope,
+          agent: {
+            role: 'subagent',
+            mode: writeScope === 'read-only' ? 'read-only' : 'write-capable',
+          },
+          teamMcpEnabled: teamMcp !== undefined,
+        }),
+      );
+      const serializedPayload = serializeCliExecutionPayload({
+        kind: choice.kind,
+        request: prompt,
+        contextFragments,
+        projectItems: context.projectItems.map((item) => ({
+          id: item.id,
+          kind: item.kind,
+          authority: item.authority,
+          localOnly: item.localOnly,
+          sealedDigest: item.sealedDigest,
+          content: item.content,
+        })),
+        ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
+      });
+      if (
+        !this.deps.authorizeEgress(
+          choice.kind,
+          taskId,
+          turnId,
+          serializedPayload.text,
+          context,
+          // The prompt and the guidance both name the roots Main prepared for this Worker. Declare
+          // them so the egress secret scan reads them as workspace structure, not as opaque values.
+          // The primary root already carries `workspacePath` in canonical form; declaring the raw
+          // spelling too would only add a second, non-canonical entry on Windows.
+          canonicalWorkspaceRoots(normalizedWorkspace.roots.map(({ path }) => path)),
+        )
+      )
+        throw new Error(`${choice.kind} Team Worker egress was denied`);
+      input.signal?.addEventListener('abort', abort, { once: true });
       input.signal?.throwIfAborted();
       return await new Promise<string>((resolve, reject) => {
         this.pending.set(turnId, {
@@ -558,6 +570,29 @@ function uniqueRuntimeChoices(choices: readonly RealRuntimeChoice[]): RealRuntim
     seen.add(kind);
     return true;
   });
+}
+
+/**
+ * Deduplicated absolute roots for the egress secret scan. Only Main-issued paths (the Task
+ * Workspace and the execution isolation worktree) belong here — never Provider-supplied text.
+ *
+ * The bytes are passed through as written: the classifier does its own separator normalization and
+ * refuses any root with a `.`/`..` segment, and resolving here against the host's own conventions
+ * would rewrite a path recorded on the other platform into a root that names nothing.
+ */
+export function canonicalWorkspaceRoots(
+  paths: readonly (string | null | undefined)[],
+): readonly string[] {
+  return [
+    ...new Set(
+      paths.filter(
+        (path): path is string =>
+          typeof path === 'string' &&
+          path !== '' &&
+          (posix.isAbsolute(path) || win32.isAbsolute(path)),
+      ),
+    ),
+  ];
 }
 
 function isRuntimeAvailabilityError(error: unknown): error is TeamRuntimeExecutionError {

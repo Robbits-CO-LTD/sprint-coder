@@ -305,7 +305,11 @@ import type {
   StopAndSendTransition,
   ProjectFolderBinding,
 } from './persistence';
-import { toApprovalAuditSummary, toApprovalSummary } from './persistence';
+import {
+  toApprovalAuditSummary,
+  toApprovalSummary,
+  GRAPH_MISSION_SESSION_TURN_PREFIX,
+} from './persistence';
 import {
   CanvasViewConflictError,
   InvalidCanvasViewError,
@@ -623,7 +627,11 @@ import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
-import { reviewGraphMission, graphMissionContextFor } from './graph-mission-review';
+import {
+  reviewGraphMission,
+  graphMissionContextFor,
+  type GraphMissionReviewContext,
+} from './graph-mission-review';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -852,6 +860,62 @@ type ComputerUseQuickStartLatch = Readonly<{
   activationIntent: string;
   expiresAtMs: number;
 }>;
+
+/** True for the durable session Turn a Graph Mission owns instead of borrowing a chat Turn. */
+export function isGraphMissionSessionTurn(turnId: string): boolean {
+  return turnId.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX);
+}
+
+/**
+ * Where a managed Worker catalog hangs its parent Harness session.
+ *
+ * A Team Worker dispatched from chat borrows the Leader's active Turn. A Graph Mission has no
+ * chat Turn at all — it starts from a trusted control after the plan is agreed — so its Workers
+ * bind to one durable session Turn owned by the Mission, shared by every step and Attempt in it.
+ * Anything that is not a graph Mission keeps the original rule: no active parent Turn, no catalog.
+ */
+export function workerManagedCatalogOwner(
+  persistence: Pick<
+    PersistenceClient,
+    | 'getActiveTurnId'
+    | 'getTeamMissionForExecution'
+    | 'getGraphTeamMission'
+    | 'ensureGraphMissionSessionTurn'
+    | 'readTurnWorkspaceSetForTask'
+    | 'getPermissionPolicy'
+  >,
+  graphContextFor: (taskId: string) => GraphMissionReviewContext,
+  taskId: string,
+  executionId: string | undefined,
+): Readonly<{ parentTurnId: string; workspaceId: string | null; policyEpoch: number }> {
+  const mission =
+    executionId === undefined ? null : persistence.getTeamMissionForExecution(executionId);
+  if (mission?.mode === 'graph') {
+    const graph = persistence.getGraphTeamMission(mission.id);
+    if (graph === null) throw new Error('Graph Mission definition is unavailable');
+    const context = graphContextFor(taskId);
+    return Object.freeze({
+      parentTurnId: persistence.ensureGraphMissionSessionTurn(taskId, mission.id),
+      // The Mission, not a chat Turn, is what this Workspace binding was agreed against, so the
+      // catalog's workspace identity names the current roots and the agreement they were admitted
+      // under. It stays stable for every step and Attempt of the Mission.
+      workspaceId: digestCanonical({
+        source: 'graph-mission',
+        missionId: mission.id,
+        workspace: context.workspace.digest,
+        agreement: graph.contextDigest,
+      }),
+      policyEpoch: context.policyEpoch,
+    });
+  }
+  const parentTurnId = persistence.getActiveTurnId(taskId);
+  if (parentTurnId === null) throw new Error('Team Worker has no active parent Turn');
+  return Object.freeze({
+    parentTurnId,
+    workspaceId: persistence.readTurnWorkspaceSetForTask(taskId, parentTurnId)?.digest ?? null,
+    policyEpoch: persistence.getPermissionPolicy(taskId).policyEpoch,
+  });
+}
 
 export function authorizationTurnIsActive(
   activeTurnId: string | null,
@@ -1264,7 +1328,7 @@ export class IpcRouter {
       },
       availability: this.teamRuntimeAvailability,
       workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
-      catalogFor: (kind, taskId, runtimeTurnId, workspace, worker, writeScope) =>
+      catalogFor: (kind, taskId, runtimeTurnId, workspace, worker, writeScope, executionId) =>
         this.prepareWorkerManagedCatalog(
           kind,
           taskId,
@@ -1272,8 +1336,9 @@ export class IpcRouter {
           workspace,
           worker.canDelegate,
           writeScope,
+          executionId,
         ),
-      authorizeEgress: (kind, taskId, turnId, prompt, context) => {
+      authorizeEgress: (kind, taskId, turnId, prompt, context, knownWorkspaceRoots) => {
         const authorize =
           kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
         return authorize({
@@ -1281,6 +1346,10 @@ export class IpcRouter {
           task: this.persistence.getTask(taskId),
           turnId,
           prompt,
+          // Exactly the roots Main handed this Worker — its Task root and its isolation worktree,
+          // already canonicalized by the runtime. The Task's other roots were never given to this
+          // dispatch, so exempting them would widen the secret scan's blind spot for nothing.
+          knownWorkspaceRoots,
           context,
           now: new Date().toISOString(),
         }).allowed;
@@ -1367,6 +1436,7 @@ export class IpcRouter {
           workspaceSet,
           worker.canDelegate,
           worker.writeCapable ? 'workspace-write' : 'read-only',
+          executionId,
         );
         return {
           tools: providerToolsFromSnapshot(snapshot),
@@ -4940,8 +5010,14 @@ export class IpcRouter {
         worker.parentTurnId,
         this.managedWorkerTurn.values(),
       )
-    )
+    ) {
       this.approvalCoordinator.turnEnded(worker.taskId, worker.parentTurnId, 'finished');
+      // A Mission session Turn belongs to no chat Turn, so nothing else would ever close it. Drop
+      // it once its last Worker is gone — completion, failure, cancel and restart recovery all
+      // arrive here — and let the next step or manual resume start a fresh one.
+      if (isGraphMissionSessionTurn(worker.parentTurnId))
+        this.managedCodingHarness.finishTurn(worker.taskId, worker.parentTurnId);
+    }
   }
 
   private finishAndAdvance(
@@ -6375,6 +6451,11 @@ export class IpcRouter {
     }
   }
 
+  /**
+   * A catalog preflight failure aborts the Worker before its Runtime ever starts, and the Team
+   * ledger only keeps the last activity string. Mirror the reason into the durable diagnostic log
+   * with an errorCode so a Mission that parks on `waiting_resume` can be explained after the fact.
+   */
   private async prepareWorkerManagedCatalog(
     kind: 'claude' | 'codex' | 'provider',
     taskId: string,
@@ -6382,10 +6463,50 @@ export class IpcRouter {
     runtimeWorkspace: RuntimeWorkspaceSet,
     canDelegate: boolean,
     writeScope: 'read-only' | 'workspace-write' | 'full',
+    executionId?: string,
   ): Promise<ToolCatalogSnapshot> {
-    const parentTurnId = this.persistence.getActiveTurnId(taskId);
-    if (parentTurnId === null) throw new Error('Team Worker has no active parent Turn');
-    const parentWorkspace = this.persistence.readTurnWorkspaceSetForTask(taskId, parentTurnId);
+    try {
+      return await this.buildWorkerManagedCatalog(
+        kind,
+        taskId,
+        runtimeTurnId,
+        runtimeWorkspace,
+        canDelegate,
+        writeScope,
+        executionId,
+      );
+    } catch (error) {
+      secureLogger.error(
+        'Team Worker managed catalog preflight failed',
+        {
+          process: 'main',
+          errorCode: 'TEAM_WORKER_CATALOG_PREFLIGHT_FAILED',
+          executionId: executionId ?? null,
+          writeScope,
+          error,
+        },
+        { category: 'team', event: 'worker_catalog_preflight_failed', taskId, runtime: kind },
+      );
+      throw error;
+    }
+  }
+
+  private async buildWorkerManagedCatalog(
+    kind: 'claude' | 'codex' | 'provider',
+    taskId: string,
+    runtimeTurnId: string,
+    runtimeWorkspace: RuntimeWorkspaceSet,
+    canDelegate: boolean,
+    writeScope: 'read-only' | 'workspace-write' | 'full',
+    executionId?: string,
+  ): Promise<ToolCatalogSnapshot> {
+    const owner = workerManagedCatalogOwner(
+      this.persistence,
+      (id) => graphMissionContextFor(this.persistence, id),
+      taskId,
+      executionId,
+    );
+    const parentTurnId = owner.parentTurnId;
     const boundRoots = await Promise.all(
       runtimeWorkspace.roots.map(async (root) => ({
         root,
@@ -6422,14 +6543,16 @@ export class IpcRouter {
         },
       ]),
     );
+    // Synchronous from the lookup to the start: concurrent graph steps share one Mission session
+    // rather than racing each other into `ToolCatalogSnapshot is already bound to this Turn`.
     let parent = this.managedCodingHarness.broker.getTurnSnapshot(taskId, parentTurnId);
     if (parent === undefined)
       parent = this.managedCodingHarness.startTurn(
         {
           taskId,
           turnId: parentTurnId,
-          workspaceId: parentWorkspace?.digest ?? null,
-          policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+          workspaceId: owner.workspaceId,
+          policyEpoch: owner.policyEpoch,
         },
         kind,
       );

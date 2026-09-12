@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
+import { assessProviderEgressDisclosure } from './provider-disclosure-classifier';
+import type * as PromptContextModule from './prompt-context';
 
 const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex'; args: unknown[] }>,
@@ -19,6 +21,20 @@ const runtimeHostMock = vi.hoisted(() => ({
     }
   >(),
 }));
+
+const promptContextMock = vi.hoisted(() => ({ compileFailure: null as string | null }));
+
+vi.mock('./prompt-context', async (importOriginal) => {
+  const actual = await importOriginal<typeof PromptContextModule>();
+  return {
+    ...actual,
+    compilePromptGuidance: (...args: Parameters<typeof actual.compilePromptGuidance>) => {
+      if (promptContextMock.compileFailure !== null)
+        throw new Error(promptContextMock.compileFailure);
+      return actual.compilePromptGuidance(...args);
+    },
+  };
+});
 
 vi.mock('./runtime-host', () => ({
   RuntimeHostClient: class {
@@ -98,6 +114,7 @@ import {
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
 
 afterEach(() => {
@@ -156,6 +173,7 @@ function runtime(
   overrides: {
     teamMcpFor?: () => RuntimeTeamMcpOption | undefined;
     releaseTeamMcp?: (turnId: string) => void;
+    releaseManagedTurn?: (turnId: string) => void;
     contextFor?: TeamWorkerRuntimeDeps['contextFor'];
     writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
     authorizeEgress?: TeamWorkerRuntimeDeps['authorizeEgress'];
@@ -173,6 +191,9 @@ function runtime(
     authorizeEgress: overrides.authorizeEgress ?? (() => true),
     ...(overrides.teamMcpFor === undefined ? {} : { teamMcpFor: overrides.teamMcpFor }),
     ...(overrides.releaseTeamMcp === undefined ? {} : { releaseTeamMcp: overrides.releaseTeamMcp }),
+    ...(overrides.releaseManagedTurn === undefined
+      ? {}
+      : { releaseManagedTurn: overrides.releaseManagedTurn }),
     ...(overrides.contextFor === undefined ? {} : { contextFor: overrides.contextFor }),
     ...(overrides.writeScopeFor === undefined ? {} : { writeScopeFor: overrides.writeScopeFor }),
   });
@@ -528,10 +549,51 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
           expect.objectContaining({ id: 'project:one:reference:one' }),
         ],
       }),
+      // The declared root is the canonical spelling Main derives from the legacy path, which on
+      // Windows resolves onto the current drive rather than staying `/workspace`.
+      runtimeWorkspaceSetFromLegacyPath('/workspace').roots.map(({ path }) => path),
     );
     expect(runtimeHostMock.starts[0]?.args[6]).toMatchObject({
       projectItems: [{ id: 'project:one:instruction' }, { id: 'project:one:reference:one' }],
     });
+  });
+
+  it('declares the execution isolation worktree root to the egress gate', async () => {
+    runtimeHostMock.starts.length = 0;
+    const isolationRoot =
+      '/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/worktree-3f1c9a7e-5b2d-4e8a-9c04-7d6b1f2a8e35-1';
+    const authorizeEgress = vi.fn(() => true);
+    const subject = runtime({ authorizeEgress });
+
+    await subject.execute({
+      worker: { ...worker(false), writeCapable: true },
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      executionId: 'execution-isolated-1',
+      accessMode: 'workspace-write',
+      workspacePath: isolationRoot,
+      workspaceSet: {
+        primaryRootId: 'root-1',
+        digest: 'f'.repeat(64),
+        roots: [
+          { rootId: 'root-1', path: isolationRoot, label: 'workspace', role: 'primary' as const },
+        ],
+      },
+      content: '実装する',
+    });
+
+    const [, , , prompt, , knownWorkspaceRoots] = authorizeEgress.mock.calls[0] as unknown as [
+      string,
+      string,
+      string,
+      string,
+      unknown,
+      readonly string[],
+    ];
+    expect(knownWorkspaceRoots).toEqual([isolationRoot]);
+    expect(prompt).toContain(isolationRoot);
+    // The Worker cannot work without naming that directory, so the scan must read it as clean.
+    expect(assessProviderEgressDisclosure(prompt).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(prompt, knownWorkspaceRoots).classification).toBe('safe');
   });
 
   it('fails explicitly before dispatch rather than silently subsetting oversized Project items', async () => {
@@ -572,6 +634,40 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(authorizeEgress).not.toHaveBeenCalled();
     expect(runtimeHostMock.starts).toHaveLength(0);
   });
+
+  it.each([
+    ['prompt guidance compilation', {}, 'prompt guidance unavailable', true],
+    ['the egress gate', { authorizeEgress: () => false }, 'Team Worker egress was denied', false],
+  ])(
+    'releases the managed parent Turn when %s fails after the catalog was bound',
+    async (_label, overrides, message, failGuidance) => {
+      runtimeHostMock.starts.length = 0;
+      promptContextMock.compileFailure = failGuidance ? message : null;
+      const releaseManagedTurn = vi.fn();
+      // `catalogFor` has already registered the Turn with Main at this point. A Graph Mission's
+      // session Turn is closed by this release, so a missed one strands the whole Mission on
+      // `waiting_resume` with `authorizationTurnIsActive` still true.
+      const catalogFor = vi.fn((..._args: unknown[]) => ({ tools: [] }));
+      const subject = runtime({ ...overrides, releaseManagedTurn, catalogFor });
+
+      try {
+        await expect(
+          subject.execute({
+            worker: worker(false),
+            envelope: { ...envelope, targetAgentId: 'worker-1' },
+            executionId: 'execution-preflight-failure',
+            content: '実装する',
+          }),
+        ).rejects.toThrow(message);
+      } finally {
+        promptContextMock.compileFailure = null;
+      }
+
+      const boundTurnId = catalogFor.mock.calls[0]![2] as unknown as string;
+      expect(releaseManagedTurn.mock.calls).toEqual([[boundTurnId]]);
+      expect(runtimeHostMock.starts).toHaveLength(0);
+    },
+  );
 
   it('places the Agent own prior Team conversation before a tool-prohibited final instruction', async () => {
     runtimeHostMock.starts.length = 0;

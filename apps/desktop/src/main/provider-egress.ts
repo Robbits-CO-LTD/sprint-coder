@@ -223,6 +223,22 @@ export function authorizeOfficialApiProviderEgress(
   );
 }
 
+/**
+ * Identify the roots the secret scan was permitted to exempt, so the audit record carries what the
+ * `clean` verdict was conditioned on. Normalized and sorted: the same declaration spelled with
+ * either separator, in any order, is the same fact. Null means nothing was exempted at all.
+ */
+function knownRootsDigest(knownWorkspaceRoots: readonly string[] | undefined): string | null {
+  const normalized = [
+    ...new Set(
+      (knownWorkspaceRoots ?? [])
+        .filter((root): root is string => typeof root === 'string' && root !== '')
+        .map((root) => root.replaceAll('\\', '/').replace(/\/+$/u, '')),
+    ),
+  ].sort();
+  return normalized.length === 0 ? null : digestCanonical(normalized);
+}
+
 function authorizeProviderEgress(
   input: ProviderEgressInput,
   providerId: string,
@@ -275,6 +291,7 @@ function authorizeProviderEgress(
     dataResidency: providerTrust === 'trusted-local' ? 'local-device' : 'unspecified',
     provenanceTrust,
     secretScan,
+    knownRootsDigest: knownRootsDigest(input.knownWorkspaceRoots),
     localOnlyTask:
       input.task.localOnly || input.context.projectItems.some((item) => item.localOnly),
     attachmentManifestDigest,

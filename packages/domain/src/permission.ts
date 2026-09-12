@@ -55,6 +55,12 @@ export type PermissionResource =
       dataResidency: string;
       provenanceTrust: 'system' | 'user' | 'workspace' | 'untrusted';
       secretScan: 'clean' | 'blocked';
+      /**
+       * Digest of the Main-issued Workspace roots the secret scan was allowed to treat as
+       * structure, or null when none were declared. A `clean` scan means nothing else; without
+       * this, an audit cannot tell which bytes the scan was told to ignore.
+       */
+      knownRootsDigest: string | null;
       localOnlyTask: boolean;
       attachmentManifestDigest: string | null;
       attachmentByteCount: number;

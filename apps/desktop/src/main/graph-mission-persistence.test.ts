@@ -29,6 +29,7 @@ import { workspaceMutationBinding } from './path-guard';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { WorkerWorktreeManager } from './worker-worktree';
 import { TeamCoordinator, DeterministicTeamWorkerRuntime } from './team-coordinator';
+import { workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 
 const roots: string[] = [];
@@ -391,6 +392,110 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         }
       },
     );
+
+    it('runs every graph step through the real Worker catalog preflight without a chat Turn', async () => {
+      const f = fixture(undefined, false, ['a', 'b', 'c']);
+      const scheduler = new TeamExecutionScheduler(2);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = runtime.execute.bind(runtime);
+      const owners: string[] = [];
+      // `RuntimeHostTeamWorkerRuntime` awaits `deps.catalogFor` before it spawns the CLI, and that
+      // preflight is where a Graph Mission used to die: it demanded an active chat Turn that a
+      // Mission started from a trusted control never has. Run the same resolution here so a
+      // regression fails as a stalled Mission rather than only in a billed real-AI E2E.
+      vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+        owners.push(
+          workerManagedCatalogOwner(
+            f.persistence,
+            (taskId) => graphMissionContextFor(f.persistence, taskId),
+            f.task.id,
+            input.executionId,
+          ).parentTurnId,
+        );
+        return execute(input);
+      });
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
+        const mission = await coordinator.startGraphMission(f.task.id, async () => f.input);
+        await vi.waitFor(() =>
+          expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+        );
+        expect(owners).toEqual([
+          `graph-mission:${mission.id}`,
+          `graph-mission:${mission.id}`,
+          `graph-mission:${mission.id}`,
+        ]);
+        // The Mission session Turn is durable but terminal, so it never becomes the Task's active
+        // Turn and never blocks the composer.
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
+        expect(
+          f.persistence.getTeamMission(mission.id).steps.map(({ executionId }) => executionId),
+        ).toHaveLength(3);
+        expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        f.persistence.close();
+      }
+    });
+
+    it('refuses a sequential Mission Worker catalog while no chat Turn is active', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      try {
+        expect(f.persistence.getTeamMissionForExecution('missing-execution')).toBeNull();
+        expect(() =>
+          workerManagedCatalogOwner(
+            f.persistence,
+            (taskId) => graphMissionContextFor(f.persistence, taskId),
+            f.task.id,
+            undefined,
+          ),
+        ).toThrow('no active parent Turn');
+        expect(
+          workerManagedCatalogOwner(
+            f.persistence,
+            (taskId) => graphMissionContextFor(f.persistence, taskId),
+            f.task.id,
+            f.persistence.getTeamMission(mission.id).steps[0]!.executionId,
+          ).parentTurnId,
+        ).toBe(`graph-mission:${mission.id}`);
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('never mints an acceptance contract for the Mission session Turn on startup', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const sessionTurnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      const contractsFor = (turnId: string) => {
+        const database = new Database(f.path, { readonly: true });
+        const rows = database
+          .prepare('SELECT 1 FROM acceptance_contracts WHERE turn_id = ?')
+          .all(turnId);
+        database.close();
+        return rows.length;
+      };
+      try {
+        f.persistence.close();
+        // The session Turn is anchored to a `system` notice, not a user objective. Backfilling it
+        // would append a fresh, meaningless contract revision on every single app start.
+        for (let start = 0; start < 2; start += 1) new SqlitePersistenceClient(f.path).close();
+        expect(contractsFor(sessionTurnId)).toBe(0);
+      } finally {
+        const reopened = new SqlitePersistenceClient(f.path);
+        expect(reopened.getTeamMission(mission.id).mode).toBe('graph');
+        reopened.close();
+      }
+    });
 
     it('restores interrupted graph steps without dispatch and resumes only the requested step', async () => {
       const f = fixture();
