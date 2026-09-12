@@ -895,6 +895,9 @@ export const teamMissionStepSummarySchema = z
           .enum(['dependencies', 'resources', 'write-conflicts', 'owner-active'])
           .nullable(),
         integrationResumeAvailable: z.boolean(),
+        stepResumeAvailable: z.boolean(),
+        /** Already resumed by hand and waiting on the scheduler (dependencies, resources). */
+        stepResumePending: z.boolean(),
       })
       .strict()
       .optional(),
@@ -5605,6 +5608,7 @@ export interface SprintCoderApi {
     reviewMission(input: GraphSourceCheckInput): Promise<GraphMissionReview>;
     startMission(input: GraphMissionStartInput): Promise<TeamMissionSummary>;
     resumeIntegration(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
+    resumeStep(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
     subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
@@ -5945,6 +5949,7 @@ export const IPC_CHANNELS = {
   graphsMissionReview: 'sprint-coder:graphs:mission-review',
   graphsMissionStart: 'sprint-coder:graphs:mission-start',
   graphsMissionResumeIntegration: 'sprint-coder:graphs:mission-resume-integration',
+  graphsMissionResumeStep: 'sprint-coder:graphs:mission-resume-step',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

@@ -11202,13 +11202,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
           )
         )
           this.transitionTeamExecution({ executionId: execution.id, to: 'waiting_resume', now });
-        const mission = this.getTeamMissionForExecution(execution.id);
-        if (mission?.state === 'running')
-          this.transitionTeamMission(mission.id, 'waiting_resume', now);
+        this.parkTeamMissionForResume(execution.id, now);
         const dispatch = this.getTeamExecutionDispatch(execution.id);
         const task = this.getTeamTask(dispatch.teamTaskId);
         if (task.status === 'running') this.transitionTeamTask(task.id, 'blocked', now);
         else if (['created', 'assigned', 'waiting', 'blocked'].includes(task.status))
+          this.transitionTeamTask(task.id, 'canceled', now);
+      }
+      // A graph step that was agreed but never dispatched owns no Attempt, so the query above
+      // cannot see it: `queueGraphStep` moves a step to `queued` on its own and only
+      // `beginGraphAttempt` mints the Attempt, so a crash in between leaves a `queued` step with no
+      // Attempt row at all, exactly like the `assigned` step that never reached the queue. Leaving
+      // either alone lets the next scheduling pass run it without the user ever asking, which is
+      // the automatic restart a Graph Mission must not do. Park both on the same manual-resume gate
+      // the dispatched steps use.
+      const undispatchedGraphs = this.db
+        .prepare(
+          `SELECT e.id FROM team_executions e JOIN team_graph_mission_steps g ON g.execution_id = e.id
+        JOIN team_missions m ON m.id = g.mission_id
+        WHERE e.state IN ('assigned','queued') AND m.state NOT IN ('completed','failed','canceled')
+        AND NOT EXISTS (
+          SELECT 1 FROM team_attempts a WHERE a.execution_id = e.id AND a.state = 'running'
+        )`,
+        )
+        .all() as { id: string }[];
+      let undispatchedParked = 0;
+      for (const undispatched of undispatchedGraphs) {
+        // The Attempt sweep above parks some of these first; re-reading keeps this from re-entering
+        // a state the execution already holds.
+        if (!['assigned', 'queued'].includes(this.getTeamExecution(undispatched.id).state))
+          continue;
+        undispatchedParked += 1;
+        this.transitionTeamExecution({ executionId: undispatched.id, to: 'waiting_resume', now });
+        this.parkTeamMissionForResume(undispatched.id, now);
+        const task = this.getTeamTask(this.getTeamExecutionDispatch(undispatched.id).teamTaskId);
+        // A manual resume mints its own message/task/delivery, so the undelivered one retires here.
+        if (['created', 'assigned', 'waiting', 'blocked'].includes(task.status))
           this.transitionTeamTask(task.id, 'canceled', now);
       }
       const running = this.db
@@ -11252,8 +11281,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         const mission = this.getTeamMissionForExecution(execution.id);
         if (mission?.mode === 'graph') {
           this.transitionTeamExecution({ executionId: execution.id, to: 'waiting_resume', now });
-          if (mission.state === 'running')
-            this.transitionTeamMission(mission.id, 'waiting_resume', now);
+          this.parkTeamMissionForResume(execution.id, now);
           const dispatch = this.getTeamExecutionDispatch(execution.id);
           if (this.getTeamTask(dispatch.teamTaskId).status === 'running')
             this.transitionTeamTask(dispatch.teamTaskId, 'blocked', now);
@@ -11301,8 +11329,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
           this.transitionTeamTask(dispatch.teamTaskId, 'blocked', now);
       }
       // A prior Worker stop does not prove an interrupted Git runner stopped.
-      return running.length + preparingGraphs.length + interruptedIntegrations.length;
+      return (
+        running.length +
+        preparingGraphs.length +
+        undispatchedParked +
+        interruptedIntegrations.length
+      );
     })();
+  }
+
+  /**
+   * Park the Mission owning an interrupted execution next to that execution, so a restart leaves
+   * the whole Graph Mission behind the same manual gate instead of only the step. `queued` is the
+   * one non-terminal state left in place: `queued -> waiting_resume` is not in the Mission
+   * transition table (packages/domain lets `queued` reach only running/canceled/failed), and a
+   * `queued` Mission has admitted no step at all, so every step already holds the restart on its
+   * own `waiting_resume` gate and the Mission first moves when a manual resume admits one.
+   */
+  private parkTeamMissionForResume(executionId: string, now: string): void {
+    const mission = this.getTeamMissionForExecution(executionId);
+    if (
+      mission === null ||
+      ['queued', 'waiting_resume', 'completed', 'failed', 'canceled'].includes(mission.state)
+    )
+      return;
+    this.transitionTeamMission(mission.id, 'waiting_resume', now);
   }
 
   recordTeamV2Activity(input: {

@@ -1,4 +1,8 @@
-import { graphStartActivationIntent } from './graph-activation-intent';
+import {
+  graphResumeActivationIntent,
+  graphResumeStepActivationIntent,
+  graphStartActivationIntent,
+} from './graph-activation-intent';
 import { describe, expect, it } from 'vitest';
 import { createTrustedComputerUseUiActivationGate } from './computer-use-activation';
 import { approvalActivationIntent, startActivationIntent } from './computer-use-activation-intent';
@@ -6,7 +10,10 @@ import { approvalActivationIntent, startActivationIntent } from './computer-use-
 class ActivationElement {
   readonly dataset: Record<string, string>;
 
-  constructor(kind: 'application' | 'start' | 'approval' | 'graph-start', intent?: string) {
+  constructor(
+    kind: 'application' | 'start' | 'approval' | 'graph-start' | 'graph-resume-step',
+    intent?: string,
+  ) {
     this.dataset = {
       computerUseActivation: kind,
       ...(intent === undefined ? {} : { computerUseIntent: intent }),
@@ -42,6 +49,37 @@ describe('trusted Computer Use UI activation', () => {
       gate.observe({ isTrusted: true, target });
       expect(gate.consume('graph-start')).toEqual({ intent });
       expect(gate.consume('graph-start')).toBeNull();
+    } finally {
+      Object.assign(globalThis, { Element: previous });
+    }
+  });
+
+  it("keeps resuming one step separate from resuming a completed step's integration", () => {
+    const previous = globalThis.Element;
+    Object.assign(globalThis, { Element: ActivationElement });
+    try {
+      const input = {
+        taskId: 'task',
+        instanceId: 'view',
+        renderRevision: 1,
+        missionId: 'mission',
+        stepKey: 'a',
+        generation: 1,
+      };
+      const intent = graphResumeStepActivationIntent(input);
+      // Re-running a Worker and integrating a finished one are different authorities, so one
+      // gesture must never satisfy the other.
+      expect(intent).not.toBe(graphResumeActivationIntent(input));
+      expect(graphResumeStepActivationIntent({ ...input, stepKey: 'b' })).not.toBe(intent);
+      const gate = createTrustedComputerUseUiActivationGate(() => 100);
+      const target = new ActivationElement('graph-resume-step', intent) as unknown as Element;
+      expect(gate.observe({ isTrusted: false, target })).toBe(false);
+      expect(gate.consume('graph-resume-step')).toBeNull();
+      gate.observe({ isTrusted: true, target });
+      expect(gate.consume('graph-resume')).toBeNull();
+      gate.observe({ isTrusted: true, target });
+      expect(gate.consume('graph-resume-step')).toEqual({ intent });
+      expect(gate.consume('graph-resume-step')).toBeNull();
     } finally {
       Object.assign(globalThis, { Element: previous });
     }

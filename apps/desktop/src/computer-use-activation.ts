@@ -1,5 +1,5 @@
 export type ComputerUseUiActivationKind =
-  'application' | 'start' | 'approval' | 'graph-start' | 'graph-resume';
+  'application' | 'start' | 'approval' | 'graph-start' | 'graph-resume' | 'graph-resume-step';
 
 export function createTrustedComputerUseUiActivationGate(now: () => number = Date.now) {
   let pending: { kind: ComputerUseUiActivationKind; intent: string | null; at: number } | null =
@@ -17,7 +17,8 @@ export function createTrustedComputerUseUiActivationGate(now: () => number = Dat
         kind !== 'start' &&
         kind !== 'approval' &&
         kind !== 'graph-start' &&
-        kind !== 'graph-resume'
+        kind !== 'graph-resume' &&
+        kind !== 'graph-resume-step'
       )
         return false;
       const rawIntent = control?.dataset['computerUseIntent'];

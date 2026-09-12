@@ -1,7 +1,9 @@
+import { previewGraphSource } from './graph-source-preview';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { graphMissionContextFor, prepareGraphStepWriteFootprints } from './graph-mission-review';
 import type { GraphMissionCommitInput, GraphMissionRecord } from './graph-mission-record';
 import type { GraphResourceReservation } from './graph-resource';
+import type { GraphIntegrationHold } from './graph-integration-hold';
 import {
   teamDetailSchema,
   teamActivitySummarySchema,
@@ -59,6 +61,7 @@ import type {
   TeamBudgetReservationRecord,
   TeamBlueprintBindingRecord,
   TeamExecutionRecord,
+  TeamExecutionDispatchRecord,
   TeamAttemptStartReason,
   TeamMissionRecord,
   TeamMissionWorktreeRecord,
@@ -1044,24 +1047,39 @@ export class TeamCoordinator {
     });
   }
 
-  private async scheduleGraphMission(taskId: string, missionId: string): Promise<void> {
+  /**
+   * `resumeStepKey` makes this a manual, single-step resume: only that step is submitted, and only
+   * from `waiting_resume`. Sweeping the siblings in would start Workers the user never asked to
+   * restart — the whole point of parking an interrupted Graph Mission behind a human decision.
+   * Without it this is the initial dispatch, which submits every still-`assigned` step.
+   */
+  private async scheduleGraphMission(
+    taskId: string,
+    missionId: string,
+    resumeStepKey?: string,
+  ): Promise<void> {
     const graph = this.persistence.getGraphTeamMission(missionId);
     if (!graph || graph.taskId !== taskId) throw new Error('Graph Mission binding mismatch');
     const team = this.persistence.getTeam(this.persistence.getTeamMission(missionId).teamId);
     for (const step of graph.steps) {
+      if (resumeStepKey !== undefined && step.key !== resumeStepKey) continue;
+      const resuming = resumeStepKey !== undefined;
       const current = this.persistence.getTeamExecution(step.executionId);
-      if (current.state !== 'assigned' || this.graphScheduledExecutions.has(current.id)) continue;
+      if (
+        current.state !== (resuming ? 'waiting_resume' : 'assigned') ||
+        this.graphScheduledExecutions.has(current.id)
+      )
+        continue;
       this.graphScheduledExecutions.add(current.id);
       try {
         let footprints = await prepareGraphStepWriteFootprints(graph, step.key, () =>
           graphMissionContextFor(this.persistence, taskId),
         );
-        const execution = this.persistence.queueGraphStep(
-          missionId,
-          step.key,
-          step.generation,
-          this.isoNow(),
-        );
+        // A resumed step stays `waiting_resume` until `beginGraphAttempt` admits it, because
+        // `waiting_resume -> running` is only reachable through `queued` inside that transaction.
+        const execution = resuming
+          ? current
+          : this.persistence.queueGraphStep(missionId, step.key, step.generation, this.isoNow());
         const fields = this.connectionSchedulingFields(execution, taskId, team.id);
         const job: TeamExecutionJob = {
           executionId: execution.id,
@@ -1087,11 +1105,15 @@ export class TeamCoordinator {
           onReadinessError: (error) => {
             this.executionScheduler.cancelQueued(execution.id);
             this.graphScheduledExecutions.delete(execution.id);
-            this.persistence.transitionTeamExecution({
-              executionId: execution.id,
-              to: 'waiting_resume',
-              now: this.isoNow(),
-            });
+            // A resumed step is still `waiting_resume` while it waits for admission, and that is
+            // already the parked state this wants to reach; re-entering it is not a legal
+            // transition, so only a step that got as far as `queued` moves here.
+            if (this.persistence.getTeamExecution(execution.id).state !== 'waiting_resume')
+              this.persistence.transitionTeamExecution({
+                executionId: execution.id,
+                to: 'waiting_resume',
+                now: this.isoNow(),
+              });
             this.persistence.setWorkerCurrentActivity(
               execution.assigneeAgentId,
               (error instanceof Error ? error.message : 'Graph admission changed').slice(0, 2000),
@@ -1100,6 +1122,7 @@ export class TeamCoordinator {
             this.emit(taskId, team.id);
           },
           run: async () => {
+            let requeued = false;
             try {
               footprints = await prepareGraphStepWriteFootprints(graph, step.key, () =>
                 graphMissionContextFor(this.persistence, taskId),
@@ -1112,10 +1135,16 @@ export class TeamCoordinator {
                 now: this.isoNow(),
               });
               if (!acquired.acquired) {
+                requeued = true;
                 this.executionScheduler.requeueActive(execution.id, job);
                 return;
               }
-              await this.runGraphExecution(graph, step.key, acquired.reservation);
+              await this.runGraphExecution(
+                graph,
+                step.key,
+                acquired.reservation,
+                resuming ? 'manual_resume' : 'initial',
+              );
             } catch (error) {
               const latest = this.persistence.getTeamExecution(execution.id);
               if (latest.state === 'queued')
@@ -1131,19 +1160,19 @@ export class TeamCoordinator {
               );
               this.emit(taskId, team.id);
             } finally {
-              if (this.persistence.getTeamExecution(execution.id).state !== 'queued')
-                this.graphScheduledExecutions.delete(execution.id);
+              if (!requeued) this.graphScheduledExecutions.delete(execution.id);
             }
           },
         };
         this.executionScheduler.submit(job);
       } catch (error) {
         this.graphScheduledExecutions.delete(current.id);
-        this.persistence.transitionTeamExecution({
-          executionId: current.id,
-          to: 'waiting_resume',
-          now: this.isoNow(),
-        });
+        if (this.persistence.getTeamExecution(current.id).state !== 'waiting_resume')
+          this.persistence.transitionTeamExecution({
+            executionId: current.id,
+            to: 'waiting_resume',
+            now: this.isoNow(),
+          });
         throw error;
       }
     }
@@ -1153,10 +1182,14 @@ export class TeamCoordinator {
     graph: GraphMissionRecord,
     stepKey: string,
     owner: GraphResourceReservation,
+    reason: 'initial' | 'manual_resume' = 'initial',
   ): Promise<void> {
     const step = graph.steps.find((step) => step.key === stepKey)!;
     const execution = this.persistence.getTeamExecution(step.executionId);
-    const dispatch = this.persistence.getTeamExecutionDispatch(execution.id);
+    // A manual resume retires the interrupted message/task/delivery and mints a fresh dispatch
+    // inside `beginGraphAttempt`, so this is read only after that call — reading it earlier would
+    // send the Worker the retired one. Nothing before the Attempt needs a dispatch.
+    let dispatch!: TeamExecutionDispatchRecord;
     const snapshot = this.persistence.getTeamSnapshot(execution.teamId);
     const leader = snapshot.agents.find((agent) => agent.id === execution.createdByAgentId)!;
     const storedWorker = snapshot.agents.find((agent) => agent.id === execution.assigneeAgentId)!;
@@ -1219,8 +1252,10 @@ export class TeamCoordinator {
         stepKey,
         generation: step.generation,
         reservationId: owner.id,
+        reason,
         now: this.isoNow(),
       });
+      dispatch = this.persistence.getTeamExecutionDispatch(execution.id);
       attemptId = started.attempt.id;
       this.persistence.transitionTeamAttempt({ attemptId, to: 'running', now: this.isoNow() });
       this.persistence.transitionWorkerState(worker.id, 'busy');
@@ -1436,6 +1471,123 @@ export class TeamCoordinator {
       this.executionScheduler.notifyReadinessChanged();
       this.emit(graph.taskId, execution.teamId);
     }
+  }
+
+  /**
+   * User-driven restart of one interrupted graph step. Nothing here runs on its own: a Graph
+   * Mission that lost its runtime (app restart, crash before dispatch) parks every step on
+   * `waiting_resume`, and only this call — reached from a trusted control — puts a single step
+   * back in the queue. Work whose Worker already finished is refused so its result is reused by
+   * `resumeGraphIntegration` instead of being produced a second time.
+   */
+  async resumeGraphStep(
+    taskId: string,
+    missionId: string,
+    stepKey: string,
+  ): Promise<TeamMissionSummary> {
+    return this.enqueue(taskId, async () => {
+      const graph = this.persistence.getGraphTeamMission(missionId);
+      const step = graph?.steps.find((step) => step.key === stepKey);
+      if (!graph || !step || graph.taskId !== taskId)
+        throw new Error('Graph step does not belong to Task');
+      // A Mission that was canceled or already finished owns no resumable work: its steps keep
+      // whatever state they were parked in, and dispatching one would restart a Worker for an
+      // abandoned agreement.
+      const mission = this.persistence.getTeamMission(missionId);
+      if (['completed', 'failed', 'canceled'].includes(mission.state))
+        throw new Error('Graph Mission is not resumable');
+      const execution = this.persistence.getTeamExecution(step.executionId);
+      if (execution.state !== 'waiting_resume' || this.graphScheduledExecutions.has(execution.id))
+        throw new Error('Graph step is not waiting for manual resume');
+      const { owners, hold } = this.graphIntegrationHoldFor(missionId, execution.id);
+      // A sealed result is agreed work. Re-running the Worker would discard it, so the integration
+      // path stays the only way forward.
+      if (hold !== null) throw new Error('Completed graph work must resume integration');
+      // An interrupted write step keeps its worktree/isolation. Restarting on top of a preserved
+      // workspace needs its own review slice, so refuse rather than guess.
+      if (
+        this.persistence.getTeamMissionWorktree(execution.id) ||
+        this.persistence.getTeamExecutionIsolation(execution.id)
+      )
+        throw new Error('Interrupted write work requires review of its preserved workspace');
+      await this.verifyWorkspace?.(taskId);
+      await prepareGraphStepWriteFootprints(graph, stepKey, () =>
+        graphMissionContextFor(this.persistence, taskId),
+      );
+      const document = this.persistence.getGraphDocument(taskId);
+      if (!document || document.semanticDigest !== graph.semanticDigest)
+        throw new Error('Graph agreement changed');
+      const context = graphMissionContextFor(this.persistence, taskId);
+      for (const source of document.sources) {
+        const root = context.workspace.roots.find((root) => root.rootId === source.rootId);
+        if (
+          (await previewGraphSource(source, root?.path ?? null, context.policyEpoch)).status !==
+          'current'
+        )
+          throw new Error('Graph source evidence changed; update the agreement');
+      }
+      // A restart is not proof that a dispatched runner stopped; make Main observe the stop before
+      // the quarantined reservation is released to the new Attempt.
+      if (owners.some((owner) => owner.attemptId !== null))
+        await this.runtime.stop(execution.assigneeAgentId);
+      for (const owner of owners)
+        this.persistence.releaseGraphResources({
+          reservationId: owner.id,
+          executionId: execution.id,
+          generation: owner.generation,
+          confirmation:
+            owner.attemptId === null
+              ? { kind: 'not-dispatched' }
+              : { kind: 'attempt-stopped', attemptId: owner.attemptId },
+          now: this.isoNow(),
+        });
+      try {
+        await this.scheduleGraphMission(taskId, missionId, stepKey);
+      } catch (error) {
+        // The reservations are gone but the step is still `waiting_resume`, so the user can ask
+        // again once the reason is fixed. Say what stopped it instead of leaving a silent button.
+        this.persistence.setWorkerCurrentActivity(
+          execution.assigneeAgentId,
+          (error instanceof Error ? error.message : 'Graph step resume failed').slice(0, 2000),
+          this.isoNow(),
+        );
+        this.emit(taskId, execution.teamId);
+        throw error;
+      }
+      this.emit(taskId, execution.teamId);
+      return this.missionSummary(this.persistence.getTeamMission(missionId));
+    });
+  }
+
+  /**
+   * The one reading of "is this step's Worker result already sealed and only waiting on repository
+   * integration?". `missionSummary` (which decides whether the UI offers a step resume or an
+   * integration resume) and `resumeGraphStep` (which refuses to re-run a sealed step) must agree
+   * exactly, or the UI offers a button the call then rejects. A hold outlives the reservation it
+   * was taken on — `releaseGraphResources` only refuses while the hold is active, and the row is
+   * dropped separately — so a released owner is inspected too when nothing is held any more.
+   */
+  private graphIntegrationHoldFor(
+    missionId: string,
+    executionId: string,
+  ): {
+    owner: GraphResourceReservation | null;
+    owners: readonly GraphResourceReservation[];
+    hold: GraphIntegrationHold | null;
+  } {
+    const mine = this.persistence
+      .listGraphResourceReservations(missionId)
+      .filter((owner) => owner.executionId === executionId);
+    const owners = mine.filter((owner) => owner.state !== 'released');
+    const inspected = owners.length ? owners : mine.slice(-1);
+    return {
+      owner: inspected[0] ?? null,
+      owners,
+      hold:
+        inspected
+          .map((owner) => this.persistence.getGraphIntegrationHold(owner.id))
+          .find((hold) => hold !== null) ?? null,
+    };
   }
 
   /** Main-only graph continuation. The agreed result and stop record are reused, never a new Worker run. */
@@ -3492,7 +3644,6 @@ export class TeamCoordinator {
   private missionSummary(mission: TeamMissionRecord): TeamMissionSummary {
     const graph =
       mission.mode === 'graph' ? this.persistence.getGraphTeamMission(mission.id) : null;
-    const resources = graph ? this.persistence.listGraphResourceReservations(mission.id) : [];
     return {
       mode: mission.mode,
       ...(graph ? { graph: { id: graph.graphId, semanticRevision: graph.semanticRevision } } : {}),
@@ -3507,11 +3658,13 @@ export class TeamCoordinator {
         const execution = this.persistence.getTeamExecution(step.executionId);
         const dispatch = this.persistence.getTeamExecutionDispatch(step.executionId);
         const mapping = graph?.steps.find((item) => item.executionId === step.executionId);
-        const owner =
-          resources.find(
-            (item) => item.executionId === step.executionId && item.state !== 'released',
-          ) ?? resources.filter((item) => item.executionId === step.executionId).at(-1);
-        const hold = owner ? this.persistence.getGraphIntegrationHold(owner.id) : null;
+        const { owner, hold } = mapping
+          ? this.graphIntegrationHoldFor(mission.id, step.executionId)
+          : { owner: null, hold: null };
+        // A resumed step holds `waiting_resume` until the scheduler admits it, so the UI would
+        // otherwise show "再開待ち" with a button that now refuses — say it is already resumed.
+        const stepResumePending =
+          execution.state === 'waiting_resume' && this.graphScheduledExecutions.has(execution.id);
         return {
           ...(mapping
             ? {
@@ -3521,9 +3674,16 @@ export class TeamCoordinator {
                   generation: mapping.generation,
                   resourceState: owner?.state ?? null,
                   waitReason:
-                    execution.state === 'queued'
+                    execution.state === 'queued' || stepResumePending
                       ? (this.graphWaitReasons.get(execution.id) ?? null)
                       : null,
+                  stepResumePending,
+                  stepResumeAvailable:
+                    execution.state === 'waiting_resume' &&
+                    hold === null &&
+                    !stepResumePending &&
+                    !this.persistence.getTeamMissionWorktree(execution.id) &&
+                    !this.persistence.getTeamExecutionIsolation(execution.id),
                   integrationResumeAvailable:
                     execution.state === 'waiting_resume' &&
                     hold !== null &&

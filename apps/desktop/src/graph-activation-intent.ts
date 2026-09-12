@@ -21,3 +21,15 @@ export function graphResumeActivationIntent(input: GraphMissionResumeInput): str
     generation: input.generation,
   });
 }
+
+export function graphResumeStepActivationIntent(input: GraphMissionResumeInput): string {
+  return JSON.stringify({
+    operation: 'graph-resume-step',
+    taskId: input.taskId,
+    instanceId: input.instanceId,
+    renderRevision: input.renderRevision,
+    missionId: input.missionId,
+    stepKey: input.stepKey,
+    generation: input.generation,
+  });
+}

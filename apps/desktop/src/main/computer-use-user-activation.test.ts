@@ -83,7 +83,7 @@ describe('ComputerUseUserActivationGate', () => {
     gate.dispose();
   });
 
-  it.each(['approval', 'graph-start', 'graph-resume'] as const)(
+  it.each(['approval', 'graph-start', 'graph-resume', 'graph-resume-step'] as const)(
     'binds %s independently from Computer Use start and picker intents',
     (kind) => {
       vi.stubEnv('NODE_ENV', 'test');

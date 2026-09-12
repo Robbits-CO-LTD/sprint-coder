@@ -1,5 +1,8 @@
 import { useState } from 'react';
-import { graphResumeActivationIntent } from '../../graph-activation-intent';
+import {
+  graphResumeActivationIntent,
+  graphResumeStepActivationIntent,
+} from '../../graph-activation-intent';
 import type { GraphMissionPlan, GraphView, TeamMissionStepSummary } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
@@ -98,18 +101,26 @@ export function GraphMissionPlanPanel({
                         <p data-testid="graph-step-state">
                           {execution.graph?.waitReason
                             ? waitLabels[execution.graph.waitReason]
-                            : executionLabels[execution.state]}
+                            : execution.graph?.stepResumePending
+                              ? '再開済み · 依存の完了待ち'
+                              : executionLabels[execution.state]}
                           {execution.graph?.resourceState === 'quarantined'
                             ? ' · 資源を保持して停止確認待ち'
                             : ''}
                         </p>
-                        {execution.graph?.integrationResumeAvailable ? (
-                          <GraphIntegrationResumeButton
-                            key={`${view.instanceId}:${execution.executionId}`}
+                        {execution.graph?.integrationResumeAvailable ||
+                        execution.graph?.stepResumeAvailable ? (
+                          <GraphResumeButton
+                            // The mode is part of the identity: a pending/error left over from one
+                            // resume must not carry into the other.
+                            key={`${view.instanceId}:${execution.executionId}:${
+                              execution.graph.integrationResumeAvailable ? 'integration' : 'step'
+                            }`}
                             view={view}
                             missionId={mission.id}
                             stepKey={step.key}
                             generation={execution.graph.generation}
+                            integration={execution.graph.integrationResumeAvailable}
                           />
                         ) : null}
                       </>
@@ -164,16 +175,24 @@ export function GraphMissionPlanPanel({
   );
 }
 
-function GraphIntegrationResumeButton({
+/**
+ * One control for the two ways a parked graph step moves again. `integration` means the Worker
+ * already delivered its result and only the repository step is left, so it resumes that and never
+ * runs the Worker again; otherwise the step itself is dispatched once more. Each half carries its
+ * own trusted-activation kind and intent, so an activation for one can never drive the other.
+ */
+function GraphResumeButton({
   view,
   missionId,
   stepKey,
   generation,
+  integration,
 }: {
   view: GraphView;
   missionId: string;
   stepKey: string;
   generation: number;
+  integration: boolean;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,9 +211,10 @@ function GraphIntegrationResumeButton({
     try {
       const api = window.sprintCoder?.graphs;
       if (!api) throw new Error('アプリとの接続を確認できませんでした。');
-      await api.resumeIntegration(input);
+      if (integration) await api.resumeIntegration(input);
+      else await api.resumeStep(input);
     } catch (error) {
-      setError(error instanceof Error ? error.message : '統合を再開できませんでした。');
+      setError(error instanceof Error ? error.message : '再開できませんでした。');
     } finally {
       setPending(false);
     }
@@ -205,11 +225,13 @@ function GraphIntegrationResumeButton({
         type="button"
         className="button"
         disabled={pending}
-        data-computer-use-activation="graph-resume"
-        data-computer-use-intent={graphResumeActivationIntent(input)}
+        data-computer-use-activation={integration ? 'graph-resume' : 'graph-resume-step'}
+        data-computer-use-intent={
+          integration ? graphResumeActivationIntent(input) : graphResumeStepActivationIntent(input)
+        }
         onClick={() => void resume()}
       >
-        {pending ? '統合を再開しています…' : '完了した変更の統合を再開'}
+        {pending ? '再開しています…' : integration ? '完了した変更の統合を再開' : 'この工程を再開'}
       </button>
       {error ? <p role="alert">{error}</p> : null}
     </div>

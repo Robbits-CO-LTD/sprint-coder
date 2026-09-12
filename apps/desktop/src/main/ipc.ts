@@ -1,6 +1,7 @@
 import {
   graphStartActivationIntent,
   graphResumeActivationIntent,
+  graphResumeStepActivationIntent,
 } from '../graph-activation-intent';
 import {
   app,
@@ -1803,6 +1804,33 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.handle(
+      IPC_CHANNELS.graphsMissionResumeStep,
+      graphMissionResumeInputSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-resume-step');
+        if (!activation || activation.intent !== graphResumeStepActivationIntent(input))
+          throw new Error('計画の工程再開ボタンから操作してください。');
+        const document = this.graphs?.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const graph = this.persistence.getGraphTeamMission(input.missionId);
+        const step = graph?.steps.find((step) => step.key === input.stepKey);
+        if (
+          !document ||
+          !graph ||
+          graph.taskId !== input.taskId ||
+          graph.graphId !== document.id ||
+          graph.semanticRevision !== document.semanticRevision ||
+          step?.generation !== input.generation
+        )
+          throw new Error('Graph integration agreement changed');
+        return this.teamCoordinator.resumeGraphStep(input.taskId, input.missionId, input.stepKey);
+      },
+    );
     this.handle(
       IPC_CHANNELS.graphsMissionResumeIntegration,
       graphMissionResumeInputSchema,
@@ -4350,7 +4378,8 @@ export class IpcRouter {
       rawKind !== 'start' &&
       rawKind !== 'approval' &&
       rawKind !== 'graph-start' &&
-      rawKind !== 'graph-resume'
+      rawKind !== 'graph-resume' &&
+      rawKind !== 'graph-resume-step'
     )
       return;
     if (rawIntent !== null && typeof rawIntent !== 'string') return;

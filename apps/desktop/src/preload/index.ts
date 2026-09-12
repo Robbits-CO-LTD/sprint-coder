@@ -1,6 +1,7 @@
 import {
   graphStartActivationIntent,
   graphResumeActivationIntent,
+  graphResumeStepActivationIntent,
 } from '../graph-activation-intent';
 import { contextBridge, ipcRenderer } from 'electron';
 import { z } from 'zod';
@@ -292,6 +293,18 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    resumeStep: async (input) => {
+      const parsed = graphMissionResumeInputSchema.parse(input);
+      const activation = trustedComputerUseActivation.consume('graph-resume-step');
+      if (activation?.intent !== graphResumeStepActivationIntent(parsed))
+        throw new Error('計画の工程再開ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsMissionResumeStep,
+        graphMissionResumeInputSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
     resumeIntegration: async (input) => {
       const parsed = graphMissionResumeInputSchema.parse(input);
       const activation = trustedComputerUseActivation.consume('graph-resume');

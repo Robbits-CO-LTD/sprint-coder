@@ -158,6 +158,18 @@ function begin(
   f.persistence.transitionTeamTask(dispatch.teamTaskId, 'running', now);
   return { ...result, dispatch };
 }
+/** The flags the plan panel reads to decide which resume — if any — it may offer for a step. */
+function stepResumeFlags(
+  coordinator: TeamCoordinator,
+  taskId: string,
+  missionId: string,
+  key: string,
+) {
+  const mission = coordinator.get(taskId)?.missions.find((item) => item.id === missionId);
+  const step = mission?.steps.find((item) => item.graph?.key === key);
+  if (!step?.graph) throw new Error('Expected a graph step summary');
+  return step.graph;
+}
 function completion(missionId: string, key: string, run: ReturnType<typeof begin>) {
   const doneEvidence = [{ criterion: 'Reviewed', evidence: 'Main fixture verified the result' }];
   return {
@@ -379,6 +391,237 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         }
       },
     );
+
+    it('restores interrupted graph steps without dispatch and resumes only the requested step', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const run = begin(f, mission.id, 'a');
+      f.persistence.transitionTeamAttempt({ attemptId: run.attempt.id, to: 'running', now });
+      f.persistence.interruptGraphStep({
+        missionId: mission.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: run.reservation.id,
+        attemptId: run.attempt.id,
+        outcome: 'failed',
+        reason: 'fixture interruption',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      restored.recoverInterruptedTeamExecutions(now);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const stop = vi.spyOn(runtime, 'stop');
+      const scheduler = new TeamExecutionScheduler(2);
+      const coordinator = new TeamCoordinator(
+        restored,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        coordinator.recoverOnStartup();
+        expect(execute).not.toHaveBeenCalled();
+        // The Mission is parked next to its steps, and the UI offers the step resume — not the
+        // integration one, because this Worker never sealed a result.
+        expect(restored.getTeamMission(mission.id).state).toBe('waiting_resume');
+        expect(stepResumeFlags(coordinator, f.task.id, mission.id, 'a')).toMatchObject({
+          stepResumeAvailable: true,
+          stepResumePending: false,
+          integrationResumeAvailable: false,
+        });
+        await coordinator.resumeGraphStep(f.task.id, mission.id, 'a');
+        await vi.waitFor(() =>
+          expect(restored.getTeamExecution(run.execution.id).state).toBe('completed'),
+        );
+        expect(stop).toHaveBeenCalledWith(run.execution.assigneeAgentId);
+        expect(execute).toHaveBeenCalledTimes(1);
+        const second = restored.getTeamMission(mission.id).steps[1]!;
+        expect(restored.getTeamExecution(second.executionId).state).toBe('waiting_resume');
+        await coordinator.resumeGraphStep(f.task.id, mission.id, 'b');
+        await vi.waitFor(() => expect(restored.getTeamMission(mission.id).state).toBe('completed'));
+        expect(execute).toHaveBeenCalledTimes(2);
+        expect(restored.listTeamAttempts(run.execution.id)).toHaveLength(2);
+        expect(restored.checkTeamIntegrity().inconsistencies).toEqual([]);
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        restored.close();
+      }
+    });
+
+    it('keeps a manually resumed step waiting until its dependency completes', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const [first, second] = f.persistence.getTeamMission(mission.id).steps;
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      restored.recoverInterruptedTeamExecutions(now);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const scheduler = new TeamExecutionScheduler(2);
+      const coordinator = new TeamCoordinator(
+        restored,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        coordinator.recoverOnStartup();
+        // An agreement that never reached dispatch is parked too, so nothing restarts by itself.
+        expect(restored.getTeamExecution(first!.executionId).state).toBe('waiting_resume');
+        expect(restored.getTeamExecution(second!.executionId).state).toBe('waiting_resume');
+        // A Mission that never admitted a step stays `queued`: `queued -> waiting_resume` is not a
+        // legal Mission transition, and the steps already hold the restart on their own gate.
+        expect(restored.getTeamMission(mission.id).state).toBe('queued');
+        await coordinator.resumeGraphStep(f.task.id, mission.id, 'b');
+        await expect(coordinator.resumeGraphStep(f.task.id, mission.id, 'b')).rejects.toThrow(
+          'not waiting for manual resume',
+        );
+        expect(execute).not.toHaveBeenCalled();
+        expect(restored.getTeamExecution(second!.executionId).state).toBe('waiting_resume');
+        // Resumed but still behind its dependency: the UI says so instead of offering the button.
+        await vi.waitFor(() =>
+          expect(stepResumeFlags(coordinator, f.task.id, mission.id, 'b')).toMatchObject({
+            stepResumePending: true,
+            stepResumeAvailable: false,
+            waitReason: 'dependencies',
+          }),
+        );
+        await coordinator.resumeGraphStep(f.task.id, mission.id, 'a');
+        await vi.waitFor(() => expect(restored.getTeamMission(mission.id).state).toBe('completed'));
+        expect(execute).toHaveBeenCalledTimes(2);
+        expect(restored.checkTeamIntegrity().inconsistencies).toEqual([]);
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        restored.close();
+      }
+    });
+
+    it('refuses to re-run a graph step whose sealed result is waiting on integration', async () => {
+      const { f, a, run } = await sealedWriteFixture();
+      const hold = f.persistence.holdGraphIntegration({
+        ...completion(a.mission.id, 'a', run),
+        reason: 'Integration requires retry',
+      });
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const stop = vi.spyOn(runtime, 'stop');
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        new TeamExecutionScheduler(2),
+      );
+      try {
+        expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('waiting_resume');
+        // The UI offers only the integration resume, matching what the call below enforces.
+        expect(stepResumeFlags(coordinator, f.task.id, a.mission.id, 'a')).toMatchObject({
+          stepResumeAvailable: false,
+          stepResumePending: false,
+          integrationResumeAvailable: true,
+        });
+        await expect(coordinator.resumeGraphStep(f.task.id, a.mission.id, 'a')).rejects.toThrow(
+          'Completed graph work must resume integration',
+        );
+        expect(execute).not.toHaveBeenCalled();
+        expect(stop).not.toHaveBeenCalled();
+        expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('waiting_resume');
+        expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toMatchObject({
+          integrationActive: false,
+        });
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('parks a graph step that was queued before any Attempt and resumes it by hand', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const [first, second] = f.persistence.getTeamMission(mission.id).steps;
+      // `queueGraphStep` queues the step on its own; the crash lands before `beginGraphAttempt`
+      // mints the Attempt, so no Attempt row exists for the recovery sweep to find.
+      const queued = f.persistence.queueGraphStep(mission.id, 'a', 1, now);
+      expect(queued.state).toBe('queued');
+      expect(f.persistence.listTeamAttempts(first!.executionId)).toEqual([]);
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      expect(restored.recoverInterruptedTeamExecutions(now)).toBe(2);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const stop = vi.spyOn(runtime, 'stop');
+      const scheduler = new TeamExecutionScheduler(2);
+      const coordinator = new TeamCoordinator(
+        restored,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        coordinator.recoverOnStartup();
+        expect(restored.getTeamExecution(first!.executionId).state).toBe('waiting_resume');
+        expect(execute).not.toHaveBeenCalled();
+        expect(stepResumeFlags(coordinator, f.task.id, mission.id, 'a')).toMatchObject({
+          stepResumeAvailable: true,
+          integrationResumeAvailable: false,
+        });
+        await coordinator.resumeGraphStep(f.task.id, mission.id, 'a');
+        await vi.waitFor(() =>
+          expect(restored.getTeamExecution(first!.executionId).state).toBe('completed'),
+        );
+        // Nothing was dispatched before the restart, so Main has no runner to stop.
+        expect(stop).not.toHaveBeenCalled();
+        expect(execute).toHaveBeenCalledTimes(1);
+        // The sibling stays parked: finishing a step never restarts the rest of the graph.
+        expect(restored.getTeamExecution(second!.executionId).state).toBe('waiting_resume');
+        expect(restored.checkTeamIntegrity().inconsistencies).toEqual([]);
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        restored.close();
+      }
+    });
+
+    it('refuses a step resume once its Mission is no longer resumable', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const [first] = f.persistence.getTeamMission(mission.id).steps;
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      restored.recoverInterruptedTeamExecutions(now);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const scheduler = new TeamExecutionScheduler(2);
+      const coordinator = new TeamCoordinator(
+        restored,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        coordinator.recoverOnStartup();
+        restored.transitionTeamMission(mission.id, 'canceled', now);
+        await expect(coordinator.resumeGraphStep(f.task.id, mission.id, 'a')).rejects.toThrow(
+          'Graph Mission is not resumable',
+        );
+        expect(execute).not.toHaveBeenCalled();
+        expect(restored.getTeamExecution(first!.executionId).state).toBe('waiting_resume');
+        expect(restored.listTeamAttempts(first!.executionId)).toEqual([]);
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        restored.close();
+      }
+    });
 
     it('resumes a sealed graph integration without starting another Worker attempt', async () => {
       const { f, a, run, manager } = await sealedWriteFixture();
