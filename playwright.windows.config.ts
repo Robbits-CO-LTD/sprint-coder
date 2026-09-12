@@ -13,6 +13,7 @@ export const WINDOWS_MAJOR_E2E_SPECS = [
   '**/file-edits.spec.ts',
   '**/approval-flow.spec.ts',
   '**/team-flow.spec.ts',
+  '**/archify-graph.spec.ts',
 ] as const;
 
 export default defineConfig(createPlaywrightConfig(), {

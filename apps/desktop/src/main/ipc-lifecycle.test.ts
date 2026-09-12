@@ -28,11 +28,13 @@ vi.mock('electron', () => ({
 
 it('broadcasts terminal activity to the window even without a Task event port', () => {
   const send = vi.fn();
+  const invalidate = vi.fn();
   const router = Object.create(IpcRouter.prototype) as { publish(event: unknown): void };
   Object.assign(router, {
     window: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } },
     ports: new Set(),
     recordTurnDiagnosticEvent: vi.fn(),
+    graphSourceMonitor: { invalidate },
     persistence: {
       getActiveTurnId: () => null,
       getTask: () => ({
@@ -60,11 +62,13 @@ it('broadcasts terminal activity to the window even without a Task event port', 
     IPC_CHANNELS.tasksUpdated,
     expect.objectContaining({ id: 'task-1', activeTurnId: null }),
   );
+  expect(invalidate).toHaveBeenCalledWith('task-1');
 });
 
 it('finishes resource disposal after the BrowserWindow has been destroyed', async () => {
   const router = Object.create(IpcRouter.prototype) as IpcRouter;
   const dispose = vi.fn();
+  const disposeGraphSources = vi.fn();
   const state: Record<string, unknown> = {
     window: {
       isDestroyed: () => true,
@@ -74,6 +78,7 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
     },
     taskTitleProviderAborts: { abortAll: vi.fn() },
     closeAllPorts: vi.fn(),
+    graphSourceMonitor: { dispose: disposeGraphSources },
   };
   for (const key of [
     'providerAbortByTurn',
@@ -109,6 +114,7 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
   Object.assign(router, state);
   await expect(router.dispose()).resolves.toBeUndefined();
   expect(dispose).toHaveBeenCalledTimes(13);
+  expect(disposeGraphSources).toHaveBeenCalledTimes(1);
 });
 
 it('reports invalid handler output as an internal failure without exposing schema contents', async () => {

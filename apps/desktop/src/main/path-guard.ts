@@ -24,6 +24,7 @@ export type PathChainEntry = {
   linkTarget: string | null;
 };
 export type CanonicalPathIdentity = {
+  rootIdentityDigest: string;
   rootId: string;
   workspacePath: string;
   originalTargetPath: string;
@@ -105,6 +106,7 @@ export async function canonicalizeResourcePath(input: {
   const chain = await snapshotLexicalChain(workspacePath, lexicalTarget);
 
   return {
+    rootIdentityDigest: workspaceRootIdentityDigest(workspaceStats),
     rootId: input.rootId ?? 'legacy-primary',
     workspacePath,
     originalTargetPath: input.targetPath,
@@ -149,6 +151,7 @@ export async function revalidatePathGuard(guard: PathGuard): Promise<CanonicalPa
     current = await canonicalizeResourcePath({
       rootId: guard.rootId,
       workspacePath: guard.workspacePath,
+      expectedRootIdentityDigest: guard.rootIdentityDigest,
       targetPath: guard.originalTargetPath,
       operation: guard.operation,
     });

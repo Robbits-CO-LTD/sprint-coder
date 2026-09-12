@@ -5,6 +5,17 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
+  graphRenderInputSchema,
+  graphGetInputSchema,
+  graphSourcesInputSchema,
+  graphSourceCheckInputSchema,
+  graphMissionStartInputSchema,
+  graphMissionResumeInputSchema,
+  graphSourcePreviewInputSchema,
+  graphCancelInputSchema,
+  graphHistoryInputSchema,
+  graphCompareInputSchema,
+  graphReleaseInputSchema,
   anthropicConnectionCreateInputSchema,
   approvalResolveInputSchema,
   computerUseApprovalResolveInputSchema,
@@ -5042,6 +5053,20 @@ describe('isTrustedIpcSender', () => {
 // ipcMain.on messages in index.ts. None are bound to an ipcMain.handle envelope schema, so they are
 // deliberately excluded and asserted absent below.
 const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
+  [IPC_CHANNELS.graphsRender]: graphRenderInputSchema,
+  [IPC_CHANNELS.graphsGet]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsSources]: graphSourcesInputSchema,
+  [IPC_CHANNELS.graphsSourceCheck]: graphSourceCheckInputSchema,
+  [IPC_CHANNELS.graphsMissionReview]: graphSourceCheckInputSchema,
+  [IPC_CHANNELS.graphsMissionStart]: graphMissionStartInputSchema,
+  [IPC_CHANNELS.graphsMissionResumeIntegration]: graphMissionResumeInputSchema,
+  [IPC_CHANNELS.graphsMissionResumeStep]: graphMissionResumeInputSchema,
+  [IPC_CHANNELS.graphsSourcePreview]: graphSourcePreviewInputSchema,
+  [IPC_CHANNELS.graphsGeneration]: graphGetInputSchema,
+  [IPC_CHANNELS.graphsHistory]: graphHistoryInputSchema,
+  [IPC_CHANNELS.graphsCompare]: graphCompareInputSchema,
+  [IPC_CHANNELS.graphsCancel]: graphCancelInputSchema,
+  [IPC_CHANNELS.graphsRelease]: graphReleaseInputSchema,
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
   [IPC_CHANNELS.runtimeFailureDiagnosticGet]: runtimeFailureDiagnosticQuerySchema,
   [IPC_CHANNELS.settingsGetRuntime]: emptyPayloadSchema,
@@ -5191,6 +5216,9 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
 // Channels owned directly by Main or sent from Main to Renderer do not pass through IpcRouter's
 // command-envelope parser, so they are intentionally outside the adversarial input-schema table.
 const NON_ROUTER_CHANNELS = new Set<string>([
+  IPC_CHANNELS.graphsSourceStatus,
+  IPC_CHANNELS.graphsUpdated,
+  IPC_CHANNELS.graphsGenerationUpdated,
   IPC_CHANNELS.tasksUpdated,
   IPC_CHANNELS.teamsEvent,
   IPC_CHANNELS.turnsPort,

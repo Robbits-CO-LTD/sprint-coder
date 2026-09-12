@@ -248,7 +248,7 @@ export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.f
   team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
   team_cancel_execution: '自分の配下のexecutionを取り消します。',
   team_get_status:
-    '現在のTeam階層、Agent、execution、待機状態を取得します。Manager/Workerには権限内の祖先・自分の配下だけが返ります。',
+    '現在のTeam階層、Agent、execution、待機状態を取得します。waitingForWorkerは同じWorkerの先行実行待ち、workerQueueDepthはそのWorkerを待っている実行件数です。Manager/Workerには権限内の祖先・自分の配下だけが返ります。',
   team_wait_events: '指定cursor以降の配下Worker報告を取得します。',
   team_wait_reports: '配下Workerの新しい完了報告を待ちます。',
   team_send_message: '同じTeamのAgentへ監査される直接messageを送信します。',
@@ -1161,11 +1161,11 @@ const TEAM_JAPANESE_PAIRED_ROLE_ASSIGNMENT = new RegExp(
   'i',
 );
 
-// A failed/canceled Team turn is commonly resumed with a short instruction that no longer repeats
+// A Team turn is commonly resumed with a short instruction that no longer repeats
 // the word "Team". Keep this deliberately narrow: ordinary follow-up questions must not silently
 // gain team capabilities just because an older turn once used them.
 const TEAM_CONTINUATION =
-  /^(?:continue|resume|retry|続けて|続行|再開|再試行|リトライ)(?:してください|して|お願い)?[。.!！]?$/i;
+  /^(?:(?:continue|resume|retry|続けて|続行|再開|再試行|リトライ)(?:してください|して|お願い)?|(?:やって|進めて|実行して)(?:ください|ほしい)?|お願いします)[。.!！]?$/i;
 const TEAM_MEMBER_CHANGE_TARGET = /\bworker\b|\bagent\b|ワーカー|担当|メンバー|リーダー/i;
 const TEAM_MEMBER_MODEL_TARGET = /codex|claude|ollama/gi;
 const TEAM_MEMBER_CHANGE_ACTION =

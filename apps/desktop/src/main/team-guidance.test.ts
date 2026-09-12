@@ -233,6 +233,11 @@ describe('builtin Team skill', () => {
       '続けて',
       '再開してください',
       'リトライ',
+      'やって',
+      'やってください。',
+      '進めて',
+      '実行してほしい',
+      'お願いします',
       'codex to ollamanisite',
       'CodexとOllamaにして',
       '担当をCodexとOllamaへ変更して',
@@ -241,6 +246,10 @@ describe('builtin Team skill', () => {
       expect(isTeamContinuationInput(input), input).toBe(true);
     for (const input of [
       '続きを説明して',
+      'やってはいけない',
+      'やっていいか説明して',
+      '実行しないで',
+      '「やって」とREADMEに書いて',
       'continue implementing this feature',
       '通常の依頼です',
       'モデルを変更して',

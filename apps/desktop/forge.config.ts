@@ -50,6 +50,8 @@ function isNativeSafeFsAddonPackagePath(file: string): boolean {
 export function shouldIgnoreFromPackage(file: string): boolean {
   if (!file) return false;
   if (file === '/.vite' || file.startsWith('/.vite/')) return false;
+  if (file === '/vendor' || file === '/vendor/archify' || file.startsWith('/vendor/archify/'))
+    return false;
   if (isNativeSafeFsAddonPackagePath(file)) return false;
   return true;
 }
@@ -884,6 +886,7 @@ const config: ForgeConfig = {
         { entry: 'src/main/index.ts', config: 'vite.main.config.ts' },
         { entry: 'src/preload/index.ts', config: 'vite.preload.config.ts' },
         { entry: 'src/runtime-host/index.ts', config: 'vite.runtime-host.config.ts' },
+        { entry: 'src/graph-render-host/index.ts', config: 'vite.graph-render-host.config.ts' },
       ],
       renderer: [{ name: 'main_window', config: 'vite.renderer.config.ts' }],
     }),

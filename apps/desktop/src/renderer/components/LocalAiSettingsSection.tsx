@@ -118,18 +118,23 @@ export function LocalAiSettingsSection({ active }: { active: boolean }) {
     <section className="settings-local-ai" aria-labelledby="settings-local-ai-title">
       <div className="settings-section-heading">
         <div>
-          <h3 id="settings-local-ai-title">このPCのLocal AI</h3>
-          <p>モデルはこの端末へ保存され、Managed Local runtimeが端末内で推論します。</p>
+          <h3 id="settings-local-ai-title">{selectorOpen ? 'モデルを探す' : '端末とモデル'}</h3>
+          <p>
+            {selectorOpen
+              ? '公開モデルを検索し、サイズやライセンスを確認して追加できます。'
+              : 'ダウンロードしたモデルを使って、この端末でAIを実行します。'}
+          </p>
         </div>
         <button
           type="button"
-          className="settings-primary-button"
+          className={selectorOpen ? 'settings-secondary-button' : 'settings-primary-button'}
           onClick={() => setSelectorOpen((value) => !value)}
           aria-expanded={selectorOpen}
           aria-controls="local-ai-selector"
           disabled={!supported}
         >
-          {selectorOpen ? 'Selectorを閉じる' : 'Local AI Selector'}
+          {selectorOpen ? <ArrowLeft size={14} /> : <Search size={14} />}
+          {selectorOpen ? 'モデル管理に戻る' : 'モデルを探す'}
         </button>
       </div>
 
@@ -642,6 +647,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
   const [licenseAccepted, setLicenseAccepted] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -651,10 +657,13 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
     const api = localAiApi();
     if (api === null) return;
     setBusy(true);
+    setSearching(true);
     setError(null);
     try {
       const result = await api.query({ ...query, cursor });
       setPage(result);
+      setSelected(null);
+      setDetail(null);
       setQuery((current) => ({ ...current, cursor }));
       if (cursor === null) {
         setScrollTop(0);
@@ -664,6 +673,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
       setError('公開モデルを検索できませんでした。接続を確認して再試行してください。');
     } finally {
       setBusy(false);
+      setSearching(false);
     }
   }
 
@@ -772,76 +782,103 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
       className={`local-ai-selector${selected !== null ? ' has-detail' : ''}`}
       aria-busy={busy}
     >
-      <div className="local-ai-selector-toolbar">
-        <label>
-          <span className="sr-only">モデル名</span>
-          <Search size={14} />
-          <input
-            ref={searchRef}
-            className="settings-text-input"
-            value={query.text}
-            placeholder="モデルを検索"
-            onChange={(event) => setQuery((current) => ({ ...current, text: event.target.value }))}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                void search();
+      <form
+        className="local-ai-selector-toolbar"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!busy) void search();
+        }}
+      >
+        <label className="local-ai-search-field">
+          <span>モデル名</span>
+          <span className="local-ai-search-input">
+            <Search size={16} />
+            <input
+              ref={searchRef}
+              className="settings-text-input"
+              value={query.text}
+              placeholder="モデル名やキーワードで検索"
+              onChange={(event) =>
+                setQuery((current) => ({ ...current, text: event.target.value }))
               }
-            }}
-          />
-        </label>
-        <select
-          aria-label="取得元"
-          value={query.source}
-          onChange={(event) =>
-            setQuery((current) => ({
-              ...current,
-              source: event.target.value as PublicModelCatalogQuery['source'],
-            }))
-          }
-        >
-          <option value="all">すべての取得元</option>
-          <option value="hugging_face">Hugging Face</option>
-          <option value="localai_gallery">LocalAI Gallery</option>
-        </select>
-        <select
-          aria-label="用途"
-          value={query.purpose}
-          onChange={(event) =>
-            setQuery((current) => ({
-              ...current,
-              purpose: event.target.value as PublicModelCatalogQuery['purpose'],
-            }))
-          }
-        >
-          <option value="code">コード</option>
-          <option value="text_generation">文章生成</option>
-          <option value="conversational">会話</option>
-          <option value="all">すべて</option>
-        </select>
-        <label className="local-ai-checkbox">
-          <input
-            type="checkbox"
-            checked={query.compatibility === 'compatible'}
-            onChange={(event) =>
-              setQuery((current) => ({
-                ...current,
-                compatibility: event.target.checked ? 'compatible' : 'all',
-              }))
-            }
-          />
-          互換モデルのみ
+            />
+          </span>
         </label>
         <button
-          type="button"
-          className="settings-secondary-button"
-          onClick={() => void search()}
+          type="submit"
+          className="settings-primary-button local-ai-search-button"
           disabled={busy}
         >
-          検索
+          <Search size={14} />
+          {searching ? '検索中…' : '検索'}
         </button>
+        <div className="local-ai-search-filters">
+          <label className="local-ai-filter-field">
+            <span>取得元</span>
+            <select
+              aria-label="取得元"
+              disabled={busy}
+              value={query.source}
+              onChange={(event) =>
+                setQuery((current) => ({
+                  ...current,
+                  source: event.target.value as PublicModelCatalogQuery['source'],
+                }))
+              }
+            >
+              <option value="all">すべての取得元</option>
+              <option value="hugging_face">Hugging Face</option>
+              <option value="localai_gallery">LocalAI Gallery</option>
+            </select>
+          </label>
+          <label className="local-ai-filter-field">
+            <span>用途</span>
+            <select
+              aria-label="用途"
+              disabled={busy}
+              value={query.purpose}
+              onChange={(event) =>
+                setQuery((current) => ({
+                  ...current,
+                  purpose: event.target.value as PublicModelCatalogQuery['purpose'],
+                }))
+              }
+            >
+              <option value="code">コード</option>
+              <option value="text_generation">文章生成</option>
+              <option value="conversational">会話</option>
+              <option value="all">すべて</option>
+            </select>
+          </label>
+          <label className="local-ai-checkbox">
+            <input
+              type="checkbox"
+              disabled={busy}
+              checked={query.compatibility === 'compatible'}
+              onChange={(event) =>
+                setQuery((current) => ({
+                  ...current,
+                  compatibility: event.target.checked ? 'compatible' : 'all',
+                }))
+              }
+            />
+            互換モデルのみ
+          </label>
+        </div>
+      </form>
+      <div className="local-ai-catalog-status" role="status">
+        <span>
+          {searching
+            ? '公開モデルを検索しています…'
+            : page === null
+              ? '公開モデルカタログ'
+              : `検索結果 · ${items.length}件`}
+        </span>
+        <span>{page === null ? '検索してモデルを追加' : 'モデルを選んで詳細を確認'}</span>
       </div>
-      <div className="local-ai-selector-columns">
+      <div
+        className={`local-ai-selector-columns${items.length === 0 && selected === null ? ' is-empty' : ''}`}
+      >
         <div className="local-ai-selector-results">
           <div className="local-ai-selector-mobile-heading">
             {selected !== null && (
@@ -858,10 +895,17 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
               </button>
             )}
           </div>
-          {page === null ? (
+          {searching && page === null ? (
             <div className="local-ai-selector-empty">
+              <Search size={24} />
+              <strong>モデルを検索しています</strong>
+              <p>取得元から情報を読み込んでいます。</p>
+            </div>
+          ) : page === null ? (
+            <div className="local-ai-selector-empty">
+              <Search size={24} />
               <strong>公開モデルを探す</strong>
-              <p>名称・取得元・用途で絞り込み、検索してください。</p>
+              <p>モデル名を入力するか、そのまま検索してください。取得元や用途で絞り込めます。</p>
             </div>
           ) : items.length === 0 ? (
             <div className="local-ai-selector-empty">
@@ -882,6 +926,7 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
                   <button
                     key={item.id}
                     type="button"
+                    aria-disabled={busy}
                     role="option"
                     aria-selected={selected?.id === item.id}
                     className="local-ai-result-row"
@@ -890,7 +935,9 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
                       top: (start + index) * ROW_HEIGHT,
                       height: ROW_HEIGHT,
                     }}
-                    onClick={() => void select(item)}
+                    onClick={() => {
+                      if (!busy) void select(item);
+                    }}
                   >
                     <span>
                       <strong>{item.name}</strong>
@@ -925,7 +972,18 @@ function LocalAiSelector({ onInstalled }: { onInstalled: () => Promise<void> }) 
               <p>ライセンス、構成、コンテキスト長と導入可能なGGUFを確認できます。</p>
             </div>
           ) : detail === null ? (
-            <p className="settings-hint">詳細を読み込んでいます。</p>
+            <div className="local-ai-selector-empty">
+              <strong>{busy ? '詳細を読み込んでいます' : '詳細を取得できませんでした'}</strong>
+              {!busy && (
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={() => void select(selected)}
+                >
+                  再試行
+                </button>
+              )}
+            </div>
           ) : (
             <ModelDetail
               detail={detail}

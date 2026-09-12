@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { TEAM_GLOBAL_EXECUTION_LIMIT, TeamExecutionScheduler } from './team-execution-scheduler';
 import { ConnectionAdmissionController } from './connection-admission';
 import type { ProviderConnection } from '@sprint-coder/contracts';
@@ -24,38 +24,228 @@ async function settleScheduler(): Promise<void> {
   await new Promise<void>((resolve) => queueMicrotask(resolve));
 }
 
+const providerConnection = (
+  id: string,
+  runtimeKind: ProviderConnection['runtimeKind'],
+  maxConcurrentRequests: number | null,
+): ProviderConnection => ({
+  id,
+  providerId: id.split(':')[0]!,
+  runtimeKind,
+  displayName: id,
+  enabled: true,
+  secretReference: null,
+  verification: {
+    status: runtimeKind === 'builtin_cli' ? 'not_required' : 'verified',
+    verifiedAt: null,
+    expiresAt: null,
+    message: null,
+  },
+  rateLimit: {
+    mode: runtimeKind === 'builtin_cli' ? 'bypass' : 'auto',
+    maxConcurrentRequests,
+    requestsPerMinute: null,
+    tokensPerMinute: null,
+    lastObservedRateLimitHeaders: null,
+  },
+  createdAt: '2026-07-28T00:00:00.000Z',
+  updatedAt: '2026-07-28T00:00:00.000Z',
+});
+
 describe('TeamExecutionScheduler', () => {
+  it('excludes blocked graph candidates before slots and Connection admission, waking on state change', async () => {
+    const admission = new ConnectionAdmissionController(() =>
+      Date.parse('2026-07-28T00:00:01.000Z'),
+    );
+    admission.configure(providerConnection('openai:primary', 'official_api', 1));
+    const select = vi.spyOn(admission, 'selectNext');
+    const admit = vi.spyOn(admission, 'admit');
+    const scheduler = new TeamExecutionScheduler(1, admission);
+    let ready = false;
+    const blocked = deferred();
+    const independent = deferred();
+    const starts: string[] = [];
+    for (const [index, executionId] of ['blocked', 'independent'].entries())
+      scheduler.submit({
+        executionId,
+        workerId: executionId,
+        teamId: 'team',
+        teamLimit: 1,
+        isReady: () => executionId === 'independent' || ready,
+        connection: {
+          connectionId: 'openai:primary',
+          queueOrdinal: index + 1,
+          queuedAt: '2026-07-28T00:00:00.000Z',
+          estimatedTokens: 1,
+        },
+        run: async () => {
+          starts.push(executionId);
+          await (executionId === 'blocked' ? blocked.promise : independent.promise);
+        },
+      });
+    await settleScheduler();
+    expect(starts).toEqual(['independent']);
+    expect(
+      select.mock.calls.flatMap(([candidates]) => candidates.map(({ executionId }) => executionId)),
+    ).not.toContain('blocked');
+    independent.resolve();
+    await settleScheduler();
+    expect(scheduler.snapshot()).toMatchObject({ activeCount: 0, queuedExecutionIds: ['blocked'] });
+    expect(admit).toHaveBeenCalledTimes(1);
+    const selectsBefore = select.mock.calls.length;
+    await settleScheduler();
+    expect(select).toHaveBeenCalledTimes(selectsBefore);
+    ready = true;
+    scheduler.notifyReadinessChanged();
+    await settleScheduler();
+    expect(starts).toEqual(['independent', 'blocked']);
+    blocked.resolve();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(0);
+  });
+
+  it('allows an invalid readiness candidate to be removed without skipping independent work', async () => {
+    const scheduler = new TeamExecutionScheduler(2);
+    const error = new Error('Graph generation changed');
+    const errors: unknown[] = [];
+    scheduler.submit({
+      executionId: 'invalid',
+      workerId: 'a',
+      teamId: 'team',
+      teamLimit: 2,
+      isReady: () => {
+        throw error;
+      },
+      onReadinessError: (error) => {
+        errors.push(error);
+        scheduler.cancelQueued('invalid');
+      },
+      run: vi.fn(),
+    });
+    const run = vi.fn(async () => undefined);
+    scheduler.submit({
+      executionId: 'independent',
+      workerId: 'b',
+      teamId: 'team',
+      teamLimit: 2,
+      run,
+    });
+    await settleScheduler();
+    expect(errors).toEqual([error]);
+    expect(run).toHaveBeenCalledOnce();
+    expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+  });
+
+  it('holds a Worker through preflight cancellation until its run settles while unrelated work proceeds', async () => {
+    const scheduler = new TeamExecutionScheduler(4);
+    const first = deferred();
+    const next = deferred();
+    const other = deferred();
+    const started: string[] = [];
+    const changes: boolean[] = [];
+    scheduler.submit({
+      executionId: 'a1',
+      workerId: 'a',
+      teamId: 'team',
+      teamLimit: 4,
+      run: async () => {
+        started.push('a1');
+        await first.promise;
+      },
+    });
+    scheduler.submit({
+      executionId: 'a2',
+      workerId: 'a',
+      teamId: 'team',
+      teamLimit: 4,
+      onWorkerWaitChanged: (waiting) => changes.push(waiting),
+      run: async () => {
+        started.push('a2');
+        await next.promise;
+      },
+    });
+    scheduler.submit({
+      executionId: 'a3',
+      workerId: 'a',
+      teamId: 'team',
+      teamLimit: 4,
+      run: async () => {
+        started.push('a3');
+      },
+    });
+    scheduler.submit({
+      executionId: 'b',
+      workerId: 'b',
+      teamId: 'team',
+      teamLimit: 4,
+      run: async () => {
+        started.push('b');
+        await other.promise;
+      },
+    });
+    await settleScheduler();
+    expect(started).toEqual(['a1', 'b']);
+    expect(scheduler.snapshot()).toMatchObject({
+      activeCount: 2,
+      waitingWorkerExecutionIds: ['a2', 'a3'],
+    });
+    expect(scheduler.cancelQueued('a1')).toBe(true);
+    other.resolve();
+    await settleScheduler();
+    expect(started).toEqual(['a1', 'b']);
+    expect(scheduler.snapshot().activeCount).toBe(1);
+    expect(scheduler.cancelQueued('a3')).toBe(true);
+    first.resolve();
+    await settleScheduler();
+    expect(started).toEqual(['a1', 'b', 'a2']);
+    expect(changes).toEqual([true, false]);
+    next.resolve();
+    await settleScheduler();
+    expect(scheduler.snapshot()).toMatchObject({ activeCount: 0, waitingWorkerExecutionIds: [] });
+  });
+
+  it('excludes Worker waiters before Connection admission and refuses owner changes on retry', async () => {
+    const admission = new ConnectionAdmissionController(() =>
+      Date.parse('2026-07-28T00:00:01.000Z'),
+    );
+    admission.configure(providerConnection('openai:primary', 'official_api', 2));
+    const admit = vi.spyOn(admission, 'admit');
+    const scheduler = new TeamExecutionScheduler(4, admission);
+    const gates = [deferred(), deferred(), deferred()];
+    const jobs = ['a1', 'a2', 'b'].map((executionId, index) => ({
+      executionId,
+      workerId: index < 2 ? 'a' : 'b',
+      teamId: 'team',
+      teamLimit: 4,
+      connection: {
+        connectionId: 'openai:primary',
+        queueOrdinal: index + 1,
+        queuedAt: '2026-07-28T00:00:00.000Z',
+        estimatedTokens: 1,
+      },
+      run: () => gates[index]!.promise,
+    }));
+    for (const job of jobs) scheduler.submit(job);
+    await settleScheduler();
+    expect(admit.mock.calls.map(([candidate]) => candidate.executionId)).toEqual(['a1', 'b']);
+    expect(() => scheduler.requeueActive('a1', { ...jobs[0]!, workerId: 'b' })).toThrow(
+      'Worker and Team',
+    );
+    expect(() => scheduler.requeueActive('a1', { ...jobs[0]!, teamId: 'foreign' })).toThrow(
+      'Worker and Team',
+    );
+    gates[0]!.resolve();
+    await settleScheduler();
+    expect(admit.mock.calls.map(([candidate]) => candidate.executionId)).toEqual(['a1', 'b', 'a2']);
+    gates[1]!.resolve();
+    gates[2]!.resolve();
+    await settleScheduler();
+  });
+
   it('keeps global slots available when one external Connection is saturated', async () => {
     const admission = new ConnectionAdmissionController(() =>
       Date.parse('2026-07-28T00:00:01.000Z'),
     );
-    const providerConnection = (
-      id: string,
-      runtimeKind: ProviderConnection['runtimeKind'],
-      maxConcurrentRequests: number | null,
-    ): ProviderConnection => ({
-      id,
-      providerId: id.split(':')[0]!,
-      runtimeKind,
-      displayName: id,
-      enabled: true,
-      secretReference: null,
-      verification: {
-        status: runtimeKind === 'builtin_cli' ? 'not_required' : 'verified',
-        verifiedAt: null,
-        expiresAt: null,
-        message: null,
-      },
-      rateLimit: {
-        mode: runtimeKind === 'builtin_cli' ? 'bypass' : 'auto',
-        maxConcurrentRequests,
-        requestsPerMinute: null,
-        tokensPerMinute: null,
-        lastObservedRateLimitHeaders: null,
-      },
-      createdAt: '2026-07-28T00:00:00.000Z',
-      updatedAt: '2026-07-28T00:00:00.000Z',
-    });
     for (const connection of [
       providerConnection('openai:primary', 'official_api', 1),
       providerConnection('anthropic:primary', 'official_api', 1),
@@ -74,6 +264,7 @@ describe('TeamExecutionScheduler', () => {
     ].entries())
       scheduler.submit({
         executionId: `execution-${index + 1}`,
+        workerId: `execution-${index + 1}`,
         teamId: `team-${index + 1}`,
         teamLimit: 8,
         connection: {
@@ -108,6 +299,7 @@ describe('TeamExecutionScheduler', () => {
       const gate = gates[index]!;
       scheduler.submit({
         executionId: `execution-${index}`,
+        workerId: `execution-${index}`,
         teamId: 'team-1',
         teamLimit: TEAM_GLOBAL_EXECUTION_LIMIT,
         run: async () => {
@@ -151,6 +343,7 @@ describe('TeamExecutionScheduler', () => {
     ] as const)
       scheduler.submit({
         executionId,
+        workerId: executionId,
         teamId,
         teamLimit: 1,
         run: async () => {
@@ -179,6 +372,7 @@ describe('TeamExecutionScheduler', () => {
       const gate = gates[index]!;
       scheduler.submit({
         executionId: `execution-${index}`,
+        workerId: `execution-${index}`,
         teamId: 'team-1',
         teamLimit: 8,
         run: async () => {
@@ -206,6 +400,7 @@ describe('TeamExecutionScheduler', () => {
     const started: string[] = [];
     scheduler.submit({
       executionId: 'failed',
+      workerId: 'failed',
       teamId: 'team-1',
       teamLimit: 8,
       run: async () => {
@@ -215,6 +410,7 @@ describe('TeamExecutionScheduler', () => {
     });
     scheduler.submit({
       executionId: 'next',
+      workerId: 'next',
       teamId: 'team-1',
       teamLimit: 8,
       run: async () => {
@@ -243,6 +439,7 @@ describe('TeamExecutionScheduler', () => {
     ] as const)
       scheduler.submit({
         executionId,
+        workerId: executionId,
         teamId: 'team-1',
         teamLimit: 8,
         run: async () => {
@@ -267,6 +464,7 @@ describe('TeamExecutionScheduler', () => {
     const preflight = deferred();
     scheduler.submit({
       executionId: 'preflight',
+      workerId: 'preflight',
       teamId: 'team-1',
       teamLimit: 1,
       run: () => preflight.promise,
@@ -287,6 +485,7 @@ describe('TeamExecutionScheduler', () => {
     const running = deferred();
     scheduler.submit({
       executionId: 'running',
+      workerId: 'running',
       teamId: 'team-1',
       teamLimit: 1,
       run: () => running.promise,
@@ -306,6 +505,7 @@ describe('TeamExecutionScheduler', () => {
     const preflight = deferred();
     scheduler.submit({
       executionId: 'canceled-preflight',
+      workerId: 'canceled-preflight',
       teamId: 'team-1',
       teamLimit: 1,
       run: () => preflight.promise,
@@ -325,6 +525,7 @@ describe('TeamExecutionScheduler', () => {
     const started: string[] = [];
     scheduler.submit({
       executionId: 'execution-1',
+      workerId: 'execution-1',
       teamId: 'team-1',
       teamLimit: 8,
       run: async () => {
@@ -336,6 +537,7 @@ describe('TeamExecutionScheduler', () => {
     expect(
       scheduler.requeueActive('execution-1', {
         executionId: 'execution-1',
+        workerId: 'execution-1',
         teamId: 'team-1',
         teamLimit: 8,
         run: async () => {
@@ -360,6 +562,7 @@ describe('TeamExecutionScheduler', () => {
     const started: string[] = [];
     scheduler.submit({
       executionId: 'execution-1',
+      workerId: 'execution-1',
       teamId: 'team-1',
       teamLimit: 8,
       run: async () => {
@@ -371,6 +574,7 @@ describe('TeamExecutionScheduler', () => {
     expect(
       scheduler.requeueActive('execution-1', {
         executionId: 'execution-1',
+        workerId: 'execution-1',
         teamId: 'team-1',
         teamLimit: 8,
         run: async () => {
