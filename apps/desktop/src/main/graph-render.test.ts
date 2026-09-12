@@ -278,6 +278,33 @@ describe('Archify generation boundary', () => {
     ).toThrow();
   });
 
+  it('registers the selection bridge before the diagram the user can click', async () => {
+    // Issue #464: the bridge used to be appended as the last child of <body>, behind the pinned
+    // viewer's single ~9,400-line inline script, which the parser only reaches after the diagram's
+    // <svg>. The diagram was therefore painted and hit-testable while no click listener existed
+    // yet, and a click in that window was delivered to the frame and silently dropped. Its script
+    // must come first in the document, ahead of the viewer scripts and of any clickable markup.
+    const template = await readFile(join(vendorRoot, 'assets/template.html'), 'utf8');
+    const scripts = trustedArchifyScripts(template);
+    const { html, csp } = prepareGraphHtml(template, scripts, {
+      graphId: taskId,
+      revision: 1,
+      instanceId: taskId,
+      parentOrigin: 'app://bundle',
+    });
+    const bridge = html.indexOf("document.addEventListener('click'");
+    expect(bridge).toBeGreaterThan(-1);
+    expect(bridge).toBeLessThan(html.indexOf('</head>'));
+    expect(bridge).toBeLessThan(html.indexOf('<body'));
+    expect(bridge).toBeLessThan(html.indexOf('<svg'));
+    for (const script of scripts) expect(bridge).toBeLessThan(html.indexOf(script));
+    // It also has to announce readiness, which is what the panel waits for before presenting the
+    // frame as interactive — and it stays pinned by its own hash, never loaded from outside.
+    expect(html).toContain("type: 'sprint-graph-ready'");
+    expect(csp).toContain("script-src 'sha256-");
+    expect(csp).toContain("default-src 'none'");
+  });
+
   it('refuses executable HTML that did not come from the pinned viewer', async () => {
     const template = await readFile(join(vendorRoot, 'assets/template.html'), 'utf8');
     const scripts = trustedArchifyScripts(template);

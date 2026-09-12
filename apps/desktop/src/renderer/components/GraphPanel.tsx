@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { GraphSelection, GraphView, GraphGeneration } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
-import { acceptGraphSelection } from '../lib/graph-selection';
+import { acceptGraphReady, acceptGraphSelection } from '../lib/graph-selection';
 import { GraphHistoryPanel } from './GraphHistoryPanel';
 import { GraphGenerationNotice } from './GraphGenerationNotice';
 import { GraphSourcesPanel } from './GraphSourcesPanel';
@@ -12,6 +12,10 @@ import { GraphMissionPlanPanel } from './GraphMissionPlanPanel';
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
   const [selection, setSelection] = useState<GraphSelection | null>(null);
+  // The artifact's own diagram is painted well before its bridge script has registered the
+  // selection listeners, so a click landing in that window is delivered to the frame and silently
+  // dropped. Stay non-interactive until the displayed artifact announces itself (issue #464).
+  const [ready, setReady] = useState(false);
   const [comment, setComment] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [generation, setGeneration] = useState<GraphGeneration | null>(null);
@@ -86,6 +90,7 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         currentView.current = next;
         setView(next);
         setSelection(null);
+        setReady(false);
         setError(null);
       }
     };
@@ -109,12 +114,9 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
   useEffect(() => {
     if (view === null) return;
     const listener = (event: MessageEvent) => {
-      const accepted = acceptGraphSelection(
-        event.data,
-        event.source,
-        frame.current?.contentWindow ?? null,
-        view,
-      );
+      const expected = frame.current?.contentWindow ?? null;
+      if (acceptGraphReady(event.data, event.source, expected, view)) setReady(true);
+      const accepted = acceptGraphSelection(event.data, event.source, expected, view);
       if (accepted !== null) setSelection(accepted);
     };
     window.addEventListener('message', listener);
@@ -171,15 +173,23 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
         </p>
       ) : null}
       {view ? (
-        <iframe
-          key={view.instanceId}
-          ref={frame}
-          src={view.artifactUrl}
-          sandbox="allow-scripts"
-          title={`${view.title} — Archify`}
-          data-testid="graph-frame"
-          onLoad={sendExecutionState}
-        />
+        <>
+          <iframe
+            key={view.instanceId}
+            ref={frame}
+            src={view.artifactUrl}
+            sandbox="allow-scripts"
+            title={`${view.title} — Archify`}
+            data-testid="graph-frame"
+            data-graph-ready={ready ? '1' : '0'}
+            onLoad={sendExecutionState}
+          />
+          {ready ? null : (
+            <p className="settings-hint" role="status" data-testid="graph-frame-pending">
+              図を操作できるように準備しています…
+            </p>
+          )}
+        </>
       ) : (
         <p className="settings-hint">
           作成した図をここで確認できます。図の表示だけでは作業を開始しません。

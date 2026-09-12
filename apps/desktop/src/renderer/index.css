@@ -1753,6 +1753,12 @@ button {
   min-height: 220px;
   border: 0;
 }
+/* The diagram is painted before the artifact's bridge script has registered its selection
+   listeners. Swallowing pointer input until it announces itself is what stops a click from
+   looking accepted while being silently dropped (issue #464). */
+.graph-panel iframe[data-graph-ready='0'] {
+  pointer-events: none;
+}
 .graph-panel > .graph-generation {
   flex-shrink: 0;
   padding: 10px 12px;

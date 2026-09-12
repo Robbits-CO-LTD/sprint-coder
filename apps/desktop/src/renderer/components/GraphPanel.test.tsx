@@ -109,33 +109,94 @@ async function mount(strict: boolean): Promise<void> {
   });
 }
 
-/** Replays what the artifact's bridge script (main/graph-html.ts) posts on a node click. */
-async function clickNodeInFrame(id: string): Promise<void> {
+function displayedFrame(): HTMLIFrameElement {
   const frame = container.querySelector('iframe');
   if (frame === null) throw new Error('the artifact frame was not rendered');
-  const url = new URL(frame.getAttribute('src')!);
-  const served = service.fetch(url.pathname.slice(1));
-  if (served === null) throw new Error(`the displayed artifact ${url.pathname} answers 404`);
+  return frame;
+}
+
+/** The instance the displayed artifact was served with, or null if that URL answers 404. */
+function servedInstance(): string | null {
+  const url = new URL(displayedFrame().getAttribute('src')!);
+  return service.fetch(url.pathname.slice(1));
+}
+
+async function postFromFrame(data: unknown): Promise<void> {
+  const frame = displayedFrame();
   await act(async () => {
-    window.dispatchEvent(
-      new MessageEvent('message', {
-        data: {
-          type: 'sprint-graph-selection',
-          instanceId: served,
-          graphId,
-          revision: 1,
-          kind: 'node',
-          id,
-        },
-        source: frame.contentWindow,
-      }),
-    );
+    window.dispatchEvent(new MessageEvent('message', { data, source: frame.contentWindow }));
+  });
+}
+
+/** Replays the readiness announcement the bridge script posts once its listeners are registered. */
+async function announceReady(): Promise<void> {
+  const served = servedInstance();
+  if (served === null) throw new Error('the displayed artifact answers 404');
+  await postFromFrame({
+    type: 'sprint-graph-ready',
+    instanceId: served,
+    graphId,
+    revision: 1,
+  });
+}
+
+/** Replays what the artifact's bridge script (main/graph-html.ts) posts on a node click. */
+async function clickNodeInFrame(id: string): Promise<void> {
+  const served = servedInstance();
+  if (served === null) throw new Error('the displayed artifact answers 404');
+  await postFromFrame({
+    type: 'sprint-graph-selection',
+    instanceId: served,
+    graphId,
+    revision: 1,
+    kind: 'node',
+    id,
   });
 }
 
 it('accepts a node selection from the displayed artifact', async () => {
   await mount(false);
   expect(service.minted).toHaveLength(1);
+  await announceReady();
+  await clickNodeInFrame('api');
+  expect(container.querySelector('[data-testid="graph-evidence-kind"]')?.textContent).toBe('推定');
+});
+
+// Issue #464: the artifact's diagram is painted before its bridge script has registered the
+// selection listeners, so a click in that window reaches the frame and is silently dropped. The
+// panel must not present the frame as interactive until the displayed artifact says it is.
+it('refuses pointer input until the displayed artifact announces its listeners', async () => {
+  await mount(false);
+  expect(displayedFrame().getAttribute('data-graph-ready')).toBe('0');
+  expect(container.querySelector('[data-testid="graph-frame-pending"]')).not.toBeNull();
+  await announceReady();
+  expect(displayedFrame().getAttribute('data-graph-ready')).toBe('1');
+  expect(container.querySelector('[data-testid="graph-frame-pending"]')).toBeNull();
+});
+
+it('ignores a readiness announcement for an artifact that is not displayed', async () => {
+  await mount(false);
+  await postFromFrame({
+    type: 'sprint-graph-ready',
+    instanceId: '00000000-0000-4000-8000-0000000009ff',
+    graphId,
+    revision: 1,
+  });
+  expect(displayedFrame().getAttribute('data-graph-ready')).toBe('0');
+});
+
+it('goes back to refusing pointer input when a new artifact replaces the displayed one', async () => {
+  await mount(false);
+  await announceReady();
+  expect(displayedFrame().getAttribute('data-graph-ready')).toBe('1');
+  // A regenerated graph arrives on the subscription with a fresh lease, so the new artifact has to
+  // announce itself again before it can be clicked.
+  await act(async () => {
+    const push = vi.mocked(window.sprintCoder!.graphs.subscribe).mock.calls[0]![0];
+    push(service.get());
+  });
+  expect(displayedFrame().getAttribute('data-graph-ready')).toBe('0');
+  await announceReady();
   await clickNodeInFrame('api');
   expect(container.querySelector('[data-testid="graph-evidence-kind"]')?.textContent).toBe('推定');
 });
@@ -150,27 +211,22 @@ it('keeps the displayed artifact live and selectable across a StrictMode double 
     `app://graph/${service.minted[1]!}?theme=dark`,
   );
   expect(service.fetch(service.minted[1]!)).toBe(service.minted[1]);
+  await announceReady();
   await clickNodeInFrame('api');
   expect(container.querySelector('[data-testid="graph-evidence-kind"]')?.textContent).toBe('推定');
 });
 
 it('rejects a selection whose artifact instance is not the displayed one', async () => {
   await mount(false);
+  await announceReady();
   // What a stale artifact — one served before a newer lease rebound it — would post.
-  await act(async () => {
-    window.dispatchEvent(
-      new MessageEvent('message', {
-        data: {
-          type: 'sprint-graph-selection',
-          instanceId: '00000000-0000-4000-8000-0000000009ff',
-          graphId,
-          revision: 1,
-          kind: 'node',
-          id: 'api',
-        },
-        source: container.querySelector('iframe')!.contentWindow,
-      }),
-    );
+  await postFromFrame({
+    type: 'sprint-graph-selection',
+    instanceId: '00000000-0000-4000-8000-0000000009ff',
+    graphId,
+    revision: 1,
+    kind: 'node',
+    id: 'api',
   });
   expect(container.querySelector('[data-testid="graph-sources"]')).toBeNull();
 });

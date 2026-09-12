@@ -4280,6 +4280,21 @@ export const graphSelectionSchema = z
   })
   .strict();
 export type GraphSelection = z.infer<typeof graphSelectionSchema>;
+/**
+ * Announced by the artifact's bridge script once its click/keyboard listeners are registered.
+ * Until the viewer says this, a click inside the frame is delivered to a document that has no
+ * selection handler yet and is silently lost, so the panel must not present the frame as
+ * interactive before it arrives.
+ */
+export const graphReadySchema = z
+  .object({
+    type: z.literal('sprint-graph-ready'),
+    instanceId: z.string().uuid(),
+    graphId: z.string().uuid(),
+    revision: z.number().int().positive(),
+  })
+  .strict();
+export type GraphReady = z.infer<typeof graphReadySchema>;
 export const emptyPayloadSchema = z.object({}).strict();
 export const skillCatalogItemSchema = z
   .object({
