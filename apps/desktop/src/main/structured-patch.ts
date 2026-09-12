@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
-import { canonicalizeResourcePath } from './path-guard';
+import { basename, dirname } from 'node:path';
+import { canonicalizeResourcePath, type CanonicalPathIdentity } from './path-guard';
+import {
+  directoryCaseSensitive,
+  directoryCanonicalUnicode,
+  windowsCaseInsensitiveNamesEqual,
+} from './directory-name-rules';
+import { foldUnicodeFileName } from './unicode-file-name-fold';
 import type {
   FileRevisionToken,
   FileRevisionRegistry,
@@ -139,6 +146,7 @@ export async function prepareStructuredPatch(input: {
 
   const prepared: PreparedPatchOperation[] = [];
   const claimedPaths = new Set<string>();
+  const missingEndpoints: CanonicalPathIdentity[] = [];
   for (const operation of input.operations) {
     const sourceGuard = await canonicalizeResourcePath({
       rootId: input.rootId,
@@ -148,6 +156,7 @@ export async function prepareStructuredPatch(input: {
       operation: operation.kind === 'add' || operation.kind === 'mkdir' ? 'write' : 'read',
     });
     claimPath(claimedPaths, sourceGuard.resolvedPath);
+    claimMissingEndpoint(missingEndpoints, sourceGuard);
 
     if (operation.kind === 'add' || operation.kind === 'mkdir') {
       if (sourceGuard.targetIdentity !== null)
@@ -234,6 +243,7 @@ export async function prepareStructuredPatch(input: {
       operation: 'write',
     });
     claimPath(claimedPaths, destinationGuard.resolvedPath);
+    claimMissingEndpoint(missingEndpoints, destinationGuard);
     if (destinationGuard.targetIdentity !== null)
       throw new PatchValidationError('DESTINATION_EXISTS', 'Rename destination already exists');
     prepared.push(
@@ -534,6 +544,77 @@ function claimPath(paths: Set<string>, path: string): void {
   if (paths.has(path))
     throw new PatchValidationError('PATH_COLLISION', 'Patch contains colliding path endpoints');
   paths.add(path);
+}
+
+/** Missing names cannot be realpathed. Compare only siblings, using the guarded parent's
+ * actual rules when spellings may alias; never assume case rules from the operating system. */
+function claimMissingEndpoint(
+  endpoints: CanonicalPathIdentity[],
+  candidate: CanonicalPathIdentity,
+): void {
+  if (candidate.targetIdentity !== null) return;
+  const name = basename(candidate.resolvedPath);
+  for (const previous of endpoints) {
+    if (
+      previous.parentIdentity.dev !== candidate.parentIdentity.dev ||
+      previous.parentIdentity.ino !== candidate.parentIdentity.ino
+    )
+      continue;
+    const previousName = basename(previous.resolvedPath);
+    const folded =
+      process.platform === 'win32'
+        ? (value: string) => value.normalize('NFD').toLowerCase().toUpperCase()
+        : foldUnicodeFileName;
+    if (folded(previousName) !== folded(name)) continue;
+    const canonicalUnicode =
+      process.platform === 'darwin' &&
+      directoryCanonicalUnicode(dirname(candidate.resolvedPath), candidate.parentIdentity);
+    // APFS canonicalizes Unicode, so NFD equality names one file there. Other Darwin volumes
+    // (HFS+, network mounts) store Apple's modified NFD instead, so compare under that rule
+    // rather than shortcutting: a volume whose Unicode rule we cannot read still has to answer
+    // for its case rule below, never pass unchecked.
+    const unicodeAlias =
+      process.platform === 'darwin' &&
+      (canonicalUnicode
+        ? previousName.normalize('NFD') === name.normalize('NFD')
+        : hfsPlusNamesAlias(previousName, name));
+    if (process.platform === 'win32' && !windowsCaseInsensitiveNamesEqual(previousName, name))
+      continue;
+    if (
+      unicodeAlias ||
+      !directoryCaseSensitive(dirname(candidate.resolvedPath), candidate.parentIdentity)
+    )
+      throw new PatchValidationError(
+        'PATH_COLLISION',
+        'Patch contains colliding missing endpoints',
+      );
+  }
+  endpoints.push(candidate);
+}
+
+/** Apple's modified NFD (TN1150) leaves these ranges undecomposed, which is why an HFS+ volume
+ * holds U+FA10 and U+585A as two names even though plain NFD folds them into one. */
+function hfsPlusUndecomposed(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x2000 && codePoint <= 0x2fff) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0x2f800 && codePoint <= 0x2faff)
+  );
+}
+
+/** True when a non-APFS Darwin volume stores both spellings under one name. NFD equality covers
+ * canonical aliases including combining-mark reordering, and the undecomposed code points must
+ * match too because HFS+ keeps those apart. This only decides aliasing; spellings it cannot prove
+ * identical still face the directory's own case rule, so the check never widens what is allowed. */
+function hfsPlusNamesAlias(left: string, right: string): boolean {
+  return (
+    left.normalize('NFD') === right.normalize('NFD') &&
+    hfsPlusUndecomposedKey(left) === hfsPlusUndecomposedKey(right)
+  );
+}
+
+function hfsPlusUndecomposedKey(value: string): string {
+  return [...value].filter((character) => hfsPlusUndecomposed(character.codePointAt(0)!)).join('');
 }
 
 function validatePostImage(content: string): void {

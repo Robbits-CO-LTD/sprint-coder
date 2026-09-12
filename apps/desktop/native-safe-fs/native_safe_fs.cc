@@ -14,6 +14,7 @@
 #include <libproc.h>
 #include <sys/stdio.h>
 #include <sys/un.h>
+#include <sys/mount.h>
 #elif defined(__linux__)
 #include <linux/fs.h>
 #include <linux/memfd.h>
@@ -3440,7 +3441,7 @@ void Cleanup(void*) {
   state.closing_workspaces.clear();
 }
 
-napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
+napi_value DirectoryNameRule(napi_env env, napi_callback_info info, bool canonical_unicode) {
   size_t argc = 1;
   napi_value argv[1];
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
@@ -3458,16 +3459,50 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
     return ThrowFailure(env, "ROOT_IDENTITY_CHANGED", "Directory identity changed");
   }
   int sensitive = -1;
+#if !defined(__APPLE__)
+  if (canonical_unicode) {
+    close(fd);
+    return ThrowFailure(env, "INVALID_INPUT", "Darwin directory required");
+  }
+#endif
 #if defined(__APPLE__)
+  if (canonical_unicode) {
+    struct statfs filesystem {};
+    if (fstatfs(fd, &filesystem) != 0) {
+      close(fd);
+      return ThrowFailure(env, "NATIVE_FAILURE", "Directory filesystem is unavailable");
+    }
+    const bool canonical = std::strcmp(filesystem.f_fstypename, "apfs") == 0;
+    close(fd);
+    napi_value result;
+    napi_get_boolean(env, canonical, &result);
+    return result;
+  }
   sensitive = static_cast<int>(fpathconf(fd, _PC_CASE_SENSITIVE));
 #elif defined(__linux__) && defined(FS_CASEFOLD_FL)
   int flags = 0;
   struct statfs filesystem {};
   // A successful flags ioctl alone does not establish case rules (for example on FAT/NTFS).
   if (fstatfs(fd, &filesystem) == 0 &&
-      (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == F2FS_SUPER_MAGIC) &&
+      (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == F2FS_SUPER_MAGIC ||
+       filesystem.f_type == BTRFS_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC ||
+       filesystem.f_type == OVERLAYFS_SUPER_MAGIC) &&
       ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0)
     sensitive = (flags & FS_CASEFOLD_FL) == 0 ? 1 : 0;
+  if (filesystem.f_type == XFS_SUPER_MAGIC || filesystem.f_type == OVERLAYFS_SUPER_MAGIC) {
+    // Linux 64-bit XFS_IOC_FSGEOMETRY_V1 has a 112-byte result, flags at byte 92.
+    // Query the opened filesystem rather than assuming all XFS volumes are case-sensitive.
+    // DIRV2CI is legacy ASCII-only folding, which the Unicode comparer cannot represent.
+    alignas(uint64_t) std::array<unsigned char, 112> geometry {};
+    if (sizeof(void*) == 8 && ioctl(fd, _IOC(_IOC_READ, 'X', 100, geometry.size()),
+                                   geometry.data()) == 0) {
+      uint32_t geometry_flags = 0;
+      std::memcpy(&geometry_flags, geometry.data() + 92, sizeof(geometry_flags));
+      // fs/xfs/libxfs/xfs_fs.h: XFS_FSOP_GEOM_FLAGS_DIRV2CI (1 << 12). The neighbouring bits are
+      // LOGV2 (1 << 8) and LAZYSB (1 << 14), neither of which says anything about name folding.
+      sensitive = (geometry_flags & (1u << 12)) == 0 ? 1 : -1;
+    }
+  }
 #endif
   close(fd);
   if (sensitive != 0 && sensitive != 1)
@@ -3477,8 +3512,17 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
+  return DirectoryNameRule(env, info, false);
+}
+napi_value DirectoryCanonicalUnicode(napi_env env, napi_callback_info info) {
+  return DirectoryNameRule(env, info, true);
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
+      {"directoryCanonicalUnicode", nullptr, DirectoryCanonicalUnicode, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"directoryCaseSensitive", nullptr, DirectoryCaseSensitive, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},

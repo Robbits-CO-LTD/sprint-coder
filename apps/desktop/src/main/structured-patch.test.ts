@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileRevisionRegistry } from './file-revision';
@@ -380,6 +380,70 @@ describe('structured patch preparation', () => {
     ).toBe('alpha beta gamma\n');
   });
 
+  it.each(['add', 'mkdir', 'rename'] as const)(
+    'checks missing %s endpoints using the parent directory case rules before any effect',
+    async (kind) => {
+      const { workspace, registry, a } = await fixture();
+      const insensitive = (await stat(join(workspace, 'src/A.txt')).catch(() => null)) !== null;
+      const before = await readdir(join(workspace, 'src'));
+      const patch = prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: [
+          kind === 'rename'
+            ? { kind, path: 'src/a.txt', destination: 'src/New.txt', revision: a.reference }
+            : kind === 'mkdir'
+              ? { kind, path: 'src/New.txt' }
+              : { kind, path: 'src/New.txt', content: 'first' },
+          { kind: 'add', path: 'src/new.txt', content: 'second' },
+        ],
+      });
+      if (insensitive) await expect(patch).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+      else await expect(patch).resolves.toMatchObject({ operations: [{}, {}] });
+      expect(await readdir(join(workspace, 'src'))).toEqual(before);
+      expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe('alpha beta gamma\n');
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'preserves distinct Windows Unicode names for new files',
+    async () => {
+      const { workspace, registry } = await fixture();
+      const paths = ['src/straße.txt', 'src/strasse.txt', 'src/é.txt', 'src/e\u0301.txt'];
+      const patch = await prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: paths.map((path) => ({ kind: 'add' as const, path, content: path })),
+      });
+      expect(patch.operations).toHaveLength(4);
+      for (const path of paths) await writeFile(join(workspace, path), path, { flag: 'wx' });
+      for (const path of paths) expect(await readFile(join(workspace, path), 'utf8')).toBe(path);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps dotted and dotless i as distinct new names',
+    async () => {
+      const { workspace, registry } = await fixture();
+      const paths = ['src/i.txt', 'src/ı.txt'];
+      for (const path of paths) await writeFile(join(workspace, path), path, { flag: 'wx' });
+      for (const path of paths) expect(await readFile(join(workspace, path), 'utf8')).toBe(path);
+      for (const path of paths) await rm(join(workspace, path));
+      const patch = await prepareStructuredPatch({
+        owner,
+        workspacePath: workspace,
+        policyEpoch: 1,
+        registry,
+        operations: paths.map((path) => ({ kind: 'add' as const, path, content: path })),
+      });
+      expect(patch.operations).toHaveLength(2);
+    },
+  );
+
   it('rejects two differently cased references to the same file before preparing effects', async ({
     skip,
   }) => {
@@ -418,5 +482,80 @@ describe('structured patch preparation', () => {
         ],
       }),
     ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+    expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe('alpha beta gamma\n');
+    expect((await stat(alias)).ino).toBe(aliasStat.ino);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects actual symlink aliases before preparing effects',
+    async () => {
+      const { workspace, registry, a } = await fixture();
+      // File symlinks are refused at the read boundary. A directory alias can be
+      // read and must still converge when its regular-file endpoints are claimed.
+      await symlink('src', join(workspace, 'alias-src'), 'dir');
+      const alias = await registry.read({
+        owner,
+        workspacePath: workspace,
+        targetPath: 'alias-src/a.txt',
+        policyEpoch: 1,
+      });
+      await expect(
+        prepareStructuredPatch({
+          owner,
+          workspacePath: workspace,
+          policyEpoch: 1,
+          registry,
+          operations: [
+            {
+              kind: 'update',
+              path: 'src/a.txt',
+              revision: a.reference,
+              edits: [{ oldText: 'beta', newText: 'first' }],
+            },
+            {
+              kind: 'update',
+              path: 'alias-src/a.txt',
+              revision: alias.reference,
+              edits: [{ oldText: 'beta', newText: 'second' }],
+            },
+          ],
+        }),
+      ).rejects.toMatchObject({ code: 'PATH_COLLISION' });
+      expect(await readFile(join(workspace, 'src/a.txt'), 'utf8')).toBe('alpha beta gamma\n');
+    },
+  );
+
+  it('preserves distinct case-sensitive files as separate endpoints', async ({ skip }) => {
+    const { workspace, registry, a } = await fixture();
+    if (await stat(join(workspace, 'src/A.txt')).catch(() => null))
+      return skip('The fixture filesystem is case-insensitive');
+    await writeFile(join(workspace, 'src/A.txt'), 'separate');
+    const alternate = await registry.read({
+      owner,
+      workspacePath: workspace,
+      targetPath: 'src/A.txt',
+      policyEpoch: 1,
+    });
+    const patch = await prepareStructuredPatch({
+      owner,
+      workspacePath: workspace,
+      policyEpoch: 1,
+      registry,
+      operations: [
+        {
+          kind: 'update',
+          path: 'src/a.txt',
+          revision: a.reference,
+          edits: [{ oldText: 'beta', newText: 'first' }],
+        },
+        {
+          kind: 'update',
+          path: 'src/A.txt',
+          revision: alternate.reference,
+          edits: [{ oldText: 'separate', newText: 'second' }],
+        },
+      ],
+    });
+    expect(new Set(patch.operations.map((operation) => operation.canonicalPath)).size).toBe(2);
   });
 });

@@ -400,6 +400,8 @@ const MAX_TOTAL_PATH_LENGTH = 4_096;
 function validateInput(targetPath: string): void {
   if (targetPath.length === 0 || targetPath.includes('\0'))
     throw new PathGuardError('INVALID_PATH', 'Invalid target path');
+  if (/[\uD800-\uDFFF]/u.test(targetPath))
+    throw new PathGuardError('INVALID_PATH', 'Target path contains an unpaired surrogate');
   if (targetPath.length > MAX_TOTAL_PATH_LENGTH)
     throw new PathGuardError('INVALID_PATH', 'Target path exceeds the maximum supported length');
   if (targetPath.split(/[\\/]+/).some((segment) => segment.length > MAX_PATH_SEGMENT_LENGTH))
@@ -459,6 +461,8 @@ async function resolveExisting(
   code: Extract<PathGuardErrorCode, 'PATH_NOT_FOUND'>,
 ): Promise<string> {
   try {
+    // fs/promises.realpath already uses the native canonicalizer. The callback/sync
+    // emulations can retain case aliases and break structured-patch endpoint claims.
     return await realpath(path);
   } catch (error) {
     if (isNotFound(error)) throw new PathGuardError(code, 'Path does not exist or is dangling');
