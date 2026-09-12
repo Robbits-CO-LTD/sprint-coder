@@ -12,8 +12,10 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
+import { nativeSafeFsMissingExports } from '../../apps/desktop/src/main/native-safe-fs';
 
 /**
  * sprint-coder Electron E2E launch helpers.
@@ -201,6 +203,8 @@ export function resolveE2EMode(): E2EMode {
  * a better-sqlite3 ABI mismatch aborts main-process init so no window is ever created and every
  * spec dies on `firstWindow` timeout; a missing native-safe-fs addon makes the manual editor
  * report 保存できませんでした; a missing sandbox-runner stops run_command approvals from appearing.
+ * A native-safe-fs addon left over from before an export was added counts as unbuilt too: it
+ * loads and probes like a current build and only fails at the call site (Issue #465).
  *
  * This warns rather than throwing, because "built" is not the same bar for every run: Windows CI
  * deliberately builds no sandbox-runner (no Rust toolchain) and runs a spec list that never
@@ -217,10 +221,32 @@ export function warnAboutUnbuiltDevNativePrerequisites(): void {
     'Release',
     'sprint_coder_native_safe_fs.node',
   );
-  if (!existsSync(addon))
+  if (!existsSync(addon)) {
     missing.push(
       `native-safe-fs addon (${relative(REPO_ROOT, addon)}) — the manual file editor cannot save`,
     );
+  } else {
+    // Existing is not the same bar as built from this source. The addon is Node-API, so a build
+    // that predates an export the main process needs still loads and still probes as available;
+    // it only fails at the call, as a product-looking failure (Issue #465: a build without
+    // directoryCaseSensitive made Graph Mission review report 変更範囲のパスを確認できません for
+    // every not-yet-created write claim, while packaged CI passed because it rebuilds the addon).
+    // Loading it here costs nothing the app does not already do, and reports the gap by name.
+    try {
+      const gaps = nativeSafeFsMissingExports(createRequire(__filename)(addon));
+      if (gaps.length > 0)
+        missing.push(
+          `native-safe-fs addon (${relative(REPO_ROOT, addon)}) predates this source — it does ` +
+            `not export ${gaps.join(', ')}, so guarding a not-yet-created path fails ` +
+            '(Graph Mission review reports 変更範囲のパスを確認できません)',
+        );
+    } catch (error) {
+      missing.push(
+        `native-safe-fs addon (${relative(REPO_ROOT, addon)}) could not be loaded ` +
+          `(${error instanceof Error ? error.message : String(error)}) — every guarded write fails`,
+      );
+    }
+  }
 
   const runnerName =
     process.platform === 'win32'

@@ -250,6 +250,39 @@ export function nativeSafeFsAddonPath(): string {
   return nativeSafeFsAddonLocation().addonPath;
 }
 
+/**
+ * Addon exports the path-guarding layer reaches by name at call time (directory-name-rules.ts),
+ * rather than through `loadNativeSafeFs`'s validated contract.
+ *
+ * A `build/Release` left over from before one of them was added loads and probes exactly like a
+ * current build, so nothing notices until the first not-yet-created path is guarded — and that
+ * failure then reads as a product defect rather than as a build that predates its own source
+ * (Issue #465: a build without `directoryCaseSensitive` turned every missing write-claim path
+ * into 「変更範囲のパスを確認できません」). Naming the required exports in one place lets a
+ * preflight report the build gap as what it is.
+ */
+export function nativeSafeFsRequiredExports(
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  return [
+    'probe',
+    'directoryCaseSensitive',
+    ...(platform === 'darwin' ? ['directoryCanonicalUnicode'] : []),
+    ...(platform === 'win32' ? ['caseInsensitiveNamesEqual'] : []),
+  ];
+}
+
+/** Required export names an already-loaded addon does not provide; empty for a current build. */
+export function nativeSafeFsMissingExports(
+  addon: unknown,
+  platform: NodeJS.Platform = process.platform,
+): readonly string[] {
+  return nativeSafeFsRequiredExports(platform).filter(
+    (name) =>
+      typeof addon !== 'object' || addon === null || typeof Reflect.get(addon, name) !== 'function',
+  );
+}
+
 /** NativeSafeFs deliberately refuses symlinks in its absolute directory walk. macOS commonly
  * returns userData below the `/var` alias, so bind the addon to the real directory identity rather
  * than weakening the native O_NOFOLLOW boundary. */
