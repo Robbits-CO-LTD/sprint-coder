@@ -26,6 +26,7 @@ import {
   executionSpecPathGuard,
   posixSupervisorCommand,
   posixGroupSignalIsAuthorized,
+  argvRepeatsExecutable,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
   type CommandOutputChunk,
@@ -280,6 +281,117 @@ describe('CommandRunner', () => {
     expect(spec.envDelta['PATH']).toBe(buildControlledEnvironment()['PATH']);
   });
 
+  it('detects an argv entry that repeats the executable', () => {
+    expect(
+      argvRepeatsExecutable('/usr/bin/tee', '/usr/bin/tee', ['/usr/bin/tee', 'out'], 'darwin'),
+    ).toBe(true);
+    expect(argvRepeatsExecutable('/usr/bin/tee', '/usr/bin/tee', ['tee', 'out'], 'darwin')).toBe(
+      true,
+    );
+    // A bare request resolves to an absolute path; both spellings are the repetition.
+    expect(argvRepeatsExecutable('tee', '/usr/bin/tee', ['tee'], 'linux')).toBe(true);
+    // A symlinked request keeps its own spelling, which the canonical path no longer carries.
+    expect(argvRepeatsExecutable('/bin/sh', '/bin/dash', ['sh', '-c', 'true'], 'linux')).toBe(true);
+  });
+
+  it('accepts argv whose first entry is not this executable', () => {
+    for (const argv of [
+      [],
+      ['-c', 'echo hi'],
+      ['--version'],
+      // `env`-style wrappers name another executable, and never as argv[0].
+      ['-S', '/bin/echo', 'hi'],
+      // A later repetition is a real argument (`/bin/echo /bin/echo` prints the path).
+      ['hi', '/bin/echo'],
+      // Another executable's name is unrelated to this one.
+      ['printf', 'hi'],
+      // POSIX paths are case sensitive.
+      ['/BIN/ECHO', 'hi'],
+      // A first operand can always be spelled so it cannot be read as the executable.
+      ['./echo', 'hi'],
+    ])
+      expect(argvRepeatsExecutable('/bin/echo', '/bin/echo', argv, 'darwin')).toBe(false);
+  });
+
+  it('folds only case and separators when comparing Windows executable spellings', () => {
+    const canonical = 'C:\\Program Files\\nodejs\\node.exe';
+    for (const first of [
+      canonical,
+      'C:/Program Files/nodejs/node.exe',
+      'c:\\program files\\nodejs\\NODE.EXE',
+      'node.exe',
+      'Node',
+    ])
+      expect(argvRepeatsExecutable('node', canonical, [first, '--version'], 'win32')).toBe(true);
+    for (const [requested, sealed, first] of [
+      ['node', canonical, 'npm.cmd'],
+      // Only `.exe`/`.com` are implicit Windows executable extensions, so `runner` is a real
+      // first operand for `runner.bin`, not a repetition.
+      ['C:\\tools\\runner.bin', 'C:\\tools\\runner.bin', 'runner'],
+      ['C:\\tools\\runner.bat', 'C:\\tools\\runner.bat', 'runner'],
+      ['C:\\tools\\runner.exe', 'C:\\tools\\runner.exe', '.\\runner'],
+    ] as const)
+      expect(argvRepeatsExecutable(requested, sealed, [first, 'x'], 'win32')).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses to seal a command whose argv repeats the executable',
+    async () => {
+      const root = await workspace();
+      await expect(
+        prepareExecutionSpec({
+          workspacePath: root,
+          executable: '/bin/sh',
+          argv: ['sh', '-c', 'printf rejected'],
+          cwd: '.',
+        }),
+      ).rejects.toMatchObject({
+        name: 'CommandRunnerError',
+        code: 'ARGV_REPEATS_EXECUTABLE',
+        message: expect.stringContaining('argv must contain arguments only'),
+      });
+
+      // The same argv without the repetition still seals and runs unchanged.
+      const spec = await prepareExecutionSpec({
+        workspacePath: root,
+        executable: '/bin/sh',
+        argv: ['-c', 'printf accepted'],
+        cwd: '.',
+      });
+      expect(spec.argv).toEqual(['-c', 'printf accepted']);
+      const chunks: CommandOutputChunk[] = [];
+      const result = await new CommandRunner().run(spec, {
+        onChunk: (chunk) => {
+          chunks.push(chunk);
+        },
+      });
+      expect(result.exitCode).toBe(0);
+      expect(chunks.map(({ text }) => text).join('')).toBe('accepted');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'never turns a repeated `find` operand into a cwd-wide deletion',
+    async () => {
+      const root = await workspace();
+      await mkdir(join(root, 'find'));
+      await writeFile(join(root, 'keep.txt'), 'keep');
+
+      // `/usr/bin/find find -delete` deletes one directory; dropping argv[0] would make GNU find
+      // default to `.` and delete the whole Workspace cwd, so the call must never be rewritten.
+      await expect(
+        prepareExecutionSpec({
+          workspacePath: root,
+          executable: '/usr/bin/find',
+          argv: ['find', '-delete'],
+          cwd: '.',
+        }),
+      ).rejects.toMatchObject({ code: 'ARGV_REPEATS_EXECUTABLE' });
+      await expect(access(join(root, 'keep.txt'))).resolves.toBeUndefined();
+      await expect(access(join(root, 'find'))).resolves.toBeUndefined();
+    },
+  );
+
   it.runIf(process.platform === 'win32')(
     'seals trusted System32 cmd.exe with the Windows /c switch used by approval and execution',
     async () => {
@@ -297,6 +409,15 @@ describe('CommandRunner', () => {
         argv: ['/K', 'echo persistent'],
       });
       expect(nativeSpec.argv).toEqual(['/d', '/K', 'echo persistent']);
+
+      // A provider that repeats the executable is refused before anything is sealed.
+      await expect(
+        prepareExecutionSpec({
+          workspacePath: root,
+          executable: windowsPath.join(getTrustedWindowsSystemDirectory(), 'cmd.exe'),
+          argv: ['cmd.exe', '/c', 'echo ollama-ok'],
+        }),
+      ).rejects.toMatchObject({ code: 'ARGV_REPEATS_EXECUTABLE' });
     },
   );
 
