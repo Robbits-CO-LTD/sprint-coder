@@ -7,11 +7,12 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-RUN_DIR=""; TIMEOUT=120
+RUN_DIR=""; TIMEOUT=120; RENDERER_ONLY=0
 while [ $# -gt 0 ]; do case "$1" in
   --run-dir) RUN_DIR="$2"; shift 2;;
   --repo-root) REPO_ROOT="$2"; shift 2;;
   --timeout) TIMEOUT="$2"; shift 2;;
+  --renderer-only) RENDERER_ONLY=1; shift;;
   *) echo "unknown arg: $1" >&2; exit 64;; esac; done
 [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ] || { echo "--run-dir must be an existing run directory" >&2; exit 64; }
 DESKTOP_ROOT="$REPO_ROOT/apps/desktop"
@@ -33,6 +34,32 @@ if [ -n "$pid" ]; then
 fi
 
 started_at="$(date +%s)"
+if [ "$RENDERER_ONLY" = 1 ]; then
+  # Computer Use lanes: `npm start` (electron-forge) also opens its own Electron window, and the app_*
+  # tools address only ONE process per bundle id (com.github.Electron), so the lane window would be
+  # unreachable. Serve just the renderer with Vite (same :5173 the built main bundle expects) and keep
+  # the main/preload/runtime-host bundles a previous `npm start` already built.
+  for b in index.js preload.js; do [ -f "$BUILD/$b" ] || { echo "renderer-only needs a previous npm start build: missing apps/desktop/.vite/build/$b" >&2; exit 3; }; done
+  ( cd "$DESKTOP_ROOT" && exec nohup npx vite --config vite.renderer.config.ts --port 5173 --strictPort --host localhost > "$RUN_DIR/dev-server.log" 2>&1 < /dev/null ) &
+  npid=$!
+  sleep 1
+  identity="$(ps -p "$npid" -o lstart=,command= 2>/dev/null || true)"
+  node -e '
+    const [out, pid, identity, started] = process.argv.slice(1);
+    const lstart = identity.slice(0, 24).trim(); const command = identity.slice(24).trim();
+    require("fs").writeFileSync(out, JSON.stringify({ owned: true, mode: "renderer-only", pid: Number(pid), lstart, command, started_at: started }, null, 2) + "\n");
+  ' "$RUN_DIR/dev-server.json" "$npid" "$identity" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  deadline=$((started_at + TIMEOUT))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    p="$(listening_pid)"
+    if [ -n "$p" ] && curl -s -o /dev/null --max-time 2 http://localhost:5173/; then
+      printf '{"owned":true,"mode":"renderer-only","pid":%s,"npx_pid":%s,"cwd":"%s","status":"started","log":"%s"}\n' "$p" "$npid" "$DESKTOP_ROOT" "$RUN_DIR/dev-server.log"; exit 0
+    fi
+    if ! kill -0 "$npid" 2>/dev/null; then echo "vite exited early; tail of log:" >&2; tail -20 "$RUN_DIR/dev-server.log" >&2; term_tree "$npid"; exit 1; fi
+    sleep 2
+  done
+  echo "renderer dev server did not become ready within ${TIMEOUT}s; stopping it" >&2; term_tree "$npid"; exit 1
+fi
 prev_main="$( [ -f "$BUILD/index.js" ] && stat -f %m "$BUILD/index.js" || echo 0 )"
 prev_preload="$( [ -f "$BUILD/preload.js" ] && stat -f %m "$BUILD/preload.js" || echo 0 )"
 # exec inside the subshell so $! is npm itself (not a wrapper shell that stop-dev-instance.sh cannot match)

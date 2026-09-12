@@ -62,8 +62,10 @@ redaction="$(node -e '
     ["hex string >= 40", /\b[0-9a-f]{40,}\b/i],
   ];
   const hits = rules.filter(([, re]) => re.test(text)).map(([name]) => name);
+  // Long mixed-case alphanumeric tokens look like secrets; relative paths (contain "/") and
+  // dotted file names are excluded here because the absolute-path rules above already cover paths.
   for (const tok of text.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? [])
-    if (/[a-z]/.test(tok) && /[A-Z]/.test(tok) && /\d/.test(tok)) { hits.push("long mixed-case token"); break; }
+    if (!tok.includes("/") && !tok.includes(".") && /[a-z]/.test(tok) && /[A-Z]/.test(tok) && /\d/.test(tok)) { hits.push("long mixed-case token"); break; }
   process.stdout.write(hits.join("; "));
 ' "$TITLE_FILE" "$BODY_FILE")"
 [ -z "$redaction" ] || errors+=("redaction_failed: $redaction")

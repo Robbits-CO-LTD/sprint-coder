@@ -69,6 +69,14 @@ mb="$DESKTOP_ROOT/.vite/build/index.js"
 if [ -f "$mb" ]; then ok "dev main bundle present (built $(date -r "$mb" '+%Y-%m-%d %H:%M'))"
 else warn "dev main bundle apps/desktop/.vite/build/index.js missing; npm start (or E2E globalSetup) builds it"; fi
 
+# 4b. Vite optimize cache vs workspace packages (stale cache => black renderer, every spec times out)
+vcache="$(ls -t "$DESKTOP_ROOT"/node_modules/.vite/deps/@sprint-coder_contracts*.js 2>/dev/null | head -1)"
+if [ -n "$vcache" ] && [ -f "$vcache" ]; then
+  newest_src="$(find "$REPO_ROOT/packages/contracts/src" "$REPO_ROOT/packages/domain/src" -name '*.ts' -newer "$vcache" 2>/dev/null | head -1)"
+  if [ -n "$newest_src" ]; then block "Vite optimize cache apps/desktop/node_modules/.vite/deps is OLDER than workspace package sources (e.g. ${newest_src#$REPO_ROOT/}) — the dev renderer will throw 'does not provide an export named …' and every spec times out. Fix: rm -rf apps/desktop/node_modules/.vite node_modules/.vite, then (re)start the dev server"
+  else ok "Vite optimize cache is newer than packages/contracts and packages/domain sources"; fi
+else ok "no Vite optimize cache yet (first dev server start will build it)"; fi
+
 # 5. dev server on :5173 — must belong to THIS checkout
 pid="$(lsof -nP -iTCP:5173 -sTCP:LISTEN -Fp 2>/dev/null | sed -n 's/^p//p' | head -1)"
 if [ -z "$pid" ]; then

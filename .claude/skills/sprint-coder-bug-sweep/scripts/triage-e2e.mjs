@@ -38,7 +38,7 @@ function walk(suite, file, titles) {
 }
 for (const s of report.suites ?? []) walk(s, s.file ?? s.title, []);
 
-const ENV_RE = /Packaged app not found|did not become ready|electron-forge package|ECONNREFUSED[^\n]*5173|NODE_MODULE_VERSION|Sprint Coder API unavailable/i;
+const ENV_RE = /Packaged app not found|did not become ready|electron-forge package|ECONNREFUSED[^\n]*5173|NODE_MODULE_VERSION|Sprint Coder API unavailable|does not provide an export named|Outdated Optimize Dep/i;
 const FIRSTWINDOW_RE = /firstWindow|Timeout \d+ms exceeded[^\n]*firstWindow/i;
 const OPTIN_FILE_RE = /leader-mcp-smoke|leader-mcp-codex-smoke|cli-workspace-egress/;
 const failures = tests.filter((t) => t.status === 'unexpected' || t.status === 'flaky');
@@ -102,6 +102,8 @@ const md = [];
 md.push(`# E2E triage (${summary.generated_at})`, '');
 md.push(`結果: ${summary.totals.expected} passed / ${summary.totals.unexpected} failed / ${summary.totals.skipped} skipped / ${summary.totals.flaky} flaky （${summary.totals.duration_ms != null ? Math.round(summary.totals.duration_ms / 1000) + ' 秒' : '所要不明'}）`, '');
 if (wholesaleEnv) md.push('> **環境起因の疑い**: 大半のテストが firstWindow で同形に死んでいる。native 前提（prepare:desktop）と dev server を先に疑うこと。', '');
+const sidebarTimeouts = rows.filter((r) => r.classification !== 'pass' && /sidebar-new-task-button|composer-textarea/.test(r.firstError) && /Timeout/.test(r.firstError)).length;
+if (sidebarTimeouts >= Math.max(3, Math.ceil(tests.length * 0.5))) md.push('> **renderer が起動していない疑い**: window は開くが sidebar/composer が現れずに timeout する失敗が大半。Vite の依存キャッシュ（apps/desktop/node_modules/.vite/deps）が workspace パッケージの新しい export を含まない可能性が高い。`rm -rf apps/desktop/node_modules/.vite node_modules/.vite` して dev server を再起動し、Computer Use の app_screenshot で forge window が真っ黒でないことを確認する。', '');
 md.push('| 分類 | 件数 |', '|---|---|', ...Object.entries(summary.by_class).map(([k, v]) => `| ${k} | ${v} |`), '');
 if (summary.failures.length) {
   md.push('## 失敗（分類ヒント付き）', '');

@@ -5,7 +5,9 @@
 # sends prompts to a real, billed CLI. The instance uses the repo's own Electron binary against
 # apps/desktop, this checkout's :5173 dev server, an isolated SPRINT_CODER_USER_DATA_DIR, real CLIs
 # (E2E mock/fixture flags explicitly unset) and SPRINT_CODER_E2E_BACKGROUND=1 (visible, never steals
-# focus). Identity (pid + start time + command) is written to lanes/<lane>/app.json for
+# focus). Chromium's occlusion/renderer backgrounding is disabled so Computer Use screenshots and the
+# accessibility tree stay live while the window sits behind the user's other windows.
+# Identity (pid + start time + command) is written to lanes/<lane>/app.json for
 # stop-dev-instance.sh. With --debug-port the port must be free beforehand, and the DevTools browser
 # id printed by THIS launch is bound to the listening pid in lanes/<lane>/debug.json for seed-instance.mjs.
 set -uo pipefail
@@ -70,7 +72,8 @@ printf '%s\n' "$marker" >> "$LANE_DIR/app.log"     # append: earlier turns' stde
   exec env -u SPRINT_CODER_RUNTIME_ADOPT -u SPRINT_CODER_E2E_CLI_FIXTURES -u SPRINT_CODER_ALLOW_SIMULATED_TEAM_WORKERS \
       -u SPRINT_CODER_E2E_HIDDEN -u SPRINT_CODER_E2E_MODE -u SPRINT_CODER_LEADER_MCP -u SPRINT_CODER_REAL_WORKERS \
       SPRINT_CODER_USER_DATA_DIR="$PROFILE" SPRINT_CODER_SKILL_HOME="$PROFILE" SPRINT_CODER_E2E_BACKGROUND=1 \
-      nohup "$BIN" ${DEBUG_PORT:+--remote-debugging-port=$DEBUG_PORT} "$DESKTOP_ROOT" >> "$LANE_DIR/app.log" 2>&1 < /dev/null
+      nohup "$BIN" --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
+        ${DEBUG_PORT:+--remote-debugging-port=$DEBUG_PORT} "$DESKTOP_ROOT" >> "$LANE_DIR/app.log" 2>&1 < /dev/null
 ) &
 apid=$!
 sleep 6

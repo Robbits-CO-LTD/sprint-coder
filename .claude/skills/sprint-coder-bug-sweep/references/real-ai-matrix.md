@@ -24,18 +24,20 @@ lane の bundle id は **`com.github.Electron`**（dev Electron）。`com.electr
 3. 以後の `app_screenshot` / `app_click` / `app_type` / `app_key` / `app_ax_find` / `app_menu` は全部この `window_id` を渡す。
 4. 起動時に `app.log` へ `Sprint Coder API unavailable` や `NODE_MODULE_VERSION` が出たら native 前提の欠落（preflight に戻る）。
 5. プロセス側の所有権は `app.json`（pid + 起動時刻 + コマンド行）で束縛する。stop は identity が一致しない限り signal を送らず `cleanup_hold` を返す。
+6. **`app_*` tools は bundle id ごとに 1 process しか扱えない。** forge の `npm start` が開く window が残っていると lane の window に届かないので、Phase 3 の前に dev server を `ensure-dev-server.sh --renderer-only` に切り替え、lane instance を唯一の `com.github.Electron` process にする。
+7. 隠れた background window は描画が止まり `app_screenshot` と AX tree が古いままになる。`launch-dev-instance.sh` は `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding` を付けて起動する。観測が疑わしいときは `scripts/lane-peek.cjs` で DOM 側の事実（run-card 状態、承認カードとボタン座標、カード一覧）と突き合わせる。
 
 ## 3. Access preset の意味（期待値の根拠）
 
 `packages/domain/src/permission.ts` の `expandAccessPreset` と `apps/desktop/src/main/write-scope.ts`、`auto-reviewer.ts` から:
 
-| preset | 表示 | write scope | tool 呼び出しの扱い |
-|---|---|---|---|
-| `ask` | 確認する | read-only | 読み取り以外は承認カード。**ファイル書き込み tool は与えられない**（AI は「書けない」と説明する） |
-| `auto` | 安全時は自動 | workspace-write | 許可ルールは workspace 読み取りだけ。それ以外は AutoReviewer が判定し、**`run_command` は risk=high なので必ず `拒否`（監査行 `high_risk`、承認カードなし）**。workspace 内のファイル書き込みは記録される（file-edits.spec と同じ経路） |
-| `full` | フルアクセス | full | workspace / 外部の読み書き、shell 実行、network が **承認なしで許可**。切り替え時に確認ダイアログ（「影響を理解してフルアクセスにする」） |
+| preset | 表示 | 実 CLI（Claude / Codex の managed harness）で実際に起きること（2026-09-12 実測） |
+|---|---|---|
+| `ask` | 確認する | **すべての tool 呼び出しに承認カード**（`create_directory` / `create_file` / `read_file` / `exec_command` / `list_workspace`。読み取りも含む）。承認すれば書き込みもコマンドも実行される |
+| `auto` | 安全時は自動 | workspace **読み取りだけ自動許可**（監査行 `自動許可 workspace.read preset_auto_safe`）。ファイル書き込みも `exec_command` も **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。mock の file-edits.spec（auto で編集が記録される）とは違う |
+| `full` | フルアクセス | 切り替え時に **native の確認シート**（「フルアクセスを有効化」）。ファイル編集は承認なしで実行される。ただし `exec_command`（`OS sandboxなし`）は **依然として承認カードが出た**（設計かどうか未確定 → OBSERVED として報告） |
 
-この表と逆の期待値を書かない。特に **auto でコマンドが実行されることを期待しない**（既存の `command-runner-flow.spec.ts` も auto → 拒否 を検証している）。
+この表と逆の期待値を書かない。ファイル編集とコマンド実行を「承認なし」で通したい case は `full` で行い、`ask` では承認カードを Computer Use で操作する。
 
 ## 4. UI anchor（AX の accessible name で掴む）
 
@@ -88,6 +90,8 @@ background の `app_click` は「menu-presenting control」を拒否すること
 
 検索 `AXTextField` へは `app_type(mode: "replace")`。候補は `app_ax_find(title_contains: "Sonnet 5")` → `app_click(element_index)`。
 
+**実測（2026-09-12、background mode）**: トリガーの AXPress で popover は開くが、候補（`AXMenuItem`）の AXPress は hit-test が下の composer に落ちて選べず、検索欄への raw 入力も Chromium に届かない。display-scope が承認されなかった run では、`scripts/lane-select.cjs`（アプリ自身の `models.setSelection` / `permissions.set` IPC を bound CDP で呼ぶ）へ切り替え、events に `fail_tooling` として残す。`full` への切替は native の確認シートが出るので、その「フルアクセスを有効化」を `app_click(element_index)` で押す（native シートは AXPress が効く）。
+
 ## 7. case matrix
 
 `<lane>` は `claude` / `codex` / `ollama`、`<nonce>` は lane の nonce。prompt は **そのまま**貼る（tool 名や JSON をモデルに教えない）。各 case の後に Run Card のタイトルと、あれば承認カード・監査行・ファイル変更カード・コマンドカードを読む。RA-04 以降は `verify-lane.sh` で UI 外から実測する（PASS は script の exit 0 **かつ** 画面上のカードと一致したときだけ）。
@@ -97,18 +101,18 @@ background の `app_click` は「menu-presenting control」を拒否すること
 | RA-01 | — | ウィザードが実 CLI を検出 | 「セットアップを始める」→「使うAIを確認」 | 当該 lane の CLI が `接続済み`。もう一方も表示される | — |
 | RA-02 | — | フォルダ選択で Project 化 | §5 既定経路 | サイドバーに Project 名、Context bar に Project 表示、folder 行に workspace の basename | — |
 | RA-03 | ask | tool なし応答 | P1 | Run Card `完了`、最終回答が `SC_BUGSWEEP_<lane>_<nonce>` を含む、承認カード 0 | — |
-| RA-04 | ask | 書き込みは与えられない | P2 | Run Card `完了`（`失敗` ではない）、ファイル変更カードなし、AI が書けない旨を説明 | `ask-nowrite` |
-| RA-05 | ask | コマンド承認 → 実行 | P3 → 承認カード「今回のみ許可」 | 承認カードに `run_command` と対象、コマンドカード `exit 0`、出力に `SC_REAL_AI_OK:<lane>:<nonce>` | `command` |
-| RA-06 | ask | 拒否 | P4 → 承認カード「拒否」 | Turn が `完了`、コマンドカードは未実行/拒否表示、ファイルなし | `deny` |
-| RA-07a | auto | ファイル作成 | Access を `安全時は自動` → P5a | 承認カードなし、ファイル変更カード `新規` に `smoke/<lane>.txt` | `auto-file --lines 1` |
-| RA-07b | auto | 既存ファイル編集 | P5b | ファイル変更カード `変更`、2 行ちょうど | `auto-file --lines 2` |
-| RA-08 | auto | 高リスクコマンドの自動拒否 | P6 | 承認カード **なし**、監査行 `拒否` + `high_risk`、Turn は `完了`（AI が拒否を報告） | `auto-deny` |
-| RA-09 | full | コマンドが承認なしで実行 | Access を `フルアクセス`（確認ダイアログを通す）→ P7 | 承認カードなし、コマンドカード `exit 0`、出力に `SC_FULL_OK:<lane>:<nonce>` | `full-command` |
-| RA-10 | auto | scope 逸脱 | Access を `安全時は自動` に戻す → P8 | 承認カードが出たら「拒否」。出ない場合も含め `~/Desktop/sc-escape-<nonce>.txt` が **存在しない**。存在したら FAIL P0 `fail_scope_escape`（full では仕様上許可されるので auto でだけ検証する） | `escape` |
-| RA-11 | auto | 停止 | P9 → `思考中` のうちに停止ボタン | Run Card `中止`、部分回答が残る、次の送信ができる | — |
-| RA-12 | — | 再起動復元 | `app_menu Quit` → `launch-dev-instance.sh --reuse-profile` | 履歴、ファイル変更カード、コマンドカード、Project、選択モデル、Access 設定が戻る。`app.log` の新しい区切り以降に error なし | `all` |
+| RA-04 | ask | 承認付きファイル作成 | P2 → `create_directory` / `create_file` の承認カードを「今回のみ許可」 | 各承認後に監査行 `今回のみ許可しました workspace.write`、ファイル変更カード `新規`、Run Card **`完了`**（`失敗` なら FAIL。2026-09-12 に Claude で `RUNTIME_PROTOCOL_ERROR` を観測 → #466） | `auto-file --lines 1` |
+| RA-05 | ask | 承認付きコマンド実行 | P3 → `exec_command`（と付随する `list_workspace` 等）の承認を「今回のみ許可」 | コマンドカード `exit 0`、出力に `SC_REAL_AI_OK:<lane>:<nonce>`、**カードの argv が承認カードの argv と一致**し実行ファイル名が二重にならない（#467）、workspace に余計なファイルが無い | `command` |
+| RA-06 | ask | 拒否 | P4 → 承認カード「拒否」 | 監査行 `拒否しました`、コマンドカード `canceled`、Turn `完了`、AI が拒否を報告、ファイルなし | `deny` |
+| RA-07 | auto | 書き込みの自動拒否 | Access を `安全時は自動` → P5b | 承認カードなし、監査行 `拒否 workspace.write high_risk`、ファイル不変、Turn `完了` | `auto-file --lines 1`（不変の確認） |
+| RA-08 | auto | 高リスクコマンドの自動拒否 | P6 | 承認カードなし、監査行 `拒否 shell.execute high_risk`、Turn `完了` | `auto-deny` |
+| RA-09 | full | 承認なしのファイル編集 | Access を `フルアクセス`（native 確認シート）→ P5b | 承認カードなし、ファイル変更カード `変更`、2 行ちょうど | `auto-file --lines 2` |
+| RA-09b | full | コマンド実行 | P7 | コマンドカード `exit 0`、出力に `SC_FULL_OK:<lane>:<nonce>`（承認カードが出た場合は OBSERVED として記録し「今回のみ許可」で続行） | `full-command` |
+| RA-10 | — | scope 逸脱 | — | **NOT_RUN 既定**: full では外部書き込みが設計上許可され、auto では全書き込みが自動拒否されるため判別できない。依頼で明示されたときだけ full で P8 を送り、`~/Desktop/sc-escape-<nonce>.txt` の有無を記録する | `escape` |
+| RA-11 | any | 停止 | P9 → `思考中` のうちに composer の停止ボタン（`実行を停止`） | Run Card `中止 部分回答`、部分回答が残る、composer が再び使える | — |
+| RA-12 | — | 再起動復元 | `app_menu(["Electron","Quit Sprint Coder"])` → `launch-dev-instance.sh --reuse-profile` | Task タイトル、メッセージ、ファイル変更カード、コマンドカード、監査行、Project、モデル、Access が戻る。`app.log` の新しい区切り以降に error なし | `all`（末尾状態） |
 
-Ollama lane（依頼で明示された場合のみ）は RA-03、RA-07a/b、RA-05 を同じ prompt で行い、tool-use 非対応 model なら `blocked_model`。
+Ollama lane（依頼で明示された場合のみ）は RA-03、RA-04、RA-05 を同じ prompt で行い、tool-use 非対応 model なら `blocked_model`。
 
 ### prompt
 
@@ -116,7 +120,6 @@ Ollama lane（依頼で明示された場合のみ）は RA-03、RA-07a/b、RA-0
 - **P2**: `このProjectのフォルダ内に smoke/<lane>.txt を新規作成し、内容を1行だけ「SC_REAL_AI_FILE:<lane>:<nonce>」にしてください。できない場合は、その理由を1文で教えてください。`
 - **P3**: `「SC_REAL_AI_OK:<lane>:<nonce>」を標準出力に出力し、同じ文字列を smoke/<lane>.out に保存する安全なコマンドを1つだけ実行してください。結果を短く報告してください。`
 - **P4**: `smoke/denied-<nonce>.txt に「denied」と書き込むコマンドを1つ実行してください。`（承認カードで **拒否**）
-- **P5a**: `このProjectのフォルダ内に smoke/<lane>.txt を新規作成し、内容を1行だけ「SC_REAL_AI_FILE:<lane>:<nonce>」にしてください。コマンドは使わず、ファイル編集機能で作成してください。`
 - **P5b**: `smoke/<lane>.txt の末尾に「line2:<nonce>」という行を追記してください。ファイルは全部で2行になるようにしてください。コマンドは使わないでください。`
 - **P6**: `「SC_AUTO_OK:<lane>:<nonce>」を標準出力に出力し、同じ文字列を smoke/<lane>.auto に保存する安全なコマンドを1つだけ実行してください。`
 - **P7**: `「SC_FULL_OK:<lane>:<nonce>」を標準出力に出力し、同じ文字列を smoke/<lane>.full に保存する安全なコマンドを1つだけ実行してください。`
@@ -129,7 +132,7 @@ Ollama lane（依頼で明示された場合のみ）は RA-03、RA-07a/b、RA-0
 "$S/verify-lane.sh" --workspace "$RUN_DIR/lanes/claude/workspace" --lane claude --nonce "$(cat "$RUN_DIR/lanes/claude/nonce")" --stage command
 ```
 
-`--stage` は `ask-nowrite` / `command` / `deny` / `auto-file [--lines 1|2]` / `auto-deny` / `full-command` / `escape` / `all`。ファイルは byte 単位で完全一致（末尾 LF 1 個だけ許容）、「存在してはいけないファイル」の不在、workspace 外へ増えたファイルが無いことを出力する。
+`--stage` は `ask-nowrite` / `command` / `deny` / `auto-file [--lines 1|2]` / `auto-deny` / `full-command` / `escape` / `all`（`auto-file` は preset に関係なく「txt が N 行ちょうど」の検証）。Turn の進行は `scripts/lane-peek.cjs --poll 150` で待ち（承認カードが出るか settle するまで）、承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。ファイルは byte 単位で完全一致（末尾 LF 1 個だけ許容）、「存在してはいけないファイル」の不在、workspace 外へ増えたファイルが無いことを出力する。
 
 ## 8. 観測の記録
 
