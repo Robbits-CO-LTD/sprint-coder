@@ -639,7 +639,6 @@ import {
   RuntimeHostTeamWorkerRuntime,
   TeamRuntimeAvailabilityTracker,
   buildInheritedWorkerContext,
-  canonicalWorkspaceRoots,
   chooseWorkerRuntime,
 } from './team-worker-runtime';
 import {
@@ -1347,11 +1346,10 @@ export class IpcRouter {
           task: this.persistence.getTask(taskId),
           turnId,
           prompt,
-          // The Worker runtime roots (isolation worktree included) plus the Task's own roots.
-          knownWorkspaceRoots: canonicalWorkspaceRoots([
-            ...knownWorkspaceRoots,
-            ...this.persistence.getEffectiveWorkspaceSet(taskId).roots.map(({ path }) => path),
-          ]),
+          // Exactly the roots Main handed this Worker — its Task root and its isolation worktree,
+          // already canonicalized by the runtime. The Task's other roots were never given to this
+          // dispatch, so exempting them would widen the secret scan's blind spot for nothing.
+          knownWorkspaceRoots,
           context,
           now: new Date().toISOString(),
         }).allowed;

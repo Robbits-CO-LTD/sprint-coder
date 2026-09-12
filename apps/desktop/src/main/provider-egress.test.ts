@@ -15,6 +15,7 @@ import {
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
 } from './provider-egress';
+import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
 import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
@@ -250,6 +251,7 @@ if (runsWithElectronAbi)
             dataResidency: 'unspecified',
             provenanceTrust: 'system',
             secretScan: 'clean',
+            knownRootsDigest: null,
             localOnlyTask: false,
             attachmentManifestDigest,
             attachmentByteCount: 4096,
@@ -261,6 +263,56 @@ if (runsWithElectronAbi)
         expect.objectContaining({ resource_digest: expectedResourceDigest }),
       ]);
       fixture.persistence.close();
+    });
+
+    it('binds the roots the secret scan was allowed to exempt into the audited resource', () => {
+      const root = '/private/tmp/sprint-coder-known-roots/workspace';
+      const auditFor = (knownWorkspaceRoots: readonly string[] | undefined) => {
+        const fixture = createFixture(false);
+        const decision = authorizeCodexProviderEgress({
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId: 'turn-known-roots',
+          prompt: 'clean prompt',
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+          ...(knownWorkspaceRoots === undefined ? {} : { knownWorkspaceRoots }),
+        });
+        const audit = readAudit(fixture.path) as { resource_digest: string }[];
+        fixture.persistence.close();
+        return { allowed: decision.allowed, digest: audit[0]!.resource_digest };
+      };
+      const resourceDigestWith = (knownRootsDigest: string | null) =>
+        createHash('sha256')
+          .update(
+            JSON.stringify({
+              kind: 'provider',
+              providerId: 'openai-codex',
+              fragmentKind: 'prompt',
+              byteCount: Buffer.byteLength('clean prompt', 'utf8'),
+              providerTrust: 'trusted-remote',
+              dataResidency: 'unspecified',
+              provenanceTrust: 'system',
+              secretScan: 'clean',
+              knownRootsDigest,
+              localOnlyTask: false,
+              attachmentManifestDigest: null,
+              attachmentByteCount: 0,
+            }),
+          )
+          .digest('hex');
+
+      const none = auditFor(undefined);
+      const exempted = auditFor([root]);
+      // Same prompt, same `clean` verdict — but an audit must still distinguish a scan that was
+      // told to ignore a root from one that was told to ignore nothing.
+      expect(none).toEqual({ allowed: true, digest: resourceDigestWith(null) });
+      expect(exempted).toEqual({
+        allowed: true,
+        digest: resourceDigestWith(digestCanonical([root])),
+      });
+      // The declaration is a fact about paths, not about spelling or ordering.
+      expect(auditFor([`${root}/`, root.replaceAll('/', '\\')]).digest).toBe(exempted.digest);
     });
 
     it('rejects partial or unsafe attachment egress facts before evaluation', () => {

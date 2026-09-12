@@ -78,6 +78,39 @@ describe('sealed Workspace root egress classification', () => {
       'sensitive',
     );
   });
+
+  it('blocks a high-entropy value that a Main-issued root splits into sub-threshold halves', () => {
+    // Neither half clears the 24-character entropy window on its own, so scanning the leftovers
+    // one by one reads the whole thing as clean. Removing only the root's bytes does not.
+    const split = `8Jv2mQp7Zx4Lk9Wd6Tn3=${root}/Rs5Yc1Ua0BfHgW7pQz2X`;
+    const assessment = assessProviderEgressDisclosure(split, [root]);
+    expect(assessment.classification).toBe('sensitive');
+    expect(assessment.reasons).toContain('high-entropy-value');
+    expect(assessment.redactedContent).not.toBe(split);
+    // The root on its own, and an ordinary descendant of it, stay exempt.
+    expect(assessProviderEgressDisclosure(root, [root]).classification).toBe('safe');
+    expect(assessProviderEgressDisclosure(`${root}/apps/desktop/src`, [root]).classification).toBe(
+      'safe',
+    );
+  });
+
+  it('exempts nothing when a declared root is not a usable path', () => {
+    // `roots.map(({ path }) => path)` can hand over holes. A malformed declaration must leave the
+    // scan exactly as strict as no declaration at all, never throw out of the egress gate.
+    for (const roots of [
+      [undefined as unknown as string],
+      [''],
+      ['   '],
+      ['relative/workspace'],
+      [null as unknown as string, root],
+    ])
+      expect(assessProviderEgressDisclosure(`${root}/${opaque}`, roots).classification).toBe(
+        'sensitive',
+      );
+    expect(assessProviderEgressDisclosure(root, [undefined as unknown as string])).toMatchObject({
+      classification: 'sensitive',
+    });
+  });
 });
 
 describe('Worker isolation worktree egress classification', () => {

@@ -22,7 +22,11 @@ import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { projectContextProviderMessages } from './project-context-delivery';
-import { applyWorkerContextInheritance, reserveTeamWorkerContext } from './team-worker-runtime';
+import {
+  applyWorkerContextInheritance,
+  canonicalWorkspaceRoots,
+  reserveTeamWorkerContext,
+} from './team-worker-runtime';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
@@ -275,7 +279,12 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             connection,
             prompt: JSON.stringify(providerMessagesForEgressPolicy(messages)),
             context: inheritedContext,
-            knownWorkspaceRoots: input.workspaceSet?.roots.map((root) => root.path) ?? [],
+            // Same declaration the CLI Worker makes: the Workspace roots plus the isolation
+            // worktree Main generated, so naming that directory is not read as an opaque secret.
+            knownWorkspaceRoots: canonicalWorkspaceRoots([
+              ...(input.workspaceSet?.roots.map((root) => root.path) ?? []),
+              input.workspacePath,
+            ]),
           })
         )
           throw new Error('Provider Worker egress was denied');

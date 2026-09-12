@@ -472,6 +472,31 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       }
     });
 
+    it('never mints an acceptance contract for the Mission session Turn on startup', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const sessionTurnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      const contractsFor = (turnId: string) => {
+        const database = new Database(f.path, { readonly: true });
+        const rows = database
+          .prepare('SELECT 1 FROM acceptance_contracts WHERE turn_id = ?')
+          .all(turnId);
+        database.close();
+        return rows.length;
+      };
+      try {
+        f.persistence.close();
+        // The session Turn is anchored to a `system` notice, not a user objective. Backfilling it
+        // would append a fresh, meaningless contract revision on every single app start.
+        for (let start = 0; start < 2; start += 1) new SqlitePersistenceClient(f.path).close();
+        expect(contractsFor(sessionTurnId)).toBe(0);
+      } finally {
+        const reopened = new SqlitePersistenceClient(f.path);
+        expect(reopened.getTeamMission(mission.id).mode).toBe('graph');
+        reopened.close();
+      }
+    });
+
     it('restores interrupted graph steps without dispatch and resumes only the requested step', async () => {
       const f = fixture();
       const mission = f.persistence.createGraphTeamMission(f.input);

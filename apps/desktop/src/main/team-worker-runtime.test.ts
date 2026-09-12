@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { assessProviderEgressDisclosure } from './provider-disclosure-classifier';
+import type * as PromptContextModule from './prompt-context';
 
 const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex'; args: unknown[] }>,
@@ -20,6 +21,20 @@ const runtimeHostMock = vi.hoisted(() => ({
     }
   >(),
 }));
+
+const promptContextMock = vi.hoisted(() => ({ compileFailure: null as string | null }));
+
+vi.mock('./prompt-context', async (importOriginal) => {
+  const actual = await importOriginal<typeof PromptContextModule>();
+  return {
+    ...actual,
+    compilePromptGuidance: (...args: Parameters<typeof actual.compilePromptGuidance>) => {
+      if (promptContextMock.compileFailure !== null)
+        throw new Error(promptContextMock.compileFailure);
+      return actual.compilePromptGuidance(...args);
+    },
+  };
+});
 
 vi.mock('./runtime-host', () => ({
   RuntimeHostClient: class {
@@ -157,6 +172,7 @@ function runtime(
   overrides: {
     teamMcpFor?: () => RuntimeTeamMcpOption | undefined;
     releaseTeamMcp?: (turnId: string) => void;
+    releaseManagedTurn?: (turnId: string) => void;
     contextFor?: TeamWorkerRuntimeDeps['contextFor'];
     writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
     authorizeEgress?: TeamWorkerRuntimeDeps['authorizeEgress'];
@@ -174,6 +190,9 @@ function runtime(
     authorizeEgress: overrides.authorizeEgress ?? (() => true),
     ...(overrides.teamMcpFor === undefined ? {} : { teamMcpFor: overrides.teamMcpFor }),
     ...(overrides.releaseTeamMcp === undefined ? {} : { releaseTeamMcp: overrides.releaseTeamMcp }),
+    ...(overrides.releaseManagedTurn === undefined
+      ? {}
+      : { releaseManagedTurn: overrides.releaseManagedTurn }),
     ...(overrides.contextFor === undefined ? {} : { contextFor: overrides.contextFor }),
     ...(overrides.writeScopeFor === undefined ? {} : { writeScopeFor: overrides.writeScopeFor }),
   });
@@ -612,6 +631,40 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(authorizeEgress).not.toHaveBeenCalled();
     expect(runtimeHostMock.starts).toHaveLength(0);
   });
+
+  it.each([
+    ['prompt guidance compilation', {}, 'prompt guidance unavailable', true],
+    ['the egress gate', { authorizeEgress: () => false }, 'Team Worker egress was denied', false],
+  ])(
+    'releases the managed parent Turn when %s fails after the catalog was bound',
+    async (_label, overrides, message, failGuidance) => {
+      runtimeHostMock.starts.length = 0;
+      promptContextMock.compileFailure = failGuidance ? message : null;
+      const releaseManagedTurn = vi.fn();
+      // `catalogFor` has already registered the Turn with Main at this point. A Graph Mission's
+      // session Turn is closed by this release, so a missed one strands the whole Mission on
+      // `waiting_resume` with `authorizationTurnIsActive` still true.
+      const catalogFor = vi.fn((..._args: unknown[]) => ({ tools: [] }));
+      const subject = runtime({ ...overrides, releaseManagedTurn, catalogFor });
+
+      try {
+        await expect(
+          subject.execute({
+            worker: worker(false),
+            envelope: { ...envelope, targetAgentId: 'worker-1' },
+            executionId: 'execution-preflight-failure',
+            content: '実装する',
+          }),
+        ).rejects.toThrow(message);
+      } finally {
+        promptContextMock.compileFailure = null;
+      }
+
+      const boundTurnId = catalogFor.mock.calls[0]![2] as unknown as string;
+      expect(releaseManagedTurn.mock.calls).toEqual([[boundTurnId]]);
+      expect(runtimeHostMock.starts).toHaveLength(0);
+    },
+  );
 
   it('places the Agent own prior Team conversation before a tool-prohibited final instruction', async () => {
     runtimeHostMock.starts.length = 0;

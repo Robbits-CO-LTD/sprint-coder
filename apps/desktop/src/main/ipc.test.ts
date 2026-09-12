@@ -2542,6 +2542,108 @@ describe('Main image attachment dispatch boundary', () => {
       expect(isGraphMissionSessionTurn(owner.parentTurnId)).toBe(false);
     });
   });
+
+  describe('Mission session Turn lifecycle across graph steps', () => {
+    const prepareWorkerManagedCatalog = Reflect.get(
+      IpcRouter.prototype,
+      'prepareWorkerManagedCatalog',
+    ) as (
+      this: unknown,
+      kind: 'claude' | 'codex' | 'provider',
+      taskId: string,
+      runtimeTurnId: string,
+      runtimeWorkspace: { primaryRootId: string | null; digest: string; roots: readonly never[] },
+      canDelegate: boolean,
+      writeScope: 'read-only' | 'workspace-write' | 'full',
+      executionId?: string,
+    ) => Promise<unknown>;
+    const releaseManagedWorkerTurn = Reflect.get(
+      IpcRouter.prototype,
+      'releaseManagedWorkerTurn',
+    ) as (this: unknown, runtimeTurnId: string) => void;
+
+    it('shares one session Turn across steps and reopens it only after the last Worker', async () => {
+      const missionTurnId = 'graph-mission:mission-1';
+      const started = new Map<string, { revision: number; workspaceId: string | null }>();
+      const startTurn = vi.fn((input: { taskId: string; turnId: string; workspaceId: string }) => {
+        const snapshot = { revision: started.size + 1, workspaceId: input.workspaceId };
+        started.set(`${input.taskId}:${input.turnId}`, snapshot);
+        return { ...snapshot, entries: [] };
+      });
+      const finishTurn = vi.fn((taskId: string, turnId: string) => {
+        started.delete(`${taskId}:${turnId}`);
+      });
+      const turnEnded = vi.fn();
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        managedWorkerTurn: new Map(),
+        approvalCoordinator: { turnEnded },
+        managedCodingHarness: {
+          broker: {
+            getTurnSnapshot: (taskId: string, turnId: string) => {
+              const snapshot = started.get(`${taskId}:${turnId}`);
+              return snapshot === undefined ? undefined : { ...snapshot, entries: [] };
+            },
+          },
+          startTurn,
+          finishTurn,
+        },
+        persistence: {
+          getActiveTurnId: () => null,
+          getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'graph' }),
+          getGraphTeamMission: () => ({ contextDigest: 'c'.repeat(64) }),
+          ensureGraphMissionSessionTurn: () => missionTurnId,
+          getTeamByTask: () => null,
+          getEffectiveWorkspaceSet: () => ({ source: 'none', roots: [], digest: 'w'.repeat(64) }),
+          getEffectiveWorkspaceRootIdentities: () => [],
+          getPermissionPolicy: () => ({ policyEpoch: 9 }),
+          listTeamExecutions: () => [],
+        },
+      });
+      const workspace = { primaryRootId: null, digest: 'x'.repeat(64), roots: [] as never[] };
+      const prepare = (runtimeTurnId: string, executionId: string) =>
+        prepareWorkerManagedCatalog.call(
+          router,
+          'claude',
+          'task-1',
+          runtimeTurnId,
+          workspace,
+          false,
+          'read-only',
+          executionId,
+        );
+
+      await prepare('runtime-a', 'execution-a');
+      await prepare('runtime-b', 'execution-b');
+      // Both steps hang off the same Mission session, so the second never re-opens a Turn that
+      // the managed broker already has bound.
+      expect(startTurn).toHaveBeenCalledTimes(1);
+      expect(startTurn.mock.calls[0]![0]).toMatchObject({
+        taskId: 'task-1',
+        turnId: missionTurnId,
+        policyEpoch: 9,
+      });
+      expect(
+        [...(router['managedWorkerTurn'] as Map<string, { parentTurnId: string }>).values()].map(
+          ({ parentTurnId }) => parentTurnId,
+        ),
+      ).toEqual([missionTurnId, missionTurnId]);
+
+      releaseManagedWorkerTurn.call(router, 'runtime-a');
+      expect(finishTurn).not.toHaveBeenCalled();
+      expect(turnEnded).not.toHaveBeenCalled();
+
+      releaseManagedWorkerTurn.call(router, 'runtime-b');
+      expect(turnEnded).toHaveBeenCalledWith('task-1', missionTurnId, 'finished');
+      expect(finishTurn.mock.calls).toEqual([['task-1', missionTurnId]]);
+
+      // The next step of the same Mission starts a fresh session Turn rather than reusing a
+      // finished one.
+      await prepare('runtime-c', 'execution-c');
+      expect(startTurn).toHaveBeenCalledTimes(2);
+      expect(startTurn.mock.calls[1]![0]).toMatchObject({ turnId: missionTurnId });
+    });
+  });
 });
 
 describe('Turn Workspace health gate', () => {

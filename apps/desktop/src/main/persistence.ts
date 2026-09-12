@@ -7065,13 +7065,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   private backfillAcceptanceContracts(): void {
-    const turns = this.db
+    const anchoredTurns = this.db
       .prepare(
         `SELECT turns.id, turns.task_id, turns.created_at, messages.content
          FROM turns JOIN messages ON messages.id = turns.user_message_id
          ORDER BY turns.created_at, turns.id`,
       )
       .all() as { id: string; task_id: string; created_at: string; content: string }[];
+    // A Graph Mission session Turn has no user objective to accept — its anchor is a `system`
+    // notice — so a contract minted from that notice would be a new, meaningless acceptance
+    // record on every single startup. The Mission's own steps carry the acceptance criteria.
+    const turns = anchoredTurns.filter(
+      ({ id }) => !id.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX),
+    );
     this.db.transaction(() => {
       for (const turn of turns) {
         const row = this.db
@@ -10637,9 +10643,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * active parent Turn to borrow. The managed tool ledger, approvals and Turn plans are all keyed
    * on `turns(id)` with enforced foreign keys, so the Mission owns one durable session Turn of its
    * own instead. It is created terminal (never `getActiveTurnId`, never in the chat composer's
-   * way) and anchored to a `system` notice, which every history/context query already excludes.
-   * Its Worker authorizations stay alive through `authorizationTurnIsActive`, exactly as a chat
-   * Turn's durable Workers do.
+   * way) and anchored to a `system` notice. `prepareContext` and `buildInheritedWorkerContext`
+   * both drop `system` messages, so no Worker inherits it as context; `listMessages` does return
+   * it, so the timeline shows it once as a `sys-notice` when the Mission's first Worker catalog is
+   * prepared. Its Worker authorizations stay alive through `authorizationTurnIsActive`, exactly as
+   * a chat Turn's durable Workers do.
    */
   ensureGraphMissionSessionTurn(taskId: string, missionId: string): string {
     const turnId = `${GRAPH_MISSION_SESSION_TURN_PREFIX}${missionId}`;

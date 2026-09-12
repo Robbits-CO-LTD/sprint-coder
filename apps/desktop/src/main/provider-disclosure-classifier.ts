@@ -165,6 +165,10 @@ function knownRootSpans(
 ): readonly KnownRootSpan[] {
   const spans: KnownRootSpan[] = [];
   for (const root of knownWorkspaceRoots) {
+    // A caller may hand over a Workspace root that was never materialized as a path. Exempt only
+    // what is provably a Main-issued root: anything else yields no span, so the scan runs as if
+    // no root had been declared rather than throwing out of the egress gate.
+    if (typeof root !== 'string' || root === '') continue;
     const normalized = root.replaceAll('\\', '/').replace(/\/+$/u, '');
     if (!ABSOLUTE_ROOT.test(normalized)) continue;
     const segments = normalized.split('/');
@@ -203,7 +207,10 @@ function isSensitiveEntropyCandidate(
     cursor = Math.max(cursor, span.end);
   }
   if (cursor < end) remainders.push(candidate.slice(cursor - offset));
-  return remainders.some((remainder) => {
+  // Each remainder is rescanned on its own, and so is their concatenation: a single secret split
+  // by a root it happens to straddle (`<half>=<root>/<half>`) is under the entropy threshold on
+  // either side alone, but not once the root's own bytes are the only thing removed.
+  return [...remainders, remainders.join('')].some((remainder) => {
     ENTROPY_CANDIDATE.lastIndex = 0;
     return [...remainder.matchAll(ENTROPY_CANDIDATE)].some((match) =>
       isHighEntropyCandidate(match[0]),
