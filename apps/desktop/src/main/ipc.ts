@@ -1,4 +1,9 @@
 import {
+  graphStartActivationIntent,
+  graphResumeActivationIntent,
+  graphResumeStepActivationIntent,
+} from '../graph-activation-intent';
+import {
   app,
   clipboard,
   dialog,
@@ -9,7 +14,29 @@ import {
   type IpcMainInvokeEvent,
   type MessagePortMain,
 } from 'electron';
+import {
+  graphRenderInputSchema,
+  graphGetInputSchema,
+  graphCancelInputSchema,
+  graphHistoryInputSchema,
+  graphHistorySchema,
+  graphCompareInputSchema,
+  graphDiffSchema,
+  graphGenerationSchema,
+  graphSourceRefSchema,
+  graphSourcesInputSchema,
+  graphSourcePreviewInputSchema,
+  graphSourcePreviewSchema,
+  graphSourceCheckInputSchema,
+  graphSourceStatusSchema,
+  graphMissionReviewSchema,
+  graphMissionStartInputSchema,
+  graphMissionResumeInputSchema,
+  graphReleaseInputSchema,
+  graphViewSchema,
+} from '@sprint-coder/contracts';
 import { createHash, randomUUID } from 'node:crypto';
+import type { GraphRenderService } from './graph-render';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import {
@@ -590,6 +617,10 @@ import { RetryableActionRegistry } from './retryable-action';
 import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor';
 import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
+import { createGraphToolBoundary } from './graph-tools';
+import { previewGraphSource } from './graph-source-preview';
+import { GraphSourceMonitor } from './graph-source-monitor';
+import { reviewGraphMission, graphMissionContextFor } from './graph-mission-review';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -854,6 +885,7 @@ export function computerUseProviderModelIsEligible(input: {
 }
 
 export class IpcRouter {
+  private graphGenerationUnsubscribe: (() => void) | null = null;
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
   private readonly mockRuntime: MockRuntimeAdapter;
@@ -976,6 +1008,7 @@ export class IpcRouter {
   // generated-image-collector.ts for why).
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
+  private readonly graphSourceMonitor: GraphSourceMonitor;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly managedCodingHarness: ManagedCodingHarness;
   private readonly autoReviewer = AutoReviewer.createProduction();
@@ -1026,7 +1059,23 @@ export class IpcRouter {
     providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
     computerUseNative: ComputerUseNativeHost = createUnavailableComputerUseNativeHost(),
     computerUseActivationGate?: ComputerUseUserActivationGate,
+    private readonly graphs: GraphRenderService | null = null,
   ) {
+    this.graphSourceMonitor = new GraphSourceMonitor({
+      document: (input) => {
+        this.persistence.getTask(input.taskId);
+        if (!this.graphs) throw new Error('Graph service unavailable');
+        return this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
+      },
+      binding: (taskId) => ({
+        workspace: this.persistence.getEffectiveWorkspaceSet(taskId),
+        policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+      }),
+      publish: (status) => {
+        if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.graphsSourceStatus, status);
+      },
+    });
     this.providerEndpointPolicy = providerEndpointPolicy;
     this.providerEndpointChallenges = new ProviderEndpointConsentChallenges(providerEndpointPolicy);
     this.attachmentDraftStore = new ImageAttachmentDraftStore(this.persistence);
@@ -1485,6 +1534,18 @@ export class IpcRouter {
         this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.providerId,
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
+      ...(this.graphs === null
+        ? {}
+        : {
+            graphs: createGraphToolBoundary(
+              this.graphs,
+              (view) => {
+                if (!this.window.isDestroyed())
+                  this.window.webContents.send(IPC_CHANNELS.graphsUpdated, view);
+              },
+              (action) => this.updateInstallMutationGate.run(action),
+            ),
+          }),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
       recordPlan: (context, items) =>
         this.persistence.recordManagedTurnPlan({
@@ -1743,6 +1804,228 @@ export class IpcRouter {
   }
 
   register(): void {
+    this.handle(
+      IPC_CHANNELS.graphsMissionResumeStep,
+      graphMissionResumeInputSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-resume-step');
+        if (!activation || activation.intent !== graphResumeStepActivationIntent(input))
+          throw new Error('計画の工程再開ボタンから操作してください。');
+        const document = this.graphs?.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const graph = this.persistence.getGraphTeamMission(input.missionId);
+        const step = graph?.steps.find((step) => step.key === input.stepKey);
+        if (
+          !document ||
+          !graph ||
+          graph.taskId !== input.taskId ||
+          graph.graphId !== document.id ||
+          graph.semanticRevision !== document.semanticRevision ||
+          step?.generation !== input.generation
+        )
+          throw new Error('Graph integration agreement changed');
+        return this.teamCoordinator.resumeGraphStep(input.taskId, input.missionId, input.stepKey);
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsMissionResumeIntegration,
+      graphMissionResumeInputSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-resume');
+        if (!activation || activation.intent !== graphResumeActivationIntent(input))
+          throw new Error('計画の統合再開ボタンから操作してください。');
+        const document = this.graphs?.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const graph = this.persistence.getGraphTeamMission(input.missionId);
+        const step = graph?.steps.find((step) => step.key === input.stepKey);
+        if (
+          !document ||
+          !graph ||
+          graph.taskId !== input.taskId ||
+          graph.graphId !== document.id ||
+          graph.semanticRevision !== document.semanticRevision ||
+          step?.generation !== input.generation
+        )
+          throw new Error('Graph integration agreement changed');
+        return this.teamCoordinator.resumeGraphIntegration(
+          input.taskId,
+          input.missionId,
+          input.stepKey,
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsMissionStart,
+      graphMissionStartInputSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
+        if (activation === null || activation.intent !== graphStartActivationIntent(input))
+          throw new Error('計画の開始ボタンから操作してください。');
+        return this.teamCoordinator.startGraphMission(input.taskId, async () => {
+          if (!this.graphs) throw new Error('Graph service unavailable');
+          const document = this.graphs.liveDocument(
+            input.taskId,
+            input.instanceId,
+            input.renderRevision,
+          );
+          const review = await reviewGraphMission(
+            {
+              taskId: input.taskId,
+              instanceId: input.instanceId,
+              renderRevision: input.renderRevision,
+            },
+            document,
+            () => graphMissionContextFor(this.persistence, input.taskId),
+          );
+          this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
+          if (!review.summary.matched || review.contextDigest !== input.contextDigest)
+            throw new Error('計画または実行条件が変わりました。もう一度確認してください。');
+          const context = graphMissionContextFor(this.persistence, input.taskId);
+          return {
+            taskId: input.taskId,
+            graphId: document.id,
+            renderRevision: document.renderRevision,
+            semanticRevision: document.semanticRevision,
+            semanticDigest: document.semanticDigest,
+            contextDigest: review.contextDigest,
+            workspaceDigest: context.workspace.digest,
+            policyEpoch: context.policyEpoch,
+            consentId: activation.token,
+            now: new Date().toISOString(),
+          };
+        });
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsMissionReview,
+      graphSourceCheckInputSchema,
+      graphMissionReviewSchema,
+      async (input) => {
+        this.persistence.getTask(input.taskId);
+        if (!this.graphs) throw new Error('Graph service unavailable');
+        const document = this.graphs.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const result = await reviewGraphMission(input, document, () =>
+          graphMissionContextFor(this.persistence, input.taskId),
+        );
+        this.graphs.liveDocument(input.taskId, input.instanceId, input.renderRevision);
+        return result.summary;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsSourceCheck,
+      graphSourceCheckInputSchema,
+      graphSourceStatusSchema,
+      (input) => this.graphSourceMonitor.check(input),
+    );
+    this.handle(
+      IPC_CHANNELS.graphsSources,
+      graphSourcesInputSchema,
+      z.array(graphSourceRefSchema).max(64),
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        const document = this.graphs?.document(input.taskId, input.renderRevision);
+        if (!document) throw new Error('Graph version not found');
+        return document.sources.filter(
+          (source) =>
+            source.elementKind === input.elementKind && source.elementId === input.elementId,
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsSourcePreview,
+      graphSourcePreviewInputSchema,
+      graphSourcePreviewSchema,
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        const source = this.graphs
+          ?.document(input.taskId, input.renderRevision)
+          ?.sources.find((entry) => entry.id === input.sourceId);
+        if (!source) throw new Error('Graph source not found');
+        const root = resolveEffectiveWorkspaceRoot(
+          this.persistence.getEffectiveWorkspaceSet(input.taskId),
+          source.rootId,
+        );
+        return previewGraphSource(
+          source,
+          root?.path ?? null,
+          this.persistence.getPermissionPolicy(input.taskId).policyEpoch,
+        );
+      },
+    );
+    this.graphGenerationUnsubscribe =
+      this.graphs?.subscribeGeneration((generation) => {
+        if (!this.window.isDestroyed() && !this.window.webContents.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.graphsGenerationUpdated, generation);
+      }) ?? null;
+    this.handle(
+      IPC_CHANNELS.graphsGeneration,
+      graphGetInputSchema,
+      graphGenerationSchema.nullable(),
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        return this.graphs?.generation(input.taskId) ?? null;
+      },
+    );
+    this.handle(IPC_CHANNELS.graphsRender, graphRenderInputSchema, graphViewSchema, (input) =>
+      this.updateInstallMutationGate.run(async () => {
+        this.persistence.getTask(input.taskId);
+        if (this.graphs === null) throw new Error('Graph renderer is unavailable');
+        const view = await this.graphs.render(input);
+        if (!this.window.isDestroyed())
+          this.window.webContents.send(IPC_CHANNELS.graphsUpdated, view);
+        return view;
+      }),
+    );
+    this.handle(
+      IPC_CHANNELS.graphsGet,
+      graphGetInputSchema,
+      graphViewSchema.nullable(),
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        return this.graphs?.get(input.taskId) ?? null;
+      },
+    );
+    this.handle(IPC_CHANNELS.graphsCancel, graphCancelInputSchema, z.undefined(), (input) =>
+      this.updateInstallMutationGate.run(() => {
+        this.persistence.getTask(input.taskId);
+        this.graphs?.cancel(input.taskId, input.generationId);
+      }),
+    );
+    this.handle(
+      IPC_CHANNELS.graphsHistory,
+      graphHistoryInputSchema,
+      graphHistorySchema,
+      (input) => {
+        this.persistence.getTask(input.taskId);
+        if (this.graphs === null) throw new Error('Graph service is unavailable');
+        return this.graphs.history(input);
+      },
+    );
+    this.handle(IPC_CHANNELS.graphsCompare, graphCompareInputSchema, graphDiffSchema, (input) => {
+      this.persistence.getTask(input.taskId);
+      if (this.graphs === null) throw new Error('Graph service is unavailable');
+      return this.graphs.compare(input);
+    });
+    this.handle(IPC_CHANNELS.graphsRelease, graphReleaseInputSchema, z.undefined(), (input) =>
+      this.updateInstallMutationGate.run(() => {
+        this.persistence.getTask(input.taskId);
+        this.graphs?.release(input.taskId, input.instanceId);
+        this.graphSourceMonitor.release(input.taskId, input.instanceId);
+      }),
+    );
     ipcMain.on(IPC_CHANNELS.computerUseActivationIntent, this.handleComputerUseActivationIntent);
     this.handle(IPC_CHANNELS.appGetInfo, emptyPayloadSchema, appInfoSchema, () => ({
       version: app.getVersion(),
@@ -2899,6 +3182,7 @@ export class IpcRouter {
           },
         );
         await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
+        this.graphSourceMonitor.invalidate(input.taskId);
         return value;
       },
     );
@@ -3601,7 +3885,7 @@ export class IpcRouter {
         if (selectedPath === undefined)
           throw new Error('Directory selection did not include a path');
         const binding = await workspaceMutationBinding(selectedPath);
-        return this.persistence.executeOperation(
+        const value = this.persistence.executeOperation(
           principal,
           input.taskId,
           IPC_CHANNELS.workspaceSelect,
@@ -3616,6 +3900,8 @@ export class IpcRouter {
             return workspaceValue(binding.canonicalPath);
           },
         );
+        this.graphSourceMonitor.invalidate(input.taskId);
+        return value;
       },
     );
 
@@ -4087,7 +4373,15 @@ export class IpcRouter {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return;
     const rawKind = (raw as Record<string, unknown>)['kind'];
     const rawIntent = (raw as Record<string, unknown>)['intent'];
-    if (rawKind !== 'application' && rawKind !== 'start' && rawKind !== 'approval') return;
+    if (
+      rawKind !== 'application' &&
+      rawKind !== 'start' &&
+      rawKind !== 'approval' &&
+      rawKind !== 'graph-start' &&
+      rawKind !== 'graph-resume' &&
+      rawKind !== 'graph-resume-step'
+    )
+      return;
     if (rawIntent !== null && typeof rawIntent !== 'string') return;
     this.computerUseActivationGate.bindIntent(event, rawKind, rawIntent);
   };
@@ -4275,10 +4569,18 @@ export class IpcRouter {
     await this.compatibleRuntime.dispose();
     await this.managedLocalProviderRuntime?.dispose();
     this.claudeRuntime.dispose();
+    this.graphGenerationUnsubscribe?.();
+    this.graphGenerationUnsubscribe = null;
+    this.graphSourceMonitor.dispose();
+    await this.graphs?.dispose();
     await this.attachmentCustodyStore.dispose();
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
+  }
+
+  graphArtifactResponse(url: URL): Response {
+    return this.graphs?.response(url) ?? new Response('Not found', { status: 404 });
   }
 
   getActiveTurnsForUpdate(): readonly {
@@ -4406,17 +4708,24 @@ export class IpcRouter {
       hash,
     );
     if (cached.found) return { value: cached.value as TOutput, executed: false };
-    return {
-      value: this.persistence.executeOperation(
-        principal,
-        taskId,
-        kind,
-        envelope.operationId,
-        hash,
-        action,
-      ),
-      executed: true,
-    };
+    const value = this.persistence.executeOperation(
+      principal,
+      taskId,
+      kind,
+      envelope.operationId,
+      hash,
+      action,
+    );
+    if (
+      [
+        IPC_CHANNELS.projectsFoldersReplace,
+        IPC_CHANNELS.projectsUpdate,
+        IPC_CHANNELS.projectsAssignTask,
+        IPC_CHANNELS.projectsUnassignTask,
+      ].some((channel) => channel === kind)
+    )
+      this.graphSourceMonitor.invalidate();
+    return { value, executed: true };
   }
 
   private createGenericManagedRuntimeToolHandlers(): GenericManagedRuntimeToolHandlers {
@@ -6847,6 +7156,7 @@ export class IpcRouter {
   }
 
   private pushTaskUpdated(task: ReturnType<PersistenceClient['getTask']>): void {
+    this.graphSourceMonitor.invalidate(task.id);
     if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
     this.window.webContents.send(
       IPC_CHANNELS.tasksUpdated,
@@ -8257,6 +8567,8 @@ export class IpcRouter {
 
   private publish(rawEvent: TurnEvent): void {
     const event = turnEventSchema.parse(rawEvent);
+    if (event.type === 'file.saved' || event.type === 'files.changed')
+      this.graphSourceMonitor.invalidate(event.taskId);
     this.recordTurnDiagnosticEvent(event);
     if (event.type === 'turn.accepted' || event.type === 'turn.completed')
       this.pushTaskUpdated(this.persistence.getTask(event.taskId));

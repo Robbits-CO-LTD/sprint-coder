@@ -55,6 +55,11 @@ export function TeamExecutionStatus({
         <span className="team-exec-key">実行状態</span>
         <span className="team-exec-value">{display.stateLabel}</span>
       </p>
+      {execution.state === 'running' && (execution.workerQueueDepth ?? 0) > 0 ? (
+        <p className="team-exec-row" data-testid="team-execution-worker-queue">
+          後続{execution.workerQueueDepth}件が待機中
+        </p>
+      ) : null}
       {display.attemptReasonLabel !== null && (
         <p className="team-exec-row" data-testid="team-execution-attempt-reason">
           <span className="team-exec-key">開始理由</span>

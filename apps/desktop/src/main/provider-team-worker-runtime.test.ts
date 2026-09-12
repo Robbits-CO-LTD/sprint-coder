@@ -4,7 +4,10 @@ import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
 import type { ProviderVerificationService } from './provider-verification';
-import { ProviderAwareTeamWorkerRuntime } from './provider-team-worker-runtime';
+import {
+  ProviderAwareTeamWorkerRuntime,
+  type ProviderTeamWorkerRuntimeDeps,
+} from './provider-team-worker-runtime';
 
 const connection: ProviderConnection = {
   id: 'openai:primary',
@@ -31,6 +34,141 @@ const connection: ProviderConnection = {
 };
 
 describe('ProviderAwareTeamWorkerRuntime', () => {
+  it('waits for an in-flight tool and session cleanup before confirming stop', async () => {
+    const tool = deferred<unknown>();
+    const cleanup = deferred<void>();
+    const executeTool = vi.fn(() => tool.promise);
+    const release = vi.fn(() => cleanup.promise);
+    let rounds = 0;
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(async () => undefined),
+      async *execute() {
+        rounds += 1;
+        yield { type: 'tool_call', callId: 'write', name: 'create_file', input: {} };
+        yield { type: 'completed', stopReason: 'tool_calls' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime, {
+      managedToolsConnectionId: connection.id,
+      prepareManagedTools: async () => ({
+        tools: [{ name: 'create_file', description: 'write', inputSchema: { type: 'object' } }],
+        execute: executeTool,
+        release,
+      }),
+    });
+    const result = adapter
+      .execute({
+        worker: { ...providerWorker(), writeCapable: true },
+        envelope,
+        content: 'write',
+        executionId: 'owned-execution',
+        workspaceSet: {
+          primaryRootId: 'root',
+          roots: [{ rootId: 'root', path: '/workspace', label: 'root', role: 'primary' }],
+          digest: 'a'.repeat(64),
+        },
+      })
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(executeTool).toHaveBeenCalledOnce());
+    const stopped = vi.fn();
+    const stop = adapter.stop('worker-1').then(stopped);
+    await vi.waitFor(() =>
+      expect(runtime.cancel).toHaveBeenCalledWith('owned-execution:provider-call:1'),
+    );
+    await Promise.resolve();
+    expect(stopped).not.toHaveBeenCalled();
+    tool.resolve({ ok: true });
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce());
+    expect(stopped).not.toHaveBeenCalled();
+    cleanup.resolve();
+    await stop;
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(await result).toBeInstanceOf(Error);
+    expect(rounds).toBe(1);
+  });
+
+  it('waits for the selected Provider stream to exit while another Worker keeps running', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const exit = deferred<void>();
+    const signals = new Map<string, AbortSignal>();
+    let exiting = false;
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(async () => undefined),
+      async *execute(_connection, request, signal) {
+        signals.set(request.executionId, signal);
+        const selected = request.executionId.startsWith('first:');
+        try {
+          await (selected ? first.promise : second.promise);
+          yield { type: 'completed', stopReason: 'completed' };
+        } finally {
+          if (selected) {
+            exiting = true;
+            await exit.promise;
+          }
+        }
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+    const firstResult = adapter
+      .execute({ worker: providerWorker(), envelope, content: 'first', executionId: 'first' })
+      .catch((error: unknown) => error);
+    const secondResult = adapter.execute({
+      worker: { ...providerWorker(), id: 'worker-2' },
+      envelope: { ...envelope, targetAgentId: 'worker-2' },
+      content: 'second',
+      executionId: 'second',
+    });
+    await vi.waitFor(() => expect(signals.size).toBe(2));
+    const stopped = vi.fn();
+    const stop = adapter.stop('worker-1').then(stopped);
+    first.resolve();
+    await vi.waitFor(() => expect(exiting).toBe(true));
+    expect(stopped).not.toHaveBeenCalled();
+    expect(signals.get('second:provider-call:1')?.aborted).toBe(false);
+    exit.resolve();
+    await stop;
+    expect(await firstResult).toBeInstanceOf(Error);
+    second.resolve();
+    await expect(secondResult).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+    expect(runtime.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels during Connection verification without starting the Provider', async () => {
+    const verification = deferred<ProviderConnection>();
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      execute: vi.fn(async function* () {
+        yield { type: 'completed' as const, stopReason: 'completed' };
+      }),
+    };
+    const fallbackStop = vi.fn();
+    const adapter = controlledProviderAdapter(runtime, {
+      verification: {
+        requireVerifiedForExecution: () => verification.promise,
+      } as unknown as ProviderVerificationService,
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: fallbackStop },
+    });
+    const result = adapter
+      .execute({ worker: providerWorker(), envelope, content: 'inspect' })
+      .catch((error: unknown) => error);
+    const stopped = vi.fn();
+    const stop = adapter.stop('worker-1').then(stopped);
+    await Promise.resolve();
+    expect(stopped).not.toHaveBeenCalled();
+    verification.resolve(connection);
+    await stop;
+    expect(await result).toBeInstanceOf(Error);
+    expect(runtime.execute).not.toHaveBeenCalled();
+    expect(fallbackStop).not.toHaveBeenCalled();
+  });
+
   it('does not retain a managed tool session when inherited context exceeds the Worker budget', async () => {
     let outstandingSessions = 0;
     const adapter = new ProviderAwareTeamWorkerRuntime({
@@ -695,6 +833,37 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(result.usage?.toolCalls).toBe(1);
   });
 });
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function controlledProviderAdapter(
+  runtime: ProviderRuntime,
+  overrides: Partial<ProviderTeamWorkerRuntimeDeps> = {},
+): ProviderAwareTeamWorkerRuntime {
+  const registry = new MainProviderRegistry();
+  registry.register({ runtimeKind: 'official_api', providerId: 'openai', runtime });
+  return new ProviderAwareTeamWorkerRuntime({
+    fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+    verification: {
+      requireVerifiedForExecution: async () => connection,
+    } as unknown as ProviderVerificationService,
+    registry,
+    getConnection: () => connection,
+    authorizeEgress: () => true,
+    managerGuidance: '',
+    managerTools: [],
+    workerGuidance: '',
+    workerTools: [],
+    executeManagerTool: vi.fn(),
+    ...overrides,
+  });
+}
 
 function providerWorker(canDelegate = false): AgentRecord {
   return {

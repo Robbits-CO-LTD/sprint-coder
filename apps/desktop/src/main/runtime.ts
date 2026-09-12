@@ -19,6 +19,13 @@ import type { ToolBroker } from './tool-broker';
 import type { ManagedCodingHarness } from './provider-workspace-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { createTeamScenarioSampler, isTeamScenarioFixtureInput } from './team-tools';
+import {
+  createGraphToolFixtureSampler,
+  isGraphToolFixture,
+  GRAPH_SOURCE_FIXTURE_MARKER,
+  GRAPH_MISSION_FIXTURE_MARKER,
+  GRAPH_BOUND_MISSION_FIXTURE_MARKER,
+} from './graph-tool-fixture';
 
 type Publish = (event: TurnEvent) => void;
 type Serialize = <T>(taskId: string, action: () => T) => Promise<T>;
@@ -295,9 +302,17 @@ export class MockRuntimeAdapter {
         workspaceRevision: workspaceBinding.workspaceRevision,
         contractRevision,
         toolCatalogSnapshot,
-        sample: teamFixtureActive
-          ? createTeamScenarioSampler(input)
-          : createDeterministicMockSampler(input, mockReply, mockMode),
+        sample:
+          this.managedHarness !== undefined && isGraphToolFixture(input)
+            ? createGraphToolFixtureSampler(
+                input === GRAPH_SOURCE_FIXTURE_MARKER ||
+                  input === GRAPH_BOUND_MISSION_FIXTURE_MARKER,
+                input === GRAPH_MISSION_FIXTURE_MARKER ||
+                  input === GRAPH_BOUND_MISSION_FIXTURE_MARKER,
+              )
+            : teamFixtureActive
+              ? createTeamScenarioSampler(input)
+              : createDeterministicMockSampler(input, mockReply, mockMode),
         executeTool: async (call) => {
           let result: unknown;
           try {

@@ -82,6 +82,7 @@ export type FinalizeWorktreeResult = Readonly<{
   workerHead: string;
   changedFiles: readonly string[];
 }>;
+export type SealedWorktreeChange = Readonly<{ status: 'A' | 'D' | 'M' | 'T'; path: string }>;
 
 export type IntegrateWorktreeInput = Readonly<{
   repoPath: string;
@@ -147,10 +148,7 @@ export class WorkerWorktreeManager {
     if (rootPaths.length === 0) throw new WorktreeError('invalid_input', 'Workspace has no roots');
     const rootsByRepository = new Map<string, string[]>();
     for (const rootPath of rootPaths) {
-      const result = await this.runGit(rootPath, ['rev-parse', '--show-toplevel'], 'create_failed');
-      const repoPath = await realpath(resolve(result.stdout.trim()));
-      if (!isAbsolute(repoPath))
-        throw new WorktreeError('create_failed', 'Git returned an invalid repository path');
+      const repoPath = await this.resolveRepositoryPath(rootPath);
       const roots = rootsByRepository.get(repoPath) ?? [];
       roots.push(await realpath(resolve(rootPath)));
       rootsByRepository.set(repoPath, roots);
@@ -194,6 +192,15 @@ export class WorkerWorktreeManager {
       );
     }
     return Object.freeze(repositories);
+  }
+
+  /** Resolve the lock namespace without rejecting another integration's temporary working state. */
+  async resolveRepositoryPath(rootPath: string): Promise<string> {
+    const result = await this.runGit(rootPath, ['rev-parse', '--show-toplevel'], 'create_failed');
+    const repoPath = await realpath(resolve(result.stdout.trim()));
+    if (!isAbsolute(repoPath))
+      throw new WorktreeError('create_failed', 'Git returned an invalid repository path');
+    return repoPath;
   }
 
   /** Deterministic worktree directory for an execution or agent. */
@@ -317,7 +324,7 @@ export class WorkerWorktreeManager {
     await this.runGit(worktreePath, ['add', '--all'], 'integration_failed');
     const { stdout: changedOutput } = await this.runGit(
       worktreePath,
-      ['diff', '--cached', '--name-only', '-z', baseHead],
+      ['diff', '--cached', '--no-renames', '--name-only', '-z', baseHead],
       'integration_failed',
     );
     const changedFiles = changedOutput.split('\0').filter((path) => path !== '');
@@ -346,6 +353,61 @@ export class WorkerWorktreeManager {
     if (common.stdout.trim() !== baseHead)
       throw new WorktreeError('integration_failed', 'Worker commit is not based on expected HEAD');
     return { workerHead, changedFiles };
+  }
+
+  /** Inspect immutable commits rather than trusting a Worker report or a mutable worktree. */
+  async readSealedChanges(input: IntegrateWorktreeInput): Promise<readonly SealedWorktreeChange[]> {
+    validateGitHead(input.baseHead);
+    validateGitHead(input.workerHead);
+    const ancestry = await this.runGit(
+      input.repoPath,
+      ['rev-list', '--parents', '-n', '1', input.workerHead],
+      'integration_failed',
+    );
+    const [head, ...parents] = ancestry.stdout.trim().split(' ');
+    if (
+      head !== input.workerHead ||
+      (head !== input.baseHead && (parents.length !== 1 || parents[0] !== input.baseHead))
+    )
+      throw new WorktreeError(
+        'integration_failed',
+        'Worker changes are not a single sealed commit',
+      );
+    const result = await this.runGit(
+      input.repoPath,
+      [
+        '-c',
+        'core.quotePath=true',
+        'diff',
+        '--no-ext-diff',
+        '--no-textconv',
+        '--no-renames',
+        '--name-status',
+        input.baseHead,
+        input.workerHead,
+        '--',
+      ],
+      'integration_failed',
+    );
+    return result.stdout
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const status = line[0];
+        if (
+          line[1] !== '\t' ||
+          (status !== 'A' && status !== 'D' && status !== 'M' && status !== 'T')
+        )
+          throw new WorktreeError('integration_failed', 'Unsupported sealed change status');
+        const path = decodeGitChangePath(line.slice(2).replace(/\r$/u, ''));
+        if (
+          path === '' ||
+          path.split('/').some((part) => part === '' || part === '.' || part === '..') ||
+          path.includes('\0')
+        )
+          throw new WorktreeError('integration_failed', 'Invalid sealed change path');
+        return { status, path };
+      });
   }
 
   /** Integrate onto a clean descendant of baseHead. A failed cherry-pick is always aborted. */
@@ -541,6 +603,55 @@ function isInside(parent: string, child: string): boolean {
     !fromParent.startsWith(`..${sep}`) &&
     !isAbsolute(fromParent)
   );
+}
+
+function decodeGitChangePath(value: string): string {
+  if (!value.startsWith('"')) {
+    if (/[^\x20-\x7e]/u.test(value))
+      throw new WorktreeError('integration_failed', 'Unquoted Git path bytes');
+    return value;
+  }
+  if (!value.endsWith('"'))
+    throw new WorktreeError('integration_failed', 'Invalid quoted Git path');
+  const bytes: number[] = [];
+  const escapes: Record<string, number> = {
+    a: 7,
+    b: 8,
+    t: 9,
+    n: 10,
+    v: 11,
+    f: 12,
+    r: 13,
+    '\\': 92,
+    '"': 34,
+  };
+  for (let i = 1; i < value.length - 1; i++) {
+    const char = value[i]!;
+    if (char !== '\\') {
+      if (char === '"' || char.charCodeAt(0) < 32 || char.charCodeAt(0) >= 127)
+        throw new WorktreeError('integration_failed', 'Invalid quoted Git path');
+      bytes.push(char.charCodeAt(0));
+      continue;
+    }
+    const escaped = value[++i]!;
+    if (i >= value.length - 1)
+      throw new WorktreeError('integration_failed', 'Invalid Git path escape');
+    if (Object.hasOwn(escapes, escaped)) bytes.push(escapes[escaped]!);
+    else {
+      const octal = value.slice(i, i + 3);
+      if (!/^[0-3][0-7]{2}$/u.test(octal))
+        throw new WorktreeError('integration_failed', 'Invalid Git path escape');
+      bytes.push(Number.parseInt(octal, 8));
+      i += 2;
+    }
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+      Uint8Array.from(bytes),
+    );
+  } catch {
+    throw new WorktreeError('integration_failed', 'Git change path is not valid UTF-8');
+  }
 }
 
 function validateWorktreeId(worktreeId: string): void {

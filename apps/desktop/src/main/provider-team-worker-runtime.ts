@@ -67,7 +67,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   }): Promise<{
     tools: readonly ProviderTool[];
     execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>;
-    release(): void;
+    release(): void | Promise<void>;
   }>;
 }>;
 
@@ -91,6 +91,10 @@ function emptyPreparedContext(): PreparedContext {
 
 export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly active = new Map<string, ActiveProviderWorker>();
+  private readonly executions = new Map<
+    string,
+    { controller: AbortController; settled: Promise<void> }
+  >();
 
   constructor(private readonly deps: ProviderTeamWorkerRuntimeDeps) {}
 
@@ -117,11 +121,39 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       builtinRuntimeForModelSelection(input.worker.modelSelection) !== null
     )
       return this.deps.fallback.execute(input);
+    if (this.executions.has(input.worker.id)) throw new Error('Worker execution is already active');
+    const controller = new AbortController();
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const execution = { controller, settled };
+    this.executions.set(input.worker.id, execution);
+    try {
+      return await this.executeProvider({
+        ...input,
+        signal:
+          input.signal === undefined
+            ? controller.signal
+            : AbortSignal.any([input.signal, controller.signal]),
+      });
+    } finally {
+      if (this.executions.get(input.worker.id) === execution)
+        this.executions.delete(input.worker.id);
+      settle();
+    }
+  }
+
+  private async executeProvider(
+    input: Parameters<TeamWorkerRuntime['execute']>[0],
+  ): Promise<WorkerRuntimeResult> {
+    input.signal?.throwIfAborted();
     const connectionId = input.worker.modelSelection.connectionId;
     const modelId = input.worker.modelSelection.requestedModel;
     if (connectionId === null || modelId === null)
       throw new Error('Provider Worker model selection is incomplete');
     const connection = await this.deps.verification.requireVerifiedForExecution(connectionId);
+    input.signal?.throwIfAborted();
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.executionId ?? input.envelope.deliveryId;
@@ -230,9 +262,11 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     });
     let modelLease: ProviderModelLease | undefined;
     try {
+      controller.signal.throwIfAborted();
       const runtime = this.deps.registry.resolve(connection);
       const streamBudget = new ProviderStreamBudget();
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
+        controller.signal.throwIfAborted();
         providerCallCount += 1;
         if (
           !this.deps.authorizeEgress({
@@ -253,6 +287,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             controller.signal,
           );
         else await modelLease.prepare(controller.signal);
+        controller.signal.throwIfAborted();
         const providerExecutionId = providerCallExecutionId(executionId, providerCallCount);
         this.active.set(input.worker.id, {
           executionId: providerExecutionId,
@@ -275,6 +310,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           controller.signal,
           streamBudget,
         )) {
+          controller.signal.throwIfAborted();
           if (event.type === 'output_delta') {
             output.push(event.text);
             roundOutput.push(event.text);
@@ -303,6 +339,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             });
           } else if (event.type === 'completed') completed = true;
         }
+        controller.signal.throwIfAborted();
         if (!completed) throw new Error('Provider Worker stream ended without completion');
         if (reasoningActive) {
           input.onEvent?.({ type: 'reasoningPresence', active: false });
@@ -319,6 +356,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           toolCalls: roundToolCalls,
         });
         for (const toolCall of roundToolCalls) {
+          controller.signal.throwIfAborted();
           toolCallCount += 1;
           input.onEvent?.({
             type: 'activity',
@@ -386,25 +424,38 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         ...(providerUsage === undefined ? {} : { providerUsage }),
       };
     } finally {
-      managedToolSession?.release();
-      await modelLease?.release();
-      clearInterval(heartbeat);
-      input.signal?.removeEventListener('abort', abortFromCaller);
-      if (reasoningActive) input.onEvent?.({ type: 'reasoningPresence', active: false });
-      if (this.active.get(input.worker.id)?.controller === controller)
-        this.active.delete(input.worker.id);
+      try {
+        try {
+          await managedToolSession?.release();
+        } finally {
+          await modelLease?.release();
+        }
+      } finally {
+        clearInterval(heartbeat);
+        input.signal?.removeEventListener('abort', abortFromCaller);
+        if (reasoningActive) input.onEvent?.({ type: 'reasoningPresence', active: false });
+        if (this.active.get(input.worker.id)?.controller === controller)
+          this.active.delete(input.worker.id);
+      }
     }
   }
 
   async stop(agentId: string): Promise<void> {
+    const execution = this.executions.get(agentId);
+    if (execution === undefined) return this.deps.fallback.stop(agentId);
+    execution.controller.abort();
     const active = this.active.get(agentId);
-    if (active === undefined) return this.deps.fallback.stop(agentId);
-    active.controller.abort();
-    await this.deps.registry.resolve(active.connection).cancel(active.executionId);
-    this.active.delete(agentId);
+    try {
+      if (active !== undefined)
+        await this.deps.registry.resolve(active.connection).cancel(active.executionId);
+    } finally {
+      // Cancellation is a request. A tool or stream may still be unwinding after it returns.
+      await execution.settled;
+    }
   }
 
   dispose(): void {
+    for (const execution of this.executions.values()) execution.controller.abort();
     for (const active of this.active.values()) active.controller.abort();
     this.active.clear();
     const disposable = this.deps.fallback as TeamWorkerRuntime & { dispose?: () => void };

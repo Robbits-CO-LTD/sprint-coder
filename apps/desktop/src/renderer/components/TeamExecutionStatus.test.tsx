@@ -46,6 +46,31 @@ function execution(overrides: Partial<TeamExecutionSummary> = {}): TeamExecution
 }
 
 describe('latestExecutionForWorker', () => {
+  it('keeps running work visible above a newer waiter and pending work above completed history', () => {
+    const running = execution({
+      id: 'active',
+      updatedAt: '2026-07-28T01:00:00.000Z',
+      workerQueueDepth: 1,
+    });
+    const queued = execution({
+      id: 'next',
+      state: 'queued',
+      waitingForWorker: true,
+      updatedAt: '2026-07-28T02:00:00.000Z',
+    });
+    const completed = execution({
+      id: 'past',
+      state: 'completed',
+      updatedAt: '2026-07-28T03:00:00.000Z',
+    });
+    expect(latestExecutionForWorker([queued, completed, running], 'worker-1')?.id).toBe('active');
+    expect(latestExecutionForWorker([completed, queued], 'worker-1')?.id).toBe('next');
+    expect(describeExecution(queued).waitReasonLabel).toContain('同じWorker');
+    for (const variant of ['canvas', 'list'] as const)
+      expect(
+        renderToStaticMarkup(<TeamExecutionStatus execution={running} variant={variant} />),
+      ).toContain('後続1件が待機中');
+  });
   it('picks the assignee row with the newest updatedAt', () => {
     const older = execution({ id: 'old', updatedAt: '2026-07-28T01:00:00.000Z' });
     const newer = execution({ id: 'new', updatedAt: '2026-07-28T03:00:00.000Z' });

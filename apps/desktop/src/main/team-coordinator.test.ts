@@ -16,6 +16,7 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import type { AgentRecord, TeamSnapshot } from './persistence';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
+  DeterministicTeamWorkerRuntime,
   TeamCoordinator,
   captureGitWorkspaceFingerprint,
   executeWithWatchdog,
@@ -58,7 +59,82 @@ function removeTemporaryDirectory(
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   for (const directory of cleanup.splice(0)) removeTemporaryDirectory(directory);
+});
+
+describe('DeterministicTeamWorkerRuntime E2E hold', () => {
+  const HOLD = 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT';
+  const run = (
+    runtime: DeterministicTeamWorkerRuntime,
+    events: string[],
+    signal?: AbortSignal,
+  ): Promise<WorkerRuntimeResult> =>
+    runtime.execute({
+      worker: { id: 'worker-store', role: 'store' } as unknown as AgentRecord,
+      envelope: {
+        deliveryId: 'delivery-1',
+        sourceAgentId: 'leader',
+        targetAgentId: 'worker-store',
+      } as unknown as TeamEnvelope,
+      content: '結合確認',
+      onEvent: (event) => events.push(event.type),
+      ...(signal === undefined ? {} : { signal }),
+    });
+
+  it('completes normally while the flag is unset', async () => {
+    const events: string[] = [];
+    await expect(run(new DeterministicTeamWorkerRuntime(), events)).resolves.toMatchObject({
+      completion: { status: 'succeeded' },
+    });
+    expect(events).toEqual(['accepted', 'activity', 'completed']);
+  });
+
+  it('holds after the first activity event and completes once the flag is cleared', async () => {
+    vi.stubEnv(HOLD, '1');
+    const events: string[] = [];
+    const pending = run(new DeterministicTeamWorkerRuntime(), events);
+    await vi.waitFor(() => expect(events).toEqual(['accepted', 'activity']));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(events).toEqual(['accepted', 'activity']);
+    vi.stubEnv(HOLD, '');
+    await expect(pending).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+    expect(events).toEqual(['accepted', 'activity', 'completed']);
+  });
+
+  it('holds only the named role so other Workers still finish', async () => {
+    vi.stubEnv(HOLD, 'store');
+    const other: string[] = [];
+    const runtime = new DeterministicTeamWorkerRuntime();
+    await expect(
+      runtime.execute({
+        worker: { id: 'worker-api', role: 'api' } as unknown as AgentRecord,
+        envelope: {
+          deliveryId: 'delivery-2',
+          sourceAgentId: 'leader',
+          targetAgentId: 'worker-api',
+        } as unknown as TeamEnvelope,
+        content: '実装B',
+        onEvent: (event) => other.push(event.type),
+      }),
+    ).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+    expect(other).toEqual(['accepted', 'activity', 'completed']);
+    const held: string[] = [];
+    const controller = new AbortController();
+    const pending = run(runtime, held, controller.signal);
+    await vi.waitFor(() => expect(held).toEqual(['accepted', 'activity']));
+    controller.abort();
+    await expect(pending).rejects.toThrow('Worker execution stopped');
+    // An aborted hold records no completion: the caller must treat it as an interruption.
+    expect(held).toEqual(['accepted', 'activity']);
+  });
+
+  it('refuses immediately when the signal was already aborted', async () => {
+    vi.stubEnv(HOLD, '1');
+    await expect(
+      run(new DeterministicTeamWorkerRuntime(), [], AbortSignal.abort()),
+    ).rejects.toThrow('Worker execution stopped');
+  });
 });
 
 describe('removeTemporaryDirectory', () => {
@@ -1530,6 +1606,167 @@ if (runsWithElectronAbi)
       );
       persistence.close();
     });
+
+    it.each(['legacy', 'project'] as const)(
+      'serializes legacy Mission and Project integration with %s arriving first',
+      async (firstArrival) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Legacy Task Mission');
+        const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        const projectRoot = join(realpathSync(workspace), 'project');
+        mkdirSync(projectRoot);
+        writeFileSync(join(projectRoot, 'README.md'), 'project base\n');
+        expect(spawnSync('git', ['-C', workspace, 'add', 'project']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'project root',
+          ]).status,
+        ).toBe(0);
+        const project = persistence.createProject({
+          name: 'Nested Project root',
+          folders: [
+            {
+              id: '50000000-0000-4000-8000-000000000003',
+              path: projectRoot,
+              canonicalPath: projectRoot,
+              label: 'project',
+              role: 'primary',
+              workspaceKey: 'd'.repeat(64),
+              rootIdentityDigest: 'e'.repeat(64),
+            },
+          ],
+        });
+        const projectTask = persistence.createTask('Project writer', false, project.id);
+        const runtime = new BlockingDistinctFileRuntime();
+        const execute = runtime.execute.bind(runtime);
+        vi.spyOn(runtime, 'execute').mockImplementation((input) =>
+          input.worker.writeCapable
+            ? execute(input)
+            : TestWorkerRuntime.prototype.execute.call(runtime, input),
+        );
+        const manager = new TrackingIntegrationManager({ worktreesRoot });
+        const scheduler = new TeamIntegrationScheduler();
+        let releaseIntegration!: () => void;
+        const barrier = new Promise<void>((resolve) => {
+          releaseIntegration = resolve;
+        });
+        const integrate = manager.integrate.bind(manager);
+        const integrationCalls = vi
+          .spyOn(manager, 'integrate')
+          .mockImplementation(async (input) => {
+            await barrier;
+            return integrate(input);
+          });
+        const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, scheduler);
+        const writer = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'legacy writer',
+          objective: 'write legacy output',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        const reader = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'reader',
+          objective: 'verify legacy output',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const projectWriter = await coordinator.hireWorker({
+          taskId: projectTask.id,
+          role: 'project writer',
+          objective: 'write project output',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        const mission = await coordinator.assignMission({
+          taskId: task.id,
+          objective: 'legacy Mission concurrent with Project',
+          doneCriteria: ['output verified'],
+          steps: [
+            {
+              workerId: writer.id,
+              objective: 'legacy',
+              doneCriteria: ['legacy.txt exists'],
+              access: 'workspace-write',
+            },
+            {
+              workerId: reader.id,
+              objective: 'verify',
+              doneCriteria: ['verified'],
+              access: 'read-only',
+            },
+          ],
+        });
+        await waitFor(() => runtime.releases.length === 1);
+        const projectExecution = await coordinator.assignTask({
+          taskId: projectTask.id,
+          targetAgentId: projectWriter.id,
+          content: 'project',
+          doneCriteria: ['project.txt exists'],
+          accessMode: 'workspace-write',
+        });
+        await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+        const legacyExecutionId = mission.steps[0]!.executionId;
+        expect(persistence.getTeamExecutionIsolation(legacyExecutionId)).toBeNull();
+        expect(persistence.getTeamMissionWorktree(legacyExecutionId)?.state).toBe('active');
+        expect(persistence.getTeamExecutionIsolation(projectExecution.executionId)?.phase).toBe(
+          'running',
+        );
+        const firstIndex = firstArrival === 'legacy' ? 0 : 1;
+        const executionIds = [legacyExecutionId, projectExecution.executionId];
+        try {
+          runtime.releases[firstIndex]!();
+          await waitFor(() => integrationCalls.mock.calls.length === 1);
+          runtime.releases[1 - firstIndex]!();
+          await waitFor(
+            () =>
+              scheduler.snapshot().queuedExecutionIds.length === 1 ||
+              integrationCalls.mock.calls.length === 2,
+          );
+          expect(scheduler.snapshot()).toEqual({
+            activeExecutionIds: [executionIds[firstIndex]],
+            queuedExecutionIds: [executionIds[1 - firstIndex]],
+          });
+          expect(integrationCalls).toHaveBeenCalledTimes(1);
+        } finally {
+          releaseIntegration();
+        }
+        await waitFor(
+          () =>
+            persistence.getTeamMission(mission.id).state === 'completed' &&
+            persistence.getTeamExecution(projectExecution.executionId).state === 'completed',
+          15_000,
+        );
+        expect(integrationCalls).toHaveBeenCalledTimes(2);
+        expect(manager.maxActiveIntegrations).toBe(1);
+        expect(readFileSync(join(workspace, 'legacy.txt'), 'utf8')).toBe('legacy\n');
+        expect(readFileSync(join(projectRoot, 'project.txt'), 'utf8')).toBe('project\n');
+        expect(spawnSync('git', ['-C', workspace, 'status', '--porcelain']).stdout.toString()).toBe(
+          '',
+        );
+        expect(
+          spawnSync('git', ['-C', workspace, 'rev-list', '--count', 'HEAD']).stdout.toString(),
+        ).toBe('4\n');
+        await waitFor(
+          () =>
+            persistence.getTeamExecutionIsolation(projectExecution.executionId)?.repositories[0]
+              ?.state === 'cleaned' &&
+            persistence.getTeamMissionWorktree(legacyExecutionId)?.state === 'cleaned',
+        );
+        persistence.close();
+      },
+      30_000,
+    );
 
     it('runs concurrent writers whose distinct roots share one repository', async () => {
       const persistence = createPersistence();
@@ -3461,6 +3698,79 @@ if (runsWithElectronAbi)
         details: { requiresRehire: true },
       });
       expect(persistence.getTeamSnapshot(team.id).agents).toHaveLength(2);
+      persistence.close();
+    });
+
+    it('reports Worker admission waits from real queued rows while other Workers run', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Worker admission');
+      const runtime = new BlockingWorkerRuntime();
+      const scheduler = new TeamExecutionScheduler(4);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        120_000,
+        scheduler,
+      );
+      const held = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'held',
+        objective: 'held',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      const other = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'other',
+        objective: 'other',
+        contextInheritancePolicy: 'summary',
+        writeCapable: false,
+      });
+      let releaseFence!: () => void;
+      const fence = new Promise<void>((resolve) => {
+        releaseFence = resolve;
+      });
+      // Models a previous run whose durable result is settled but whose scheduler cleanup is not.
+      scheduler.submit({
+        executionId: 'retiring-run',
+        workerId: held.id,
+        teamId: held.teamId,
+        teamLimit: 4,
+        run: () => fence,
+      });
+      const queued = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: held.id,
+        content: 'held work',
+        doneCriteria: ['runtime completes'],
+      });
+      await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: other.id,
+        content: 'other work',
+        doneCriteria: ['runtime completes'],
+      });
+      await waitFor(() => runtime.contents.includes('other work'));
+      expect(runtime.contents).toEqual(['other work']);
+      expect(
+        coordinator.get(task.id)?.executions.find((row) => row.id === queued.executionId),
+      ).toMatchObject({ state: 'queued', waitingForWorker: true, workerQueueDepth: 1 });
+      expect(
+        coordinator
+          .getForAgent(task.id, held.id)
+          ?.executions.find((row) => row.id === queued.executionId)?.waitingForWorker,
+      ).toBe(true);
+      releaseFence();
+      await waitFor(() => runtime.contents.includes('held work'));
+      expect(
+        coordinator.get(task.id)?.executions.find((row) => row.id === queued.executionId),
+      ).toMatchObject({ state: 'running', waitingForWorker: false, workerQueueDepth: 0 });
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(() =>
+        persistence.listTeamExecutions(held.teamId).every((row) => row.state === 'completed'),
+      );
       persistence.close();
     });
 

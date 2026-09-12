@@ -662,6 +662,8 @@ export type TeamMessageSummary = {
   updatedAt: string;
 };
 export type TeamExecutionSummary = {
+  waitingForWorker?: boolean;
+  workerQueueDepth?: number;
   id: string;
   teamId: string;
   assigneeAgentId: string;
@@ -798,29 +800,7 @@ export type TeamExecutionIsolation = {
   }>;
   reason: string | null;
 };
-export type TeamMissionSummary = {
-  id: string;
-  teamId: string;
-  createdByAgentId: string;
-  state: 'queued' | 'running' | 'waiting_resume' | 'completed' | 'failed' | 'canceled';
-  objective: string;
-  doneCriteria: string[];
-  currentStepOrdinal: number;
-  steps: {
-    ordinal: number;
-    executionId: string;
-    workerId: string;
-    objective: string;
-    doneCriteria: string[];
-    access: 'read-only' | 'workspace-write';
-    state: TeamExecutionSummary['state'];
-    checkpoint: TeamMissionCheckpoint | null;
-    worktree: TeamMissionWorktreeSummary | null;
-  }[];
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-};
+export type TeamMissionSummary = import('@sprint-coder/contracts').TeamMissionSummary;
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];
@@ -855,6 +835,7 @@ export type CanvasViewSaveInput = {
 export type CanvasViewSaveResult = { revision: number };
 
 export interface SprintCoderApi {
+  graphs: import('@sprint-coder/contracts').SprintCoderApi['graphs'];
   computerUse?: import('@sprint-coder/contracts').ComputerUseApi;
   app: {
     getInfo(): Promise<{
