@@ -3235,6 +3235,184 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    artifactIt(
+      'verifies committed Edit Saga post-images on disk so a Turn without a model read-back completes',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const rootId = randomUUID();
+        const rootIdentityDigest = 'a'.repeat(64);
+        const workspacePath = join(dirname(path), 'issue-466-root');
+        const directoryPath = join(workspacePath, 'created');
+        const workspaceFile = join(directoryPath, 'one-line.txt');
+        mkdirSync(workspacePath, { recursive: true });
+        const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
+        const project = persistence.createProject({
+          name: 'issue 466 verification',
+          folders: [
+            {
+              id: rootId,
+              path: workspacePath,
+              canonicalPath: workspacePath,
+              label: 'issue-466-root',
+              role: 'primary',
+              workspaceKey,
+              rootIdentityDigest,
+            },
+          ],
+        });
+        const task = persistence.createTask('create one file', false, project.id);
+        const turn = persistence.startTurn(task.id, 'Project内に1行のファイルを新規作成して');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(dirname(path), 'issue-466-artifacts'),
+          quotaBytes: 4096,
+        });
+        const store = new PersistenceEditSagaStore(persistence);
+        const binding = { rootId, workspacePath, workspaceKey, rootIdentityDigest };
+        const directorySaga = await new EditSagaExecutor(
+          store,
+          directoryBoundary(directoryPath),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'issue-466-directory-lease'),
+        ).apply({
+          id: 'issue-466-directory-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'issue-466-directory-operation',
+          plan: persistedMkdirPlan(directoryPath),
+          mutationBinding: binding,
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+        writeFileSync(workspaceFile, 'before');
+        const fileSaga = await new EditSagaExecutor(
+          store,
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'issue-466-file-lease'),
+        ).apply({
+          id: 'issue-466-file-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'issue-466-file-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          mutationBinding: binding,
+          createdAt: new Date(Date.parse(directorySaga.updatedAt) + 1_000).toISOString(),
+        });
+
+        // Claude Code finishes its Turn straight after the approved write, with no read_file of
+        // its own, so nothing has produced verification evidence yet (issue #466).
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+
+        const createdAt = new Date(Date.parse(fileSaga.updatedAt) + 1_000).toISOString();
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt,
+          }),
+        ).toEqual([]);
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId, producer, trust }) => ({ criterionId, producer, trust }))
+            .sort((left, right) => left.criterionId.localeCompare(right.criterionId)),
+        ).toEqual([
+          {
+            criterionId: `verification:${directorySaga.id}`,
+            producer: 'assurance-controller',
+            trust: 'main-observed',
+          },
+          {
+            criterionId: `verification:${fileSaga.id}`,
+            producer: 'assurance-controller',
+            trust: 'main-observed',
+          },
+        ]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turn.turnId, stage);
+        expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+          type: 'turn.completed',
+          state: 'completed',
+        });
+        // Re-running it is a no-op rather than a second terminal Assurance round.
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt,
+          }),
+        ).toEqual([]);
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'keeps the criterion open when a committed post-image no longer matches on disk',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'an edit that does not survive the Turn');
+        const workspaceFile = join(workspacePath, 'issue-466-clobbered.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'issue-466-clobbered-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'issue-466-clobbered-lease'),
+        ).apply({
+          id: 'issue-466-clobbered-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'issue-466-clobbered-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        writeFileSync(workspaceFile, 'reverted by something else');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+
+        rmSync(workspaceFile);
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        persistence.close();
+      },
+    );
+
     artifactIt('does not infer mkdir ancestry from unsealed original path spellings', async () => {
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();

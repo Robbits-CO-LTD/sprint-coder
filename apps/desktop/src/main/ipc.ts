@@ -311,6 +311,7 @@ import {
   GRAPH_MISSION_SESSION_TURN_PREFIX,
 } from './persistence';
 import {
+  AcceptanceEvidenceMissingError,
   CanvasViewConflictError,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
@@ -371,6 +372,12 @@ const EMPTY_FILE_DIGEST = createHash('sha256').update('').digest('hex');
 const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
 const COMPUTER_USE_QUICK_START_LATCH_TTL_MS = 2_000;
+/**
+ * Shown when the Acceptance Contract refuses a completion: the edits Main could verify are kept,
+ * but at least one file no longer matches what the Edit Saga committed, so the Turn is not complete.
+ */
+const ACCEPTANCE_EVIDENCE_MISSING_MESSAGE =
+  '変更後のファイルを検証できなかったため、Turnを完了として扱えません。ファイルの変更内容を確認してから再試行してください。';
 
 type ProviderImageAttachmentDispatch = Readonly<{
   binding: ProviderImageAttachmentCapabilityBinding;
@@ -5044,16 +5051,6 @@ export class IpcRouter {
     // A turn that ends mid-write leaves its redaction state behind otherwise (issue #39).
     for (const key of this.fileEditByKey.keys())
       if (key.startsWith(`${turnId}\u0000`)) this.fileEditByKey.delete(key);
-    // Back to idle on a clean finish. A failure already pushed its own `failed` status with the
-    // reason attached (see handleRuntimeFailure), and must not be overwritten by an idle here.
-    if (kind !== undefined && kind !== 'provider' && state === 'completed')
-      this.pushRuntimeStatus({
-        kind,
-        state: 'idle',
-        taskId,
-        errorCode: null,
-        userMessage: null,
-      });
     // Before the Turn is finalised, so `image.generated` lands in the event stream ahead of
     // `turn.completed` and the timeline shows the image inside the Turn that produced it.
     this.ingestGeneratedImages(taskId, turnId);
@@ -5071,11 +5068,27 @@ export class IpcRouter {
         resolvedProvider: resolvedProvider ?? null,
         resolvedModel,
       });
-    const completion = this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText);
+    const settled = this.settleTurnCompletion(taskId, turnId, state, finalText);
+    // Back to idle on a clean finish. A Runtime failure already pushed its own `failed` status with
+    // the reason attached (see handleRuntimeFailure) and must not be overwritten by an idle here;
+    // a completion the Acceptance Contract refused has pushed nothing yet, so it states its own.
+    if (kind !== undefined && kind !== 'provider' && state === 'completed')
+      this.pushRuntimeStatus(
+        settled.state === 'completed'
+          ? { kind, state: 'idle', taskId, errorCode: null, userMessage: null }
+          : {
+              kind,
+              state: 'failed',
+              taskId,
+              turnId,
+              errorCode: 'ACCEPTANCE_EVIDENCE_MISSING',
+              userMessage: ACCEPTANCE_EVIDENCE_MISSING_MESSAGE,
+            },
+      );
     this.runtimeDiagnosticContextByTurn.delete(turnId);
-    const event = completion.event;
-    if (completion.task !== null) this.pushTaskUpdated(completion.task);
-    if (state === 'completed') this.commitProjectMemoryCandidates(turnId);
+    const event = settled.completion.event;
+    if (settled.completion.task !== null) this.pushTaskUpdated(settled.completion.task);
+    if (settled.state === 'completed') this.commitProjectMemoryCandidates(turnId);
     else this.pendingProjectMemoriesByTurn.delete(turnId);
     this.publish(
       event.type === 'turn.completed' && resolvedModel !== undefined
@@ -5085,8 +5098,69 @@ export class IpcRouter {
     if (!authorizationTurnIsActive(null, taskId, turnId, this.managedWorkerTurn.values()))
       this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
     this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
-    if (state === 'completed' && pendingTaskTitle !== undefined)
+    if (settled.state === 'completed' && pendingTaskTitle !== undefined)
       void this.generateAndApplyTaskTitle(pendingTaskTitle);
+  }
+
+  /**
+   * Finalises the Turn, taking the Acceptance Contract into account.
+   *
+   * The Turn's write activity has already stopped by the time this runs, so Main re-reads every
+   * committed Edit Saga's sealed post-image here and records the deterministic verification
+   * evidence itself. Before that, the evidence only appeared when the model volunteered a
+   * `read_file` after its edit — Codex does, Claude Code often does not — so a file that was
+   * created exactly as asked still failed its Turn (issue #466).
+   *
+   * A criterion that is genuinely still open (the write was reverted, clobbered, or never landed)
+   * keeps blocking `completed`, which is the gate Standard Assurance is there to provide. What it
+   * must not do is escape as an unhandled exception: the generic `handleRuntimeEvent` catch turned
+   * that into `RUNTIME_PROTOCOL_ERROR` and told the user the Runtime Host had sent an invalid
+   * event, when the event was valid and Main's own completion gate had refused it. Terminalize as
+   * `failed` with the real reason instead.
+   */
+  private settleTurnCompletion(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'failed',
+    finalText?: string,
+  ): {
+    state: 'completed' | 'failed';
+    completion: ReturnType<PersistenceClient['completeTurnAndFinishGoal']>;
+  } {
+    if (state === 'completed')
+      try {
+        const open = this.persistence.verifyCommittedEditSagaPostImages({
+          taskId,
+          turnId,
+          createdAt: new Date().toISOString(),
+        });
+        if (open.length > 0)
+          secureLogger.warn('Turn completion is missing acceptance evidence', {
+            taskId,
+            turnId,
+            openCriterionIds: open,
+          });
+      } catch (error) {
+        secureLogger.error('Edit Saga post-image verification failed', { taskId, turnId, error });
+      }
+    try {
+      return {
+        state,
+        completion: this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText),
+      };
+    } catch (error) {
+      if (!(error instanceof AcceptanceEvidenceMissingError)) throw error;
+      secureLogger.error('Turn completion was refused by the Acceptance Contract', {
+        taskId,
+        turnId,
+        openCriterionIds: error.openCriterionIds,
+        error,
+      });
+      return {
+        state: 'failed',
+        completion: this.persistence.completeTurnAndFinishGoal(taskId, turnId, 'failed', finalText),
+      };
+    }
   }
 
   /**
