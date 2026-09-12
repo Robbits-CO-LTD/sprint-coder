@@ -2,14 +2,36 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, rm, stat, rename, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan } from '@sprint-coder/contracts';
 import { nextGraphDocument } from './graph-document';
 import { workspaceMutationBinding } from './path-guard';
 import { reviewGraphMission, type GraphMissionReviewContext } from './graph-mission-review';
+import type * as DirectoryNameRules from './directory-name-rules';
+import { NativeSafeFsError } from './native-safe-fs';
+import { secureLogger, writeSecureLogEntry, type SecureLogEntry } from './secure-logger';
+
+// The native directory name rules are read for every not-yet-created claim path. A build of the
+// addon that predates them throws instead of answering, which is the whole of Issue #465, so the
+// review must stay fail-closed *and* leave that error's own code somewhere legible.
+const nativeDirectoryRules = vi.hoisted(() => ({ failure: null as Error | null }));
+vi.mock('./directory-name-rules', async (importOriginal) => {
+  const actual = await importOriginal<typeof DirectoryNameRules>();
+  return {
+    ...actual,
+    directoryCaseSensitive: (
+      ...args: Parameters<typeof actual.directoryCaseSensitive>
+    ): boolean => {
+      if (nativeDirectoryRules.failure !== null) throw nativeDirectoryRules.failure;
+      return actual.directoryCaseSensitive(...args);
+    },
+  };
+});
 
 const cleanup: string[] = [];
 afterEach(async () => {
+  nativeDirectoryRules.failure = null;
+  secureLogger.setSink(writeSecureLogEntry);
   for (const root of cleanup.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function fixture() {
@@ -198,6 +220,34 @@ describe('graph Mission reference review', () => {
         (issue) => issue.code === 'root_changed',
       ),
     ).toBe(true);
+  });
+
+  it('logs the guard error code behind a blocked claim path without widening the Issue', async () => {
+    const f = await fixture();
+    const entries: SecureLogEntry[] = [];
+    secureLogger.setSink((entry) => entries.push(entry));
+    nativeDirectoryRules.failure = new NativeSafeFsError(
+      'ADDON_UNAVAILABLE',
+      'Directory name rules are unavailable',
+    );
+    const result = await reviewGraphMission(f.input, f.document, () => f.context);
+    expect(result.summary.matched).toBe(false);
+    expect(result.summary.issues).toContainEqual({
+      code: 'path_unavailable',
+      stepKey: 'b',
+      rootId: 'root',
+      path: 'new/sub/file.ts',
+    });
+    expect(entries.map((entry) => entry.context)).toContainEqual(
+      expect.objectContaining({
+        issue: 'path_unavailable',
+        stepKey: 'b',
+        path: 'new/sub/file.ts',
+        error: expect.objectContaining({ name: 'NativeSafeFsError', code: 'ADDON_UNAVAILABLE' }),
+      }),
+    );
+    // The renderer still learns only the Issue: a review summary never describes the native layer.
+    expect(JSON.stringify(result.summary)).not.toMatch(/ADDON_UNAVAILABLE|NativeSafeFsError/u);
   });
 
   it('resolves an internal directory alias but refuses escaping and dangling aliases', async () => {

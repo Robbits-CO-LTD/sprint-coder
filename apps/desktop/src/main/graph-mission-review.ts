@@ -17,6 +17,7 @@ import {
 import { previewGraphSource } from './graph-source-preview';
 import { canonicalGraphJson } from './graph-document';
 import { directoryCaseSensitive } from './directory-name-rules';
+import { secureLogger } from './secure-logger';
 import {
   prepareGraphWriteFootprint,
   graphWriteConflictPairs,
@@ -78,6 +79,46 @@ export function graphMissionContextDigest(
   return createHash('sha256')
     .update(canonicalGraphJson(graphMissionContextSnapshot(context, workerIds)))
     .digest('hex');
+}
+
+function failureCode(error: unknown): string {
+  const code: unknown =
+    typeof error === 'object' && error !== null ? Reflect.get(error, 'code') : undefined;
+  return typeof code === 'string' ? code : 'unknown';
+}
+
+/** Review folds every preparation failure into one of a few Issue codes, and an Issue is all the
+ * renderer may learn — it must never describe the filesystem or the native layer to the user.
+ * That leaves nobody able to tell a genuinely unusable path from a native layer that cannot
+ * answer directory name rules at all (Issue #465: a native-safe-fs build predating
+ * `directoryCaseSensitive` turned every not-yet-created write claim into `path_unavailable`).
+ * Keep the failing error's own code in the local diagnostic log, beside the Issue it became. */
+function logMissionReviewFailure(
+  event: string,
+  issue: Issue['code'],
+  error: unknown,
+  context: Readonly<{
+    taskId: string;
+    stepKey?: string | null;
+    rootId?: string | null;
+    path?: string | null;
+  }>,
+): void {
+  secureLogger.warn(
+    'Graph Mission review could not prepare a declaration',
+    {
+      issue,
+      stepKey: context.stepKey ?? null,
+      rootId: context.rootId ?? null,
+      path: context.path ?? null,
+      error: {
+        name: error instanceof Error ? error.name : typeof error,
+        code: failureCode(error),
+        message: error instanceof Error ? error.message : String(error),
+      },
+    },
+    { category: 'team', event, taskId: context.taskId },
+  );
 }
 
 /** Resolve declarations using only the Task's current roots. Never create missing directories. */
@@ -205,14 +246,17 @@ export async function reviewGraphMission(
             ...(await bindClaim(root.rootId, root.path, identity, claim.path)),
           });
         } catch (error) {
-          add(
+          const issue =
             error instanceof PathGuardError && error.code === 'IDENTITY_CHANGED'
               ? 'root_changed'
-              : 'path_unavailable',
-            step.key,
-            root.rootId,
-            claim.path,
-          );
+              : 'path_unavailable';
+          logMissionReviewFailure('graph_mission_write_claim_unbound', issue, error, {
+            taskId: input.taskId,
+            stepKey: step.key,
+            rootId: root.rootId,
+            path: claim.path,
+          });
+          add(issue, step.key, root.rootId, claim.path);
         }
       }
       for (const resource of step.resourceClaims) {
@@ -241,7 +285,12 @@ export async function reviewGraphMission(
             scope: 'workspace',
             rootIdentityDigest: bound.rootIdentityDigest,
           });
-        } catch {
+        } catch (error) {
+          logMissionReviewFailure('graph_mission_resource_claim_unbound', 'root_changed', error, {
+            taskId: input.taskId,
+            stepKey: step.key,
+            rootId: resource.rootId,
+          });
           add('root_changed', step.key, resource.rootId);
         }
       }
@@ -260,7 +309,13 @@ export async function reviewGraphMission(
     for (const claim of claims) {
       try {
         writeFootprints.push(await prepareGraphWriteFootprint(claim));
-      } catch {
+      } catch (error) {
+        logMissionReviewFailure('graph_mission_write_footprint_failed', 'state_changed', error, {
+          taskId: input.taskId,
+          stepKey: claim.stepKey,
+          rootId: claim.rootId,
+          path: claim.relativePath,
+        });
         add('state_changed', claim.stepKey, claim.rootId);
         break;
       }
@@ -268,7 +323,11 @@ export async function reviewGraphMission(
     for (const guard of resourceGuards) {
       try {
         await revalidatePathGuard(guard);
-      } catch {
+      } catch (error) {
+        logMissionReviewFailure('graph_mission_resource_guard_stale', 'state_changed', error, {
+          taskId: input.taskId,
+          rootId: guard.rootId,
+        });
         add('state_changed', null, guard.rootId);
         break;
       }
@@ -279,7 +338,11 @@ export async function reviewGraphMission(
       try {
         if ((await workspaceMutationBinding(root.path)).rootIdentityDigest !== root.identity)
           add('root_changed', null, rootId);
-      } catch {
+      } catch (error) {
+        logMissionReviewFailure('graph_mission_root_rebinding_failed', 'root_unavailable', error, {
+          taskId: input.taskId,
+          rootId,
+        });
         add('root_unavailable', null, rootId);
       }
     }
@@ -288,7 +351,13 @@ export async function reviewGraphMission(
   for (const claim of claims) {
     try {
       await revalidatePathGuard(claim.guard);
-    } catch {
+    } catch (error) {
+      logMissionReviewFailure('graph_mission_claim_guard_stale', 'state_changed', error, {
+        taskId: input.taskId,
+        stepKey: claim.stepKey,
+        rootId: claim.rootId,
+        path: claim.relativePath,
+      });
       add('state_changed', claim.stepKey, claim.rootId);
       break;
     }

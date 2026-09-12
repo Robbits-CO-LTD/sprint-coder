@@ -9,6 +9,7 @@ import {
   mkdir,
   rm,
 } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,6 +18,11 @@ import {
   directoryCanonicalUnicode,
   windowsCaseInsensitiveNamesEqual,
 } from './directory-name-rules';
+import {
+  nativeSafeFsAddonPath,
+  nativeSafeFsMissingExports,
+  nativeSafeFsRequiredExports,
+} from './native-safe-fs';
 
 const cleanup: string[] = [];
 afterEach(async () => {
@@ -29,6 +35,18 @@ async function fixture() {
   return { path, identity: { dev: String(info.dev), ino: String(info.ino) } };
 }
 describe('directory name rules', () => {
+  // A build left over from before these exports existed loads and probes exactly like a current
+  // one, so only a call notices — as a product-looking failure far from its cause (Issue #465).
+  it('is only satisfied by an addon build that exports every rule read by name', () => {
+    const addon: unknown = createRequire(__filename)(nativeSafeFsAddonPath());
+    expect(nativeSafeFsMissingExports(addon)).toEqual([]);
+    expect(nativeSafeFsRequiredExports('darwin')).toContain('directoryCanonicalUnicode');
+    expect(nativeSafeFsRequiredExports('win32')).toContain('caseInsensitiveNamesEqual');
+    expect(nativeSafeFsMissingExports({ probe: () => undefined }, 'linux')).toEqual([
+      'directoryCaseSensitive',
+    ]);
+  });
+
   it.skipIf(process.platform !== 'win32')(
     'uses ordinal Windows casing without Unicode expansion',
     () => {
