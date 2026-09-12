@@ -207,6 +207,31 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       await expect(sessions.wait(autoBackgrounded.sessionId, owner)).resolves.toMatchObject({
         state: 'exited',
       });
+
+      // Providers repeat the executable as argv[0] although the tool contract forbids it (#467).
+      // The repetition must never reach the process as its first argument.
+      const repeated = (await broker.dispatch({
+        ...owner,
+        callId: 'exec-repeated-executable',
+        providerName: 'exec_command',
+        input: {
+          executable: '/bin/sh',
+          argv: ['/bin/sh', '-c', 'printf normalized'],
+          purpose: 'repeated executable contract',
+          background: true,
+        },
+      })) as { sessionId: string };
+      await expect(sessions.wait(repeated.sessionId, owner)).resolves.toMatchObject({
+        state: 'exited',
+        result: { exitCode: 0 },
+      });
+      const repeatedSnapshot = (await broker.dispatch({
+        ...owner,
+        callId: 'poll-repeated-executable',
+        providerName: 'poll_command',
+        input: { sessionId: repeated.sessionId },
+      })) as typeof snapshot;
+      expect(repeatedSnapshot.chunks.map(({ text }) => text).join('')).toBe('normalized');
       await broker.dispose();
     });
   },

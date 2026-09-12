@@ -4,7 +4,15 @@ import { readFileSync } from 'node:fs';
 import { stat, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
-import { delimiter, extname, isAbsolute, join, relative, win32 as windowsPath } from 'node:path';
+import {
+  delimiter,
+  extname,
+  isAbsolute,
+  join,
+  posix as posixPath,
+  relative,
+  win32 as windowsPath,
+} from 'node:path';
 import { promisify } from 'node:util';
 import {
   createExecutionSpec,
@@ -30,6 +38,7 @@ import {
   type SealedExecutableIdentity,
 } from './prepared-execution-image';
 import { createStreamingSecretRedactor } from './secret-redactor';
+import { secureLogger } from './secure-logger';
 import {
   assignProcessToOwnedJob,
   closeOwnedJob,
@@ -157,13 +166,32 @@ export async function prepareExecutionSpec(
     executableCanonicalPath,
     allowSourceHardlinks,
   );
+  const requestedArgv = normalizeRepeatedExecutableArgv(
+    input.executable,
+    executableCanonicalPath,
+    input.argv,
+  );
+  if (requestedArgv.removedExecutableArgv !== undefined)
+    secureLogger.warn(
+      'Command argv repeated the executable and was normalized before approval',
+      {
+        requestedExecutable: input.executable,
+        canonicalExecutable: executableCanonicalPath,
+        // Only the dropped executable spelling is recorded. The remaining arguments can carry
+        // caller-supplied values, and the approval record already keeps the authorized argv.
+        removedArgv0: requestedArgv.removedExecutableArgv,
+        argvLengthBefore: input.argv.length,
+        argvLengthAfter: requestedArgv.argv.length,
+      },
+      { event: 'command_argv_executable_normalized' },
+    );
   const spec = createExecutionSpec({
     absoluteExecutable: executableCanonicalPath,
     executionIdentityDigest: sealedExecutableIdentityDigest(executableIdentity),
     argv: normalizeTrustedWindowsCmdArgv(
       executableCanonicalPath,
       trustedWindowsSystemDirectory,
-      input.argv,
+      requestedArgv.argv,
     ),
     cwdIdentity: {
       canonicalPath: pathGuard.resolvedPath,
@@ -232,6 +260,52 @@ async function isTrustedWindowsMultiLinkExecutable(
     trustedSystemDirectory ?? (await realpath(getTrustedWindowsSystemDirectory()));
   const childPath = relative(systemDirectory, canonicalPath);
   return childPath !== '' && !childPath.startsWith('..') && !isAbsolute(childPath);
+}
+
+export type RepeatedExecutableArgv = Readonly<{
+  argv: readonly string[];
+  removedExecutableArgv: string | undefined;
+}>;
+
+// Providers repeat the executable as argv[0] even though the managed tool contract requires
+// arguments only. CommandRunner spawns `[launchPath, ...argvPrefix, ...spec.argv]`, so the repeated
+// spelling would reach the process as its first real argument: `/usr/bin/tee` with
+// `["tee", "out"]` created a file literally named `tee`, and `/bin/echo` with `["/bin/echo", "x"]`
+// printed the executable back. Dropping the one leading repetition here — before the ExecutionSpec
+// (and therefore its digest, the approval card, and the persisted command row) exists — keeps the
+// approved argv identical to the argv that is spawned.
+//
+// Only argv[0] is examined, and only when it spells this executable. A different leading
+// executable name (`env`-style wrappers, or an executable passed deliberately as a later argument)
+// is left untouched.
+export function normalizeRepeatedExecutableArgv(
+  requestedExecutable: string,
+  canonicalExecutable: string,
+  argv: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): RepeatedExecutableArgv {
+  const first = argv[0];
+  if (first === undefined || first.length < 1) return { argv, removedExecutableArgv: undefined };
+  const paths = platform === 'win32' ? windowsPath : posixPath;
+  const fold = (value: string): string =>
+    platform === 'win32' ? windowsPath.normalize(value).toLowerCase() : value;
+  const spellings = new Set<string>();
+  for (const executable of [requestedExecutable, canonicalExecutable]) {
+    if (executable.length < 1) continue;
+    spellings.add(fold(executable));
+    const base = paths.basename(executable);
+    if (base.length < 1) continue;
+    spellings.add(fold(base));
+    // A bare Windows name resolves through PATH with `.exe`/`.com` appended, so the provider's
+    // extension-less spelling is the same repetition as the sealed `node.exe`.
+    if (platform === 'win32') {
+      const extension = windowsPath.extname(base);
+      if (extension.length > 0 && extension.length < base.length)
+        spellings.add(fold(base.slice(0, -extension.length)));
+    }
+  }
+  if (!spellings.has(fold(first))) return { argv, removedExecutableArgv: undefined };
+  return { argv: argv.slice(1), removedExecutableArgv: first };
 }
 
 export function normalizeTrustedWindowsCmdArgv(

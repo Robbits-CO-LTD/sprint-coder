@@ -7352,6 +7352,72 @@ if (runsWithElectronAbi)
     );
 
     commandExecutionIt(
+      'authorizes and runs one executable when the provider repeats it in argv',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.setWorkspace(task.id, join(path, '..'));
+        const started = startExecutingTurn(persistence, task.id);
+        let authorizedInput: unknown;
+        const broker = createDefaultToolBroker(
+          () => persistence.getPermissionPolicy(task.id).policyEpoch,
+          (request) => {
+            authorizedInput = request.input;
+            return { decision: 'allow', reason: 'integration_test' };
+          },
+          { persistence, publish: () => undefined },
+        );
+        startMockTurnCatalog(broker, {
+          taskId: task.id,
+          turnId: started.turnId,
+          workspaceId: 'workspace-1',
+          policyEpoch: 0,
+        });
+
+        let result: { exitCode: number };
+        try {
+          result = (await broker.dispatch({
+            taskId: task.id,
+            turnId: started.turnId,
+            callId: 'command-repeated-executable',
+            providerName: 'run_command',
+            input: {
+              executable: '/usr/bin/printf',
+              // Providers repeat the executable even though the tool contract forbids it (#467).
+              argv: ['printf', 'command-ok\\n'],
+              cwd: '.',
+              purpose: '実行ファイル名の重複を確認します',
+            },
+          })) as { exitCode: number };
+        } catch (error) {
+          persistence.close();
+          throw error;
+        }
+
+        expect(result.exitCode).toBe(0);
+        // The approval card is rendered from this sealed spec, so it must already be the argv that
+        // is spawned: one `/usr/bin/printf`, never `printf printf command-ok`.
+        expect(authorizedInput).toMatchObject({
+          absoluteExecutable: '/usr/bin/printf',
+          argv: ['command-ok\\n'],
+        });
+        const [command] = persistence.listCommands(task.id);
+        expect(command).toMatchObject({
+          executable: '/usr/bin/printf',
+          argv: ['command-ok\\n'],
+          state: 'exited',
+        });
+        expect(
+          persistence
+            .listCommandOutput(command!.id)
+            .map(({ text }) => text)
+            .join(''),
+        ).toBe('command-ok\n');
+        persistence.close();
+      },
+    );
+
+    commandExecutionIt(
       'resolves command cwd from the sealed Turn roots after Workspace changes',
       async () => {
         const { persistence, path } = createPersistence();
