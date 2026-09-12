@@ -33,14 +33,11 @@
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/" />
     <meta
       property="og:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
     <meta property="og:image:width" content="1600" />
     <meta property="og:image:height" content="1000" />
-    <meta
-      property="og:image:alt"
-      content="Sprint Coderで複数のAI Workerへ開発タスクを分担している画面"
-    />
+    <meta property="og:image:alt" content="Sprint Coder — 一人のAIから、動くAI Teamへ。" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Sprint Coder | 一人のAIから、動くAI Teamへ。" />
     <meta
@@ -49,10 +46,10 @@
     />
     <meta
       name="twitter:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png"
+      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
     />
 
-    <link rel="stylesheet" href="/styles.css?v=20260912-1" />
+    <link rel="stylesheet" href="/styles.css?v=20260912-2" />
     <script>
       if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         document.documentElement.classList.add('js');
@@ -313,7 +310,9 @@
 
                 <aside class="sw-team">
                   <div class="sw-team-head">
-                    <span>active · Worker 3人</span><b data-on="done">すべて完了</b>
+                    <b class="swap" data-on="done"
+                      ><span>active · Worker 3人</span><span>completed · Worker 3人</span></b
+                    >
                   </div>
 
                   <div class="worker" data-state-phase="w1">
@@ -332,6 +331,10 @@
                       <div>
                         <dt>TOKENS</dt>
                         <dd data-count="4812" data-phase="w1">4,812</dd>
+                      </div>
+                      <div>
+                        <dt>時間</dt>
+                        <dd data-count="38" data-phase="w1" data-suffix="s">38s</dd>
                       </div>
                       <div>
                         <dt>TOOLS</dt>
@@ -358,6 +361,10 @@
                         <dd data-count="12304" data-phase="w2">12,304</dd>
                       </div>
                       <div>
+                        <dt>時間</dt>
+                        <dd data-count="74" data-phase="w2" data-suffix="s">74s</dd>
+                      </div>
+                      <div>
                         <dt>TOOLS</dt>
                         <dd data-count="19" data-phase="w2">19</dd>
                       </div>
@@ -380,6 +387,10 @@
                       <div>
                         <dt>TOKENS</dt>
                         <dd data-count="3177" data-phase="w3">3,177</dd>
+                      </div>
+                      <div>
+                        <dt>時間</dt>
+                        <dd data-count="21" data-phase="w3" data-suffix="s">21s</dd>
                       </div>
                       <div>
                         <dt>TOOLS</dt>
@@ -474,8 +485,7 @@
                     </div>
                     <div class="cp-policy" data-on="policy">
                       <small>ACCESS</small>
-                      <span class="is-picked">確認する</span><span>自動</span
-                      ><span>フルアクセス</span>
+                      <span class="is-picked">確認する</span><span>自動</span><span>フル</span>
                     </div>
                     <div class="cp-approve" data-on="ok">
                       <span class="cp-btn">許可して実行</span>
@@ -810,7 +820,7 @@
     </footer>
 
     <script
-      src="/story.js?v=20260912-1"
+      src="/story.js?v=20260912-2"
       onerror="document.documentElement.classList.remove('js')"
     ></script>
   </body>
