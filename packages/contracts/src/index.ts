@@ -1707,6 +1707,15 @@ export const approvalDecisionSchema = z.enum(['allow_once', 'allow_task', 'deny'
 export type ApprovalDecision = z.infer<typeof approvalDecisionSchema>;
 export const approvalStateSchema = z.enum(['pending', 'resolved', 'canceled', 'stale', 'expired']);
 export type ApprovalState = z.infer<typeof approvalStateSchema>;
+/**
+ * Upper bound on live-only approval detail.
+ *
+ * Sized for the largest card a `write_stdin` approval can produce: every one of its 2,048 accepted
+ * characters escaped to its longest visible form (8 characters each), plus the command line, cwd,
+ * session id and digest header. Producers validate against this before an approval is created.
+ */
+export const APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS = 20_480;
+
 export const approvalSummarySchema = z
   .object({
     id: idSchema,
@@ -1722,6 +1731,21 @@ export const approvalSummarySchema = z
     target: z.string().min(1).max(500),
     impact: z.string().min(1).max(500),
     execution: z.string().min(1).max(100_000),
+    /**
+     * Live-only detail for a pending approval, never written to the approval row or the persisted
+     * `approval.requested` event. It carries the exact bytes a decision is being made about — the
+     * characters a `write_stdin` call would send — which must reach the card in full but must not
+     * survive the decision in plaintext (Issue #473). Absent on anything replayed from storage.
+     *
+     * A value over this bound is refused as a tool error before the approval exists. Parsing the
+     * event is what delivers the card, so a payload the schema rejects would leave a Turn waiting
+     * on an approval nobody can see — the producer must stay inside the bound, never discover it.
+     */
+    ephemeralExecution: z
+      .string()
+      .min(1)
+      .max(APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS)
+      .optional(),
     risk: toolRiskSchema,
     capability: toolCapabilitySchema,
     challenge: z.string().min(8).max(256),

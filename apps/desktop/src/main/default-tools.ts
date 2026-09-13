@@ -19,6 +19,12 @@ import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
 import type { ManagedCommandSessions } from './managed-command-sessions';
+import {
+  assertManagedStdinSize,
+  createManagedStdinRequest,
+  MANAGED_STDIN_MAX_CHARACTERS,
+  type ManagedStdinRequest,
+} from './managed-command-stdin';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
@@ -111,8 +117,10 @@ function managedCommandControlTool(
   return createToolDefinition({
     toolId: createToolId({ provider: 'builtin', namespace: 'command', name, version: '1' }),
     providerName,
-    // These calls can only address a random, Task/Turn-bound session that was already authorized
-    // by exec_command. They do not mint new process authority, so ownership is the boundary.
+    // Polling output and stopping a session can only address a random, Task/Turn-bound session
+    // that exec_command already authorized. Reading and stopping mint no new process authority,
+    // so ownership is the boundary. Writing stdin does mint it and is defined separately
+    // (WRITE_STDIN_TOOL, Issue #473).
     kind: 'search',
     schemaVersion: 1,
     inputSchema: { type: 'object', properties, required, additionalProperties: false },
@@ -134,18 +142,50 @@ export const POLL_COMMAND_TOOL = managedCommandControlTool(
   { sessionId: { type: 'string' }, afterSeq: { type: 'integer', minimum: 0 } },
   ['sessionId'],
 );
-export const WRITE_STDIN_TOOL = managedCommandControlTool(
-  'write-stdin',
-  'write_stdin',
-  { sessionId: { type: 'string' }, chars: { type: 'string' }, close: { type: 'boolean' } },
-  ['sessionId', 'chars'],
-);
 export const TERMINATE_COMMAND_TOOL = managedCommandControlTool(
   'terminate',
   'terminate_command',
   { sessionId: { type: 'string' } },
   ['sessionId'],
 );
+
+/**
+ * Unlike `poll_command` and `terminate_command`, writing stdin is not a read or a stop: the bytes
+ * become part of what the process does, and for `tee`, `python3`, `node`, `sh -s` or `xargs` they
+ * are the instructions themselves. Ownership of the session is therefore not the boundary
+ * (Issue #473) — the write carries the same `shell.execute` authority as the command it feeds, so
+ * `ask` shows a card, `auto` refuses it as high risk with an audit row, and `full` allows it.
+ */
+export const WRITE_STDIN_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'command',
+    name: 'write-stdin',
+    version: '1',
+  }),
+  providerName: 'write_stdin',
+  kind: 'shell',
+  schemaVersion: 1,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      sessionId: { type: 'string' },
+      chars: { type: 'string', maxLength: MANAGED_STDIN_MAX_CHARACTERS },
+      close: { type: 'boolean' },
+    },
+    required: ['sessionId', 'chars'],
+    additionalProperties: false,
+  },
+  outputSchema: { type: 'object' },
+  sideEffect: 'process',
+  risk: 'high',
+  requiredCapabilities: ['shell.execute'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'any' },
+  providerCompatibility: ['*'],
+});
 
 export const UPDATE_PLAN_TOOL = createToolDefinition({
   toolId: createToolId({
@@ -626,15 +666,29 @@ export function registerManagedCommandControlTools(
   broker.registerImplementation({
     toolId: WRITE_STDIN_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (input, context) => {
+    // The session's command is resolved before authorization so the approval card names the
+    // process the bytes reach. Ownership is checked here too: a session this Turn does not own
+    // is refused before any card is raised.
+    prepare: (input, context) => {
       const request = input as { sessionId: string; chars: string; close?: boolean };
+      // Size first: the pinned schema advertises the cap but does not enforce string bounds, and a
+      // value the card could not show in full must never reach an approval (Issue #473).
+      assertManagedStdinSize(request.chars);
+      return createManagedStdinRequest({
+        chars: request.chars,
+        close: request.close === true,
+        command: sessions.commandIdentity(request.sessionId, context),
+      });
+    },
+    // Writes to one session serialize with each other and contend with nothing else. The default
+    // claim would be a Workspace-wide write, which this is not: the bytes go to one process.
+    resourceClaims: (input) => [
+      { key: `command-stdin:${(input as ManagedStdinRequest).sessionId}`, mode: 'write' },
+    ],
+    execute: (input, context) => {
+      const request = input as ManagedStdinRequest;
       return {
-        written: sessions.writeStdin(
-          request.sessionId,
-          context,
-          request.chars,
-          request.close === true,
-        ),
+        written: sessions.writeStdin(request.sessionId, context, request.chars, request.close),
       };
     },
   });

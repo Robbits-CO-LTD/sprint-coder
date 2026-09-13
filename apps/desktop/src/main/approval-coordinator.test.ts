@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,8 +26,41 @@ import { FileRevisionRegistry } from './file-revision';
 import {
   REQUEST_USER_INPUT_TOOL,
   UPDATE_PLAN_TOOL,
+  WRITE_STDIN_TOOL,
   registerManagedControlTools,
 } from './default-tools';
+import {
+  createManagedStdinRequest,
+  managedStdinContentMac,
+  MANAGED_STDIN_MAX_CHARACTERS,
+  type ManagedStdinRequest,
+} from './managed-command-stdin';
+import {
+  APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS,
+  approvalSummarySchema,
+} from '@sprint-coder/contracts';
+
+/** Shape-complete approval used only to prove a produced card survives the published contract. */
+const pendingApprovalFixture = {
+  id: 'approval-contract-probe',
+  taskId: 'task-1',
+  turnId: 'turn-1',
+  callId: 'call-1',
+  state: 'pending' as const,
+  decision: null,
+  revision: 0,
+  policyEpoch: 7,
+  toolName: 'write_stdin',
+  reason: 'provider_command_requires_explicit_approval',
+  target: 'stdin → /usr/bin/tee notes.txt (session session-1)',
+  impact: 'process',
+  execution: '{"tool":"write_stdin"}',
+  risk: 'high' as const,
+  capability: 'shell.execute' as const,
+  challenge: 'challenge-value',
+  createdAt: '2026-08-18T00:00:00.000Z',
+  expiresAt: '2026-08-18T01:00:00.000Z',
+};
 
 const NOW = '2026-07-22T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-22T13:00:00.000Z';
@@ -50,7 +83,10 @@ type StoredApproval = {
   decision: Decision | null;
   expiresAt: string;
   display?: { target: string; impact: string; execution: string };
+  /** Live-only card detail. The real client drops this before writing anything durable. */
+  ephemeralExecution?: string;
   sandboxProfile?: 'read-only' | 'workspace-write' | 'full';
+  risk?: 'low' | 'medium' | 'high';
 };
 
 type StoredGrant = {
@@ -847,5 +883,191 @@ describe('ApprovalCoordinator', () => {
     harness.coordinator.resolve(resolveCommand(second, 'allow_once'));
     await expect(dispatch).resolves.toEqual({ ok: true });
     expect(executions()).toBe(1);
+  });
+});
+/**
+ * `exec_command` spawns with stdin open, so anything written afterwards is part of what the
+ * approved command actually does. The write is approved on its own card, and that card has to
+ * carry both the process it reaches and every character being sent (Issue #473).
+ */
+describe('managed command stdin approval', () => {
+  const command = {
+    sessionId: 'session-1',
+    executable: '/usr/bin/tee',
+    argv: ['notes.txt'],
+    cwd: '/workspace',
+  };
+
+  function createStdinBroker(
+    authorize: (
+      request: ToolAuthorizationRequest,
+    ) => ReturnType<ApprovalCoordinator['authorizeTool']>,
+  ) {
+    const registry = new ToolRegistry();
+    registry.register(WRITE_STDIN_TOOL);
+    const broker = new ToolBroker(registry, () => 7, authorize);
+    const written: string[] = [];
+    broker.registerImplementation({
+      toolId: WRITE_STDIN_TOOL.toolId,
+      implementationKind: 'built-in',
+      prepare: (input) =>
+        createManagedStdinRequest({
+          chars: (input as { chars: string }).chars,
+          close: (input as { close?: boolean }).close === true,
+          command,
+        }),
+      execute: (input) => {
+        written.push((input as ManagedStdinRequest).chars);
+        return { written: true };
+      },
+    });
+    return { broker, written };
+  }
+
+  function dispatchStdin(
+    broker: ToolBroker,
+    callId: string,
+    input: { sessionId: string; chars: string; close?: boolean },
+  ) {
+    return broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId,
+      providerName: 'write_stdin',
+      input,
+    });
+  }
+
+  it('shows every character live, keeps none of them durable, and writes nothing on a denial', async () => {
+    const harness = createHarness();
+    const { broker, written } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    // Both dangerous and secret: the card must show all of it, and the durable record must keep
+    // neither the command nor the password.
+    const chars = 'echo "# harmless comment"\npassword=hunter2-do-not-store\nrm -rf .\n';
+    const dispatch = dispatchStdin(broker, 'call-stdin-denied', {
+      sessionId: 'session-1',
+      chars,
+      close: true,
+    });
+    const approval = await waitForPublished(harness);
+
+    expect(approval.capabilities).toEqual(['shell.execute']);
+    expect(approval.risk).toBe('high');
+    expect(approval.sandboxProfile).toBe('full');
+    expect(approval.display?.target).toContain('/usr/bin/tee notes.txt');
+
+    // The live card carries the exact bytes, in full, under the same keyed identity the audit
+    // record stores — so a user can match the card they approved to the row it left behind.
+    expect(approval.ephemeralExecution).toContain('password=hunter2-do-not-store');
+    expect(approval.ephemeralExecution).toContain('rm -rf .');
+    expect(approval.ephemeralExecution).toContain(`mac=${managedStdinContentMac(chars)}`);
+
+    // The durable projection identifies those bytes and carries no secret.
+    const execution = JSON.parse(approval.display!.execution) as Record<string, unknown>;
+    expect(execution).toMatchObject({
+      tool: 'write_stdin',
+      sessionId: 'session-1',
+      executable: '/usr/bin/tee',
+      argv: ['notes.txt'],
+      close: true,
+      charsBytes: Buffer.byteLength(chars, 'utf8'),
+      charsMac: managedStdinContentMac(chars),
+    });
+    // Nothing an offline guess could confirm: the plain hash of the characters appears nowhere.
+    expect(approval.display!.execution).not.toContain(
+      createHash('sha256').update(chars, 'utf8').digest('hex'),
+    );
+    // No excerpt at all, redacted or otherwise: a bare password for `sudo -S` reads as ordinary
+    // text and no scanner would catch it.
+    expect(execution).not.toHaveProperty('chars');
+    expect(execution).not.toHaveProperty('charsPreview');
+    for (const fragment of ['hunter2', 'password', 'rm -rf', 'harmless'])
+      expect(approval.display!.execution).not.toContain(fragment);
+
+    harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+    await expect(dispatch).rejects.toThrow('Tool authorization deny');
+    expect(written).toEqual([]);
+  });
+
+  it('delivers the largest accepted write as a card the approval contract accepts', async () => {
+    // Escaping multiplies length, so the worst legal input — every character a bidi override —
+    // must still fit the event payload bound. A card over it would be dropped by `safeParse`
+    // after the approval row and the waiter already exist, leaving the Turn waiting on a card
+    // nobody can see.
+    const harness = createHarness();
+    const { broker } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const chars = '\u202e'.repeat(MANAGED_STDIN_MAX_CHARACTERS);
+    const dispatch = dispatchStdin(broker, 'call-stdin-worst-case', {
+      sessionId: 'session-1',
+      chars,
+    });
+    const approval = await waitForPublished(harness);
+
+    expect(approval.ephemeralExecution!.length).toBeLessThanOrEqual(
+      APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS,
+    );
+    expect(
+      approvalSummarySchema.safeParse({
+        ...pendingApprovalFixture,
+        ephemeralExecution: approval.ephemeralExecution,
+      }).success,
+    ).toBe(true);
+    expect(approval.ephemeralExecution).toContain('\\x{202E}'.repeat(4));
+
+    harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+    await expect(dispatch).rejects.toThrow('Tool authorization deny');
+  });
+
+  it('refuses a write the card could not show in full, before any approval is raised', async () => {
+    const harness = createHarness();
+    const { broker, written } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+
+    await expect(
+      dispatchStdin(broker, 'call-stdin-oversized', {
+        sessionId: 'session-1',
+        chars: `${'a'.repeat(MANAGED_STDIN_MAX_CHARACTERS)}\nrm -rf .`,
+      }),
+    ).rejects.toMatchObject({
+      name: 'ManagedStdinRejection',
+      code: 'STDIN_TOO_LARGE',
+      message: expect.stringContaining('Split the input into consecutive write_stdin calls'),
+    });
+    expect(harness.published).toHaveLength(0);
+    expect(harness.persistence.approvals.size).toBe(0);
+    expect(written).toEqual([]);
+  });
+
+  it('writes the exact characters once approved, with nothing hidden on the card', async () => {
+    const harness = createHarness();
+    const { broker, written } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    // A carriage return can overwrite the line before it and a bidi override can reorder what is
+    // drawn, so neither may reach the card as itself.
+    const chars = 'safe\n\u001b[2K\r\u202erm -rf .\n';
+    const dispatch = dispatchStdin(broker, 'call-stdin-allowed', {
+      sessionId: 'session-1',
+      chars,
+    });
+    const approval = await waitForPublished(harness);
+
+    expect(approval.ephemeralExecution).toContain('\\x{1B}[2K\\x{0D}\\x{202E}rm -rf .');
+    // Newlines stay newlines: the card renders them, so escaping them would only hurt legibility.
+    expect(approval.ephemeralExecution).toContain('safe\n');
+    expect(written).toEqual([]);
+
+    harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+    await expect(dispatch).resolves.toEqual({ written: true });
+    expect(written).toEqual([chars]);
   });
 });

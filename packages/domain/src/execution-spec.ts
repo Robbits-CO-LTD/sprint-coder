@@ -11,7 +11,13 @@ export type ExecutionSpec = Readonly<{
     identityDigest: string;
   }>;
   envDelta: Readonly<Record<string, string>>;
-  stdinMode: 'closed';
+  /**
+   * `approved-writes`: the process keeps a writable stdin after spawn. Nothing is ever written
+   * without its own approval — `write_stdin` carries `shell.execute` and is approved per call
+   * (Issue #473). `closed` is retained only so historical specs stay readable; CommandRunner
+   * never issues it, because the spawn it performs has always kept stdin writable.
+   */
+  stdinMode: 'approved-writes' | 'closed';
   shell: 'none';
   commandBytesHash: string;
 }>;
@@ -35,7 +41,8 @@ export function createExecutionSpec(input: ExecutionSpecInput): ExecutionSpec {
     throw new Error('ExecutionSpec cwd identity digest is invalid');
   if (!DIGEST.test(input.executionIdentityDigest))
     throw new Error('ExecutionSpec execution identity digest is invalid');
-  if (input.stdinMode !== 'closed') throw new Error('ExecutionSpec stdin mode is unsupported');
+  if (input.stdinMode !== 'approved-writes' && input.stdinMode !== 'closed')
+    throw new Error('ExecutionSpec stdin mode is unsupported');
   if (input.shell !== 'none') throw new Error('ExecutionSpec shell mode is unsupported');
 
   const envDelta: Record<string, string> = {};

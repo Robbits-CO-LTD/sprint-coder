@@ -174,6 +174,12 @@ export type ApprovalSummary = {
   target: string;
   impact: string;
   execution: string;
+  /**
+   * Live-only detail for a pending approval, never stored. Present when the decision is about
+   * bytes the user must read in full — the characters a `write_stdin` call would send — which the
+   * durable record keeps only as a digest and a redacted preview (Issue #473).
+   */
+  ephemeralExecution?: string;
   risk: 'low' | 'medium' | 'high';
   capability: Capability;
   challenge: string;

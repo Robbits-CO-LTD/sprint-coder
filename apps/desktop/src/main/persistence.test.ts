@@ -29,6 +29,12 @@ import {
 } from '@sprint-coder/domain';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
+import {
+  createManagedStdinRequest,
+  managedStdinApprovalExecution,
+  managedStdinApprovalTarget,
+  managedStdinEphemeralExecution,
+} from './managed-command-stdin';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
@@ -94,8 +100,10 @@ import {
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 // The bridge runs the full SQLite integration suite in a child Electron process. Native startup,
-// the Windows-only Job Object case, and hosted-runner contention can exceed a short timeout.
-const persistenceBridgeTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
+// the Windows-only Job Object case, and hosted-runner contention can exceed a short timeout: the
+// suite passed the 60 s mark on hosted macOS and Linux runners once it grew past ~190 cases
+// (PR #471 / #474), so every platform gets the same generous budget.
+const persistenceBridgeTimeoutMs = 180_000;
 const artifactIt = it.skipIf(process.platform === 'win32');
 const commandExecutionIt = it.skipIf(process.platform === 'win32');
 const windowsCommandGateIt = it.runIf(process.platform === 'win32');
@@ -6778,6 +6786,72 @@ if (runsWithElectronAbi)
           .get(task.id),
       ).toEqual({ type: 'approval.requested' });
       inspection.close();
+      persistence.close();
+    });
+
+    it('keeps live-only approval detail out of the row, the event, and every later read', () => {
+      // A stdin write is approved on its exact characters, which can be a password or a token. The
+      // card needs all of them; nothing durable may keep any of them (Issue #473).
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const secret = 'export DB_PASSWORD=hunter2-do-not-store';
+      const request = createManagedStdinRequest({
+        chars: secret,
+        close: true,
+        command: {
+          sessionId: 'session-1',
+          executable: '/bin/sh',
+          argv: ['-s'],
+          cwd: '/workspace',
+        },
+      });
+
+      const requested = persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          display: {
+            target: managedStdinApprovalTarget(request),
+            impact: 'process',
+            execution: JSON.stringify(managedStdinApprovalExecution(request)),
+          },
+          ephemeralExecution: managedStdinEphemeralExecution(request),
+        }),
+      );
+
+      expect(requested.approval.ephemeralExecution).toContain(secret);
+      expect(
+        (requested.event as { approval: { ephemeralExecution?: string } }).approval
+          .ephemeralExecution,
+      ).toContain(secret);
+
+      const inspection = new Database(path, { readonly: true });
+      const stored = inspection
+        .prepare('SELECT display_json FROM approvals WHERE id = ?')
+        .get('approval-1') as { display_json: string };
+      const approvalRow = inspection
+        .prepare('SELECT spec_digest FROM approvals WHERE id = ?')
+        .get('approval-1') as { spec_digest: string };
+      const events = inspection
+        .prepare('SELECT payload_json FROM turn_events WHERE task_id = ?')
+        .all(task.id) as { payload_json: string }[];
+      inspection.close();
+
+      // Not one fragment of it, anywhere durable — and no unkeyed digest of it either, because a
+      // plain hash stored beside a byte count lets a held database confirm a guessed password.
+      for (const fragment of [
+        'hunter2',
+        'DB_PASSWORD',
+        'export DB',
+        'ephemeralExecution',
+        createHash('sha256').update(secret, 'utf8').digest('hex'),
+      ]) {
+        expect(stored.display_json).not.toContain(fragment);
+        expect(approvalRow.spec_digest).not.toContain(fragment);
+        for (const event of events) expect(event.payload_json).not.toContain(fragment);
+      }
+      // The reads the Renderer uses for pending state and history never revive it either.
+      expect(persistence.listPendingApprovals(task.id)[0]?.ephemeralExecution).toBeUndefined();
+      expect(persistence.listRecentApprovals(task.id)[0]?.ephemeralExecution).toBeUndefined();
       persistence.close();
     });
 

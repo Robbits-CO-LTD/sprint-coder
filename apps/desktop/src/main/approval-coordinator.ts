@@ -16,6 +16,12 @@ import {
   workspaceToolAuthorizationGuard,
   workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
+import {
+  managedStdinApprovalExecution,
+  managedStdinApprovalTarget,
+  managedStdinAuthorizationFacts,
+  managedStdinEphemeralExecution,
+} from './managed-command-stdin';
 
 type ApprovalLike = {
   id: string;
@@ -93,7 +99,11 @@ export function sandboxProfileForToolAuthorization(
   implementationKind: ToolAuthorizationRequest['entry']['implementationKind'],
   capability: Capability,
 ) {
-  if (implementationKind === 'command-runner') return 'full' as const;
+  // `shell.execute` is recorded as `full` whoever implements it. A built-in that feeds a running
+  // process (write_stdin, Issue #473) hands over the same authority the process already holds, and
+  // an approval row claiming `read-only` would understate that in the audit.
+  if (implementationKind === 'command-runner' || capability === 'shell.execute')
+    return 'full' as const;
   return capability === 'workspace.write' || capability === 'filesystem.external.write'
     ? ('workspace-write' as const)
     : ('read-only' as const);
@@ -183,7 +193,7 @@ export class ApprovalCoordinator {
     const requestDigest = digest({
       toolId: request.entry.toolId,
       schemaDigest: request.entry.schemaDigest,
-      input: request.input,
+      input: durableDigestInput(request.input),
       capability,
       policyEpoch: request.context.policyEpoch,
     });
@@ -247,6 +257,7 @@ export class ApprovalCoordinator {
         impact: request.entry.sideEffect,
         execution: safeApprovalExecution(request),
       },
+      ...ephemeralApprovalExecution(request),
       challenge,
       challengeHash: digest(challenge),
       expiresAt: this.options.expiresAt(),
@@ -544,11 +555,11 @@ export function approvalFactsForTool(
         : disclosure !== undefined
           ? digest({ toolId: request.entry.toolId, disclosure, operation })
           : workspaceGuard === undefined
-            ? digest({ toolId: request.entry.toolId, input: request.input })
+            ? digest({ toolId: request.entry.toolId, input: durableDigestInput(request.input) })
             : workspaceGuards.length > 1
               ? digest({
                   toolId: request.entry.toolId,
-                  input: request.input,
+                  input: durableDigestInput(request.input),
                   pathGuardDigests: workspaceGuards.map(pathGuardIdentityDigest),
                   operation,
                 })
@@ -564,6 +575,8 @@ export function approvalFactsForTool(
 }
 
 function displayTarget(input: unknown): string {
+  const stdin = managedStdinAuthorizationFacts(input);
+  if (stdin !== undefined) return managedStdinApprovalTarget(stdin);
   const disclosure = providerDisclosureAuthorizationFacts(input);
   if (disclosure !== undefined) return disclosure.canonicalPath;
   const workspaceGuard = workspaceToolAuthorizationGuard(input);
@@ -576,7 +589,41 @@ function displayTarget(input: unknown): string {
   return 'requested resource';
 }
 
+/**
+ * What a persisted digest over a Tool input may be taken from.
+ *
+ * Every digest this module produces is stored — `spec_digest` on the approval row, the permission
+ * audit's `execution_spec_digest`, the `allow_task` request digest — so none of them may be
+ * computable from a guess. For a stdin write that means the raw characters are replaced by the
+ * same keyed MAC the audit record carries: equal bytes still produce equal digests, so a task
+ * grant recognises a repeat, but nobody holding the database can confirm a candidate password
+ * (Issue #473).
+ */
+function durableDigestInput(input: unknown): unknown {
+  const stdin = managedStdinAuthorizationFacts(input);
+  return stdin === undefined ? input : managedStdinApprovalExecution(stdin);
+}
+
+/**
+ * Detail the user needs in full to decide, which must not outlive the decision.
+ *
+ * A stdin write is the one approval whose subject *is* the bytes, and those bytes can be a
+ * password, a Bearer token, or a private key. `safeApprovalExecution` above therefore keeps only
+ * the digest and a redacted preview in the durable record, and the exact characters travel on this
+ * live-only channel that persistence drops before writing anything (Issue #473).
+ */
+function ephemeralApprovalExecution(request: ToolAuthorizationRequest): {
+  ephemeralExecution?: string;
+} {
+  const stdin = managedStdinAuthorizationFacts(request.input);
+  return stdin === undefined ? {} : { ephemeralExecution: managedStdinEphemeralExecution(stdin) };
+}
+
 function safeApprovalExecution(request: ToolAuthorizationRequest): string {
+  // The bytes are the execution here, so they belong on the card. Long input is summarised, and
+  // the byte count and digest always identify exactly what was approved (Issue #473).
+  const stdin = managedStdinAuthorizationFacts(request.input);
+  if (stdin !== undefined) return stableStringify(managedStdinApprovalExecution(stdin));
   const disclosure = providerDisclosureAuthorizationFacts(request.input);
   if (disclosure !== undefined)
     return stableStringify({

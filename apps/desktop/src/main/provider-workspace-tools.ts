@@ -333,7 +333,7 @@ const descriptions = new Map([
   ],
   [
     WRITE_STDIN_TOOL.providerName,
-    'Write bounded characters to one owned command session and optionally close stdin.',
+    'Write bounded characters to one owned command session and optionally close stdin. What is written becomes part of what the approved command does, so each write requires approval like the command itself.',
   ],
   [
     TERMINATE_COMMAND_TOOL.providerName,

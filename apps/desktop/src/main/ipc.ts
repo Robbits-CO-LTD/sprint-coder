@@ -49,6 +49,8 @@ import {
 } from 'node:path';
 import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
 import { CommandRunnerError } from './command-runner';
+import { ManagedStdinRejection } from './managed-command-stdin';
+import { configureApprovalDigestKey } from './approval-digest-key';
 import { pathComparisonKey } from '../path-comparison';
 import {
   approvalActivationIntent,
@@ -1166,6 +1168,9 @@ export class IpcRouter {
     this.attachmentCustodyStore = new AttachmentCustodyStore(
       join(app.getPath('userData'), 'attachment-custody'),
     );
+    // Before any approval can be raised: digests over approval content are keyed by a per-install
+    // secret that lives only in this directory, never in SQLite (Issue #473).
+    configureApprovalDigestKey(app.getPath('userData'));
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),
@@ -5381,7 +5386,11 @@ export class IpcRouter {
           }
         : rawFacts;
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
-    const commandRunner = request.entry.implementationKind === 'command-runner';
+    // Provider-issued process authority covers both starting a command and feeding one that is
+    // already running: `write_stdin` carries `shell.execute` without being a command-runner Tool
+    // (Issue #473), and a preset-wide allow must not cover it silently either.
+    const providerProcessAuthority =
+      request.entry.implementationKind === 'command-runner' || capability === 'shell.execute';
     const sandboxProfile = sandboxProfileForToolAuthorization(
       request.entry.implementationKind,
       capability,
@@ -5446,7 +5455,10 @@ export class IpcRouter {
         },
         ...(pathGuard === undefined ? {} : { pathGuard }),
       };
-      return request.entry.implementationKind === 'command-runner'
+      // Every `shell.execute` request goes through the ExecutionSpec lane, including the built-in
+      // that writes to a running command's stdin (write_stdin, Issue #473). `preview` refuses
+      // `shell.execute` outright, so branching on the implementation kind would have thrown.
+      return capability === 'shell.execute'
         ? this.permissionBroker.previewExecutionSpec(input)
         : this.permissionBroker.preview(input);
     };
@@ -5545,7 +5557,7 @@ export class IpcRouter {
       // still wins above; only an evaluated allow is upgraded to an explicit user approval.
       return requireExplicitProviderCommandApproval(
         { decision: 'allow' as const, reason: evaluation.reason, beforeExecute },
-        commandRunner,
+        providerProcessAuthority,
       );
     }
     return requireExplicitProviderCommandApproval(
@@ -5556,7 +5568,7 @@ export class IpcRouter {
             ? 'permission_allow_once_missing_permit'
             : evaluation.reason,
       },
-      commandRunner,
+      providerProcessAuthority,
     );
   }
 
@@ -9313,9 +9325,9 @@ export function managedLocalForcedRoundMessages(
 
 export function requireExplicitProviderCommandApproval(
   decision: ToolAuthorizationDecision,
-  commandRunner: boolean,
+  providerProcessAuthority: boolean,
 ): ToolAuthorizationDecision {
-  if (!commandRunner || decision.decision !== 'allow') return decision;
+  if (!providerProcessAuthority || decision.decision !== 'allow') return decision;
   return {
     decision: 'approval_required',
     reason: 'provider_command_requires_explicit_approval',
@@ -9374,6 +9386,10 @@ export function providerWorkspaceToolFailure(error: unknown): string {
   if (error instanceof WorkspacePatchRejection)
     return providerToolErrorContent('PATCH_REJECTED', error.message);
   if (error instanceof CommandRunnerError)
+    return providerToolErrorContent(error.code, error.message);
+  // The stdin cap has to reach the model verbatim: the message tells it how to split the write so
+  // it can retry instead of seeing an opaque failure (Issue #473).
+  if (error instanceof ManagedStdinRejection)
     return providerToolErrorContent(error.code, error.message);
   if (error instanceof SkillSettingsError)
     return providerToolErrorContent(error.code, clipPublicMessage(error.message));

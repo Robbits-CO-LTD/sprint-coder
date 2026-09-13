@@ -560,6 +560,12 @@ Toolの表示名と意味分類を分ける。
 - cwdをWorkspace root配下へcanonicalizeする。
 - environmentはallowlist + Task追加分で構築し、secretをlogへ出さない。
 - 承認対象をimmutable ExecutionSpec `{absoluteExecutable, argv, cwdIdentity, envDelta(redacted), stdinMode, shell, commandBytesHash}` とし、digest変更時は承認を失効する。
+- processのstdinはspawn後も書き込み可能なので、`stdinMode`は実態 `approved-writes` を宣言する。実行開始後のstdin書き込み（`write_stdin`）はcommand本体と同じ`shell.execute`を要求する別の承認対象とし、session所有権だけを境界にしない。
+- stdin承認は要約しない。1回の書き込みを承認カードが全文表示できる長さへ制限し、超過は承認要求前にtool errorで返して分割させる。制御文字・bidi/zero-width文字はエスケープ表記して隠れないようにし、literal backslashも二重化して表示を入力と一対一にする。
+- stdinの生文字列はpending承認カードへ渡すだけの非永続値とし、`display_json`とturn eventにはbyte数とMACだけを残す。redact済みでも内容previewは保存しない（secret scannerはラベルや既知token形式しか見つけられず、`sudo -S`へ渡す素のパスワードは平文のまま残るため）。
+- 内容の同一性は無塩hashではなくinstall固有鍵のHMAC-SHA256とする。byte数付きの素のsha256は候補をhashして照合できる検証器になり、低エントロピーのパスワードを復元できてしまう。鍵はuserData配下に32 byte・0600で初回利用時に生成し、SQLiteにもRendererにも入れない。`spec_digest`・permission audit・`allow_task`判定に使うdigestの入力からも生のstdinを外し、同じMACを使う（同一bytesのdedupはMACで成立する）。
+- 非永続なので、snapshot復元・Task切替・event欠落で全文を失ったpending stdin承認は許可操作を無効化し、拒否して再送させる（fail closed）。カードは全文を常に展開表示し、折りたたみ状態から許可できないようにする。
+- 承認カードのlive payloadはescape後の長さで上限を検証し、超過はツールエラーで分割させる。contract上限を超えるpayloadはeventが捨てられてTurnがカード無しで待ち続けるため、承認を作る前に弾く。
 - stdout/stderrにsequenceを付け、backpressureと最大bufferを持つ。
 - cancel時は子孫processを含めて終了し、OS別integration testを用意する。
 - parserは危険検出と表示補助に限定し、security boundaryにしない。自動allowはshellなし、absolute executable、厳格argv schemaを持つ専用built-inだけとする。shell mode、interpreter code、task runner、Git hook/alias等の実行拡張点はpromptまたはsandbox内denyへ倒す。
