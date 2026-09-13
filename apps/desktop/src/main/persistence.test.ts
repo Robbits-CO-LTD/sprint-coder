@@ -9,8 +9,10 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +30,8 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
 import {
   AcceptanceEvidenceMissingError,
+  MAX_VERIFIABLE_POST_IMAGE_BYTES,
+  readVerifiablePostImage,
   CanvasViewConflictError,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
@@ -3412,6 +3416,69 @@ if (runsWithElectronAbi)
         persistence.close();
       },
     );
+
+    // These pin the refusal contract the completion path depends on. The substitution race itself
+    // (a path that turns into a symlink, fifo or huge file between two syscalls) is closed by
+    // construction rather than by timing: every check below is made against the descriptor the
+    // reader opened, so there is no second look at the path for a race to win.
+    describe('post-image read for deterministic verification', () => {
+      function scratchDirectory(name: string): string {
+        const directory = mkdtempSync(join(tmpdir(), `sprint-coder-${name}-`));
+        cleanup.push(directory);
+        return directory;
+      }
+
+      it('reads a regular post-image back within the ceiling', () => {
+        const directory = scratchDirectory('post-image-regular');
+        const file = join(directory, 'post-image.txt');
+        writeFileSync(file, 'after\n');
+
+        expect(readVerifiablePostImage(file)).toBe('after\n');
+        expect(readVerifiablePostImage(join(directory, 'never-written.txt'))).toBeNull();
+        writeFileSync(join(directory, 'empty.txt'), '');
+        expect(readVerifiablePostImage(join(directory, 'empty.txt'))).toBe('');
+        expect(readVerifiablePostImage(directory)).toBeNull();
+      });
+
+      artifactIt('refuses a post-image path that a symlink has replaced', () => {
+        const directory = scratchDirectory('post-image-symlink');
+        const file = join(directory, 'post-image.txt');
+        const decoy = join(directory, 'decoy.txt');
+        // Byte-identical to the post-image the Edit Saga committed: only `O_NOFOLLOW` separates
+        // reading the file Main wrote from reading whatever was substituted for its path.
+        writeFileSync(decoy, 'after\n');
+        symlinkSync(decoy, file);
+
+        expect(readFileSync(file, 'utf8')).toBe('after\n');
+        expect(readVerifiablePostImage(file)).toBeNull();
+      });
+
+      it('refuses a post-image larger than the verification ceiling', () => {
+        const directory = scratchDirectory('post-image-oversize');
+        const file = join(directory, 'post-image.txt');
+        writeFileSync(file, Buffer.alloc(MAX_VERIFIABLE_POST_IMAGE_BYTES + 1, 0x61));
+
+        expect(readVerifiablePostImage(file)).toBeNull();
+
+        writeFileSync(file, Buffer.alloc(MAX_VERIFIABLE_POST_IMAGE_BYTES, 0x61));
+        expect(readVerifiablePostImage(file)?.length).toBe(MAX_VERIFIABLE_POST_IMAGE_BYTES);
+      });
+
+      // `open` on a fifo with no writer blocks forever unless `O_NONBLOCK` is set, and it would
+      // block Main synchronously inside the completion path. Dropping that flag fails this as a
+      // timeout rather than as a wrong answer, which is why the case is worth its own test.
+      artifactIt(
+        'refuses a fifo without blocking the completion path',
+        () => {
+          const directory = scratchDirectory('post-image-fifo');
+          const file = join(directory, 'post-image.txt');
+          execFileSync('mkfifo', [file]);
+
+          expect(readVerifiablePostImage(file)).toBeNull();
+        },
+        10_000,
+      );
+    });
 
     artifactIt('does not infer mkdir ancestry from unsealed original path spellings', async () => {
       const { persistence, path } = createPersistence();

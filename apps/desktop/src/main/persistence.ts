@@ -53,13 +53,16 @@ import {
 } from './graph-generation';
 import {
   closeSync,
+  constants,
   copyFileSync,
   fsyncSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -465,7 +468,7 @@ function toGeneratedImage(row: GeneratedImageRow): GeneratedImage {
 const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
 
 /** Matches the workspace read tool's ceiling: a post-image Main cannot read stays unverified. */
-const MAX_VERIFIABLE_POST_IMAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_VERIFIABLE_POST_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /**
  * The 8-byte PNG signature.
@@ -19837,19 +19840,55 @@ function displayTurnDiffPath(
 
 /**
  * Reads a committed Edit Saga's post-image back for deterministic verification, or null when the
- * entry on disk is not a plain file Main may read. `lstatSync` keeps a symlink that replaced the
- * path from being followed, and the size ceiling matches the workspace read tool so an unbounded
- * file cannot be pulled into memory at completion time. Every caller still compares the bytes
- * against the sealed post hash, so an unreadable or changed path simply records no evidence.
+ * entry on disk is not a plain file Main may read.
+ *
+ * Every check is bound to the descriptor this function opened, never to the path, because the path
+ * is inside a Workspace the model was just writing to and anything could take its place between two
+ * syscalls. Checking a path with `lstat` and then reading that path again would leave exactly that
+ * window open:
+ *
+ *   - **`O_NOFOLLOW`.** A symlink planted at the path fails the open (`ELOOP`) instead of handing
+ *     back some other file's bytes. Windows has no such flag, so there `fstat` is the only guard —
+ *     which is why the type and size checks below use the descriptor rather than the path.
+ *   - **`O_NONBLOCK`.** Opening a fifo for reading blocks until a writer appears, which would hang
+ *     the Main process inside the completion path. With this flag the open returns immediately and
+ *     `fstat` reports a fifo, not a file, so it is refused like any other non-regular entry.
+ *   - **`fstat` on the descriptor.** Regular files only, and the ceiling matches the workspace read
+ *     tool so an unbounded file cannot be pulled into memory while a Turn is being finalised.
+ *   - **A buffer sized from that same `fstat`.** A file that grows after the check still cannot read
+ *     past the ceiling; the extra bytes simply never reach the hash comparison.
+ *
+ * Callers compare the bytes against the sealed post hash, so every refusal here — and every partial
+ * or substituted read that slips past it — records no evidence and leaves the criterion open.
  */
-function readVerifiablePostImage(canonicalPath: string): string | null {
+export function readVerifiablePostImage(canonicalPath: string): string | null {
+  let fd: number | null = null;
   try {
-    const stat = lstatSync(canonicalPath, { throwIfNoEntry: false });
-    if (stat === undefined || !stat.isFile() || stat.size > MAX_VERIFIABLE_POST_IMAGE_BYTES)
-      return null;
-    return readFileSync(canonicalPath, 'utf8');
+    fd = openSync(
+      canonicalPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    const stat = fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.size > BigInt(MAX_VERIFIABLE_POST_IMAGE_BYTES)) return null;
+    const size = Number(stat.size);
+    if (size === 0) return '';
+    const buffer = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const chunk = readSync(fd, buffer, read, size - read, read);
+      if (chunk === 0) break;
+      read += chunk;
+    }
+    return buffer.subarray(0, read).toString('utf8');
   } catch {
     return null;
+  } finally {
+    if (fd !== null)
+      try {
+        closeSync(fd);
+      } catch {
+        // The bytes are already read or already refused; a failed close cannot change either.
+      }
   }
 }
 
