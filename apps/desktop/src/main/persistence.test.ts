@@ -6781,6 +6781,52 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps live-only approval detail out of the row, the event, and every later read', () => {
+      // A stdin write is approved on its exact characters, which can be a password or a token. The
+      // card needs all of them; nothing durable may keep any of them (Issue #473).
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const secret = 'export DB_PASSWORD=hunter2-do-not-store';
+
+      const requested = persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          display: {
+            target: 'stdin → /bin/sh (session session-1)',
+            impact: 'process',
+            execution: JSON.stringify({ tool: 'write_stdin', charsSha256: 'd'.repeat(64) }),
+          },
+          ephemeralExecution: `--- stdin ---\n${secret}`,
+        }),
+      );
+
+      expect(requested.approval.ephemeralExecution).toContain(secret);
+      expect(
+        (requested.event as { approval: { ephemeralExecution?: string } }).approval
+          .ephemeralExecution,
+      ).toContain(secret);
+
+      const inspection = new Database(path, { readonly: true });
+      const stored = inspection
+        .prepare('SELECT display_json FROM approvals WHERE id = ?')
+        .get('approval-1') as { display_json: string };
+      const events = inspection
+        .prepare('SELECT payload_json FROM turn_events WHERE task_id = ?')
+        .all(task.id) as { payload_json: string }[];
+      inspection.close();
+
+      expect(stored.display_json).not.toContain('hunter2');
+      expect(stored.display_json).not.toContain('ephemeralExecution');
+      for (const event of events) {
+        expect(event.payload_json).not.toContain('hunter2');
+        expect(event.payload_json).not.toContain('ephemeralExecution');
+      }
+      // The reads the Renderer uses for pending state and history never revive it either.
+      expect(persistence.listPendingApprovals(task.id)[0]?.ephemeralExecution).toBeUndefined();
+      expect(persistence.listRecentApprovals(task.id)[0]?.ephemeralExecution).toBeUndefined();
+      persistence.close();
+    });
+
     it('persists an exact provider disclosure grant without a schema migration', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();

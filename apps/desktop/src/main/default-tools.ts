@@ -19,7 +19,12 @@ import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
 import type { ManagedCommandSessions } from './managed-command-sessions';
-import { createManagedStdinRequest, type ManagedStdinRequest } from './managed-command-stdin';
+import {
+  assertManagedStdinSize,
+  createManagedStdinRequest,
+  MANAGED_STDIN_MAX_CHARACTERS,
+  type ManagedStdinRequest,
+} from './managed-command-stdin';
 import { registerTeamTools, TEAM_TOOLS } from './team-tools';
 import { resolveWorkspaceToolRoot } from './workspace-root-resolution';
 
@@ -165,7 +170,7 @@ export const WRITE_STDIN_TOOL = createToolDefinition({
     type: 'object',
     properties: {
       sessionId: { type: 'string' },
-      chars: { type: 'string' },
+      chars: { type: 'string', maxLength: MANAGED_STDIN_MAX_CHARACTERS },
       close: { type: 'boolean' },
     },
     required: ['sessionId', 'chars'],
@@ -666,6 +671,9 @@ export function registerManagedCommandControlTools(
     // is refused before any card is raised.
     prepare: (input, context) => {
       const request = input as { sessionId: string; chars: string; close?: boolean };
+      // Size first: the pinned schema advertises the cap but does not enforce string bounds, and a
+      // value the card could not show in full must never reach an approval (Issue #473).
+      assertManagedStdinSize(request.chars);
       return createManagedStdinRequest({
         chars: request.chars,
         close: request.close === true,

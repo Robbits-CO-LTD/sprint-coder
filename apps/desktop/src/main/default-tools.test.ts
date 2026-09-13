@@ -5,6 +5,7 @@ import {
   TERMINATE_COMMAND_TOOL,
   WRITE_STDIN_TOOL,
 } from './default-tools';
+import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
 
 describe('managed exec command guidance', () => {
   it('explains the Windows sealed-executable and Node test constraints', () => {
@@ -31,6 +32,15 @@ describe('managed command session control authority', () => {
     expect(WRITE_STDIN_TOOL.sideEffect).toBe(MANAGED_EXEC_COMMAND_TOOL.sideEffect);
     expect(WRITE_STDIN_TOOL.kind).toBe('shell');
     expect(WRITE_STDIN_TOOL.risk).toBe('high');
+  });
+
+  it('advertises the per-call stdin limit that keeps the approval card complete', () => {
+    // The pinned schema does not enforce string bounds, so this is what tells the provider the
+    // limit; `prepare` is what refuses a call that exceeds it (Issue #473).
+    expect(
+      (WRITE_STDIN_TOOL.inputSchema as { properties: { chars: { maxLength?: number } } }).properties
+        .chars.maxLength,
+    ).toBe(MANAGED_STDIN_MAX_CHARACTERS);
   });
 
   it('leaves polling and termination free of new authority', () => {

@@ -13,6 +13,7 @@ import {
   registerManagedCommandControlTools,
   type CommandToolBoundary,
 } from './default-tools';
+import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
 import { CommandRunner } from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
@@ -372,6 +373,53 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       expect(authorized.every(({ capabilities }) => capabilities.includes('shell.execute'))).toBe(
         true,
       );
+      await broker.dispose();
+    });
+
+    it('refuses a write larger than the approval card can show, before authorizing it', async () => {
+      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
+      const registry = new ToolRegistry();
+      for (const definition of [POLL_COMMAND_TOOL, WRITE_STDIN_TOOL, TERMINATE_COMMAND_TOOL])
+        registry.register(definition);
+      const sessions = new ManagedCommandSessions();
+      let authorizations = 0;
+      const broker = new ToolBroker(
+        registry,
+        () => 1,
+        () => {
+          authorizations += 1;
+          return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+        },
+      );
+      registerManagedCommandControlTools(broker, sessions);
+      const owner = {
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        workspaceId: 'workspace-1',
+        policyEpoch: 1,
+      };
+      broker.startTurn(owner, 'codex');
+
+      // A card that summarises is a bypass: harmless-looking text followed by a real command would
+      // be approved on the strength of the part the user could see.
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'stdin-oversized',
+          providerName: 'write_stdin',
+          input: {
+            sessionId: 'not-reached',
+            chars: `# ${'x'.repeat(MANAGED_STDIN_MAX_CHARACTERS)}\nrm -rf .`,
+          },
+        }),
+      ).rejects.toMatchObject({
+        name: 'ManagedStdinRejection',
+        code: 'STDIN_TOO_LARGE',
+        // The provider is told the limit and how to stay inside it, so it resends as smaller
+        // writes instead of treating this as an unexplained failure.
+        message: expect.stringContaining('Split the input into consecutive write_stdin calls'),
+      });
+      expect(authorizations).toBe(0);
       await broker.dispose();
     });
 

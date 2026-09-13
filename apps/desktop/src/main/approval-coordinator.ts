@@ -20,6 +20,7 @@ import {
   managedStdinApprovalExecution,
   managedStdinApprovalTarget,
   managedStdinAuthorizationFacts,
+  managedStdinEphemeralExecution,
 } from './managed-command-stdin';
 
 type ApprovalLike = {
@@ -256,6 +257,7 @@ export class ApprovalCoordinator {
         impact: request.entry.sideEffect,
         execution: safeApprovalExecution(request),
       },
+      ...ephemeralApprovalExecution(request),
       challenge,
       challengeHash: digest(challenge),
       expiresAt: this.options.expiresAt(),
@@ -585,6 +587,21 @@ function displayTarget(input: unknown): string {
       if (typeof record[key] === 'string') return record[key];
   }
   return 'requested resource';
+}
+
+/**
+ * Detail the user needs in full to decide, which must not outlive the decision.
+ *
+ * A stdin write is the one approval whose subject *is* the bytes, and those bytes can be a
+ * password, a Bearer token, or a private key. `safeApprovalExecution` above therefore keeps only
+ * the digest and a redacted preview in the durable record, and the exact characters travel on this
+ * live-only channel that persistence drops before writing anything (Issue #473).
+ */
+function ephemeralApprovalExecution(request: ToolAuthorizationRequest): {
+  ephemeralExecution?: string;
+} {
+  const stdin = managedStdinAuthorizationFacts(request.input);
+  return stdin === undefined ? {} : { ephemeralExecution: managedStdinEphemeralExecution(stdin) };
 }
 
 function safeApprovalExecution(request: ToolAuthorizationRequest): string {

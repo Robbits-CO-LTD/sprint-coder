@@ -1722,6 +1722,13 @@ export const approvalSummarySchema = z
     target: z.string().min(1).max(500),
     impact: z.string().min(1).max(500),
     execution: z.string().min(1).max(100_000),
+    /**
+     * Live-only detail for a pending approval, never written to the approval row or the persisted
+     * `approval.requested` event. It carries the exact bytes a decision is being made about — the
+     * characters a `write_stdin` call would send — which must reach the card in full but must not
+     * survive the decision in plaintext (Issue #473). Absent on anything replayed from storage.
+     */
+    ephemeralExecution: z.string().min(1).max(16_000).optional(),
     risk: toolRiskSchema,
     capability: toolCapabilitySchema,
     challenge: z.string().min(8).max(256),

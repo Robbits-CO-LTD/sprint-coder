@@ -13,7 +13,11 @@ export function ApprovalCard({
 }) {
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
-  const executionIsLong = approval.execution.length > 512;
+  // A pending approval may carry detail the user must see in full but that is never stored — the
+  // exact characters a write_stdin call would send (Issue #473). History replays the durable
+  // projection instead, which keeps the byte count, digest, and a redacted preview.
+  const execution = approval.ephemeralExecution ?? approval.execution;
+  const executionIsLong = execution.length > 512;
   const userInput =
     approval.toolName === 'request_user_input' ? parseUserInput(approval.execution) : null;
   const stdinNote = standardInputNote(approval);
@@ -68,9 +72,7 @@ export function ApprovalCard({
           <dt>実行内容</dt>
           <dd>
             <code className={executionIsLong && !executionExpanded ? 'is-collapsed' : undefined}>
-              {executionIsLong && !executionExpanded
-                ? `${approval.execution.slice(0, 512)}…`
-                : approval.execution}
+              {executionIsLong && !executionExpanded ? `${execution.slice(0, 512)}…` : execution}
             </code>
             {executionIsLong ? (
               <button

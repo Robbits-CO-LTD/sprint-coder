@@ -4148,6 +4148,13 @@ export type ApprovalRequestInput = {
   risk: 'low' | 'medium' | 'high';
   reasonUntrusted: string;
   display: { target: string; impact: string; execution: string };
+  /**
+   * Live-only card detail. It is attached to the returned approval and event after both have been
+   * written, so it never reaches `display_json` or the persisted `approval.requested` payload.
+   * Used for values the user must see in full to decide but that must not outlive the decision in
+   * plaintext — the exact characters a `write_stdin` call would send (Issue #473).
+   */
+  ephemeralExecution?: string;
   challenge: string;
   expiresAt: string;
   requestedAt: string;
@@ -14496,7 +14503,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
         if (approvalRequestDigest(input) !== persistedApprovalRequestDigest(existing))
           throw new OperationConflictError();
         const event = this.findApprovalEvent(input.taskId, duplicate.id, 'approval.requested');
-        return { approval: existing, event };
+        return withEphemeralApprovalExecution(
+          { approval: existing, event },
+          input.ephemeralExecution,
+        );
       }
       const turn = this.getTurn(input.taskId, input.turnId);
       if (turn.state !== 'executing' && turn.state !== 'planning')
@@ -14556,7 +14566,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         approvalId: input.id,
         approval: toApprovalSummary(approval),
       });
-      return { approval, event };
+      // Strictly after the row and the event are written: the ephemeral text is only ever handed
+      // to the live listener.
+      return withEphemeralApprovalExecution({ approval, event }, input.ephemeralExecution);
     })();
   }
 
@@ -21284,6 +21296,29 @@ function parseApprovalDisplay(value: string): {
     target: sanitizeApprovalText(parsed.target, 500),
     impact: sanitizeApprovalText(parsed.impact, 500),
     execution: sanitizeApprovalText(parsed.execution, 100_000),
+  };
+}
+
+/**
+ * Attaches live-only card detail to an already-persisted approval result.
+ *
+ * Both the approval row and the `approval.requested` event have been written by the time this
+ * runs, so the returned copies carry the text to the Renderer without it existing anywhere
+ * durable. Replaying the stored event, listing pending approvals, or reading the approval history
+ * all produce the redacted projection instead.
+ */
+function withEphemeralApprovalExecution(
+  result: ApprovalPersistenceResult,
+  ephemeralExecution: string | undefined,
+): ApprovalPersistenceResult {
+  if (ephemeralExecution === undefined) return result;
+  const approval = { ...result.approval, ephemeralExecution };
+  return {
+    ...result,
+    approval,
+    ...(result.event?.type === 'approval.requested'
+      ? { event: { ...result.event, approval: { ...result.event.approval, ephemeralExecution } } }
+      : {}),
   };
 }
 

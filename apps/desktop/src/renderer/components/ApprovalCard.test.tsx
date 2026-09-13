@@ -94,6 +94,42 @@ describe('ApprovalCard standard input wording', () => {
     expect(html).not.toContain('標準入力');
   });
 
+  it('shows the live characters in full, and the durable projection once they are gone', () => {
+    // Pending: the bytes the decision is about. History: the digest and redacted preview that
+    // outlive it (Issue #473).
+    const durable = JSON.stringify({
+      tool: 'write_stdin',
+      charsBytes: 41,
+      charsSha256: 'a'.repeat(64),
+      charsPreview: 'password=[REDACTED]',
+    });
+    const pending = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{
+          ...shellApproval,
+          toolName: 'write_stdin',
+          execution: durable,
+          ephemeralExecution: '--- stdin ---\npassword=hunter2\nrm -rf .',
+        }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(pending).toContain('rm -rf .');
+    expect(pending).toContain('password=hunter2');
+
+    const history = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{ ...shellApproval, toolName: 'write_stdin', execution: durable }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(history).not.toContain('hunter2');
+    expect(history).toContain('password=[REDACTED]');
+    expect(history).toContain('a'.repeat(64));
+  });
+
   it('tells the user a stdin write changes what the running command does', () => {
     const html = renderToStaticMarkup(
       <ApprovalCard

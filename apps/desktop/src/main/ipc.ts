@@ -49,6 +49,7 @@ import {
 } from 'node:path';
 import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
 import { CommandRunnerError } from './command-runner';
+import { ManagedStdinRejection } from './managed-command-stdin';
 import { pathComparisonKey } from '../path-comparison';
 import {
   approvalActivationIntent,
@@ -9381,6 +9382,10 @@ export function providerWorkspaceToolFailure(error: unknown): string {
   if (error instanceof WorkspacePatchRejection)
     return providerToolErrorContent('PATCH_REJECTED', error.message);
   if (error instanceof CommandRunnerError)
+    return providerToolErrorContent(error.code, error.message);
+  // The stdin cap has to reach the model verbatim: the message tells it how to split the write so
+  // it can retry instead of seeing an opaque failure (Issue #473).
+  if (error instanceof ManagedStdinRejection)
     return providerToolErrorContent(error.code, error.message);
   if (error instanceof SkillSettingsError)
     return providerToolErrorContent(error.code, clipPublicMessage(error.message));
