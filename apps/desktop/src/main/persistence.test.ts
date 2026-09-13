@@ -6817,11 +6817,10 @@ if (runsWithElectronAbi)
         .all(task.id) as { payload_json: string }[];
       inspection.close();
 
-      expect(stored.display_json).not.toContain('hunter2');
-      expect(stored.display_json).not.toContain('ephemeralExecution');
-      for (const event of events) {
-        expect(event.payload_json).not.toContain('hunter2');
-        expect(event.payload_json).not.toContain('ephemeralExecution');
+      // Not one fragment of it, anywhere durable.
+      for (const fragment of ['hunter2', 'DB_PASSWORD', 'export DB', 'ephemeralExecution']) {
+        expect(stored.display_json).not.toContain(fragment);
+        for (const event of events) expect(event.payload_json).not.toContain(fragment);
       }
       // The reads the Renderer uses for pending state and history never revive it either.
       expect(persistence.listPendingApprovals(task.id)[0]?.ephemeralExecution).toBeUndefined();

@@ -13,14 +13,21 @@ export function ApprovalCard({
 }) {
   const cardRef = useRef<HTMLElement>(null);
   const [executionExpanded, setExecutionExpanded] = useState(false);
-  // A pending approval may carry detail the user must see in full but that is never stored — the
-  // exact characters a write_stdin call would send (Issue #473). History replays the durable
-  // projection instead, which keeps the byte count, digest, and a redacted preview.
-  const execution = approval.ephemeralExecution ?? approval.execution;
-  const executionIsLong = execution.length > 512;
+  // A stdin write is approved on its exact characters, and those characters are live-only: they
+  // are never stored, so a card rebuilt from a snapshot or from the durable event does not have
+  // them (Issue #473). Approving without them would approve bytes nobody read, so the card fails
+  // closed — deny stays available, allow does not.
+  const stdinApproval = approval.toolName === 'write_stdin';
+  const liveDetailMissing = stdinApproval && approval.ephemeralExecution === undefined;
+  const execution = liveDetailMissing
+    ? describeWithheldStdin(approval.execution)
+    : (approval.ephemeralExecution ?? approval.execution);
+  // Never collapsed for stdin: an allow must not be reachable over a partially rendered value.
+  const executionIsLong = !stdinApproval && execution.length > 512;
   const userInput =
     approval.toolName === 'request_user_input' ? parseUserInput(approval.execution) : null;
   const stdinNote = standardInputNote(approval);
+  const allowDisabled = busy || liveDetailMissing;
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -59,6 +66,11 @@ export function ApprovalCard({
           {stdinNote}
         </p>
       )}
+      {liveDetailMissing ? (
+        <p className="approval-card__warning" role="alert" data-testid="approval-stdin-withheld">
+          入力内容を再取得できないため承認できません。拒否して、送り直してもらってください。
+        </p>
+      ) : null}
       <dl className="approval-card__facts">
         <div>
           <dt>対象</dt>
@@ -92,7 +104,7 @@ export function ApprovalCard({
           type="button"
           className="primary"
           data-testid="approval-allow-once"
-          disabled={busy}
+          disabled={allowDisabled}
           onClick={() => onDecision('allow_once', userInput === null ? undefined : 0)}
         >
           {userInput?.choices[0] ?? '今回のみ許可'}
@@ -100,7 +112,7 @@ export function ApprovalCard({
         <button
           data-testid="approval-allow-task"
           type="button"
-          disabled={busy}
+          disabled={allowDisabled}
           onClick={() => onDecision('allow_task', userInput === null ? undefined : 1)}
         >
           {userInput?.choices[1] ?? 'Task中許可'}
@@ -144,6 +156,23 @@ function standardInputNote(approval: ApprovalSummary): string | null {
   return stdinMode === 'approved-writes'
     ? '標準入力は開いたままです。実行開始後に送られる入力は、write_stdin として別途承認します。'
     : null;
+}
+
+/**
+ * What a stdin approval shows once its characters are gone.
+ *
+ * The durable record keeps only how many bytes were offered and their digest — no excerpt, because
+ * a bare password typed for `sudo -S` reads as ordinary text and no scanner would have caught it.
+ */
+function describeWithheldStdin(execution: string): string {
+  try {
+    const value = JSON.parse(execution) as { charsBytes?: unknown; charsSha256?: unknown };
+    if (typeof value.charsBytes !== 'number' || typeof value.charsSha256 !== 'string')
+      return execution;
+    return `stdin ${value.charsBytes} bytes, sha256=${value.charsSha256}\n（送信内容は保存していないため表示できません）`;
+  } catch {
+    return execution;
+  }
 }
 
 function parseUserInput(execution: string): { question: string; choices: string[] } | null {

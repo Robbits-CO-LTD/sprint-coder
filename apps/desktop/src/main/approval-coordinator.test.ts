@@ -34,6 +34,32 @@ import {
   MANAGED_STDIN_MAX_CHARACTERS,
   type ManagedStdinRequest,
 } from './managed-command-stdin';
+import {
+  APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS,
+  approvalSummarySchema,
+} from '@sprint-coder/contracts';
+
+/** Shape-complete approval used only to prove a produced card survives the published contract. */
+const pendingApprovalFixture = {
+  id: 'approval-contract-probe',
+  taskId: 'task-1',
+  turnId: 'turn-1',
+  callId: 'call-1',
+  state: 'pending' as const,
+  decision: null,
+  revision: 0,
+  policyEpoch: 7,
+  toolName: 'write_stdin',
+  reason: 'provider_command_requires_explicit_approval',
+  target: 'stdin → /usr/bin/tee notes.txt (session session-1)',
+  impact: 'process',
+  execution: '{"tool":"write_stdin"}',
+  risk: 'high' as const,
+  capability: 'shell.execute' as const,
+  challenge: 'challenge-value',
+  createdAt: '2026-08-18T00:00:00.000Z',
+  expiresAt: '2026-08-18T01:00:00.000Z',
+};
 
 const NOW = '2026-07-22T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-22T13:00:00.000Z';
@@ -950,13 +976,48 @@ describe('managed command stdin approval', () => {
       charsBytes: Buffer.byteLength(chars, 'utf8'),
       charsSha256: createHash('sha256').update(chars, 'utf8').digest('hex'),
     });
+    // No excerpt at all, redacted or otherwise: a bare password for `sudo -S` reads as ordinary
+    // text and no scanner would catch it.
     expect(execution).not.toHaveProperty('chars');
-    expect(approval.display!.execution).not.toContain('hunter2');
-    expect(execution['charsPreview']).toContain('password=[REDACTED]');
+    expect(execution).not.toHaveProperty('charsPreview');
+    for (const fragment of ['hunter2', 'password', 'rm -rf', 'harmless'])
+      expect(approval.display!.execution).not.toContain(fragment);
 
     harness.coordinator.resolve(resolveCommand(approval, 'deny'));
     await expect(dispatch).rejects.toThrow('Tool authorization deny');
     expect(written).toEqual([]);
+  });
+
+  it('delivers the largest accepted write as a card the approval contract accepts', async () => {
+    // Escaping multiplies length, so the worst legal input — every character a bidi override —
+    // must still fit the event payload bound. A card over it would be dropped by `safeParse`
+    // after the approval row and the waiter already exist, leaving the Turn waiting on a card
+    // nobody can see.
+    const harness = createHarness();
+    const { broker } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const chars = '\u202e'.repeat(MANAGED_STDIN_MAX_CHARACTERS);
+    const dispatch = dispatchStdin(broker, 'call-stdin-worst-case', {
+      sessionId: 'session-1',
+      chars,
+    });
+    const approval = await waitForPublished(harness);
+
+    expect(approval.ephemeralExecution!.length).toBeLessThanOrEqual(
+      APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS,
+    );
+    expect(
+      approvalSummarySchema.safeParse({
+        ...pendingApprovalFixture,
+        ephemeralExecution: approval.ephemeralExecution,
+      }).success,
+    ).toBe(true);
+    expect(approval.ephemeralExecution).toContain('\\x{202E}'.repeat(4));
+
+    harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+    await expect(dispatch).rejects.toThrow('Tool authorization deny');
   });
 
   it('refuses a write the card could not show in full, before any approval is raised', async () => {

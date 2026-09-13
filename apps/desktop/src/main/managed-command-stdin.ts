@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
+import { APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS } from '@sprint-coder/contracts';
 import type { ManagedCommandIdentity } from './managed-command-sessions';
-import { redactSecrets } from './secret-redactor';
 
 /**
  * The approval subject of `write_stdin` (Issue #473).
@@ -30,8 +30,8 @@ export type ManagedStdinRequest = Readonly<{
  */
 export const MANAGED_STDIN_MAX_CHARACTERS = 2_048;
 
-/** Characters of redacted stdin kept in the durable audit record. */
-const AUDIT_PREVIEW_CHARACTERS = 64;
+/** How much of the command line and cwd the card header keeps, so its length stays bounded. */
+const HEADER_FIELD_CHARACTERS = 300;
 
 export class ManagedStdinRejection extends Error {
   constructor(
@@ -74,6 +74,16 @@ export function createManagedStdinRequest(
       cwd: input.command.cwd,
     }),
   });
+  // The card text is what the approval event carries, and an event the contract rejects is an
+  // event the Renderer never receives — the Turn would then wait forever on an approval nobody
+  // can see. Escaping can multiply length eightfold, so the produced value is measured here and
+  // refused through the same tool error the provider already knows how to act on.
+  const card = managedStdinEphemeralExecution(request);
+  if (card.length > APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS)
+    throw new ManagedStdinRejection(
+      'STDIN_TOO_LARGE',
+      `write_stdin produced a ${card.length}-character approval card, over the ${APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS}-character limit, because the input needs escaping to be shown safely. Split the input into smaller consecutive write_stdin calls — each one is approved on its own — and send the final call with close: true.`,
+    );
   issuedStdinRequests.add(request);
   return request;
 }
@@ -89,19 +99,18 @@ export function managedStdinApprovalTarget(request: ManagedStdinRequest): string
   const commandLine = visibleStdinText(
     [request.command.executable, ...request.command.argv].join(' '),
   );
-  const shown = commandLine.length > 300 ? `${commandLine.slice(0, 300)}…` : commandLine;
-  return `stdin → ${shown} (session ${request.sessionId})`;
+  return `stdin → ${clipHeaderField(commandLine)} (session ${request.sessionId})`;
 }
 
 /**
  * The durable audit projection, which is what `requestApproval` writes to `display_json` and to
  * the persisted `approval.requested` event.
  *
- * It deliberately carries no raw stdin. A password, Bearer token, or private key sent to a
- * command would otherwise survive in plaintext — and reach the unprivileged Renderer's history —
- * even after the user refused the write. The byte count and digest still identify the exact bytes
- * that were offered, and the short preview is passed through the same secret scanner used for
- * command output before it is stored.
+ * It carries no stdin content at all — not even a redacted excerpt. Secret scanners recognise
+ * labels and known token shapes; a bare password typed for `sudo -S` or `gpg --passphrase-fd 0`
+ * looks like ordinary text and would have survived in plaintext, in the durable record and the
+ * unprivileged Renderer's history, even after the user refused the write. The byte count and
+ * digest still identify exactly which bytes were offered.
  */
 export function managedStdinApprovalExecution(
   request: ManagedStdinRequest,
@@ -115,7 +124,6 @@ export function managedStdinApprovalExecution(
     close: request.close,
     charsBytes: Buffer.byteLength(request.chars, 'utf8'),
     charsSha256: createHash('sha256').update(request.chars, 'utf8').digest('hex'),
-    charsPreview: visibleStdinText(redactSecrets(request.chars).slice(0, AUDIT_PREVIEW_CHARACTERS)),
   };
 }
 
@@ -127,33 +135,43 @@ export function managedStdinApprovalExecution(
  * durable record keeps the digest above.
  */
 export function managedStdinEphemeralExecution(request: ManagedStdinRequest): string {
-  return [
+  const header = clipHeaderField(
     visibleStdinText([request.command.executable, ...request.command.argv].join(' ')),
-    `session=${request.sessionId} cwd=${request.command.cwd} close=${request.close} bytes=${Buffer.byteLength(request.chars, 'utf8')} sha256=${createHash('sha256').update(request.chars, 'utf8').digest('hex')}`,
+  );
+  const cwd = clipHeaderField(visibleStdinText(request.command.cwd));
+  return [
+    header,
+    `session=${request.sessionId} cwd=${cwd} close=${request.close} bytes=${Buffer.byteLength(request.chars, 'utf8')} sha256=${createHash('sha256').update(request.chars, 'utf8').digest('hex')}`,
     '--- stdin ---',
     visibleStdinText(request.chars),
   ].join('\n');
 }
 
+/** Keeps an already-approved command's own length from deciding whether a stdin write is possible. */
+function clipHeaderField(value: string): string {
+  return value.length > HEADER_FIELD_CHARACTERS
+    ? `${value.slice(0, HEADER_FIELD_CHARACTERS)}…`
+    : value;
+}
+
 /**
  * Makes every character visible.
  *
- * Newlines stay newlines — the card renders the execution block with `white-space: pre-wrap`, so a
- * line break is shown as a line break rather than swallowed. Everything else that a display can
- * hide behind is written out: C0/C1 controls (a lone carriage return can overwrite what came
- * before it), and the bidi and zero-width formatting characters that let text claim to say one
- * thing and run another.
+ * Newline and tab stay themselves — the card renders the execution block with
+ * `white-space: pre-wrap`, so they are shown rather than swallowed. Everything else that a display
+ * can hide behind is written out by Unicode general category rather than by a hand-listed range,
+ * so nothing is missed: controls (`Cc`, where a lone carriage return can overwrite the line before
+ * it), every format character (`Cf` — the bidi overrides and isolates, U+061C, the deprecated
+ * U+206A..U+206F, the zero-width marks and U+FEFF), the line and paragraph separators (`Zl`,
+ * `Zp`), and the private-use and unassigned code points (`Co`, `Cn`) that render as whatever the
+ * reader's font decides.
  */
 export function visibleStdinText(value: string): string {
-  return value.replace(HIDEABLE_CHARACTERS, (character) => {
-    const code = character.codePointAt(0) ?? 0;
-    return `\\x{${code.toString(16).toUpperCase().padStart(2, '0')}}`;
-  });
+  return value.replace(HIDEABLE_CHARACTERS, (character) =>
+    character === '\n' || character === '\t'
+      ? character
+      : `\\x{${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(2, '0')}}`,
+  );
 }
 
-// Tab and newline are kept as themselves: the card renders the execution block with
-// `white-space: pre-wrap`, so they are shown rather than swallowed. Everything else a display can
-// hide behind is written out.
-const HIDEABLE_CHARACTERS =
-  // eslint-disable-next-line no-control-regex -- matching hideable characters is the point
-  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u200B-\u200F\u2028-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/gu;
+const HIDEABLE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]/gu;
