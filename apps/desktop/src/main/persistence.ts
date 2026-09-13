@@ -293,6 +293,7 @@ import {
   type OperationObservation,
   type TurnDiffEntry,
 } from './edit-saga';
+import { assertStableSingleLinkFile } from './stable-file-snapshot';
 import {
   createNativeMutationIntentSnapshot,
   deriveNativeMutationEffectKind,
@@ -16336,13 +16337,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * `read_file`, so whether a correct edit could complete its Turn depended on whether the model
    * happened to read the file back: Codex does, Claude Code often does not, and the Turn then died
    * on `AcceptanceEvidenceMissingError` (issue #466). Main owns the check instead, exactly as the
-   * Assurance design requires — "完了前はwrite activityを止め、対象hashを再確認して" — by re-reading
-   * each Saga's sealed post-image and handing the observed bytes to the same trusted-read path.
+   * Assurance design requires — "完了前はwrite activityを止め、対象hashを再確認して".
    *
-   * This is not a weaker gate: the evidence is still Main-observed and still requires the bytes on
-   * disk to hash to the sealed plan's post hash, so a write that was reverted, clobbered or
-   * superseded records nothing and keeps its criterion open. Only the dependency on the model's
-   * behaviour is removed.
+   * The criterion is per Saga, so the check is all-or-nothing across that Saga's operations: a
+   * batch's evidence may not be issued because one of its files happened to match. `[update A,
+   * delete B]` whose B was recreated after the commit no longer holds, and evidence that said
+   * otherwise would close the criterion on a Workspace the Saga does not describe.
+   *
+   * This is not a weaker gate than the trusted read it replaces: the evidence is still
+   * Main-observed and still requires every sealed post-image to be present on disk as written, so
+   * a write that was reverted, clobbered or superseded records nothing and keeps its criterion
+   * open. Only the dependency on the model's behaviour is removed.
    */
   verifyCommittedEditSagaPostImages(input: {
     taskId: string;
@@ -16360,23 +16365,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
           .all(input.taskId, input.turnId) as EditSagaRow[]
       ).map(toEditSaga);
       for (const saga of sagas) {
-        if (this.hasVerificationEvidence(input.taskId, input.turnId, saga.id)) continue;
-        for (const { operation } of saga.steps) {
-          // Renames and deletions have no surviving post-image to re-read, and a directory has no
-          // content hash — a mkdir Saga is verified through its descendant file read instead.
-          if (operation.destination !== null || operation.postHash === null) continue;
-          const content = readVerifiablePostImage(operation.canonicalPath);
-          if (content === null) continue;
-          this.recordWorkspaceReadVerification({
-            taskId: input.taskId,
-            turnId: input.turnId,
-            rootId: saga.rootId ?? 'legacy-primary',
-            path: operation.path,
-            content,
-            createdAt: input.createdAt,
-          });
-          if (this.hasVerificationEvidence(input.taskId, input.turnId, saga.id)) break;
-        }
+        // A Saga whose Assurance is already settled must not be advanced again: a second round on
+        // a `complete` or `blocked` decision is rejected by the state machine, and a Turn with one
+        // such Saga would otherwise take the whole verification pass down with it.
+        const settled = this.listAssuranceRounds(input.taskId, input.turnId, saga.id).at(-1);
+        if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
+        if (!committedSagaMatchesSealedPostImages(saga)) continue;
+        this.recordAssuranceVerification({
+          taskId: input.taskId,
+          turnId: input.turnId,
+          sagaId: saga.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt: input.createdAt,
+        });
       }
       return Object.freeze(
         decideCompletion(
@@ -16385,13 +16387,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ).openCriterionIds,
       );
     })();
-  }
-
-  private hasVerificationEvidence(taskId: string, turnId: string, sagaId: string): boolean {
-    return this.listEvidenceRecords(taskId, turnId).some(
-      (record) =>
-        record.kind === 'verification_passed' && record.criterionId === `verification:${sagaId}`,
-    );
   }
 
   private insertAcceptanceContract(contract: AcceptanceContract): void {
@@ -19839,39 +19834,110 @@ function displayTurnDiffPath(
 }
 
 /**
- * Reads a committed Edit Saga's post-image back for deterministic verification, or null when the
- * entry on disk is not a plain file Main may read.
+ * Whether every operation of a committed Edit Saga still describes the Workspace.
  *
- * Every check is bound to the descriptor this function opened, never to the path, because the path
- * is inside a Workspace the model was just writing to and anything could take its place between two
- * syscalls. Checking a path with `lstat` and then reading that path again would leave exactly that
- * window open:
+ * All-or-nothing, because the Acceptance criterion is per Saga: a batch is only as verified as its
+ * least verified operation, and a Saga with no steps has observed nothing at all.
+ */
+function committedSagaMatchesSealedPostImages(saga: EditSagaSnapshot): boolean {
+  return (
+    saga.steps.length > 0 &&
+    saga.steps.every(({ operation }) => operationMatchesSealedPostImage(operation))
+  );
+}
+
+/**
+ * Whether one sealed operation's post-image is what is on disk now.
+ *
+ * Each kind has its own post-image, and each is checked as the plan described it — a deletion that
+ * was undone, or a rename whose source came back, is not verified by the destination alone.
+ */
+function operationMatchesSealedPostImage(operation: JournaledPatchOperation): boolean {
+  switch (operation.kind) {
+    case 'mkdir':
+      return isDirectoryPostImage(operation.canonicalPath);
+    case 'delete':
+      return isAbsentPostImage(operation.canonicalPath);
+    case 'rename':
+      return (
+        operation.canonicalDestination !== null &&
+        isAbsentPostImage(operation.canonicalPath) &&
+        matchesSealedContentHash(operation.canonicalDestination, operation.postHash)
+      );
+    default:
+      return matchesSealedContentHash(operation.canonicalPath, operation.postHash);
+  }
+}
+
+/** Hashes the raw bytes, never a decoded string: see `readVerifiablePostImage`. */
+function matchesSealedContentHash(canonicalPath: string, postHash: string | null): boolean {
+  if (postHash === null) return false;
+  const bytes = readVerifiablePostImage(canonicalPath);
+  return bytes !== null && createHash('sha256').update(bytes).digest('hex') === postHash;
+}
+
+/** `lstat` rather than `stat`: a symlink planted where the entry was deleted is not an absence. */
+function isAbsentPostImage(canonicalPath: string): boolean {
+  try {
+    return lstatSync(canonicalPath, { throwIfNoEntry: false }) === undefined;
+  } catch {
+    // A path that cannot be stat'ed at all has not been observed to be absent.
+    return false;
+  }
+}
+
+/** `lstat` again: a symlink to a directory is not the directory the mkdir operation created. */
+function isDirectoryPostImage(canonicalPath: string): boolean {
+  try {
+    return lstatSync(canonicalPath, { throwIfNoEntry: false })?.isDirectory() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reads a committed Edit Saga's post-image back for deterministic verification, as raw bytes, or
+ * null when what is at the path is not a stable plain file holding exactly those bytes.
+ *
+ * **Bytes, not a string.** `Buffer.toString('utf8')` maps every invalid sequence to U+FFFD, so a
+ * post-image that legitimately contains U+FFFD and a file holding a lone `0x80` decode to the same
+ * string and would hash alike. The sealed post hash is the sha256 of the bytes that were written,
+ * so the comparison has to be made against bytes.
+ *
+ * **Every check is bound to the descriptor this function opened**, never to the path on its own,
+ * because the path is inside a Workspace the model was just writing to and anything could take its
+ * place between two syscalls:
  *
  *   - **`O_NOFOLLOW`.** A symlink planted at the path fails the open (`ELOOP`) instead of handing
- *     back some other file's bytes. Windows has no such flag, so there `fstat` is the only guard —
- *     which is why the type and size checks below use the descriptor rather than the path.
+ *     back some other file's bytes. Windows has no such flag and would follow a reparse point, so
+ *     the `lstat` below refuses a symlink there — and cross-checks its identity against the
+ *     descriptor, so a path pointing at a different inode than the one being read is refused on
+ *     every platform.
  *   - **`O_NONBLOCK`.** Opening a fifo for reading blocks until a writer appears, which would hang
  *     the Main process inside the completion path. With this flag the open returns immediately and
  *     `fstat` reports a fifo, not a file, so it is refused like any other non-regular entry.
  *   - **`fstat` on the descriptor.** Regular files only, and the ceiling matches the workspace read
  *     tool so an unbounded file cannot be pulled into memory while a Turn is being finalised.
- *   - **A buffer sized from that same `fstat`.** A file that grows after the check still cannot read
- *     past the ceiling; the extra bytes simply never reach the hash comparison.
+ *   - **A buffer sized from that same `fstat`, then an EOF probe.** Bytes appended to the same
+ *     inode after the size was taken would otherwise leave this returning a prefix that still
+ *     hashes to the sealed post image while the file on disk says something longer.
+ *   - **`assertStableSingleLinkFile` over all four observations.** The path and the descriptor must
+ *     agree on one single-link regular inode whose size and mtime did not move across the read.
  *
- * Callers compare the bytes against the sealed post hash, so every refusal here — and every partial
- * or substituted read that slips past it — records no evidence and leaves the criterion open.
+ * Callers compare these bytes against the sealed post hash, so every refusal here records no
+ * evidence and leaves the criterion open.
  */
-export function readVerifiablePostImage(canonicalPath: string): string | null {
+export function readVerifiablePostImage(canonicalPath: string): Buffer | null {
   let fd: number | null = null;
   try {
     fd = openSync(
       canonicalPath,
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
     );
-    const stat = fstatSync(fd, { bigint: true });
-    if (!stat.isFile() || stat.size > BigInt(MAX_VERIFIABLE_POST_IMAGE_BYTES)) return null;
-    const size = Number(stat.size);
-    if (size === 0) return '';
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile() || opened.size > BigInt(MAX_VERIFIABLE_POST_IMAGE_BYTES)) return null;
+    const lexical = lstatSync(canonicalPath, { bigint: true });
+    const size = Number(opened.size);
     const buffer = Buffer.alloc(size);
     let read = 0;
     while (read < size) {
@@ -19879,7 +19945,17 @@ export function readVerifiablePostImage(canonicalPath: string): string | null {
       if (chunk === 0) break;
       read += chunk;
     }
-    return buffer.subarray(0, read).toString('utf8');
+    // Short of the size `fstat` reported, or longer than it: either way these are not the whole
+    // contents of the file that is there now.
+    if (read !== size || readSync(fd, Buffer.alloc(1), 0, 1, size) !== 0) return null;
+    assertStableSingleLinkFile(
+      lexical,
+      opened,
+      fstatSync(fd, { bigint: true }),
+      lstatSync(canonicalPath, { bigint: true }),
+      buffer,
+    );
+    return buffer;
   } catch {
     return null;
   } finally {

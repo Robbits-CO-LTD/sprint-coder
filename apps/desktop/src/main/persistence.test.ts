@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  linkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -3417,6 +3418,139 @@ if (runsWithElectronAbi)
       },
     );
 
+    artifactIt(
+      'withholds a batch Saga verification until every one of its operations still holds',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'update one file and delete another');
+        const updatePath = join(workspacePath, 'batch-update.txt');
+        const deletePath = join(workspacePath, 'batch-delete.txt');
+        writeFileSync(updatePath, 'before');
+        writeFileSync(deletePath, 'doomed');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'batch-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          updateAndDeleteBoundary(artifacts, updatePath, deletePath),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'batch-lease'),
+        ).apply({
+          id: 'batch-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'batch-operation',
+          plan: persistedUpdateAndDeletePlan(updatePath, deletePath),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+        expect(saga.state).toBe('committed');
+        expect(readFileSync(updatePath, 'utf8')).toBe('after');
+        expect(existsSync(deletePath)).toBe(false);
+
+        // The update still matches, so a per-file check would close the criterion here. The
+        // deletion no longer holds, and the Saga is only as verified as its weakest operation.
+        writeFileSync(deletePath, 'brought back');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+
+        rmSync(deletePath);
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turn.turnId, stage);
+        expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+          state: 'completed',
+        });
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'compares the sealed post hash against bytes, so a lossy decode cannot stand in for it',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'write a replacement character');
+        const workspaceFile = join(workspacePath, 'replacement-character.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'replacement-character-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts, 'before', '�'),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'replacement-character-lease'),
+        ).apply({
+          id: 'replacement-character-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'replacement-character-operation',
+          plan: persistedEditPlan('before', '�', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        // A lone `0x80` decodes to the very U+FFFD the Saga committed, so a verification that
+        // hashed the decoded string would accept these three bytes' worth of difference.
+        writeFileSync(workspaceFile, Buffer.from([0x80]));
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('�');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+
+        // Appending to a verified post-image is a different file, not a longer prefix of one.
+        writeFileSync(workspaceFile, Buffer.concat([Buffer.from('�'), Buffer.from('extra')]));
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+
+        writeFileSync(workspaceFile, Buffer.from('�'));
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:03.000Z',
+          }),
+        ).toEqual([]);
+        persistence.close();
+      },
+    );
+
     // These pin the refusal contract the completion path depends on. The substitution race itself
     // (a path that turns into a symlink, fifo or huge file between two syscalls) is closed by
     // construction rather than by timing: every check below is made against the descriptor the
@@ -3428,16 +3562,39 @@ if (runsWithElectronAbi)
         return directory;
       }
 
-      it('reads a regular post-image back within the ceiling', () => {
+      it('reads a regular post-image back as raw bytes within the ceiling', () => {
         const directory = scratchDirectory('post-image-regular');
         const file = join(directory, 'post-image.txt');
         writeFileSync(file, 'after\n');
 
-        expect(readVerifiablePostImage(file)).toBe('after\n');
+        expect(readVerifiablePostImage(file)).toEqual(Buffer.from('after\n'));
         expect(readVerifiablePostImage(join(directory, 'never-written.txt'))).toBeNull();
         writeFileSync(join(directory, 'empty.txt'), '');
-        expect(readVerifiablePostImage(join(directory, 'empty.txt'))).toBe('');
+        expect(readVerifiablePostImage(join(directory, 'empty.txt'))).toEqual(Buffer.alloc(0));
         expect(readVerifiablePostImage(directory)).toBeNull();
+      });
+
+      it('returns the bytes on disk rather than a lossily decoded string', () => {
+        const directory = scratchDirectory('post-image-bytes');
+        const invalid = join(directory, 'invalid-utf8.txt');
+        const replacement = join(directory, 'replacement-character.txt');
+        // `0x80` is not valid UTF-8 and decodes to U+FFFD, the same string a post-image that really
+        // contains U+FFFD decodes to. Only the raw bytes tell the two files apart.
+        writeFileSync(invalid, Buffer.from([0x80]));
+        writeFileSync(replacement, Buffer.from('�', 'utf8'));
+
+        expect(readFileSync(invalid, 'utf8')).toBe(readFileSync(replacement, 'utf8'));
+        expect(readVerifiablePostImage(invalid)).toEqual(Buffer.from([0x80]));
+        expect(readVerifiablePostImage(invalid)).not.toEqual(readVerifiablePostImage(replacement));
+      });
+
+      artifactIt('refuses a post-image that another name still links to', () => {
+        const directory = scratchDirectory('post-image-hardlink');
+        const file = join(directory, 'post-image.txt');
+        writeFileSync(file, 'after\n');
+        linkSync(file, join(directory, 'second-name.txt'));
+
+        expect(readVerifiablePostImage(file)).toBeNull();
       });
 
       artifactIt('refuses a post-image path that a symlink has replaced', () => {
@@ -8928,6 +9085,98 @@ function fileBoundary(
       const value = (await artifacts.read(reference)).toString('utf8');
       writeFileSync(filePath, value);
       return observeValue(value);
+    },
+  };
+}
+
+/** `[update <updatePath>, delete <deletePath>]`, the batch shape a single `apply_patch` can seal. */
+function persistedUpdateAndDeletePlan(
+  updatePath: string,
+  deletePath: string,
+): PreparedStructuredPatch {
+  const revision = (content: string, name: string) =>
+    Object.freeze({
+      identityDigest: editHash(`identity:${name}`),
+      contentHash: editHash(content),
+      size: Buffer.byteLength(content),
+      mode: 0o100600,
+      nlink: 1 as const,
+    });
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      Object.freeze({
+        kind: 'update' as const,
+        path: updatePath,
+        canonicalPath: updatePath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-batch-update',
+        preRevision: revision('before', 'batch-update'),
+        preImage: 'before',
+        postImage: 'after',
+        preHash: editHash('before'),
+        postHash: editHash('after'),
+      }),
+      Object.freeze({
+        kind: 'delete' as const,
+        path: deletePath,
+        canonicalPath: deletePath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-batch-delete',
+        preRevision: revision('doomed', 'batch-delete'),
+        preImage: 'doomed',
+        postImage: null,
+        preHash: editHash('doomed'),
+        postHash: null,
+      }),
+    ]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+/** Dispatches each step of a batch Saga to the real filesystem by the operation's own kind. */
+function updateAndDeleteBoundary(
+  artifacts: EditArtifactStore,
+  updatePath: string,
+  deletePath: string,
+): EditEffectBoundary {
+  const present = (value: string) => persistedObservation(value, `file:${editHash(value)}`);
+  const absent = (): OperationObservation => ({
+    source: { state: 'absent' },
+    destination: { state: 'absent' },
+  });
+  return {
+    async apply(step: EditSagaStep) {
+      if (step.operation.kind === 'delete') {
+        rmSync(deletePath);
+        return absent();
+      }
+      const reference = step.operation.postArtifact;
+      if (reference === null) throw new Error('missing post artifact');
+      const value = (await artifacts.read(reference)).toString('utf8');
+      writeFileSync(updatePath, value);
+      return present(value);
+    },
+    async observe(step: EditSagaStep) {
+      if (step.operation.kind === 'delete')
+        return existsSync(deletePath)
+          ? { state: 'pre' as const, observation: present('doomed') }
+          : { state: 'post' as const, observation: absent() };
+      const value = readFileSync(updatePath, 'utf8');
+      return value === 'before'
+        ? { state: 'pre' as const, observation: present(value) }
+        : { state: 'post' as const, observation: present(value) };
+    },
+    async restore(step: EditSagaStep) {
+      if (step.operation.kind === 'delete') {
+        writeFileSync(deletePath, 'doomed');
+        return present('doomed');
+      }
+      writeFileSync(updatePath, 'before');
+      return present('before');
     },
   };
 }
