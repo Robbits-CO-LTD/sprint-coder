@@ -57,7 +57,7 @@ severity は並び順に使うだけで、証拠不足を補わない。
 ## 環境
 
 - Repository: `Robbits-CO-LTD/sprint-coder`
-- Source: `<full SHA>`
+- Source: `<short SHA (7〜12 桁; 40 桁 hex は秘匿スキャンが弾く)>`
 - macOS / Electron / Node / CLI version（秘密を含まない範囲）
 - Runtime: mock | Claude Code CLI (<model>) | Codex CLI (<model>)
 
@@ -97,7 +97,7 @@ fingerprint は `sha256(repo | phase | spec or case | 安定した要素名 | �
 "$S/file-issue.sh" --run-dir "$RUN_DIR" --title-file "$RUN_DIR/issues/<fp>.title" --body-file "$RUN_DIR/issues/<fp>.md" [--label bug] [--max 5] [--dry-run]
 ```
 
-対象 repository は manifest の `repository` から取り、`--repo` が食い違えば拒否する（cwd の `gh repo view` には依存しない）。script は次を機械チェックし、1 つでも落ちれば作成しない: タイトル prefix と文字数、`#\d+` の混入、marker がちょうど 1 個、**構造化した秘匿スキャン**（Anthropic / OpenAI / GitHub / Slack / AWS / Google の既知 token 形式、JWT、Bearer、秘密鍵ブロック、`api_key=` 型の代入、Unix / Windows / `~` の絶対 path、メールアドレス、nonce 入り marker、40 桁以上の hex、32 文字以上の大小英数混在 token）→ 1 つでも当たれば `redaction_failed`、label の存在、fingerprint 一致の既存 Issue、`--max` 超過。作成後は `gh issue view --json` で OPEN・タイトル一致・marker 1 個・label を確認し、`issues/index.json` に追記する。read-back に失敗した Issue は成功に数えず、以後の起票を止める。
+対象 repository は manifest の `repository` から取り、`--repo` が食い違えば拒否する（cwd の `gh repo view` には依存しない）。script は次を機械チェックし、1 つでも落ちれば作成しない: タイトル prefix と文字数、`#\d+` の混入、marker がちょうど 1 個、**構造化した秘匿スキャン**（Anthropic / OpenAI / GitHub / Slack / AWS / Google の既知 token 形式、JWT、Bearer、秘密鍵ブロック、`api_key=` 型の代入、Unix / Windows / `~` の絶対 path、メールアドレス、nonce 入り marker、40 桁以上の hex、32 文字以上の大小英数混在 token）→ 1 つでも当たれば `redaction_failed`。**混在 token は `/` で割った各成分と token 全体の両方で見る**（標準 Base64 は `/` を含むので `/` は免除にならない）。**免除は一切ない**（ファイル名は未信頼の PR や被験 AI が決められるので、path が実在することは安全の根拠にならない）。証拠の path は **成分が 32 文字未満の短い相対 path** だけを書き、長い混在 token を含む path は本文に載せず「lane の workspace に生成されたファイル」のような説明文に置き換える、label の存在、fingerprint 一致の既存 Issue、`--max` 超過。作成後は `gh issue view --json` で OPEN・タイトル一致・marker 1 個・label を確認し、`issues/index.json` に追記する。read-back に失敗した Issue は成功に数えず、以後の起票を止める。
 
 秘匿スキャンは deny-list であって完全ではない。スキャンを通っても、本文に「第三者が特定できる値」「run 固有の値」が残っていないか自分で読み直す。判断に迷う値は削る（fail closed）。
 

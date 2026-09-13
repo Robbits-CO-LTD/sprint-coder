@@ -47,8 +47,19 @@ addon="$DESKTOP_ROOT/native-safe-fs/build/Release/sprint_coder_native_safe_fs.no
 runner="$DESKTOP_ROOT/sandbox-runner/build/Release/sprint-coder-sandbox-runner"
 sqlite="$REPO_ROOT/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
 gypi="$REPO_ROOT/node_modules/better-sqlite3/build/config.gypi"
-[ -f "$addon" ]  && ok "native-safe-fs addon present" || block "native-safe-fs addon missing (manual file editor cannot save) — fix: $fix"
-[ -x "$runner" ] && ok "sandbox-runner present"       || block "sandbox-runner missing (run_command approvals never appear) — fix: $fix"
+if [ -f "$addon" ]; then
+  # A present but STALE addon is worse than a missing one: it loads, probes fine, and only fails when a
+  # newer export is called (2026-09-12: directoryCaseSensitive missing => every Graph Mission review
+  # reported path_unavailable in dev mode while packaged CI passed). Compare against its sources.
+  stale_src="$(find "$DESKTOP_ROOT/native-safe-fs" -type f \( -name '*.cc' -o -name '*.h' -o -name '*.gyp' -o -name '*.json' \) ! -path '*/build/*' ! -path '*/node_modules/*' -newer "$addon" 2>/dev/null | head -1)"
+  if [ -n "$stale_src" ]; then block "native-safe-fs addon is OLDER than its source (${stale_src#$REPO_ROOT/}) — stale exports fail only when called (path_unavailable etc.). Fix: node build-native-safe-fs.mjs (or $fix)"
+  else ok "native-safe-fs addon present and newer than its sources"; fi
+else block "native-safe-fs addon missing (manual file editor cannot save) — fix: $fix"; fi
+if [ -x "$runner" ]; then
+  stale_rs="$(find "$DESKTOP_ROOT/sandbox-runner/src" -type f -name '*.rs' -newer "$runner" 2>/dev/null | head -1)"
+  if [ -n "$stale_rs" ]; then warn "sandbox-runner binary is older than ${stale_rs#$REPO_ROOT/} — rebuild with node build-sandbox-runner.mjs if sandbox behaviour matters for this run"
+  else ok "sandbox-runner present and newer than its sources"; fi
+else block "sandbox-runner missing (run_command approvals never appear) — fix: $fix"; fi
 if [ -f "$sqlite" ]; then
   ev="$(node -p "require('$REPO_ROOT/node_modules/electron/package.json').version" 2>/dev/null || echo '')"
   if [ -f "$gypi" ]; then
@@ -68,6 +79,27 @@ else block "dev Electron binary missing — run: node node_modules/electron/inst
 mb="$DESKTOP_ROOT/.vite/build/index.js"
 if [ -f "$mb" ]; then ok "dev main bundle present (built $(date -r "$mb" '+%Y-%m-%d %H:%M'))"
 else warn "dev main bundle apps/desktop/.vite/build/index.js missing; npm start (or E2E globalSetup) builds it"; fi
+
+# 4b. Vite optimize cache vs workspace packages, PER PACKAGE (stale cache => black renderer, every
+#     spec times out). One @sprint-coder_<pkg>.js can be days old while another was just rebuilt, so
+#     each package is compared with its own bundle. Only RUNTIME sources count: a checkout where just
+#     a *.test.ts / *.spec.ts / *.d.ts / __tests__ file moved must not block the whole sweep.
+deps_dir="$DESKTOP_ROOT/node_modules/.vite/deps"
+stale_pkgs=""; checked_pkgs=""
+for src_dir in "$REPO_ROOT"/packages/*/src; do
+  [ -d "$src_dir" ] || continue
+  pkg="$(basename "$(dirname "$src_dir")")"
+  vcache="$(ls -t "$deps_dir/@sprint-coder_$pkg.js" "$deps_dir/@sprint-coder_$pkg".*.js 2>/dev/null | head -1)"
+  [ -n "$vcache" ] && [ -f "$vcache" ] || continue
+  checked_pkgs="$checked_pkgs $pkg"
+  newer_src="$(find "$src_dir" \
+    \( -name '__tests__' -o -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' -o -name '*.d.ts' \) -prune -o \
+    \( -name '*.ts' -o -name '*.tsx' \) -newer "$vcache" -print 2>/dev/null | head -1)"
+  [ -n "$newer_src" ] && stale_pkgs="$stale_pkgs $pkg(${newer_src#$REPO_ROOT/})"
+done
+if [ -n "$stale_pkgs" ]; then block "Vite optimize cache in apps/desktop/node_modules/.vite/deps is OLDER than the runtime sources of:$stale_pkgs — the dev renderer will throw 'does not provide an export named …' and every spec times out. Fix: rm -rf apps/desktop/node_modules/.vite node_modules/.vite, then (re)start the dev server"
+elif [ -n "$checked_pkgs" ]; then ok "Vite optimize cache is newer than the runtime sources of:$checked_pkgs"
+else ok "no Vite optimize cache yet (first dev server start will build it)"; fi
 
 # 5. dev server on :5173 — must belong to THIS checkout
 pid="$(lsof -nP -iTCP:5173 -sTCP:LISTEN -Fp 2>/dev/null | sed -n 's/^p//p' | head -1)"
