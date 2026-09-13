@@ -29,6 +29,12 @@ import {
 } from '@sprint-coder/domain';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
+import {
+  createManagedStdinRequest,
+  managedStdinApprovalExecution,
+  managedStdinApprovalTarget,
+  managedStdinEphemeralExecution,
+} from './managed-command-stdin';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
@@ -6790,15 +6796,25 @@ if (runsWithElectronAbi)
       const task = persistence.createTask();
       const turn = startExecutingTurn(persistence, task.id);
       const secret = 'export DB_PASSWORD=hunter2-do-not-store';
+      const request = createManagedStdinRequest({
+        chars: secret,
+        close: true,
+        command: {
+          sessionId: 'session-1',
+          executable: '/bin/sh',
+          argv: ['-s'],
+          cwd: '/workspace',
+        },
+      });
 
       const requested = persistence.requestApproval(
         approvalRequest(task.id, turn.turnId, {
           display: {
-            target: 'stdin → /bin/sh (session session-1)',
+            target: managedStdinApprovalTarget(request),
             impact: 'process',
-            execution: JSON.stringify({ tool: 'write_stdin', charsSha256: 'd'.repeat(64) }),
+            execution: JSON.stringify(managedStdinApprovalExecution(request)),
           },
-          ephemeralExecution: `--- stdin ---\n${secret}`,
+          ephemeralExecution: managedStdinEphemeralExecution(request),
         }),
       );
 
@@ -6812,14 +6828,25 @@ if (runsWithElectronAbi)
       const stored = inspection
         .prepare('SELECT display_json FROM approvals WHERE id = ?')
         .get('approval-1') as { display_json: string };
+      const approvalRow = inspection
+        .prepare('SELECT spec_digest FROM approvals WHERE id = ?')
+        .get('approval-1') as { spec_digest: string };
       const events = inspection
         .prepare('SELECT payload_json FROM turn_events WHERE task_id = ?')
         .all(task.id) as { payload_json: string }[];
       inspection.close();
 
-      // Not one fragment of it, anywhere durable.
-      for (const fragment of ['hunter2', 'DB_PASSWORD', 'export DB', 'ephemeralExecution']) {
+      // Not one fragment of it, anywhere durable — and no unkeyed digest of it either, because a
+      // plain hash stored beside a byte count lets a held database confirm a guessed password.
+      for (const fragment of [
+        'hunter2',
+        'DB_PASSWORD',
+        'export DB',
+        'ephemeralExecution',
+        createHash('sha256').update(secret, 'utf8').digest('hex'),
+      ]) {
         expect(stored.display_json).not.toContain(fragment);
+        expect(approvalRow.spec_digest).not.toContain(fragment);
         for (const event of events) expect(event.payload_json).not.toContain(fragment);
       }
       // The reads the Renderer uses for pending state and history never revive it either.

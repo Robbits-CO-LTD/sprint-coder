@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import { APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS } from '@sprint-coder/contracts';
+import { approvalContentMac } from './approval-digest-key';
 import type { ManagedCommandIdentity } from './managed-command-sessions';
 
 /**
@@ -109,8 +109,15 @@ export function managedStdinApprovalTarget(request: ManagedStdinRequest): string
  * It carries no stdin content at all — not even a redacted excerpt. Secret scanners recognise
  * labels and known token shapes; a bare password typed for `sudo -S` or `gpg --passphrase-fd 0`
  * looks like ordinary text and would have survived in plaintext, in the durable record and the
- * unprivileged Renderer's history, even after the user refused the write. The byte count and
- * digest still identify exactly which bytes were offered.
+ * unprivileged Renderer's history, even after the user refused the write.
+ *
+ * The identity of those bytes is a keyed MAC, not a plain hash. A bare SHA-256 stored beside its
+ * byte count is a verifier: anyone holding the database could hash candidate passwords until one
+ * matched. `charsMac` is unverifiable without the per-install key, which never enters the
+ * database, while still being equal for equal bytes so `allow_task` can recognise a repeat.
+ *
+ * This projection is also what every persisted digest over the request is taken from, so no
+ * unkeyed digest of stdin reaches `spec_digest`, the permission audit, or a task grant.
  */
 export function managedStdinApprovalExecution(
   request: ManagedStdinRequest,
@@ -123,7 +130,7 @@ export function managedStdinApprovalExecution(
     cwd: request.command.cwd,
     close: request.close,
     charsBytes: Buffer.byteLength(request.chars, 'utf8'),
-    charsSha256: createHash('sha256').update(request.chars, 'utf8').digest('hex'),
+    charsMac: managedStdinContentMac(request.chars),
   };
 }
 
@@ -141,10 +148,18 @@ export function managedStdinEphemeralExecution(request: ManagedStdinRequest): st
   const cwd = clipHeaderField(visibleStdinText(request.command.cwd));
   return [
     header,
-    `session=${request.sessionId} cwd=${cwd} close=${request.close} bytes=${Buffer.byteLength(request.chars, 'utf8')} sha256=${createHash('sha256').update(request.chars, 'utf8').digest('hex')}`,
+    `session=${request.sessionId} cwd=${cwd} close=${request.close} bytes=${Buffer.byteLength(request.chars, 'utf8')} mac=${managedStdinContentMac(request.chars)}`,
     '--- stdin ---',
     visibleStdinText(request.chars),
   ].join('\n');
+}
+
+/**
+ * Keyed identity of the characters, shown on the card and stored in the audit so the two can be
+ * matched, and unverifiable by anyone who only has the stored value.
+ */
+export function managedStdinContentMac(chars: string): string {
+  return approvalContentMac('write_stdin.chars', chars);
 }
 
 /** Keeps an already-approved command's own length from deciding whether a stdin write is possible. */
@@ -165,13 +180,18 @@ function clipHeaderField(value: string): string {
  * U+206A..U+206F, the zero-width marks and U+FEFF), the line and paragraph separators (`Zl`,
  * `Zp`), and the private-use and unassigned code points (`Co`, `Cn`) that render as whatever the
  * reader's font decides.
+ *
+ * A literal backslash is doubled, which is what makes the rendering one-to-one: without it a real
+ * ESC and the six characters `\x{1B}` typed literally would draw the same thing, and a reader
+ * could not tell which one the command is about to receive. Ordinary text pays for that with
+ * noisier backslashes, which is the right way round for a value being authorized.
  */
 export function visibleStdinText(value: string): string {
-  return value.replace(HIDEABLE_CHARACTERS, (character) =>
-    character === '\n' || character === '\t'
-      ? character
-      : `\\x{${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(2, '0')}}`,
-  );
+  return value.replace(HIDEABLE_CHARACTERS, (character) => {
+    if (character === '\n' || character === '\t') return character;
+    if (character === '\\') return '\\\\';
+    return `\\x{${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(2, '0')}}`;
+  });
 }
 
-const HIDEABLE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]/gu;
+const HIDEABLE_CHARACTERS = /[\\\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]/gu;

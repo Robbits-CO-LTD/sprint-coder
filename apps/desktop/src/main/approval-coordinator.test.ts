@@ -31,6 +31,7 @@ import {
 } from './default-tools';
 import {
   createManagedStdinRequest,
+  managedStdinContentMac,
   MANAGED_STDIN_MAX_CHARACTERS,
   type ManagedStdinRequest,
 } from './managed-command-stdin';
@@ -958,12 +959,11 @@ describe('managed command stdin approval', () => {
     expect(approval.sandboxProfile).toBe('full');
     expect(approval.display?.target).toContain('/usr/bin/tee notes.txt');
 
-    // The live card carries the exact bytes, in full.
+    // The live card carries the exact bytes, in full, under the same keyed identity the audit
+    // record stores — so a user can match the card they approved to the row it left behind.
     expect(approval.ephemeralExecution).toContain('password=hunter2-do-not-store');
     expect(approval.ephemeralExecution).toContain('rm -rf .');
-    expect(approval.ephemeralExecution).toContain(
-      `sha256=${createHash('sha256').update(chars, 'utf8').digest('hex')}`,
-    );
+    expect(approval.ephemeralExecution).toContain(`mac=${managedStdinContentMac(chars)}`);
 
     // The durable projection identifies those bytes and carries no secret.
     const execution = JSON.parse(approval.display!.execution) as Record<string, unknown>;
@@ -974,8 +974,12 @@ describe('managed command stdin approval', () => {
       argv: ['notes.txt'],
       close: true,
       charsBytes: Buffer.byteLength(chars, 'utf8'),
-      charsSha256: createHash('sha256').update(chars, 'utf8').digest('hex'),
+      charsMac: managedStdinContentMac(chars),
     });
+    // Nothing an offline guess could confirm: the plain hash of the characters appears nowhere.
+    expect(approval.display!.execution).not.toContain(
+      createHash('sha256').update(chars, 'utf8').digest('hex'),
+    );
     // No excerpt at all, redacted or otherwise: a bare password for `sudo -S` reads as ordinary
     // text and no scanner would catch it.
     expect(execution).not.toHaveProperty('chars');

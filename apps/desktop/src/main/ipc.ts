@@ -50,6 +50,7 @@ import {
 import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
 import { CommandRunnerError } from './command-runner';
 import { ManagedStdinRejection } from './managed-command-stdin';
+import { configureApprovalDigestKey } from './approval-digest-key';
 import { pathComparisonKey } from '../path-comparison';
 import {
   approvalActivationIntent,
@@ -1167,6 +1168,9 @@ export class IpcRouter {
     this.attachmentCustodyStore = new AttachmentCustodyStore(
       join(app.getPath('userData'), 'attachment-custody'),
     );
+    // Before any approval can be raised: digests over approval content are keyed by a per-install
+    // secret that lives only in this directory, never in SQLite (Issue #473).
+    configureApprovalDigestKey(app.getPath('userData'));
     const providerSecrets = new ProviderSecretStorage(
       join(app.getPath('userData'), 'provider-secrets'),
       new ElectronProviderSecretCipher(),

@@ -1,12 +1,37 @@
-import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+import { configureApprovalDigestKey, resetApprovalDigestKeyForTest } from './approval-digest-key';
 import {
   createManagedStdinRequest,
   managedStdinApprovalExecution,
   managedStdinEphemeralExecution,
+  managedStdinContentMac,
   visibleStdinText,
   MANAGED_STDIN_MAX_CHARACTERS,
 } from './managed-command-stdin';
 import { APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS } from '@sprint-coder/contracts';
+
+const directories: string[] = [];
+afterAll(() => {
+  for (const directory of directories) rmSync(directory, { recursive: true, force: true });
+  resetApprovalDigestKeyForTest();
+});
+
+/** Runs `read` against a fresh install key, so two calls cannot share one. */
+function withKeyDirectory<T>(read: () => T): T {
+  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-approval-key-'));
+  directories.push(directory);
+  resetApprovalDigestKeyForTest();
+  configureApprovalDigestKey(directory);
+  try {
+    return read();
+  } finally {
+    resetApprovalDigestKeyForTest();
+  }
+}
 
 const command = {
   sessionId: 'session-1',
@@ -44,8 +69,58 @@ describe('stdin approval text', () => {
     const execution = managedStdinApprovalExecution(request);
 
     expect(execution).toMatchObject({ charsBytes: 8, tool: 'write_stdin' });
-    expect(execution['charsSha256']).toMatch(/^[a-f0-9]{64}$/);
+    expect(execution['charsMac']).toMatch(/^[a-f0-9]{64}$/);
+    expect(execution).not.toHaveProperty('charsSha256');
     expect(JSON.stringify(execution)).not.toContain('hunter2');
+    // A plain hash beside a byte count is a verifier for a guessed password; the stored value
+    // must not be one.
+    expect(JSON.stringify(execution)).not.toContain(
+      createHash('sha256').update('hunter2\n', 'utf8').digest('hex'),
+    );
+  });
+
+  it('renders two different inputs differently, including a literal backslash', () => {
+    // Without doubling the backslash these two draw the same thing, and a reader could not tell a
+    // real escape sequence from the six characters spelling one.
+    const realEscape = '\u001b[2J';
+    const typedText = '\\x{1B}[2J';
+
+    expect(visibleStdinText(realEscape)).not.toBe(visibleStdinText(typedText));
+    expect(visibleStdinText(typedText)).toBe('\\\\x{1B}[2J');
+    expect(visibleStdinText(realEscape)).toBe('\\x{1B}[2J');
+  });
+
+  it('keys the content identity to the install, so a stored value confirms no guess', () => {
+    const chars = 'hunter2\n';
+    const first = withKeyDirectory(() => managedStdinContentMac(chars));
+    const second = withKeyDirectory(() => managedStdinContentMac(chars));
+
+    // Same characters, different install key: a candidate cannot be tested against a stored value.
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(first).not.toBe(second);
+    expect(first).not.toBe(createHash('sha256').update(chars, 'utf8').digest('hex'));
+  });
+
+  it('reuses one 0600 key file per install so a repeat of the same bytes still matches', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-approval-key-'));
+    directories.push(directory);
+    const chars = 'same bytes';
+
+    resetApprovalDigestKeyForTest();
+    configureApprovalDigestKey(directory);
+    const first = managedStdinContentMac(chars);
+    // A restart re-reads the file rather than minting a new key, which is what lets an
+    // allow_task grant recognise the identical write again.
+    resetApprovalDigestKeyForTest();
+    configureApprovalDigestKey(directory);
+    const afterRestart = managedStdinContentMac(chars);
+    resetApprovalDigestKeyForTest();
+
+    expect(afterRestart).toBe(first);
+    const keyPath = join(directory, 'approval-digest', 'content-mac.key');
+    const stats = statSync(keyPath);
+    expect(stats.size).toBe(32);
+    if (process.platform !== 'win32') expect(stats.mode & 0o777).toBe(0o600);
   });
 
   it('bounds the card even when the approved command line is enormous', () => {

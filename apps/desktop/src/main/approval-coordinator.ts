@@ -193,7 +193,7 @@ export class ApprovalCoordinator {
     const requestDigest = digest({
       toolId: request.entry.toolId,
       schemaDigest: request.entry.schemaDigest,
-      input: request.input,
+      input: durableDigestInput(request.input),
       capability,
       policyEpoch: request.context.policyEpoch,
     });
@@ -555,11 +555,11 @@ export function approvalFactsForTool(
         : disclosure !== undefined
           ? digest({ toolId: request.entry.toolId, disclosure, operation })
           : workspaceGuard === undefined
-            ? digest({ toolId: request.entry.toolId, input: request.input })
+            ? digest({ toolId: request.entry.toolId, input: durableDigestInput(request.input) })
             : workspaceGuards.length > 1
               ? digest({
                   toolId: request.entry.toolId,
-                  input: request.input,
+                  input: durableDigestInput(request.input),
                   pathGuardDigests: workspaceGuards.map(pathGuardIdentityDigest),
                   operation,
                 })
@@ -587,6 +587,21 @@ function displayTarget(input: unknown): string {
       if (typeof record[key] === 'string') return record[key];
   }
   return 'requested resource';
+}
+
+/**
+ * What a persisted digest over a Tool input may be taken from.
+ *
+ * Every digest this module produces is stored — `spec_digest` on the approval row, the permission
+ * audit's `execution_spec_digest`, the `allow_task` request digest — so none of them may be
+ * computable from a guess. For a stdin write that means the raw characters are replaced by the
+ * same keyed MAC the audit record carries: equal bytes still produce equal digests, so a task
+ * grant recognises a repeat, but nobody holding the database can confirm a candidate password
+ * (Issue #473).
+ */
+function durableDigestInput(input: unknown): unknown {
+  const stdin = managedStdinAuthorizationFacts(input);
+  return stdin === undefined ? input : managedStdinApprovalExecution(stdin);
 }
 
 /**
