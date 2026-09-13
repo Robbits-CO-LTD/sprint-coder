@@ -41,7 +41,7 @@ description: sprint-coder の不具合を一掃する統合手順。(1) Playwrig
 4. [references/fix-loop.md](references/fix-loop.md) — Phase 5 の 1 Issue あたりの手順と停止条件。
 5. memory の `sprint-coder-native-prereqs`、`sprint-coder-real-worker-e2e-gap`、`sprint-coder-review-bot`、`sprint-coder-patrol-lessons`（起票前に前提を実測する教訓）。
 
-`scripts/` 自体を直したときは自己テストを流す（どちらもオフライン・秒で終わる）: `bash scripts/file-issue.test.sh`（秘匿スキャンのゲート）、`node --test scripts/triage-e2e.test.mjs`（stale Vite cache の分類）。
+`scripts/` 自体を直したときは自己テストを流す（どれもオフライン・秒で終わる）: `bash scripts/file-issue.test.sh`（秘匿スキャンのゲート）、`node --test scripts/triage-e2e.test.mjs`（stale Vite cache の分類）、`node --test scripts/lane-peek-turn.test.mjs`（lane-peek の新 Turn 受理判定）。
 
 ## 2. Phase 0 — 束縛と preflight
 
@@ -86,7 +86,7 @@ node .claude/skills/sprint-coder-bug-sweep/scripts/triage-e2e.mjs "$RUN_DIR/e2e/
 
 `triage-e2e.mjs` は失敗ごとに `spec:行 › タイトル`、error の 1 行目（ANSI 除去・400 字）、分類ヒント、fingerprint を `e2e/triage.md` と `e2e/triage.json` に出す。分類は sprint-coder-e2e §4 の 4 つに **必ず** 落とす:
 
-1. **環境起因** — `Packaged app not found` / `did not become ready` / 全 spec が `firstWindow: Timeout` で同形に死ぬ。アプリは無罪。preflight に戻る。`does not provide an export named 'X'` を `env_stale_vite_cache` にできるのは、**`packages/<pkg>/src` が今も X を export していて**、かつ Vite の依存キャッシュが（test を除いた）source より古いときだけ。export が無ければ export の削除・改名の疑いとして本物の失敗候補に残る（理由は `triage.md` の「分類の根拠」に出る）。`--stale-vite-cache` を渡しても export の確認は省略されない。
+1. **環境起因** — `Packaged app not found` / `did not become ready` / 全 spec が `firstWindow: Timeout` で同形に死ぬ。アプリは無罪。preflight に戻る。`does not provide an export named 'X'` を `env_stale_vite_cache` にできるのは、**`packages/<pkg>/src/index.ts`（公開 entrypoint）が今も X を*値として* export していて**、かつ **その package の** Vite 依存キャッシュ（`@sprint-coder_<pkg>.js`）が実行時 source より古いときだけ。`export type` / `export interface` は実行時に消えるので値 export に数えない。`export * from` 経由は追跡せず判定不能（＝環境起因にしない）。export が無ければ削除・改名・型化の疑いとして本物の失敗候補に残る（理由は `triage.md` の「分類の根拠」に出る）。`--stale-vite-cache` は mtime 証拠の代わりであって、export 確認は省略されない。
 2. **意図的 skip** — `leader-mcp-smoke` / `leader-mcp-codex-smoke` / `cli-workspace-egress` / archify-graph の real-worker case は opt-in。skip は失敗ではない。
 3. **既知 flake** — `command-runner-flow.spec.ts` の focus 系。**同じ spec をもう 1 回単独で流し**、pass/fail が交互なら `flaky_unresolved`（起票しない、報告には残す）。
 4. **本物の失敗** — 上のどれでもない。**独立再現**として、その spec を単独で 1 回だけ再実行する（各 spec は自分の userData を作るので別 session になる）。2 回とも同じ expect が同じ delta で落ちて初めて起票候補。

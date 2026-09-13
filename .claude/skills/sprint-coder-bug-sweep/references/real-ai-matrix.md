@@ -143,7 +143,9 @@ B="$RUN_DIR/lanes/claude/baseline-RA-03.json"
 "$S/lane-peek.cjs" --run-dir "$RUN_DIR" --lane claude --poll 150 --baseline "$B"
 ```
 
-`--baseline-out` はその時点の Turn identity（user / assistant の最終テキスト、run card 数と状態、コマンド・ファイル・監査カードの件数、承認カード文言の hash）を保存するだけで、待たずに終了する。`--poll --baseline` は **baseline と違う Turn** を観測してから settle（`completed` / `failed` / `canceled` / `interrupted`）か承認カードを待つので、送信直後の初回 read が前 Turn の終了カードを映していても、Turn が 4 秒の読み取り間隔の間に終わっても、前 Turn の結果を拾わない。承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。
+`--baseline-out` はその時点の Turn identity（user / assistant の最終テキスト、run card の位置と状態、コマンド・ファイル・監査カードの件数、承認カード文言の hash）を保存するだけで、待たずに終了する。
+
+判定の要は **Run Card が「最新の user message の下」にあるか** で、これは renderer の作りから来ている: Timeline は現在の Turn の Run Card を 1 枚だけ、その Turn の user message の下に描く。送信は先に optimistic な user message を足し、`turn.accepted` が来て初めて Run Card が新 Turn のものに差し替わる。したがって 2 Turn 目以降の送信直後は「新しい user message がある + 前 Turn の `completed` カードが残っている」状態になり、**user message が増えたことも、最後のカードが terminal なことも、送った Turn の証拠にならない**。`--poll --baseline` は最新 user message に紐づく Run Card が現れるまで terminal / 承認カードを受理しないので、Turn が 4 秒の読み取り間隔の間に終わっても前 Turn の結果を拾わない（`--baseline` なしのときは「そのカードが `running` で見えた」ことだけが証拠なので、間に合わなければ受理せず stale になる）。承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。
 
 **新しい Turn を一度も観測できずに poll が終わると、JSON に `"stale": true` が付き exit code は 3 になる**（`--baseline` を付けない従来の呼び方でも同じ）。stale な出力は「この Turn の結果」ではないので、PASS / FAIL の根拠に使わず、再観測するか `fail_tooling` として events に残す。
 

@@ -39,12 +39,12 @@ function walk(suite, file, titles) {
 for (const s of report.suites ?? []) walk(s, s.file ?? s.title, []);
 
 const ENV_RE = /Packaged app not found|did not become ready|electron-forge package|ECONNREFUSED[^\n]*5173|NODE_MODULE_VERSION|Sprint Coder API unavailable/i;
-// "does not provide an export named 'X'" is environmental ONLY when both hold: Vite's optimize cache
-// is provably older than the shipped package sources (--stale-vite-cache, or the mtimes at triage
-// time) AND the package really exports X today. The same SyntaxError is a real regression when an
-// export was removed/renamed without updating its importer, so the export lookup is never skipped —
-// the flag replaces the mtime evidence, not the lookup. Test sources are ignored by the mtime scan:
-// touching a *.test.ts must not turn a genuine missing export into an environment story.
+// "does not provide an export named 'X'" is environmental ONLY when both hold: THAT package's Vite
+// optimize cache is provably older than its runtime sources (--stale-vite-cache, or the mtimes at
+// triage time) AND the package still exports X as a runtime VALUE. The same SyntaxError is a real
+// regression when an export was removed, renamed or turned into a type-only export, so the lookup is
+// never skipped — the flag replaces the mtime evidence, not the lookup. Test sources are ignored by
+// the mtime scan: touching a *.test.ts must not turn a genuine missing export into an env story.
 const MISSING_EXPORT_RE = /does not provide an export named ['"`]?([A-Za-z_$][A-Za-z0-9_$]*)/;
 const OUTDATED_DEP_RE = /Outdated Optimize Dep/i;
 const PKG_RE = /@sprint-coder[_/]([a-z0-9][a-z0-9-]*)/i;
@@ -67,46 +67,91 @@ function newestMtime(dir) {
   for (const f of sourceFiles(dir)) { try { newest = Math.max(newest, fs.statSync(f).mtimeMs); } catch { /* raced */ } }
   return newest;
 }
-function viteCacheStale() {
-  try {
-    const deps = path.join(repoRoot, 'apps', 'desktop', 'node_modules', '.vite', 'deps');
-    const files = fs.readdirSync(deps).filter((f) => /^@sprint-coder_.*\.js$/.test(f));
-    if (files.length === 0) return false;
-    const cache = Math.max(...files.map((f) => fs.statSync(path.join(deps, f)).mtimeMs));
-    return newestMtime(path.join(repoRoot, 'packages', 'contracts', 'src')) > cache || newestMtime(path.join(repoRoot, 'packages', 'domain', 'src')) > cache;
-  } catch { return false; }
+// Staleness is decided PER PACKAGE: one @sprint-coder_<pkg>.js bundle can be days old while another
+// was just rebuilt, and collapsing them into one max mtime hides exactly the stale one.
+function workspacePackages() {
+  try { return fs.readdirSync(path.join(repoRoot, 'packages'), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return []; }
 }
-const staleCache = argv.includes('--stale-vite-cache') || viteCacheStale();
-// true = the package source exports the name today, false = it does not, null = cannot tell.
+function stalePackages() {
+  const stale = new Set();
+  const deps = path.join(repoRoot, 'apps', 'desktop', 'node_modules', '.vite', 'deps');
+  let files = [];
+  try { files = fs.readdirSync(deps); } catch { return stale; }
+  for (const pkg of workspacePackages()) {
+    const re = new RegExp(`^@sprint-coder_${pkg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[^/]*)?\\.js$`);
+    const bundles = files.filter((f) => re.test(f));
+    if (bundles.length === 0) continue; // never optimized => nothing to be stale
+    let cache = 0;
+    for (const f of bundles) { try { cache = Math.max(cache, fs.statSync(path.join(deps, f)).mtimeMs); } catch { /* raced */ } }
+    if (newestMtime(path.join(repoRoot, 'packages', pkg, 'src')) > cache) stale.add(pkg);
+  }
+  return stale;
+}
+const staleFlag = argv.includes('--stale-vite-cache');
+const stalePkgs = stalePackages();
+const staleCache = staleFlag || stalePkgs.size > 0;
+const staleFor = (pkg) => staleFlag || stalePkgs.has(pkg);
+// Only VALUE exports count: `export type` / `export interface` are erased at build time, so treating
+// them as exports would clear a genuine "imported a value that no longer exists" regression. The
+// lookup starts at the package's public entrypoint (packages/<pkg>/src/index.ts) and follows its
+// `export { … } from` re-exports; `export * from` is NOT followed and yields null (cannot tell).
+const VALUE_DECL = (name) => new RegExp(`export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:const|let|var|function\\s*\\*?|class|enum)\\s+${name}\\b`);
+const LOCAL_DECL = (name) => new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:const|let|var|function\\s*\\*?|class|enum)\\s+${name}\\b`);
+function resolveModule(fromFile, spec) {
+  if (!spec.startsWith('.')) return null; // a bare specifier leaves this package: cannot tell
+  const base = path.resolve(path.dirname(fromFile), spec.replace(/\.js$/, ''));
+  for (const cand of [`${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts'), path.join(base, 'index.tsx')]) {
+    try { if (fs.statSync(cand).isFile()) return cand; } catch { /* next candidate */ }
+  }
+  return null;
+}
+// true = exported as a runtime value, false = not exported, null = cannot tell (fail closed).
+function fileExportsValue(file, name, seen = new Set()) {
+  const key = `${file}#${name}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
+  if (VALUE_DECL(name).test(text)) return true;
+  const nsRe = new RegExp(`export\\s+\\*\\s+as\\s+${name}\\s+from`);
+  if (nsRe.test(text)) return true;
+  let unknown = false;
+  for (const m of text.matchAll(/export\s+(type\s+)?\{([^}]*)\}\s*(?:from\s*['"]([^'"]+)['"])?/g)) {
+    if (m[1]) continue; // export type { … }
+    for (const raw of m[2].split(',')) {
+      const spec = raw.trim();
+      if (!spec || /^type\s/.test(spec)) continue; // export { type X }
+      const [local, exported = local] = spec.split(/\s+as\s+/).map((s) => s.trim());
+      if (exported !== name) continue;
+      if (m[3]) {
+        const target = resolveModule(file, m[3]);
+        const deeper = target ? fileExportsValue(target, local, seen) : null;
+        if (deeper === true) return true;
+        unknown = unknown || deeper === null;
+      } else if (LOCAL_DECL(local).test(text)) return true;
+      else unknown = true; // re-exported import alias: not resolvable here
+    }
+  }
+  if (/export\s+\*\s+from/.test(text)) unknown = true; // wildcard re-export: not followed
+  return unknown ? null : false;
+}
 const exportLookup = new Map();
-function packageExportsName(pkg, name) {
+function packageExportsValue(pkg, name) {
   const key = `${pkg}#${name}`;
   if (exportLookup.has(key)) return exportLookup.get(key);
-  const dir = path.join(repoRoot, 'packages', pkg, 'src');
-  const files = sourceFiles(dir);
-  let result = files.length === 0 ? null : false;
-  const declared = new RegExp(`export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:const|let|var|function\\s*\\*?|class|type|interface|enum|namespace)\\s+${name}\\b`);
-  for (const f of files) {
-    let text = '';
-    try { text = fs.readFileSync(f, 'utf8'); } catch { continue; }
-    if (declared.test(text)) { result = true; break; }
-    for (const m of text.matchAll(/export\s+(?:type\s+)?\{([^}]*)\}/g)) {
-      const named = m[1].split(',').map((s) => s.trim().replace(/^type\s+/, '')).map((s) => (/\sas\s/.test(s) ? s.split(/\s+as\s+/)[1].trim() : s));
-      if (named.includes(name)) { result = true; break; }
-    }
-    if (result) break;
-  }
+  const entry = ['index.ts', 'index.tsx'].map((f) => path.join(repoRoot, 'packages', pkg, 'src', f)).find((f) => { try { return fs.statSync(f).isFile(); } catch { return false; } });
+  const result = entry ? fileExportsValue(entry, name) : null;
   exportLookup.set(key, result);
   return result;
 }
 function classifyMissingExport(msg) {
   const name = MISSING_EXPORT_RE.exec(msg)[1];
   const pkg = (PKG_RE.exec(msg) ?? [])[1] ?? null;
-  const has = pkg ? packageExportsName(pkg, name) : null;
-  if (has === null) return { cls: 'real_candidate', reason: `export '${name}' の提供元 package を特定できず（pkg=${pkg ?? '不明'}）、環境起因と断定できない` };
-  if (has === false) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} の src に '${name}' の export が無い → キャッシュではなく export の削除/改名の疑い` };
-  if (!staleCache) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} は '${name}' を export しているが、Vite 依存キャッシュ陳腐化の証拠（mtime / --stale-vite-cache）が無い` };
-  return { cls: 'env_stale_vite_cache', reason: `@sprint-coder/${pkg} は '${name}' を export しており、依存キャッシュが source より古い` };
+  const has = pkg ? packageExportsValue(pkg, name) : null;
+  if (has === null) return { cls: 'real_candidate', reason: `'${name}' が値として export されているか確認できない（pkg=${pkg ?? '不明'}: entrypoint 不明 / export * 経由）ので環境起因と断定しない` };
+  if (has === false) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} の entrypoint に '${name}' の値 export が無い（型だけ、または削除/改名）→ キャッシュではなくコード側の疑い` };
+  if (!staleFor(pkg)) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} は '${name}' を値 export しているが、この package の Vite 依存キャッシュ陳腐化の証拠（mtime / --stale-vite-cache）が無い` };
+  return { cls: 'env_stale_vite_cache', reason: `@sprint-coder/${pkg} は '${name}' を値 export しており、この package の依存キャッシュが source より古い` };
 }
 const FIRSTWINDOW_RE = /firstWindow|Timeout \d+ms exceeded[^\n]*firstWindow/i;
 const OPTIN_FILE_RE = /leader-mcp-smoke|leader-mcp-codex-smoke|cli-workspace-egress/;
@@ -141,9 +186,11 @@ function classify(t) {
   const msg = t.errors.join('\n');
   if (t.status === 'skipped') return { cls: OPTIN_FILE_RE.test(t.file) || /opt-in/i.test(t.annotations.join(' ')) ? 'optin_skip' : 'skipped', reason: '' };
   if (t.status === 'expected') return { cls: 'pass', reason: '' };
+  // Before the wholesale check: a removed export makes every spec die at firstWindow too, and
+  // "80% failed the same way" must not launder it into an environment story.
+  if (MISSING_EXPORT_RE.test(msg)) return classifyMissingExport(msg);
   if (wholesaleEnv && FIRSTWINDOW_RE.test(msg)) return { cls: 'env_wholesale', reason: '' };
   if (ENV_RE.test(msg)) return { cls: 'env', reason: '' };
-  if (MISSING_EXPORT_RE.test(msg)) return classifyMissingExport(msg);
   if (OUTDATED_DEP_RE.test(msg)) return staleCache
     ? { cls: 'env_stale_vite_cache', reason: 'Outdated Optimize Dep + 依存キャッシュが source より古い' }
     : { cls: 'real_candidate', reason: 'Outdated Optimize Dep だがキャッシュ陳腐化の証拠が無い' };
@@ -162,6 +209,7 @@ const perf = rows.filter((r) => /perf-budgets/.test(r.file)).flatMap((r) => r.st
 const stats = report.stats ?? {};
 const summary = {
   report: reportPath, repo, generated_at: new Date().toISOString(), stale_vite_cache_evidence: staleCache,
+  stale_vite_cache_packages: [...stalePkgs].sort(), stale_vite_cache_flag: staleFlag,
   totals: { tests: tests.length, expected: stats.expected ?? 0, unexpected: stats.unexpected ?? 0, flaky: stats.flaky ?? 0, skipped: stats.skipped ?? 0, duration_ms: stats.duration ?? null },
   wholesale_env: wholesaleEnv,
   by_class: rows.reduce((a, r) => ((a[r.classification] = (a[r.classification] ?? 0) + 1), a), {}),

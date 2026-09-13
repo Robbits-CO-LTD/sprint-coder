@@ -33,7 +33,11 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
       if (!task) throw new Error('current Task unavailable');
       const out = { taskId: task.id };
       if (model) {
-        const [connectionId, requestedProvider, requestedModel] = model.split('/');
+        // modelId itself may contain "/" (OpenRouter ships author/model ids), so only the FIRST two
+        // separators are structural and everything after them is the model id.
+        const [connectionId, requestedProvider, ...rest] = model.split('/');
+        const requestedModel = rest.join('/');
+        if (!connectionId || !requestedProvider || !requestedModel) throw new Error(`--model must be <connectionId>/<providerId>/<modelId>: ${model}`);
         const catalog = await sc.models.query({ taskId: task.id });
         const option = (catalog.items ?? []).find((o) => o.connectionId === connectionId && o.modelId === requestedModel);
         if (!option) throw new Error(`model not in catalog: ${model}`);

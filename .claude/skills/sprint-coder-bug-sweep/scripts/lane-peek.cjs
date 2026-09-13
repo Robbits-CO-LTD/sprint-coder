@@ -6,17 +6,19 @@
 // Prints one JSON line: run-card status, approval card (text + button centers), auto-decision audit
 // rows, file-change / command cards, last assistant text, footer, access preset, model. With --poll it
 // keeps reading until the last turn settles (completed/failed/canceled/interrupted) or an approval
-// card appears. A terminal state only counts once a NEW turn was observed: with --baseline that means
-// the identity moved away from the pre-send snapshot, without it that the card count grew or the last
-// card was seen running. If the poll ends without such evidence the JSON carries "stale": true and the
-// exit code is 3, so a caller can never read a leftover terminal card as this turn's result.
+// card appears. The renderer keeps only the CURRENT turn's run card, and 送信 adds an optimistic user
+// message before the runtime accepts the turn, so a terminal card / approval card counts as this
+// turn's result only once the card sits under the NEWEST user message (with --baseline: a user
+// message newer than the pre-send snapshot; without one: that card seen running). If the poll ends
+// without such evidence the JSON carries "stale": true and the exit code is 3, so a caller can never
+// read a leftover terminal card as this turn's result. Decision logic: lane-peek-turn.cjs.
 // Refuses any endpoint whose browser id or listening pid is not the launched instance.
 // It never clicks or types: UI actions stay with Computer Use.
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
-const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
+const { turnIdentity, decidePoll } = require('./lane-peek-turn.cjs');
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const runDir = opt('--run-dir'); const lane = opt('--lane'); const out = opt('--screenshot'); const poll = Number(opt('--poll', '0'));
@@ -43,10 +45,16 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
       const asst = q('[data-testid="assistant-message"]');
       const user = q('[data-testid="user-message"]');
       const ta = document.querySelector('[data-testid="composer-textarea"]'); const send = document.querySelector('[data-testid="composer-send-button"]');
+      // Timeline renders the single run card under the user message of the CURRENT turn, so the user
+      // messages preceding it in document order say WHICH turn it belongs to (=== userCount means the
+      // newest one; one less means 送信 added an optimistic message the runtime has not accepted yet).
+      const card = cards.length ? cards[cards.length - 1] : null;
+      const precedingUsers = card ? user.filter((u) => (u.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0).length : 0;
       return {
         wizard: !!document.querySelector('[data-testid="setup-wizard"]'),
         runCount: cards.length,
         userCount: user.length,
+        runCardUserIndex: precedingUsers,
         lastUser: user.length ? user[user.length - 1].innerText.replace(/\s+/g, ' ').slice(0, 160) : null,
         lastRun: cards.length ? cards[cards.length - 1].getAttribute('data-run-status') : null,
         approval: c ? { text: c.innerText.replace(/\s+/g, ' ').slice(0, 300), allowOnce: btn('今回のみ許可'), allowTask: btn('Task中許可'), deny: btn('拒否') } : null,
@@ -60,49 +68,34 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
         composer: { at: center(ta), sendAt: center(send), sendLabel: send?.getAttribute('aria-label') ?? null, value: ta?.value?.slice(0, 40) ?? null },
       };
     });
-    // The renderer exposes no turn id (RunCard keeps only data-testid/data-run-status), so a turn is
-    // identified by the content that a new turn necessarily changes: how many user messages and run
-    // cards are on screen, the last user/assistant text, the card counts and the run/approval state.
-    const identify = (s) => crypto.createHash('sha256').update(JSON.stringify([
-      s.userCount, s.lastUser, s.runCount, s.lastRun, s.lastAssistant,
-      s.commands.length, s.files.length, s.audit.length, s.approval?.text ?? null,
-    ])).digest('hex').slice(0, 16);
     // BEFORE 送信: persist the identity so the post-send --poll can tell a NEW turn from the old one.
     if (baselineOut) {
       const snap = await read();
-      const baseline = { lane, captured_at: new Date().toISOString(), identity: identify(snap), runCount: snap.runCount, userCount: snap.userCount, lastRun: snap.lastRun };
+      const baseline = { lane, captured_at: new Date().toISOString(), identity: turnIdentity(snap), runCount: snap.runCount, userCount: snap.userCount, runCardUserIndex: snap.runCardUserIndex, lastRun: snap.lastRun };
       fs.writeFileSync(baselineOut, JSON.stringify(baseline, null, 2) + '\n');
       if (out) await page.screenshot({ path: out });
       console.log(JSON.stringify({ ...snap, identity: baseline.identity, baseline_out: baselineOut }));
       return;
     }
-    // The first read can still show the PREVIOUS turn's terminal card (the new one is not in the DOM
-    // yet right after 送信), and a whole turn can finish between two reads. A terminal state therefore
-    // counts only after a new turn was observed: with --baseline, any drift from the pre-send identity
-    // (or a grown card count); without one, only that the card count grew or a card was seen running.
-    const TERMINAL = ['completed', 'failed', 'canceled', 'interrupted'];
+    // Acceptance lives in lane-peek-turn.cjs (unit tested): the single run card must sit under the
+    // NEWEST user message before its terminal state / approval card counts as THIS turn's result.
     const baseline = baselineFile ? JSON.parse(fs.readFileSync(baselineFile, 'utf8')) : null;
     // A baseline from another lane would make every read look "new": refuse it instead.
     if (baseline?.lane && baseline.lane !== lane) throw new Error(`baseline ${baselineFile} was captured for lane ${baseline.lane}, not ${lane}`);
     let last = await read();
-    const initialCount = last.runCount;
-    const isNew = (s) => (baseline
-      ? identify(s) !== baseline.identity || s.runCount > baseline.runCount || s.userCount > baseline.userCount
-      : s.runCount > initialCount || s.lastRun === 'running');
-    let newTurnObserved = isNew(last);
+    let decision = decidePoll(null, last, baseline);
     const deadline = Date.now() + poll * 1000;
-    while (poll > 0 && Date.now() < deadline) {
-      if (isNew(last)) newTurnObserved = true;
-      if (newTurnObserved && last.approval) break;
-      if (newTurnObserved && TERMINAL.includes(last.lastRun)) break;
-      await new Promise((r) => setTimeout(r, 4000)); last = await read();
+    while (poll > 0 && !decision.done && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 4000));
+      last = await read();
+      decision = decidePoll(decision, last, baseline);
     }
-    if (isNew(last)) newTurnObserved = true;
-    last.identity = identify(last);
+    last.identity = turnIdentity(last);
     last.baseline = baseline ? { identity: baseline.identity, captured_at: baseline.captured_at ?? null } : null;
-    last.newTurnObserved = newTurnObserved;
-    // Fail closed: a poll that never saw this turn is reporting the PREVIOUS turn's state.
-    last.stale = poll > 0 && !newTurnObserved;
+    last.newTurnObserved = decision.newTurnObserved;
+    last.accepted = decision.accepted;
+    // Fail closed: a poll that never saw this turn's own run card is reporting the PREVIOUS turn.
+    last.stale = poll > 0 && !decision.newTurnObserved;
     if (out) await page.screenshot({ path: out });
     console.log(JSON.stringify(last));
     if (last.stale) process.exitCode = 3;

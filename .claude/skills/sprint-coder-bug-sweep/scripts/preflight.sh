@@ -80,12 +80,25 @@ mb="$DESKTOP_ROOT/.vite/build/index.js"
 if [ -f "$mb" ]; then ok "dev main bundle present (built $(date -r "$mb" '+%Y-%m-%d %H:%M'))"
 else warn "dev main bundle apps/desktop/.vite/build/index.js missing; npm start (or E2E globalSetup) builds it"; fi
 
-# 4b. Vite optimize cache vs workspace packages (stale cache => black renderer, every spec times out)
-vcache="$(ls -t "$DESKTOP_ROOT"/node_modules/.vite/deps/@sprint-coder_contracts*.js 2>/dev/null | head -1)"
-if [ -n "$vcache" ] && [ -f "$vcache" ]; then
-  newest_src="$(find "$REPO_ROOT/packages/contracts/src" "$REPO_ROOT/packages/domain/src" -name '*.ts' -newer "$vcache" 2>/dev/null | head -1)"
-  if [ -n "$newest_src" ]; then block "Vite optimize cache apps/desktop/node_modules/.vite/deps is OLDER than workspace package sources (e.g. ${newest_src#$REPO_ROOT/}) — the dev renderer will throw 'does not provide an export named …' and every spec times out. Fix: rm -rf apps/desktop/node_modules/.vite node_modules/.vite, then (re)start the dev server"
-  else ok "Vite optimize cache is newer than packages/contracts and packages/domain sources"; fi
+# 4b. Vite optimize cache vs workspace packages, PER PACKAGE (stale cache => black renderer, every
+#     spec times out). One @sprint-coder_<pkg>.js can be days old while another was just rebuilt, so
+#     each package is compared with its own bundle. Only RUNTIME sources count: a checkout where just
+#     a *.test.ts / *.spec.ts / *.d.ts / __tests__ file moved must not block the whole sweep.
+deps_dir="$DESKTOP_ROOT/node_modules/.vite/deps"
+stale_pkgs=""; checked_pkgs=""
+for src_dir in "$REPO_ROOT"/packages/*/src; do
+  [ -d "$src_dir" ] || continue
+  pkg="$(basename "$(dirname "$src_dir")")"
+  vcache="$(ls -t "$deps_dir/@sprint-coder_$pkg.js" "$deps_dir/@sprint-coder_$pkg".*.js 2>/dev/null | head -1)"
+  [ -n "$vcache" ] && [ -f "$vcache" ] || continue
+  checked_pkgs="$checked_pkgs $pkg"
+  newer_src="$(find "$src_dir" \
+    \( -name '__tests__' -o -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.spec.ts' -o -name '*.spec.tsx' -o -name '*.d.ts' \) -prune -o \
+    \( -name '*.ts' -o -name '*.tsx' \) -newer "$vcache" -print 2>/dev/null | head -1)"
+  [ -n "$newer_src" ] && stale_pkgs="$stale_pkgs $pkg(${newer_src#$REPO_ROOT/})"
+done
+if [ -n "$stale_pkgs" ]; then block "Vite optimize cache in apps/desktop/node_modules/.vite/deps is OLDER than the runtime sources of:$stale_pkgs — the dev renderer will throw 'does not provide an export named …' and every spec times out. Fix: rm -rf apps/desktop/node_modules/.vite node_modules/.vite, then (re)start the dev server"
+elif [ -n "$checked_pkgs" ]; then ok "Vite optimize cache is newer than the runtime sources of:$checked_pkgs"
 else ok "no Vite optimize cache yet (first dev server start will build it)"; fi
 
 # 5. dev server on :5173 — must belong to THIS checkout
