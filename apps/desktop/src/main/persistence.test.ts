@@ -7352,6 +7352,84 @@ if (runsWithElectronAbi)
     );
 
     commandExecutionIt(
+      'refuses a command whose argv repeats the executable without asking for approval',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.setWorkspace(task.id, join(path, '..'));
+        const started = startExecutingTurn(persistence, task.id);
+        let authorizations = 0;
+        const broker = createDefaultToolBroker(
+          () => persistence.getPermissionPolicy(task.id).policyEpoch,
+          () => {
+            authorizations += 1;
+            return { decision: 'allow', reason: 'integration_test' };
+          },
+          { persistence, publish: () => undefined },
+        );
+        startMockTurnCatalog(broker, {
+          taskId: task.id,
+          turnId: started.turnId,
+          workspaceId: 'workspace-1',
+          policyEpoch: 0,
+        });
+
+        try {
+          // Providers repeat the executable even though the tool contract forbids it (#467).
+          await expect(
+            broker.dispatch({
+              taskId: task.id,
+              turnId: started.turnId,
+              callId: 'command-repeated-executable',
+              providerName: 'run_command',
+              input: {
+                executable: '/usr/bin/printf',
+                argv: ['printf', 'command-ok\\n'],
+                cwd: '.',
+                purpose: '実行ファイル名の重複を確認します',
+              },
+            }),
+          ).rejects.toMatchObject({
+            name: 'CommandRunnerError',
+            code: 'ARGV_REPEATS_EXECUTABLE',
+          });
+          // Nothing was sealed, so no approval was requested and no command row exists to run,
+          // cancel, or replay.
+          expect(authorizations).toBe(0);
+          expect(persistence.listCommands(task.id)).toEqual([]);
+          expect(persistence.listEventsAfter(task.id, 0).map(({ type }) => type)).not.toContain(
+            'command.started',
+          );
+
+          // The Turn stays usable: the provider resends the same work with a correct argv.
+          const result = (await broker.dispatch({
+            taskId: task.id,
+            turnId: started.turnId,
+            callId: 'command-resent-executable',
+            providerName: 'run_command',
+            input: {
+              executable: '/usr/bin/printf',
+              argv: ['command-ok\\n'],
+              cwd: '.',
+              purpose: '実行ファイル名の重複を確認します',
+            },
+          })) as { exitCode: number };
+          expect(result.exitCode).toBe(0);
+          expect(persistence.listCommands(task.id)).toEqual([
+            expect.objectContaining({
+              callId: 'command-resent-executable',
+              executable: '/usr/bin/printf',
+              argv: ['command-ok\\n'],
+              state: 'exited',
+            }),
+          ]);
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
+    commandExecutionIt(
       'resolves command cwd from the sealed Turn roots after Workspace changes',
       async () => {
         const { persistence, path } = createPersistence();
