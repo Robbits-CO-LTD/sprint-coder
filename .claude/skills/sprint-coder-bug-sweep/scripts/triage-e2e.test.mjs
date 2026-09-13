@@ -100,22 +100,25 @@ test('`export { type X }` and `export type { X }` are not runtime exports', () =
 });
 
 test('ambient declarations and commented-out code are never runtime exports', () => {
-  // both parsing paths: the repo's typescript AST, and the regex fallback (TRIAGE_E2E_NO_TS=1)
-  for (const env of [{}, { TRIAGE_E2E_NO_TS: '1' }]) {
-    const label = env.TRIAGE_E2E_NO_TS ? 'fallback' : 'ast';
-    const root = makeRoot({
-      'packages/contracts/src/index.ts': [
-        'export declare const Foo: string;\n// export const Bar = 1;\n/* export const Qux = 2; */\nconst s = "export const Str = 3;";\nexport const Baz = 1;\n', NEW,
-      ],
-    });
-    const summary = runTriage(root, [
-      depMessage('contracts', 'Foo'), depMessage('contracts', 'Bar'),
-      depMessage('contracts', 'Qux'), depMessage('contracts', 'Str'), depMessage('contracts', 'Baz'),
-    ], [], env);
-    const cls = summary.failures.map((f) => f.classification);
-    assert.deepEqual(cls.slice(0, 4), Array(4).fill('real_candidate'), `${label}: declare/comment/string must not count`);
-    assert.equal(cls[4], 'env_stale_vite_cache', `${label}: a plain value export still counts`);
-  }
+  const root = makeRoot({
+    'packages/contracts/src/index.ts': [
+      'export declare const Foo: string;\n// export const Bar = 1;\n/* export const Qux = 2; */\nconst s = "export const Str = 3;";\nconst re = /export const Rx = 4;/;\nexport const Baz = 1;\n', NEW,
+    ],
+  });
+  const summary = runTriage(root, [
+    depMessage('contracts', 'Foo'), depMessage('contracts', 'Bar'), depMessage('contracts', 'Qux'),
+    depMessage('contracts', 'Str'), depMessage('contracts', 'Rx'), depMessage('contracts', 'Baz'),
+  ]);
+  const cls = summary.failures.map((f) => f.classification);
+  assert.deepEqual(cls.slice(0, 5), Array(5).fill('real_candidate'), 'declare / comment / string / regex literal must not count');
+  assert.equal(cls[5], 'env_stale_vite_cache', 'a plain value export still counts');
+});
+
+test('without typescript nothing can be cleared as environmental', () => {
+  const root = makeRoot({ 'packages/contracts/src/index.ts': ['export const Baz = 1;\n', NEW] });
+  const summary = runTriage(root, depMessage('contracts', 'Baz'), [], { TRIAGE_E2E_NO_TS: '1' });
+  assert.equal(summary.failures[0].classification, 'real_candidate');
+  assert.match(summary.failures[0].reason, /typescript 不在/);
 });
 
 test('a value re-exported from the entrypoint counts as present', () => {
@@ -148,9 +151,39 @@ test('a value that is not on the public entrypoint is not cleared as environment
 
 test('--stale-vite-cache does not replace the export lookup', () => {
   const root = makeRoot({ 'packages/contracts/src/index.ts': ['export const Existing = 1;\n', OLD] });
-  const summary = runTriage(root, depMessage('contracts', 'Removed'), ['--stale-vite-cache']);
-  assert.equal(summary.stale_vite_cache_flag, true);
+  const summary = runTriage(root, depMessage('contracts', 'Removed'), ['--stale-vite-cache', 'contracts']);
+  assert.deepEqual(summary.stale_vite_cache_flag_packages, ['contracts']);
   assert.equal(summary.failures[0].classification, 'real_candidate');
+});
+
+test('--stale-vite-cache only vouches for the packages it names', () => {
+  const root = makeRoot({
+    'packages/contracts/src/index.ts': ['export const Existing = 1;\n', OLD],
+    'packages/domain/src/index.ts': ['export const Moved = 1;\n', OLD],
+  }, { contracts: NEW, domain: NEW });
+  const summary = runTriage(root, [depMessage('domain', 'Moved'), depMessage('contracts', 'Existing')], ['--stale-vite-cache', 'domain']);
+  assert.equal(summary.failures[0].classification, 'env_stale_vite_cache', 'domain was vouched for');
+  assert.equal(summary.failures[1].classification, 'real_candidate', 'contracts was not');
+});
+
+test('a bare --stale-vite-cache is refused', () => {
+  const root = makeRoot({ 'packages/contracts/src/index.ts': ['export const Existing = 1;\n', OLD] });
+  assert.throws(() => runTriage(root, depMessage('contracts', 'Existing'), ['--stale-vite-cache']), /status 64|Command failed/);
+});
+
+test('Outdated Optimize Dep is judged per package', () => {
+  const root = makeRoot({
+    'packages/contracts/src/index.ts': ['export const Existing = 1;\n', NEW],
+    'packages/domain/src/index.ts': ['export const Other = 1;\n', OLD],
+  }, { contracts: OLD, domain: NEW });
+  const summary = runTriage(root, [
+    "Error: Outdated Optimize Dep for '/@fs/x/node_modules/.vite/deps/@sprint-coder_contracts.js?v=1'",
+    "Error: Outdated Optimize Dep for '/@fs/x/node_modules/.vite/deps/@sprint-coder_domain.js?v=1'",
+    'Error: Outdated Optimize Dep',
+  ]);
+  assert.equal(summary.failures[0].classification, 'env_stale_vite_cache', 'contracts cache is stale');
+  assert.equal(summary.failures[1].classification, 'real_candidate', 'domain cache is not');
+  assert.equal(summary.failures[2].classification, 'real_candidate', 'no package in the message');
 });
 
 test('an export that exists without cache evidence stays a real candidate', () => {

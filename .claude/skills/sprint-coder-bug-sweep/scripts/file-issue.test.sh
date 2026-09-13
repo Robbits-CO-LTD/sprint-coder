@@ -4,7 +4,8 @@
 # Every case runs the real script with --dry-run --label '' --max 0, so the per-run cap always fails
 # the gate before gh is touched; the assertion is only what the redaction scan reported. Cases pass an
 # expected reason ("long mixed-case token" …) or "clean", so a case can never pass for another rule's
-# reason. Exit 0 when every case passes.
+# reason. Several fixtures are REAL files: the scan has no exemption for existing paths, so they must
+# be flagged exactly like an invented token. Exit 0 when every case passes.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILE_ISSUE="$SCRIPT_DIR/file-issue.sh"
@@ -14,10 +15,10 @@ RUN_DIR="$TMP/run"
 mkdir -p "$RUN_DIR/evidence/claude" "$RUN_DIR/lanes/claude/workspace/smoke"
 printf '{"repository":"Robbits-CO-LTD/sprint-coder","filing_mode":"report-only"}\n' > "$RUN_DIR/manifest.json"
 printf 'evidence\n' > "$RUN_DIR/evidence/claude/x.md"
-# a deep evidence path: whole token >= 32 with mixed case and digits, every component short
+# a REAL deep evidence path: whole token >= 32 with mixed case and digits, every component short
 DEEP_REL="evidence/claude/run1/Shot2Beta/final"
 mkdir -p "$RUN_DIR/$(dirname "$DEEP_REL")"; printf 'evidence\n' > "$RUN_DIR/$DEEP_REL"
-# an existing file whose NAME is a long mixed token — existing must not whitelist it
+# a REAL file whose name is a long mixed token
 LONGNAME_REL="evidence/claude/Shot1Aaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt"
 printf 'evidence\n' > "$RUN_DIR/$LONGNAME_REL"
 # the subtree the tested AI writes into: never an exemption, even for short components
@@ -60,17 +61,17 @@ case_run 'long mixed-case token' 'single 32+ mixed-case token' 'value Aa1bbbbbbb
 case_run 'base64-like token' 'base64-like token' 'blob AAAABBBBCCCCDDDDEEEEFFFFGGGG1111+abc= tail'
 # 4. a relative path that really exists in the repo (the reviewer's example)
 case_run clean 'existing repo path (short)' 'apps/desktop/src/main/ipc.ts の approvals ハンドラ'
-# 5. a long existing repo path whose dotless prefix is 32+ chars and mixed-case
-case_run clean 'existing repo path (long)' 'apps/desktop/src/renderer/components/RunCard.tsx を確認した'
+# 5. a long existing repo path with no digit in it: not a mixed token, so still fine
+case_run clean 'existing repo path without digits' 'apps/desktop/src/renderer/components/RunCard.tsx を確認した'
 # 6. a short evidence path under RUN_DIR
 case_run clean 'existing evidence path under RUN_DIR' 'evidence/claude/x.md に保存した'
-# 7. a deep existing evidence path: the whole token is long, but every component is short
-case_run clean 'deep existing evidence path' "$DEEP_REL に保存した"
-# 8. the same shape that does NOT exist must fail closed
+# 7. a deep EXISTING evidence path whose whole token is long and mixed: no exemption for existing
+case_run 'long mixed-case token' 'deep existing evidence path (no exemption)' "$DEEP_REL に保存した"
+# 8. the same shape that does NOT exist must fail closed too
 case_run 'long mixed-case token' 'non-existent path-shaped token' 'evidence/claude/Shot9Zzzzzzzzzzzzzzzzzzzzzzzzzzzz'
-# 9. existing does NOT whitelist a suspicious component (the file name itself is attacker controlled)
+# 9. an existing file whose name is a long mixed token (the name is attacker controlled)
 case_run 'long mixed-case token' 'existing file with a long mixed-case name' "$LONGNAME_REL に保存した"
-# 10. RUN_DIR lanes/<lane>/workspace is written by the AI under test: no exemption at all
+# 10. RUN_DIR lanes/<lane>/workspace is written by the AI under test
 case_run 'long mixed-case token' 'AI-writable workspace path (component)' "$AI_REL を作った"
 case_run 'long mixed-case token' 'AI-writable workspace path (whole token)' "$AI_DEEP_REL を作った"
 

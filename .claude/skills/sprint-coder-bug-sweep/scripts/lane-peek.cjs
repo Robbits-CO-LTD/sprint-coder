@@ -10,8 +10,12 @@
 // message before the runtime accepts the turn, so a terminal card / approval card counts as this
 // turn's result only once the card sits under the NEWEST user message (with --baseline: a user
 // message newer than the pre-send snapshot; without one: that card seen running). If the poll ends
-// without such evidence the JSON carries "stale": true and the exit code is 3, so a caller can never
-// read a leftover terminal card as this turn's result. Decision logic: lane-peek-turn.cjs.
+// without such evidence the JSON carries "stale": true, so a caller can never read a leftover terminal
+// card as this turn's result. Decision logic: lane-peek-turn.cjs.
+// Exit codes: 0 = the state is this turn's (settled, approval card, or a plain read without --poll),
+// 2 = fail_tooling (the endpoint is not the launched instance), 3 = "stale": true (no run card for
+// this turn was ever seen — the output describes the PREVIOUS turn), 4 = "timeout": true (this turn
+// was seen but had not settled when --poll ran out), 1 = the peek itself failed, 64 = usage.
 // Refuses any endpoint whose browser id or listening pid is not the launched instance.
 // It never clicks or types: UI actions stay with Computer Use.
 const { chromium } = require('playwright');
@@ -94,10 +98,13 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
     last.baseline = baseline ? { identity: baseline.identity, captured_at: baseline.captured_at ?? null } : null;
     last.newTurnObserved = decision.newTurnObserved;
     last.accepted = decision.accepted;
-    // Fail closed: a poll that never saw this turn's own run card is reporting the PREVIOUS turn.
+    // Fail closed: a poll that never saw this turn's own run card is reporting the PREVIOUS turn,
+    // and a poll that ran out of time never saw the turn settle. Neither is a result.
     last.stale = poll > 0 && !decision.newTurnObserved;
+    last.timeout = poll > 0 && !decision.done;
     if (out) await page.screenshot({ path: out });
     console.log(JSON.stringify(last));
     if (last.stale) process.exitCode = 3;
+    else if (last.timeout) process.exitCode = 4;
   } finally { await browser.close().catch(() => {}); }
 })().catch((e) => { console.error('peek failed:', e.message); process.exit(1); });

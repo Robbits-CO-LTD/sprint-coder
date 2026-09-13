@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Summarize a Playwright JSON report (PLAYWRIGHT_JSON_OUTPUT_NAME / --reporter=json) into
 // <out>/triage.json and <out>/triage.md with a classification hint and a stable fingerprint per failure.
-//   node triage-e2e.mjs <report.json> --out DIR [--repo owner/repo] [--stale-vite-cache] [--repo-root DIR]
+//   node triage-e2e.mjs <report.json> --out DIR [--repo owner/repo] [--repo-root DIR]
+//        [--stale-vite-cache <pkg>[,<pkg>…]]
 // Hints are only hints: the sprint-coder-e2e skill's 4-way split (env / opt-in skip / known flake /
 // real) is decided by the operator after an independent re-run of each real candidate.
 import fs from 'node:fs';
@@ -88,17 +89,26 @@ function stalePackages() {
   }
   return stale;
 }
-const staleFlag = argv.includes('--stale-vite-cache');
+// --stale-vite-cache takes the packages the operator SAW go stale (contracts,domain): staleness is a
+// per-package fact, so a bare flag that vouches for every package is not accepted.
+const flagIdx = argv.indexOf('--stale-vite-cache');
+const flagValue = flagIdx >= 0 ? argv[flagIdx + 1] : null;
+if (flagIdx >= 0 && (!flagValue || flagValue.startsWith('--'))) {
+  console.error('--stale-vite-cache needs the package list it applies to, e.g. --stale-vite-cache contracts,domain');
+  process.exit(64);
+}
+const flagPkgs = new Set((flagValue ?? '').split(',').map((x) => x.trim()).filter(Boolean));
 const stalePkgs = stalePackages();
-const staleCache = staleFlag || stalePkgs.size > 0;
-const staleFor = (pkg) => staleFlag || stalePkgs.has(pkg);
+const staleFor = (pkg) => Boolean(pkg) && (flagPkgs.has(pkg) || stalePkgs.has(pkg));
+const staleCache = flagPkgs.size > 0 || stalePkgs.size > 0;
 // Only VALUE exports count: `export type` / `export interface` / `export declare …` are erased at
 // build time, so treating them as exports would clear a genuine "imported a value that no longer
 // exists" regression. The lookup starts at the package's public entrypoint
 // (packages/<pkg>/src/index.ts) and follows its `export { … } from` re-exports; `export * from` is
-// NOT followed and yields null (cannot tell). Parsing uses the repo's own typescript when it
-// resolves, so comments, strings and ambient declarations cannot be mistaken for real exports; the
-// regex fallback strips comments and string literals and gives up (null) on ambient module blocks.
+// NOT followed and yields null (cannot tell). Parsing is the repo's own typescript and nothing else:
+// comments, strings, regex literals and ambient declarations must not be mistaken for real exports,
+// and a hand-written scanner cannot promise that — when typescript does not resolve, every lookup is
+// "cannot tell" and no failure is ever cleared as environmental.
 const require_ = createRequire(import.meta.url);
 let ts = null;
 if (!process.env.TRIAGE_E2E_NO_TS) { try { ts = require_('typescript'); } catch { ts = null; } }
@@ -140,46 +150,13 @@ function astExportMap(file, text) {
   }
   return map;
 }
-/** Drop comments and string/template literals so neither can look like a declaration. */
-function stripCommentsAndStrings(src) {
-  let out = ''; let i = 0;
-  while (i < src.length) {
-    const c = src[i]; const d = src[i + 1];
-    if (c === '/' && d === '/') { while (i < src.length && src[i] !== '\n') i++; out += ' '; }
-    else if (c === '/' && d === '*') { i += 2; while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; out += ' '; }
-    else if (c === '"' || c === "'" || c === '`') { const q = c; i++; while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; } i++; out += '""'; }
-    else { out += c; i++; }
-  }
-  return out;
-}
-const DECL_KINDS = '(?:const|let|var|function\\s*\\*?|class|enum)';
-function regexExportMap(text) {
-  const src = stripCommentsAndStrings(text);
-  if (/\bdeclare\s+(?:module|global|namespace)\b/.test(src)) return null; // ambient block: cannot tell
-  const map = { values: new Set(), locals: new Set(), named: [], wildcards: false };
-  for (const m of src.matchAll(new RegExp(`export\\s+(?:abstract\\s+)?(?:async\\s+)?${DECL_KINDS}\\s+([A-Za-z_$][\\w$]*)`, 'g'))) map.values.add(m[1]);
-  for (const m of src.matchAll(new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:abstract\\s+)?(?:async\\s+)?${DECL_KINDS}\\s+([A-Za-z_$][\\w$]*)`, 'g'))) map.locals.add(m[1]);
-  for (const m of src.matchAll(/export\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from/g)) map.values.add(m[1]);
-  if (/export\s+\*\s+from/.test(src)) map.wildcards = true;
-  for (const m of src.matchAll(/export\s+(type\s+)?\{([^}]*)\}\s*(?:from\s*""\s*)?/g)) {
-    if (m[1]) continue; // export type { … }
-    const from = /\}\s*from/.test(m[0]) ? '' : null; // the specifier text was stripped: unresolvable
-    for (const raw of m[2].split(',')) {
-      const spec = raw.trim();
-      if (!spec || /^type\s/.test(spec)) continue; // export { type X }
-      const [local, exported = local] = spec.split(/\s+as\s+/).map((x) => x.trim());
-      map.named.push({ exported, local, from });
-    }
-  }
-  return map;
-}
 const mapCache = new Map();
 function exportMapFor(file) {
   if (mapCache.has(file)) return mapCache.get(file);
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch { text = null; }
   let map = null;
-  if (text !== null) { try { map = ts ? astExportMap(file, text) : regexExportMap(text); } catch { map = null; } }
+  if (text !== null && ts) { try { map = astExportMap(file, text); } catch { map = null; } }
   mapCache.set(file, map);
   return map;
 }
@@ -217,9 +194,9 @@ function classifyMissingExport(msg) {
   const name = MISSING_EXPORT_RE.exec(msg)[1];
   const pkg = (PKG_RE.exec(msg) ?? [])[1] ?? null;
   const has = pkg ? packageExportsValue(pkg, name) : null;
-  if (has === null) return { cls: 'real_candidate', reason: `'${name}' が値として export されているか確認できない（pkg=${pkg ?? '不明'}: entrypoint 不明 / export * 経由）ので環境起因と断定しない` };
+  if (has === null) return { cls: 'real_candidate', reason: `'${name}' が値として export されているか確認できない（pkg=${pkg ?? '不明'}: entrypoint 不明 / export * 経由 / typescript 不在）ので環境起因と断定しない` };
   if (has === false) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} の entrypoint に '${name}' の値 export が無い（型だけ、または削除/改名）→ キャッシュではなくコード側の疑い` };
-  if (!staleFor(pkg)) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} は '${name}' を値 export しているが、この package の Vite 依存キャッシュ陳腐化の証拠（mtime / --stale-vite-cache）が無い` };
+  if (!staleFor(pkg)) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} は '${name}' を値 export しているが、この package の Vite 依存キャッシュ陳腐化の証拠（mtime / --stale-vite-cache ${pkg}）が無い` };
   return { cls: 'env_stale_vite_cache', reason: `@sprint-coder/${pkg} は '${name}' を値 export しており、この package の依存キャッシュが source より古い` };
 }
 const FIRSTWINDOW_RE = /firstWindow|Timeout \d+ms exceeded[^\n]*firstWindow/i;
@@ -260,9 +237,13 @@ function classify(t) {
   if (MISSING_EXPORT_RE.test(msg)) return classifyMissingExport(msg);
   if (wholesaleEnv && FIRSTWINDOW_RE.test(msg)) return { cls: 'env_wholesale', reason: '' };
   if (ENV_RE.test(msg)) return { cls: 'env', reason: '' };
-  if (OUTDATED_DEP_RE.test(msg)) return staleCache
-    ? { cls: 'env_stale_vite_cache', reason: 'Outdated Optimize Dep + 依存キャッシュが source より古い' }
-    : { cls: 'real_candidate', reason: 'Outdated Optimize Dep だがキャッシュ陳腐化の証拠が無い' };
+  if (OUTDATED_DEP_RE.test(msg)) {
+    const pkg = (PKG_RE.exec(msg) ?? [])[1] ?? null;
+    if (!pkg) return { cls: 'real_candidate', reason: 'Outdated Optimize Dep だが対象 package を特定できず、陳腐化の証拠と結び付けられない' };
+    return staleFor(pkg)
+      ? { cls: 'env_stale_vite_cache', reason: `Outdated Optimize Dep + @sprint-coder/${pkg} の依存キャッシュが source より古い` }
+      : { cls: 'real_candidate', reason: `Outdated Optimize Dep だが @sprint-coder/${pkg} の陳腐化の証拠が無い` };
+  }
   if (/command-runner-flow\.spec\.ts$/.test(t.file) && /toBeFocused|focus/i.test(msg)) return { cls: 'known_flake', reason: '' };
   if (t.status === 'flaky') return { cls: 'flaky_in_run', reason: '' };
   return { cls: 'real_candidate', reason: '' };
@@ -278,7 +259,7 @@ const perf = rows.filter((r) => /perf-budgets/.test(r.file)).flatMap((r) => r.st
 const stats = report.stats ?? {};
 const summary = {
   report: reportPath, repo, generated_at: new Date().toISOString(), stale_vite_cache_evidence: staleCache,
-  stale_vite_cache_packages: [...stalePkgs].sort(), stale_vite_cache_flag: staleFlag,
+  stale_vite_cache_packages: [...stalePkgs].sort(), stale_vite_cache_flag_packages: [...flagPkgs].sort(),
   totals: { tests: tests.length, expected: stats.expected ?? 0, unexpected: stats.unexpected ?? 0, flaky: stats.flaky ?? 0, skipped: stats.skipped ?? 0, duration_ms: stats.duration ?? null },
   wholesale_env: wholesaleEnv,
   by_class: rows.reduce((a, r) => ((a[r.classification] = (a[r.classification] ?? 0) + 1), a), {}),

@@ -147,7 +147,17 @@ B="$RUN_DIR/lanes/claude/baseline-RA-03.json"
 
 判定の要は **Run Card が「最新の user message の下」にあるか** で、これは renderer の作りから来ている: Timeline は現在の Turn の Run Card を 1 枚だけ、その Turn の user message の下に描く。送信は先に optimistic な user message を足し、`turn.accepted` が来て初めて Run Card が新 Turn のものに差し替わる。したがって 2 Turn 目以降の送信直後は「新しい user message がある + 前 Turn の `completed` カードが残っている」状態になり、**user message が増えたことも、最後のカードが terminal なことも、送った Turn の証拠にならない**。`--poll --baseline` は最新 user message に紐づく Run Card が現れるまで terminal / 承認カードを受理しないので、Turn が 4 秒の読み取り間隔の間に終わっても前 Turn の結果を拾わない（`--baseline` なしのときは「そのカードが `running` で見えた」ことだけが証拠なので、間に合わなければ受理せず stale になる）。承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。
 
-**新しい Turn を一度も観測できずに poll が終わると、JSON に `"stale": true` が付き exit code は 3 になる**（`--baseline` を付けない従来の呼び方でも同じ）。stale な出力は「この Turn の結果」ではないので、PASS / FAIL の根拠に使わず、再観測するか `fail_tooling` として events に残す。
+`lane-peek.cjs` の終了コード:
+
+| exit | 意味 | 扱い |
+|---|---|---|
+| 0 | この Turn が settle した / この Turn の承認カードが出た（`--poll` 無しの単発 read も 0） | 観測結果として使える |
+| 3 | `"stale": true`。新しい Turn の Run Card を一度も観測できないまま poll 終了＝ **前 Turn の状態** | PASS/FAIL の根拠にしない。再観測するか `fail_tooling` |
+| 4 | `"timeout": true`。この Turn は観測したが poll 時間内に settle しなかった | 待ち直す（`--poll` を延ばす）か `fail_tooling` |
+| 2 | `fail_tooling`（port の listener pid / browser id が起動した instance と違う） | lane をやり直す |
+| 1 | peek 自体の失敗（CDP・renderer 未検出など） | driver 側の問題 |
+
+3 と 4 の出力は「この Turn の結果」ではないので、証拠として events に残すだけにする。
 
 ## 8. 観測の記録
 

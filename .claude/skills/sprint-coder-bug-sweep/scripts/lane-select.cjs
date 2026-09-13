@@ -6,9 +6,10 @@
 // for the popover step — this is not a product finding and not a substitute for RA-xx cases.
 //   node lane-select.cjs --run-dir DIR --lane NAME [--model <connectionId>/<providerId>/<modelId>]
 //        [--preset ask|auto|full] [--task-id ID]
-// It only ever changes the Task the sidebar shows as selected (aria-current / .sb-row.active). A
-// --task-id must match that row, and the row's title must match the store's, or nothing is changed:
-// picking "the first unarchived Task" would silently reconfigure a Task the operator is not looking at.
+// It only ever changes the Task the sidebar shows as selected (aria-current / .sb-row.active); with
+// no selected row it changes nothing. --task-id is only a cross-check of that row, and the row's
+// title must match the store's (an untitled Task is refused): picking "the first unarchived Task"
+// would silently reconfigure a Task the operator is not looking at.
 // Switching to `full` opens the app's native confirmation sheet: click 「フルアクセスを有効化」 with
 // Computer Use (AXPress works on that sheet) while this script waits.
 const { chromium } = require('playwright');
@@ -42,17 +43,18 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
         active: el.classList.contains('active') || !!el.querySelector('[aria-current="true"]'),
         title: el.querySelector('button.sb-item')?.getAttribute('title') ?? el.querySelector('button')?.textContent?.trim() ?? null,
       }));
+      // The selected row is the ONLY thing that decides which Task is changed. --task-id is a
+      // cross-check, never a source: without a selected row there is nothing to verify against.
       const active = rows.find((r) => r.active) ?? null;
-      const taskId = taskIdArg ?? active?.id ?? null;
-      if (!taskId) throw new Error('current Task unavailable: no selected Task row in the sidebar — select the Task in the UI, or pass --task-id <id>');
-      if (active && active.id !== taskId) throw new Error(`--task-id ${taskId} is not the Task on screen (${active.id}) — refusing to change another Task`);
-      const row = rows.find((r) => r.id === taskId) ?? null;
-      if (!row) throw new Error(`Task ${taskId} is not visible in the sidebar, so it cannot be cross-checked against the UI — refusing`);
+      if (!active) throw new Error('current Task unavailable: the sidebar shows no selected Task (aria-current) — select the Task in the UI and retry; --task-id alone is not a reason to change anything');
+      if (taskIdArg && taskIdArg !== active.id) throw new Error(`--task-id ${taskIdArg} is not the Task on screen (${active.id}) — refusing to change another Task`);
+      const taskId = active.id;
       const task = (await sc.tasks.list()).find((t) => t.id === taskId);
-      if (!task) throw new Error(`Task ${taskId} is not in tasks.list()`);
-      const uiTitle = (row.title ?? '').trim(); const storeTitle = (task.title ?? '').trim();
-      if (uiTitle && storeTitle && uiTitle !== storeTitle) throw new Error(`Task title mismatch: sidebar "${uiTitle}" vs store "${storeTitle}" — refusing`);
-      const out = { taskId: task.id, taskTitle: storeTitle || null, taskIdSource: taskIdArg ? 'arg' : 'sidebar' };
+      if (!task) throw new Error(`Task ${taskId} is selected in the sidebar but not in tasks.list()`);
+      const uiTitle = (active.title ?? '').trim(); const storeTitle = (task.title ?? '').trim();
+      if (!uiTitle || !storeTitle) throw new Error(`Task ${taskId} has no title on ${uiTitle ? 'the store' : 'the sidebar'} side, so UI and store cannot be cross-checked — name the Task first`);
+      if (uiTitle !== storeTitle) throw new Error(`Task title mismatch: sidebar "${uiTitle}" vs store "${storeTitle}" — refusing`);
+      const out = { taskId: task.id, taskTitle: storeTitle, taskIdChecked: Boolean(taskIdArg) };
       if (model) {
         // modelId itself may contain "/" (OpenRouter ships author/model ids), so only the FIRST two
         // separators are structural and everything after them is the model id.
