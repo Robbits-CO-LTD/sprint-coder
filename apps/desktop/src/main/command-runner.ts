@@ -279,11 +279,14 @@ export function argvRepeatsExecutable(
     const base = paths.basename(executable);
     if (base.length < 1) continue;
     spellings.add(fold(base));
-    // A bare Windows name resolves through PATH with `.exe`/`.com` appended, so the provider's
-    // extension-less spelling is the same repetition as the sealed `node.exe`. No other suffix
-    // is an implicit Windows executable extension here, so `runner.bin` never matches `runner`.
-    if (platform === 'win32' && /\.(?:exe|com)$/iu.test(base))
+    // A Windows name resolves with `.exe`/`.com` appended, so the provider's extension-less
+    // spelling — bare (`node`) or as a full path (`C:\\tools\\runner`) — is the same repetition as
+    // the sealed `node.exe` / `runner.exe`. No other suffix is an implicit Windows executable
+    // extension here, so `runner.bin` never matches `runner`.
+    if (platform === 'win32' && /\.(?:exe|com)$/iu.test(base)) {
       spellings.add(fold(base.slice(0, -4)));
+      spellings.add(fold(executable.slice(0, -4)));
+    }
   }
   return spellings.has(fold(first));
 }

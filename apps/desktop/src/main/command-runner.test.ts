@@ -321,13 +321,25 @@ describe('CommandRunner', () => {
       'c:\\program files\\nodejs\\NODE.EXE',
       'node.exe',
       'Node',
+      // The extension-less spelling of the full path is the same executable too.
+      'C:\\Program Files\\nodejs\\node',
+      'c:/program files/nodejs/NODE',
     ])
       expect(argvRepeatsExecutable('node', canonical, [first, '--version'], 'win32')).toBe(true);
+    expect(
+      argvRepeatsExecutable(
+        'C:\\tools\\runner.exe',
+        'C:\\tools\\runner.exe',
+        ['C:\\tools\\runner', 'x'],
+        'win32',
+      ),
+    ).toBe(true);
     for (const [requested, sealed, first] of [
       ['node', canonical, 'npm.cmd'],
       // Only `.exe`/`.com` are implicit Windows executable extensions, so `runner` is a real
       // first operand for `runner.bin`, not a repetition.
       ['C:\\tools\\runner.bin', 'C:\\tools\\runner.bin', 'runner'],
+      ['C:\\tools\\runner.bin', 'C:\\tools\\runner.bin', 'C:\\tools\\runner'],
       ['C:\\tools\\runner.bat', 'C:\\tools\\runner.bat', 'runner'],
       ['C:\\tools\\runner.exe', 'C:\\tools\\runner.exe', '.\\runner'],
     ] as const)
