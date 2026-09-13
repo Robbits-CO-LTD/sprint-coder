@@ -5995,6 +5995,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
   function createCompletionHarness(
     openCriterionIds: readonly string[],
     activeCommandSessions = false,
+    committedEditSagas = true,
   ) {
     const publish = vi.fn();
     const pushRuntimeStatus = vi.fn();
@@ -6008,6 +6009,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     });
     const cancelTurn = vi.fn().mockResolvedValue(undefined);
     const terminateTurn = vi.fn().mockResolvedValue(undefined);
+    const startNextQueued = vi.fn(() => null);
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
       mailbox: { run: (_taskId: string, action: () => unknown) => Promise.resolve(action()) },
@@ -6045,7 +6047,8 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       publish,
       persistence: {
         completeTurnAndFinishGoal,
-        startNextQueued: vi.fn(() => null),
+        startNextQueued,
+        hasCommittedEditSagas: vi.fn(() => committedEditSagas),
         getActiveTurnId: vi.fn(() => 'turn-466'),
       },
       handleRuntimeFailure,
@@ -6058,6 +6061,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       pushRuntimeStatus,
       handleRuntimeFailure,
       completeTurnAndFinishGoal,
+      startNextQueued,
     };
   }
 
@@ -6106,6 +6110,25 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     );
   });
 
+  it('completes a Turn whose background command edited nothing', async () => {
+    // Starting a dev server and reporting back is the background contract working as intended.
+    // There is no post-image a running process could contradict, so there is nothing to refuse.
+    const harness = createCompletionHarness([], true, false);
+
+    await settleCompletedEvent(harness);
+
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
+      'task-466',
+      'turn-466',
+      'completed',
+      'ファイルを作成しました',
+    );
+    expect(harness.startNextQueued).toHaveBeenCalledWith('task-466');
+    expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'idle', errorCode: null }),
+    );
+  });
+
   it('refuses to complete a Turn that still owns a running command, and leaves it running', async () => {
     const harness = createCompletionHarness([], true);
 
@@ -6124,6 +6147,8 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     // killing it here would take a result the user asked for away from them.
     expect(harness.cancelTurn).not.toHaveBeenCalled();
     expect(harness.terminateTurn).not.toHaveBeenCalled();
+    // And the Workspace is not handed to the next queued Turn while that command is still writing.
+    expect(harness.startNextQueued).not.toHaveBeenCalled();
     expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
     const status = harness.pushRuntimeStatus.mock.calls.at(-1)?.[0] as {
       state: string;

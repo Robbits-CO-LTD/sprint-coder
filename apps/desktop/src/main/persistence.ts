@@ -5360,6 +5360,7 @@ export interface PersistenceClient {
     turnId: string;
     createdAt: string;
   }): readonly string[];
+  hasCommittedEditSagas(taskId: string, turnId: string): boolean;
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -12552,8 +12553,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): { event: TurnEvent; task: TaskSummary | null } {
+    // Opened before the transaction and closed after it commits: the shared locks the observation
+    // sessions hold have to outlive the decision they justify.
+    const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
+    try {
+      return this.completeAndFinishGoalInTransaction(taskId, turnId, state, finalText, observation);
+    } finally {
+      observation?.close();
+    }
+  }
+
+  private completeAndFinishGoalInTransaction(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText: string | undefined,
+    observation: TurnSealedObservation | null,
+  ): { event: TurnEvent; task: TaskSummary | null } {
     return this.db.transaction(() => {
-      const event = this.completeTurnInTransaction(taskId, turnId, state, finalText);
+      const event = this.completeTurnInTransaction(
+        taskId,
+        turnId,
+        state,
+        finalText,
+        observation ?? undefined,
+      );
       const current = this.getTaskRow(taskId);
       if (current.goal === null || current.goal_status !== 'active') return { event, task: null };
       const now = new Date();
@@ -16366,9 +16390,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
     turnId: string;
     createdAt: string;
   }): readonly string[] {
-    return this.db.transaction(() =>
-      this.verifyEditSagaPostImagesInTransaction(input.taskId, input.turnId, input.createdAt),
-    )();
+    const observation = this.openSealedObservation(input.taskId, input.turnId);
+    try {
+      return this.db.transaction(() =>
+        this.verifyEditSagaPostImagesInTransaction(
+          input.taskId,
+          input.turnId,
+          input.createdAt,
+          observation,
+        ),
+      )();
+    } finally {
+      observation.close();
+    }
+  }
+
+  /** Whether the Turn committed any Edit Saga, i.e. whether it has a post-image to verify. */
+  hasCommittedEditSagas(taskId: string, turnId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 AS present FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed' LIMIT 1`,
+        )
+        .get(taskId, turnId) !== undefined
+    );
   }
 
   /**
@@ -16394,42 +16440,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
     taskId: string,
     turnId: string,
     createdAt: string,
+    observation: TurnSealedObservation,
   ): readonly string[] {
-    const sagas = (
-      this.db
-        .prepare(
-          `SELECT * FROM edit_sagas
-           WHERE task_id = ? AND turn_id = ? AND state = 'committed'
-           ORDER BY updated_at, id`,
-        )
-        .all(taskId, turnId) as EditSagaRow[]
-    ).map(toEditSaga);
-    const rootIsSealed = this.sealedTurnRootPredicate(taskId, turnId);
-    const observation = this.openSealedObservation(turnId, sagas);
+    const sagas = observation.sagas;
+    const rootIsSealed = this.sealedTurnRootPredicate(taskId, turnId, observation);
     const failed: string[] = [];
-    try {
-      const holds = turnPostImageVerifier(sagas, observation.observe);
-      for (const saga of sagas) {
-        if (!rootIsSealed(saga) || !holds(saga)) {
-          failed.push(`verification:${saga.id}`);
-          continue;
-        }
-        // A Saga whose Assurance is already settled must not be advanced again: a second round on a
-        // `complete` or `blocked` decision is rejected by the state machine, and a Turn with one
-        // such Saga would otherwise take the whole verification pass down with it.
-        const settled = this.listAssuranceRounds(taskId, turnId, saga.id).at(-1);
-        if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
-        this.recordAssuranceVerification({
-          taskId,
-          turnId,
-          sagaId: saga.id,
-          outcome: 'passed',
-          failureClass: null,
-          createdAt,
-        });
+    const holds = turnPostImageVerifier(sagas, observation.observe);
+    for (const saga of sagas) {
+      if (!rootIsSealed(saga) || !holds(saga)) {
+        failed.push(`verification:${saga.id}`);
+        continue;
       }
-    } finally {
-      observation.close();
+      // A Saga whose Assurance is already settled must not be advanced again: a second round on a
+      // `complete` or `blocked` decision is rejected by the state machine, and a Turn with one
+      // such Saga would otherwise take the whole verification pass down with it.
+      const settled = this.listAssuranceRounds(taskId, turnId, saga.id).at(-1);
+      if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
+      this.recordAssuranceVerification({
+        taskId,
+        turnId,
+        sagaId: saga.id,
+        outcome: 'passed',
+        failureClass: null,
+        createdAt,
+      });
     }
     const open = decideCompletion(
       this.getAcceptanceContract(taskId, turnId),
@@ -16451,13 +16485,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * mutation gate is closed and so cannot have written an Edit Saga — observation falls back to the
    * path-based reader, which is weaker in the way `pathSealedObservation` describes.
    */
-  private openSealedObservation(
-    turnId: string,
-    sagas: readonly EditSagaSnapshot[],
-  ): Readonly<{ observe: SealedObservationSource; close: () => void }> {
+  openSealedObservation(taskId: string, turnId: string): TurnSealedObservation {
+    const sagas = (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed'
+           ORDER BY updated_at, id`,
+        )
+        .all(taskId, turnId) as EditSagaRow[]
+    ).map(toEditSaga);
     const observer = this.sealedPostImageObserver;
-    if (observer === null)
-      return Object.freeze({ observe: pathSealedObservation, close: () => undefined });
+    if (observer === null || sagas.length === 0)
+      return Object.freeze({
+        sagas,
+        observe: pathSealedObservation,
+        rootIdentity: () => undefined,
+        close: () => undefined,
+      });
     const rootPaths = new Map(
       (
         this.db
@@ -16474,11 +16519,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     for (const saga of sagas)
       for (const { operation } of saga.steps)
         for (const { path } of sealedPathExpectations(operation)) rootOfPath.set(path, saga.rootId);
-    const sessions = new Map<string, SealedPostImageSession | null>();
-    const sessionFor = (rootId: string): SealedPostImageSession | null => {
+    // `unsupported` is not a failure to verify: it means this build has no native backend for the
+    // platform, so the path reader answers instead, exactly as it does with no observer at all.
+    const sessions = new Map<string, SealedPostImageSession | 'unsupported' | null>();
+    const sessionFor = (rootId: string): SealedPostImageSession | 'unsupported' | null => {
       if (!sessions.has(rootId)) {
         const root = rootPaths.get(rootId);
-        let session: SealedPostImageSession | null;
+        let session: SealedPostImageSession | 'unsupported' | null;
         try {
           session =
             root === undefined
@@ -16488,21 +16535,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
                   workspacePath: root.canonical_path,
                   workspaceKey: root.workspace_key,
                 });
-        } catch {
-          // LOCK_BUSY, a moved root, an unsupported backend: all of them mean this Turn cannot be
+        } catch (error) {
+          // An exclusive mutation session holds the root, or the root moved: this Turn cannot be
           // verified right now, which is not the same as failing verification.
-          session = null;
+          session = error instanceof SealedPostImageUnsupportedError ? 'unsupported' : null;
         }
         sessions.set(rootId, session);
       }
       return sessions.get(rootId) ?? null;
     };
     return Object.freeze({
+      sagas,
+      rootIdentity: (rootId: string | null) => {
+        if (rootId === null) return undefined;
+        const session = sessionFor(rootId);
+        return session === null || session === 'unsupported'
+          ? undefined
+          : session.rootIdentityDigest;
+      },
       observe: (canonicalPath: string): SealedPostImageObservation | null => {
         const rootId = rootOfPath.get(canonicalPath);
         // A legacy Saga with no sealed root has no session to observe through.
         if (rootId === undefined || rootId === null) return pathSealedObservation(canonicalPath);
         const session = sessionFor(rootId);
+        if (session === 'unsupported') return pathSealedObservation(canonicalPath);
         const root = rootPaths.get(rootId);
         if (session === null || root === undefined) return null;
         const segments = relative(root.canonical_path, canonicalPath).split(sep);
@@ -16516,10 +16572,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
       close: () => {
         for (const session of sessions.values())
           try {
-            session?.close();
+            if (session !== null && session !== 'unsupported') session.close();
           } catch {
             // The verdict is already decided; a failed close cannot change it.
           }
+        sessions.clear();
       },
     });
   }
@@ -16535,6 +16592,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private sealedTurnRootPredicate(
     taskId: string,
     turnId: string,
+    observation: TurnSealedObservation,
   ): (saga: EditSagaSnapshot) => boolean {
     const rootPaths = new Map(
       (
@@ -16554,6 +16612,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // A Saga sealed before roots carried an identity has nothing to compare against. The parent
       // chain and the post-image hash still gate it; this check simply cannot speak for it.
       if (saga.rootIdentityDigest === null) return true;
+      // From the descriptor the observation session pinned wherever there is one, so the identity
+      // compared is the root the observations are actually made through. Only a Turn with no native
+      // session falls back to stat'ing the path, which is a second look at something that could
+      // have moved since.
+      const pinned = observation.rootIdentity(saga.rootId);
+      if (pinned !== undefined) return pinned === saga.rootIdentityDigest;
       const rootPath =
         saga.rootId === null ? taskWorkspacePath : (rootPaths.get(saga.rootId) ?? null);
       if (rootPath === null) return false;
@@ -17548,9 +17612,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): TurnEvent {
-    return this.db.transaction(() =>
-      this.completeTurnInTransaction(taskId, turnId, state, finalText),
-    )();
+    // As in `completeTurnAndFinishGoal`: the observation outlives the transaction it justifies.
+    const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
+    try {
+      return this.db.transaction(() =>
+        this.completeTurnInTransaction(taskId, turnId, state, finalText, observation ?? undefined),
+      )();
+    } finally {
+      observation?.close();
+    }
   }
 
   cancelTurn(taskId: string, turnId: string): TurnEvent | null {
@@ -19375,19 +19445,21 @@ export class SqlitePersistenceClient implements PersistenceClient {
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
+    observation?: TurnSealedObservation,
   ): TurnEvent {
     const turn = this.getTurn(taskId, turnId);
     if (state === 'completed') {
-      // One gate, one transaction. Re-reading the post-images in a transaction of their own and
-      // then deciding in this one would leave a window where a background writer the Turn still
-      // owns could change a file between the evidence and the decision that trusts it: the Turn
-      // would complete on bytes that were true a moment ago. Verifying here means the reads, the
-      // evidence they produce, and the terminal state they justify all commit together or not at
-      // all (issue #466 review).
+      // One gate, one transaction. Observing the post-images in a transaction of their own and then
+      // deciding in this one would leave a window where a writer could change a file between the
+      // evidence and the decision that trusts it: the Turn would complete on bytes that were true a
+      // moment ago. The observation sessions are opened before this transaction and closed after it
+      // commits, so the reads, the evidence they produce, and the terminal state they justify all
+      // commit together or not at all (issue #466 review).
       const open = this.verifyEditSagaPostImagesInTransaction(
         taskId,
         turnId,
         new Date().toISOString(),
+        observation ?? this.openSealedObservation(taskId, turnId),
       );
       if (open.length > 0) throw new AcceptanceEvidenceMissingError(open);
     }
@@ -20024,8 +20096,27 @@ type SealedObservationSource = (canonicalPath: string) => SealedPostImageObserva
 
 /** A read-only view of one Workspace root. `observe` throws when the endpoint is not observable. */
 export type SealedPostImageSession = Readonly<{
+  /** The pinned root's identity, from the descriptor this session holds — never from the path. */
+  rootIdentityDigest: string;
   observe(segments: readonly string[]): SealedPostImageObservation;
   close(): void;
+}>;
+
+/** Thrown by an observer whose backend has no implementation on this platform. */
+export class SealedPostImageUnsupportedError extends Error {}
+
+/**
+ * One Turn's open observation. Held across the completion transaction and closed after it commits,
+ * so the shared locks the sessions hold are still in place while the decision they justify is
+ * written — releasing them first would leave a window where the Workspace could move between the
+ * last observation and the durable outcome.
+ */
+export type TurnSealedObservation = Readonly<{
+  sagas: readonly EditSagaSnapshot[];
+  observe: SealedObservationSource;
+  /** The pinned identity of a root, or undefined when nothing pinned it. */
+  rootIdentity: (rootId: string | null) => string | undefined;
+  close: () => void;
 }>;
 
 /**

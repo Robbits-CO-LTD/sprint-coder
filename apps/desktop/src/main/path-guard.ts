@@ -269,6 +269,15 @@ export function currentWorkspaceRootIdentityDigest(rootPath: string): string | n
   }
 }
 
+/**
+ * The same digest, from a `dev`/`ino` pair someone else observed — a pinned descriptor, say, rather
+ * than a path that could have been re-pointed since. Always a directory: only a directory is ever
+ * sealed as a Workspace root.
+ */
+export function workspaceRootIdentityDigestFor(dev: string, ino: string): string {
+  return workspaceRootIdentityDigest({ dev, ino, kind: 'directory' });
+}
+
 function workspaceRootIdentityDigest(
   identity: Pick<FileIdentity, 'dev' | 'ino' | 'kind'> | BigIntStats,
 ): string {

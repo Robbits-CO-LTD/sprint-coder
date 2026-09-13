@@ -5106,7 +5106,12 @@ export class IpcRouter {
     );
     if (!authorizationTurnIsActive(null, taskId, turnId, this.managedWorkerTurn.values()))
       this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
-    this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
+    // A Turn refused because a command it started is still writing must not hand the Workspace to
+    // the next queued Turn: that Turn would edit underneath a process this one left running. The
+    // queue stays as it is and the user restarts it — by stopping the command and retrying, or by
+    // sending the next message themselves.
+    if (settled.refusal !== 'active_command')
+      this.dispatchQueueTransition(this.persistence.startNextQueued(taskId));
     if (settled.state === 'completed' && pendingTaskTitle !== undefined)
       void this.generateAndApplyTaskTitle(pendingTaskTitle);
   }
@@ -5145,9 +5150,16 @@ export class IpcRouter {
     completion: ReturnType<PersistenceClient['completeTurnAndFinishGoal']>;
     refusal: 'acceptance_evidence' | 'active_command' | null;
   } {
-    // No verification is attempted in this case: re-reading post-images while a process the Turn
-    // started may still be writing them would only produce evidence nobody should trust.
-    if (state === 'completed' && this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId))
+    // Only a Turn with something to verify. A Turn that started a dev server in the background and
+    // then answered has no post-image to be contradicted, and refusing it would break the very
+    // background contract it is using. One that committed an Edit Saga does: re-reading its
+    // post-images while a process it started may still be writing them would only produce evidence
+    // nobody should trust, so no verification is attempted and the Turn does not complete.
+    if (
+      state === 'completed' &&
+      this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId) &&
+      this.persistence.hasCommittedEditSagas(taskId, turnId)
+    )
       return this.refuseCompletion(taskId, turnId, finalText, 'active_command', {
         message: 'Turn completion was refused while it still owned a running command',
       });

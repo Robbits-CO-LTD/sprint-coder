@@ -2972,6 +2972,15 @@ napi_value OpenReadSession(napi_env env, napi_callback_info info) {
   napi_set_named_property(env, result, "id", MakeString(env, id));
   napi_set_named_property(env, result, "rootId", MakeString(env, root_id));
   napi_set_named_property(env, result, "workspaceKey", MakeString(env, session.workspace_key));
+  // From the descriptor that is pinned and share-locked, not from a second look at the path. The
+  // caller compares this with the identity its Sagas were sealed against, so it has to describe the
+  // directory the observations will actually be made through.
+  napi_set_named_property(
+      env, result, "rootDev",
+      MakeString(env, std::to_string(static_cast<uint64_t>(root_stat.st_dev))));
+  napi_set_named_property(
+      env, result, "rootIno",
+      MakeString(env, std::to_string(static_cast<uint64_t>(root_stat.st_ino))));
   return result;
 }
 

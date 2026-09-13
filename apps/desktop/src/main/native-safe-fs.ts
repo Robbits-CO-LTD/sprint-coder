@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { mkdir, realpath } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
+import { workspaceRootIdentityDigestFor } from './path-guard';
 import {
   parseNativeMutationIntentSnapshot,
   type NativeMutationEffectObservation,
@@ -73,6 +74,14 @@ export type NativeSafeFsReadSession = Readonly<{
   id: string;
   rootId: string;
   workspaceKey: string;
+  /**
+   * The identity of the root this session pinned, in the form `workspaceMutationBinding` seals.
+   *
+   * Derived from the descriptor the session holds, not from a second `lstat` of the path, so a
+   * caller can compare it with the identity its Edit Sagas were sealed against and know it is
+   * comparing against the directory the observations will be made through.
+   */
+  rootIdentityDigest: string;
 }>;
 
 /** What is at a sealed endpoint now. `other` covers symlinks, fifos, devices and hard-linked files. */
@@ -784,19 +793,28 @@ function validateRawAddon(value: unknown): RawAddon {
 function parseReadSession(value: unknown): NativeSafeFsReadSession {
   if (typeof value !== 'object' || value === null)
     throw new Error('NativeSafeFs read session is malformed');
-  const record = value as Partial<NativeSafeFsReadSession>;
+  const record = value as Partial<NativeSafeFsReadSession> & {
+    rootDev?: unknown;
+    rootIno?: unknown;
+  };
   if (
     typeof record.id !== 'string' ||
     !/^[a-f0-9]{32}$/.test(record.id) ||
     typeof record.rootId !== 'string' ||
     typeof record.workspaceKey !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(record.workspaceKey)
+    !/^[a-f0-9]{64}$/.test(record.workspaceKey) ||
+    typeof record.rootDev !== 'string' ||
+    !/^\d+$/.test(record.rootDev) ||
+    typeof record.rootIno !== 'string' ||
+    !/^\d+$/.test(record.rootIno)
   )
     throw new Error('NativeSafeFs read session is malformed');
   return Object.freeze({
     id: record.id,
     rootId: record.rootId,
     workspaceKey: record.workspaceKey,
+    // Converted here rather than in the addon so the digest formula stays in one place.
+    rootIdentityDigest: workspaceRootIdentityDigestFor(record.rootDev, record.rootIno),
   });
 }
 

@@ -25,11 +25,16 @@ import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
   prepareNativeSafeFsLockDirectory,
+  NativeSafeFsError,
   type NativeSafeFs,
 } from './native-safe-fs';
 import { loadComputerUseNative } from './computer-use-native';
 import { createComputerUseNativeHost } from './computer-use-native-host';
-import { SqliteEditSagaLeaseGuard, SqlitePersistenceClient } from './persistence';
+import {
+  SealedPostImageUnsupportedError,
+  SqliteEditSagaLeaseGuard,
+  SqlitePersistenceClient,
+} from './persistence';
 import { EditSagaExecutor, PersistenceEditSagaStore } from './edit-saga';
 import { reconcileUserFileSaves } from './user-file-save-saga';
 import { EditArtifactStore } from './edit-artifact-store';
@@ -642,22 +647,35 @@ async function wireEditSagaRecovery(
     // The completion gate verifies sealed post-images through the same addon the Edit Sagas write
     // through, so a verification walks the parent chain descriptor-relative instead of trusting a
     // path to still mean what it meant. Read-only and fence-free: see `openReadSession`.
-    persistence.setSealedPostImageObserver?.((root) => {
-      const identity = lstatSync(root.workspacePath, { bigint: true, throwIfNoEntry: false });
-      if (identity === undefined || !identity.isDirectory()) return null;
-      const session = nativeSafeFs.openReadSession({
-        rootId: root.rootId,
-        workspacePath: root.workspacePath,
-        rootDev: identity.dev.toString(),
-        rootIno: identity.ino.toString(),
-        workspaceKey: root.workspaceKey,
+    //
+    // Only where the backend exists. Windows exports these as refusals until its implementation
+    // lands, and an observer that always refuses is worse than none: every edited Turn would be
+    // unverifiable and so refuse to complete. The platform check keeps that off Windows entirely,
+    // and `SealedPostImageUnsupportedError` is the second line of defence if one ever slips past.
+    if (process.platform !== 'win32')
+      persistence.setSealedPostImageObserver?.((root) => {
+        const identity = lstatSync(root.workspacePath, { bigint: true, throwIfNoEntry: false });
+        if (identity === undefined || !identity.isDirectory()) return null;
+        try {
+          const session = nativeSafeFs.openReadSession({
+            rootId: root.rootId,
+            workspacePath: root.workspacePath,
+            rootDev: identity.dev.toString(),
+            rootIno: identity.ino.toString(),
+            workspaceKey: root.workspaceKey,
+          });
+          return Object.freeze({
+            rootIdentityDigest: session.rootIdentityDigest,
+            observe: (segments: readonly string[]) =>
+              nativeSafeFs.observeSealedPostImage(session, segments),
+            close: () => nativeSafeFs.closeReadSession(session),
+          });
+        } catch (error) {
+          if (error instanceof NativeSafeFsError && error.code === 'UNSUPPORTED_PLATFORM')
+            throw new SealedPostImageUnsupportedError(error.message);
+          throw error;
+        }
       });
-      return Object.freeze({
-        observe: (segments: readonly string[]) =>
-          nativeSafeFs.observeSealedPostImage(session, segments),
-        close: () => nativeSafeFs.closeReadSession(session),
-      });
-    });
     const sessions = new Map<string, NativeSafeFsSession>();
     const resolveSession = async (lease: MutationLeaseToken): Promise<NativeSafeFsSession> => {
       const existing = sessions.get(lease.leaseId);

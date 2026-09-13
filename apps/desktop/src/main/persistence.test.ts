@@ -36,6 +36,7 @@ import {
   AcceptanceEvidenceMissingError,
   MAX_VERIFIABLE_POST_IMAGE_BYTES,
   readVerifiablePostImage,
+  SealedPostImageUnsupportedError,
   CanvasViewConflictError,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
@@ -3619,6 +3620,7 @@ if (runsWithElectronAbi)
               workspaceKey: root.workspaceKey,
             });
             return {
+              rootIdentityDigest: session.rootIdentityDigest,
               observe: (segments: readonly string[]) =>
                 native.observeSealedPostImage(session, segments),
               close: () => native.closeReadSession(session),
@@ -3667,6 +3669,42 @@ if (runsWithElectronAbi)
           }),
         ).toEqual([`verification:${saga.id}`]);
         blocked.close();
+
+        // A backend with no implementation on this platform is not a refusal to verify: the Turn
+        // falls back to observation by path, exactly as it does with no observer bound at all.
+        // Without this, Windows — where every export refuses — could never complete an edited Turn.
+        rmSync(nested);
+        mkdirSync(nested);
+        writeFileSync(workspaceFile, 'after');
+        const unsupported = new SqlitePersistenceClient(path);
+        unsupported.setSealedPostImageObserver(() => {
+          throw new SealedPostImageUnsupportedError('no backend on this platform');
+        });
+        expect(
+          unsupported.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:04.000Z',
+          }),
+        ).toEqual([]);
+        unsupported.close();
+
+        // Root renamed away and replaced by a fresh directory of the same name: every path resolves
+        // and the bytes match, and the session opens — but its identity comes from the descriptor it
+        // pinned, so it no longer matches the identity the Saga was sealed against.
+        renameSync(workspacePath, join(dirname(path), 'native-observed-moved'));
+        mkdirSync(nested, { recursive: true });
+        writeFileSync(workspaceFile, 'after');
+        const replaced = new SqlitePersistenceClient(path);
+        bindObserver(replaced);
+        expect(
+          replaced.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:05.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        replaced.close();
         persistence.close();
       },
     );
