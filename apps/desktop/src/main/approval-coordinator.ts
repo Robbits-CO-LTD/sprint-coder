@@ -16,6 +16,11 @@ import {
   workspaceToolAuthorizationGuard,
   workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
+import {
+  managedStdinApprovalExecution,
+  managedStdinApprovalTarget,
+  managedStdinAuthorizationFacts,
+} from './managed-command-stdin';
 
 type ApprovalLike = {
   id: string;
@@ -93,7 +98,11 @@ export function sandboxProfileForToolAuthorization(
   implementationKind: ToolAuthorizationRequest['entry']['implementationKind'],
   capability: Capability,
 ) {
-  if (implementationKind === 'command-runner') return 'full' as const;
+  // `shell.execute` is recorded as `full` whoever implements it. A built-in that feeds a running
+  // process (write_stdin, Issue #473) hands over the same authority the process already holds, and
+  // an approval row claiming `read-only` would understate that in the audit.
+  if (implementationKind === 'command-runner' || capability === 'shell.execute')
+    return 'full' as const;
   return capability === 'workspace.write' || capability === 'filesystem.external.write'
     ? ('workspace-write' as const)
     : ('read-only' as const);
@@ -564,6 +573,8 @@ export function approvalFactsForTool(
 }
 
 function displayTarget(input: unknown): string {
+  const stdin = managedStdinAuthorizationFacts(input);
+  if (stdin !== undefined) return managedStdinApprovalTarget(stdin);
   const disclosure = providerDisclosureAuthorizationFacts(input);
   if (disclosure !== undefined) return disclosure.canonicalPath;
   const workspaceGuard = workspaceToolAuthorizationGuard(input);
@@ -577,6 +588,10 @@ function displayTarget(input: unknown): string {
 }
 
 function safeApprovalExecution(request: ToolAuthorizationRequest): string {
+  // The bytes are the execution here, so they belong on the card. Long input is summarised, and
+  // the byte count and digest always identify exactly what was approved (Issue #473).
+  const stdin = managedStdinAuthorizationFacts(request.input);
+  if (stdin !== undefined) return stableStringify(managedStdinApprovalExecution(stdin));
   const disclosure = providerDisclosureAuthorizationFacts(request.input);
   if (disclosure !== undefined)
     return stableStringify({

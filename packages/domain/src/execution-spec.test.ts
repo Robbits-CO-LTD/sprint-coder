@@ -10,7 +10,7 @@ const base = {
     identityDigest: 'a'.repeat(64),
   },
   envDelta: {},
-  stdinMode: 'closed' as const,
+  stdinMode: 'approved-writes' as const,
   shell: 'none' as const,
 };
 
@@ -72,6 +72,20 @@ describe('immutable ExecutionSpec', () => {
 
     expect(executionSpecDigest(first)).toBe(executionSpecDigest(reordered));
     expect(executionSpecDigest(first)).not.toBe(executionSpecDigest(changed));
+  });
+
+  it('binds the declared stdin mode and refuses an unknown one', () => {
+    // CommandRunner spawns with stdin writable, so `approved-writes` is what it declares. `closed`
+    // stays readable for specs recorded before Issue #473, and the two are distinct subjects.
+    const approvedWrites = createExecutionSpec(base);
+    const closed = createExecutionSpec({ ...base, stdinMode: 'closed' });
+
+    expect(approvedWrites.stdinMode).toBe('approved-writes');
+    expect(validateExecutionSpec(closed)).toBe(true);
+    expect(executionSpecDigest(approvedWrites)).not.toBe(executionSpecDigest(closed));
+    expect(() => createExecutionSpec({ ...base, stdinMode: 'open' as never })).toThrow(
+      'stdin mode is unsupported',
+    );
   });
 
   it('accepts the Windows ProgramFiles(x86) discovery key without widening key syntax', () => {

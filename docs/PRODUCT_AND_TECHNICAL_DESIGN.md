@@ -560,6 +560,7 @@ Toolの表示名と意味分類を分ける。
 - cwdをWorkspace root配下へcanonicalizeする。
 - environmentはallowlist + Task追加分で構築し、secretをlogへ出さない。
 - 承認対象をimmutable ExecutionSpec `{absoluteExecutable, argv, cwdIdentity, envDelta(redacted), stdinMode, shell, commandBytesHash}` とし、digest変更時は承認を失効する。
+- processのstdinはspawn後も書き込み可能なので、`stdinMode`は実態 `approved-writes` を宣言する。実行開始後のstdin書き込み（`write_stdin`）はcommand本体と同じ`shell.execute`を要求する別の承認対象とし、送信文字列（長い場合は先頭N文字 + byte数 + sha256）を承認カードと監査へ残す。session所有権だけを境界にしない。
 - stdout/stderrにsequenceを付け、backpressureと最大bufferを持つ。
 - cancel時は子孫processを含めて終了し、OS別integration testを用意する。
 - parserは危険検出と表示補助に限定し、security boundaryにしない。自動allowはshellなし、absolute executable、厳格argv schemaを持つ専用built-inだけとする。shell mode、interpreter code、task runner、Git hook/alias等の実行拡張点はpromptまたはsandbox内denyへ倒す。

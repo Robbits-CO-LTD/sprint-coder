@@ -26,8 +26,10 @@ import { FileRevisionRegistry } from './file-revision';
 import {
   REQUEST_USER_INPUT_TOOL,
   UPDATE_PLAN_TOOL,
+  WRITE_STDIN_TOOL,
   registerManagedControlTools,
 } from './default-tools';
+import { createManagedStdinRequest, type ManagedStdinRequest } from './managed-command-stdin';
 
 const NOW = '2026-07-22T12:00:00.000Z';
 const EXPIRES_AT = '2026-07-22T13:00:00.000Z';
@@ -51,6 +53,7 @@ type StoredApproval = {
   expiresAt: string;
   display?: { target: string; impact: string; execution: string };
   sandboxProfile?: 'read-only' | 'workspace-write' | 'full';
+  risk?: 'low' | 'medium' | 'high';
 };
 
 type StoredGrant = {
@@ -847,5 +850,109 @@ describe('ApprovalCoordinator', () => {
     harness.coordinator.resolve(resolveCommand(second, 'allow_once'));
     await expect(dispatch).resolves.toEqual({ ok: true });
     expect(executions()).toBe(1);
+  });
+});
+
+/**
+ * `exec_command` spawns with stdin open, so anything written afterwards is part of what the
+ * approved command actually does. The write is approved on its own card, and that card has to
+ * carry both the process it reaches and the characters being sent (Issue #473).
+ */
+describe('managed command stdin approval', () => {
+  function createStdinBroker(
+    authorize: (
+      request: ToolAuthorizationRequest,
+    ) => ReturnType<ApprovalCoordinator['authorizeTool']>,
+    command = {
+      sessionId: 'session-1',
+      executable: '/usr/bin/tee',
+      argv: ['notes.txt'],
+      cwd: '/workspace',
+    },
+  ) {
+    const registry = new ToolRegistry();
+    registry.register(WRITE_STDIN_TOOL);
+    const broker = new ToolBroker(registry, () => 7, authorize);
+    const written: string[] = [];
+    broker.registerImplementation({
+      toolId: WRITE_STDIN_TOOL.toolId,
+      implementationKind: 'built-in',
+      prepare: (input) =>
+        createManagedStdinRequest({
+          chars: (input as { chars: string }).chars,
+          close: (input as { close?: boolean }).close === true,
+          command,
+        }),
+      execute: (input) => {
+        written.push((input as ManagedStdinRequest).chars);
+        return { written: true };
+      },
+    });
+    return { broker, written };
+  }
+
+  it('names the running command and carries the characters, and a denial writes nothing', async () => {
+    const harness = createHarness();
+    const { broker, written } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const dispatch = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-stdin-denied',
+      providerName: 'write_stdin',
+      input: { sessionId: 'session-1', chars: 'rm -rf /\n', close: true },
+    });
+    const approval = await waitForPublished(harness);
+
+    expect(approval.capabilities).toEqual(['shell.execute']);
+    expect(approval.risk).toBe('high');
+    expect(approval.sandboxProfile).toBe('full');
+    expect(approval.display?.target).toContain('/usr/bin/tee notes.txt');
+    expect(approval.display?.target).toContain('session-1');
+    const execution = JSON.parse(approval.display!.execution) as Record<string, unknown>;
+    expect(execution).toMatchObject({
+      tool: 'write_stdin',
+      sessionId: 'session-1',
+      executable: '/usr/bin/tee',
+      argv: ['notes.txt'],
+      close: true,
+      chars: 'rm -rf /\n',
+      charsTruncated: false,
+    });
+    expect(execution['charsSha256']).toMatch(/^[a-f0-9]{64}$/);
+
+    harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+    await expect(dispatch).rejects.toThrow('Tool authorization deny');
+    expect(written).toEqual([]);
+  });
+
+  it('writes only after the user approves, and summarises a long value', async () => {
+    const harness = createHarness();
+    const { broker, written } = createStdinBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const chars = 'x'.repeat(1_000);
+    const dispatch = broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-stdin-allowed',
+      providerName: 'write_stdin',
+      input: { sessionId: 'session-1', chars },
+    });
+    const approval = await waitForPublished(harness);
+    const execution = JSON.parse(approval.display!.execution) as Record<string, unknown>;
+
+    expect(execution['chars']).toBeUndefined();
+    expect(execution['charsTruncated']).toBe(true);
+    expect(execution['charsPreview']).toBe('x'.repeat(256));
+    expect(execution['charsBytes']).toBe(1_000);
+    expect(written).toEqual([]);
+
+    harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+    await expect(dispatch).resolves.toEqual({ written: true });
+    expect(written).toEqual([chars]);
   });
 });

@@ -18,10 +18,18 @@ export type ManagedCommandSnapshot = Readonly<{
   error: string | null;
 }>;
 
+export type ManagedCommandIdentity = Readonly<{
+  sessionId: string;
+  executable: string;
+  argv: readonly string[];
+  cwd: string;
+}>;
+
 type Session = {
   id: string;
   state: ManagedCommandSnapshot['state'];
   executionId: string | null;
+  spec: ExecutionSpec;
   controller: AbortController;
   chunks: CommandOutputChunk[];
   result: CommandResult | null;
@@ -60,6 +68,7 @@ export class ManagedCommandSessions {
       id: sessionId,
       state: 'starting',
       executionId: null,
+      spec,
       controller: new AbortController(),
       chunks: [],
       result: null,
@@ -122,6 +131,24 @@ export class ManagedCommandSessions {
   ): ManagedCommandSnapshot {
     const session = this.require(sessionId, owner);
     return this.snapshot(session, afterSeq);
+  }
+
+  /**
+   * The command this session is running, as the approval subject for `write_stdin` (Issue #473).
+   * Ownership is checked here too, so a session this Turn does not own is refused before any
+   * approval card is raised.
+   */
+  commandIdentity(
+    sessionId: string,
+    owner: Readonly<{ taskId: string; turnId: string }>,
+  ): ManagedCommandIdentity {
+    const session = this.require(sessionId, owner);
+    return Object.freeze({
+      sessionId: session.id,
+      executable: session.spec.absoluteExecutable,
+      argv: Object.freeze([...session.spec.argv]),
+      cwd: session.spec.cwdIdentity.canonicalPath,
+    });
   }
 
   writeStdin(

@@ -16,6 +16,7 @@ export function ApprovalCard({
   const executionIsLong = approval.execution.length > 512;
   const userInput =
     approval.toolName === 'request_user_input' ? parseUserInput(approval.execution) : null;
+  const stdinNote = standardInputNote(approval);
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -49,6 +50,11 @@ export function ApprovalCard({
           sandboxなしで、あなたと同じ権限で実行されます。Workspace外のファイルやネットワークにもアクセスできます。
         </p>
       ) : null}
+      {stdinNote === null ? null : (
+        <p className="approval-card__warning" role="note">
+          {stdinNote}
+        </p>
+      )}
       <dl className="approval-card__facts">
         <div>
           <dt>対象</dt>
@@ -116,6 +122,26 @@ export function ApprovalCard({
       ) : null}
     </section>
   );
+}
+
+/**
+ * Says out loud what the approved command's stdin does. A command spawns with stdin open, so the
+ * approved argv is not the whole story; anything written afterwards is approved on its own card
+ * (Issue #473), and that card is the one that carries the characters being sent.
+ */
+function standardInputNote(approval: ApprovalSummary): string | null {
+  if (approval.capability !== 'shell.execute') return null;
+  if (approval.toolName === 'write_stdin')
+    return '実行中のコマンドの標準入力へ送信されます。コマンドの動作は、ここで送る内容によって変わります。';
+  let stdinMode: unknown;
+  try {
+    stdinMode = (JSON.parse(approval.execution) as { stdinMode?: unknown }).stdinMode;
+  } catch {
+    return null;
+  }
+  return stdinMode === 'approved-writes'
+    ? '標準入力は開いたままです。実行開始後に送られる入力は、write_stdin として別途承認します。'
+    : null;
 }
 
 function parseUserInput(execution: string): { question: string; choices: string[] } | null {

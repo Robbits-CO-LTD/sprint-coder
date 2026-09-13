@@ -53,3 +53,61 @@ describe('ApprovalCard user input mode', () => {
     expect(html.match(/<button/g) ?? []).toHaveLength(2);
   });
 });
+
+describe('ApprovalCard standard input wording', () => {
+  const shellApproval: ApprovalSummary = {
+    ...approval,
+    toolName: 'exec_command',
+    reason: 'provider_command_requires_explicit_approval',
+    target: '/bin/sh',
+    impact: 'process',
+    risk: 'high',
+    capability: 'shell.execute',
+    execution: JSON.stringify({
+      executable: '/bin/sh',
+      argv: ['-c', 'tee notes.txt'],
+      cwd: '/workspace',
+      shell: 'none',
+      stdinMode: 'approved-writes',
+    }),
+  };
+
+  it('says the command keeps stdin open and that later input is approved separately', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard approval={shellApproval} busy={false} onDecision={() => undefined} />,
+    );
+    expect(html).toContain('標準入力は開いたままです');
+    expect(html).toContain('write_stdin');
+  });
+
+  it('says nothing about stdin when the approved spec closed it', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{
+          ...shellApproval,
+          execution: JSON.stringify({ executable: '/bin/sh', stdinMode: 'closed' }),
+        }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(html).not.toContain('標準入力');
+  });
+
+  it('tells the user a stdin write changes what the running command does', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{
+          ...shellApproval,
+          toolName: 'write_stdin',
+          target: 'stdin → /bin/sh -c tee notes.txt (session session-1)',
+          execution: JSON.stringify({ tool: 'write_stdin', chars: 'rm -rf /' }),
+        }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(html).toContain('実行中のコマンドの標準入力へ送信されます');
+    expect(html).toContain('session-1');
+  });
+});

@@ -181,7 +181,11 @@ export async function prepareExecutionSpec(
       identityDigest: pathGuardIdentityDigest(pathGuard),
     },
     envDelta: controlledEnvironment,
-    stdinMode: 'closed',
+    // The spawn below keeps stdio[0] as a pipe so an approved `write_stdin` can reach the
+    // process. Declaring `closed` here would have been a lie about the approved subject
+    // (Issue #473); `approved-writes` says what is true: stdin stays writable, and every write
+    // is approved on its own.
+    stdinMode: 'approved-writes',
     shell: 'none',
   });
   issuedSpecs.set(spec, {

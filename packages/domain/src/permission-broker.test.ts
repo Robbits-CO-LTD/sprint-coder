@@ -12,6 +12,7 @@ import {
   resourceContains,
   resourceSetIsSubset,
   revokeCapability,
+  type AccessPreset,
   type PermissionRequest,
   type CapabilityCeiling,
   type PermissionRule,
@@ -310,6 +311,65 @@ describe('PermissionBroker policy evaluation', () => {
     ];
     expect(variants.map(permissionRequestFingerprint)).not.toContain(fingerprint);
     expect(new Set(variants.map(permissionRequestFingerprint)).size).toBe(variants.length);
+  });
+
+  it('refuses a stdin write under the auto preset and allows it under full access', () => {
+    // write_stdin carries shell.execute at high risk (Issue #473), so the preset outcome is the
+    // same one exec_command gets: a card under ask, an automatic refusal under auto, a narrow
+    // allow under full access.
+    const stdinCeiling = {
+      entries: [
+        {
+          capability: 'shell.execute',
+          resourceSet: { kind: 'all' },
+          operations: ['execute'],
+          expiresAt: '2026-07-22T13:00:00.000Z',
+          providerEgress: ['none'],
+          sandboxProfiles: ['full'],
+        },
+      ],
+      maxWorkerDepth: 0,
+      maxConcurrentWorkers: 0,
+    } as const satisfies CapabilityCeiling;
+    const stdinWriteRequest = {
+      taskId: 'task-1',
+      subjectId: 'tool:builtin/command/write-stdin@1',
+      capability: 'shell.execute',
+      resource: { kind: 'external', target: 'stdin → /usr/bin/tee out.txt (session session-1)' },
+      operation: 'execute',
+      providerEgress: 'none',
+      sandboxProfile: 'full',
+      executionSpecDigest: EXECUTION_DIGEST,
+      reviewerInputDigest: REVIEWER_INPUT_DIGEST,
+      risk: 'high',
+    } as const satisfies PermissionRequest;
+    const policyFor = (preset: AccessPreset) => ({
+      managedDeny: [],
+      projectDeny: [],
+      parentCeiling: stdinCeiling,
+      modeCeiling: stdinCeiling,
+      sandbox: { feasible: true, profile: 'full' as const },
+      rememberedGrants: [],
+      policyEpoch: 4,
+      ...expandAccessPreset(preset),
+    });
+
+    expect(
+      evaluatePermissionPolicy({ request: stdinWriteRequest, policy: policyFor('ask'), now: NOW }),
+    ).toMatchObject({ decision: 'approval_required' });
+    expect(
+      evaluatePermissionPolicy({
+        request: stdinWriteRequest,
+        policy: {
+          ...policyFor('auto'),
+          reviewerDecision: reviewerAllow(stdinWriteRequest),
+        },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'reviewer_binding_invalid_or_high_risk' });
+    expect(
+      evaluatePermissionPolicy({ request: stdinWriteRequest, policy: policyFor('full'), now: NOW }),
+    ).toMatchObject({ decision: 'allow', reason: 'preset_full' });
   });
 
   it('never lets the reviewer allow a high-risk request', () => {

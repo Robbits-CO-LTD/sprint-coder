@@ -5381,7 +5381,11 @@ export class IpcRouter {
           }
         : rawFacts;
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
-    const commandRunner = request.entry.implementationKind === 'command-runner';
+    // Provider-issued process authority covers both starting a command and feeding one that is
+    // already running: `write_stdin` carries `shell.execute` without being a command-runner Tool
+    // (Issue #473), and a preset-wide allow must not cover it silently either.
+    const providerProcessAuthority =
+      request.entry.implementationKind === 'command-runner' || capability === 'shell.execute';
     const sandboxProfile = sandboxProfileForToolAuthorization(
       request.entry.implementationKind,
       capability,
@@ -5446,7 +5450,10 @@ export class IpcRouter {
         },
         ...(pathGuard === undefined ? {} : { pathGuard }),
       };
-      return request.entry.implementationKind === 'command-runner'
+      // Every `shell.execute` request goes through the ExecutionSpec lane, including the built-in
+      // that writes to a running command's stdin (write_stdin, Issue #473). `preview` refuses
+      // `shell.execute` outright, so branching on the implementation kind would have thrown.
+      return capability === 'shell.execute'
         ? this.permissionBroker.previewExecutionSpec(input)
         : this.permissionBroker.preview(input);
     };
@@ -5545,7 +5552,7 @@ export class IpcRouter {
       // still wins above; only an evaluated allow is upgraded to an explicit user approval.
       return requireExplicitProviderCommandApproval(
         { decision: 'allow' as const, reason: evaluation.reason, beforeExecute },
-        commandRunner,
+        providerProcessAuthority,
       );
     }
     return requireExplicitProviderCommandApproval(
@@ -5556,7 +5563,7 @@ export class IpcRouter {
             ? 'permission_allow_once_missing_permit'
             : evaluation.reason,
       },
-      commandRunner,
+      providerProcessAuthority,
     );
   }
 
@@ -9313,9 +9320,9 @@ export function managedLocalForcedRoundMessages(
 
 export function requireExplicitProviderCommandApproval(
   decision: ToolAuthorizationDecision,
-  commandRunner: boolean,
+  providerProcessAuthority: boolean,
 ): ToolAuthorizationDecision {
-  if (!commandRunner || decision.decision !== 'allow') return decision;
+  if (!providerProcessAuthority || decision.decision !== 'allow') return decision;
   return {
     decision: 'approval_required',
     reason: 'provider_command_requires_explicit_approval',
