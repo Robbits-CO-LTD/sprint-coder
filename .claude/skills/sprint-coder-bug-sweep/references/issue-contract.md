@@ -57,7 +57,7 @@ severity は並び順に使うだけで、証拠不足を補わない。
 ## 環境
 
 - Repository: `Robbits-CO-LTD/sprint-coder`
-- Source: `<full SHA>`
+- Source: `<short SHA (7〜12 桁; 40 桁 hex は秘匿スキャンが弾く)>`
 - macOS / Electron / Node / CLI version（秘密を含まない範囲）
 - Runtime: mock | Claude Code CLI (<model>) | Codex CLI (<model>)
 
