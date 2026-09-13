@@ -11,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -3613,11 +3614,13 @@ if (runsWithElectronAbi)
       it('refuses a post-image larger than the verification ceiling', () => {
         const directory = scratchDirectory('post-image-oversize');
         const file = join(directory, 'post-image.txt');
+        // Written once and then trimmed to the ceiling rather than written twice: this shard
+        // already runs eight Electron ABI bridge children beside each other, and the multi-megabyte
+        // temp writes are the one part of these tests with a footprint worth keeping small.
         writeFileSync(file, Buffer.alloc(MAX_VERIFIABLE_POST_IMAGE_BYTES + 1, 0x61));
-
         expect(readVerifiablePostImage(file)).toBeNull();
 
-        writeFileSync(file, Buffer.alloc(MAX_VERIFIABLE_POST_IMAGE_BYTES, 0x61));
+        truncateSync(file, MAX_VERIFIABLE_POST_IMAGE_BYTES);
         expect(readVerifiablePostImage(file)?.length).toBe(MAX_VERIFIABLE_POST_IMAGE_BYTES);
       });
 
