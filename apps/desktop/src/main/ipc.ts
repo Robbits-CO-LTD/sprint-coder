@@ -385,7 +385,7 @@ const COMPLETION_REFUSALS = Object.freeze({
   active_command: {
     errorCode: 'COMMAND_STILL_RUNNING',
     userMessage:
-      'このTurnが起動したコマンドを停止できなかったため、Turnを完了として扱えません。実行中のプロセスを終了し、変更内容を確認してから再試行してください。',
+      'バックグラウンドのコマンドが実行中のため、完了として扱えません。停止してから再試行してください。',
   },
 } as const);
 
@@ -1688,9 +1688,7 @@ export class IpcRouter {
       240,
       (taskId, action) => this.mailbox.run(taskId, action),
       (taskId, turnId, state) => {
-        if (this.turnRuntimes.get(turnId) !== 'mock') return;
-        if (state === 'completed') void this.finishCompletedTurn(taskId, turnId);
-        else this.finishAndAdvance(taskId, turnId, state);
+        if (this.turnRuntimes.get(turnId) === 'mock') this.finishAndAdvance(taskId, turnId, state);
       },
       (taskId, turnId) => this.prepareContext(taskId, turnId),
       this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
@@ -5039,48 +5037,11 @@ export class IpcRouter {
     }
   }
 
-  /**
-   * Completes a Turn, first winding up any command it still owns.
-   *
-   * A Turn that started a watcher or a server in the background and then reported back is finishing
-   * legitimately, and used to complete; it must still complete. But its commands belong to it —
-   * nothing can poll them once it ends — and an Edit Saga verified while one is still writing can
-   * be contradicted a moment later. So the sessions are stopped and awaited first, and only then
-   * does the verification and completion transaction run.
-   *
-   * Synchronous whenever the Turn owns nothing, which is the ordinary case: going through a
-   * microtask there would reorder completion against everything else queued on the mailbox.
-   */
-  private finishCompletedTurn(
-    taskId: string,
-    turnId: string,
-    finalText?: string,
-  ): void | Promise<void> {
-    if (!this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId)) {
-      this.finishAndAdvance(taskId, turnId, 'completed', finalText);
-      return;
-    }
-    return this.managedCodingHarness
-      .settleTurnCommandSessions(taskId, turnId)
-      .catch((error: unknown) => {
-        secureLogger.warn('Managed command teardown before completion failed', {
-          taskId,
-          turnId,
-          error,
-        });
-        return 'unconfirmed' as const;
-      })
-      .then((settlement) => {
-        this.finishAndAdvance(taskId, turnId, 'completed', finalText, settlement);
-      });
-  }
-
   private finishAndAdvance(
     taskId: string,
     turnId: string,
     state: 'completed' | 'failed',
     finalText?: string,
-    commandSettlement: 'settled' | 'unconfirmed' = 'settled',
   ): void {
     const pendingTaskTitle = this.pendingTaskTitles.get(turnId);
     this.pendingTaskTitles.delete(turnId);
@@ -5117,7 +5078,7 @@ export class IpcRouter {
         resolvedProvider: resolvedProvider ?? null,
         resolvedModel,
       });
-    const settled = this.settleTurnCompletion(taskId, turnId, state, finalText, commandSettlement);
+    const settled = this.settleTurnCompletion(taskId, turnId, state, finalText);
     // Back to idle on a clean finish. A Runtime failure already pushed its own `failed` status with
     // the reason attached (see handleRuntimeFailure) and must not be overwritten by an idle here;
     // a completion the gate refused has pushed nothing yet, so it states its own reason.
@@ -5162,10 +5123,11 @@ export class IpcRouter {
    *
    * Two things can refuse a completion here, and neither is a Runtime fault:
    *
-   *   - **A command that would not stop.** `finishCompletedTurn` has already asked the Turn's
-   *     commands to exit and waited for them; a Turn whose background `exec_command` ignored that
-   *     is still writing, and nothing verified while it runs can be trusted. Only an *unconfirmed*
-   *     teardown refuses — a watcher that was started and then cleanly stopped completes normally.
+   *   - **A command the Turn still owns.** `finishTurn` releases the Turn's tools but leaves an
+   *     owned background `exec_command` running, and a process that is still writing can contradict
+   *     anything verified while it runs. The command is left alone — it outlives its Turn by design
+   *     and its completion is delivered at the next safe point — so it is the *Turn* that does not
+   *     complete, and the user is told to stop the command and retry.
    *   - **A criterion that is genuinely still open** (the write was reverted, clobbered, or never
    *     landed), which is the gate Standard Assurance is there to provide.
    *
@@ -5178,17 +5140,16 @@ export class IpcRouter {
     turnId: string,
     state: 'completed' | 'failed',
     finalText?: string,
-    commandSettlement: 'settled' | 'unconfirmed' = 'settled',
   ): {
     state: 'completed' | 'failed';
     completion: ReturnType<PersistenceClient['completeTurnAndFinishGoal']>;
     refusal: 'acceptance_evidence' | 'active_command' | null;
   } {
-    // No verification is attempted in this case: re-reading post-images while a process that
-    // ignored its abort may still be writing them would only produce evidence nobody should trust.
-    if (state === 'completed' && commandSettlement === 'unconfirmed')
+    // No verification is attempted in this case: re-reading post-images while a process the Turn
+    // started may still be writing them would only produce evidence nobody should trust.
+    if (state === 'completed' && this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId))
       return this.refuseCompletion(taskId, turnId, finalText, 'active_command', {
-        message: 'Turn completion was refused because a command it owned could not be stopped',
+        message: 'Turn completion was refused while it still owned a running command',
       });
     try {
       return {
@@ -8353,9 +8314,9 @@ export class IpcRouter {
         completed: async () => {
           if (aggregateUsage !== undefined)
             this.persistence.recordTurnProviderUsage(taskId, turnId, aggregateUsage);
-          await this.mailbox.run(taskId, async () => {
+          await this.mailbox.run(taskId, () => {
             if (this.turnRuntimes.get(turnId) === 'provider')
-              await this.finishCompletedTurn(taskId, turnId);
+              this.finishAndAdvance(taskId, turnId, 'completed');
           });
         },
         failed: async (error) => {
@@ -8468,7 +8429,7 @@ export class IpcRouter {
       {
         completed: () => {
           if (resolvedModel !== undefined) this.resolvedModelByTurn.set(turnId, resolvedModel);
-          return this.finishCompletedTurn(taskId, turnId, finalText);
+          this.finishAndAdvance(taskId, turnId, 'completed', finalText);
         },
         failed: (error) => this.handleRuntimeFailure(kind, taskId, turnId, error),
       },

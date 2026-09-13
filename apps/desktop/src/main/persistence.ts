@@ -295,6 +295,7 @@ import {
   type TurnDiffEntry,
 } from './edit-saga';
 import { assertStableSingleLinkFile } from './stable-file-snapshot';
+import { currentWorkspaceRootIdentityDigest } from './path-guard';
 import {
   createNativeMutationIntentSnapshot,
   deriveNativeMutationEffectKind,
@@ -16373,6 +16374,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * Supersession is resolved per path rather than per Saga: the last operation in the Turn to touch
    * a path owns that path's final state, and every earlier operation on it is judged by that final
    * expectation. So `A→B→C` verifies both Sagas once C is on disk, and neither once it is not.
+   *
+   * The Workspace root each Saga was sealed against is checked too. Paths alone cannot say which
+   * directory they name: rename the root away, put a fresh directory of the same name in its place,
+   * and every canonical path still resolves — to a tree the Saga never touched. Comparing the
+   * root's current identity with the digest sealed into the Saga is what distinguishes them.
    */
   private verifyEditSagaPostImagesInTransaction(
     taskId: string,
@@ -16388,10 +16394,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .all(taskId, turnId) as EditSagaRow[]
     ).map(toEditSaga);
+    const rootIsSealed = this.sealedTurnRootPredicate(taskId, turnId);
     const holds = turnPostImageVerifier(sagas);
     const failed: string[] = [];
     for (const saga of sagas) {
-      if (!holds(saga)) {
+      if (!rootIsSealed(saga) || !holds(saga)) {
         failed.push(`verification:${saga.id}`);
         continue;
       }
@@ -16414,6 +16421,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.listEvidenceRecords(taskId, turnId),
     ).openCriterionIds;
     return Object.freeze([...new Set([...open, ...failed])]);
+  }
+
+  /**
+   * Whether each committed Saga's Workspace root is still the directory it was sealed against.
+   *
+   * A canonical path names a location, not a directory. Rename the root away, put a fresh directory
+   * of the same name back, and every path under it resolves again — to a tree no Saga in this Turn
+   * ever wrote to, where a planted file can match a sealed post hash. The root identity the Saga
+   * carries is what tells the two apart, and it is compared with the same digest `PathGuard` seals.
+   */
+  private sealedTurnRootPredicate(
+    taskId: string,
+    turnId: string,
+  ): (saga: EditSagaSnapshot) => boolean {
+    const rootPaths = new Map(
+      (
+        this.db
+          .prepare('SELECT root_id, canonical_path FROM turn_workspace_roots WHERE turn_id = ?')
+          .all(turnId) as { root_id: string; canonical_path: string }[]
+      ).map((row) => [row.root_id, row.canonical_path] as const),
+    );
+    const taskWorkspacePath = this.getTaskRow(taskId).workspace_path;
+    const observed = new Map<string, string | null>();
+    const identityOf = (rootPath: string): string | null => {
+      if (!observed.has(rootPath))
+        observed.set(rootPath, currentWorkspaceRootIdentityDigest(rootPath));
+      return observed.get(rootPath) ?? null;
+    };
+    return (saga) => {
+      // A Saga sealed before roots carried an identity has nothing to compare against. The parent
+      // chain and the post-image hash still gate it; this check simply cannot speak for it.
+      if (saga.rootIdentityDigest === null) return true;
+      const rootPath =
+        saga.rootId === null ? taskWorkspacePath : (rootPaths.get(saga.rootId) ?? null);
+      if (rootPath === null) return false;
+      return identityOf(rootPath) === saga.rootIdentityDigest;
+    };
   }
 
   private insertAcceptanceContract(contract: AcceptanceContract): void {
@@ -20014,7 +20058,19 @@ function parentChainIsUnchanged(canonicalPath: string): boolean {
  *     the `lstat` below refuses a symlink there — and cross-checks its identity against the
  *     descriptor, so a path pointing at a different inode than the one being read is refused on
  *     every platform. `O_NOFOLLOW` only guards the last component, so the parent chain is
- *     re-resolved separately (`parentChainIsUnchanged`).
+ *     re-resolved separately (`parentChainIsUnchanged`), before the open and again after the read.
+ *
+ * **Known residual window.** Re-resolving the parent is a check, not a pin: between the `realpath`
+ * that passed and the `openSync` that follows, a parent directory inside the Workspace could be
+ * swapped for a link elsewhere, and the post-read re-resolution only catches a swap still in place
+ * when the read ends. Node has no `openat`, so this cannot be closed from JavaScript. The write
+ * side does not share the window — `NativeSafeFsEditEffectBoundary` is the only production
+ * `EditEffectBoundary` (`index.ts`), and it opens every component descriptor-relative with
+ * `O_NOFOLLOW|O_DIRECTORY` (`native_safe_fs.cc` `OpenRelativeParent`) or, on Windows, with
+ * `FILE_OPEN_REPARSE_POINT` per segment (`native_safe_fs_win_mutation.cc` `OpenDirectoryPath`).
+ * Closing it here means reading through that same addon, whose content-hash entry point is
+ * asynchronous and session-bound, which this verifier — deliberately inside the completion
+ * transaction — cannot call. See the issue #466 review thread.
  *   - **`O_NONBLOCK`.** Opening a fifo for reading blocks until a writer appears, which would hang
  *     the Main process inside the completion path. With this flag the open returns immediately and
  *     `fstat` reports a fifo, not a file, so it is refused like any other non-regular entry.
@@ -20060,6 +20116,10 @@ export function readVerifiablePostImage(canonicalPath: string): Buffer | null {
       lstatSync(canonicalPath, { bigint: true }),
       buffer,
     );
+    // Re-resolved after the read as well as before the open. It does not make the walk atomic — see
+    // the note above — but a parent that is still a link to somewhere else when the read finishes
+    // is refused rather than reported as verified.
+    if (!parentChainIsUnchanged(canonicalPath)) return null;
     return buffer;
   } catch {
     return null;

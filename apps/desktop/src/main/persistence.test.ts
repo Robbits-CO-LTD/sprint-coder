@@ -8,6 +8,7 @@ import {
   readFileSync,
   linkSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -47,6 +48,7 @@ import {
   validateCanvasCamera,
   validateCanvasNodePositions,
 } from './persistence';
+import { currentWorkspaceRootIdentityDigest } from './path-guard';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import { nextGraphDocument } from './graph-document';
 import { GraphRenderService } from './graph-render';
@@ -140,8 +142,13 @@ function bindMutationWorkspace(
   path: string,
   rootIdentityDigest: string,
 ): string {
-  const workspaceKey = mutationWorkspaceKey(path, rootIdentityDigest);
-  persistence.setWorkspaceBinding(taskId, { path, workspaceKey, rootIdentityDigest });
+  // Production seals the root's real identity, and the completion verifier compares the sealed
+  // digest against the directory that is there now. A fixture binding a made-up digest to a real
+  // directory would describe a root that never existed; fall back to the caller's value only for
+  // the paths that are themselves made up.
+  const sealed = currentWorkspaceRootIdentityDigest(path) ?? rootIdentityDigest;
+  const workspaceKey = mutationWorkspaceKey(path, sealed);
+  persistence.setWorkspaceBinding(taskId, { path, workspaceKey, rootIdentityDigest: sealed });
   return workspaceKey;
 }
 
@@ -3042,11 +3049,12 @@ if (runsWithElectronAbi)
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
       const workspaceKey = 'b'.repeat(64);
-      const rootIdentityDigest = 'a'.repeat(64);
       const workspacePath = join(dirname(path), 'display-root');
       const workspaceFile = join(workspacePath, 'src', 'a.ts');
       mkdirSync(dirname(workspaceFile), { recursive: true });
       writeFileSync(workspaceFile, 'before');
+      // Sealed from the directory that is really there, as production does.
+      const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
       const project = persistence.createProject({
         name: 'display paths',
         folders: [
@@ -3134,12 +3142,12 @@ if (runsWithElectronAbi)
     artifactIt('uses a verified descendant file read to verify an earlier mkdir Saga', async () => {
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
-      const rootIdentityDigest = 'a'.repeat(64);
       const workspacePath = join(dirname(path), 'mkdir-read-root');
       const directoryPath = join(workspacePath, 'smoke-final');
       const unrelatedDirectoryPath = join(workspacePath, 'unrelated');
       const workspaceFile = join(directoryPath, 'codex.txt');
       mkdirSync(workspacePath, { recursive: true });
+      const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
       const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
       const project = persistence.createProject({
         name: 'mkdir read verification',
@@ -3249,11 +3257,11 @@ if (runsWithElectronAbi)
       async () => {
         const { persistence, path } = createPersistence();
         const rootId = randomUUID();
-        const rootIdentityDigest = 'a'.repeat(64);
         const workspacePath = join(dirname(path), 'issue-466-root');
         const directoryPath = join(workspacePath, 'created');
         const workspaceFile = join(directoryPath, 'one-line.txt');
         mkdirSync(workspacePath, { recursive: true });
+        const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
         const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
         const project = persistence.createProject({
           name: 'issue 466 verification',
@@ -3563,6 +3571,58 @@ if (runsWithElectronAbi)
       },
     );
 
+    artifactIt(
+      'refuses a post-image whose Workspace root was replaced by a new directory',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = join(dirname(path), 'replaced-root');
+        mkdirSync(workspacePath);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'write into a root that gets swapped out');
+        const workspaceFile = join(workspacePath, 'post-image.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(dirname(path), 'replaced-root-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'replaced-root-lease'),
+        ).apply({
+          id: 'replaced-root-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'replaced-root-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        // Every path still resolves and every parent is a real directory — but not the same one. The
+        // post-image is byte-identical, so only the root's sealed identity separates the two trees.
+        renameSync(workspacePath, join(dirname(path), 'moved-away-root'));
+        mkdirSync(workspacePath);
+        writeFileSync(workspaceFile, 'after');
+
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+        expect(readVerifiablePostImage(workspaceFile)).not.toBeNull();
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+        persistence.close();
+      },
+    );
+
     artifactIt('refuses a post-image whose parent directory became a symlink', async () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -3769,12 +3829,12 @@ if (runsWithElectronAbi)
     artifactIt('does not infer mkdir ancestry from unsealed original path spellings', async () => {
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
-      const rootIdentityDigest = 'a'.repeat(64);
       const workspacePath = join(dirname(path), 'mkdir-spelling-root');
       const directoryPath = join(workspacePath, 'actual-parent');
       const siblingPath = join(workspacePath, 'actual-sibling');
       const workspaceFile = join(siblingPath, 'file.txt');
       mkdirSync(workspacePath, { recursive: true });
+      const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
       const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
       const project = persistence.createProject({
         name: 'mkdir spelling verification',

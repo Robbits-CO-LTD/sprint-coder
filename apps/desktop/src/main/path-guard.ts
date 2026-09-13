@@ -1,4 +1,4 @@
-import { constants, realpathSync, type BigIntStats } from 'node:fs';
+import { constants, lstatSync, realpathSync, type BigIntStats } from 'node:fs';
 import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -248,6 +248,25 @@ export async function workspaceMutationBinding(inputPath: string): Promise<
     .update(JSON.stringify(['workspace-mutation-v2', rootIdentityDigest]))
     .digest('hex');
   return Object.freeze({ canonicalPath, rootIdentityDigest, workspaceKey });
+}
+
+/**
+ * The sealed identity of a Workspace root as it is *right now*, or null when the path is not a
+ * directory this process can identify.
+ *
+ * Same digest as `workspaceMutationBinding` seals, computed synchronously and without resolving
+ * symlinks, so a caller holding a sealed `rootIdentityDigest` can ask whether the root it was
+ * sealed against is still the directory sitting at that path. A root that was renamed away and
+ * replaced by a fresh directory of the same name has the same path and a different identity.
+ */
+export function currentWorkspaceRootIdentityDigest(rootPath: string): string | null {
+  try {
+    const stats = lstatSync(rootPath, { bigint: true, throwIfNoEntry: false });
+    if (stats === undefined || !stats.isDirectory()) return null;
+    return workspaceRootIdentityDigest(stats);
+  } catch {
+    return null;
+  }
 }
 
 function workspaceRootIdentityDigest(

@@ -132,59 +132,6 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       }
     });
 
-    it('settles a Turn that owns a long-running command so it can still complete', async () => {
-      if (process.platform === 'linux' && !(await probeSandboxRunner()).available) return;
-      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-settle-'));
-      roots.push(workspace);
-      const spec = await prepareExecutionSpec({
-        workspacePath: workspace,
-        executable: '/bin/sh',
-        argv: ['-c', 'while :; do sleep 1; done'],
-      });
-      const sessions = new ManagedCommandSessions();
-      const owner = { taskId: 'task-1', turnId: 'turn-1' };
-      const other = { taskId: 'task-1', turnId: 'turn-2' };
-      try {
-        // Nothing owned yet: the completion path must not pay for a teardown it does not need.
-        expect(sessions.hasActiveTurnSessions(owner)).toBe(false);
-        expect(await sessions.settleTurnSessions(owner)).toBe('settled');
-
-        const background = await sessions.start(spec, owner);
-        const neighbour = await sessions.start(spec, other);
-        expect(sessions.hasActiveTurnSessions(owner)).toBe(true);
-
-        // A watcher the Turn started is stopped and confirmed gone, so the Turn may complete.
-        expect(await sessions.settleTurnSessions(owner)).toBe('settled');
-        expect(sessions.poll(background.sessionId, owner).state).toBe('canceled');
-        expect(sessions.hasActiveTurnSessions(owner)).toBe(false);
-        // Another Turn's command is none of this Turn's business.
-        expect(sessions.poll(neighbour.sessionId, other).state).toBe('running');
-      } finally {
-        await sessions.dispose();
-      }
-    });
-
-    it('reports a command it cannot confirm stopped as unconfirmed rather than waiting for ever', async () => {
-      const sessions = new ManagedCommandSessions();
-      const owner = { taskId: 'task-1', turnId: 'turn-1' };
-      // A process that never acknowledges its abort: the completion gate has to be able to give up
-      // on it, and must say so rather than reporting a Workspace that has settled.
-      Reflect.get(sessions, 'sessions').set('stuck', {
-        id: 'stuck',
-        state: 'running',
-        controller: new AbortController(),
-        completion: new Promise<void>(() => undefined),
-        started: Promise.resolve(),
-        resolveStarted: () => undefined,
-        chunks: [],
-        taskId: owner.taskId,
-        turnId: owner.turnId,
-      });
-
-      expect(sessions.hasActiveTurnSessions(owner)).toBe(true);
-      expect(await sessions.settleTurnSessions(owner, 20)).toBe('unconfirmed');
-    });
-
     it.each([
       'SPAWN_FAILED',
       'EXECUTION_SPEC_INVALID',

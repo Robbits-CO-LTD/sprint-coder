@@ -693,29 +693,12 @@ export class ManagedCodingHarness {
   }
 
   /**
-   * Whether this Turn owns anything that would need winding up before it can complete. Lets the
-   * completion path stay synchronous for the ordinary Turn, which owns no background command.
+   * Whether this Turn still owns a running command. `finishTurn` releases the Turn's tools but
+   * deliberately leaves an owned background `exec_command` alone, so this is the only way the
+   * completion gate can tell whether the Workspace has stopped moving.
    */
   hasActiveCommandSessions(taskId: string, turnId: string): boolean {
     return this.commandSessions?.hasActiveTurnSessions({ taskId, turnId }) ?? false;
-  }
-
-  /**
-   * Winds up the commands this Turn owns and reports whether they are confirmed gone.
-   *
-   * `finishTurn` releases the Turn's tools but deliberately leaves an owned background
-   * `exec_command` running, so the completion gate calls this first: a Turn that started a watcher
-   * and then reported back should still complete, and it can only do so once that watcher has
-   * actually exited and the Workspace has stopped moving underneath its Edit Sagas.
-   */
-  async settleTurnCommandSessions(
-    taskId: string,
-    turnId: string,
-    timeoutMs?: number,
-  ): Promise<'settled' | 'unconfirmed'> {
-    return (
-      (await this.commandSessions?.settleTurnSessions({ taskId, turnId }, timeoutMs)) ?? 'settled'
-    );
   }
 
   finishTurn(taskId: string, turnId: string): void {
