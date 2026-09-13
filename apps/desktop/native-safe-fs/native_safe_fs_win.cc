@@ -1110,6 +1110,14 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"cleanupIntentAuxiliary", nullptr, WindowsMutationCleanupIntentAuxiliary, nullptr, nullptr,
        nullptr, napi_default, nullptr},
       {"observeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+      // The read-only verification session is POSIX-only so far. Windows has the pieces to build it
+      // — `OpenDirectoryPath`/`ObserveEndpoint` in native_safe_fs_win_mutation.cc walk each segment
+      // with FILE_OPEN_REPARSE_POINT — but it is not wired up yet, so the export is present and
+      // refuses, and the verifier falls back to its path-based reader on this platform.
+      {"openReadSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"closeReadSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"observeSealedPostImage", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
       {"createDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"inspectDirectoryOwnership", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
        nullptr},

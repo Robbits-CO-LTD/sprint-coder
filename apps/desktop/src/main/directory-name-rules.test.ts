@@ -44,6 +44,9 @@ describe('directory name rules', () => {
     expect(nativeSafeFsRequiredExports('win32')).toContain('caseInsensitiveNamesEqual');
     expect(nativeSafeFsMissingExports({ probe: () => undefined }, 'linux')).toEqual([
       'directoryCaseSensitive',
+      'openReadSession',
+      'closeReadSession',
+      'observeSealedPostImage',
     ]);
   });
 

@@ -654,6 +654,143 @@ describe('NativeSafeFs authority boundary', () => {
     });
   });
 
+  describe.skipIf(process.platform === 'win32')('read-only verification session', () => {
+    async function readSessionWorkspace(): Promise<{
+      boundary: ReturnType<typeof loadNativeSafeFs>;
+      root: string;
+      open: () => ReturnType<ReturnType<typeof loadNativeSafeFs>['openReadSession']>;
+    }> {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'native-safe-fs-read-session-')));
+      cleanup.push(root);
+      const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
+      const identity = await lstat(root, { bigint: true });
+      return {
+        boundary,
+        root,
+        open: () =>
+          boundary.openReadSession({
+            rootId: 'root-1',
+            workspacePath: root,
+            rootDev: String(identity.dev),
+            rootIno: String(identity.ino),
+            workspaceKey: 'a'.repeat(64),
+          }),
+      };
+    }
+
+    it('observes a sealed post-image, an absence, and a directory', async () => {
+      const { boundary, root, open } = await readSessionWorkspace();
+      await mkdir(join(root, 'nested'));
+      await writeFile(join(root, 'nested', 'one-line.txt'), 'after');
+      await mkdir(join(root, 'a-directory'));
+
+      const session = open();
+      try {
+        expect(boundary.observeSealedPostImage(session, ['nested', 'one-line.txt'])).toEqual({
+          kind: 'file',
+          // sha256 of the raw bytes, which is exactly what the Edit Saga seals as its post hash.
+          contentHash: createHash('sha256').update('after').digest('hex'),
+          identityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+          size: 5,
+        });
+        expect(boundary.observeSealedPostImage(session, ['nested', 'gone.txt'])).toEqual({
+          kind: 'absent',
+        });
+        expect(boundary.observeSealedPostImage(session, ['a-directory'])).toEqual({
+          kind: 'directory',
+        });
+      } finally {
+        boundary.closeReadSession(session);
+      }
+    });
+
+    it('refuses an endpoint whose parent was replaced by a symlink', async () => {
+      const { boundary, root, open } = await readSessionWorkspace();
+      const decoy = join(root, 'decoy');
+      await mkdir(decoy);
+      await writeFile(join(decoy, 'one-line.txt'), 'after');
+      await mkdir(join(root, 'nested'));
+      await writeFile(join(root, 'nested', 'one-line.txt'), 'after');
+
+      const session = open();
+      try {
+        await rm(join(root, 'nested'), { recursive: true });
+        await symlink(decoy, join(root, 'nested'), 'dir');
+        // The bytes behind the link are identical; the openat chain never reaches them.
+        expect(() => boundary.observeSealedPostImage(session, ['nested', 'one-line.txt'])).toThrow(
+          expect.objectContaining({ code: 'UNSAFE_PATH' }),
+        );
+      } finally {
+        boundary.closeReadSession(session);
+      }
+    });
+
+    it('reports a non-regular endpoint as neither a file nor an absence', async () => {
+      const { boundary, root, open } = await readSessionWorkspace();
+      await writeFile(join(root, 'target.txt'), 'after');
+      await symlink(join(root, 'target.txt'), join(root, 'link.txt'), 'file');
+
+      const session = open();
+      try {
+        expect(boundary.observeSealedPostImage(session, ['link.txt'])).toEqual({ kind: 'other' });
+      } finally {
+        boundary.closeReadSession(session);
+      }
+    });
+
+    it('refuses to open beside an exclusive mutation session and leaves its fence alone', async () => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'native-safe-fs-read-fence-')));
+      cleanup.push(root);
+      const lockRoot = await realpath(await mkdtemp(join(tmpdir(), 'native-safe-fs-read-locks-')));
+      cleanup.push(lockRoot);
+      const lockDirectory = await prepareNativeSafeFsLockDirectory(lockRoot);
+      const boundary = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: lockDirectory,
+      });
+      const identity = await lstat(root, { bigint: true });
+      const workspaceKey = 'a'.repeat(64);
+      const open = () =>
+        boundary.openReadSession({
+          rootId: 'root-1',
+          workspacePath: root,
+          rootDev: String(identity.dev),
+          rootIno: String(identity.ino),
+          workspaceKey,
+        });
+      const mutation = await boundary.openSession({
+        rootId: 'root-1',
+        workspacePath: root,
+        rootDev: String(identity.dev),
+        rootIno: String(identity.ino),
+        workspaceKey,
+        lockDirectoryPath: lockDirectory,
+        fence: '1',
+      });
+      try {
+        // Verification must never be able to elbow a live mutation aside.
+        expect(open).toThrow(expect.objectContaining({ code: 'LOCK_BUSY' }));
+      } finally {
+        await boundary.closeSession(mutation);
+      }
+
+      // And it must not have consumed a fence generation: fence 2 is still the next one, which it
+      // would not be if the read session had stored a fence of its own.
+      const session = open();
+      boundary.closeReadSession(session);
+      const next = await boundary.openSession({
+        rootId: 'root-1',
+        workspacePath: root,
+        rootDev: String(identity.dev),
+        rootIno: String(identity.ino),
+        workspaceKey,
+        lockDirectoryPath: lockDirectory,
+        fence: '2',
+      });
+      await boundary.closeSession(next);
+    });
+  });
+
   describe.skipIf(process.platform === 'win32')('POSIX backend', () => {
     it('canonicalizes a symlink-aliased userData path before binding the lock directory', async () => {
       const root = await realpath(await mkdtemp(join(tmpdir(), 'native-safe-fs-lock-canonical-')));

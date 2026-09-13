@@ -61,6 +61,27 @@ export type NativeMutationRecoveryExecutionBinding = Readonly<{
   nativeSessionId: string;
 }>;
 
+export type NativeSafeFsReadSessionInput = Readonly<{
+  rootId: string;
+  workspacePath: string;
+  rootDev: string;
+  rootIno: string;
+  workspaceKey: string;
+}>;
+
+export type NativeSafeFsReadSession = Readonly<{
+  id: string;
+  rootId: string;
+  workspaceKey: string;
+}>;
+
+/** What is at a sealed endpoint now. `other` covers symlinks, fifos, devices and hard-linked files. */
+export type NativeSealedObservation =
+  | Readonly<{ kind: 'file'; contentHash: string; identityDigest: string; size: number }>
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'directory' }>
+  | Readonly<{ kind: 'other' }>;
+
 export type NativeSafeFsOpenInput = Readonly<{
   rootId: string;
   workspacePath: string;
@@ -103,6 +124,28 @@ export interface NativeSafeFs {
     session: NativeSafeFsSession,
     pathSegments: readonly string[],
   ): Promise<NativeDirectoryObservation>;
+  /**
+   * Opens a read-only view of a Workspace for verifying sealed post-images.
+   *
+   * Not a mutation session: it takes a shared lock on the root and never touches the durable fence,
+   * so verifying cannot consume a fence generation or invalidate a live mutation session. A
+   * Workspace an exclusive mutation session holds answers `LOCK_BUSY`, which the caller must read
+   * as "cannot verify" — never as "verified".
+   *
+   * Synchronous, so the completion gate can observe inside the transaction that decides the Turn's
+   * outcome. Throws `UNSUPPORTED_PLATFORM` where the backend has no implementation yet (Windows).
+   */
+  openReadSession(input: NativeSafeFsReadSessionInput): NativeSafeFsReadSession;
+  closeReadSession(session: NativeSafeFsReadSession): void;
+  /**
+   * Observes one endpoint through the same descriptor-relative walk the mutation path writes
+   * through: every parent component is opened from the pinned root with `O_NOFOLLOW|O_DIRECTORY`,
+   * so the object read is the one that was pinned rather than whatever the path resolves to now.
+   */
+  observeSealedPostImage(
+    session: NativeSafeFsReadSession,
+    pathSegments: readonly string[],
+  ): NativeSealedObservation;
   createDirectory(
     session: NativeSafeFsSession,
     pathSegments: readonly string[],
@@ -196,6 +239,9 @@ type RawAddon = Readonly<{
   applyIntentEffect(input: RawEffectInput): Promise<unknown>;
   cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
   observeDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
+  openReadSession(input: NativeSafeFsReadSessionInput): unknown;
+  closeReadSession(input: { id: string }): unknown;
+  observeSealedPostImage(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
   createDirectory(input: RawDirectoryOwnershipInput): unknown;
   inspectDirectoryOwnership(input: RawDirectoryOwnershipInput): unknown;
   cleanupDirectoryOwnership(
@@ -267,6 +313,11 @@ export function nativeSafeFsRequiredExports(
   return [
     'probe',
     'directoryCaseSensitive',
+    // The completion gate verifies sealed post-images through these. A build without them predates
+    // the verifier, and every edited Turn would refuse to complete rather than say why.
+    'openReadSession',
+    'closeReadSession',
+    'observeSealedPostImage',
     ...(platform === 'darwin' ? ['directoryCanonicalUnicode'] : []),
     ...(platform === 'win32' ? ['caseInsensitiveNamesEqual'] : []),
   ];
@@ -533,6 +584,51 @@ export function loadNativeSafeFs(
       }
     },
 
+    openReadSession(input: NativeSafeFsReadSessionInput): NativeSafeFsReadSession {
+      try {
+        return parseReadSession(
+          addon!.openReadSession(
+            Object.freeze({
+              rootId: input.rootId,
+              workspacePath: input.workspacePath,
+              rootDev: input.rootDev,
+              rootIno: input.rootIno,
+              workspaceKey: input.workspaceKey,
+            }),
+          ),
+        );
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    closeReadSession(session: NativeSafeFsReadSession): void {
+      try {
+        addon!.closeReadSession(Object.freeze({ id: session.id }));
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    observeSealedPostImage(
+      session: NativeSafeFsReadSession,
+      pathSegments: readonly string[],
+    ): NativeSealedObservation {
+      validateDirectoryPathSegments(pathSegments);
+      try {
+        return parseSealedObservation(
+          addon!.observeSealedPostImage(
+            Object.freeze({
+              sessionId: session.id,
+              pathSegments: Object.freeze([...pathSegments]),
+            }),
+          ),
+        );
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
     async createDirectory(
       session: NativeSafeFsSession,
       pathSegments: readonly string[],
@@ -671,6 +767,9 @@ function validateRawAddon(value: unknown): RawAddon {
     typeof (value as Partial<RawAddon>).applyIntentEffect !== 'function' ||
     typeof (value as Partial<RawAddon>).cleanupIntentAuxiliary !== 'function' ||
     typeof (value as Partial<RawAddon>).observeDirectory !== 'function' ||
+    typeof (value as Partial<RawAddon>).openReadSession !== 'function' ||
+    typeof (value as Partial<RawAddon>).closeReadSession !== 'function' ||
+    typeof (value as Partial<RawAddon>).observeSealedPostImage !== 'function' ||
     typeof (value as Partial<RawAddon>).createDirectory !== 'function' ||
     typeof (value as Partial<RawAddon>).inspectDirectoryOwnership !== 'function' ||
     typeof (value as Partial<RawAddon>).cleanupDirectoryOwnership !== 'function' ||
@@ -680,6 +779,55 @@ function validateRawAddon(value: unknown): RawAddon {
   )
     throw new Error('NativeSafeFs addon contract mismatch');
   return value as RawAddon;
+}
+
+function parseReadSession(value: unknown): NativeSafeFsReadSession {
+  if (typeof value !== 'object' || value === null)
+    throw new Error('NativeSafeFs read session is malformed');
+  const record = value as Partial<NativeSafeFsReadSession>;
+  if (
+    typeof record.id !== 'string' ||
+    !/^[a-f0-9]{32}$/.test(record.id) ||
+    typeof record.rootId !== 'string' ||
+    typeof record.workspaceKey !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(record.workspaceKey)
+  )
+    throw new Error('NativeSafeFs read session is malformed');
+  return Object.freeze({
+    id: record.id,
+    rootId: record.rootId,
+    workspaceKey: record.workspaceKey,
+  });
+}
+
+function parseSealedObservation(value: unknown): NativeSealedObservation {
+  if (typeof value !== 'object' || value === null)
+    throw new Error('NativeSafeFs observation is malformed');
+  const record = value as {
+    kind?: unknown;
+    contentHash?: unknown;
+    identityDigest?: unknown;
+    size?: unknown;
+  };
+  if (record.kind === 'absent' || record.kind === 'directory' || record.kind === 'other')
+    return Object.freeze({ kind: record.kind });
+  if (
+    record.kind !== 'file' ||
+    typeof record.contentHash !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(record.contentHash) ||
+    typeof record.identityDigest !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(record.identityDigest) ||
+    typeof record.size !== 'number' ||
+    !Number.isSafeInteger(record.size) ||
+    record.size < 0
+  )
+    throw new Error('NativeSafeFs observation is malformed');
+  return Object.freeze({
+    kind: 'file',
+    contentHash: record.contentHash,
+    identityDigest: record.identityDigest,
+    size: record.size,
+  });
 }
 
 function validateDirectoryPathSegments(pathSegments: readonly string[]): void {
