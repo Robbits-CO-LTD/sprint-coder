@@ -94,8 +94,10 @@ import {
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 // The bridge runs the full SQLite integration suite in a child Electron process. Native startup,
-// the Windows-only Job Object case, and hosted-runner contention can exceed a short timeout.
-const persistenceBridgeTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
+// the Windows-only Job Object case, and hosted-runner contention can exceed a short timeout: the
+// suite passed the 60 s mark on hosted macOS and Linux runners once it grew past ~190 cases
+// (PR #471 / #474), so every platform gets the same generous budget.
+const persistenceBridgeTimeoutMs = 180_000;
 const artifactIt = it.skipIf(process.platform === 'win32');
 const commandExecutionIt = it.skipIf(process.platform === 'win32');
 const windowsCommandGateIt = it.runIf(process.platform === 'win32');
