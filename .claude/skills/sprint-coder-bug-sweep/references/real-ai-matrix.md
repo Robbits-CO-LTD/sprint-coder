@@ -132,7 +132,20 @@ Ollama lane（依頼で明示された場合のみ）は RA-03、RA-04、RA-05 �
 "$S/verify-lane.sh" --workspace "$RUN_DIR/lanes/claude/workspace" --lane claude --nonce "$(cat "$RUN_DIR/lanes/claude/nonce")" --stage command
 ```
 
-`--stage` は `ask-nowrite` / `command` / `deny` / `auto-file [--lines 1|2]` / `auto-deny` / `full-command` / `escape` / `all`（`auto-file` は preset に関係なく「txt が N 行ちょうど」の検証）。Turn の進行は `scripts/lane-peek.cjs --poll 150` で待ち（承認カードが出るか settle するまで）、承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。ファイルは byte 単位で完全一致（末尾 LF 1 個だけ許容）、「存在してはいけないファイル」の不在、workspace 外へ増えたファイルが無いことを出力する。
+`--stage` は `ask-nowrite` / `command` / `deny` / `auto-file [--lines 1|2]` / `auto-deny` / `full-command` / `escape` / `all`（`auto-file` は preset に関係なく「txt が N 行ちょうど」の検証）。ファイルは byte 単位で完全一致（末尾 LF 1 個だけ許容）、「存在してはいけないファイル」の不在、workspace 外へ増えたファイルが無いことを出力する。
+
+Turn の進行待ちは **送信を挟んで 2 回** `lane-peek.cjs` を呼ぶ。
+
+```bash
+B="$RUN_DIR/lanes/claude/baseline-RA-03.json"
+"$S/lane-peek.cjs" --run-dir "$RUN_DIR" --lane claude --baseline-out "$B"   # 送信前（prompt を送る直前）
+# …Computer Use で prompt を入力して送信…
+"$S/lane-peek.cjs" --run-dir "$RUN_DIR" --lane claude --poll 150 --baseline "$B"
+```
+
+`--baseline-out` はその時点の Turn identity（user / assistant の最終テキスト、run card 数と状態、コマンド・ファイル・監査カードの件数、承認カード文言の hash）を保存するだけで、待たずに終了する。`--poll --baseline` は **baseline と違う Turn** を観測してから settle（`completed` / `failed` / `canceled` / `interrupted`）か承認カードを待つので、送信直後の初回 read が前 Turn の終了カードを映していても、Turn が 4 秒の読み取り間隔の間に終わっても、前 Turn の結果を拾わない。承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。
+
+**新しい Turn を一度も観測できずに poll が終わると、JSON に `"stale": true` が付き exit code は 3 になる**（`--baseline` を付けない従来の呼び方でも同じ）。stale な出力は「この Turn の結果」ではないので、PASS / FAIL の根拠に使わず、再観測するか `fail_tooling` として events に残す。
 
 ## 8. 観測の記録
 

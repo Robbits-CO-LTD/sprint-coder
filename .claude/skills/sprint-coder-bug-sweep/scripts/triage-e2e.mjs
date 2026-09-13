@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Summarize a Playwright JSON report (PLAYWRIGHT_JSON_OUTPUT_NAME / --reporter=json) into
 // <out>/triage.json and <out>/triage.md with a classification hint and a stable fingerprint per failure.
-//   node triage-e2e.mjs <report.json> --out DIR [--repo owner/repo]
+//   node triage-e2e.mjs <report.json> --out DIR [--repo owner/repo] [--stale-vite-cache] [--repo-root DIR]
 // Hints are only hints: the sprint-coder-e2e skill's 4-way split (env / opt-in skip / known flake /
 // real) is decided by the operator after an independent re-run of each real candidate.
 import fs from 'node:fs';
@@ -39,16 +39,32 @@ function walk(suite, file, titles) {
 for (const s of report.suites ?? []) walk(s, s.file ?? s.title, []);
 
 const ENV_RE = /Packaged app not found|did not become ready|electron-forge package|ECONNREFUSED[^\n]*5173|NODE_MODULE_VERSION|Sprint Coder API unavailable/i;
-// "does not provide an export named" is only environmental when Vite's optimize cache is provably
-// older than the workspace package sources; the same SyntaxError is a real regression when an export
-// was removed/renamed without updating its importer. Evidence: --stale-vite-cache (operator observed
-// it) or the cache/source mtimes at triage time.
-const STALE_CACHE_RE = /does not provide an export named|Outdated Optimize Dep/i;
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', '..');
+// "does not provide an export named 'X'" is environmental ONLY when both hold: Vite's optimize cache
+// is provably older than the shipped package sources (--stale-vite-cache, or the mtimes at triage
+// time) AND the package really exports X today. The same SyntaxError is a real regression when an
+// export was removed/renamed without updating its importer, so the export lookup is never skipped —
+// the flag replaces the mtime evidence, not the lookup. Test sources are ignored by the mtime scan:
+// touching a *.test.ts must not turn a genuine missing export into an environment story.
+const MISSING_EXPORT_RE = /does not provide an export named ['"`]?([A-Za-z_$][A-Za-z0-9_$]*)/;
+const OUTDATED_DEP_RE = /Outdated Optimize Dep/i;
+const PKG_RE = /@sprint-coder[_/]([a-z0-9][a-z0-9-]*)/i;
+const repoRoot = opt('--repo-root', process.env.REPO_ROOT ?? path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', '..'));
+const NON_SOURCE_RE = /(?:\.test\.tsx?|\.spec\.tsx?|\.d\.ts)$/;
+function sourceFiles(dir) {
+  const files = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== '__tests__' && e.name !== 'node_modules') walk(p); }
+      else if (/\.tsx?$/.test(e.name) && !NON_SOURCE_RE.test(e.name)) files.push(p);
+    }
+  };
+  try { walk(dir); } catch { /* missing dir */ }
+  return files;
+}
 function newestMtime(dir) {
   let newest = 0;
-  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.ts$/.test(e.name)) newest = Math.max(newest, fs.statSync(p).mtimeMs); } };
-  try { walk(dir); } catch { /* missing dir */ }
+  for (const f of sourceFiles(dir)) { try { newest = Math.max(newest, fs.statSync(f).mtimeMs); } catch { /* raced */ } }
   return newest;
 }
 function viteCacheStale() {
@@ -61,6 +77,37 @@ function viteCacheStale() {
   } catch { return false; }
 }
 const staleCache = argv.includes('--stale-vite-cache') || viteCacheStale();
+// true = the package source exports the name today, false = it does not, null = cannot tell.
+const exportLookup = new Map();
+function packageExportsName(pkg, name) {
+  const key = `${pkg}#${name}`;
+  if (exportLookup.has(key)) return exportLookup.get(key);
+  const dir = path.join(repoRoot, 'packages', pkg, 'src');
+  const files = sourceFiles(dir);
+  let result = files.length === 0 ? null : false;
+  const declared = new RegExp(`export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:const|let|var|function\\s*\\*?|class|type|interface|enum|namespace)\\s+${name}\\b`);
+  for (const f of files) {
+    let text = '';
+    try { text = fs.readFileSync(f, 'utf8'); } catch { continue; }
+    if (declared.test(text)) { result = true; break; }
+    for (const m of text.matchAll(/export\s+(?:type\s+)?\{([^}]*)\}/g)) {
+      const named = m[1].split(',').map((s) => s.trim().replace(/^type\s+/, '')).map((s) => (/\sas\s/.test(s) ? s.split(/\s+as\s+/)[1].trim() : s));
+      if (named.includes(name)) { result = true; break; }
+    }
+    if (result) break;
+  }
+  exportLookup.set(key, result);
+  return result;
+}
+function classifyMissingExport(msg) {
+  const name = MISSING_EXPORT_RE.exec(msg)[1];
+  const pkg = (PKG_RE.exec(msg) ?? [])[1] ?? null;
+  const has = pkg ? packageExportsName(pkg, name) : null;
+  if (has === null) return { cls: 'real_candidate', reason: `export '${name}' の提供元 package を特定できず（pkg=${pkg ?? '不明'}）、環境起因と断定できない` };
+  if (has === false) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} の src に '${name}' の export が無い → キャッシュではなく export の削除/改名の疑い` };
+  if (!staleCache) return { cls: 'real_candidate', reason: `@sprint-coder/${pkg} は '${name}' を export しているが、Vite 依存キャッシュ陳腐化の証拠（mtime / --stale-vite-cache）が無い` };
+  return { cls: 'env_stale_vite_cache', reason: `@sprint-coder/${pkg} は '${name}' を export しており、依存キャッシュが source より古い` };
+}
 const FIRSTWINDOW_RE = /firstWindow|Timeout \d+ms exceeded[^\n]*firstWindow/i;
 const OPTIN_FILE_RE = /leader-mcp-smoke|leader-mcp-codex-smoke|cli-workspace-egress/;
 const failures = tests.filter((t) => t.status === 'unexpected' || t.status === 'flaky');
@@ -92,21 +139,24 @@ function delta(msg) {
 }
 function classify(t) {
   const msg = t.errors.join('\n');
-  if (t.status === 'skipped') return OPTIN_FILE_RE.test(t.file) || /opt-in/i.test(t.annotations.join(' ')) ? 'optin_skip' : 'skipped';
-  if (t.status === 'expected') return 'pass';
-  if (wholesaleEnv && FIRSTWINDOW_RE.test(msg)) return 'env_wholesale';
-  if (ENV_RE.test(msg)) return 'env';
-  if (STALE_CACHE_RE.test(msg)) return staleCache ? 'env_stale_vite_cache' : 'real_candidate';
-  if (/command-runner-flow\.spec\.ts$/.test(t.file) && /toBeFocused|focus/i.test(msg)) return 'known_flake';
-  if (t.status === 'flaky') return 'flaky_in_run';
-  return 'real_candidate';
+  if (t.status === 'skipped') return { cls: OPTIN_FILE_RE.test(t.file) || /opt-in/i.test(t.annotations.join(' ')) ? 'optin_skip' : 'skipped', reason: '' };
+  if (t.status === 'expected') return { cls: 'pass', reason: '' };
+  if (wholesaleEnv && FIRSTWINDOW_RE.test(msg)) return { cls: 'env_wholesale', reason: '' };
+  if (ENV_RE.test(msg)) return { cls: 'env', reason: '' };
+  if (MISSING_EXPORT_RE.test(msg)) return classifyMissingExport(msg);
+  if (OUTDATED_DEP_RE.test(msg)) return staleCache
+    ? { cls: 'env_stale_vite_cache', reason: 'Outdated Optimize Dep + 依存キャッシュが source より古い' }
+    : { cls: 'real_candidate', reason: 'Outdated Optimize Dep だがキャッシュ陳腐化の証拠が無い' };
+  if (/command-runner-flow\.spec\.ts$/.test(t.file) && /toBeFocused|focus/i.test(msg)) return { cls: 'known_flake', reason: '' };
+  if (t.status === 'flaky') return { cls: 'flaky_in_run', reason: '' };
+  return { cls: 'real_candidate', reason: '' };
 }
 const rows = tests.map((t) => {
-  const cls = classify(t);
+  const { cls, reason } = classify(t);
   const first = t.errors[0] ?? '';
   const fp = cls === 'pass' || cls === 'optin_skip' || cls === 'skipped' ? null
     : crypto.createHash('sha256').update([repo, 'phase1', t.file, normalize(t.title), errorClass(first), delta(first)].join('|')).digest('hex');
-  return { ...t, classification: cls, errorClass: errorClass(first), delta: delta(first), firstError: first.slice(0, 400), fingerprint: fp };
+  return { ...t, classification: cls, reason, errorClass: errorClass(first), delta: delta(first), firstError: first.slice(0, 400), fingerprint: fp };
 });
 const perf = rows.filter((r) => /perf-budgets/.test(r.file)).flatMap((r) => r.stdout.filter((l) => /startup|p95|fps|ms/i.test(l)).map((l) => l.trim()));
 const stats = report.stats ?? {};
@@ -131,7 +181,7 @@ md.push('| 分類 | 件数 |', '|---|---|', ...Object.entries(summary.by_class).
 if (summary.failures.length) {
   md.push('## 失敗（分類ヒント付き）', '');
   for (const f of summary.failures) {
-    md.push(`### ${f.file}:${f.line} › ${f.title}`, '', `- 分類ヒント: **${f.classification}** (${f.errorClass})`, `- 期待/実測: ${f.delta || '(なし)'}`, `- fingerprint: \`${f.fingerprint}\``, '', '```', f.firstError, '```', '');
+    md.push(`### ${f.file}:${f.line} › ${f.title}`, '', `- 分類ヒント: **${f.classification}** (${f.errorClass})`, ...(f.reason ? [`- 分類の根拠: ${f.reason}`] : []), `- 期待/実測: ${f.delta || '(なし)'}`, `- fingerprint: \`${f.fingerprint}\``, '', '```', f.firstError, '```', '');
   }
 } else md.push('## 失敗: なし', '');
 if (summary.skipped.length) { md.push('## skip', '', ...summary.skipped.map((s) => `- ${s.classification}: ${s.file} › ${s.title}${s.annotations.length ? ` (${s.annotations.join('; ')})` : ''}`), ''); }

@@ -5,9 +5,12 @@
 # live filing needs manifest filing_mode=live. Gates (any failure => nothing is created): title
 # prefix/length/no #N/no 。, exactly one <!-- bug-sweep:fingerprint=<64hex> --> marker, structured
 # redaction scan (known token formats, absolute paths on every platform, e-mail, nonce markers, long
-# mixed tokens/hashes) => redaction_failed, label existence, fingerprint already on GitHub, per-run cap.
+# mixed tokens/hashes — whole-token AND per path component, only existing evidence paths are exempt)
+# => redaction_failed, label existence, fingerprint already on GitHub, per-run cap.
 # Semantic duplicate checking is the operator's job; open bug titles are printed to help.
 set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
 RUN_DIR=""; TITLE_FILE=""; BODY_FILE=""; LABEL="bug"; MAX=5; DRY=0; REPO_ARG=""
 while [ $# -gt 0 ]; do case "$1" in
   --run-dir) RUN_DIR="$2"; shift 2;;
@@ -40,6 +43,7 @@ fp="$(sed -n 's/.*<!-- bug-sweep:fingerprint=\([0-9a-f]*\) -->.*/\1/p' "$BODY_FI
 # structured redaction scan (fail closed: any hit => redaction_failed)
 redaction="$(node -e '
   const fs = require("fs");
+  const path = require("path");
   const title = fs.readFileSync(process.argv[1], "utf8");
   const body = fs.readFileSync(process.argv[2], "utf8").split("\n").filter((l) => !l.includes("bug-sweep:fingerprint=")).join("\n");
   const text = title + "\n" + body;
@@ -62,17 +66,25 @@ redaction="$(node -e '
     ["hex string >= 40", /\b[0-9a-f]{40,}\b/i],
   ];
   const hits = rules.filter(([, re]) => re.test(text)).map(([name]) => name);
-  // Long mixed-case alphanumeric tokens look like secrets. A "/" does NOT exempt a token (Base64
-  // and URL-embedded secrets contain "/"): the token is judged per path component, so a relative
-  // evidence path like evidence/claude/stray-tee-from-RA-05 passes (short components) while a
-  // 32+ char mixed-case component, or any 32+ char token carrying Base64 padding/plus, is flagged.
-  const suspiciousComponent = (t) => t.length >= 32 && /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && !t.includes(".");
-  for (const tok of text.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? []) {
+  // Long mixed-case alphanumeric tokens look like secrets. A "/" does NOT exempt a token (standard
+  // Base64 and URL-embedded secrets contain "/"), so every token is judged BOTH as a whole and per
+  // path component: Aa1aaaaaaaaaaaaaaaaaaaa/BB2bbbbbbbbbbbbbbbbbbbb has no suspicious component but
+  // is flagged as a whole. The ONLY exemption is a known evidence path: a relative path that really
+  // exists under the repo root or the run dir is blanked before the token scan (so its extension does
+  // not split the token either). A path-shaped token that does not exist fails closed.
+  const roots = [process.argv[3], process.argv[4]].filter((r) => r);
+  const REL_PATH = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g;
+  const knownEvidencePath = (t) =>
+    !t.split("/").some((c) => c === "" || c === "." || c === "..") &&
+    roots.some((r) => { try { return fs.existsSync(path.join(r, t)); } catch { return false; } });
+  const scanned = text.replace(REL_PATH, (m) => (knownEvidencePath(m) ? " evidence-path " : m));
+  const suspicious = (t) => t.length >= 32 && /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && !t.includes(".");
+  for (const tok of scanned.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? []) {
     if (/[+=]/.test(tok) && /[A-Za-z]/.test(tok) && /\d/.test(tok)) { hits.push("base64-like token"); break; }
-    if (tok.split("/").some(suspiciousComponent)) { hits.push("long mixed-case token"); break; }
+    if (suspicious(tok) || tok.split("/").some(suspicious)) { hits.push("long mixed-case token"); break; }
   }
   process.stdout.write(hits.join("; "));
-' "$TITLE_FILE" "$BODY_FILE")"
+' "$TITLE_FILE" "$BODY_FILE" "$REPO_ROOT" "$RUN_DIR")"
 [ -z "$redaction" ] || errors+=("redaction_failed: $redaction")
 if [ -n "$LABEL" ]; then
   labels="$(gh label list --repo "$REPO" --limit 200 --json name --jq '.[].name' 2>/dev/null || true)"

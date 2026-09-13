@@ -41,6 +41,8 @@ description: sprint-coder の不具合を一掃する統合手順。(1) Playwrig
 4. [references/fix-loop.md](references/fix-loop.md) — Phase 5 の 1 Issue あたりの手順と停止条件。
 5. memory の `sprint-coder-native-prereqs`、`sprint-coder-real-worker-e2e-gap`、`sprint-coder-review-bot`、`sprint-coder-patrol-lessons`（起票前に前提を実測する教訓）。
 
+`scripts/` 自体を直したときは自己テストを流す（どちらもオフライン・秒で終わる）: `bash scripts/file-issue.test.sh`（秘匿スキャンのゲート）、`node --test scripts/triage-e2e.test.mjs`（stale Vite cache の分類）。
+
 ## 2. Phase 0 — 束縛と preflight
 
 ```bash
@@ -84,7 +86,7 @@ node .claude/skills/sprint-coder-bug-sweep/scripts/triage-e2e.mjs "$RUN_DIR/e2e/
 
 `triage-e2e.mjs` は失敗ごとに `spec:行 › タイトル`、error の 1 行目（ANSI 除去・400 字）、分類ヒント、fingerprint を `e2e/triage.md` と `e2e/triage.json` に出す。分類は sprint-coder-e2e §4 の 4 つに **必ず** 落とす:
 
-1. **環境起因** — `Packaged app not found` / `did not become ready` / 全 spec が `firstWindow: Timeout` で同形に死ぬ。アプリは無罪。preflight に戻る。
+1. **環境起因** — `Packaged app not found` / `did not become ready` / 全 spec が `firstWindow: Timeout` で同形に死ぬ。アプリは無罪。preflight に戻る。`does not provide an export named 'X'` を `env_stale_vite_cache` にできるのは、**`packages/<pkg>/src` が今も X を export していて**、かつ Vite の依存キャッシュが（test を除いた）source より古いときだけ。export が無ければ export の削除・改名の疑いとして本物の失敗候補に残る（理由は `triage.md` の「分類の根拠」に出る）。`--stale-vite-cache` を渡しても export の確認は省略されない。
 2. **意図的 skip** — `leader-mcp-smoke` / `leader-mcp-codex-smoke` / `cli-workspace-egress` / archify-graph の real-worker case は opt-in。skip は失敗ではない。
 3. **既知 flake** — `command-runner-flow.spec.ts` の focus 系。**同じ spec をもう 1 回単独で流し**、pass/fail が交互なら `flaky_unresolved`（起票しない、報告には残す）。
 4. **本物の失敗** — 上のどれでもない。**独立再現**として、その spec を単独で 1 回だけ再実行する（各 spec は自分の userData を作るので別 session になる）。2 回とも同じ expect が同じ delta で落ちて初めて起票候補。
@@ -123,7 +125,7 @@ S=.claude/skills/sprint-coder-bug-sweep/scripts
 2. **workspace を Project にする**: native のフォルダ選択（`CU-01-native-dialog`。display-scope で `cmd+shift+g` → path → Return → Return）。display-scope が取れない場合だけ `scripts/seed-instance.mjs`（`--debug-port` で起動した instance に CDP で Project を作る）へ切り替え、manifest に `seeded_via_cdp=true` を記録し、case RA-02 を `NOT_RUN` にする。
 3. **モデル選択**: モデルピッカーで Claude lane は `sonnet`、Codex lane は `gpt-5.5` を検索して選ぶ。ピッカーの表示が選んだモデル名になるまで確認する。
 4. **preset ごとに期待値が違う**（根拠は matrix §3 の実測表: `確認する`(ask) = 読み取りも含め全 tool 呼び出しが承認カード、`安全時は自動`(auto) = 読み取りだけ自動許可で書き込み・コマンドは `high_risk` 自動拒否、`フルアクセス`(full) = 編集は承認なし、unsandboxed `exec_command` は承認あり）。ask で RA-03〜RA-06（承認カード `今回のみ許可` / `拒否` を操作）、auto で RA-07（書き込み自動拒否）・RA-08（コマンド自動拒否）、full（native 確認シート「フルアクセスを有効化」を通す）で RA-09（編集）・RA-09b（コマンド）、RA-10 は既定 NOT_RUN、RA-11（停止）は任意の preset。
-5. **各 Turn** で Run Card の遷移（`思考中` → `完了` / `失敗` / `中止`）、承認カード・監査行・ファイル変更カード・コマンドカードの `exit 0` を画面から読み、`scripts/verify-lane.sh --stage <case の stage>` で **UI の外から** 実ファイルを byte 単位で実測する。UI と実測が一致して初めて PASS。待ち合わせは `scripts/lane-peek.cjs --run-dir "$RUN_DIR" --lane claude --poll 150`（settle か承認カードまで待ち、承認ボタンの座標を返す。読むだけで操作はしない）。
+5. **各 Turn** で Run Card の遷移（`思考中` → `完了` / `失敗` / `中止`）、承認カード・監査行・ファイル変更カード・コマンドカードの `exit 0` を画面から読み、`scripts/verify-lane.sh --stage <case の stage>` で **UI の外から** 実ファイルを byte 単位で実測する。UI と実測が一致して初めて PASS。待ち合わせは **送信前に** `scripts/lane-peek.cjs --run-dir "$RUN_DIR" --lane claude --baseline-out "$RUN_DIR/lanes/claude/baseline-<case>.json"`（その時点の Turn identity を保存）、**送信後に** `scripts/lane-peek.cjs --run-dir "$RUN_DIR" --lane claude --poll 150 --baseline "$RUN_DIR/lanes/claude/baseline-<case>.json"`（baseline と違う Turn が settle するか承認カードが出るまで待ち、承認ボタンの座標を返す。読むだけで操作はしない）。**exit 3 / `"stale": true` は「新しい Turn を一度も観測できなかった」＝ 前 Turn の終了状態を見ている**という意味なので、PASS 判定に使わず再観測するか `fail_tooling` にする。
 6. **再起動復元**（RA-12）: メニューから通常終了 → `launch-dev-instance.sh --reuse-profile` で同じ profile を再起動 → 履歴・カード・Project・モデル・Access が戻ることを確認（`--stage all`）。
 7. **cleanup**: `scripts/stop-dev-instance.sh --run-dir "$RUN_DIR" --lane claude`。`app.json` の identity と一致する PID だけを SIGTERM し、一致しない・残る場合は `cleanup_hold`（SIGKILL しない）。`app_release` で lock を返す。
 8. Codex lane で 1〜7 を繰り返す。最後に `ensure-dev-server.sh` が起動した `npm start` だけを `stop-dev-instance.sh --dev-server` で止める。
