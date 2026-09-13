@@ -166,10 +166,10 @@ function standardInputNote(approval: ApprovalSummary): string | null {
  */
 function describeWithheldStdin(execution: string): string {
   try {
-    const value = JSON.parse(execution) as { charsBytes?: unknown; charsSha256?: unknown };
-    if (typeof value.charsBytes !== 'number' || typeof value.charsSha256 !== 'string')
+    const value = JSON.parse(execution) as { charsBytes?: unknown; charsMac?: unknown };
+    if (typeof value.charsBytes !== 'number' || typeof value.charsMac !== 'string')
       return execution;
-    return `stdin ${value.charsBytes} bytes, sha256=${value.charsSha256}\n（送信内容は保存していないため表示できません）`;
+    return `stdin ${value.charsBytes} bytes, mac=${value.charsMac}\n（送信内容は保存していないため表示できません）`;
   } catch {
     return execution;
   }

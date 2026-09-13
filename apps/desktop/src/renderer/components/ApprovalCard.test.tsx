@@ -109,7 +109,7 @@ describe('ApprovalCard standard input wording', () => {
         approval={{
           ...shellApproval,
           toolName: 'write_stdin',
-          execution: JSON.stringify({ tool: 'write_stdin', charsBytes: 41, charsSha256: DIGEST }),
+          execution: JSON.stringify({ tool: 'write_stdin', charsBytes: 41, charsMac: DIGEST }),
           ephemeralExecution: '--- stdin ---\npassword=hunter2\nrm -rf .',
         }}
         busy={false}
@@ -130,7 +130,7 @@ describe('ApprovalCard standard input wording', () => {
         approval={{
           ...shellApproval,
           toolName: 'write_stdin',
-          execution: JSON.stringify({ tool: 'write_stdin', charsBytes: 41, charsSha256: DIGEST }),
+          execution: JSON.stringify({ tool: 'write_stdin', charsBytes: 41, charsMac: DIGEST }),
         }}
         busy={false}
         onDecision={() => undefined}
@@ -157,7 +157,7 @@ describe('ApprovalCard standard input wording', () => {
           execution: JSON.stringify({
             tool: 'write_stdin',
             charsBytes: 2_048,
-            charsSha256: DIGEST,
+            charsMac: DIGEST,
           }),
           ephemeralExecution: `--- stdin ---\n${chars}`,
         }}

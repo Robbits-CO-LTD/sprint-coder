@@ -194,4 +194,7 @@ export function visibleStdinText(value: string): string {
   });
 }
 
-const HIDEABLE_CHARACTERS = /[\\\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]/gu;
+// Nonspacing and enclosing marks (`Mn` / `Me`) are included on purpose: U+034F COMBINING GRAPHEME
+// JOINER or U+FE0F VARIATION SELECTOR-16 draw nothing in most fonts, so a password or token carrying
+// them would look identical on the card while the bytes the command receives differ.
+const HIDEABLE_CHARACTERS = /[\\\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Mn}\p{Me}]/gu;
