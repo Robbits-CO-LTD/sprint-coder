@@ -692,6 +692,15 @@ export class ManagedCodingHarness {
     await this.commandSessions?.terminateTurn({ taskId, turnId });
   }
 
+  /**
+   * Whether this Turn still owns a running command. `finishTurn` releases the Turn's tools but
+   * deliberately leaves an owned background `exec_command` alone, so this is the only way the
+   * completion gate can tell that the Workspace has actually stopped moving.
+   */
+  hasActiveCommandSessions(taskId: string, turnId: string): boolean {
+    return this.commandSessions?.hasActiveTurnSessions({ taskId, turnId }) ?? false;
+  }
+
   finishTurn(taskId: string, turnId: string): void {
     this.graphReads.finishTurn(taskId, turnId);
     this.deps.graphs?.finishTurn?.(taskId, turnId);

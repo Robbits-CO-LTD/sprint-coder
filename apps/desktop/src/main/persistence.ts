@@ -64,6 +64,7 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -16354,39 +16355,65 @@ export class SqlitePersistenceClient implements PersistenceClient {
     turnId: string;
     createdAt: string;
   }): readonly string[] {
-    return this.db.transaction(() => {
-      const sagas = (
-        this.db
-          .prepare(
-            `SELECT * FROM edit_sagas
-             WHERE task_id = ? AND turn_id = ? AND state = 'committed'
-             ORDER BY updated_at DESC, id DESC`,
-          )
-          .all(input.taskId, input.turnId) as EditSagaRow[]
-      ).map(toEditSaga);
-      for (const saga of sagas) {
-        // A Saga whose Assurance is already settled must not be advanced again: a second round on
-        // a `complete` or `blocked` decision is rejected by the state machine, and a Turn with one
-        // such Saga would otherwise take the whole verification pass down with it.
-        const settled = this.listAssuranceRounds(input.taskId, input.turnId, saga.id).at(-1);
-        if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
-        if (!committedSagaMatchesSealedPostImages(saga)) continue;
-        this.recordAssuranceVerification({
-          taskId: input.taskId,
-          turnId: input.turnId,
-          sagaId: saga.id,
-          outcome: 'passed',
-          failureClass: null,
-          createdAt: input.createdAt,
-        });
+    return this.db.transaction(() =>
+      this.verifyEditSagaPostImagesInTransaction(input.taskId, input.turnId, input.createdAt),
+    )();
+  }
+
+  /**
+   * The body of the verification, so the completion gate can run it inside the transaction that
+   * decides and writes the Turn's outcome rather than in one of its own.
+   *
+   * Every committed Saga is re-checked, including Sagas that already hold `verification_passed`
+   * evidence. Evidence is a record of what was true when it was written, not a standing promise:
+   * `apply_patch(A→B)`, a trusted `read_file(B)` that closed the criterion, then `apply_patch(B→C)`
+   * leaves the first Saga's evidence valid while the B it attested to no longer exists anywhere.
+   * A Saga that no longer holds has its criterion reported open however much evidence it carries.
+   *
+   * Supersession is resolved per path rather than per Saga: the last operation in the Turn to touch
+   * a path owns that path's final state, and every earlier operation on it is judged by that final
+   * expectation. So `A→B→C` verifies both Sagas once C is on disk, and neither once it is not.
+   */
+  private verifyEditSagaPostImagesInTransaction(
+    taskId: string,
+    turnId: string,
+    createdAt: string,
+  ): readonly string[] {
+    const sagas = (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed'
+           ORDER BY updated_at, id`,
+        )
+        .all(taskId, turnId) as EditSagaRow[]
+    ).map(toEditSaga);
+    const holds = turnPostImageVerifier(sagas);
+    const failed: string[] = [];
+    for (const saga of sagas) {
+      if (!holds(saga)) {
+        failed.push(`verification:${saga.id}`);
+        continue;
       }
-      return Object.freeze(
-        decideCompletion(
-          this.getAcceptanceContract(input.taskId, input.turnId),
-          this.listEvidenceRecords(input.taskId, input.turnId),
-        ).openCriterionIds,
-      );
-    })();
+      // A Saga whose Assurance is already settled must not be advanced again: a second round on a
+      // `complete` or `blocked` decision is rejected by the state machine, and a Turn with one such
+      // Saga would otherwise take the whole verification pass down with it.
+      const settled = this.listAssuranceRounds(taskId, turnId, saga.id).at(-1);
+      if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
+      this.recordAssuranceVerification({
+        taskId,
+        turnId,
+        sagaId: saga.id,
+        outcome: 'passed',
+        failureClass: null,
+        createdAt,
+      });
+    }
+    const open = decideCompletion(
+      this.getAcceptanceContract(taskId, turnId),
+      this.listEvidenceRecords(taskId, turnId),
+    ).openCriterionIds;
+    return Object.freeze([...new Set([...open, ...failed])]);
   }
 
   private insertAcceptanceContract(contract: AcceptanceContract): void {
@@ -19206,11 +19233,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ): TurnEvent {
     const turn = this.getTurn(taskId, turnId);
     if (state === 'completed') {
-      const decision = decideCompletion(
-        this.getAcceptanceContract(taskId, turnId),
-        this.listEvidenceRecords(taskId, turnId),
+      // One gate, one transaction. Re-reading the post-images in a transaction of their own and
+      // then deciding in this one would leave a window where a background writer the Turn still
+      // owns could change a file between the evidence and the decision that trusts it: the Turn
+      // would complete on bytes that were true a moment ago. Verifying here means the reads, the
+      // evidence they produce, and the terminal state they justify all commit together or not at
+      // all (issue #466 review).
+      const open = this.verifyEditSagaPostImagesInTransaction(
+        taskId,
+        turnId,
+        new Date().toISOString(),
       );
-      if (!decision.allowed) throw new AcceptanceEvidenceMissingError(decision.openCriterionIds);
+      if (open.length > 0) throw new AcceptanceEvidenceMissingError(open);
     }
     this.cancelPendingApprovals(taskId, turnId, new Date().toISOString());
     transitionTurn(turn.state, state);
@@ -19833,63 +19867,130 @@ function displayTurnDiffPath(
   return relativePath === null ? value : formatWorkspaceDisplayPath(label, relativePath);
 }
 
+/** What one sealed operation says a single path should look like once the Saga has committed. */
+type SealedPathExpectation =
+  | Readonly<{ path: string; kind: 'content'; contentHash: string | null }>
+  | Readonly<{ path: string; kind: 'absent' }>
+  | Readonly<{ path: string; kind: 'directory' }>;
+
 /**
- * Whether every operation of a committed Edit Saga still describes the Workspace.
+ * Builds the "does this committed Saga still describe the Workspace?" test for one Turn.
  *
- * All-or-nothing, because the Acceptance criterion is per Saga: a batch is only as verified as its
- * least verified operation, and a Saga with no steps has observed nothing at all.
+ * Two rules, and they interact:
+ *
+ *   - **All-or-nothing per Saga**, because the Acceptance criterion is per Saga. A batch is only as
+ *     verified as its least verified operation, and a Saga with no steps has observed nothing.
+ *   - **Last writer wins per path.** A Turn may rewrite the same file repeatedly, and only the last
+ *     operation to touch a path describes that path's final state. Judging an earlier Saga by its
+ *     own post-image would fail every Turn that edited a file twice; judging it by the final
+ *     expectation keeps the whole chain honest — `A→B→C` verifies both Sagas once C is on disk, and
+ *     neither once it is not.
+ *
+ * `sagas` must be ordered oldest commit first. Filesystem answers are memoised per path: a Turn's
+ * Sagas overlap heavily and each path only has one final expectation to check.
  */
-function committedSagaMatchesSealedPostImages(saga: EditSagaSnapshot): boolean {
-  return (
+function turnPostImageVerifier(
+  sagas: readonly EditSagaSnapshot[],
+): (saga: EditSagaSnapshot) => boolean {
+  const finalExpectations = new Map<string, SealedPathExpectation>();
+  for (const saga of sagas)
+    for (const { operation } of saga.steps)
+      for (const expectation of sealedPathExpectations(operation))
+        finalExpectations.set(expectation.path, expectation);
+  const observed = new Map<string, boolean>();
+  const satisfied = (path: string): boolean => {
+    const cached = observed.get(path);
+    if (cached !== undefined) return cached;
+    const expectation = finalExpectations.get(path);
+    const holds = expectation === undefined ? false : expectationHolds(expectation);
+    observed.set(path, holds);
+    return holds;
+  };
+  return (saga) =>
     saga.steps.length > 0 &&
-    saga.steps.every(({ operation }) => operationMatchesSealedPostImage(operation))
-  );
+    saga.steps.every(({ operation }) =>
+      sealedPathExpectations(operation).every(({ path }) => satisfied(path)),
+    );
 }
 
 /**
- * Whether one sealed operation's post-image is what is on disk now.
+ * The paths one operation is responsible for, and what each should be.
  *
- * Each kind has its own post-image, and each is checked as the plan described it — a deletion that
- * was undone, or a rename whose source came back, is not verified by the destination alone.
+ * A rename owns two: the destination has to hold the moved bytes *and* the source has to be gone,
+ * so a rename whose source came back is not verified by its destination alone.
  */
-function operationMatchesSealedPostImage(operation: JournaledPatchOperation): boolean {
+function sealedPathExpectations(
+  operation: JournaledPatchOperation,
+): readonly SealedPathExpectation[] {
   switch (operation.kind) {
     case 'mkdir':
-      return isDirectoryPostImage(operation.canonicalPath);
+      return [{ path: operation.canonicalPath, kind: 'directory' }];
     case 'delete':
-      return isAbsentPostImage(operation.canonicalPath);
+      return [{ path: operation.canonicalPath, kind: 'absent' }];
     case 'rename':
-      return (
-        operation.canonicalDestination !== null &&
-        isAbsentPostImage(operation.canonicalPath) &&
-        matchesSealedContentHash(operation.canonicalDestination, operation.postHash)
-      );
+      return [
+        { path: operation.canonicalPath, kind: 'absent' },
+        // A sealed rename always carries its destination; one without is unverifiable, and a null
+        // content hash can never be satisfied, so such an operation fails closed.
+        {
+          path: operation.canonicalDestination ?? operation.canonicalPath,
+          kind: 'content',
+          contentHash: operation.canonicalDestination === null ? null : operation.postHash,
+        },
+      ];
     default:
-      return matchesSealedContentHash(operation.canonicalPath, operation.postHash);
+      return [{ path: operation.canonicalPath, kind: 'content', contentHash: operation.postHash }];
   }
 }
 
-/** Hashes the raw bytes, never a decoded string: see `readVerifiablePostImage`. */
-function matchesSealedContentHash(canonicalPath: string, postHash: string | null): boolean {
-  if (postHash === null) return false;
-  const bytes = readVerifiablePostImage(canonicalPath);
-  return bytes !== null && createHash('sha256').update(bytes).digest('hex') === postHash;
+function expectationHolds(expectation: SealedPathExpectation): boolean {
+  if (!parentChainIsUnchanged(expectation.path)) return false;
+  switch (expectation.kind) {
+    case 'absent':
+      // `lstat`, not `stat`: a symlink planted where the entry was deleted is not an absence.
+      return statKindOf(expectation.path) === 'absent';
+    case 'directory':
+      // `lstat` again: a symlink to a directory is not the directory the operation created.
+      return statKindOf(expectation.path) === 'directory';
+    default: {
+      if (expectation.contentHash === null) return false;
+      const bytes = readVerifiablePostImage(expectation.path);
+      // Hashes the raw bytes, never a decoded string: see `readVerifiablePostImage`.
+      return (
+        bytes !== null &&
+        createHash('sha256').update(bytes).digest('hex') === expectation.contentHash
+      );
+    }
+  }
 }
 
-/** `lstat` rather than `stat`: a symlink planted where the entry was deleted is not an absence. */
-function isAbsentPostImage(canonicalPath: string): boolean {
+function statKindOf(canonicalPath: string): 'absent' | 'directory' | 'other' | 'unknown' {
   try {
-    return lstatSync(canonicalPath, { throwIfNoEntry: false }) === undefined;
+    const stat = lstatSync(canonicalPath, { throwIfNoEntry: false });
+    if (stat === undefined) return 'absent';
+    return stat.isDirectory() ? 'directory' : 'other';
   } catch {
-    // A path that cannot be stat'ed at all has not been observed to be absent.
-    return false;
+    // A path that cannot be stat'ed at all has been observed to be nothing in particular.
+    return 'unknown';
   }
 }
 
-/** `lstat` again: a symlink to a directory is not the directory the mkdir operation created. */
-function isDirectoryPostImage(canonicalPath: string): boolean {
+/**
+ * Whether every directory above this path is still the one the sealed canonical path names.
+ *
+ * `O_NOFOLLOW` only guards the last component. A canonical path is resolved through `realpath` when
+ * the PathGuard seals it, so re-resolving it has to give the same answer back; if a parent inside
+ * the Workspace has since become a symlink or a junction pointing somewhere else, `realpath` walks
+ * out to the decoy and the two disagree. Without this, a matching leaf `fstat`/`lstat` pair on a
+ * planted file outside the Workspace would satisfy a criterion (issue #466 review).
+ *
+ * The parent is resolved rather than the path itself so a deleted or renamed-away leaf — which has
+ * no `realpath` — is still checked against an honest directory chain.
+ */
+function parentChainIsUnchanged(canonicalPath: string): boolean {
+  const parent = dirname(canonicalPath);
   try {
-    return lstatSync(canonicalPath, { throwIfNoEntry: false })?.isDirectory() === true;
+    return realpathSync.native(parent) === parent;
   } catch {
     return false;
   }
@@ -19912,7 +20013,8 @@ function isDirectoryPostImage(canonicalPath: string): boolean {
  *     back some other file's bytes. Windows has no such flag and would follow a reparse point, so
  *     the `lstat` below refuses a symlink there — and cross-checks its identity against the
  *     descriptor, so a path pointing at a different inode than the one being read is refused on
- *     every platform.
+ *     every platform. `O_NOFOLLOW` only guards the last component, so the parent chain is
+ *     re-resolved separately (`parentChainIsUnchanged`).
  *   - **`O_NONBLOCK`.** Opening a fifo for reading blocks until a writer appears, which would hang
  *     the Main process inside the completion path. With this flag the open returns immediately and
  *     `fstat` reports a fifo, not a file, so it is refused like any other non-regular entry.
@@ -19928,6 +20030,9 @@ function isDirectoryPostImage(canonicalPath: string): boolean {
  * evidence and leaves the criterion open.
  */
 export function readVerifiablePostImage(canonicalPath: string): Buffer | null {
+  // Checked here as well as in the expectation that calls this, so the reader cannot be handed a
+  // path whose parent has been swapped and answer as if the leaf were the only thing that mattered.
+  if (!parentChainIsUnchanged(canonicalPath)) return null;
   let fd: number | null = null;
   try {
     fd = openSync(

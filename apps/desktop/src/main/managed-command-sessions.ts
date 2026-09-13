@@ -177,6 +177,25 @@ export class ManagedCommandSessions {
     this.sessions.clear();
   }
 
+  /**
+   * Whether this Turn still owns a command that could be writing to the Workspace.
+   *
+   * Synchronous on purpose: the completion gate has to answer "has write activity stopped?" in the
+   * same breath as it decides the Turn's outcome, and a Turn that finishes while a background
+   * `exec_command` is still running has not stopped writing — whatever its Edit Sagas verified a
+   * moment earlier can still change underneath them.
+   */
+  hasActiveTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): boolean {
+    return [...this.sessions.values()].some(
+      (session) =>
+        session.taskId === owner.taskId &&
+        session.turnId === owner.turnId &&
+        (session.state === 'starting' ||
+          session.state === 'running' ||
+          session.terminationUnconfirmed),
+    );
+  }
+
   async terminateTurn(owner: Readonly<{ taskId: string; turnId: string }>): Promise<void> {
     const owned = [...this.sessions.values()].filter(
       (session) =>

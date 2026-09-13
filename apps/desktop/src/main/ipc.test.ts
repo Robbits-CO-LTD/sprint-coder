@@ -5992,7 +5992,10 @@ describe('Ollama empty-round integration', () => {
 });
 
 describe('Turn completion when Edit Saga verification evidence is missing', () => {
-  function createCompletionHarness(openCriterionIds: readonly string[]) {
+  function createCompletionHarness(
+    openCriterionIds: readonly string[],
+    activeCommandSessions = false,
+  ) {
     const publish = vi.fn();
     const pushRuntimeStatus = vi.fn();
     const handleRuntimeFailure = vi.fn();
@@ -6003,7 +6006,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
         throw new AcceptanceEvidenceMissingError(openCriterionIds);
       return { event: { type: 'turn.completed', state }, task: null };
     });
-    const verifyCommittedEditSagaPostImages = vi.fn(() => openCriterionIds);
+    const cancelTurn = vi.fn().mockResolvedValue(undefined);
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
       mailbox: { run: (_taskId: string, action: () => unknown) => Promise.resolve(action()) },
@@ -6012,7 +6015,11 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       teamRequiredTurns: new Set<string>(),
       teamCoordinator: { get: () => undefined },
       pendingTaskTitles: new Map(),
-      managedCodingHarness: { finishTurn: vi.fn() },
+      managedCodingHarness: {
+        finishTurn: vi.fn(),
+        cancelTurn,
+        hasActiveCommandSessions: vi.fn(() => activeCommandSessions),
+      },
       attachmentCapabilityByTurn: new Map(),
       attachmentCustodyByTurn: new Map(),
       attachmentCustodyStore: { release: vi.fn() },
@@ -6036,7 +6043,6 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       publish,
       persistence: {
         completeTurnAndFinishGoal,
-        verifyCommittedEditSagaPostImages,
         startNextQueued: vi.fn(() => null),
         getActiveTurnId: vi.fn(() => 'turn-466'),
       },
@@ -6044,11 +6050,11 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     });
     return {
       router,
+      cancelTurn,
       publish,
       pushRuntimeStatus,
       handleRuntimeFailure,
       completeTurnAndFinishGoal,
-      verifyCommittedEditSagaPostImages,
     };
   }
 
@@ -6076,27 +6082,50 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     }
   }
 
-  it('verifies the committed Edit Saga post-images before the Turn is finalised', async () => {
+  it('finalises a verified Turn through the completion transaction alone', async () => {
     const harness = createCompletionHarness([]);
 
     await settleCompletedEvent(harness);
 
-    expect(harness.verifyCommittedEditSagaPostImages).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: 'task-466', turnId: 'turn-466' }),
-    );
-    expect(harness.verifyCommittedEditSagaPostImages.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.completeTurnAndFinishGoal.mock.invocationCallOrder[0]!,
-    );
-    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledWith(
+    // The post-image verification lives inside `completeTurnAndFinishGoal`'s transaction, so the
+    // Turn reaches its terminal state through exactly one persistence call — a second, separate
+    // verification call here would put the reads and the decision in different transactions.
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
       'task-466',
       'turn-466',
       'completed',
       'ファイルを作成しました',
     );
     expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+    expect(harness.cancelTurn).not.toHaveBeenCalled();
     expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
       expect.objectContaining({ state: 'idle', errorCode: null }),
     );
+  });
+
+  it('refuses to complete a Turn that still owns a running command, and tears it down', async () => {
+    const harness = createCompletionHarness([], true);
+
+    await settleCompletedEvent(harness);
+
+    // Nothing verified can be trusted while a process the Turn started is still writing, so the
+    // gate never even asks for `completed`.
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
+      'task-466',
+      'turn-466',
+      'failed',
+      'ファイルを作成しました',
+    );
+    expect(harness.cancelTurn).toHaveBeenCalledWith('task-466', 'turn-466');
+    expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+    const status = harness.pushRuntimeStatus.mock.calls.at(-1)?.[0] as {
+      state: string;
+      errorCode: string | null;
+      userMessage: string | null;
+    };
+    expect(status.state).toBe('failed');
+    expect(status.errorCode).toBe('COMMAND_STILL_RUNNING');
+    expect(status.userMessage).not.toContain('無効なイベント');
   });
 
   it('never blames the Runtime Host for a completion its own Acceptance Contract refused', async () => {

@@ -373,11 +373,21 @@ const MAX_PROVIDER_LEADER_ROUNDS = 32;
 const PROVIDER_IMAGE_CAPABILITY_TIMEOUT_MS = 5_000;
 const COMPUTER_USE_QUICK_START_LATCH_TTL_MS = 2_000;
 /**
- * Shown when the Acceptance Contract refuses a completion: the edits Main could verify are kept,
- * but at least one file no longer matches what the Edit Saga committed, so the Turn is not complete.
+ * Shown when the completion gate refuses a Turn. The edits are kept either way; what the Turn does
+ * not get is the claim that it finished, so each reason has to say which of the two it was.
  */
-const ACCEPTANCE_EVIDENCE_MISSING_MESSAGE =
-  '変更後のファイルを検証できなかったため、Turnを完了として扱えません。ファイルの変更内容を確認してから再試行してください。';
+const COMPLETION_REFUSALS = Object.freeze({
+  acceptance_evidence: {
+    errorCode: 'ACCEPTANCE_EVIDENCE_MISSING',
+    userMessage:
+      '変更後のファイルを検証できなかったため、Turnを完了として扱えません。ファイルの変更内容を確認してから再試行してください。',
+  },
+  active_command: {
+    errorCode: 'COMMAND_STILL_RUNNING',
+    userMessage:
+      'バックグラウンドのコマンドが実行中のままのため、Turnを完了として扱えません。コマンドを停止して変更内容を確認してから再試行してください。',
+  },
+} as const);
 
 type ProviderImageAttachmentDispatch = Readonly<{
   binding: ProviderImageAttachmentCapabilityBinding;
@@ -5071,18 +5081,17 @@ export class IpcRouter {
     const settled = this.settleTurnCompletion(taskId, turnId, state, finalText);
     // Back to idle on a clean finish. A Runtime failure already pushed its own `failed` status with
     // the reason attached (see handleRuntimeFailure) and must not be overwritten by an idle here;
-    // a completion the Acceptance Contract refused has pushed nothing yet, so it states its own.
+    // a completion the gate refused has pushed nothing yet, so it states its own reason.
     if (kind !== undefined && kind !== 'provider' && state === 'completed')
       this.pushRuntimeStatus(
-        settled.state === 'completed'
+        settled.refusal === null
           ? { kind, state: 'idle', taskId, errorCode: null, userMessage: null }
           : {
               kind,
               state: 'failed',
               taskId,
               turnId,
-              errorCode: 'ACCEPTANCE_EVIDENCE_MISSING',
-              userMessage: ACCEPTANCE_EVIDENCE_MISSING_MESSAGE,
+              ...COMPLETION_REFUSALS[settled.refusal],
             },
       );
     this.runtimeDiagnosticContextByTurn.delete(turnId);
@@ -5105,18 +5114,25 @@ export class IpcRouter {
   /**
    * Finalises the Turn, taking the Acceptance Contract into account.
    *
-   * The Turn's write activity has already stopped by the time this runs, so Main re-reads every
-   * committed Edit Saga's sealed post-image here and records the deterministic verification
-   * evidence itself. Before that, the evidence only appeared when the model volunteered a
-   * `read_file` after its edit — Codex does, Claude Code often does not — so a file that was
-   * created exactly as asked still failed its Turn (issue #466).
+   * `completeTurnAndFinishGoal` re-reads every committed Edit Saga's sealed post-image inside the
+   * transaction that decides the outcome, so this method does not verify anything itself — doing it
+   * here would put the reads and the decision in separate transactions. Before that verification
+   * existed, evidence only appeared when the model volunteered a `read_file` after its edit — Codex
+   * does, Claude Code often does not — so a file that was created exactly as asked still failed its
+   * Turn (issue #466).
    *
-   * A criterion that is genuinely still open (the write was reverted, clobbered, or never landed)
-   * keeps blocking `completed`, which is the gate Standard Assurance is there to provide. What it
-   * must not do is escape as an unhandled exception: the generic `handleRuntimeEvent` catch turned
-   * that into `RUNTIME_PROTOCOL_ERROR` and told the user the Runtime Host had sent an invalid
-   * event, when the event was valid and Main's own completion gate had refused it. Terminalize as
-   * `failed` with the real reason instead.
+   * Two things can refuse a completion here, and neither is a Runtime fault:
+   *
+   *   - **Write activity that has not stopped.** `finishTurn` releases the Turn's tools but leaves
+   *     an owned background `exec_command` running, and nothing verified can be trusted while a
+   *     process the Turn started is still writing. Such a Turn is terminalized as `failed` and its
+   *     commands are torn down, rather than completed on bytes that are still moving.
+   *   - **A criterion that is genuinely still open** (the write was reverted, clobbered, or never
+   *     landed), which is the gate Standard Assurance is there to provide.
+   *
+   * What neither may do is escape as an unhandled exception: the generic `handleRuntimeEvent` catch
+   * turned that into `RUNTIME_PROTOCOL_ERROR` and told the user the Runtime Host had sent an invalid
+   * event, when the event was valid and Main's own completion gate had refused it.
    */
   private settleTurnCompletion(
     taskId: string,
@@ -5126,41 +5142,57 @@ export class IpcRouter {
   ): {
     state: 'completed' | 'failed';
     completion: ReturnType<PersistenceClient['completeTurnAndFinishGoal']>;
+    refusal: 'acceptance_evidence' | 'active_command' | null;
   } {
-    if (state === 'completed')
-      try {
-        const open = this.persistence.verifyCommittedEditSagaPostImages({
-          taskId,
-          turnId,
-          createdAt: new Date().toISOString(),
-        });
-        if (open.length > 0)
-          secureLogger.warn('Turn completion is missing acceptance evidence', {
-            taskId,
-            turnId,
-            openCriterionIds: open,
-          });
-      } catch (error) {
-        secureLogger.error('Edit Saga post-image verification failed', { taskId, turnId, error });
-      }
+    if (state === 'completed' && this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId))
+      return this.refuseCompletion(taskId, turnId, finalText, 'active_command', {
+        message: 'Turn completion was refused while it still owned a running command',
+      });
     try {
       return {
         state,
         completion: this.persistence.completeTurnAndFinishGoal(taskId, turnId, state, finalText),
+        refusal: null,
       };
     } catch (error) {
       if (!(error instanceof AcceptanceEvidenceMissingError)) throw error;
-      secureLogger.error('Turn completion was refused by the Acceptance Contract', {
-        taskId,
-        turnId,
+      return this.refuseCompletion(taskId, turnId, finalText, 'acceptance_evidence', {
+        message: 'Turn completion was refused by the Acceptance Contract',
         openCriterionIds: error.openCriterionIds,
         error,
       });
-      return {
-        state: 'failed',
-        completion: this.persistence.completeTurnAndFinishGoal(taskId, turnId, 'failed', finalText),
-      };
     }
+  }
+
+  private refuseCompletion(
+    taskId: string,
+    turnId: string,
+    finalText: string | undefined,
+    refusal: 'acceptance_evidence' | 'active_command',
+    context: Record<string, unknown> & { message: string },
+  ): {
+    state: 'failed';
+    completion: ReturnType<PersistenceClient['completeTurnAndFinishGoal']>;
+    refusal: 'acceptance_evidence' | 'active_command';
+  } {
+    const { message, ...detail } = context;
+    secureLogger.error(message, { taskId, turnId, ...detail });
+    // Best effort and deliberately not awaited: the Turn is being terminalized now, and the point
+    // of the teardown is to stop the Workspace moving, not to gate this decision on a process that
+    // may be ignoring its abort.
+    if (refusal === 'active_command')
+      void this.managedCodingHarness.cancelTurn(taskId, turnId).catch((error: unknown) => {
+        secureLogger.warn('Managed command teardown after a refused completion failed', {
+          taskId,
+          turnId,
+          error,
+        });
+      });
+    return {
+      state: 'failed',
+      completion: this.persistence.completeTurnAndFinishGoal(taskId, turnId, 'failed', finalText),
+      refusal,
+    };
   }
 
   /**
