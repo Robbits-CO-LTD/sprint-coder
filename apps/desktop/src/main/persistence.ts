@@ -4620,6 +4620,7 @@ export interface PersistenceClient {
   setAutoSkillProvider?(
     provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
+  setSealedPostImageObserver?(observer: SealedPostImageObserver): void;
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
@@ -6082,6 +6083,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     | null = null;
   private autoSkillProvider:
     ((runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[]) | null = null;
+  private sealedPostImageObserver: SealedPostImageObserver | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;
 
@@ -6142,6 +6144,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void {
     this.autoSkillProvider = provider;
+  }
+
+  /**
+   * Binds the read-only native observer the completion gate verifies through. Wired up where the
+   * addon is already loaded; until it is, verification observes by path.
+   */
+  setSealedPostImageObserver(observer: SealedPostImageObserver): void {
+    this.sealedPostImageObserver = observer;
   }
 
   /**
@@ -16395,32 +16405,123 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .all(taskId, turnId) as EditSagaRow[]
     ).map(toEditSaga);
     const rootIsSealed = this.sealedTurnRootPredicate(taskId, turnId);
-    const holds = turnPostImageVerifier(sagas);
+    const observation = this.openSealedObservation(turnId, sagas);
     const failed: string[] = [];
-    for (const saga of sagas) {
-      if (!rootIsSealed(saga) || !holds(saga)) {
-        failed.push(`verification:${saga.id}`);
-        continue;
+    try {
+      const holds = turnPostImageVerifier(sagas, observation.observe);
+      for (const saga of sagas) {
+        if (!rootIsSealed(saga) || !holds(saga)) {
+          failed.push(`verification:${saga.id}`);
+          continue;
+        }
+        // A Saga whose Assurance is already settled must not be advanced again: a second round on a
+        // `complete` or `blocked` decision is rejected by the state machine, and a Turn with one
+        // such Saga would otherwise take the whole verification pass down with it.
+        const settled = this.listAssuranceRounds(taskId, turnId, saga.id).at(-1);
+        if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
+        this.recordAssuranceVerification({
+          taskId,
+          turnId,
+          sagaId: saga.id,
+          outcome: 'passed',
+          failureClass: null,
+          createdAt,
+        });
       }
-      // A Saga whose Assurance is already settled must not be advanced again: a second round on a
-      // `complete` or `blocked` decision is rejected by the state machine, and a Turn with one such
-      // Saga would otherwise take the whole verification pass down with it.
-      const settled = this.listAssuranceRounds(taskId, turnId, saga.id).at(-1);
-      if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
-      this.recordAssuranceVerification({
-        taskId,
-        turnId,
-        sagaId: saga.id,
-        outcome: 'passed',
-        failureClass: null,
-        createdAt,
-      });
+    } finally {
+      observation.close();
     }
     const open = decideCompletion(
       this.getAcceptanceContract(taskId, turnId),
       this.listEvidenceRecords(taskId, turnId),
     ).openCriterionIds;
     return Object.freeze([...new Set([...open, ...failed])]);
+  }
+
+  /**
+   * Opens the observation source for one Turn's verification.
+   *
+   * Each Workspace root gets one read-only native session, which pins the root and walks every path
+   * component descriptor-relative — the same primitive the mutation path writes through, so the
+   * object being verified is the one that was pinned rather than whatever the path resolves to.
+   * A root whose session cannot be opened (an exclusive mutation session holds it, the root moved)
+   * observes nothing, and every endpoint under it stays unverified rather than being taken on trust.
+   *
+   * Where no observer is wired up at all — Windows until its backend lands, and any build whose
+   * mutation gate is closed and so cannot have written an Edit Saga — observation falls back to the
+   * path-based reader, which is weaker in the way `pathSealedObservation` describes.
+   */
+  private openSealedObservation(
+    turnId: string,
+    sagas: readonly EditSagaSnapshot[],
+  ): Readonly<{ observe: SealedObservationSource; close: () => void }> {
+    const observer = this.sealedPostImageObserver;
+    if (observer === null)
+      return Object.freeze({ observe: pathSealedObservation, close: () => undefined });
+    const rootPaths = new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT root_id, canonical_path, workspace_key
+             FROM turn_workspace_roots WHERE turn_id = ?`,
+          )
+          .all(turnId) as { root_id: string; canonical_path: string; workspace_key: string }[]
+      ).map((row) => [row.root_id, row] as const),
+    );
+    // Last writer wins, exactly as the expectations do, so a path is observed through the root of
+    // the Saga that owns its final state.
+    const rootOfPath = new Map<string, string | null>();
+    for (const saga of sagas)
+      for (const { operation } of saga.steps)
+        for (const { path } of sealedPathExpectations(operation)) rootOfPath.set(path, saga.rootId);
+    const sessions = new Map<string, SealedPostImageSession | null>();
+    const sessionFor = (rootId: string): SealedPostImageSession | null => {
+      if (!sessions.has(rootId)) {
+        const root = rootPaths.get(rootId);
+        let session: SealedPostImageSession | null;
+        try {
+          session =
+            root === undefined
+              ? null
+              : observer({
+                  rootId,
+                  workspacePath: root.canonical_path,
+                  workspaceKey: root.workspace_key,
+                });
+        } catch {
+          // LOCK_BUSY, a moved root, an unsupported backend: all of them mean this Turn cannot be
+          // verified right now, which is not the same as failing verification.
+          session = null;
+        }
+        sessions.set(rootId, session);
+      }
+      return sessions.get(rootId) ?? null;
+    };
+    return Object.freeze({
+      observe: (canonicalPath: string): SealedPostImageObservation | null => {
+        const rootId = rootOfPath.get(canonicalPath);
+        // A legacy Saga with no sealed root has no session to observe through.
+        if (rootId === undefined || rootId === null) return pathSealedObservation(canonicalPath);
+        const session = sessionFor(rootId);
+        const root = rootPaths.get(rootId);
+        if (session === null || root === undefined) return null;
+        const segments = relative(root.canonical_path, canonicalPath).split(sep);
+        if (segments.length === 0 || segments[0] === '' || segments[0] === '..') return null;
+        try {
+          return session.observe(segments);
+        } catch {
+          return null;
+        }
+      },
+      close: () => {
+        for (const session of sessions.values())
+          try {
+            session?.close();
+          } catch {
+            // The verdict is already decided; a failed close cannot change it.
+          }
+      },
+    });
   }
 
   /**
@@ -19911,6 +20012,32 @@ function displayTurnDiffPath(
   return relativePath === null ? value : formatWorkspaceDisplayPath(label, relativePath);
 }
 
+/** What is at a sealed endpoint now, however it was observed. */
+export type SealedPostImageObservation =
+  | Readonly<{ kind: 'file'; contentHash: string }>
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'directory' }>
+  | Readonly<{ kind: 'other' }>;
+
+/** Null means "this path could not be observed", which the verifier reads as unverified. */
+type SealedObservationSource = (canonicalPath: string) => SealedPostImageObservation | null;
+
+/** A read-only view of one Workspace root. `observe` throws when the endpoint is not observable. */
+export type SealedPostImageSession = Readonly<{
+  observe(segments: readonly string[]): SealedPostImageObservation;
+  close(): void;
+}>;
+
+/**
+ * Opens a read-only view of a Workspace root, or returns null when this build has none.
+ *
+ * Injected rather than imported so persistence keeps no dependency on the native addon: the port is
+ * wired up where the addon already lives, and a build without it falls back to observation by path.
+ */
+export type SealedPostImageObserver = (
+  root: Readonly<{ rootId: string; workspacePath: string; workspaceKey: string }>,
+) => SealedPostImageSession | null;
+
 /** What one sealed operation says a single path should look like once the Saga has committed. */
 type SealedPathExpectation =
   | Readonly<{ path: string; kind: 'content'; contentHash: string | null }>
@@ -19935,6 +20062,7 @@ type SealedPathExpectation =
  */
 function turnPostImageVerifier(
   sagas: readonly EditSagaSnapshot[],
+  observe: SealedObservationSource,
 ): (saga: EditSagaSnapshot) => boolean {
   const finalExpectations = new Map<string, SealedPathExpectation>();
   for (const saga of sagas)
@@ -19946,7 +20074,7 @@ function turnPostImageVerifier(
     const cached = observed.get(path);
     if (cached !== undefined) return cached;
     const expectation = finalExpectations.get(path);
-    const holds = expectation === undefined ? false : expectationHolds(expectation);
+    const holds = expectation === undefined ? false : expectationHolds(expectation, observe(path));
     observed.set(path, holds);
     return holds;
   };
@@ -19987,25 +20115,52 @@ function sealedPathExpectations(
   }
 }
 
-function expectationHolds(expectation: SealedPathExpectation): boolean {
-  if (!parentChainIsUnchanged(expectation.path)) return false;
+/**
+ * Compares one sealed expectation with what was observed. Pure: the observation is made outside, so
+ * a build that can pin the object it reads and one that can only name it produce the same verdict
+ * from the same facts. A null observation is "could not be observed", which is never a pass.
+ */
+function expectationHolds(
+  expectation: SealedPathExpectation,
+  observation: SealedPostImageObservation | null,
+): boolean {
+  if (observation === null) return false;
   switch (expectation.kind) {
     case 'absent':
-      // `lstat`, not `stat`: a symlink planted where the entry was deleted is not an absence.
-      return statKindOf(expectation.path) === 'absent';
+      return observation.kind === 'absent';
     case 'directory':
-      // `lstat` again: a symlink to a directory is not the directory the operation created.
-      return statKindOf(expectation.path) === 'directory';
-    default: {
-      if (expectation.contentHash === null) return false;
-      const bytes = readVerifiablePostImage(expectation.path);
-      // Hashes the raw bytes, never a decoded string: see `readVerifiablePostImage`.
+      return observation.kind === 'directory';
+    default:
       return (
-        bytes !== null &&
-        createHash('sha256').update(bytes).digest('hex') === expectation.contentHash
+        expectation.contentHash !== null &&
+        observation.kind === 'file' &&
+        observation.contentHash === expectation.contentHash
       );
-    }
   }
+}
+
+/**
+ * Observation by path, for builds with no native read session (Windows today, and any build whose
+ * mutation gate is closed — which cannot have written an Edit Saga in the first place).
+ *
+ * Weaker than the native walk on one specific point, and the difference is worth stating: this
+ * re-resolves the parent chain either side of the read rather than pinning it, so a parent swapped
+ * for a link between the check and the open is caught only if it is still swapped when the read
+ * ends. Node has no `openat`; `observeSealedPostImage` exists because of exactly this.
+ */
+function pathSealedObservation(path: string): SealedPostImageObservation | null {
+  if (!parentChainIsUnchanged(path)) return null;
+  const kind = statKindOf(path);
+  if (kind === 'unknown') return null;
+  if (kind === 'absent') return Object.freeze({ kind: 'absent' });
+  if (kind === 'directory') return Object.freeze({ kind: 'directory' });
+  const bytes = readVerifiablePostImage(path);
+  return bytes === null
+    ? Object.freeze({ kind: 'other' })
+    : Object.freeze({
+        kind: 'file',
+        contentHash: createHash('sha256').update(bytes).digest('hex'),
+      });
 }
 
 function statKindOf(canonicalPath: string): 'absent' | 'directory' | 'other' | 'unknown' {

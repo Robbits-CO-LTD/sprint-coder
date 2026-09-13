@@ -13,7 +13,7 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron';
 import squirrelStartup from 'electron-squirrel-startup';
-import { readdirSync } from 'node:fs';
+import { lstatSync, readdirSync } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -639,6 +639,25 @@ async function wireEditSagaRecovery(
       });
       return undefined;
     }
+    // The completion gate verifies sealed post-images through the same addon the Edit Sagas write
+    // through, so a verification walks the parent chain descriptor-relative instead of trusting a
+    // path to still mean what it meant. Read-only and fence-free: see `openReadSession`.
+    persistence.setSealedPostImageObserver?.((root) => {
+      const identity = lstatSync(root.workspacePath, { bigint: true, throwIfNoEntry: false });
+      if (identity === undefined || !identity.isDirectory()) return null;
+      const session = nativeSafeFs.openReadSession({
+        rootId: root.rootId,
+        workspacePath: root.workspacePath,
+        rootDev: identity.dev.toString(),
+        rootIno: identity.ino.toString(),
+        workspaceKey: root.workspaceKey,
+      });
+      return Object.freeze({
+        observe: (segments: readonly string[]) =>
+          nativeSafeFs.observeSealedPostImage(session, segments),
+        close: () => nativeSafeFs.closeReadSession(session),
+      });
+    });
     const sessions = new Map<string, NativeSafeFsSession>();
     const resolveSession = async (lease: MutationLeaseToken): Promise<NativeSafeFsSession> => {
       const existing = sessions.get(lease.leaseId);

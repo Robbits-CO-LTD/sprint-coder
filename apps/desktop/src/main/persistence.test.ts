@@ -7,6 +7,7 @@ import {
   mkdirSync,
   readFileSync,
   linkSync,
+  lstatSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -48,6 +49,7 @@ import {
   validateCanvasCamera,
   validateCanvasNodePositions,
 } from './persistence';
+import { loadNativeSafeFs, nativeSafeFsAddonPath, NativeSafeFsError } from './native-safe-fs';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import { nextGraphDocument } from './graph-document';
@@ -3567,6 +3569,104 @@ if (runsWithElectronAbi)
         expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
           state: 'completed',
         });
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'verifies through the native read session when one is bound, and refuses a swapped parent',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = join(dirname(path), 'native-observed-root');
+        const nested = join(workspacePath, 'nested');
+        const decoy = join(workspacePath, 'decoy');
+        mkdirSync(nested, { recursive: true });
+        mkdirSync(decoy);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'verify through the addon');
+        const workspaceFile = join(nested, 'one-line.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(dirname(path), 'native-observed-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'native-observed-lease'),
+        ).apply({
+          id: 'native-observed-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'native-observed-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        // The same addon the Edit Saga writes through, bound as the verifier's observer.
+        const native = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
+        const bindObserver = (client: SqlitePersistenceClient) =>
+          client.setSealedPostImageObserver((root) => {
+            const identity = lstatSync(root.workspacePath, { bigint: true });
+            const session = native.openReadSession({
+              rootId: root.rootId,
+              workspacePath: root.workspacePath,
+              rootDev: identity.dev.toString(),
+              rootIno: identity.ino.toString(),
+              workspaceKey: root.workspaceKey,
+            });
+            return {
+              observe: (segments: readonly string[]) =>
+                native.observeSealedPostImage(session, segments),
+              close: () => native.closeReadSession(session),
+            };
+          });
+        bindObserver(persistence);
+
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([]);
+
+        // Byte-identical decoy behind a swapped parent: the openat chain never reaches it, so the
+        // Saga stays unverified even though every path still resolves and the bytes still match.
+        writeFileSync(join(decoy, 'one-line.txt'), 'after');
+        rmSync(nested, { recursive: true });
+        symlinkSync(decoy, nested);
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+
+        const reopened = new SqlitePersistenceClient(path);
+        bindObserver(reopened);
+        expect(
+          reopened.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        reopened.close();
+
+        // A root the observer cannot open at all — an exclusive mutation session holds it, or the
+        // backend refuses — leaves every endpoint under it unverified. "Cannot verify" is not
+        // "verified", and it is not "failed verification" either: the criterion simply stays open.
+        const blocked = new SqlitePersistenceClient(path);
+        blocked.setSealedPostImageObserver(() => {
+          throw new NativeSafeFsError('LOCK_BUSY', 'Failed to share-lock workspace root');
+        });
+        expect(
+          blocked.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:03.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        blocked.close();
         persistence.close();
       },
     );
