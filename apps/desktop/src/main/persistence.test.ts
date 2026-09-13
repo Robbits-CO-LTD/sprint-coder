@@ -6,11 +6,17 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  linkSync,
+  lstatSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +34,9 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { ToolBroker } from './tool-broker';
 import {
   AcceptanceEvidenceMissingError,
+  MAX_VERIFIABLE_POST_IMAGE_BYTES,
+  readVerifiablePostImage,
+  SealedPostImageUnsupportedError,
   CanvasViewConflictError,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
@@ -41,6 +50,8 @@ import {
   validateCanvasCamera,
   validateCanvasNodePositions,
 } from './persistence';
+import { loadNativeSafeFs, nativeSafeFsAddonPath, NativeSafeFsError } from './native-safe-fs';
+import { currentWorkspaceRootIdentityDigest } from './path-guard';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
 import { nextGraphDocument } from './graph-document';
 import { GraphRenderService } from './graph-render';
@@ -99,7 +110,10 @@ function createPersistence(
     invalidateNativeWorkspace?: (workspaceKey: string, minimumFence: string) => void;
   } = {},
 ): { persistence: SqlitePersistenceClient; path: string } {
-  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-persistence-'));
+  // Resolved, because a PathGuard hands the Edit Saga a canonical path that has already been
+  // through `realpath` and the completion verifier re-resolves it. `tmpdir()` is itself a symlink
+  // on macOS, so an unresolved fixture root would look like a swapped parent directory.
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'sprint-coder-persistence-')));
   cleanup.push(directory);
   const path = join(directory, 'test.sqlite3');
   return {
@@ -131,8 +145,13 @@ function bindMutationWorkspace(
   path: string,
   rootIdentityDigest: string,
 ): string {
-  const workspaceKey = mutationWorkspaceKey(path, rootIdentityDigest);
-  persistence.setWorkspaceBinding(taskId, { path, workspaceKey, rootIdentityDigest });
+  // Production seals the root's real identity, and the completion verifier compares the sealed
+  // digest against the directory that is there now. A fixture binding a made-up digest to a real
+  // directory would describe a root that never existed; fall back to the caller's value only for
+  // the paths that are themselves made up.
+  const sealed = currentWorkspaceRootIdentityDigest(path) ?? rootIdentityDigest;
+  const workspaceKey = mutationWorkspaceKey(path, sealed);
+  persistence.setWorkspaceBinding(taskId, { path, workspaceKey, rootIdentityDigest: sealed });
   return workspaceKey;
 }
 
@@ -3033,11 +3052,12 @@ if (runsWithElectronAbi)
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
       const workspaceKey = 'b'.repeat(64);
-      const rootIdentityDigest = 'a'.repeat(64);
       const workspacePath = join(dirname(path), 'display-root');
       const workspaceFile = join(workspacePath, 'src', 'a.ts');
       mkdirSync(dirname(workspaceFile), { recursive: true });
       writeFileSync(workspaceFile, 'before');
+      // Sealed from the directory that is really there, as production does.
+      const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
       const project = persistence.createProject({
         name: 'display paths',
         folders: [
@@ -3125,12 +3145,12 @@ if (runsWithElectronAbi)
     artifactIt('uses a verified descendant file read to verify an earlier mkdir Saga', async () => {
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
-      const rootIdentityDigest = 'a'.repeat(64);
       const workspacePath = join(dirname(path), 'mkdir-read-root');
       const directoryPath = join(workspacePath, 'smoke-final');
       const unrelatedDirectoryPath = join(workspacePath, 'unrelated');
       const workspaceFile = join(directoryPath, 'codex.txt');
       mkdirSync(workspacePath, { recursive: true });
+      const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
       const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
       const project = persistence.createProject({
         name: 'mkdir read verification',
@@ -3235,15 +3255,724 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    artifactIt(
+      'verifies committed Edit Saga post-images on disk so a Turn without a model read-back completes',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const rootId = randomUUID();
+        const workspacePath = join(dirname(path), 'issue-466-root');
+        const directoryPath = join(workspacePath, 'created');
+        const workspaceFile = join(directoryPath, 'one-line.txt');
+        mkdirSync(workspacePath, { recursive: true });
+        const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
+        const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
+        const project = persistence.createProject({
+          name: 'issue 466 verification',
+          folders: [
+            {
+              id: rootId,
+              path: workspacePath,
+              canonicalPath: workspacePath,
+              label: 'issue-466-root',
+              role: 'primary',
+              workspaceKey,
+              rootIdentityDigest,
+            },
+          ],
+        });
+        const task = persistence.createTask('create one file', false, project.id);
+        const turn = persistence.startTurn(task.id, 'Project内に1行のファイルを新規作成して');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(dirname(path), 'issue-466-artifacts'),
+          quotaBytes: 4096,
+        });
+        const store = new PersistenceEditSagaStore(persistence);
+        const binding = { rootId, workspacePath, workspaceKey, rootIdentityDigest };
+        const directorySaga = await new EditSagaExecutor(
+          store,
+          directoryBoundary(directoryPath),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'issue-466-directory-lease'),
+        ).apply({
+          id: 'issue-466-directory-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'issue-466-directory-operation',
+          plan: persistedMkdirPlan(directoryPath),
+          mutationBinding: binding,
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+        writeFileSync(workspaceFile, 'before');
+        const fileSaga = await new EditSagaExecutor(
+          store,
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'issue-466-file-lease'),
+        ).apply({
+          id: 'issue-466-file-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'issue-466-file-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          mutationBinding: binding,
+          createdAt: new Date(Date.parse(directorySaga.updatedAt) + 1_000).toISOString(),
+        });
+
+        // Claude Code finishes its Turn straight after the approved write, with no read_file of
+        // its own, so nothing has produced verification evidence yet (issue #466).
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turn.turnId, stage);
+        // Completion verifies the post-images itself, in the transaction that terminalizes the
+        // Turn, so a correct edit no longer needs the model to have read it back.
+        expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+          type: 'turn.completed',
+          state: 'completed',
+        });
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId, producer, trust }) => ({ criterionId, producer, trust }))
+            .sort((left, right) => left.criterionId.localeCompare(right.criterionId)),
+        ).toEqual([
+          {
+            criterionId: `verification:${directorySaga.id}`,
+            producer: 'assurance-controller',
+            trust: 'main-observed',
+          },
+          {
+            criterionId: `verification:${fileSaga.id}`,
+            producer: 'assurance-controller',
+            trust: 'main-observed',
+          },
+        ]);
+        // Re-running the verification is a no-op rather than a second terminal Assurance round.
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: new Date(Date.parse(fileSaga.updatedAt) + 1_000).toISOString(),
+          }),
+        ).toEqual([]);
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'keeps the criterion open when a committed post-image no longer matches on disk',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'an edit that does not survive the Turn');
+        const workspaceFile = join(workspacePath, 'issue-466-clobbered.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'issue-466-clobbered-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'issue-466-clobbered-lease'),
+        ).apply({
+          id: 'issue-466-clobbered-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'issue-466-clobbered-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        writeFileSync(workspaceFile, 'reverted by something else');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+
+        rmSync(workspaceFile);
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'withholds a batch Saga verification until every one of its operations still holds',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'update one file and delete another');
+        const updatePath = join(workspacePath, 'batch-update.txt');
+        const deletePath = join(workspacePath, 'batch-delete.txt');
+        writeFileSync(updatePath, 'before');
+        writeFileSync(deletePath, 'doomed');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'batch-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          updateAndDeleteBoundary(artifacts, updatePath, deletePath),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'batch-lease'),
+        ).apply({
+          id: 'batch-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'batch-operation',
+          plan: persistedUpdateAndDeletePlan(updatePath, deletePath),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+        expect(saga.state).toBe('committed');
+        expect(readFileSync(updatePath, 'utf8')).toBe('after');
+        expect(existsSync(deletePath)).toBe(false);
+
+        // The update still matches, so a per-file check would close the criterion here. The
+        // deletion no longer holds, and the Saga is only as verified as its weakest operation.
+        writeFileSync(deletePath, 'brought back');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        expect(
+          persistence
+            .listEvidenceRecords(task.id, turn.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+
+        rmSync(deletePath);
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turn.turnId, stage);
+        expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+          state: 'completed',
+        });
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      're-checks a Saga whose evidence was earned before a later Saga rewrote the same file',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'edit the same file twice');
+        const workspaceFile = join(workspacePath, 'rewritten.txt');
+        writeFileSync(workspaceFile, 'A');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'rewritten-artifacts'),
+          quotaBytes: 4096,
+        });
+        const store = new PersistenceEditSagaStore(persistence);
+        const commit = async (from: string, to: string, id: string) =>
+          new EditSagaExecutor(
+            store,
+            fileBoundary(workspaceFile, artifacts, from, to),
+            artifacts,
+            undefined,
+            new SqliteEditSagaLeaseGuard(persistence, `${id}-lease`),
+          ).apply({
+            id,
+            taskId: task.id,
+            turnId: turn.turnId,
+            operationId: `${id}-operation`,
+            plan: persistedEditPlan(from, to, workspaceFile, workspaceFile),
+            createdAt: `2026-07-23T00:00:0${id === 'rewrite-a-to-b' ? '0' : '2'}.000Z`,
+          });
+
+        const first = await commit('A', 'B', 'rewrite-a-to-b');
+        // The model read B back, which is exactly how evidence was earned before Main did its own
+        // verification — and that evidence stays valid in the ledger for ever after.
+        expect(
+          persistence.recordWorkspaceReadVerification({
+            taskId: task.id,
+            turnId: turn.turnId,
+            rootId: 'legacy-primary',
+            path: workspaceFile,
+            content: 'B',
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toMatchObject({ sagaId: first.id, decision: 'complete' });
+        const second = await commit('B', 'C', 'rewrite-b-to-c');
+
+        // B is gone: only C describes the file now. Neither Saga may be verified while C is not
+        // what is on disk, however complete the first Saga's Assurance round already is.
+        writeFileSync(workspaceFile, 'something else entirely');
+        expect(
+          [
+            ...persistence.verifyCommittedEditSagaPostImages({
+              taskId: task.id,
+              turnId: turn.turnId,
+              createdAt: '2026-07-23T00:00:03.000Z',
+            }),
+          ].sort(),
+        ).toEqual([`verification:${first.id}`, `verification:${second.id}`].sort());
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+
+        // C restored: the last writer for the path holds, so both Sagas in the chain hold with it.
+        writeFileSync(workspaceFile, 'C');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:04.000Z',
+          }),
+        ).toEqual([]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turn.turnId, stage);
+        expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+          state: 'completed',
+        });
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'verifies through the native read session when one is bound, and refuses a swapped parent',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = join(dirname(path), 'native-observed-root');
+        const nested = join(workspacePath, 'nested');
+        const decoy = join(workspacePath, 'decoy');
+        mkdirSync(nested, { recursive: true });
+        mkdirSync(decoy);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'verify through the addon');
+        const workspaceFile = join(nested, 'one-line.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(dirname(path), 'native-observed-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'native-observed-lease'),
+        ).apply({
+          id: 'native-observed-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'native-observed-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        // The same addon the Edit Saga writes through, bound as the verifier's observer.
+        const native = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
+        const bindObserver = (client: SqlitePersistenceClient) =>
+          client.setSealedPostImageObserver((root) => {
+            const identity = lstatSync(root.workspacePath, { bigint: true });
+            const session = native.openReadSession({
+              rootId: root.rootId,
+              workspacePath: root.workspacePath,
+              rootDev: identity.dev.toString(),
+              rootIno: identity.ino.toString(),
+              workspaceKey: root.workspaceKey,
+            });
+            return {
+              rootIdentityDigest: session.rootIdentityDigest,
+              observe: (segments: readonly string[]) =>
+                native.observeSealedPostImage(session, segments),
+              close: () => native.closeReadSession(session),
+            };
+          });
+        bindObserver(persistence);
+
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([]);
+
+        // Byte-identical decoy behind a swapped parent: the openat chain never reaches it, so the
+        // Saga stays unverified even though every path still resolves and the bytes still match.
+        writeFileSync(join(decoy, 'one-line.txt'), 'after');
+        rmSync(nested, { recursive: true });
+        symlinkSync(decoy, nested);
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+
+        const reopened = new SqlitePersistenceClient(path);
+        bindObserver(reopened);
+        expect(
+          reopened.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        reopened.close();
+
+        // A root the observer cannot open at all — an exclusive mutation session holds it, or the
+        // backend refuses — leaves every endpoint under it unverified. "Cannot verify" is not
+        // "verified", and it is not "failed verification" either: the criterion simply stays open.
+        const blocked = new SqlitePersistenceClient(path);
+        blocked.setSealedPostImageObserver(() => {
+          throw new NativeSafeFsError('LOCK_BUSY', 'Failed to share-lock workspace root');
+        });
+        expect(
+          blocked.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:03.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        blocked.close();
+
+        // A backend with no implementation on this platform is not a refusal to verify: the Turn
+        // falls back to observation by path, exactly as it does with no observer bound at all.
+        // Without this, Windows — where every export refuses — could never complete an edited Turn.
+        rmSync(nested);
+        mkdirSync(nested);
+        writeFileSync(workspaceFile, 'after');
+        const unsupported = new SqlitePersistenceClient(path);
+        unsupported.setSealedPostImageObserver(() => {
+          throw new SealedPostImageUnsupportedError('no backend on this platform');
+        });
+        expect(
+          unsupported.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:04.000Z',
+          }),
+        ).toEqual([]);
+        unsupported.close();
+
+        // Root renamed away and replaced by a fresh directory of the same name: every path resolves
+        // and the bytes match, and the session opens — but its identity comes from the descriptor it
+        // pinned, so it no longer matches the identity the Saga was sealed against.
+        renameSync(workspacePath, join(dirname(path), 'native-observed-moved'));
+        mkdirSync(nested, { recursive: true });
+        writeFileSync(workspaceFile, 'after');
+        const replaced = new SqlitePersistenceClient(path);
+        bindObserver(replaced);
+        expect(
+          replaced.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:05.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        replaced.close();
+        persistence.close();
+      },
+    );
+
+    artifactIt(
+      'refuses a post-image whose Workspace root was replaced by a new directory',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = join(dirname(path), 'replaced-root');
+        mkdirSync(workspacePath);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'write into a root that gets swapped out');
+        const workspaceFile = join(workspacePath, 'post-image.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(dirname(path), 'replaced-root-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'replaced-root-lease'),
+        ).apply({
+          id: 'replaced-root-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'replaced-root-operation',
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        // Every path still resolves and every parent is a real directory — but not the same one. The
+        // post-image is byte-identical, so only the root's sealed identity separates the two trees.
+        renameSync(workspacePath, join(dirname(path), 'moved-away-root'));
+        mkdirSync(workspacePath);
+        writeFileSync(workspaceFile, 'after');
+
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+        expect(readVerifiablePostImage(workspaceFile)).not.toBeNull();
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+        expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+          AcceptanceEvidenceMissingError,
+        );
+        persistence.close();
+      },
+    );
+
+    artifactIt('refuses a post-image whose parent directory became a symlink', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const workspacePath = dirname(path);
+      bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+      const turn = persistence.startTurn(task.id, 'write inside a directory that gets swapped');
+      const nested = join(workspacePath, 'nested');
+      const decoy = join(workspacePath, 'decoy');
+      mkdirSync(nested);
+      mkdirSync(decoy);
+      const workspaceFile = join(nested, 'post-image.txt');
+      writeFileSync(workspaceFile, 'before');
+      const artifacts = await EditArtifactStore.open({
+        rootPath: join(workspacePath, 'parent-swap-artifacts'),
+        quotaBytes: 4096,
+      });
+      const saga = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        fileBoundary(workspaceFile, artifacts),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'parent-swap-lease'),
+      ).apply({
+        id: 'parent-swap-saga',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'parent-swap-operation',
+        plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+        createdAt: '2026-07-23T00:00:00.000Z',
+      });
+
+      // The decoy holds byte-identical contents, so the leaf's own `fstat`/`lstat` pair agrees with
+      // the sealed post hash. Only re-resolving the parent chain tells the two directories apart.
+      writeFileSync(join(decoy, 'post-image.txt'), 'after');
+      rmSync(nested, { recursive: true });
+      symlinkSync(decoy, nested);
+
+      expect(readFileSync(workspaceFile, 'utf8')).toBe('after');
+      expect(readVerifiablePostImage(workspaceFile)).toBeNull();
+      expect(
+        persistence.verifyCommittedEditSagaPostImages({
+          taskId: task.id,
+          turnId: turn.turnId,
+          createdAt: '2026-07-23T00:00:01.000Z',
+        }),
+      ).toEqual([`verification:${saga.id}`]);
+      expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
+        AcceptanceEvidenceMissingError,
+      );
+      persistence.close();
+    });
+
+    artifactIt(
+      'compares the sealed post hash against bytes, so a lossy decode cannot stand in for it',
+      async () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const workspacePath = dirname(path);
+        bindMutationWorkspace(persistence, task.id, workspacePath, 'c'.repeat(64));
+        const turn = persistence.startTurn(task.id, 'write a replacement character');
+        const workspaceFile = join(workspacePath, 'replacement-character.txt');
+        writeFileSync(workspaceFile, 'before');
+        const artifacts = await EditArtifactStore.open({
+          rootPath: join(workspacePath, 'replacement-character-artifacts'),
+          quotaBytes: 4096,
+        });
+        const saga = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts, 'before', '�'),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'replacement-character-lease'),
+        ).apply({
+          id: 'replacement-character-saga',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'replacement-character-operation',
+          plan: persistedEditPlan('before', '�', workspaceFile, workspaceFile),
+          createdAt: '2026-07-23T00:00:00.000Z',
+        });
+
+        // A lone `0x80` decodes to the very U+FFFD the Saga committed, so a verification that
+        // hashed the decoded string would accept these three bytes' worth of difference.
+        writeFileSync(workspaceFile, Buffer.from([0x80]));
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('�');
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:01.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+
+        // Appending to a verified post-image is a different file, not a longer prefix of one.
+        writeFileSync(workspaceFile, Buffer.concat([Buffer.from('�'), Buffer.from('extra')]));
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:02.000Z',
+          }),
+        ).toEqual([`verification:${saga.id}`]);
+
+        writeFileSync(workspaceFile, Buffer.from('�'));
+        expect(
+          persistence.verifyCommittedEditSagaPostImages({
+            taskId: task.id,
+            turnId: turn.turnId,
+            createdAt: '2026-07-23T00:00:03.000Z',
+          }),
+        ).toEqual([]);
+        persistence.close();
+      },
+    );
+
+    // These pin the refusal contract the completion path depends on. The substitution race itself
+    // (a path that turns into a symlink, fifo or huge file between two syscalls) is closed by
+    // construction rather than by timing: every check below is made against the descriptor the
+    // reader opened, so there is no second look at the path for a race to win.
+    describe('post-image read for deterministic verification', () => {
+      function scratchDirectory(name: string): string {
+        const directory = realpathSync.native(mkdtempSync(join(tmpdir(), `sprint-coder-${name}-`)));
+        cleanup.push(directory);
+        return directory;
+      }
+
+      it('reads a regular post-image back as raw bytes within the ceiling', () => {
+        const directory = scratchDirectory('post-image-regular');
+        const file = join(directory, 'post-image.txt');
+        writeFileSync(file, 'after\n');
+
+        expect(readVerifiablePostImage(file)).toEqual(Buffer.from('after\n'));
+        expect(readVerifiablePostImage(join(directory, 'never-written.txt'))).toBeNull();
+        writeFileSync(join(directory, 'empty.txt'), '');
+        expect(readVerifiablePostImage(join(directory, 'empty.txt'))).toEqual(Buffer.alloc(0));
+        expect(readVerifiablePostImage(directory)).toBeNull();
+      });
+
+      it('returns the bytes on disk rather than a lossily decoded string', () => {
+        const directory = scratchDirectory('post-image-bytes');
+        const invalid = join(directory, 'invalid-utf8.txt');
+        const replacement = join(directory, 'replacement-character.txt');
+        // `0x80` is not valid UTF-8 and decodes to U+FFFD, the same string a post-image that really
+        // contains U+FFFD decodes to. Only the raw bytes tell the two files apart.
+        writeFileSync(invalid, Buffer.from([0x80]));
+        writeFileSync(replacement, Buffer.from('�', 'utf8'));
+
+        expect(readFileSync(invalid, 'utf8')).toBe(readFileSync(replacement, 'utf8'));
+        expect(readVerifiablePostImage(invalid)).toEqual(Buffer.from([0x80]));
+        expect(readVerifiablePostImage(invalid)).not.toEqual(readVerifiablePostImage(replacement));
+      });
+
+      artifactIt('refuses a post-image that another name still links to', () => {
+        const directory = scratchDirectory('post-image-hardlink');
+        const file = join(directory, 'post-image.txt');
+        writeFileSync(file, 'after\n');
+        linkSync(file, join(directory, 'second-name.txt'));
+
+        expect(readVerifiablePostImage(file)).toBeNull();
+      });
+
+      artifactIt('refuses a post-image path that a symlink has replaced', () => {
+        const directory = scratchDirectory('post-image-symlink');
+        const file = join(directory, 'post-image.txt');
+        const decoy = join(directory, 'decoy.txt');
+        // Byte-identical to the post-image the Edit Saga committed: only `O_NOFOLLOW` separates
+        // reading the file Main wrote from reading whatever was substituted for its path.
+        writeFileSync(decoy, 'after\n');
+        symlinkSync(decoy, file);
+
+        expect(readFileSync(file, 'utf8')).toBe('after\n');
+        expect(readVerifiablePostImage(file)).toBeNull();
+      });
+
+      it('refuses a post-image larger than the verification ceiling', () => {
+        const directory = scratchDirectory('post-image-oversize');
+        const file = join(directory, 'post-image.txt');
+        // Written once and then trimmed to the ceiling rather than written twice: this shard
+        // already runs eight Electron ABI bridge children beside each other, and the multi-megabyte
+        // temp writes are the one part of these tests with a footprint worth keeping small.
+        writeFileSync(file, Buffer.alloc(MAX_VERIFIABLE_POST_IMAGE_BYTES + 1, 0x61));
+        expect(readVerifiablePostImage(file)).toBeNull();
+
+        truncateSync(file, MAX_VERIFIABLE_POST_IMAGE_BYTES);
+        expect(readVerifiablePostImage(file)?.length).toBe(MAX_VERIFIABLE_POST_IMAGE_BYTES);
+      });
+
+      // `open` on a fifo with no writer blocks forever unless `O_NONBLOCK` is set, and it would
+      // block Main synchronously inside the completion path. Dropping that flag fails this as a
+      // timeout rather than as a wrong answer, which is why the case is worth its own test.
+      artifactIt(
+        'refuses a fifo without blocking the completion path',
+        () => {
+          const directory = scratchDirectory('post-image-fifo');
+          const file = join(directory, 'post-image.txt');
+          execFileSync('mkfifo', [file]);
+
+          expect(readVerifiablePostImage(file)).toBeNull();
+        },
+        10_000,
+      );
+    });
+
     artifactIt('does not infer mkdir ancestry from unsealed original path spellings', async () => {
       const { persistence, path } = createPersistence();
       const rootId = randomUUID();
-      const rootIdentityDigest = 'a'.repeat(64);
       const workspacePath = join(dirname(path), 'mkdir-spelling-root');
       const directoryPath = join(workspacePath, 'actual-parent');
       const siblingPath = join(workspacePath, 'actual-sibling');
       const workspaceFile = join(siblingPath, 'file.txt');
       mkdirSync(workspacePath, { recursive: true });
+      const rootIdentityDigest = currentWorkspaceRootIdentityDigest(workspacePath)!;
       const workspaceKey = mutationWorkspaceKey(workspacePath, rootIdentityDigest);
       const project = persistence.createProject({
         name: 'mkdir spelling verification',
@@ -3464,14 +4193,40 @@ if (runsWithElectronAbi)
         finishedAt: '2099-07-23T00:00:01.200Z',
       });
 
+      // Exit 0 is process evidence. It creates no Assurance evidence of its own, and it never has.
       expect(
         persistence
           .listEvidenceRecords(task.id, turn.turnId)
           .some(({ kind }) => kind === 'verification_passed'),
       ).toBe(false);
+
+      // What the command cannot do is stand in for the post-image. Take the file the Saga committed
+      // away and the Turn is refused, however cleanly the command exited — the only thing that can
+      // close the criterion is Main reading those bytes back.
+      rmSync(workspaceFile);
       expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
         AcceptanceEvidenceMissingError,
       );
+
+      // Restored, the Turn completes on Main's own read, and the evidence names the assurance
+      // controller as its producer rather than anything the command did.
+      writeFileSync(workspaceFile, 'after');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+        state: 'completed',
+      });
+      expect(
+        persistence
+          .listEvidenceRecords(task.id, turn.turnId)
+          .filter(({ kind }) => kind === 'verification_passed')
+          .map(({ criterionId, producer }) => ({ criterionId, producer })),
+      ).toEqual([
+        {
+          criterionId: 'verification:command-is-not-assurance-saga',
+          producer: 'assurance-controller',
+        },
+      ]);
       persistence.close();
     });
 
@@ -3658,7 +4413,10 @@ if (runsWithElectronAbi)
           taskId: task.id,
           turnId: turn.turnId,
           operationId: 'cleanup-operation',
-          plan: persistedEditPlan(),
+          // The sealed path has to be the file the boundary actually writes: the completion gate
+          // re-reads each committed Saga's post-image, so a plan naming a path that was never
+          // touched can no longer reach `completed` on a manually recorded Assurance round alone.
+          plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
           createdAt: '2026-07-23T00:00:00.000Z',
         }),
       ).rejects.toBeInstanceOf(EditSagaCrashError);
@@ -8683,6 +9441,98 @@ function fileBoundary(
       const value = (await artifacts.read(reference)).toString('utf8');
       writeFileSync(filePath, value);
       return observeValue(value);
+    },
+  };
+}
+
+/** `[update <updatePath>, delete <deletePath>]`, the batch shape a single `apply_patch` can seal. */
+function persistedUpdateAndDeletePlan(
+  updatePath: string,
+  deletePath: string,
+): PreparedStructuredPatch {
+  const revision = (content: string, name: string) =>
+    Object.freeze({
+      identityDigest: editHash(`identity:${name}`),
+      contentHash: editHash(content),
+      size: Buffer.byteLength(content),
+      mode: 0o100600,
+      nlink: 1 as const,
+    });
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      Object.freeze({
+        kind: 'update' as const,
+        path: updatePath,
+        canonicalPath: updatePath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-batch-update',
+        preRevision: revision('before', 'batch-update'),
+        preImage: 'before',
+        postImage: 'after',
+        preHash: editHash('before'),
+        postHash: editHash('after'),
+      }),
+      Object.freeze({
+        kind: 'delete' as const,
+        path: deletePath,
+        canonicalPath: deletePath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-batch-delete',
+        preRevision: revision('doomed', 'batch-delete'),
+        preImage: 'doomed',
+        postImage: null,
+        preHash: editHash('doomed'),
+        postHash: null,
+      }),
+    ]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+/** Dispatches each step of a batch Saga to the real filesystem by the operation's own kind. */
+function updateAndDeleteBoundary(
+  artifacts: EditArtifactStore,
+  updatePath: string,
+  deletePath: string,
+): EditEffectBoundary {
+  const present = (value: string) => persistedObservation(value, `file:${editHash(value)}`);
+  const absent = (): OperationObservation => ({
+    source: { state: 'absent' },
+    destination: { state: 'absent' },
+  });
+  return {
+    async apply(step: EditSagaStep) {
+      if (step.operation.kind === 'delete') {
+        rmSync(deletePath);
+        return absent();
+      }
+      const reference = step.operation.postArtifact;
+      if (reference === null) throw new Error('missing post artifact');
+      const value = (await artifacts.read(reference)).toString('utf8');
+      writeFileSync(updatePath, value);
+      return present(value);
+    },
+    async observe(step: EditSagaStep) {
+      if (step.operation.kind === 'delete')
+        return existsSync(deletePath)
+          ? { state: 'pre' as const, observation: present('doomed') }
+          : { state: 'post' as const, observation: absent() };
+      const value = readFileSync(updatePath, 'utf8');
+      return value === 'before'
+        ? { state: 'pre' as const, observation: present(value) }
+        : { state: 'post' as const, observation: present(value) };
+    },
+    async restore(step: EditSagaStep) {
+      if (step.operation.kind === 'delete') {
+        writeFileSync(deletePath, 'doomed');
+        return present('doomed');
+      }
+      writeFileSync(updatePath, 'before');
+      return present('before');
     },
   };
 }

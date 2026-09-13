@@ -177,8 +177,21 @@ export class ManagedCommandSessions {
     this.sessions.clear();
   }
 
-  async terminateTurn(owner: Readonly<{ taskId: string; turnId: string }>): Promise<void> {
-    const owned = [...this.sessions.values()].filter(
+  /**
+   * Whether this Turn still owns a command that could be writing to the Workspace.
+   *
+   * Synchronous, and deliberately only an observation. The completion gate must not abort these
+   * sessions: a background `exec_command` outlives the Turn that started it by design, and its
+   * completion is delivered at the next safe point. Cancelling one to let a Turn finish would take
+   * a result the user asked for away from them — so the Turn that owns a live command simply does
+   * not complete, and says so.
+   */
+  hasActiveTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): boolean {
+    return this.activeTurnSessions(owner).length > 0;
+  }
+
+  private activeTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): Session[] {
+    return [...this.sessions.values()].filter(
       (session) =>
         session.taskId === owner.taskId &&
         session.turnId === owner.turnId &&
@@ -186,6 +199,10 @@ export class ManagedCommandSessions {
           session.state === 'running' ||
           session.terminationUnconfirmed),
     );
+  }
+
+  async terminateTurn(owner: Readonly<{ taskId: string; turnId: string }>): Promise<void> {
+    const owned = this.activeTurnSessions(owner);
     for (const session of owned)
       if (session.state === 'starting' || session.state === 'running')
         session.controller.abort(new Error('Managed command Turn canceled'));

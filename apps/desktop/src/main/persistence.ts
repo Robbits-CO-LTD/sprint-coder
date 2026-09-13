@@ -53,14 +53,18 @@ import {
 } from './graph-generation';
 import {
   closeSync,
+  constants,
   copyFileSync,
   fsyncSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -290,6 +294,8 @@ import {
   type OperationObservation,
   type TurnDiffEntry,
 } from './edit-saga';
+import { assertStableSingleLinkFile } from './stable-file-snapshot';
+import { currentWorkspaceRootIdentityDigest } from './path-guard';
 import {
   createNativeMutationIntentSnapshot,
   deriveNativeMutationEffectKind,
@@ -463,6 +469,9 @@ function toGeneratedImage(row: GeneratedImageRow): GeneratedImage {
 
 /** A single generated icon is tens of KB; this is a sanity ceiling, not a target. */
 const MAX_GENERATED_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** Matches the workspace read tool's ceiling: a post-image Main cannot read stays unverified. */
+export const MAX_VERIFIABLE_POST_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /**
  * The 8-byte PNG signature.
@@ -4611,6 +4620,7 @@ export interface PersistenceClient {
   setAutoSkillProvider?(
     provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
+  setSealedPostImageObserver?(observer: SealedPostImageObserver): void;
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
@@ -5345,6 +5355,12 @@ export interface PersistenceClient {
     content: string;
     createdAt: string;
   }): AssuranceRound | null;
+  verifyCommittedEditSagaPostImages(input: {
+    taskId: string;
+    turnId: string;
+    createdAt: string;
+  }): readonly string[];
+  hasCommittedEditSagas(taskId: string, turnId: string): boolean;
   updateEditSaga(
     id: string,
     expectedRevision: number,
@@ -6068,6 +6084,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     | null = null;
   private autoSkillProvider:
     ((runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[]) | null = null;
+  private sealedPostImageObserver: SealedPostImageObserver | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;
 
@@ -6128,6 +6145,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void {
     this.autoSkillProvider = provider;
+  }
+
+  /**
+   * Binds the read-only native observer the completion gate verifies through. Wired up where the
+   * addon is already loaded; until it is, verification observes by path.
+   */
+  setSealedPostImageObserver(observer: SealedPostImageObserver): void {
+    this.sealedPostImageObserver = observer;
   }
 
   /**
@@ -12528,8 +12553,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): { event: TurnEvent; task: TaskSummary | null } {
+    // Opened before the transaction and closed after it commits: the shared locks the observation
+    // sessions hold have to outlive the decision they justify.
+    const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
+    try {
+      return this.completeAndFinishGoalInTransaction(taskId, turnId, state, finalText, observation);
+    } finally {
+      observation?.close();
+    }
+  }
+
+  private completeAndFinishGoalInTransaction(
+    taskId: string,
+    turnId: string,
+    state: 'completed' | 'canceled' | 'failed' | 'interrupted',
+    finalText: string | undefined,
+    observation: TurnSealedObservation | null,
+  ): { event: TurnEvent; task: TaskSummary | null } {
     return this.db.transaction(() => {
-      const event = this.completeTurnInTransaction(taskId, turnId, state, finalText);
+      const event = this.completeTurnInTransaction(
+        taskId,
+        turnId,
+        state,
+        finalText,
+        observation ?? undefined,
+      );
       const current = this.getTaskRow(taskId);
       if (current.goal === null || current.goal_status !== 'active') return { event, task: null };
       const now = new Date();
@@ -16317,6 +16365,266 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  /**
+   * Deterministic verification of every committed Edit Saga in the Turn, run by Main once the
+   * Turn's write activity has stopped. Returns the criterion ids that are still unverified.
+   *
+   * `verification:<sagaId>` evidence used to exist only as a side effect of a model-initiated
+   * `read_file`, so whether a correct edit could complete its Turn depended on whether the model
+   * happened to read the file back: Codex does, Claude Code often does not, and the Turn then died
+   * on `AcceptanceEvidenceMissingError` (issue #466). Main owns the check instead, exactly as the
+   * Assurance design requires — "完了前はwrite activityを止め、対象hashを再確認して".
+   *
+   * The criterion is per Saga, so the check is all-or-nothing across that Saga's operations: a
+   * batch's evidence may not be issued because one of its files happened to match. `[update A,
+   * delete B]` whose B was recreated after the commit no longer holds, and evidence that said
+   * otherwise would close the criterion on a Workspace the Saga does not describe.
+   *
+   * This is not a weaker gate than the trusted read it replaces: the evidence is still
+   * Main-observed and still requires every sealed post-image to be present on disk as written, so
+   * a write that was reverted, clobbered or superseded records nothing and keeps its criterion
+   * open. Only the dependency on the model's behaviour is removed.
+   */
+  verifyCommittedEditSagaPostImages(input: {
+    taskId: string;
+    turnId: string;
+    createdAt: string;
+  }): readonly string[] {
+    const observation = this.openSealedObservation(input.taskId, input.turnId);
+    try {
+      return this.db.transaction(() =>
+        this.verifyEditSagaPostImagesInTransaction(
+          input.taskId,
+          input.turnId,
+          input.createdAt,
+          observation,
+        ),
+      )();
+    } finally {
+      observation.close();
+    }
+  }
+
+  /** Whether the Turn committed any Edit Saga, i.e. whether it has a post-image to verify. */
+  hasCommittedEditSagas(taskId: string, turnId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 AS present FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed' LIMIT 1`,
+        )
+        .get(taskId, turnId) !== undefined
+    );
+  }
+
+  /**
+   * The body of the verification, so the completion gate can run it inside the transaction that
+   * decides and writes the Turn's outcome rather than in one of its own.
+   *
+   * Every committed Saga is re-checked, including Sagas that already hold `verification_passed`
+   * evidence. Evidence is a record of what was true when it was written, not a standing promise:
+   * `apply_patch(A→B)`, a trusted `read_file(B)` that closed the criterion, then `apply_patch(B→C)`
+   * leaves the first Saga's evidence valid while the B it attested to no longer exists anywhere.
+   * A Saga that no longer holds has its criterion reported open however much evidence it carries.
+   *
+   * Supersession is resolved per path rather than per Saga: the last operation in the Turn to touch
+   * a path owns that path's final state, and every earlier operation on it is judged by that final
+   * expectation. So `A→B→C` verifies both Sagas once C is on disk, and neither once it is not.
+   *
+   * The Workspace root each Saga was sealed against is checked too. Paths alone cannot say which
+   * directory they name: rename the root away, put a fresh directory of the same name in its place,
+   * and every canonical path still resolves — to a tree the Saga never touched. Comparing the
+   * root's current identity with the digest sealed into the Saga is what distinguishes them.
+   */
+  private verifyEditSagaPostImagesInTransaction(
+    taskId: string,
+    turnId: string,
+    createdAt: string,
+    observation: TurnSealedObservation,
+  ): readonly string[] {
+    const sagas = observation.sagas;
+    const rootIsSealed = this.sealedTurnRootPredicate(taskId, turnId, observation);
+    const failed: string[] = [];
+    const holds = turnPostImageVerifier(sagas, observation.observe);
+    for (const saga of sagas) {
+      if (!rootIsSealed(saga) || !holds(saga)) {
+        failed.push(`verification:${saga.id}`);
+        continue;
+      }
+      // A Saga whose Assurance is already settled must not be advanced again: a second round on a
+      // `complete` or `blocked` decision is rejected by the state machine, and a Turn with one
+      // such Saga would otherwise take the whole verification pass down with it.
+      const settled = this.listAssuranceRounds(taskId, turnId, saga.id).at(-1);
+      if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
+      this.recordAssuranceVerification({
+        taskId,
+        turnId,
+        sagaId: saga.id,
+        outcome: 'passed',
+        failureClass: null,
+        createdAt,
+      });
+    }
+    const open = decideCompletion(
+      this.getAcceptanceContract(taskId, turnId),
+      this.listEvidenceRecords(taskId, turnId),
+    ).openCriterionIds;
+    return Object.freeze([...new Set([...open, ...failed])]);
+  }
+
+  /**
+   * Opens the observation source for one Turn's verification.
+   *
+   * Each Workspace root gets one read-only native session, which pins the root and walks every path
+   * component descriptor-relative — the same primitive the mutation path writes through, so the
+   * object being verified is the one that was pinned rather than whatever the path resolves to.
+   * A root whose session cannot be opened (an exclusive mutation session holds it, the root moved)
+   * observes nothing, and every endpoint under it stays unverified rather than being taken on trust.
+   *
+   * Where no observer is wired up at all — Windows until its backend lands, and any build whose
+   * mutation gate is closed and so cannot have written an Edit Saga — observation falls back to the
+   * path-based reader, which is weaker in the way `pathSealedObservation` describes.
+   */
+  openSealedObservation(taskId: string, turnId: string): TurnSealedObservation {
+    const sagas = (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed'
+           ORDER BY updated_at, id`,
+        )
+        .all(taskId, turnId) as EditSagaRow[]
+    ).map(toEditSaga);
+    const observer = this.sealedPostImageObserver;
+    if (observer === null || sagas.length === 0)
+      return Object.freeze({
+        sagas,
+        observe: pathSealedObservation,
+        rootIdentity: () => undefined,
+        close: () => undefined,
+      });
+    const rootPaths = new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT root_id, canonical_path, workspace_key
+             FROM turn_workspace_roots WHERE turn_id = ?`,
+          )
+          .all(turnId) as { root_id: string; canonical_path: string; workspace_key: string }[]
+      ).map((row) => [row.root_id, row] as const),
+    );
+    // Last writer wins, exactly as the expectations do, so a path is observed through the root of
+    // the Saga that owns its final state.
+    const rootOfPath = new Map<string, string | null>();
+    for (const saga of sagas)
+      for (const { operation } of saga.steps)
+        for (const { path } of sealedPathExpectations(operation)) rootOfPath.set(path, saga.rootId);
+    // `unsupported` is not a failure to verify: it means this build has no native backend for the
+    // platform, so the path reader answers instead, exactly as it does with no observer at all.
+    const sessions = new Map<string, SealedPostImageSession | 'unsupported' | null>();
+    const sessionFor = (rootId: string): SealedPostImageSession | 'unsupported' | null => {
+      if (!sessions.has(rootId)) {
+        const root = rootPaths.get(rootId);
+        let session: SealedPostImageSession | 'unsupported' | null;
+        try {
+          session =
+            root === undefined
+              ? null
+              : observer({
+                  rootId,
+                  workspacePath: root.canonical_path,
+                  workspaceKey: root.workspace_key,
+                });
+        } catch (error) {
+          // An exclusive mutation session holds the root, or the root moved: this Turn cannot be
+          // verified right now, which is not the same as failing verification.
+          session = error instanceof SealedPostImageUnsupportedError ? 'unsupported' : null;
+        }
+        sessions.set(rootId, session);
+      }
+      return sessions.get(rootId) ?? null;
+    };
+    return Object.freeze({
+      sagas,
+      rootIdentity: (rootId: string | null) => {
+        if (rootId === null) return undefined;
+        const session = sessionFor(rootId);
+        return session === null || session === 'unsupported'
+          ? undefined
+          : session.rootIdentityDigest;
+      },
+      observe: (canonicalPath: string): SealedPostImageObservation | null => {
+        const rootId = rootOfPath.get(canonicalPath);
+        // A legacy Saga with no sealed root has no session to observe through.
+        if (rootId === undefined || rootId === null) return pathSealedObservation(canonicalPath);
+        const session = sessionFor(rootId);
+        if (session === 'unsupported') return pathSealedObservation(canonicalPath);
+        const root = rootPaths.get(rootId);
+        if (session === null || root === undefined) return null;
+        const segments = relative(root.canonical_path, canonicalPath).split(sep);
+        if (segments.length === 0 || segments[0] === '' || segments[0] === '..') return null;
+        try {
+          return session.observe(segments);
+        } catch {
+          return null;
+        }
+      },
+      close: () => {
+        for (const session of sessions.values())
+          try {
+            if (session !== null && session !== 'unsupported') session.close();
+          } catch {
+            // The verdict is already decided; a failed close cannot change it.
+          }
+        sessions.clear();
+      },
+    });
+  }
+
+  /**
+   * Whether each committed Saga's Workspace root is still the directory it was sealed against.
+   *
+   * A canonical path names a location, not a directory. Rename the root away, put a fresh directory
+   * of the same name back, and every path under it resolves again — to a tree no Saga in this Turn
+   * ever wrote to, where a planted file can match a sealed post hash. The root identity the Saga
+   * carries is what tells the two apart, and it is compared with the same digest `PathGuard` seals.
+   */
+  private sealedTurnRootPredicate(
+    taskId: string,
+    turnId: string,
+    observation: TurnSealedObservation,
+  ): (saga: EditSagaSnapshot) => boolean {
+    const rootPaths = new Map(
+      (
+        this.db
+          .prepare('SELECT root_id, canonical_path FROM turn_workspace_roots WHERE turn_id = ?')
+          .all(turnId) as { root_id: string; canonical_path: string }[]
+      ).map((row) => [row.root_id, row.canonical_path] as const),
+    );
+    const taskWorkspacePath = this.getTaskRow(taskId).workspace_path;
+    const observed = new Map<string, string | null>();
+    const identityOf = (rootPath: string): string | null => {
+      if (!observed.has(rootPath))
+        observed.set(rootPath, currentWorkspaceRootIdentityDigest(rootPath));
+      return observed.get(rootPath) ?? null;
+    };
+    return (saga) => {
+      // A Saga sealed before roots carried an identity has nothing to compare against. The parent
+      // chain and the post-image hash still gate it; this check simply cannot speak for it.
+      if (saga.rootIdentityDigest === null) return true;
+      // From the descriptor the observation session pinned wherever there is one, so the identity
+      // compared is the root the observations are actually made through. Only a Turn with no native
+      // session falls back to stat'ing the path, which is a second look at something that could
+      // have moved since.
+      const pinned = observation.rootIdentity(saga.rootId);
+      if (pinned !== undefined) return pinned === saga.rootIdentityDigest;
+      const rootPath =
+        saga.rootId === null ? taskWorkspacePath : (rootPaths.get(saga.rootId) ?? null);
+      if (rootPath === null) return false;
+      return identityOf(rootPath) === saga.rootIdentityDigest;
+    };
+  }
+
   private insertAcceptanceContract(contract: AcceptanceContract): void {
     this.db
       .prepare(
@@ -17304,9 +17612,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
   ): TurnEvent {
-    return this.db.transaction(() =>
-      this.completeTurnInTransaction(taskId, turnId, state, finalText),
-    )();
+    // As in `completeTurnAndFinishGoal`: the observation outlives the transaction it justifies.
+    const observation = state === 'completed' ? this.openSealedObservation(taskId, turnId) : null;
+    try {
+      return this.db.transaction(() =>
+        this.completeTurnInTransaction(taskId, turnId, state, finalText, observation ?? undefined),
+      )();
+    } finally {
+      observation?.close();
+    }
   }
 
   cancelTurn(taskId: string, turnId: string): TurnEvent | null {
@@ -19131,14 +19445,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     turnId: string,
     state: 'completed' | 'canceled' | 'failed' | 'interrupted',
     finalText?: string,
+    observation?: TurnSealedObservation,
   ): TurnEvent {
     const turn = this.getTurn(taskId, turnId);
     if (state === 'completed') {
-      const decision = decideCompletion(
-        this.getAcceptanceContract(taskId, turnId),
-        this.listEvidenceRecords(taskId, turnId),
+      // One gate, one transaction. Observing the post-images in a transaction of their own and then
+      // deciding in this one would leave a window where a writer could change a file between the
+      // evidence and the decision that trusts it: the Turn would complete on bytes that were true a
+      // moment ago. The observation sessions are opened before this transaction and closed after it
+      // commits, so the reads, the evidence they produce, and the terminal state they justify all
+      // commit together or not at all (issue #466 review).
+      const open = this.verifyEditSagaPostImagesInTransaction(
+        taskId,
+        turnId,
+        new Date().toISOString(),
+        observation ?? this.openSealedObservation(taskId, turnId),
       );
-      if (!decision.allowed) throw new AcceptanceEvidenceMissingError(decision.openCriterionIds);
+      if (open.length > 0) throw new AcceptanceEvidenceMissingError(open);
     }
     this.cancelPendingApprovals(taskId, turnId, new Date().toISOString());
     transitionTurn(turn.state, state);
@@ -19759,6 +20082,301 @@ function displayTurnDiffPath(
     return value;
   const relativePath = normalizeWorkspaceDisplayRelativePath(candidate, process.platform);
   return relativePath === null ? value : formatWorkspaceDisplayPath(label, relativePath);
+}
+
+/** What is at a sealed endpoint now, however it was observed. */
+export type SealedPostImageObservation =
+  | Readonly<{ kind: 'file'; contentHash: string }>
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'directory' }>
+  | Readonly<{ kind: 'other' }>;
+
+/** Null means "this path could not be observed", which the verifier reads as unverified. */
+type SealedObservationSource = (canonicalPath: string) => SealedPostImageObservation | null;
+
+/** A read-only view of one Workspace root. `observe` throws when the endpoint is not observable. */
+export type SealedPostImageSession = Readonly<{
+  /** The pinned root's identity, from the descriptor this session holds — never from the path. */
+  rootIdentityDigest: string;
+  observe(segments: readonly string[]): SealedPostImageObservation;
+  close(): void;
+}>;
+
+/** Thrown by an observer whose backend has no implementation on this platform. */
+export class SealedPostImageUnsupportedError extends Error {}
+
+/**
+ * One Turn's open observation. Held across the completion transaction and closed after it commits,
+ * so the shared locks the sessions hold are still in place while the decision they justify is
+ * written — releasing them first would leave a window where the Workspace could move between the
+ * last observation and the durable outcome.
+ */
+export type TurnSealedObservation = Readonly<{
+  sagas: readonly EditSagaSnapshot[];
+  observe: SealedObservationSource;
+  /** The pinned identity of a root, or undefined when nothing pinned it. */
+  rootIdentity: (rootId: string | null) => string | undefined;
+  close: () => void;
+}>;
+
+/**
+ * Opens a read-only view of a Workspace root, or returns null when this build has none.
+ *
+ * Injected rather than imported so persistence keeps no dependency on the native addon: the port is
+ * wired up where the addon already lives, and a build without it falls back to observation by path.
+ */
+export type SealedPostImageObserver = (
+  root: Readonly<{ rootId: string; workspacePath: string; workspaceKey: string }>,
+) => SealedPostImageSession | null;
+
+/** What one sealed operation says a single path should look like once the Saga has committed. */
+type SealedPathExpectation =
+  | Readonly<{ path: string; kind: 'content'; contentHash: string | null }>
+  | Readonly<{ path: string; kind: 'absent' }>
+  | Readonly<{ path: string; kind: 'directory' }>;
+
+/**
+ * Builds the "does this committed Saga still describe the Workspace?" test for one Turn.
+ *
+ * Two rules, and they interact:
+ *
+ *   - **All-or-nothing per Saga**, because the Acceptance criterion is per Saga. A batch is only as
+ *     verified as its least verified operation, and a Saga with no steps has observed nothing.
+ *   - **Last writer wins per path.** A Turn may rewrite the same file repeatedly, and only the last
+ *     operation to touch a path describes that path's final state. Judging an earlier Saga by its
+ *     own post-image would fail every Turn that edited a file twice; judging it by the final
+ *     expectation keeps the whole chain honest — `A→B→C` verifies both Sagas once C is on disk, and
+ *     neither once it is not.
+ *
+ * `sagas` must be ordered oldest commit first. Filesystem answers are memoised per path: a Turn's
+ * Sagas overlap heavily and each path only has one final expectation to check.
+ */
+function turnPostImageVerifier(
+  sagas: readonly EditSagaSnapshot[],
+  observe: SealedObservationSource,
+): (saga: EditSagaSnapshot) => boolean {
+  const finalExpectations = new Map<string, SealedPathExpectation>();
+  for (const saga of sagas)
+    for (const { operation } of saga.steps)
+      for (const expectation of sealedPathExpectations(operation))
+        finalExpectations.set(expectation.path, expectation);
+  const observed = new Map<string, boolean>();
+  const satisfied = (path: string): boolean => {
+    const cached = observed.get(path);
+    if (cached !== undefined) return cached;
+    const expectation = finalExpectations.get(path);
+    const holds = expectation === undefined ? false : expectationHolds(expectation, observe(path));
+    observed.set(path, holds);
+    return holds;
+  };
+  return (saga) =>
+    saga.steps.length > 0 &&
+    saga.steps.every(({ operation }) =>
+      sealedPathExpectations(operation).every(({ path }) => satisfied(path)),
+    );
+}
+
+/**
+ * The paths one operation is responsible for, and what each should be.
+ *
+ * A rename owns two: the destination has to hold the moved bytes *and* the source has to be gone,
+ * so a rename whose source came back is not verified by its destination alone.
+ */
+function sealedPathExpectations(
+  operation: JournaledPatchOperation,
+): readonly SealedPathExpectation[] {
+  switch (operation.kind) {
+    case 'mkdir':
+      return [{ path: operation.canonicalPath, kind: 'directory' }];
+    case 'delete':
+      return [{ path: operation.canonicalPath, kind: 'absent' }];
+    case 'rename':
+      return [
+        { path: operation.canonicalPath, kind: 'absent' },
+        // A sealed rename always carries its destination; one without is unverifiable, and a null
+        // content hash can never be satisfied, so such an operation fails closed.
+        {
+          path: operation.canonicalDestination ?? operation.canonicalPath,
+          kind: 'content',
+          contentHash: operation.canonicalDestination === null ? null : operation.postHash,
+        },
+      ];
+    default:
+      return [{ path: operation.canonicalPath, kind: 'content', contentHash: operation.postHash }];
+  }
+}
+
+/**
+ * Compares one sealed expectation with what was observed. Pure: the observation is made outside, so
+ * a build that can pin the object it reads and one that can only name it produce the same verdict
+ * from the same facts. A null observation is "could not be observed", which is never a pass.
+ */
+function expectationHolds(
+  expectation: SealedPathExpectation,
+  observation: SealedPostImageObservation | null,
+): boolean {
+  if (observation === null) return false;
+  switch (expectation.kind) {
+    case 'absent':
+      return observation.kind === 'absent';
+    case 'directory':
+      return observation.kind === 'directory';
+    default:
+      return (
+        expectation.contentHash !== null &&
+        observation.kind === 'file' &&
+        observation.contentHash === expectation.contentHash
+      );
+  }
+}
+
+/**
+ * Observation by path, for builds with no native read session (Windows today, and any build whose
+ * mutation gate is closed — which cannot have written an Edit Saga in the first place).
+ *
+ * Weaker than the native walk on one specific point, and the difference is worth stating: this
+ * re-resolves the parent chain either side of the read rather than pinning it, so a parent swapped
+ * for a link between the check and the open is caught only if it is still swapped when the read
+ * ends. Node has no `openat`; `observeSealedPostImage` exists because of exactly this.
+ */
+function pathSealedObservation(path: string): SealedPostImageObservation | null {
+  if (!parentChainIsUnchanged(path)) return null;
+  const kind = statKindOf(path);
+  if (kind === 'unknown') return null;
+  if (kind === 'absent') return Object.freeze({ kind: 'absent' });
+  if (kind === 'directory') return Object.freeze({ kind: 'directory' });
+  const bytes = readVerifiablePostImage(path);
+  return bytes === null
+    ? Object.freeze({ kind: 'other' })
+    : Object.freeze({
+        kind: 'file',
+        contentHash: createHash('sha256').update(bytes).digest('hex'),
+      });
+}
+
+function statKindOf(canonicalPath: string): 'absent' | 'directory' | 'other' | 'unknown' {
+  try {
+    const stat = lstatSync(canonicalPath, { throwIfNoEntry: false });
+    if (stat === undefined) return 'absent';
+    return stat.isDirectory() ? 'directory' : 'other';
+  } catch {
+    // A path that cannot be stat'ed at all has been observed to be nothing in particular.
+    return 'unknown';
+  }
+}
+
+/**
+ * Whether every directory above this path is still the one the sealed canonical path names.
+ *
+ * `O_NOFOLLOW` only guards the last component. A canonical path is resolved through `realpath` when
+ * the PathGuard seals it, so re-resolving it has to give the same answer back; if a parent inside
+ * the Workspace has since become a symlink or a junction pointing somewhere else, `realpath` walks
+ * out to the decoy and the two disagree. Without this, a matching leaf `fstat`/`lstat` pair on a
+ * planted file outside the Workspace would satisfy a criterion (issue #466 review).
+ *
+ * The parent is resolved rather than the path itself so a deleted or renamed-away leaf — which has
+ * no `realpath` — is still checked against an honest directory chain.
+ */
+function parentChainIsUnchanged(canonicalPath: string): boolean {
+  const parent = dirname(canonicalPath);
+  try {
+    return realpathSync.native(parent) === parent;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reads a committed Edit Saga's post-image back for deterministic verification, as raw bytes, or
+ * null when what is at the path is not a stable plain file holding exactly those bytes.
+ *
+ * **Bytes, not a string.** `Buffer.toString('utf8')` maps every invalid sequence to U+FFFD, so a
+ * post-image that legitimately contains U+FFFD and a file holding a lone `0x80` decode to the same
+ * string and would hash alike. The sealed post hash is the sha256 of the bytes that were written,
+ * so the comparison has to be made against bytes.
+ *
+ * **Every check is bound to the descriptor this function opened**, never to the path on its own,
+ * because the path is inside a Workspace the model was just writing to and anything could take its
+ * place between two syscalls:
+ *
+ *   - **`O_NOFOLLOW`.** A symlink planted at the path fails the open (`ELOOP`) instead of handing
+ *     back some other file's bytes. Windows has no such flag and would follow a reparse point, so
+ *     the `lstat` below refuses a symlink there — and cross-checks its identity against the
+ *     descriptor, so a path pointing at a different inode than the one being read is refused on
+ *     every platform. `O_NOFOLLOW` only guards the last component, so the parent chain is
+ *     re-resolved separately (`parentChainIsUnchanged`), before the open and again after the read.
+ *
+ * **Known residual window.** Re-resolving the parent is a check, not a pin: between the `realpath`
+ * that passed and the `openSync` that follows, a parent directory inside the Workspace could be
+ * swapped for a link elsewhere, and the post-read re-resolution only catches a swap still in place
+ * when the read ends. Node has no `openat`, so this cannot be closed from JavaScript. The write
+ * side does not share the window — `NativeSafeFsEditEffectBoundary` is the only production
+ * `EditEffectBoundary` (`index.ts`), and it opens every component descriptor-relative with
+ * `O_NOFOLLOW|O_DIRECTORY` (`native_safe_fs.cc` `OpenRelativeParent`) or, on Windows, with
+ * `FILE_OPEN_REPARSE_POINT` per segment (`native_safe_fs_win_mutation.cc` `OpenDirectoryPath`).
+ * Closing it here means reading through that same addon, whose content-hash entry point is
+ * asynchronous and session-bound, which this verifier — deliberately inside the completion
+ * transaction — cannot call. See the issue #466 review thread.
+ *   - **`O_NONBLOCK`.** Opening a fifo for reading blocks until a writer appears, which would hang
+ *     the Main process inside the completion path. With this flag the open returns immediately and
+ *     `fstat` reports a fifo, not a file, so it is refused like any other non-regular entry.
+ *   - **`fstat` on the descriptor.** Regular files only, and the ceiling matches the workspace read
+ *     tool so an unbounded file cannot be pulled into memory while a Turn is being finalised.
+ *   - **A buffer sized from that same `fstat`, then an EOF probe.** Bytes appended to the same
+ *     inode after the size was taken would otherwise leave this returning a prefix that still
+ *     hashes to the sealed post image while the file on disk says something longer.
+ *   - **`assertStableSingleLinkFile` over all four observations.** The path and the descriptor must
+ *     agree on one single-link regular inode whose size and mtime did not move across the read.
+ *
+ * Callers compare these bytes against the sealed post hash, so every refusal here records no
+ * evidence and leaves the criterion open.
+ */
+export function readVerifiablePostImage(canonicalPath: string): Buffer | null {
+  // Checked here as well as in the expectation that calls this, so the reader cannot be handed a
+  // path whose parent has been swapped and answer as if the leaf were the only thing that mattered.
+  if (!parentChainIsUnchanged(canonicalPath)) return null;
+  let fd: number | null = null;
+  try {
+    fd = openSync(
+      canonicalPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile() || opened.size > BigInt(MAX_VERIFIABLE_POST_IMAGE_BYTES)) return null;
+    const lexical = lstatSync(canonicalPath, { bigint: true });
+    const size = Number(opened.size);
+    const buffer = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const chunk = readSync(fd, buffer, read, size - read, read);
+      if (chunk === 0) break;
+      read += chunk;
+    }
+    // Short of the size `fstat` reported, or longer than it: either way these are not the whole
+    // contents of the file that is there now.
+    if (read !== size || readSync(fd, Buffer.alloc(1), 0, 1, size) !== 0) return null;
+    assertStableSingleLinkFile(
+      lexical,
+      opened,
+      fstatSync(fd, { bigint: true }),
+      lstatSync(canonicalPath, { bigint: true }),
+      buffer,
+    );
+    // Re-resolved after the read as well as before the open. It does not make the walk atomic — see
+    // the note above — but a parent that is still a link to somewhere else when the read finishes
+    // is refused rather than reported as verified.
+    if (!parentChainIsUnchanged(canonicalPath)) return null;
+    return buffer;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null)
+      try {
+        closeSync(fd);
+      } catch {
+        // The bytes are already read or already refused; a failed close cannot change either.
+      }
+  }
 }
 
 function mkdirSagaVerifiedByDescendantRead(

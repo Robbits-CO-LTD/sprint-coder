@@ -2882,6 +2882,220 @@ napi_value ObserveDirectory(napi_env env, napi_callback_info info) {
                                   has_ownership_token ? &ownership_token : nullptr);
 }
 
+// Read-only session, for verifying that a sealed post-image is still on disk.
+//
+// Deliberately not a mutation session. It takes a *shared* lock on the workspace root and never
+// touches the durable fence: a verification must not consume a fence generation, and must not
+// invalidate a live mutation session by raising `highest_fences`. An exclusive lock held by a real
+// mutation session makes the open fail with `LOCK_BUSY`, which the caller reads as "cannot verify"
+// rather than as "verified".
+struct ReadSession {
+  std::string id;
+  std::string workspace_key;
+  std::string workspace_path;
+  int root_fd = -1;
+};
+
+std::mutex read_session_mutex;
+std::unordered_map<std::string, ReadSession> read_sessions;
+
+bool CaptureReadSessionRoot(const std::string& session_id, int* root_fd,
+                            std::string* workspace_path, NativeFailure* failure) {
+  std::lock_guard<std::mutex> guard(read_session_mutex);
+  auto found = read_sessions.find(session_id);
+  if (found == read_sessions.end()) {
+    *failure = {"STALE_SESSION", "NativeSafeFs read session is stale"};
+    return false;
+  }
+  *root_fd = dup(found->second.root_fd);
+  if (*root_fd < 0) {
+    *failure = {"NATIVE_FAILURE", ErrnoMessage("duplicate read session root")};
+    return false;
+  }
+  *workspace_path = found->second.workspace_path;
+  return true;
+}
+
+napi_value OpenReadSession(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  ReadSession session;
+  std::string root_id;
+  std::string root_dev;
+  std::string root_ino;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadString(env, argv[0], "rootId", &root_id) ||
+      !ReadString(env, argv[0], "workspacePath", &session.workspace_path) ||
+      !ReadString(env, argv[0], "rootDev", &root_dev) ||
+      !ReadString(env, argv[0], "rootIno", &root_ino) ||
+      !ReadString(env, argv[0], "workspaceKey", &session.workspace_key) ||
+      !IsLowerHex(session.workspace_key, 64))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs read session input");
+
+  NativeFailure failure;
+  session.root_fd = OpenDirectoryChain(session.workspace_path, &failure, "UNSAFE_PATH");
+  if (session.root_fd < 0) return ThrowFailure(env, failure.code, failure.message);
+  struct stat root_stat {};
+  if (fstat(session.root_fd, &root_stat) != 0) {
+    CloseFd(&session.root_fd);
+    return ThrowFailure(env, "NATIVE_FAILURE", "Failed to stat workspace root");
+  }
+  if (std::to_string(static_cast<uint64_t>(root_stat.st_dev)) != root_dev ||
+      std::to_string(static_cast<uint64_t>(root_stat.st_ino)) != root_ino) {
+    CloseFd(&session.root_fd);
+    return ThrowFailure(env, "ROOT_IDENTITY_CHANGED", "Workspace root identity changed");
+  }
+  if (flock(session.root_fd, LOCK_SH | LOCK_NB) != 0) {
+    const bool busy = errno == EWOULDBLOCK;
+    CloseFd(&session.root_fd);
+    return ThrowFailure(env, busy ? "LOCK_BUSY" : "NATIVE_FAILURE",
+                        "Failed to share-lock workspace root");
+  }
+  if (!VerifyDirectoryNamespace(session.workspace_path, session.root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&session.root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  session.id = RandomSessionId();
+  if (session.id.empty()) {
+    CloseFd(&session.root_fd);
+    return ThrowFailure(env, "NATIVE_FAILURE", "Failed to generate a NativeSafeFs session id");
+  }
+  const std::string id = session.id;
+  {
+    std::lock_guard<std::mutex> guard(read_session_mutex);
+    read_sessions.emplace(id, session);
+  }
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "id", MakeString(env, id));
+  napi_set_named_property(env, result, "rootId", MakeString(env, root_id));
+  napi_set_named_property(env, result, "workspaceKey", MakeString(env, session.workspace_key));
+  // From the descriptor that is pinned and share-locked, not from a second look at the path. The
+  // caller compares this with the identity its Sagas were sealed against, so it has to describe the
+  // directory the observations will actually be made through.
+  napi_set_named_property(
+      env, result, "rootDev",
+      MakeString(env, std::to_string(static_cast<uint64_t>(root_stat.st_dev))));
+  napi_set_named_property(
+      env, result, "rootIno",
+      MakeString(env, std::to_string(static_cast<uint64_t>(root_stat.st_ino))));
+  return result;
+}
+
+napi_value CloseReadSession(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string session_id;
+  napi_valuetype type;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadString(env, argv[0], "id", &session_id))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs read session handle");
+  int root_fd = -1;
+  {
+    std::lock_guard<std::mutex> guard(read_session_mutex);
+    auto found = read_sessions.find(session_id);
+    // Closing an already-closed session is not an error: the caller's `finally` must be able to run
+    // whatever happened in between.
+    if (found != read_sessions.end()) {
+      root_fd = found->second.root_fd;
+      read_sessions.erase(found);
+    }
+  }
+  CloseFd(&root_fd);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
+
+napi_value MakeSealedObservation(napi_env env, const char* kind,
+                                 const RevisionObservation* observation) {
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "kind", MakeString(env, kind));
+  if (observation != nullptr) {
+    napi_set_named_property(env, result, "contentHash",
+                            MakeString(env, observation->content_hash));
+    napi_set_named_property(env, result, "identityDigest",
+                            MakeString(env, observation->identity_digest));
+    napi_value size;
+    napi_create_uint32(env, observation->size, &size);
+    napi_set_named_property(env, result, "size", size);
+  }
+  return result;
+}
+
+// Observes one sealed endpoint through the same descriptor-relative walk the mutation path writes
+// through: `OpenRelativeParent` opens every component from the pinned root with
+// `O_NOFOLLOW|O_DIRECTORY`, so no parent can be swapped for a link between the check and the open —
+// the object being read is the one that was pinned, not whatever a path happens to resolve to.
+napi_value ObserveSealedPostImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  napi_valuetype type;
+  std::string session_id;
+  std::vector<std::string> segments;
+  if (argc != 1 || napi_typeof(env, argv[0], &type) != napi_ok || type != napi_object ||
+      !ReadDirectoryInput(env, argv[0], &session_id, &segments))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs observation input");
+
+  NativeFailure failure;
+  int root_fd = -1;
+  std::string workspace_path;
+  if (!CaptureReadSessionRoot(session_id, &root_fd, &workspace_path, &failure))
+    return ThrowFailure(env, failure.code, failure.message);
+  if (!VerifyDirectoryNamespace(workspace_path, root_fd, &failure, "UNSAFE_PATH")) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  int parent_fd = OpenRelativeParent(root_fd, segments, &failure);
+  if (parent_fd < 0) {
+    CloseFd(&root_fd);
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  const char* kind = nullptr;
+  RevisionObservation observation;
+  bool observed = false;
+  struct stat namespace_stat {};
+  if (fstatat(parent_fd, segments.back().c_str(), &namespace_stat, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno == ENOENT) {
+      kind = "absent";
+    } else {
+      failure = {"UNSAFE_PATH", ErrnoMessage("stat sealed endpoint")};
+    }
+  } else if (S_ISDIR(namespace_stat.st_mode)) {
+    kind = "directory";
+  } else if (!S_ISREG(namespace_stat.st_mode) || namespace_stat.st_nlink != 1) {
+    // A symlink, a fifo, a device, or a file another name still links to. None of them is the
+    // unique regular file a sealed post-image describes.
+    kind = "other";
+  } else {
+    int file_fd = openat(parent_fd, segments.back().c_str(),
+                         O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (file_fd < 0) {
+      failure = {"UNSAFE_PATH", ErrnoMessage("open sealed endpoint")};
+    } else {
+      observed = ObserveOpenFile(file_fd, namespace_stat, &observation, &failure);
+      if (observed) kind = "file";
+      CloseFd(&file_fd);
+    }
+  }
+  // The parent chain has to still be the one that was walked; otherwise the answer describes a
+  // directory that is no longer at this path.
+  if (kind != nullptr && !VerifyRelativeParentNamespace(root_fd, segments, parent_fd, &failure))
+    kind = nullptr;
+  CloseFd(&parent_fd);
+  CloseFd(&root_fd);
+  if (kind == nullptr) {
+    if (failure.code.empty()) failure = {"UNSAFE_PATH", "NativeSafeFs endpoint was not observable"};
+    return ThrowFailure(env, failure.code, failure.message);
+  }
+  return MakeSealedObservation(env, kind, observed ? &observation : nullptr);
+}
+
 napi_value CreateDirectory(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -3430,6 +3644,14 @@ void Cleanup(void*) {
     prepared_execution_images.clear();
   }
 #endif
+  {
+    std::lock_guard<std::mutex> read_guard(read_session_mutex);
+    for (auto& [id, session] : read_sessions) {
+      (void)id;
+      CloseFd(&session.root_fd);
+    }
+    read_sessions.clear();
+  }
   std::lock_guard<std::mutex> guard(state.mutex);
   for (auto& [id, session] : state.sessions) {
     (void)id;
@@ -3542,6 +3764,12 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"observeDirectory", nullptr, ObserveDirectory, nullptr, nullptr, nullptr, napi_default,
        nullptr},
+      {"openReadSession", nullptr, OpenReadSession, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"closeReadSession", nullptr, CloseReadSession, nullptr, nullptr, nullptr, napi_default,
+       nullptr},
+      {"observeSealedPostImage", nullptr, ObserveSealedPostImage, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"createDirectory", nullptr, CreateDirectory, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"inspectDirectoryOwnership", nullptr, InspectDirectoryOwnership, nullptr, nullptr, nullptr,
