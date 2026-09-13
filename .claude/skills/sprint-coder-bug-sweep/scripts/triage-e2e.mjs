@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 
 const argv = process.argv.slice(2);
 const reportPath = argv[0];
@@ -91,12 +92,16 @@ const staleFlag = argv.includes('--stale-vite-cache');
 const stalePkgs = stalePackages();
 const staleCache = staleFlag || stalePkgs.size > 0;
 const staleFor = (pkg) => staleFlag || stalePkgs.has(pkg);
-// Only VALUE exports count: `export type` / `export interface` are erased at build time, so treating
-// them as exports would clear a genuine "imported a value that no longer exists" regression. The
-// lookup starts at the package's public entrypoint (packages/<pkg>/src/index.ts) and follows its
-// `export { … } from` re-exports; `export * from` is NOT followed and yields null (cannot tell).
-const VALUE_DECL = (name) => new RegExp(`export\\s+(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:const|let|var|function\\s*\\*?|class|enum)\\s+${name}\\b`);
-const LOCAL_DECL = (name) => new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:declare\\s+)?(?:abstract\\s+)?(?:async\\s+)?(?:const|let|var|function\\s*\\*?|class|enum)\\s+${name}\\b`);
+// Only VALUE exports count: `export type` / `export interface` / `export declare …` are erased at
+// build time, so treating them as exports would clear a genuine "imported a value that no longer
+// exists" regression. The lookup starts at the package's public entrypoint
+// (packages/<pkg>/src/index.ts) and follows its `export { … } from` re-exports; `export * from` is
+// NOT followed and yields null (cannot tell). Parsing uses the repo's own typescript when it
+// resolves, so comments, strings and ambient declarations cannot be mistaken for real exports; the
+// regex fallback strips comments and string literals and gives up (null) on ambient module blocks.
+const require_ = createRequire(import.meta.url);
+let ts = null;
+if (!process.env.TRIAGE_E2E_NO_TS) { try { ts = require_('typescript'); } catch { ts = null; } }
 function resolveModule(fromFile, spec) {
   if (!spec.startsWith('.')) return null; // a bare specifier leaves this package: cannot tell
   const base = path.resolve(path.dirname(fromFile), spec.replace(/\.js$/, ''));
@@ -105,34 +110,98 @@ function resolveModule(fromFile, spec) {
   }
   return null;
 }
+function astExportMap(file, text) {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, /\.tsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const map = { values: new Set(), locals: new Set(), named: [], wildcards: false };
+  const has = (n, kind) => (n.modifiers ?? []).some((m) => m.kind === kind);
+  const runtimeExport = (n) => has(n, ts.SyntaxKind.ExportKeyword) && !has(n, ts.SyntaxKind.DeclareKeyword) && !has(n, ts.SyntaxKind.DefaultKeyword);
+  for (const st of sf.statements) {
+    // declare module / declare global blocks and type-only statements never produce runtime exports
+    if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name)) continue;
+        map.locals.add(d.name.text);
+        if (runtimeExport(st)) map.values.add(d.name.text);
+      }
+    } else if (ts.isFunctionDeclaration(st) || ts.isClassDeclaration(st) || ts.isEnumDeclaration(st)) {
+      if (!st.name) continue;
+      map.locals.add(st.name.text);
+      if (runtimeExport(st)) map.values.add(st.name.text);
+    } else if (ts.isExportDeclaration(st)) {
+      if (st.isTypeOnly) continue;
+      const from = st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier) ? st.moduleSpecifier.text : null;
+      if (!st.exportClause) { map.wildcards = true; continue; }
+      if (ts.isNamespaceExport(st.exportClause)) { map.values.add(st.exportClause.name.text); continue; }
+      for (const sp of st.exportClause.elements) {
+        if (sp.isTypeOnly) continue;
+        map.named.push({ exported: sp.name.text, local: (sp.propertyName ?? sp.name).text, from });
+      }
+    }
+  }
+  return map;
+}
+/** Drop comments and string/template literals so neither can look like a declaration. */
+function stripCommentsAndStrings(src) {
+  let out = ''; let i = 0;
+  while (i < src.length) {
+    const c = src[i]; const d = src[i + 1];
+    if (c === '/' && d === '/') { while (i < src.length && src[i] !== '\n') i++; out += ' '; }
+    else if (c === '/' && d === '*') { i += 2; while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; out += ' '; }
+    else if (c === '"' || c === "'" || c === '`') { const q = c; i++; while (i < src.length && src[i] !== q) { if (src[i] === '\\') i++; i++; } i++; out += '""'; }
+    else { out += c; i++; }
+  }
+  return out;
+}
+const DECL_KINDS = '(?:const|let|var|function\\s*\\*?|class|enum)';
+function regexExportMap(text) {
+  const src = stripCommentsAndStrings(text);
+  if (/\bdeclare\s+(?:module|global|namespace)\b/.test(src)) return null; // ambient block: cannot tell
+  const map = { values: new Set(), locals: new Set(), named: [], wildcards: false };
+  for (const m of src.matchAll(new RegExp(`export\\s+(?:abstract\\s+)?(?:async\\s+)?${DECL_KINDS}\\s+([A-Za-z_$][\\w$]*)`, 'g'))) map.values.add(m[1]);
+  for (const m of src.matchAll(new RegExp(`(?:^|\\n)\\s*(?:export\\s+)?(?:abstract\\s+)?(?:async\\s+)?${DECL_KINDS}\\s+([A-Za-z_$][\\w$]*)`, 'g'))) map.locals.add(m[1]);
+  for (const m of src.matchAll(/export\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from/g)) map.values.add(m[1]);
+  if (/export\s+\*\s+from/.test(src)) map.wildcards = true;
+  for (const m of src.matchAll(/export\s+(type\s+)?\{([^}]*)\}\s*(?:from\s*""\s*)?/g)) {
+    if (m[1]) continue; // export type { … }
+    const from = /\}\s*from/.test(m[0]) ? '' : null; // the specifier text was stripped: unresolvable
+    for (const raw of m[2].split(',')) {
+      const spec = raw.trim();
+      if (!spec || /^type\s/.test(spec)) continue; // export { type X }
+      const [local, exported = local] = spec.split(/\s+as\s+/).map((x) => x.trim());
+      map.named.push({ exported, local, from });
+    }
+  }
+  return map;
+}
+const mapCache = new Map();
+function exportMapFor(file) {
+  if (mapCache.has(file)) return mapCache.get(file);
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { text = null; }
+  let map = null;
+  if (text !== null) { try { map = ts ? astExportMap(file, text) : regexExportMap(text); } catch { map = null; } }
+  mapCache.set(file, map);
+  return map;
+}
 // true = exported as a runtime value, false = not exported, null = cannot tell (fail closed).
 function fileExportsValue(file, name, seen = new Set()) {
   const key = `${file}#${name}`;
   if (seen.has(key)) return null;
   seen.add(key);
-  let text;
-  try { text = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  if (VALUE_DECL(name).test(text)) return true;
-  const nsRe = new RegExp(`export\\s+\\*\\s+as\\s+${name}\\s+from`);
-  if (nsRe.test(text)) return true;
-  let unknown = false;
-  for (const m of text.matchAll(/export\s+(type\s+)?\{([^}]*)\}\s*(?:from\s*['"]([^'"]+)['"])?/g)) {
-    if (m[1]) continue; // export type { … }
-    for (const raw of m[2].split(',')) {
-      const spec = raw.trim();
-      if (!spec || /^type\s/.test(spec)) continue; // export { type X }
-      const [local, exported = local] = spec.split(/\s+as\s+/).map((s) => s.trim());
-      if (exported !== name) continue;
-      if (m[3]) {
-        const target = resolveModule(file, m[3]);
-        const deeper = target ? fileExportsValue(target, local, seen) : null;
-        if (deeper === true) return true;
-        unknown = unknown || deeper === null;
-      } else if (LOCAL_DECL(local).test(text)) return true;
-      else unknown = true; // re-exported import alias: not resolvable here
-    }
+  const map = exportMapFor(file);
+  if (!map) return null;
+  if (map.values.has(name)) return true;
+  let unknown = map.wildcards; // an unfollowed `export * from` can always be hiding the name
+  for (const sp of map.named) {
+    if (sp.exported !== name) continue;
+    if (sp.from === null && map.locals.has(sp.local)) return true; // local value re-exported by name
+    if (sp.from) {
+      const target = resolveModule(file, sp.from);
+      const deeper = target ? fileExportsValue(target, sp.local, seen) : null;
+      if (deeper === true) return true;
+      unknown = unknown || deeper === null;
+    } else unknown = true; // re-exported import alias, or a specifier we could not resolve
   }
-  if (/export\s+\*\s+from/.test(text)) unknown = true; // wildcard re-export: not followed
   return unknown ? null : false;
 }
 const exportLookup = new Map();

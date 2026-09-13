@@ -4,7 +4,11 @@
 // model selection and the Access preset. Uses the app's OWN IPC through the bound CDP endpoint, then
 // reloads the renderer so the store reflects Main. Record every use in events.jsonl as fail_tooling
 // for the popover step — this is not a product finding and not a substitute for RA-xx cases.
-//   node lane-select.cjs --run-dir DIR --lane NAME [--model <connectionId>/<providerId>/<modelId>] [--preset ask|auto|full]
+//   node lane-select.cjs --run-dir DIR --lane NAME [--model <connectionId>/<providerId>/<modelId>]
+//        [--preset ask|auto|full] [--task-id ID]
+// It only ever changes the Task the sidebar shows as selected (aria-current / .sb-row.active). A
+// --task-id must match that row, and the row's title must match the store's, or nothing is changed:
+// picking "the first unarchived Task" would silently reconfigure a Task the operator is not looking at.
 // Switching to `full` opens the app's native confirmation sheet: click 「フルアクセスを有効化」 with
 // Computer Use (AXPress works on that sheet) while this script waits.
 const { chromium } = require('playwright');
@@ -14,6 +18,7 @@ const { execFileSync } = require('node:child_process');
 const argv = process.argv.slice(2);
 const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
 const runDir = opt('--run-dir'); const lane = opt('--lane'); const model = opt('--model'); const preset = opt('--preset');
+const taskIdArg = opt('--task-id') ?? null;
 if (!runDir || !lane || (!model && !preset)) { console.error('--run-dir, --lane and at least one of --model / --preset are required'); process.exit(64); }
 const laneDir = path.join(runDir, 'lanes', lane);
 const app = JSON.parse(fs.readFileSync(path.join(laneDir, 'app.json'), 'utf8'));
@@ -28,10 +33,26 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
   try {
     const page = browser.contexts().flatMap((c) => c.pages()).find((p) => /5173/.test(p.url()));
     if (!page) throw new Error('no renderer page on :5173');
-    const result = await page.evaluate(async ({ model, preset }) => {
-      const sc = window.sprintCoder; const task = (await sc.tasks.list()).find((t) => !t.archived);
-      if (!task) throw new Error('current Task unavailable');
-      const out = { taskId: task.id };
+    const result = await page.evaluate(async ({ model, preset, taskIdArg }) => {
+      const sc = window.sprintCoder;
+      // Sidebar.tsx: <div class="sb-row[ active]" data-task-id=…><button class="sb-item"
+      // aria-current="true" title={task.title}>. The selected row is the Task on screen.
+      const rows = [...document.querySelectorAll('[data-task-id]')].map((el) => ({
+        id: el.getAttribute('data-task-id'),
+        active: el.classList.contains('active') || !!el.querySelector('[aria-current="true"]'),
+        title: el.querySelector('button.sb-item')?.getAttribute('title') ?? el.querySelector('button')?.textContent?.trim() ?? null,
+      }));
+      const active = rows.find((r) => r.active) ?? null;
+      const taskId = taskIdArg ?? active?.id ?? null;
+      if (!taskId) throw new Error('current Task unavailable: no selected Task row in the sidebar — select the Task in the UI, or pass --task-id <id>');
+      if (active && active.id !== taskId) throw new Error(`--task-id ${taskId} is not the Task on screen (${active.id}) — refusing to change another Task`);
+      const row = rows.find((r) => r.id === taskId) ?? null;
+      if (!row) throw new Error(`Task ${taskId} is not visible in the sidebar, so it cannot be cross-checked against the UI — refusing`);
+      const task = (await sc.tasks.list()).find((t) => t.id === taskId);
+      if (!task) throw new Error(`Task ${taskId} is not in tasks.list()`);
+      const uiTitle = (row.title ?? '').trim(); const storeTitle = (task.title ?? '').trim();
+      if (uiTitle && storeTitle && uiTitle !== storeTitle) throw new Error(`Task title mismatch: sidebar "${uiTitle}" vs store "${storeTitle}" — refusing`);
+      const out = { taskId: task.id, taskTitle: storeTitle || null, taskIdSource: taskIdArg ? 'arg' : 'sidebar' };
       if (model) {
         // modelId itself may contain "/" (OpenRouter ships author/model ids), so only the FIRST two
         // separators are structural and everything after them is the model id.
@@ -51,7 +72,7 @@ if (String(listener) !== String(app.pid)) { console.error(`fail_tooling: port ${
         out.preset = { before: policy.preset, after: saved.preset };
       }
       return out;
-    }, { model, preset });
+    }, { model, preset, taskIdArg });
     await page.reload(); await page.waitForLoadState('domcontentloaded');
     await page.locator('[data-testid="composer-textarea"]').waitFor({ timeout: 30_000 });
     await new Promise((r) => setTimeout(r, 1500));

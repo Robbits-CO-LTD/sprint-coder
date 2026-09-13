@@ -11,11 +11,20 @@ FILE_ISSUE="$SCRIPT_DIR/file-issue.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 RUN_DIR="$TMP/run"
-mkdir -p "$RUN_DIR/evidence/claude"
+mkdir -p "$RUN_DIR/evidence/claude" "$RUN_DIR/lanes/claude/workspace/smoke"
 printf '{"repository":"Robbits-CO-LTD/sprint-coder","filing_mode":"report-only"}\n' > "$RUN_DIR/manifest.json"
-# an evidence file whose relative path is long, mixed-case and digit-bearing: exempt only because it exists
-EVIDENCE_REL="evidence/claude/Shot1Aaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt"
-printf 'evidence\n' > "$RUN_DIR/$EVIDENCE_REL"
+printf 'evidence\n' > "$RUN_DIR/evidence/claude/x.md"
+# a deep evidence path: whole token >= 32 with mixed case and digits, every component short
+DEEP_REL="evidence/claude/run1/Shot2Beta/final"
+mkdir -p "$RUN_DIR/$(dirname "$DEEP_REL")"; printf 'evidence\n' > "$RUN_DIR/$DEEP_REL"
+# an existing file whose NAME is a long mixed token — existing must not whitelist it
+LONGNAME_REL="evidence/claude/Shot1Aaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt"
+printf 'evidence\n' > "$RUN_DIR/$LONGNAME_REL"
+# the subtree the tested AI writes into: never an exemption, even for short components
+AI_REL="lanes/claude/workspace/smoke/Aa1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf 'written by the AI under test\n' > "$RUN_DIR/$AI_REL"
+AI_DEEP_REL="lanes/claude/workspace/smoke/Aa1aaaaaaaaaaaaaaaaaaaa/BB2bbbbbbbbbbbbbbbbbbbb"
+mkdir -p "$RUN_DIR/$(dirname "$AI_DEEP_REL")"; printf 'written by the AI under test\n' > "$RUN_DIR/$AI_DEEP_REL"
 FP="$(printf 'bug-sweep-redaction-test' | shasum -a 256 | cut -d' ' -f1)"
 TITLE="[bug] 秘匿スキャンの回帰テスト用ダミータイトル"
 fails=0
@@ -53,10 +62,17 @@ case_run 'base64-like token' 'base64-like token' 'blob AAAABBBBCCCCDDDDEEEEFFFFG
 case_run clean 'existing repo path (short)' 'apps/desktop/src/main/ipc.ts の approvals ハンドラ'
 # 5. a long existing repo path whose dotless prefix is 32+ chars and mixed-case
 case_run clean 'existing repo path (long)' 'apps/desktop/src/renderer/components/RunCard.tsx を確認した'
-# 6. an evidence path under RUN_DIR: long, mixed-case, digit-bearing, exempt only because it exists
-case_run clean 'existing evidence path under RUN_DIR' "$EVIDENCE_REL に保存した"
-# 7. the same shape that does NOT exist must fail closed
+# 6. a short evidence path under RUN_DIR
+case_run clean 'existing evidence path under RUN_DIR' 'evidence/claude/x.md に保存した'
+# 7. a deep existing evidence path: the whole token is long, but every component is short
+case_run clean 'deep existing evidence path' "$DEEP_REL に保存した"
+# 8. the same shape that does NOT exist must fail closed
 case_run 'long mixed-case token' 'non-existent path-shaped token' 'evidence/claude/Shot9Zzzzzzzzzzzzzzzzzzzzzzzzzzzz'
+# 9. existing does NOT whitelist a suspicious component (the file name itself is attacker controlled)
+case_run 'long mixed-case token' 'existing file with a long mixed-case name' "$LONGNAME_REL に保存した"
+# 10. RUN_DIR lanes/<lane>/workspace is written by the AI under test: no exemption at all
+case_run 'long mixed-case token' 'AI-writable workspace path (component)' "$AI_REL を作った"
+case_run 'long mixed-case token' 'AI-writable workspace path (whole token)' "$AI_DEEP_REL を作った"
 
 printf '\n%s\n' "$([ "$fails" = 0 ] && echo 'ALL PASS' || echo "$fails FAILED")"
 [ "$fails" = 0 ]

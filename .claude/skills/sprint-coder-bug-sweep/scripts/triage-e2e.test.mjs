@@ -40,7 +40,7 @@ function depMessage(pkg, name) {
   return `SyntaxError: The requested module '/@fs/x/apps/desktop/node_modules/.vite/deps/@sprint-coder_${pkg}.js?v=abc' does not provide an export named '${name}'`;
 }
 
-function runTriage(root, messages, extraArgs = []) {
+function runTriage(root, messages, extraArgs = [], extraEnv = {}) {
   const list = Array.isArray(messages) ? messages : [messages];
   const report = {
     stats: { expected: 0, unexpected: list.length, flaky: 0, skipped: 0, duration: 1000 },
@@ -53,7 +53,7 @@ function runTriage(root, messages, extraArgs = []) {
   const reportPath = path.join(root, 'report.json');
   fs.writeFileSync(reportPath, JSON.stringify(report));
   const out = path.join(root, 'triage');
-  execFileSync(process.execPath, [script, reportPath, '--out', out, '--repo-root', root, ...extraArgs], { encoding: 'utf8' });
+  execFileSync(process.execPath, [script, reportPath, '--out', out, '--repo-root', root, ...extraArgs], { encoding: 'utf8', env: { ...process.env, ...extraEnv } });
   return JSON.parse(fs.readFileSync(path.join(out, 'triage.json'), 'utf8'));
 }
 
@@ -97,6 +97,25 @@ test('`export { type X }` and `export type { X }` are not runtime exports', () =
   const summary = runTriage(root, [depMessage('contracts', 'A'), depMessage('contracts', 'B')]);
   assert.equal(summary.failures[0].classification, 'real_candidate');
   assert.equal(summary.failures[1].classification, 'real_candidate');
+});
+
+test('ambient declarations and commented-out code are never runtime exports', () => {
+  // both parsing paths: the repo's typescript AST, and the regex fallback (TRIAGE_E2E_NO_TS=1)
+  for (const env of [{}, { TRIAGE_E2E_NO_TS: '1' }]) {
+    const label = env.TRIAGE_E2E_NO_TS ? 'fallback' : 'ast';
+    const root = makeRoot({
+      'packages/contracts/src/index.ts': [
+        'export declare const Foo: string;\n// export const Bar = 1;\n/* export const Qux = 2; */\nconst s = "export const Str = 3;";\nexport const Baz = 1;\n', NEW,
+      ],
+    });
+    const summary = runTriage(root, [
+      depMessage('contracts', 'Foo'), depMessage('contracts', 'Bar'),
+      depMessage('contracts', 'Qux'), depMessage('contracts', 'Str'), depMessage('contracts', 'Baz'),
+    ], [], env);
+    const cls = summary.failures.map((f) => f.classification);
+    assert.deepEqual(cls.slice(0, 4), Array(4).fill('real_candidate'), `${label}: declare/comment/string must not count`);
+    assert.equal(cls[4], 'env_stale_vite_cache', `${label}: a plain value export still counts`);
+  }
 });
 
 test('a value re-exported from the entrypoint counts as present', () => {

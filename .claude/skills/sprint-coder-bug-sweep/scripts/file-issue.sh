@@ -5,8 +5,9 @@
 # live filing needs manifest filing_mode=live. Gates (any failure => nothing is created): title
 # prefix/length/no #N/no 。, exactly one <!-- bug-sweep:fingerprint=<64hex> --> marker, structured
 # redaction scan (known token formats, absolute paths on every platform, e-mail, nonce markers, long
-# mixed tokens/hashes — whole-token AND per path component, only existing evidence paths are exempt)
-# => redaction_failed, label existence, fingerprint already on GitHub, per-run cap.
+# mixed tokens/hashes — whole-token AND per path component; an existing evidence path only waives the
+# whole-token length rule, never a component) => redaction_failed, label existence, fingerprint
+# already on GitHub, per-run cap.
 # Semantic duplicate checking is the operator's job; open bug titles are printed to help.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,19 +70,24 @@ redaction="$(node -e '
   // Long mixed-case alphanumeric tokens look like secrets. A "/" does NOT exempt a token (standard
   // Base64 and URL-embedded secrets contain "/"), so every token is judged BOTH as a whole and per
   // path component: Aa1aaaaaaaaaaaaaaaaaaaa/BB2bbbbbbbbbbbbbbbbbbbb has no suspicious component but
-  // is flagged as a whole. The ONLY exemption is a known evidence path: a relative path that really
-  // exists under the repo root or the run dir is blanked before the token scan (so its extension does
-  // not split the token either). A path-shaped token that does not exist fails closed.
-  const roots = [process.argv[3], process.argv[4]].filter((r) => r);
-  const REL_PATH = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g;
-  const knownEvidencePath = (t) =>
-    !t.split("/").some((c) => c === "" || c === "." || c === "..") &&
-    roots.some((r) => { try { return fs.existsSync(path.join(r, t)); } catch { return false; } });
-  const scanned = text.replace(REL_PATH, (m) => (knownEvidencePath(m) ? " evidence-path " : m));
+  // is flagged as a whole.
+  // Existing files do NOT whitelist their own name: a file name is attacker controlled (an untrusted
+  // PR writes the repo, the real AI under test writes lanes/<lane>/workspace). Existing paths only
+  // waive the WHOLE-token length rule — the false positive that a deep directory tree creates — and
+  // every component is still judged. In RUN_DIR the lanes/*/workspace subtree waives nothing.
+  const repoRoot = process.argv[3]; const runDir = process.argv[4];
+  const AI_WRITABLE = /^lanes\/[^/]+\/workspace(?:\/|$)/;   // the sandbox the tested AI writes into
+  const sane = (p) => !p.split("/").some((c) => c === "" || c === "." || c === "..");
+  const existsUnder = (p) =>
+    (repoRoot ? existsIn(repoRoot, p) : false) ||
+    (runDir && !AI_WRITABLE.test(p) ? existsIn(runDir, p) : false);
+  function existsIn(root, p) { try { return fs.existsSync(path.join(root, p)); } catch { return false; } }
+  const knownPaths = (text.match(/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g) ?? []).filter((p) => sane(p) && existsUnder(p));
   const suspicious = (t) => t.length >= 32 && /[a-z]/.test(t) && /[A-Z]/.test(t) && /\d/.test(t) && !t.includes(".");
-  for (const tok of scanned.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? []) {
+  for (const tok of text.match(/[A-Za-z0-9_\-+\/=]{32,}/g) ?? []) {
     if (/[+=]/.test(tok) && /[A-Za-z]/.test(tok) && /\d/.test(tok)) { hits.push("base64-like token"); break; }
-    if (suspicious(tok) || tok.split("/").some(suspicious)) { hits.push("long mixed-case token"); break; }
+    if (tok.split("/").some(suspicious)) { hits.push("long mixed-case token"); break; }
+    if (suspicious(tok) && !knownPaths.some((p) => p.includes(tok))) { hits.push("long mixed-case token"); break; }
   }
   process.stdout.write(hits.join("; "));
 ' "$TITLE_FILE" "$BODY_FILE" "$REPO_ROOT" "$RUN_DIR")"
