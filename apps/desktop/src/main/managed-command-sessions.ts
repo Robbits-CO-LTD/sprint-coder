@@ -177,16 +177,48 @@ export class ManagedCommandSessions {
     this.sessions.clear();
   }
 
-  /**
-   * Whether this Turn still owns a command that could be writing to the Workspace.
-   *
-   * Synchronous on purpose: the completion gate has to answer "has write activity stopped?" in the
-   * same breath as it decides the Turn's outcome, and a Turn that finishes while a background
-   * `exec_command` is still running has not stopped writing — whatever its Edit Sagas verified a
-   * moment earlier can still change underneath them.
-   */
+  /** Whether this Turn still owns a command, i.e. whether there is anything to wind up. */
   hasActiveTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): boolean {
-    return [...this.sessions.values()].some(
+    return this.activeTurnSessions(owner).length > 0;
+  }
+
+  /**
+   * Stops every command this Turn still owns and waits, briefly, for them to actually exit.
+   *
+   * A Turn's sessions belong to that Turn — nothing can poll them once it ends — so winding them up
+   * at its boundary is what the ownership model already implies. The completion gate needs it for a
+   * second reason: a background `exec_command` that is still running is still writing, and an Edit
+   * Saga verified while one is alive can be contradicted a moment later.
+   *
+   * Unlike `terminateTurn` this reports rather than throws, and it will not wait for ever. A
+   * process that ignores its abort must not hold a Turn open indefinitely; `unconfirmed` says the
+   * caller may not treat the Workspace as settled, and leaves what to do about that to the caller.
+   */
+  async settleTurnSessions(
+    owner: Readonly<{ taskId: string; turnId: string }>,
+    timeoutMs = 5_000,
+  ): Promise<'settled' | 'unconfirmed'> {
+    const owned = this.activeTurnSessions(owner);
+    if (owned.length === 0) return 'settled';
+    for (const session of owned)
+      if (session.state === 'starting' || session.state === 'running')
+        session.controller.abort(new Error('Managed command Turn completed'));
+    let timer: NodeJS.Timeout | undefined;
+    const exited = await Promise.race([
+      Promise.allSettled(owned.map(({ completion }) => completion)).then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+    return exited && !owned.some(({ terminationUnconfirmed }) => terminationUnconfirmed)
+      ? 'settled'
+      : 'unconfirmed';
+  }
+
+  private activeTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): Session[] {
+    return [...this.sessions.values()].filter(
       (session) =>
         session.taskId === owner.taskId &&
         session.turnId === owner.turnId &&
@@ -197,14 +229,7 @@ export class ManagedCommandSessions {
   }
 
   async terminateTurn(owner: Readonly<{ taskId: string; turnId: string }>): Promise<void> {
-    const owned = [...this.sessions.values()].filter(
-      (session) =>
-        session.taskId === owner.taskId &&
-        session.turnId === owner.turnId &&
-        (session.state === 'starting' ||
-          session.state === 'running' ||
-          session.terminationUnconfirmed),
-    );
+    const owned = this.activeTurnSessions(owner);
     for (const session of owned)
       if (session.state === 'starting' || session.state === 'running')
         session.controller.abort(new Error('Managed command Turn canceled'));

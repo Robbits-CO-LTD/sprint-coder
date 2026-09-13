@@ -4885,6 +4885,10 @@ describe('Provider Team completion and model errors', () => {
       persistence: { recordTurnProviderUsage: vi.fn(), appendDelta },
       mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
       turnRuntimes: new Map([['turn-191', 'provider']]),
+      // The real teardown-then-complete step, over a Turn that owns no command, so it stays on its
+      // synchronous path and hands straight over to the stubbed terminal call below.
+      managedCodingHarness: { hasActiveCommandSessions: () => false },
+      finishCompletedTurn: Reflect.get(IpcRouter.prototype, 'finishCompletedTurn'),
       finishAndAdvance,
       publish,
     };
@@ -4914,7 +4918,14 @@ describe('Provider Team completion and model errors', () => {
         undefined,
       ),
     ).resolves.toBe('completed');
-    expect(finishAndAdvance).toHaveBeenLastCalledWith('task-191', 'turn-191', 'completed');
+    // A Provider Turn carries no separate final text; `finishCompletedTurn` passes the argument on
+    // regardless, so the terminal call is the four-argument form.
+    expect(finishAndAdvance).toHaveBeenLastCalledWith(
+      'task-191',
+      'turn-191',
+      'completed',
+      undefined,
+    );
     expect(appendDelta).not.toHaveBeenCalled();
 
     finishAndAdvance.mockClear();
@@ -4968,6 +4979,9 @@ describe('Provider Team completion and model errors', () => {
       teamRequiredTurns,
       teamCoordinator: { get: () => ({ workers: [] }) },
       resolvedModelByTurn: new Map<string, string>(),
+      // As above: the real teardown-then-complete step over a Turn that owns no command.
+      managedCodingHarness: { hasActiveCommandSessions: () => false },
+      finishCompletedTurn: Reflect.get(IpcRouter.prototype, 'finishCompletedTurn'),
       finishAndAdvance,
       handleRuntimeFailure,
     };
@@ -5994,7 +6008,7 @@ describe('Ollama empty-round integration', () => {
 describe('Turn completion when Edit Saga verification evidence is missing', () => {
   function createCompletionHarness(
     openCriterionIds: readonly string[],
-    activeCommandSessions = false,
+    commandSessions: { active?: boolean; settlement?: 'settled' | 'unconfirmed' } = {},
   ) {
     const publish = vi.fn();
     const pushRuntimeStatus = vi.fn();
@@ -6006,7 +6020,9 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
         throw new AcceptanceEvidenceMissingError(openCriterionIds);
       return { event: { type: 'turn.completed', state }, task: null };
     });
-    const cancelTurn = vi.fn().mockResolvedValue(undefined);
+    const settleTurnCommandSessions = vi
+      .fn()
+      .mockResolvedValue(commandSessions.settlement ?? 'settled');
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     Object.assign(router, {
       mailbox: { run: (_taskId: string, action: () => unknown) => Promise.resolve(action()) },
@@ -6017,8 +6033,8 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       pendingTaskTitles: new Map(),
       managedCodingHarness: {
         finishTurn: vi.fn(),
-        cancelTurn,
-        hasActiveCommandSessions: vi.fn(() => activeCommandSessions),
+        settleTurnCommandSessions,
+        hasActiveCommandSessions: vi.fn(() => commandSessions.active === true),
       },
       attachmentCapabilityByTurn: new Map(),
       attachmentCustodyByTurn: new Map(),
@@ -6050,7 +6066,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     });
     return {
       router,
-      cancelTurn,
+      settleTurnCommandSessions,
       publish,
       pushRuntimeStatus,
       handleRuntimeFailure,
@@ -6097,26 +6113,50 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       'ファイルを作成しました',
     );
     expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
-    expect(harness.cancelTurn).not.toHaveBeenCalled();
+    // Nothing to wind up, so the completion never leaves the synchronous path.
+    expect(harness.settleTurnCommandSessions).not.toHaveBeenCalled();
     expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
       expect.objectContaining({ state: 'idle', errorCode: null }),
     );
   });
 
-  it('refuses to complete a Turn that still owns a running command, and tears it down', async () => {
-    const harness = createCompletionHarness([], true);
+  it('stops a background command the Turn owns and then completes normally', async () => {
+    const harness = createCompletionHarness([], { active: true, settlement: 'settled' });
 
     await settleCompletedEvent(harness);
 
-    // Nothing verified can be trusted while a process the Turn started is still writing, so the
-    // gate never even asks for `completed`.
+    // Starting a watcher and then reporting back is a legitimate way to finish. The command is
+    // wound up first — its Turn owns it and nothing can poll it afterwards — and once it has
+    // actually exited the Workspace is settled and the Turn completes as it always did.
+    expect(harness.settleTurnCommandSessions).toHaveBeenCalledWith('task-466', 'turn-466');
+    expect(harness.settleTurnCommandSessions.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.completeTurnAndFinishGoal.mock.invocationCallOrder[0]!,
+    );
+    expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
+      'task-466',
+      'turn-466',
+      'completed',
+      'ファイルを作成しました',
+    );
+    expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+    expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'idle', errorCode: null }),
+    );
+  });
+
+  it('refuses a completion whose owned command could not be confirmed stopped', async () => {
+    const harness = createCompletionHarness([], { active: true, settlement: 'unconfirmed' });
+
+    await settleCompletedEvent(harness);
+
+    // A process that ignored its abort may still be writing, so no post-image is re-read and the
+    // gate never asks for `completed`.
     expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
       'task-466',
       'turn-466',
       'failed',
       'ファイルを作成しました',
     );
-    expect(harness.cancelTurn).toHaveBeenCalledWith('task-466', 'turn-466');
     expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
     const status = harness.pushRuntimeStatus.mock.calls.at(-1)?.[0] as {
       state: string;

@@ -3533,14 +3533,14 @@ if (runsWithElectronAbi)
         // what is on disk, however complete the first Saga's Assurance round already is.
         writeFileSync(workspaceFile, 'something else entirely');
         expect(
-          persistence
-            .verifyCommittedEditSagaPostImages({
+          [
+            ...persistence.verifyCommittedEditSagaPostImages({
               taskId: task.id,
               turnId: turn.turnId,
               createdAt: '2026-07-23T00:00:03.000Z',
-            })
-            .toSorted(),
-        ).toEqual([`verification:${first.id}`, `verification:${second.id}`].toSorted());
+            }),
+          ].sort(),
+        ).toEqual([`verification:${first.id}`, `verification:${second.id}`].sort());
         expect(() => persistence.completeTurn(task.id, turn.turnId, 'completed')).toThrow(
           AcceptanceEvidenceMissingError,
         );
