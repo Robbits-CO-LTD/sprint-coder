@@ -236,10 +236,14 @@ function installGraphInputProbe(): void {
         });
         if (events.length > 80) events.shift();
         if (type === 'click') {
-          queueMicrotask(() => {
-            events.push({ type: 'after-click', time: performance.now(), hidden: chip?.hidden });
+          setTimeout(() => {
+            events.push({
+              type: 'after-click',
+              time: performance.now(),
+              hidden: document.getElementById('focus-chip')?.hidden,
+            });
             if (events.length > 80) events.shift();
-          });
+          }, 0);
         }
       },
       true,
