@@ -667,7 +667,9 @@ describe('NativeSafeFs authority boundary', () => {
           },
         );
         expect(result.stdout).toContain('# fail 0');
-        expect(result.stdout).toContain('# pass 9');
+        expect(result.stdout).toContain('# tests 11');
+        // The explicit case-sensitive case requires Windows support and permission to enable it.
+        expect(result.stdout).toMatch(/# pass (?:10|11)\b/);
       },
     );
 

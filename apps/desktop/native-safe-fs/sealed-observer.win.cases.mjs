@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   linkSync,
@@ -66,6 +67,79 @@ function fixture(t) {
 const winTest = (name, fn) => test(name, { skip: process.platform !== 'win32' }, fn);
 const observe = (session, ...pathSegments) =>
   addon.observeSealedPostImage({ sessionId: session.id, pathSegments });
+
+function mutationObservation(input, sourceSegments) {
+  const mutation = addon.openSession({ ...input, fence: '1' });
+  try {
+    return addon.observeIntent({
+      sessionId: mutation.id,
+      intentId: 'sealed-observer-case',
+      intentDigest: '1'.repeat(64),
+      recordDigest: '2'.repeat(64),
+      revision: 1,
+      sourceSegments,
+      destinationSegments: null,
+      auxiliarySegments: null,
+    }).source;
+  } finally {
+    addon.closeSession(mutation.id);
+  }
+}
+
+winTest('matches mutation case-insensitive lookup for both parent and leaf names', (t) => {
+  const { root, input, open } = fixture(t);
+  mkdirSync(join(root, 'Nested'));
+  writeFileSync(join(root, 'Nested', 'Mixed.TXT'), 'mixed-case bytes');
+  const expected = mutationObservation(input, ['nested', 'mixed.txt']);
+  assert.equal(expected.state, 'present');
+  const session = open();
+  for (const segments of [
+    ['Nested', 'mixed.txt'],
+    ['nested', 'Mixed.TXT'],
+  ]) {
+    const result = observe(session, ...segments);
+    assert.equal(result.kind, 'file');
+    assert.equal(result.contentHash, expected.contentHash);
+    assert.equal(result.identityDigest, expected.identityDigest);
+  }
+  assert.deepEqual(observe(session, 'nested'), { kind: 'directory' });
+});
+
+winTest('preserves explicit case-sensitive directory lookup and distinct file identities', (t) => {
+  const { root, input, open } = fixture(t);
+  const sensitive = join(root, 'sensitive');
+  mkdirSync(sensitive);
+  const enable = spawnSync('fsutil.exe', ['file', 'setCaseSensitiveInfo', sensitive, 'enable']);
+  if (enable.status !== 0) {
+    t.skip('Enabling per-directory case sensitivity requires Windows support and permission');
+    return;
+  }
+  const identity = lstatSync(sensitive, { bigint: true });
+  assert.equal(
+    addon.directoryCaseSensitive({
+      path: sensitive,
+      dev: String(identity.dev),
+      ino: String(identity.ino),
+    }),
+    true,
+  );
+  writeFileSync(join(sensitive, 'Mixed.TXT'), 'upper');
+  writeFileSync(join(sensitive, 'mixed.txt'), 'lower');
+  assert.notEqual(
+    lstatSync(join(sensitive, 'Mixed.TXT'), { bigint: true }).ino,
+    lstatSync(join(sensitive, 'mixed.txt'), { bigint: true }).ino,
+  );
+  const expected = mutationObservation(input, ['sensitive', 'mixed.txt']);
+  assert.equal(expected.state, 'present');
+  const session = open();
+  const lower = observe(session, 'sensitive', 'mixed.txt');
+  const upper = observe(session, 'sensitive', 'Mixed.TXT');
+  assert.equal(lower.contentHash, expected.contentHash);
+  assert.equal(lower.identityDigest, expected.identityDigest);
+  assert.equal(upper.contentHash, createHash('sha256').update('upper').digest('hex'));
+  assert.notEqual(lower.identityDigest, upper.identityDigest);
+  assert.deepEqual(observe(session, 'sensitive', 'MIXED.txt'), { kind: 'absent' });
+});
 
 winTest('observes raw bytes, absence, directory and mutation-compatible file identity', (t) => {
   const { root, input, open } = fixture(t);

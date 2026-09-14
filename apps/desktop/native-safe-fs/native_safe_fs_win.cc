@@ -1138,7 +1138,8 @@ NTSTATUS ReadRelative(HANDLE parent, const std::wstring& name, ULONG options, UL
   unicode.Length = static_cast<USHORT>(name.size() * sizeof(wchar_t));
   unicode.MaximumLength = unicode.Length;
   OBJECT_ATTRIBUTES attributes{};
-  InitializeObjectAttributes(&attributes, &unicode, 0, parent, nullptr);
+  // Match mutation lookup; Windows still honors a directory's explicit case-sensitive flag.
+  InitializeObjectAttributes(&attributes, &unicode, OBJ_CASE_INSENSITIVE, parent, nullptr);
   IO_STATUS_BLOCK status{};
   // FILE_SHARE_READ excludes existing and future writers/deleters. Together with
   // FILE_OPEN_REPARSE_POINT this closes the check/open and rename/junction windows.
