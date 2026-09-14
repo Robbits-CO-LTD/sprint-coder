@@ -1,7 +1,7 @@
 {
   "name": "@sprint-coder/desktop",
   "productName": "Sprint Coder",
-  "version": "0.7.0-beta.2",
+  "version": "0.7.0-beta.3",
   "description": "ローカルファーストのAIコーディング・デスクトップアプリ",
   "author": "Sprint Coder contributors",
   "private": true,
@@ -45,7 +45,7 @@
     "@electron/windows-sign": "^1.2.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/electron-squirrel-startup": "^1.0.2",
-    "electron": "^43.2.0",
+    "electron": "43.5.0",
     "jsdom": "26.1.0",
     "typescript": "^5.9.2",
     "vite": "^7.1.3",

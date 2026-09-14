@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -205,6 +205,48 @@ test('binds an authorized file read and detects changed source bytes after resta
   }
 });
 
+function installGraphInputProbe(): void {
+  const events: Record<string, unknown>[] = [];
+  Reflect.set(window, '__sprintGraphInputProbe', events);
+  for (const type of ['pointerdown', 'pointerup', 'click']) {
+    document.addEventListener(
+      type,
+      (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        const chip = document.getElementById('focus-chip');
+        const button = document.getElementById('btn-focus-clear');
+        const rect = button?.getBoundingClientRect();
+        const frameRect = document
+          .querySelector('[data-testid="graph-frame"]')
+          ?.getBoundingClientRect();
+        events.push({
+          type,
+          time: performance.now(),
+          target: target?.id || target?.tagName,
+          trusted: event.isTrusted,
+          node: target?.closest('[data-node-id]')?.getAttribute('data-node-id'),
+          hidden: chip?.hidden,
+          documentHidden: document.hidden,
+          x: (event as MouseEvent).clientX,
+          y: (event as MouseEvent).clientY,
+          button: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
+          frame: frameRect
+            ? { x: frameRect.x, y: frameRect.y, width: frameRect.width, height: frameRect.height }
+            : null,
+        });
+        if (events.length > 80) events.shift();
+        if (type === 'click') {
+          queueMicrotask(() => {
+            events.push({ type: 'after-click', time: performance.now(), hidden: chip?.hidden });
+            if (events.length > 80) events.shift();
+          });
+        }
+      },
+      true,
+    );
+  }
+}
+
 test('the model tool path proposes and reads back a draft through the real Main service', async () => {
   const profile = createUserDataDir('graph-tool-proposal');
   let app = await launchApp(profile, undefined, {
@@ -212,8 +254,12 @@ test('the model tool path proposes and reads back a draft through the real Main 
     PATH: '',
     Path: '',
   });
+  let probePage: Page | null = null;
   try {
     const page = await firstWindow(app);
+    probePage = page;
+    await page.addInitScript(installGraphInputProbe);
+    await page.evaluate(installGraphInputProbe);
     if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });
@@ -301,6 +347,22 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await expect(reopened.getByTestId('graph-evidence-kind')).toHaveText('推定');
     await expect(reopened.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
   } finally {
+    if (test.info().status !== test.info().expectedStatus && probePage && !probePage.isClosed()) {
+      const events = await Promise.all(
+        probePage
+          .frames()
+          .map((frame) =>
+            frame
+              .evaluate(() => Reflect.get(window, '__sprintGraphInputProbe') ?? [])
+              .catch(() => []),
+          ),
+      );
+      await test.info().attach('graph-input-events', {
+        body: JSON.stringify(events),
+        contentType: 'application/json',
+      });
+      await probePage.screenshot({ path: test.info().outputPath('graph-input-failure.png') });
+    }
     await closeApp(app);
     removeUserDataDir(profile);
   }

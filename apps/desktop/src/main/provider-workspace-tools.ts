@@ -693,12 +693,19 @@ export class ManagedCodingHarness {
   }
 
   /**
-   * Whether this Turn still owns a running command. `finishTurn` releases the Turn's tools but
-   * deliberately leaves an owned background `exec_command` alone, so this is the only way the
-   * completion gate can tell whether the Workspace has stopped moving.
+   * Background commands survive finishTurn. Observe every session whose sealed Workspace root
+   * overlaps this Turn's snapshot, including previous Turns and other Tasks sharing a root.
    */
   hasActiveCommandSessions(taskId: string, turnId: string): boolean {
-    return this.commandSessions?.hasActiveTurnSessions({ taskId, turnId }) ?? false;
+    if (this.commandSessions === undefined) return false;
+    const workspace = this.deps.workspaceFor(taskId, turnId);
+    if (workspace === null) return this.commandSessions.hasActiveTurnSessions({ taskId, turnId });
+    return this.commandSessions.hasActiveWorkspaceSessions(
+      workspace.roots.map((root) => ({
+        path: root.path,
+        rootIdentityDigest: this.deps.rootIdentityFor(turnId, root.rootId),
+      })),
+    );
   }
 
   finishTurn(taskId: string, turnId: string): void {

@@ -5111,7 +5111,7 @@ export class IpcRouter {
     );
     if (!authorizationTurnIsActive(null, taskId, turnId, this.managedWorkerTurn.values()))
       this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
-    // A Turn refused because a command it started is still writing must not hand the Workspace to
+    // A Turn refused because a command can still write its Workspace must not hand the Workspace to
     // the next queued Turn: that Turn would edit underneath a process this one left running. The
     // queue stays as it is and the user restarts it — by stopping the command and retrying, or by
     // sending the next message themselves.
@@ -5133,8 +5133,8 @@ export class IpcRouter {
    *
    * Two things can refuse a completion here, and neither is a Runtime fault:
    *
-   *   - **A command the Turn still owns.** `finishTurn` releases the Turn's tools but leaves an
-   *     owned background `exec_command` running, and a process that is still writing can contradict
+   *   - **A command sharing the Workspace.** `finishTurn` releases the Turn's tools but leaves a
+   *     background `exec_command` running, and a process from any Turn or Task can contradict
    *     anything verified while it runs. The command is left alone — it outlives its Turn by design
    *     and its completion is delivered at the next safe point — so it is the *Turn* that does not
    *     complete, and the user is told to stop the command and retry.
@@ -5158,15 +5158,15 @@ export class IpcRouter {
     // Only a Turn with something to verify. A Turn that started a dev server in the background and
     // then answered has no post-image to be contradicted, and refusing it would break the very
     // background contract it is using. One that committed an Edit Saga does: re-reading its
-    // post-images while a process it started may still be writing them would only produce evidence
+    // post-images while a process sharing its Workspace may still write them would produce evidence
     // nobody should trust, so no verification is attempted and the Turn does not complete.
     if (
       state === 'completed' &&
-      this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId) &&
-      this.persistence.hasCommittedEditSagas(taskId, turnId)
+      this.persistence.hasCommittedEditSagas(taskId, turnId) &&
+      this.managedCodingHarness.hasActiveCommandSessions(taskId, turnId)
     )
       return this.refuseCompletion(taskId, turnId, finalText, 'active_command', {
-        message: 'Turn completion was refused while it still owned a running command',
+        message: 'Turn completion was refused while its Workspace had an active command',
       });
     try {
       return {

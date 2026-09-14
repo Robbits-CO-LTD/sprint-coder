@@ -1228,6 +1228,7 @@ type CommandRow = {
   finished_at: string | null;
 };
 type EditSagaRow = {
+  commit_sequence: number | null;
   id: string;
   task_id: string;
   turn_id: string;
@@ -4026,6 +4027,16 @@ const migrations = [
       CREATE TRIGGER graph_integration_hold_immutable BEFORE UPDATE OF payload_json,payload_digest,stopped_at ON team_graph_integration_holds
         WHEN NEW.payload_json<>OLD.payload_json OR NEW.payload_digest<>OLD.payload_digest OR NEW.stopped_at<>OLD.stopped_at
         BEGIN SELECT RAISE(ABORT, 'Graph integration result is immutable'); END;
+    `,
+  },
+  {
+    version: 90,
+    checksum: 'edit-saga-v90-commit-sequence',
+    // Legacy timestamps, prepare order and implicit evidence rowids cannot prove commit order
+    // (evidence was also backfilled at startup). Leave that order explicitly unknown.
+    sql: `
+      ALTER TABLE edit_sagas ADD COLUMN commit_sequence INTEGER CHECK (commit_sequence > 0);
+      CREATE UNIQUE INDEX edit_sagas_commit_order ON edit_sagas(turn_id, commit_sequence);
     `,
   },
 ];
@@ -16498,20 +16509,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * path-based reader, which is weaker in the way `pathSealedObservation` describes.
    */
   openSealedObservation(taskId: string, turnId: string): TurnSealedObservation {
-    const sagas = (
-      this.db
-        .prepare(
-          `SELECT * FROM edit_sagas
-           WHERE task_id = ? AND turn_id = ? AND state = 'committed'
-           ORDER BY updated_at, id`,
-        )
-        .all(taskId, turnId) as EditSagaRow[]
-    ).map(toEditSaga);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM edit_sagas
+         WHERE task_id = ? AND turn_id = ? AND state = 'committed'
+         ORDER BY commit_sequence, id`,
+      )
+      .all(taskId, turnId) as EditSagaRow[];
+    const sagas = rows.map(toEditSaga);
+    const ambiguousPaths = ambiguousLegacyPostImagePaths(
+      sagas,
+      new Set(rows.filter((row) => row.commit_sequence !== null).map((row) => row.id)),
+    );
     const observer = this.sealedPostImageObserver;
     if (observer === null || sagas.length === 0)
       return Object.freeze({
         sagas,
-        observe: pathSealedObservation,
+        observe: (path: string) => (ambiguousPaths.has(path) ? null : pathSealedObservation(path)),
         rootIdentity: () => undefined,
         close: () => undefined,
       });
@@ -16566,6 +16580,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           : session.rootIdentityDigest;
       },
       observe: (canonicalPath: string): SealedPostImageObservation | null => {
+        if (ambiguousPaths.has(canonicalPath)) return null;
         const rootId = rootOfPath.get(canonicalPath);
         // A legacy Saga with no sealed root has no session to observe through.
         if (rootId === undefined || rootId === null) return pathSealedObservation(canonicalPath);
@@ -16712,8 +16727,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
           expectedRevision,
         );
       if (result.changes !== 1) throw new OperationConflictError('Stale Edit Saga revision');
-      if (current.state !== 'committed' && next.state === 'committed')
+      if (current.state !== 'committed' && next.state === 'committed') {
+        // SQLite serializes writers. Allocate at the commit transition, in the same transaction
+        // as the journal and evidence; cleanup and retry must never change this order.
+        this.db
+          .prepare(
+            `UPDATE edit_sagas SET commit_sequence = (
+               SELECT COALESCE(MAX(commit_sequence), 0) + 1 FROM edit_sagas WHERE turn_id = ?
+             ) WHERE id = ?`,
+          )
+          .run(next.turnId, next.id);
         this.recordEditSagaEvidence(next);
+      }
       return next;
     })();
   }
@@ -20146,6 +20171,35 @@ type SealedPathExpectation =
   | Readonly<{ path: string; kind: 'content'; contentHash: string | null }>
   | Readonly<{ path: string; kind: 'absent' }>
   | Readonly<{ path: string; kind: 'directory' }>;
+
+/** Legacy commits precede numbered commits, but conflicting legacy expectations have no order. */
+function ambiguousLegacyPostImagePaths(
+  sagas: readonly EditSagaSnapshot[],
+  orderedSagaIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const expectations = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const saga of sagas) {
+    // Within one Saga the step order is known, including repeated paths in a batch.
+    const paths = new Map(
+      saga.steps.flatMap(({ operation }) =>
+        sealedPathExpectations(operation).map(
+          (expectation) => [expectation.path, JSON.stringify(expectation)] as const,
+        ),
+      ),
+    );
+    for (const [path, expectation] of paths) {
+      if (orderedSagaIds.has(saga.id)) {
+        // Numbered commits all happened after the migration and supersede legacy expectations.
+        ambiguous.delete(path);
+      } else if (expectations.has(path) && expectations.get(path) !== expectation) {
+        ambiguous.add(path);
+      }
+      expectations.set(path, expectation);
+    }
+  }
+  return ambiguous;
+}
 
 /**
  * Builds the "does this committed Saga still describe the Workspace?" test for one Turn.

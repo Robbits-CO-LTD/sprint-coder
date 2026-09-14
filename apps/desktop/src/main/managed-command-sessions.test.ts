@@ -1,14 +1,68 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandRunner, CommandRunnerError, prepareExecutionSpec } from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
+import { workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe('Managed command Workspace observation', () => {
+  it('pins the root before startup and observes nested or renamed roots without blocking siblings', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'sprint-coder-session-roots-'));
+    roots.push(parent);
+    const workspace = join(parent, 'workspace');
+    const nested = join(workspace, 'nested');
+    const sibling = join(parent, 'workspace-other');
+    await mkdir(nested, { recursive: true });
+    await mkdir(sibling);
+    const binding = await workspaceMutationBinding(workspace);
+    const spec = await prepareExecutionSpec({
+      workspacePath: workspace,
+      cwd: 'nested',
+      executable: process.execPath,
+      argv: ['-e', ''],
+    });
+    const runner = new CommandRunner();
+    let failStart = (): void => undefined;
+    const run = vi.spyOn(runner, 'run').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          failStart = () => reject(new CommandRunnerError('SPAWN_FAILED', 'test startup settled'));
+        }),
+    );
+    const sessions = new ManagedCommandSessions(runner);
+    const started = sessions.start(spec, { taskId: 'writer-task', turnId: 'writer-turn' });
+    const settled = expect(started).rejects.toThrow('test startup settled');
+    const observes = (path: string, rootIdentityDigest?: string) =>
+      sessions.hasActiveWorkspaceSessions([{ path, rootIdentityDigest }]);
+    try {
+      expect(observes(workspace, binding.rootIdentityDigest)).toBe(true);
+      expect(observes(nested)).toBe(true);
+      expect(observes(parent)).toBe(true);
+      expect(observes(sibling)).toBe(false);
+      expect(sessions.hasActiveWorkspaceSessions([])).toBe(false);
+
+      const moved = join(parent, 'moved');
+      await rename(workspace, moved);
+      // Path spelling alone no longer finds this writer. Its sealed root identity survives.
+      expect(observes(moved, binding.rootIdentityDigest)).toBe(true);
+      expect(observes(sibling)).toBe(false);
+      failStart();
+      await settled;
+      expect(observes(moved, binding.rootIdentityDigest)).toBe(false);
+    } finally {
+      failStart();
+      await settled;
+      await sessions.dispose();
+      run.mockRestore();
+    }
+  });
 });
 
 describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
@@ -154,6 +208,9 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
       const owner = { taskId: 'task-1', turnId: 'turn-1' };
       try {
         await expect(sessions.start(spec, owner)).rejects.toThrow('settled failure');
+        expect(
+          sessions.hasActiveWorkspaceSessions([{ path: workspace, rootIdentityDigest: undefined }]),
+        ).toBe(false);
         await expect(sessions.terminateTurn(owner)).resolves.toBeUndefined();
         run.mockRestore();
         const nextOwner = { taskId: 'task-1', turnId: 'turn-2' };
@@ -197,6 +254,9 @@ describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
           ),
         ).rejects.toThrow('pre-start process remains');
         expect(sessions.poll('00000000-0000-4000-8000-000000000001', owner).state).toBe('failed');
+        expect(
+          sessions.hasActiveWorkspaceSessions([{ path: workspace, rootIdentityDigest: undefined }]),
+        ).toBe(true);
         await expect(sessions.start(spec, { taskId: 'task-2', turnId: 'turn-2' })).rejects.toThrow(
           'session limit reached',
         );
