@@ -41,6 +41,12 @@ afterEach(async () => {
   );
 });
 const now = '2026-09-11T00:00:00.000Z';
+// mainpc: three real guarded Git/native-image reads take 25.4s; write continuation uses four
+// images plus integration. These are fixture I/O allowances, not production lifecycle deadlines.
+const gitCheckpointTimeout = process.platform === 'win32' ? 60_000 : 10_000;
+const gitPreflightTimeout = process.platform === 'win32' ? 60_000 : 1_000;
+const gitScenarioTimeout = process.platform === 'win32' ? 120_000 : 20_000;
+const graphBridgeTimeout = process.platform === 'win32' ? 300_000 : 60_000;
 function fixture(
   existing?: { persistence: SqlitePersistenceClient; path: string },
   writeCapable = false,
@@ -408,173 +414,182 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         f.persistence.close();
       }
     });
-    it('keeps a running independent WRITE branch on its original owner consent through sealed integration after re-agreement', async () => {
-      const f = fixture(undefined, true, ['a', 'b', 'c']);
-      const workspace = join(dirname(f.path), 'workspace');
-      mkdirSync(workspace);
-      writeFileSync(join(workspace, 'b.ts'), 'before\n');
-      for (const args of [
-        ['init', '-q', workspace],
-        ['-C', workspace, 'add', 'b.ts'],
-        [
-          '-C',
-          workspace,
-          '-c',
-          'user.name=Test',
-          '-c',
-          'user.email=test@example.com',
-          'commit',
-          '-qm',
-          'base',
-        ],
-      ])
-        expect(spawnSync('git', args).status).toBe(0);
-      const binding = await workspaceMutationBinding(workspace);
-      f.persistence.setWorkspaceBinding(f.task.id, {
-        path: binding.canonicalPath,
-        workspaceKey: binding.workspaceKey,
-        rootIdentityDigest: binding.rootIdentityDigest,
-      });
-      const context = graphMissionContextFor(f.persistence, f.task.id);
-      const plan = structuredClone(f.plan);
-      plan.steps[1]!.dependsOn = [];
-      plan.steps[1]!.access = 'workspace-write';
-      plan.steps[1]!.writeClaims = [
-        { rootId: context.workspace.primaryRootId!, path: 'b.ts', semanticKeys: [] },
-      ];
-      plan.steps[2]!.dependsOn = ['a', 'b'];
-      const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
-      f.persistence.saveGraphDocument(initial, 1);
-      const runtime = new DeterministicTeamWorkerRuntime();
-      const original = runtime.execute.bind(runtime);
-      const starts: string[] = [];
-      const releases = new Map<string, () => void>();
-      let draining = false;
-      const failures: unknown[] = [];
-      vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
-        const first = !starts.includes(input.worker.role);
-        starts.push(input.worker.role);
-        if (input.worker.role === 'b')
-          writeFileSync(join(input.workspacePath!, 'b.ts'), 'sealed independent B\n');
-        if (first && input.worker.role !== 'c' && !draining)
-          await new Promise<void>((resolve) => releases.set(input.worker.role, resolve));
-        return original(input);
-      });
-      const stop = vi
-        .spyOn(runtime, 'stop')
-        .mockImplementation(async (id) =>
-          releases.get(f.workers.find((worker) => worker.id === id)!.role)?.(),
-        );
-      const scheduler = new TeamExecutionScheduler(2);
-      const manager = new WorkerWorktreeManager({
-        worktreesRoot: join(dirname(f.path), 'worktrees'),
-      });
-      const coordinator = new TeamCoordinator(
-        f.persistence,
-        runtime,
-        undefined,
-        undefined,
-        undefined,
-        scheduler,
-        undefined,
-        undefined,
-        manager,
-      );
-      try {
-        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
-          ...f.input,
-          renderRevision: initial.renderRevision,
-          semanticRevision: initial.semanticRevision,
-          semanticDigest: initial.semanticDigest,
-          workspaceDigest: context.workspace.digest,
-          policyEpoch: context.policyEpoch,
-          contextDigest: graphMissionContextDigest(
-            context,
-            new Set(f.workers.map((worker) => worker.id)),
-          ),
-        }));
-        await vi.waitFor(() => expect(starts).toEqual(['a', 'b']));
-        const bExecution = mission.steps[1]!.executionId;
-        const owner = f.persistence
-          .listGraphResourceReservations(mission.id)
-          .find((owner) => owner.executionId === bExecution)!;
-        const originalConsent = f.persistence.getGraphStepAgreement(
-          mission.id,
-          'b',
-          1,
-          owner.id,
-        ).consentId;
-        const next = structuredClone(plan);
-        next.steps[0]!.dependsOn = ['b'];
-        const proposed = nextGraphDocument(f.task.id, f.diagram, initial, [], [], next);
-        f.persistence.saveGraphDocument(proposed, initial.renderRevision);
-        expect(stop).not.toHaveBeenCalled();
-        const input = {
-          taskId: f.task.id,
-          missionId: mission.id,
-          instanceId: randomUUID(),
-          renderRevision: proposed.renderRevision,
-          expectedSemanticRevision: initial.semanticRevision,
-        };
-        const review = await coordinator.requestGraphConstraintUpdate(
-          input,
-          randomUUID(),
-          () => undefined,
-        );
-        await coordinator.agreeGraphConstraintUpdate(
-          { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
-          randomUUID(),
-          () => undefined,
-        );
-        expect(stop).toHaveBeenCalledExactlyOnceWith(f.workers[0]!.id);
-        expect(f.persistence.getGraphTeamMission(mission.id)!.consentId).not.toBe(originalConsent);
-        expect(f.persistence.getGraphStepAgreement(mission.id, 'b', 1, owner.id).consentId).toBe(
-          originalConsent,
-        );
-        expect(
-          f.persistence.listGraphResourceReservations(mission.id).find((row) => row.id === owner.id)
-            ?.state,
-        ).toBe('active');
-        releases.get('b')!();
-        await vi.waitFor(
-          () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
-          { timeout: 10000 },
-        );
-        expect(readFileSync(join(binding.canonicalPath, 'b.ts'), 'utf8')).toBe(
-          'sealed independent B\n',
-        );
-        expect(f.persistence.getTeamMissionWorktree(bExecution)?.workerHead).not.toBe(
-          f.persistence.getTeamMissionWorktree(bExecution)?.baseHead,
-        );
-        expect(f.persistence.listTeamAttempts(bExecution)).toHaveLength(1);
-        expect(
-          f.persistence
-            .listGraphResourceReservations(mission.id)
-            .find((row) => row.id === owner.id),
-        ).toMatchObject({ state: 'released', generation: 1 });
-        expect(starts).toEqual(['a', 'b', 'a', 'c']);
-        expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
-      } catch (error) {
-        failures.push(error);
-      } finally {
-        draining = true;
-        for (const release of releases.values()) release();
-        try {
-          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0), {
-            timeout: 10000,
-          });
-        } catch (cleanupError) {
-          failures.push(cleanupError);
-        } finally {
-          f.persistence.close();
-        }
-      }
-      if (failures.length === 1) throw failures[0];
-      if (failures.length > 1)
-        throw new AggregateError(failures, 'Graph fixture and cleanup both failed', {
-          cause: failures[0],
+    it(
+      'keeps a running independent WRITE branch on its original owner consent through sealed integration after re-agreement',
+      async () => {
+        const f = fixture(undefined, true, ['a', 'b', 'c']);
+        const workspace = join(dirname(f.path), 'workspace');
+        mkdirSync(workspace);
+        writeFileSync(join(workspace, 'b.ts'), 'before\n');
+        for (const args of [
+          ['init', '-q', workspace],
+          ['-C', workspace, 'add', 'b.ts'],
+          [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ],
+        ])
+          expect(spawnSync('git', args).status).toBe(0);
+        const binding = await workspaceMutationBinding(workspace);
+        f.persistence.setWorkspaceBinding(f.task.id, {
+          path: binding.canonicalPath,
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
         });
-    });
+        const context = graphMissionContextFor(f.persistence, f.task.id);
+        const plan = structuredClone(f.plan);
+        plan.steps[1]!.dependsOn = [];
+        plan.steps[1]!.access = 'workspace-write';
+        plan.steps[1]!.writeClaims = [
+          { rootId: context.workspace.primaryRootId!, path: 'b.ts', semanticKeys: [] },
+        ];
+        plan.steps[2]!.dependsOn = ['a', 'b'];
+        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(initial, 1);
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const original = runtime.execute.bind(runtime);
+        const starts: string[] = [];
+        const releases = new Map<string, () => void>();
+        let draining = false;
+        const failures: unknown[] = [];
+        vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+          const first = !starts.includes(input.worker.role);
+          starts.push(input.worker.role);
+          if (input.worker.role === 'b')
+            writeFileSync(join(input.workspacePath!, 'b.ts'), 'sealed independent B\n');
+          if (first && input.worker.role !== 'c' && !draining)
+            await new Promise<void>((resolve) => releases.set(input.worker.role, resolve));
+          return original(input);
+        });
+        const stop = vi
+          .spyOn(runtime, 'stop')
+          .mockImplementation(async (id) =>
+            releases.get(f.workers.find((worker) => worker.id === id)!.role)?.(),
+          );
+        const scheduler = new TeamExecutionScheduler(2);
+        const manager = new WorkerWorktreeManager({
+          worktreesRoot: join(dirname(f.path), 'worktrees'),
+        });
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+          undefined,
+          undefined,
+          manager,
+        );
+        try {
+          const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+            ...f.input,
+            renderRevision: initial.renderRevision,
+            semanticRevision: initial.semanticRevision,
+            semanticDigest: initial.semanticDigest,
+            workspaceDigest: context.workspace.digest,
+            policyEpoch: context.policyEpoch,
+            contextDigest: graphMissionContextDigest(
+              context,
+              new Set(f.workers.map((worker) => worker.id)),
+            ),
+          }));
+          await vi.waitFor(() => expect(starts).toEqual(['a', 'b']), {
+            timeout: gitPreflightTimeout,
+          });
+          const bExecution = mission.steps[1]!.executionId;
+          const owner = f.persistence
+            .listGraphResourceReservations(mission.id)
+            .find((owner) => owner.executionId === bExecution)!;
+          const originalConsent = f.persistence.getGraphStepAgreement(
+            mission.id,
+            'b',
+            1,
+            owner.id,
+          ).consentId;
+          const next = structuredClone(plan);
+          next.steps[0]!.dependsOn = ['b'];
+          const proposed = nextGraphDocument(f.task.id, f.diagram, initial, [], [], next);
+          f.persistence.saveGraphDocument(proposed, initial.renderRevision);
+          expect(stop).not.toHaveBeenCalled();
+          const input = {
+            taskId: f.task.id,
+            missionId: mission.id,
+            instanceId: randomUUID(),
+            renderRevision: proposed.renderRevision,
+            expectedSemanticRevision: initial.semanticRevision,
+          };
+          const review = await coordinator.requestGraphConstraintUpdate(
+            input,
+            randomUUID(),
+            () => undefined,
+          );
+          await coordinator.agreeGraphConstraintUpdate(
+            { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+            randomUUID(),
+            () => undefined,
+          );
+          expect(stop).toHaveBeenCalledExactlyOnceWith(f.workers[0]!.id);
+          expect(f.persistence.getGraphTeamMission(mission.id)!.consentId).not.toBe(
+            originalConsent,
+          );
+          expect(f.persistence.getGraphStepAgreement(mission.id, 'b', 1, owner.id).consentId).toBe(
+            originalConsent,
+          );
+          expect(
+            f.persistence
+              .listGraphResourceReservations(mission.id)
+              .find((row) => row.id === owner.id)?.state,
+          ).toBe('active');
+          releases.get('b')!();
+          await vi.waitFor(
+            () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+            { timeout: gitCheckpointTimeout },
+          );
+          expect(readFileSync(join(binding.canonicalPath, 'b.ts'), 'utf8')).toBe(
+            'sealed independent B\n',
+          );
+          expect(f.persistence.getTeamMissionWorktree(bExecution)?.workerHead).not.toBe(
+            f.persistence.getTeamMissionWorktree(bExecution)?.baseHead,
+          );
+          expect(f.persistence.listTeamAttempts(bExecution)).toHaveLength(1);
+          expect(
+            f.persistence
+              .listGraphResourceReservations(mission.id)
+              .find((row) => row.id === owner.id),
+          ).toMatchObject({ state: 'released', generation: 1 });
+          expect(starts).toEqual(['a', 'b', 'a', 'c']);
+          expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          draining = true;
+          for (const release of releases.values()) release();
+          try {
+            await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0), {
+              timeout: gitCheckpointTimeout,
+            });
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          } finally {
+            f.persistence.close();
+          }
+        }
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1)
+          throw new AggregateError(failures, 'Graph fixture and cleanup both failed', {
+            cause: failures[0],
+          });
+      },
+      gitScenarioTimeout,
+    );
 
     it('migrates public v90 owner data to immutable consent bindings without changing its identity', () => {
       const f = fixture();
@@ -1100,7 +1115,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           ).rejects.toThrow('not waiting');
           await vi.waitFor(
             () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
-            { timeout: 10000 },
+            { timeout: gitCheckpointTimeout },
           );
           expect(execute).toHaveBeenCalledTimes(1);
           expect(execute.mock.calls[0]?.[0].workspacePath).toBe(worktree.path);
@@ -1108,10 +1123,13 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('integrated\n');
           expect(f.persistence.listTeamAttempts(run.execution.id)).toHaveLength(2);
         } finally {
-          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
           f.persistence.close();
         }
       },
+      gitScenarioTimeout,
     );
     it.each([false, true])(
       'dispatches independent graph steps without serializing siblings (cancel first: %s)',
@@ -1855,15 +1873,16 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
           await vi.waitFor(
             () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
-            { timeout: 15000 },
+            { timeout: process.platform === 'win32' ? gitCheckpointTimeout : 15000 },
           );
           for (const repository of isolation.repositories)
             expect(readFileSync(join(repository.repoPath, 'allowed/file.ts'), 'utf8')).toBe(
               'retained project bytes\n',
             );
           expect(f.persistence.listTeamAttempts(run.execution.id)).toHaveLength(2);
-          await vi.waitFor(() =>
-            expect(coordinator['executionScheduler'].snapshot().activeCount).toBe(0),
+          await vi.waitFor(
+            () => expect(coordinator['executionScheduler'].snapshot().activeCount).toBe(0),
+            { timeout: gitPreflightTimeout },
           );
           f.persistence.close();
           return;
@@ -1898,6 +1917,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         expect(f.persistence.listGraphResourceReservations(mission.id)[0]?.state).toBe('active');
         f.persistence.close();
       },
+      gitScenarioTimeout,
     );
 
     it('requires containment rather than mere overlap or hard-link identity for write permission', async () => {
@@ -3285,21 +3305,25 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   });
 else
   describe('graph Mission persistence Electron ABI bridge', () => {
-    it('runs the graph Mission transaction suite with Electron', async () => {
-      await promisify(execFile)(
-        electronTestExecutablePath(),
-        [
-          join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-          'run',
-          'src/main/graph-mission-persistence.test.ts',
-        ],
-        {
-          cwd: process.cwd(),
-          encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          timeout: 60_000,
-          maxBuffer: 10 * 1024 * 1024,
-        },
-      );
-    }, 65_000);
+    it(
+      'runs the graph Mission transaction suite with Electron',
+      async () => {
+        await promisify(execFile)(
+          electronTestExecutablePath(),
+          [
+            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+            'run',
+            'src/main/graph-mission-persistence.test.ts',
+          ],
+          {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+            timeout: graphBridgeTimeout,
+            maxBuffer: 10 * 1024 * 1024,
+          },
+        );
+      },
+      graphBridgeTimeout + 5_000,
+    );
   });
