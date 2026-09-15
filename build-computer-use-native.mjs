@@ -4,6 +4,11 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import {
+  nativeBuildFailureDetail,
+  sanitizedNativeBuildEnvironment,
+} from './native-build-environment.mjs';
+export { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
 
 const repositoryDirectory = dirname(fileURLToPath(import.meta.url));
 const nativeDirectory = join(repositoryDirectory, 'apps', 'desktop', 'computer-use-native');
@@ -40,68 +45,26 @@ function run(command, arguments_, environment = process.env) {
   const result = spawnSync(command, arguments_, {
     cwd: repositoryDirectory,
     env: sanitizedNativeBuildEnvironment(environment),
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // Nothing reads this child's output and it must never be relayed, so discard it at the file
+    // descriptor instead of capturing it only to throw it away. Capturing nothing also removes the
+    // maxBuffer ceiling that would otherwise abort a noisy but healthy compile with ENOBUFS.
+    stdio: ['ignore', 'ignore', 'ignore'],
     windowsHide: true,
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const diagnostic = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-      .split(/\r?\n/u)
-      .filter(
-        (line) =>
-          !line.startsWith('gyp verb') &&
-          !line.startsWith('gyp sill') &&
-          !line.includes('execFile: opts = {"env"'),
-      )
-      .slice(-200)
-      .join('\n')
-      .trim();
-    if (diagnostic !== '') process.stderr.write(`${diagnostic}\n`);
-    throw new Error(`${command} exited with status ${String(result.status ?? 1)}`);
+  if (result.error || result.status !== 0) {
+    // A child that never started (ENOENT) or was killed has no exit code at all, so report the
+    // status that actually exists rather than inventing "exit 1", and name the errno that tells a
+    // missing compiler apart from a real compile failure. The helper emits fixed tokens only and
+    // never the child's own message.
+    throw new Error(
+      `Computer Use native build child failed (exit ${result.status ?? 'none'}, ${nativeBuildFailureDetail(result)})`,
+    );
   }
 }
 
-export function sanitizedNativeBuildEnvironment(environment) {
-  // Node-gyp consumes npm_config_* after its CLI arguments, so even non-secret ambient
-  // values can replace the pinned Electron target, architecture, or header source. Keep
-  // every build control on the explicit command line and inject only a fixed log level.
-  const allowed =
-    /^(?:PATH|HOME|HOMEDRIVE|HOMEPATH|USER|USERNAME|LOGNAME|SHELL|COMSPEC|PATHEXT|PWD|INIT_CWD|TMPDIR|TEMP|TMP|TERM|LANG|LC_ALL|LC_CTYPE|NODE|PYTHON|CC|CXX|SDKROOT|DEVELOPER_DIR|MACOSX_DEPLOYMENT_TARGET|SYSTEMROOT|WINDIR|OS|PROCESSOR_[A-Z0-9_]+|NUMBER_OF_PROCESSORS|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|COMMONPROGRAMFILES(?:\(X86\))?|DRIVERDATA|COMMANDPROMPTTYPE|PLATFORM|PLATFORMTARGET|PREFERREDTOOLARCHITECTURE|INCLUDE|EXTERNAL_INCLUDE|LIB|LIBPATH|IFCPATH|VSINSTALLDIR|VISUALSTUDIOVERSION|DEVENVDIR|VCINSTALLDIR|VCTOOLSINSTALLDIR|VCTOOLSREDISTDIR|WINDOWSLIBPATH|WINDOWSSDKDIR|WINDOWSSDKVERSION|WINDOWSSDKLIBVERSION|WINDOWSSDKVERBINPATH|UCRTVERSION|UNIVERSALCRTSDKDIR|EXTENSIONSDKDIR|FRAMEWORKDIR|FRAMEWORKDIR32|FRAMEWORKVERSION|FRAMEWORKVERSION32|FRAMEWORK40VERSION|NETFXSDKDIR|VSCMD_[A-Z0-9_]+|__VSCMD_PREINIT_PATH)$/iu;
-  return {
-    ...Object.fromEntries(
-      Object.entries(environment).filter(
-        ([key, value]) =>
-          value !== undefined && allowed.test(key) && !isSecretLikeEnvironmentKey(key),
-      ),
-    ),
-    npm_config_loglevel: 'error',
-  };
-}
+const sanitizerSelfCheckOnly = process.argv.includes('--test-environment-sanitizer');
 
-function isSecretLikeEnvironmentKey(key) {
-  const canonical = key.toUpperCase().replace(/[^A-Z0-9]/gu, '');
-  return [
-    'APIKEY',
-    'ACCESSKEY',
-    'TOKEN',
-    'OTP',
-    'SECRET',
-    'PASSWORD',
-    'PASS',
-    'PRIVATEKEY',
-    'KEY',
-    'CREDENTIAL',
-    'AUTH',
-    'COOKIE',
-    'SESSION',
-    'CERT',
-    'CERTIFICATE',
-  ].some((marker) => canonical.includes(marker));
-}
-
-if (process.argv.includes('--test-environment-sanitizer')) {
+if (sanitizerSelfCheckOnly) {
   const sanitized = sanitizedNativeBuildEnvironment({
     PATH: '/usr/bin',
     INCLUDE: 'C:\\Windows Kits\\Include',
@@ -178,8 +141,10 @@ if (process.argv.includes('--test-environment-sanitizer')) {
     sanitized.CODEX_THREAD_ID !== undefined
   )
     throw new Error('Computer Use native build environment sanitizer failed');
+  // Leave through the normal exit path: on POSIX a pipe-backed stdout is asynchronous, and this
+  // line is read back through a pipe, so process.exit() could truncate it.
   process.stdout.write('Computer Use native build environment sanitizer: PASS\n');
-  process.exit(0);
+  process.exitCode = 0;
 }
 
 function sha256File(path) {
@@ -189,11 +154,12 @@ function sha256File(path) {
 function computerUseSourceCommit() {
   const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: repositoryDirectory,
+    env: sanitizedNativeBuildEnvironment(process.env),
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  if (result.error) throw result.error;
+  if (result.error) throw new Error('Computer Use source commit lookup failed');
   const repositoryCommit = result.status === 0 ? result.stdout.trim() : '';
   if (!/^[0-9a-f]{40}$/u.test(repositoryCommit))
     throw new Error('Computer Use source commit is unavailable');
@@ -205,7 +171,9 @@ function computerUseSourceCommit() {
   return repositoryCommit;
 }
 
-if (target === 'linux') {
+if (sanitizerSelfCheckOnly) {
+  // The self-check above is the whole run; no native artifact is built or verified.
+} else if (target === 'linux') {
   // Linux is intentionally outside the Computer Use platform contract.  Do not emit a manifest
   // that could be mistaken for a supported target; Forge does not package this directory on Linux.
   console.log(`[computer-use-native] ${target}-${architecture}: disabled (PLATFORM_UNSUPPORTED)`);
