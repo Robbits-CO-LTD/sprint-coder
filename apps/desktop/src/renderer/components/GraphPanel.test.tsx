@@ -300,6 +300,19 @@ it('restores selection on reopen with a fresh frame identity', async () => {
   root = undefined;
   await mount(false);
   expect(service.minted).toHaveLength(2);
+  const posted = vi.spyOn(displayedFrame().contentWindow!, 'postMessage');
+  await announceReady();
+  expect(posted).toHaveBeenCalledWith(
+    {
+      type: 'sprint-graph-restore-selection',
+      kind: 'node',
+      id: 'api',
+      instanceId: service.minted[1],
+      graphId,
+      revision: 1,
+    },
+    '*',
+  );
   expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).toContain('api');
   const stored = window.localStorage.getItem(window.localStorage.key(0)!);
   expect(stored).not.toContain(service.minted[0]);

@@ -58,6 +58,15 @@ function GraphPanelForTask({ taskId, onClose }: { taskId: string; onClose: () =>
     );
   }, [view, graphMission]);
   useEffect(sendExecutionState, [sendExecutionState]);
+  useEffect(() => {
+    if (!view || !ready) return;
+    const restored = restoreGraphSelection(view);
+    if (restored)
+      frame.current?.contentWindow?.postMessage(
+        { ...restored, type: 'sprint-graph-restore-selection' },
+        '*',
+      );
+  }, [view, ready]);
   // The graph artifact runs out of process. Until Chromium has registered that frame's hit-test
   // region — roughly the first 100ms of its life — a click aimed at the diagram is delivered to
   // THIS renderer instead, and arrives here as a click on the iframe element. That never happens
