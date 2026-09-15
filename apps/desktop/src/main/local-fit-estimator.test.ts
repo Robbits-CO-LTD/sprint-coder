@@ -267,6 +267,19 @@ describe('local fit estimator', () => {
       speculative: { ...speculative, draftArtifactHashes: [...speculative.draftArtifactHashes] },
     };
     const pairedRecord = { ...record, binding: paired };
+    const oldCpu = { ...paired, backend: 'cpu' as const, gpuLayers: 0, gpuOffloadRatio: 0 };
+    const explicitCpu = { ...oldCpu, draftPlacement: 'cpu' as const };
+    expect(
+      applyReusableLocalVerification(estimate, explicitCpu, { ...record, binding: oldCpu }).state,
+    ).toBe(estimate.state);
+    expect(
+      applyReusableLocalVerification(estimate, explicitCpu, { ...record, binding: explicitCpu })
+        .state,
+    ).toBe('verified_tools');
+    const offCpu = { ...binding, backend: 'cpu' as const, gpuLayers: 0, gpuOffloadRatio: 0 };
+    expect(
+      applyReusableLocalVerification(estimate, offCpu, { ...record, binding: offCpu }).state,
+    ).toBe('verified_tools');
     expect(applyReusableLocalVerification(estimate, paired, record).state).toBe(estimate.state);
     expect(applyReusableLocalVerification(estimate, paired, pairedRecord).state).toBe(
       'verified_tools',

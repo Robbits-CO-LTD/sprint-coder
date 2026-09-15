@@ -375,6 +375,10 @@ if (runsWithElectronAbi)
           expect(integrity).toHaveBeenCalledTimes(2);
           integrity.mockRestore();
           expect(fit.state).toBe('verified_tools');
+          expect(fit.verification?.binding).toMatchObject({
+            backend: 'cpu',
+            draftPlacement: 'cpu',
+          });
           expect(fit.verification?.binding.speculative).toMatchObject({
             draftModelId: draft.modelId,
             draftArtifactHashes: [draftPlan.artifacts[0]!.sha256],

@@ -216,6 +216,7 @@ function equalBinding(left: LocalVerificationBinding, right: LocalVerificationBi
     left.gpuOffloadRatio === right.gpuOffloadRatio &&
     left.sidecarVersion === right.sidecarVersion &&
     left.backend === right.backend &&
+    left.draftPlacement === right.draftPlacement &&
     ((left.speculative === undefined && right.speculative === undefined) ||
       (left.speculative !== undefined &&
         right.speculative !== undefined &&

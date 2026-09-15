@@ -620,7 +620,10 @@ function runtimeArguments(
     '--jinja',
   ];
   if (prepared.mmprojPath !== null) args.push('--mmproj', prepared.mmprojPath);
-  if (input.draft != null && prepared.draftPath !== null)
+  if (input.draft != null && prepared.draftPath !== null) {
+    // Draft devices/layers are independent in llama.cpp, even when target layers are zero.
+    if (settings.backend === 'cpu')
+      args.push('--spec-draft-device', 'none', '--spec-draft-ngl', '0');
     args.push(
       '-md',
       prepared.draftPath,
@@ -629,6 +632,7 @@ function runtimeArguments(
       '--spec-draft-n-max',
       String(input.draft.draftTokensMax),
     );
+  }
   return args;
 }
 

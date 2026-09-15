@@ -367,6 +367,40 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     await subject.stopModel(draft.id);
     expect(() => subject.assertDeletable(draft.id)).not.toThrow();
   });
+  it('rejects a CPU pair descriptor that budgets its draft on the GPU', async () => {
+    const model = await descriptor('a', { backend: 'cpu', gpuLayers: 0 });
+    const paired: ManagedLocalModelDescriptor = {
+      ...model,
+      baseModelId: 'owner/base',
+      draft: {
+        id: 'b'.repeat(64),
+        modelRoot: '/fixture/draft',
+        modelPath: '/fixture/draft/model.gguf',
+        baseModelId: 'owner/base',
+        artifactHashes: ['c'.repeat(64)],
+        draftTokensMax: 3,
+      },
+      fit: {
+        ...model.fit,
+        gpuOffloadRatio: 0,
+        draft: {
+          weightsBytes: 1024,
+          kvBytesPerToken: 1024,
+          scratchBytes: 1024,
+          gpuOffloadRatio: 1,
+        },
+      },
+    };
+    const { subject, supervisor } = lifecycle();
+    try {
+      await expect(subject.acquire(paired, false)).rejects.toMatchObject({
+        code: 'backend_unavailable',
+      });
+      expect(supervisor.starts).toHaveLength(0);
+    } finally {
+      await subject.dispose();
+    }
+  });
 
   it('accepts a bounded verification fallback when batch is reduced with context', async () => {
     const model = await descriptor('3', {

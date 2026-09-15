@@ -733,6 +733,7 @@ export class ManagedLocalController {
       immutableRevision: model.immutableRevision,
       artifactHashes: this.manager.artifactExpectations(modelId).map(({ sha256 }) => sha256),
       ...(draft === null ? {} : { speculative: managedLocalDraftBinding(draft) }),
+      ...(draft !== null && launch.backend === 'cpu' ? { draftPlacement: 'cpu' as const } : {}),
       quantization: model.quantization,
       contextTokens: launch.contextTokens,
       kvCacheType: 'f16',

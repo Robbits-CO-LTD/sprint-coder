@@ -562,7 +562,9 @@ function validateDescriptor(
         descriptor.baseModelId == null ||
         descriptor.draft.baseModelId !== descriptor.baseModelId)) ||
     (descriptor.backend === 'cpu' &&
-      (descriptor.gpuLayers !== 0 || descriptor.fit.gpuOffloadRatio !== 0)) ||
+      (descriptor.gpuLayers !== 0 ||
+        descriptor.fit.gpuOffloadRatio !== 0 ||
+        (descriptor.fit.draft?.gpuOffloadRatio ?? 0) !== 0)) ||
     (descriptor.backend !== 'cpu' && descriptor.gpuLayers === 0)
   )
     throw new ManagedLocalLifecycleError(
