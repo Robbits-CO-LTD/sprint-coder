@@ -31,12 +31,16 @@ const eventSchema = z.discriminatedUnion('type', [
       endpointDigest: digest.optional(),
       catalogDigest: digest.optional(),
       policyEpoch: integer.optional(),
-      selectedFromCurrentTask: z.boolean().optional(),
-      fallbackUsed: z.boolean().optional(),
-      credentialChanged: z.boolean().optional(),
     })
     .strict(),
-  z.object({ ...base, type: z.literal('preflight_passed'), bindingDigest: digest }).strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('preflight_passed'),
+      bindingDigest: digest,
+      fallbackUsed: z.boolean().optional(),
+    })
+    .strict(),
   z.object({ ...base, type: z.literal('egress_authorized'), egressDigest: digest }).strict(),
   z
     .object({
@@ -60,6 +64,7 @@ const eventSchema = z.discriminatedUnion('type', [
       ...base,
       type: z.literal('parsed'),
       ttlVerified: z.boolean().optional(),
+      selectedFromCurrentTask: z.boolean().optional(),
       round: integer,
       revision: integer,
       bindingDigest: digest,

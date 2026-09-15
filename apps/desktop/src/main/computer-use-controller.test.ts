@@ -487,6 +487,7 @@ describe('ComputerUseController', () => {
     const snapshot = runtimeCapture.snapshot();
     expect(snapshot.events.map((event) => event.type)).toEqual([
       'session',
+      'cost_limit_bound',
       'observation',
       'native_started',
       'native_finished',
@@ -494,6 +495,12 @@ describe('ComputerUseController', () => {
       'stop_requested',
       'stop_acknowledged',
     ]);
+    // The bound is recorded before any round can start, and carries no raw policy body.
+    expect(snapshot.events[1]).toMatchObject({
+      type: 'cost_limit_bound',
+      maxRounds: expect.any(Number),
+      costLimitDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
     expect(snapshot.exactThreeRoundJourneyObserved).toBe(false);
     expect(snapshot.finalGateEligible).toBe(false);
     expect(fixture.dispatchCount()).toBe(1);

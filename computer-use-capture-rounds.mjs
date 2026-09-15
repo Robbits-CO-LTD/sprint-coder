@@ -6,25 +6,22 @@ const fail = () => {
 
 /** Fixed by this module's version, not measured: the schema pins the same adapter contract. */
 export const COMPUTER_USE_CAPTURE_ADAPTER_VERSION = 'computer-use-v1';
+/**
+ * Emitted together with the preflight `bindingDigest`. They are NOT recomputable from it: the
+ * producer's binding digest commits to raw permit identity (session/connection/model/endpoint/
+ * catalog/policy/adapter), and raw identity must never reach this metadata stream. So these are
+ * co-emitted digests bound to the run only by arriving on the single preflight event whose digest
+ * every later round repeats unchanged. A protected runner must still verify them independently.
+ */
 const BINDING_IDENTITY_KEYS = [
   'connectionIdDigest',
   'modelIdDigest',
   'endpointDigest',
   'catalogDigest',
   'policyEpoch',
-  'selectedFromCurrentTask',
-  'fallbackUsed',
-  'credentialChanged',
 ];
-
-/**
- * Canonical digest of the Provider binding identity. Every preflight/round/parse event carries a
- * `bindingDigest`; requiring it to equal this makes the opaque token a checked commitment to the
- * identity fields, so a claimed identity that the rounds never bound to fails closed.
- */
-export function computerUseCaptureBindingDigest(identity) {
-  return digest(BINDING_IDENTITY_KEYS.map((key) => identity[key]));
-}
+/** No planner/Controller stage can observe this; the protected runner owns it. */
+export const COMPUTER_USE_RUNNER_OWNED_BINDING_KEYS = Object.freeze(['credentialChanged']);
 
 /** `null` when unclaimed, `undefined` when partially claimed (never completed from elsewhere). */
 function bindingIdentity(event) {
@@ -36,8 +33,9 @@ function bindingIdentity(event) {
 
 /**
  * Builds the Provider binding out of measured facts only. A missing consent, missing cost bound,
- * unclaimed or unbound identity, or an incomplete journey yields `null`: an unresolved binding is
- * left unresolved rather than filled in from a producer-supplied object.
+ * unclaimed identity, unobserved fallback/task-selection facts, or an incomplete journey yields
+ * `null`: an unresolved binding stays unresolved rather than filled in from a producer object.
+ * Every schema binding field except COMPUTER_USE_RUNNER_OWNED_BINDING_KEYS is produced here.
  */
 function measuredBinding(session, sessionIdDigest, roundsComplete) {
   const identity = session.bindingIdentity;
@@ -48,19 +46,23 @@ function measuredBinding(session, sessionIdDigest, roundsComplete) {
     session.egressDigest === null ||
     session.costLimitDigest === null ||
     !session.bindingStable ||
-    computerUseCaptureBindingDigest(identity) !== session.bindingDigest
+    session.fallbackUsed !== false ||
+    // Every completed round must have re-asserted the permit against the current Task.
+    session.selectedFromCurrentTask !== session.rounds.length
   )
     return null;
   return {
     ...identity,
     adapterVersion: COMPUTER_USE_CAPTURE_ADAPTER_VERSION,
     sessionIdDigest,
+    selectedFromCurrentTask: true,
     bindingStable: session.bindingStable,
     preflightAttempts: session.preflightAttempts,
     preflightPassed: session.preflightPassed,
     roundsAttempted: session.roundsAttempted,
     roundsCompleted: session.rounds.length,
     isOpenRouter: session.isOpenRouter,
+    fallbackUsed: session.fallbackUsed,
   };
 }
 
@@ -106,8 +108,11 @@ export function summarizeComputerUseCaptureRounds(frames) {
         bindingIdentity: null,
         bindingStable: true,
         isOpenRouter: null,
+        fallbackUsed: null,
+        selectedFromCurrentTask: 0,
         roundsAttempted: 0,
         egressDigest: null,
+        egressAuthorizations: 0,
         costLimitDigest: null,
         maxRounds: null,
         attemptCount: event.inputAttemptCount ?? null,
@@ -141,6 +146,9 @@ export function summarizeComputerUseCaptureRounds(frames) {
         session.invalid = true;
     } else if (event.type === 'preflight_passed') {
       if (event.bindingDigest !== session.bindingDigest) session.bindingStable = false;
+      // Observed, not asserted: preflight only reaches this point once the stream resolved to the
+      // same provider and model the run bound (computer-use-planner.ts:419-423).
+      session.fallbackUsed = event.fallbackUsed ?? null;
       if (
         session.preflightAttempts !== 1 ||
         session.preflightPassed ||
@@ -149,10 +157,13 @@ export function summarizeComputerUseCaptureRounds(frames) {
         session.invalid = true;
       session.preflightPassed = true;
     } else if (event.type === 'egress_authorized') {
-      // One consent decision governs the whole run: a later divergent one is not a second run.
-      if (session.rounds.length || pending) session.invalid = true;
+      // The planner authorizes egress once per Provider request: at preflight and again before
+      // every round (computer-use-planner.ts:364 and :207). So these arrive interleaved with
+      // completed rounds and must NOT be constrained to the pre-round window. What one run must
+      // hold is a single consent scope: a later divergent decision is a different authorization.
       if (session.egressDigest === null) session.egressDigest = event.egressDigest;
       else if (session.egressDigest !== event.egressDigest) session.invalid = true;
+      session.egressAuthorizations += 1;
     } else if (event.type === 'cost_limit_bound') {
       if (session.rounds.length || pending || event.maxRounds === undefined) session.invalid = true;
       if (session.costLimitDigest === null) {
@@ -222,6 +233,9 @@ export function summarizeComputerUseCaptureRounds(frames) {
       };
     } else if (event.type === 'parsed') {
       if (event.bindingDigest !== session.bindingDigest) session.bindingStable = false;
+      // Counted per round: the planner re-asserts the permit against the current Task's live
+      // compatibility binding before it records a parse (computer-use-planner.ts:288-300).
+      if (event.selectedFromCurrentTask === true) session.selectedFromCurrentTask += 1;
       if (
         !pending ||
         pending.parse ||
@@ -314,6 +328,7 @@ export function summarizeComputerUseCaptureRounds(frames) {
         roundsAttempted: session.roundsAttempted,
         // `null` means the run never bound one, not that it was unconstrained.
         egressConsentDigest: session.egressDigest,
+        egressAuthorizations: session.egressAuthorizations,
         costLimitDigest: session.costLimitDigest,
         maxRounds: session.maxRounds,
         roundsComplete,

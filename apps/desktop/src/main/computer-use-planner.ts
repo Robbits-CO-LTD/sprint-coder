@@ -205,6 +205,19 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
       signal: input.signal,
     } as const;
     const egress = (this.deps.egress ?? authorizeComputerUseProviderEgress)(egressInput);
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'egress_authorized',
+        sessionDigest: computerUseCaptureDigest(observation.sessionId),
+        egressDigest: captureEgressConsent({
+          decision: egress,
+          providerId: this.deps.connection.providerId,
+          connectionId: this.deps.connection.id,
+          modelId: this.deps.modelId,
+          endpointTrust: this.deps.endpointTrust,
+        }),
+      }),
+    );
     if (!egress.allowed) throw new ComputerUsePlannerError('provider_egress_denied');
     const requestInput = {
       executionId,
@@ -294,6 +307,8 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
       capture.record({
         type: 'parsed',
         ttlVerified: Date.parse(observation.expiresAt) > Date.now(),
+        // The permit was re-asserted against the Task's live compatibility binding just above.
+        selectedFromCurrentTask: true,
         sessionDigest: computerUseCaptureDigest(observation.sessionId),
         round: input.round,
         revision: observation.revision,
@@ -362,6 +377,19 @@ export async function preflightComputerUseProvider(
     signal,
   } as const;
   const egress = (deps.egress ?? authorizeComputerUseProviderEgress)(egressInput);
+  captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
+    capture.record({
+      type: 'egress_authorized',
+      sessionDigest: computerUseCaptureDigest(deps.sessionId),
+      egressDigest: captureEgressConsent({
+        decision: egress,
+        providerId: deps.connection.providerId,
+        connectionId: deps.connection.id,
+        modelId: deps.modelId,
+        endpointTrust: deps.endpointTrust,
+      }),
+    }),
+  );
   if (!egress.allowed) throw new ComputerUsePlannerError('preflight_provider_egress_denied');
   const executionId = `computer-preflight:${deps.sessionId}:${randomId()}`;
   const request = providerExecutionRequestSchema.parse({
@@ -400,6 +428,12 @@ export async function preflightComputerUseProvider(
       sessionDigest: computerUseCaptureDigest(deps.sessionId),
       bindingDigest: captureProviderBinding(capturedBinding),
       isOpenRouter: deps.connection.providerId === 'openrouter',
+      // Digests only: the raw connection/model id and endpoint never enter this stream.
+      connectionIdDigest: computerUseCaptureDigest(deps.connection.id),
+      modelIdDigest: computerUseCaptureDigest(deps.modelId),
+      endpointDigest: computerUseCaptureDigest(String(capturedBinding.endpointRevision)),
+      catalogDigest: computerUseCaptureDigest(String(deps.catalogRevision)),
+      policyEpoch: deps.policyEpoch,
     }),
   );
   try {
@@ -457,6 +491,9 @@ export async function preflightComputerUseProvider(
       type: 'preflight_passed',
       sessionDigest: computerUseCaptureDigest(deps.sessionId),
       bindingDigest: captureProviderBinding({ ...capturedBinding, endpointRevision }),
+      // Reaching here means the stream resolved to this exact provider and model above; any
+      // other resolution threw preflight_provider_binding_mismatch instead of recording success.
+      fallbackUsed: false,
     }),
   );
   return Object.freeze({
@@ -474,6 +511,34 @@ export async function preflightComputerUseProvider(
       Date.now() + COMPUTER_USE_LIMITS.maxSessionHours * 60 * 60_000,
     ).toISOString(),
   });
+}
+
+/**
+ * The consent SCOPE, not the per-request payload. Egress is authorized once per Provider request
+ * (preflight and every round), and each request carries a different prompt/screenshot. What one
+ * run must hold constant is the decision and the connection/model/trust it was granted against, so
+ * a mid-run policy epoch change or connection swap produces a different digest. No prompt,
+ * screenshot, endpoint URL, credential or raw identifier is an input here.
+ */
+function captureEgressConsent(input: {
+  decision: ProviderEgressDecision;
+  providerId: string;
+  connectionId: string;
+  modelId: string;
+  endpointTrust: 'trusted-local' | 'trusted-remote' | 'untrusted' | undefined;
+}): string {
+  return computerUseCaptureDigest(
+    JSON.stringify([
+      input.decision.allowed,
+      input.decision.evaluation.decision,
+      input.decision.evaluation.policyEpoch,
+      input.providerId,
+      computerUseCaptureDigest(input.connectionId),
+      computerUseCaptureDigest(input.modelId),
+      input.endpointTrust ?? 'trusted-remote',
+      COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+    ]),
+  );
 }
 
 function captureProviderBinding(

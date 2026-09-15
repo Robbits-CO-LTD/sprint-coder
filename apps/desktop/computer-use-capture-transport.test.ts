@@ -36,6 +36,8 @@ type JourneyOptions = {
   cost?: boolean;
   lateCost?: boolean;
   secondEgressDigest?: string;
+  omitFallbackFact?: boolean;
+  unselectedRound?: number;
 };
 
 describe('Computer Use normal capture framing', () => {
@@ -73,15 +75,13 @@ describe('Computer Use normal capture framing', () => {
     encode('hello', hello);
     expect(() => encode('event', { ...event, rawBody: 'PRIVATE_FIXTURE' })).toThrow();
   });
+  // Exactly what the planner can observe when it records preflight_started.
   const bindingIdentity: Record<string, string | number | boolean> = {
     connectionIdDigest: '1'.repeat(64),
     modelIdDigest: '2'.repeat(64),
     endpointDigest: '3'.repeat(64),
     catalogDigest: '4'.repeat(64),
     policyEpoch: 7,
-    selectedFromCurrentTask: true,
-    fallbackUsed: false,
-    credentialChanged: false,
   };
   const egressDigest = '5'.repeat(64);
   const costLimitDigest = '6'.repeat(64);
@@ -98,8 +98,11 @@ describe('Computer Use normal capture framing', () => {
       ttlVerified: true,
     });
     const costEvent = { type: 'cost_limit_bound', sessionDigest, costLimitDigest, maxRounds: 25 };
+    const consent = { type: 'egress_authorized', sessionDigest, egressDigest };
+    // Mirrors the planner: consent is authorized before preflight and again before every round.
     const payloads: Record<string, string | number | boolean>[] = [
       { ...event, cancelEpoch: 0, inputAttemptCount: 0 },
+      ...(options.egress ? [{ ...consent }] : []),
       {
         type: 'preflight_started',
         sessionDigest,
@@ -107,8 +110,12 @@ describe('Computer Use normal capture framing', () => {
         isOpenRouter: false,
         ...(options.identity ?? {}),
       },
-      { type: 'preflight_passed', sessionDigest, bindingDigest },
-      ...(options.egress ? [{ type: 'egress_authorized', sessionDigest, egressDigest }] : []),
+      {
+        type: 'preflight_passed',
+        sessionDigest,
+        bindingDigest,
+        ...(options.omitFallbackFact ? {} : { fallbackUsed: false }),
+      },
       ...(options.secondEgressDigest === undefined
         ? []
         : [
@@ -123,6 +130,7 @@ describe('Computer Use normal capture framing', () => {
     ];
     let inputAttemptCount = 0;
     for (let round = 1; round <= 3; round++) {
+      if (options.egress) payloads.push({ ...consent });
       payloads.push({
         type: 'round_started',
         sessionDigest,
@@ -141,6 +149,7 @@ describe('Computer Use normal capture framing', () => {
         actionClass: round === 1 ? 'type' : 'invoke',
         latencyMs: 10,
         ttlVerified: true,
+        ...(options.unselectedRound === round ? {} : { selectedFromCurrentTask: true }),
       });
       for (let scalar = 0; scalar < (round === 1 ? 2 : 1); scalar++) {
         const requestDigest = createHash('sha256').update(`${round}:${scalar}`).digest('hex');
@@ -210,28 +219,34 @@ describe('Computer Use normal capture framing', () => {
 
   it('derives the provider binding from measured rounds, consent and cost bounds', async () => {
     const rounds = await captureRounds();
-    const bindingDigest = rounds.computerUseCaptureBindingDigest(bindingIdentity);
     const [summary] = rounds.summarizeComputerUseCaptureRounds(
-      journeyFrames({ bindingDigest, identity: bindingIdentity, egress: true, cost: true }),
+      journeyFrames({ identity: bindingIdentity, egress: true, cost: true }),
     );
     expect(summary.roundsComplete).toBe(true);
     expect(summary.egressConsentDigest).toBe(egressDigest);
     expect(summary.costLimitDigest).toBe(costLimitDigest);
     expect(summary.maxRounds).toBe(25);
     expect(summary.roundsAttempted).toBe(3);
-    // Every field is measured from the owned stream or fixed by the module version; none of it
-    // is transcribed from a producer-supplied binding object.
+    // The planner authorizes egress once per Provider request, so a complete run carries one
+    // consent scope repeated across preflight and all three rounds.
+    expect(summary.egressAuthorizations).toBe(4);
+    // Everything here is measured from the owned stream or fixed by the module version. The one
+    // schema field this stream cannot observe stays out entirely.
     expect(summary.binding).toEqual({
       ...bindingIdentity,
       adapterVersion: 'computer-use-v1',
       sessionIdDigest: 'd'.repeat(64),
+      selectedFromCurrentTask: true,
       bindingStable: true,
       preflightAttempts: 1,
       preflightPassed: true,
       roundsAttempted: 3,
       roundsCompleted: 3,
       isOpenRouter: false,
+      fallbackUsed: false,
     });
+    expect(summary.binding).not.toHaveProperty('credentialChanged');
+    expect(rounds.COMPUTER_USE_RUNNER_OWNED_BINDING_KEYS).toEqual(['credentialChanged']);
   });
 
   it.each([
@@ -239,19 +254,15 @@ describe('Computer Use normal capture framing', () => {
     'no-cost',
     'no-identity',
     'partial-identity',
-    'identity-digest-mismatch',
+    'drifted-binding',
     'changed-egress',
     'late-cost',
+    'no-fallback-fact',
+    'unselected-round',
     'incomplete-journey',
   ])('does not resolve a measured binding for %s', async (kind) => {
     const rounds = await captureRounds();
-    const bindingDigest = rounds.computerUseCaptureBindingDigest(bindingIdentity);
-    const options: JourneyOptions = {
-      bindingDigest,
-      identity: bindingIdentity,
-      egress: true,
-      cost: true,
-    };
+    const options: JourneyOptions = { identity: bindingIdentity, egress: true, cost: true };
     if (kind === 'no-egress') options.egress = false;
     else if (kind === 'no-cost') options.cost = false;
     else if (kind === 'no-identity') delete options.identity;
@@ -259,10 +270,17 @@ describe('Computer Use normal capture framing', () => {
       options.identity = Object.fromEntries(
         Object.entries(bindingIdentity).filter(([key]) => key !== 'policyEpoch'),
       );
-    else if (kind === 'identity-digest-mismatch') options.bindingDigest = 'f'.repeat(64);
     else if (kind === 'changed-egress') options.secondEgressDigest = '7'.repeat(64);
     else if (kind === 'late-cost') options.lateCost = true;
+    else if (kind === 'no-fallback-fact') options.omitFallbackFact = true;
+    else if (kind === 'unselected-round') options.unselectedRound = 2;
     const frames = journeyFrames(options);
+    if (kind === 'drifted-binding')
+      Reflect.set(
+        frames.find((frame) => frame.payload.type === 'round_started')!.payload,
+        'bindingDigest',
+        '9'.repeat(64),
+      );
     if (kind === 'incomplete-journey')
       frames.splice(
         frames.findIndex((frame) => frame.payload.type === 'stop_acknowledged'),
@@ -274,6 +292,8 @@ describe('Computer Use normal capture framing', () => {
     if (kind === 'no-cost') expect(summary.costLimitDigest).toBe(null);
     if (kind === 'changed-egress' || kind === 'late-cost' || kind === 'partial-identity')
       expect(summary.roundsComplete).toBe(false);
+    // A drifted round binding must fail closed without the journey itself looking complete.
+    if (kind === 'drifted-binding') expect(summary.roundsComplete).toBe(false);
   });
 
   it.each([

@@ -1025,6 +1025,22 @@ export class ComputerUseController {
     };
     this.sessions.set(sessionId, record);
     this.startingSessions.delete(sessionId);
+    // Bound before any round can start. Digest of the limits only; no policy body or identifier.
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'cost_limit_bound',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        costLimitDigest: computerUseCaptureDigest(
+          JSON.stringify([
+            status.maxRounds,
+            COMPUTER_USE_LIMITS.maxRounds,
+            COMPUTER_USE_LIMITS.maxSessionHours,
+            status.policyEpoch,
+          ]),
+        ),
+        maxRounds: status.maxRounds,
+      }),
+    );
     record.expiryTimer = setTimeout(
       () => void this.stop(sessionId, 'limit_reached'),
       Math.max(1, Date.parse(status.expiresAt) - this.now()),

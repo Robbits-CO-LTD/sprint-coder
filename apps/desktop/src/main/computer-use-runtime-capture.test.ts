@@ -266,12 +266,19 @@ describe('Computer Use runtime observation (unit fixtures are never acceptance)'
       endpointDigest: '3'.repeat(64),
       catalogDigest: '4'.repeat(64),
       policyEpoch: 7,
-      selectedFromCurrentTask: true,
-      fallbackUsed: false,
-      credentialChanged: false,
     });
+    capture.record({ type: 'preflight_passed', sessionDigest, bindingDigest, fallbackUsed: false });
     expect(capture.snapshot().invalid).toBe(false);
-    // The existing emitter omits every identity field; that must stay valid until it is wired.
+    // A binding fact this stream cannot observe must not be accepted from the producer either.
+    capture.record({
+      type: 'preflight_started',
+      sessionDigest,
+      bindingDigest,
+      isOpenRouter: false,
+      credentialChanged: false,
+    } as unknown as ComputerUseRuntimeEvent);
+    expect(capture.snapshot().invalid).toBe(true);
+    // An emitter that omits every identity field must still stay valid.
     const bare = captureFixture();
     expect(bare.snapshot().invalid).toBe(false);
   });

@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { ProviderConnection, TaskSummary } from '@sprint-coder/contracts';
@@ -206,11 +208,51 @@ describe('Computer Use provider preflight', () => {
     const snapshot = runtimeCapture.snapshot();
     expect(snapshot.events.map((event) => event.type)).toEqual([
       'session',
+      'egress_authorized',
       'preflight_started',
       'preflight_passed',
+      'egress_authorized',
       'round_started',
       'parsed',
     ]);
+    // One consent scope governs preflight and every round of the same run.
+    const consents = snapshot.events.filter((event) => event.type === 'egress_authorized');
+    expect(new Set(consents.map((event) => Reflect.get(event, 'egressDigest'))).size).toBe(1);
+    expect(snapshot.events.find((event) => event.type === 'preflight_started')).toMatchObject({
+      connectionIdDigest: computerUseCaptureDigest('connection-1'),
+      modelIdDigest: computerUseCaptureDigest('model-1'),
+      policyEpoch: expect.any(Number),
+    });
+    expect(snapshot.events.find((event) => event.type === 'preflight_passed')).toMatchObject({
+      fallbackUsed: false,
+    });
+    expect(snapshot.events.at(-1)).toMatchObject({ selectedFromCurrentTask: true });
+    // The aggregator resolves no identity unless all five arrive together on this one event.
+    const preflight = snapshot.events.find((event) => event.type === 'preflight_started')!;
+    for (const key of [
+      'connectionIdDigest',
+      'modelIdDigest',
+      'endpointDigest',
+      'catalogDigest',
+      'policyEpoch',
+    ])
+      expect(Reflect.get(preflight, key)).toBeDefined();
+    // Feed the real emitter output straight into the aggregator: the field names and shapes must
+    // agree. One round without a Stop is deliberately not a resolved binding.
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(__dirname, '../../../../computer-use-capture-rounds.mjs')).href
+    );
+    const [aggregated] = summarizeComputerUseCaptureRounds([
+      { kind: 'hello', payload: { platform: 'darwin', nativeManifestDigest: 'f'.repeat(64) } },
+      ...snapshot.events.map((payload) => ({ kind: 'event', payload })),
+    ]);
+    expect(aggregated.egressConsentDigest).toBe(
+      Reflect.get(consents[0]!, 'egressDigest') as string,
+    );
+    expect(aggregated.egressAuthorizations).toBe(2);
+    expect(aggregated.roundsAttempted).toBe(1);
+    expect(aggregated.roundsComplete).toBe(false);
+    expect(aggregated.binding).toBe(null);
     expect(snapshot.events.at(-1)).toMatchObject({
       type: 'parsed',
       actionClass: 'type',
@@ -252,6 +294,7 @@ describe('Computer Use provider preflight', () => {
       ).rejects.toThrow();
       expect(runtimeCapture.snapshot().events.map((event) => event.type)).toEqual([
         'session',
+        'egress_authorized',
         'preflight_started',
       ]);
     }
