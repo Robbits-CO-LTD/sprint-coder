@@ -262,6 +262,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
         .evaluate(() => {
           const panel = document.querySelector('[data-testid="graph-panel"]');
           const input = panel?.querySelector<HTMLTextAreaElement>('textarea[id^="graph-comment-"]');
+          const comment = panel?.querySelector('.graph-comment');
           const label = input
             ? document.querySelector<HTMLLabelElement>(`label[for="${input.id}"]`)
             : null;
@@ -273,6 +274,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
               : null;
           return {
             graphPanel: Boolean(panel),
+            commentDisplay: comment ? getComputedStyle(comment).display : null,
             inputPresent: Boolean(input),
             labelPresent: Boolean(label),
             labelForMatches: Boolean(input && label?.htmlFor === input.id),
