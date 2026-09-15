@@ -163,8 +163,10 @@ on signatures. What is now derived from measurement, and what is still unconnect
   per-round Task selection is missing (`computer-use-capture-rounds.mjs`,
   `computer-use-capture-wire.mjs`). Producer-supplied binding objects are not transcribed.
 - _Done._ The planner and Controller emit those facts. The planner records `egress_authorized` once
-  per Provider request — at preflight and again before every round, so four times in a three-round
-  run, not once — carrying a digest of the consent scope rather than the per-request payload; it
+  per allowed Provider request — at preflight and again before every round, so four times in a
+  three-round run, not once — and records nothing when the request is denied, so the aggregator's
+  count is authorizations rather than attempts. The event carries a digest of the consent scope
+  rather than the per-request payload. The planner
   also records five binding identity fields on `preflight_started`, `fallbackUsed` on
   `preflight_passed`, and `selectedFromCurrentTask` on each `parsed`. The Controller records
   `cost_limit_bound` once when the session is registered, before any round can start. Only digests

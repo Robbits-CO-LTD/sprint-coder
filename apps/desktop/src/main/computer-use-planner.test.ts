@@ -272,6 +272,80 @@ describe('Computer Use provider preflight', () => {
     expect(snapshot.finalGateEligible).toBe(false);
   });
 
+  it('records no consent for a denied request, at preflight or mid-run', async () => {
+    const denied = () => ({
+      allowed: false,
+      evaluation: {
+        decision: 'deny' as const,
+        reason: 'fixture_denied',
+        policyEpoch: 1,
+        evaluationTrace: [],
+      },
+    });
+    const startCapture = () => {
+      const runtimeCapture = new ComputerUseRuntimeCapture();
+      runtimeCapture.start({
+        type: 'session',
+        sessionDigest: computerUseCaptureDigest('session-1'),
+        platform: 'darwin',
+        appDigest: observation.appIdentityDigest,
+        windowDigest: observation.windowIdentityDigest,
+        manifestDigest: 'f'.repeat(64),
+      });
+      return runtimeCapture;
+    };
+    // The preflight marker assertion requires this exact click position.
+    const response = '{"type":"click","x":0.75,"y":0.25,"button":"left"}';
+
+    const preflightCapture = startCapture();
+    await expect(
+      preflightComputerUseProvider(
+        {
+          ...deps(runtimeFor(() => undefined, response)),
+          sessionId: 'session-1',
+          runtimeCapture: preflightCapture,
+          egress: denied,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('preflight_provider_egress_denied');
+    expect(preflightCapture.snapshot().events.map((event) => event.type)).toEqual(['session']);
+
+    // A run whose policy turns mid-flight must not leave an authorization behind either.
+    const roundCapture = startCapture();
+    const base = { ...deps(runtimeFor(() => undefined, response)), runtimeCapture: roundCapture };
+    const permit = await preflightComputerUseProvider(
+      { ...base, sessionId: 'session-1' },
+      new AbortController().signal,
+    );
+    const planner = new ProviderComputerUsePlanner({
+      ...base,
+      compatibilityPermit: permit,
+      runtime: runtimeFor(() => undefined, response),
+      egress: denied,
+    });
+    await expect(
+      planner.plan({ observation, round: 1, signal: new AbortController().signal }),
+    ).rejects.toThrow('provider_egress_denied');
+    const snapshot = roundCapture.snapshot();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      'session',
+      'egress_authorized',
+      'preflight_started',
+      'preflight_passed',
+    ]);
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(__dirname, '../../../../computer-use-capture-rounds.mjs')).href
+    );
+    const [aggregated] = summarizeComputerUseCaptureRounds([
+      { kind: 'hello', payload: { platform: 'darwin', nativeManifestDigest: 'f'.repeat(64) } },
+      ...snapshot.events.map((payload) => ({ kind: 'event', payload })),
+    ]);
+    // The denied round must not be counted as an authorization.
+    expect(aggregated.egressAuthorizations).toBe(1);
+    expect(aggregated.roundsAttempted).toBe(0);
+  });
+
   it('does not emit preflight success for parser failure or changed resolution', async () => {
     for (const output of [
       '{"type":"finish"}',

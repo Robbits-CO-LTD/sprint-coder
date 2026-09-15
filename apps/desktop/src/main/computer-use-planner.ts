@@ -205,6 +205,9 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
       signal: input.signal,
     } as const;
     const egress = (this.deps.egress ?? authorizeComputerUseProviderEgress)(egressInput);
+    if (!egress.allowed) throw new ComputerUsePlannerError('provider_egress_denied');
+    // Only an allowed request is an authorization. The aggregator counts these events, so a
+    // denial recorded here would be indistinguishable from a granted one in the count.
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
         type: 'egress_authorized',
@@ -218,7 +221,6 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
         }),
       }),
     );
-    if (!egress.allowed) throw new ComputerUsePlannerError('provider_egress_denied');
     const requestInput = {
       executionId,
       connectionId: this.deps.connection.id,
@@ -377,6 +379,7 @@ export async function preflightComputerUseProvider(
     signal,
   } as const;
   const egress = (deps.egress ?? authorizeComputerUseProviderEgress)(egressInput);
+  if (!egress.allowed) throw new ComputerUsePlannerError('preflight_provider_egress_denied');
   captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
     capture.record({
       type: 'egress_authorized',
@@ -390,7 +393,6 @@ export async function preflightComputerUseProvider(
       }),
     }),
   );
-  if (!egress.allowed) throw new ComputerUsePlannerError('preflight_provider_egress_denied');
   const executionId = `computer-preflight:${deps.sessionId}:${randomId()}`;
   const request = providerExecutionRequestSchema.parse({
     executionId,
