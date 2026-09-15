@@ -149,13 +149,39 @@ compatibility input with a generated null closure; capture version 2 must supply
 Both output schema v4 and are checked by the real verifier. All Core/Safety PASS captures remain
 refused pending the reviewed collector connection.
 
-**Code still incomplete:** protected owned-child facts, logical privacy results and validated
-canonical assertion reports must be connected to sealing and final verification. In particular,
-the current standalone completed CLI cannot obtain the out-of-band collector verification from
-a file or a boolean; it remains HOLD. **External measurements still missing:** signed packages,
-both OS real Provider journeys and all original required state changes. These are separate from
-the code work. Windows build/native/real-device checks run only through `ssh mainpc`, coordinated
-by Main (slot 444); local portable/mocked checks are auxiliary evidence only.
+**Code still incomplete.** Signed packages and real Provider runs would not by themselves make the
+completed CLI pass today: several wiring steps are unfinished, and the gate is not merely waiting
+on signatures. What is now derived from measurement, and what is still unconnected:
+
+- _Done._ Privacy surface inspection derives its own result instead of reporting a fixed `false`
+  (`apps/desktop/src/main/computer-use-privacy-inspection.ts`). `finalGateEligible` there requires
+  every payload class present, every surface scanned, nothing contaminated, and the submitted files
+  proven to be the whole tree under the caller's claimed roots; a payload class the run never
+  generated reports as uninspected and never as clean.
+- _Done._ The round aggregator records one egress consent and one cost bound per run and builds the
+  Provider `binding` from measured preflight/round facts, returning `null` when consent, cost bound
+  or the bound identity is missing (`computer-use-capture-rounds.mjs`,
+  `computer-use-capture-wire.mjs`). Producer-supplied binding objects are not transcribed. The
+  planner and Controller do not yet emit the new `egress_authorized` / `cost_limit_bound` events or
+  the optional binding identity fields on `preflight_started`, so no live run resolves a binding yet.
+- _Not connected._ `verify-computer-use-final-gate.mjs` `main()` never supplies `verifiedOwnedRunFacts`
+  or `verifiedClosureSha256`, so `finalGateEligible` is structurally false and the completed CLI
+  always exits nonzero. As stated above this cannot be fixed with a flag or a JSON field: a
+  protected runner must call the verifier as a library.
+- _Not connected._ Of `COMPUTER_USE_OWNED_RUN_FACT_KEYS`, `signerIdentityDigest`,
+  `processIdentityDigest` and `privacyReportDigest` have no producer. The final-gate workflow already
+  computes a signer digest on both OSes and checks it against the native manifest, but neither job
+  exports it, so it is not bound into the closure.
+- _Not connected._ `generate-computer-use-final-gate-evidence.mjs` refuses every Core/Safety PASS and
+  validates only with `allowIncomplete: true`; `parentClosure` is copied from the capture as-is. The
+  27 `COMPUTER_USE_PARENT_COVERAGE` references have no producer outside tests.
+- _Not connected._ `evidence.privacy`'s eleven booleans are still copied from the capture and checked
+  only for being `true`; the inspection result above is not yet their source.
+
+**External measurements still missing:** signed packages, both OS real Provider journeys and all
+original required state changes. These are separate from the code work. Windows
+build/native/real-device checks run only through `ssh mainpc`, coordinated by Main (slot 444);
+local portable/mocked checks are auxiliary evidence only.
 
 ### Integration checkpoints for #387 and #388 handoff
 
