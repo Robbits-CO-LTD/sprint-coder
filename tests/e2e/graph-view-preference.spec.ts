@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { writeFile } from 'node:fs/promises';
 import { closeApp, createUserDataDir, firstWindow, launchApp, removeUserDataDir } from './helpers';
 
 for (const kind of ['architecture', 'workflow'] as const) {
@@ -65,9 +66,33 @@ for (const kind of ['architecture', 'workflow'] as const) {
           .locator('[data-node-id="api"][data-focus-selected]'),
       ).toHaveCount(1);
       await expect(restarted.getByTestId('graph-history')).toHaveAttribute('open', '');
+      await restarted
+        .frameLocator('[data-testid="graph-frame"]')
+        .locator('body')
+        .evaluate(async () => {
+          await document.fonts.ready;
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          );
+        });
       const path = info.outputPath(`${kind}-restored.png`);
       await restarted.getByTestId('graph-panel').screenshot({ path });
       await info.attach('restored-selection', { path, contentType: 'image/png' });
+      // Windows can capture a blank OOPIF in the first clipped image despite completed DOM
+      // restoration. Keep that image and add the native surface without activating the window.
+      const nativeImage = await app.evaluate(async ({ BrowserWindow }) => {
+        const windows = BrowserWindow.getAllWindows();
+        if (windows.length !== 1) throw new Error('Expected one acceptance window');
+        return (await windows[0]!.capturePage(undefined, { stayHidden: true, stayAwake: false }))
+          .toPNG()
+          .toString('base64');
+      });
+      const nativePath = info.outputPath(`${kind}-restored-native.png`);
+      await writeFile(nativePath, Buffer.from(nativeImage, 'base64'));
+      await info.attach('restored-native-surface', {
+        path: nativePath,
+        contentType: 'image/png',
+      });
     } finally {
       await closeApp(app);
       removeUserDataDir(profile);
