@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import { COMPUTER_USE_LIMITS } from '@sprint-coder/contracts';
 import {
   captureComputerUseRuntime,
   ComputerUseRuntimeCapture,
+  COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES,
+  COMPUTER_USE_CAPTURE_MAX_EVENTS,
   computerUseCaptureDigest,
+  createComputerUseRuntimeCapture,
   type ComputerUseRuntimeEvent,
 } from './computer-use-runtime-capture';
 
@@ -293,10 +297,126 @@ describe('Computer Use runtime observation (unit fixtures are never acceptance)'
     const unexpected = { ...observation(3), rawBody: 'PRIVATE_FIXTURE_BODY' };
     capture.record(unexpected);
     expect(JSON.stringify(capture.snapshot())).not.toContain('PRIVATE_FIXTURE_BODY');
-    for (let index = 0; index < 200; index++) capture.record(observation(index + 4));
-    expect(capture.snapshot().events.length).toBeLessThanOrEqual(128);
+    for (let index = 0; index < 4_000; index++) capture.record(observation(index + 4));
+    expect(capture.snapshot().events.length).toBeLessThanOrEqual(COMPUTER_USE_CAPTURE_MAX_EVENTS);
     expect(capture.snapshot().events.length).toBeGreaterThan(1);
-    expect(Buffer.byteLength(JSON.stringify(capture.snapshot()))).toBeLessThan(64 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(capture.snapshot()))).toBeLessThan(
+      COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES * 2,
+    );
+    expect(capture.snapshot().invalid).toBe(true);
+  });
+
+  it('keeps a session at the product round limit inside the capture budget', () => {
+    const capture = captureFixture();
+    capture.record({
+      type: 'cost_limit_bound',
+      sessionDigest,
+      costLimitDigest: '6'.repeat(64),
+      maxRounds: COMPUTER_USE_LIMITS.maxRounds,
+    });
+    capture.record({ type: 'egress_authorized', sessionDigest, egressDigest: '5'.repeat(64) });
+    for (let round = 1; round <= COMPUTER_USE_LIMITS.maxRounds; round++) {
+      // The planner authorizes egress once per round, on top of the six Controller/planner
+      // events every round records.
+      capture.record({ type: 'egress_authorized', sessionDigest, egressDigest: '5'.repeat(64) });
+      roundEvents(round).forEach((event) => capture.record(event));
+    }
+    stop(capture);
+    const snapshot = capture.snapshot();
+    expect(snapshot.invalid).toBe(false);
+    expect(snapshot.roundsAttempted).toBe(COMPUTER_USE_LIMITS.maxRounds);
+    expect(snapshot.events.filter(({ type }) => type === 'round_started')).toHaveLength(
+      COMPUTER_USE_LIMITS.maxRounds,
+    );
+  });
+
+  it('stops emitting a session the moment it becomes invalid, leaving no hole', () => {
+    const emitted: ComputerUseRuntimeEvent[] = [];
+    const capture = createComputerUseRuntimeCapture({
+      record: (event) => emitted.push(event),
+      invalid: () => false,
+      onInvalid: () => {},
+    });
+    capture.start({
+      type: 'session',
+      sessionDigest,
+      appDigest,
+      windowDigest,
+      manifestDigest: 'f'.repeat(64),
+      platform: 'darwin',
+    });
+    capture.record(observation(1));
+    const before = emitted.length;
+    capture.record({
+      ...observation(2),
+      rawBody: 'PRIVATE_FIXTURE_BODY',
+    } as unknown as ComputerUseRuntimeEvent);
+    expect(capture.snapshot().invalid).toBe(true);
+    expect(emitted).toHaveLength(before);
+    // A refused event leaves a gap, so everything after it must stay out of the stream too: a
+    // consumer has to see a truncated session, never a complete-looking one with a hole in it.
+    capture.record(observation(3));
+    expect(emitted).toHaveLength(before);
+    expect(capture.snapshot().events).toHaveLength(before);
+  });
+
+  it('starts a new session cleanly after one exhausts the capture budget', () => {
+    const emitted: ComputerUseRuntimeEvent[] = [];
+    let sinkInvalid = false;
+    let sinkListener: (() => void) | undefined;
+    const capture = createComputerUseRuntimeCapture({
+      record: (event) => emitted.push(event),
+      invalid: () => sinkInvalid,
+      onInvalid: (listener) => {
+        sinkListener = listener;
+      },
+    });
+    capture.start({
+      type: 'session',
+      sessionDigest,
+      appDigest,
+      windowDigest,
+      manifestDigest: 'f'.repeat(64),
+      platform: 'darwin',
+    });
+    for (let index = 0; index < 4_000; index++) capture.record(observation(index + 1));
+    expect(capture.snapshot().invalid).toBe(true);
+
+    // Exhausting one session's own budget is not a transport failure, so the next user-initiated
+    // session must be able to produce evidence again for the life of the process.
+    const next = computerUseCaptureDigest('next-session');
+    capture.start({
+      type: 'session',
+      sessionDigest: next,
+      appDigest,
+      windowDigest,
+      manifestDigest: 'f'.repeat(64),
+      platform: 'darwin',
+    });
+    capture.record({
+      type: 'preflight_started',
+      sessionDigest: next,
+      bindingDigest,
+      isOpenRouter: false,
+    });
+    expect(capture.snapshot().invalid).toBe(false);
+    expect(capture.snapshot().events).toHaveLength(2);
+    expect(emitted.at(-1)).toMatchObject({ type: 'preflight_started', sessionDigest: next });
+
+    // A sink that actually lost frames is different: nothing in this process can be evidenced
+    // after it, so it still invalidates the capture and keeps doing so.
+    sinkInvalid = true;
+    sinkListener?.();
+    expect(capture.snapshot().invalid).toBe(true);
+    capture.start({
+      type: 'session',
+      sessionDigest,
+      appDigest,
+      windowDigest,
+      manifestDigest: 'f'.repeat(64),
+      platform: 'darwin',
+    });
+    capture.record(observation(1));
     expect(capture.snapshot().invalid).toBe(true);
   });
 

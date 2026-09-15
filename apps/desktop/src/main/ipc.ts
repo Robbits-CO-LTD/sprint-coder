@@ -338,7 +338,10 @@ import {
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
-import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
+import {
+  createComputerUseRuntimeCapture,
+  type ComputerUseRuntimeCapture,
+} from './computer-use-runtime-capture';
 import type { ComputerUseCaptureOutput } from './computer-use-capture-output';
 import { ComputerUseEmergencyStop } from './computer-use-emergency-stop';
 import {
@@ -1157,14 +1160,7 @@ export class IpcRouter {
     private readonly graphs: GraphRenderService | null = null,
     private readonly computerUseCaptureOutput?: ComputerUseCaptureOutput,
   ) {
-    this.computerUseRuntimeCapture = new ComputerUseRuntimeCapture(
-      (event) => {
-        computerUseCaptureOutput?.record(event);
-        if (computerUseCaptureOutput?.invalid()) this.computerUseRuntimeCapture.invalidate();
-      },
-      () => computerUseCaptureOutput?.invalidate(),
-    );
-    computerUseCaptureOutput?.onInvalid(() => this.computerUseRuntimeCapture.invalidate());
+    this.computerUseRuntimeCapture = createComputerUseRuntimeCapture(computerUseCaptureOutput);
     this.graphSourceMonitor = new GraphSourceMonitor({
       document: (input) => {
         this.persistence.getTask(input.taskId);

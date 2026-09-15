@@ -17,9 +17,12 @@ observation, permission, or persistence operation.
 
 Events contain strict enum values, numbers, and SHA-256 digests. No screen, accessibility text,
 prompt, action body, response/reasoning, endpoint, connection/model name, or secret is retained.
-The latest session replaces the previous capture; at most 128 events stay in Main memory. There
-is no file writer, replay/import interface, Renderer IPC endpoint, or automatic upload. Observer
-failure or overflow invalidates the evidence without interrupting product operations or Stop.
+The latest session replaces the previous capture; the events kept in Main memory are bounded by
+the product's own round limit rather than by a fixed count. There is no file writer,
+replay/import interface, Renderer IPC endpoint, or automatic upload. Observer
+failure or overflow invalidates that session: it stops contributing events, so the session reads
+as truncated rather than complete, while the next user-initiated session still starts clean. None
+of that interrupts product operations or Stop.
 The local snapshot is detached from the recorder. Digests provide integrity/correlation, not
 authentication of their source; unit fixtures can produce them and are never runtime acceptance.
 

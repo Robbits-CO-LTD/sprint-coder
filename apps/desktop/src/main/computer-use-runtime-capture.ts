@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { ComputerUseAction, ComputerUseObservation } from '@sprint-coder/contracts';
+import {
+  COMPUTER_USE_LIMITS,
+  type ComputerUseAction,
+  type ComputerUseObservation,
+} from '@sprint-coder/contracts';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -170,6 +174,50 @@ export function captureComputerUseRuntime(
 }
 
 /**
+ * The budget has to follow the product's own round limit, not the three-round journey this capture
+ * was first written for. Each round records seven events (egress_authorized, round_started,
+ * parsed, native_started, native_finished, action_result, observation) and a session records eight
+ * outside its rounds (session, the preflight egress_authorized, preflight_started,
+ * preflight_passed, cost_limit_bound, the first observation, stop_requested, stop_acknowledged).
+ * At COMPUTER_USE_LIMITS.maxRounds that is 8 + 7 x 25 = 183 events, so a fixed 128 turned an
+ * ordinary session into an invalidated one around round 18. Two spare events per round cover a
+ * round that re-dispatches, and the session term is doubled for the same reason; the bound stays
+ * fixed and small so the capture is still bounded and ephemeral.
+ */
+const CAPTURE_SESSION_EVENTS = 8;
+const CAPTURE_ROUND_EVENTS = 7;
+const CAPTURE_ROUND_EVENT_SLACK = 2;
+export const COMPUTER_USE_CAPTURE_MAX_EVENTS =
+  CAPTURE_SESSION_EVENTS * 2 +
+  (CAPTURE_ROUND_EVENTS + CAPTURE_ROUND_EVENT_SLACK) * COMPUTER_USE_LIMITS.maxRounds;
+/** The previous 56 KiB / 128 event budget allowed 448 bytes per event; keep that allowance. */
+export const COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES = COMPUTER_USE_CAPTURE_MAX_EVENTS * 448;
+
+/** Structural subset of ComputerUseCaptureOutput: the one-way metadata sink, if one is opted in. */
+export type ComputerUseRuntimeCaptureSink = Readonly<{
+  record(event: ComputerUseRuntimeEvent): void;
+  invalid(): boolean;
+  onInvalid(listener: () => void): void;
+}>;
+
+/** Binds a capture to the opted-in metadata sink. */
+export function createComputerUseRuntimeCapture(
+  sink?: ComputerUseRuntimeCaptureSink,
+): ComputerUseRuntimeCapture {
+  const capture: ComputerUseRuntimeCapture = new ComputerUseRuntimeCapture((event) => {
+    sink?.record(event);
+    // A sink that lost frames can no longer evidence any session in this process.
+    if (sink?.invalid() === true) capture.invalidate();
+  });
+  // Only that direction is wired. A session the capture refuses is a fact about that session: it
+  // stops contributing events, so a consumer sees it truncated and can never read it as complete.
+  // Tearing the shared sink down for it would instead invalidate every later session in the
+  // process, which is how an ordinary long session used to end all evidence until restart.
+  sink?.onInvalid(() => capture.invalidate());
+  return capture;
+}
+
+/**
  * Main-only observation of actual planner/Broker/native calls. This is deliberately not an
  * attestation API: injected runtimes in tests can produce the same events. No import/replay,
  * disk writer, IPC endpoint, PASS setter, or machine-transcript conversion is provided.
@@ -177,23 +225,14 @@ export function captureComputerUseRuntime(
  * inspect physical input and persistence surfaces before any final-gate claim is possible.
  */
 export class ComputerUseRuntimeCapture {
-  constructor(
-    private readonly onEvent?: (event: ComputerUseRuntimeEvent) => void,
-    private readonly onInvalid?: () => void,
-  ) {}
+  constructor(private readonly onEvent?: (event: ComputerUseRuntimeEvent) => void) {}
   private events: ComputerUseRuntimeEvent[] = [];
   private invalid = false;
   private sessionDigest: string | null = null;
   private eventBytes = 0;
 
   invalidate(): void {
-    if (this.invalid) return;
     this.invalid = true;
-    try {
-      this.onInvalid?.();
-    } catch {
-      /* No product authority. */
-    }
   }
 
   /** A new user-initiated session replaces the previous bounded, ephemeral capture. */
@@ -212,17 +251,20 @@ export class ComputerUseRuntimeCapture {
   }
 
   record(input: ComputerUseRuntimeEvent): void {
+    // An invalid session must not resume contributing: a gap followed by more events would read
+    // as a complete session to anyone consuming the stream instead of this object's snapshot.
+    if (this.invalid) return;
     const parsed = eventSchema.safeParse(input);
     if (
       !parsed.success ||
       parsed.data.sessionDigest !== this.sessionDigest ||
-      this.events.length >= 128
+      this.events.length >= COMPUTER_USE_CAPTURE_MAX_EVENTS
     ) {
       this.invalidate();
       return;
     }
     const bytes = Buffer.byteLength(JSON.stringify(parsed.data));
-    if (this.eventBytes + bytes > 56 * 1024) {
+    if (this.eventBytes + bytes > COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES) {
       this.invalidate();
       return;
     }
