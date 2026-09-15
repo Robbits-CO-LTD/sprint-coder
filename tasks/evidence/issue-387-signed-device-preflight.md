@@ -49,9 +49,11 @@ remain `FAIL / EXTERNAL_GATE_NOT_RUN`. No mandatory Core/Safety PASS is claimed.
 
 ## Main: exact headless Windows test replay
 
-Remote target: SSH alias `mainpc`, existing `powershell.exe`. Remote source/output path: **none**;
-the compressed source and unit tests execute in memory. No checkout, install, policy bypass,
-certificate, or GUI operation is needed. Run from this change's repository/worktree root on Mac:
+Remote target: SSH alias `mainpc`, existing `powershell.exe`. This test replay needs **no remote
+file path**: the compressed source and unit tests execute in memory. The separately authorized
+fixture compile uses the paths in the build record linked below. No checkout, install, policy
+bypass, certificate, or GUI operation is needed for the unit replay. Run from this change's
+repository/worktree root on Mac:
 
 ```bash
 PATH=/opt/homebrew/opt/node@22/bin:$PATH node <<'NODE'
@@ -83,12 +85,17 @@ from that checkout root is:
 powershell.exe -NoProfile -NonInteractive -File .\apps\desktop\computer-use-native\fixtures\win32-acceptance\verify-signatures.test.ps1
 ```
 
-Remaining preparation after certificate/host coordination: run the preflight over the actual
-signed four-file set and packaged libraries; compile/check the fixture from the frozen integrated
-SHA in the approved Windows output directory; verify architecture, manifest and package binding;
-then allocate the interactive journeys. Fixture compilation/contract execution and whole-package
-preflight were not run here because the signed inputs and coordinated Windows work/output paths
-are not yet available.
+The subsequently authorized [unsigned fixture build checkpoint](issue-387-unsigned-fixture-build.md)
+completed two clean Windows x64 builds and headless contract checks under
+`C:\Users\yusei\sc-issue-387-20260915`. Both unsigned files are rejected by the signature assertion.
+They are compile evidence for baseline `5b20208`, not signed-package acceptance or evidence for a
+later integrated source revision.
+
+Remaining preparation after certificate/host coordination: rebuild the fixture from the frozen
+final integrated SHA, run the preflight over the actual signed four-file set and packaged libraries,
+verify architecture, manifest/package binding and attestations, then allocate the interactive
+journeys. Whole signed-package preflight remains unrun because approved signed inputs are not
+available.
 
 ## Main/operator coordination needed
 
