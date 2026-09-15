@@ -3,7 +3,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { createCaptureDecoder } from './computer-use-capture-wire.mjs';
-import { summarizeComputerUseCaptureRounds } from './computer-use-capture-rounds.mjs';
+import {
+  immutableCaptureResult,
+  summarizeComputerUseCaptureRounds,
+} from './computer-use-capture-rounds.mjs';
 
 const safeEnvironmentKeys = new Set([
   'PATH',
@@ -155,10 +158,10 @@ export function startOwnedComputerUseCapture({
       if (code !== 0 || !hello) throw new Error('child_exit');
       const summary = decoder.finish();
       resolveCompleted(
-        Object.freeze({
+        immutableCaptureResult({
           ...summary,
           hello,
-          frames: Object.freeze(frames),
+          frames,
           sessions: summarizeComputerUseCaptureRounds(frames),
           executableSha256,
           runIdDigest: digest(nonce),

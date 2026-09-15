@@ -4,14 +4,33 @@ const fail = () => {
   throw new Error('Computer Use round evidence is incomplete');
 };
 
+/** Detach bounded JSON metadata before freezing; never freeze caller-owned state. */
+export function immutableCaptureResult(value) {
+  const freeze = (item) => {
+    if (item && typeof item === 'object') {
+      for (const child of Object.values(item)) freeze(child);
+      Object.freeze(item);
+    }
+    return item;
+  };
+  return freeze(structuredClone(value));
+}
+
 /** Consumed directly by the owned-child collector; this computes facts, not authenticity. */
 export function summarizeComputerUseCaptureRounds(frames) {
   const sessions = new Map();
+  const hello = frames[0]?.kind === 'hello' ? frames[0].payload : null;
+  if (!hello || frames.filter((frame) => frame.kind === 'hello').length !== 1) fail();
   for (const frame of frames) {
     if (frame.kind !== 'event') continue;
     const event = frame.payload;
     if (event.type === 'session') {
-      if (sessions.has(event.sessionDigest)) fail();
+      if (
+        sessions.has(event.sessionDigest) ||
+        event.platform !== hello.platform ||
+        event.manifestDigest !== hello.nativeManifestDigest
+      )
+        fail();
       sessions.set(event.sessionDigest, {
         identity: event,
         rounds: [],
@@ -19,6 +38,7 @@ export function summarizeComputerUseCaptureRounds(frames) {
         observation: null,
         requests: new Set(),
         stopped: false,
+        stopping: false,
         invalid: false,
         preflightAttempts: 0,
         preflightPassed: false,
@@ -30,11 +50,24 @@ export function summarizeComputerUseCaptureRounds(frames) {
     const session = sessions.get(event.sessionDigest);
     if (!session) fail();
     if (session.stopped) session.invalid = true;
+    // Drain receipts may arrive after Stop intent, but no new work may start or be
+    // promoted into a completed Core journey after that boundary.
+    if (
+      session.stopping &&
+      !['native_finished', 'stop_requested', 'stop_acknowledged'].includes(event.type)
+    )
+      session.invalid = true;
     const pending = session.pending;
     if (event.type === 'preflight_started') {
       session.preflightAttempts += 1;
       session.bindingDigest = event.bindingDigest;
-      if (event.isOpenRouter !== false || session.rounds.length || pending) session.invalid = true;
+      if (
+        session.preflightAttempts !== 1 ||
+        event.isOpenRouter !== false ||
+        session.rounds.length ||
+        pending
+      )
+        session.invalid = true;
     } else if (event.type === 'preflight_passed') {
       if (
         session.preflightAttempts !== 1 ||
@@ -158,8 +191,11 @@ export function summarizeComputerUseCaptureRounds(frames) {
         continue;
       }
       pending.result = event;
+    } else if (event.type === 'stop_requested') {
+      session.stopping = true;
     } else if (event.type === 'stop_acknowledged') {
       if (
+        !session.stopping ||
         event.nativeAcknowledged !== true ||
         pending ||
         event.inputAttemptCount !== session.attemptCount ||
@@ -169,16 +205,21 @@ export function summarizeComputerUseCaptureRounds(frames) {
       session.stopped = true;
     }
   }
-  return [...sessions.entries()].map(([sessionIdDigest, session]) => ({
-    sessionIdDigest,
-    platform: session.identity.platform,
-    nativeManifestDigest: session.identity.manifestDigest,
-    rounds: session.rounds,
-    roundsComplete:
-      !session.invalid &&
-      session.stopped &&
-      session.pending === null &&
-      session.rounds.length === 3 &&
-      session.rounds.every(({ ttlVerified }) => ttlVerified),
-  }));
+  return immutableCaptureResult(
+    [...sessions.entries()].map(([sessionIdDigest, session]) => ({
+      sessionIdDigest,
+      platform: session.identity.platform,
+      nativeManifestDigest: session.identity.manifestDigest,
+      rounds: session.rounds,
+      roundsComplete:
+        !session.invalid &&
+        session.preflightAttempts === 1 &&
+        session.preflightPassed &&
+        session.stopping &&
+        session.stopped &&
+        session.pending === null &&
+        session.rounds.length === 3 &&
+        session.rounds.every(({ ttlVerified }) => ttlVerified),
+    })),
+  );
 }

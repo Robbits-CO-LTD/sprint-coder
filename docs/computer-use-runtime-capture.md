@@ -38,6 +38,12 @@ required by the parent schema. Collector completion requires the normal shutdown
 hello followed by owned-child termination is startup transport only, not a completed capture.
 Its consumer aggregates ordered native request/receipt sequences into one canonical round,
 including multiple Unicode-scalar dispatches. Missing TTL/epoch/receipt facts stay incomplete.
+The aggregator requires exactly one preflight attempt and a Stop request before acknowledgement;
+new work after Stop cannot complete a journey (in-flight drain receipts remain observable).
+Each session's platform and native manifest digest must match the owned child's hello. Completion
+and canonical summaries are detached and deeply frozen, including frame payloads and nested rounds.
+These checks prevent mixed/mutable diagnostic facts; they do not verify signer or running-image
+identity and do not make synthetic events into live-Provider evidence.
 
 `exactThreeRoundJourneyObserved` requires one preflight, matching session/provider binding,
 three ordered parse/action rounds, per-action matched native call pairs bound to action digest

@@ -65,10 +65,7 @@ describe('Computer Use normal capture framing', () => {
     encode('hello', hello);
     expect(() => encode('event', { ...event, rawBody: 'PRIVATE_FIXTURE' })).toThrow();
   });
-  it('aggregates Unicode scalar receipts into ordered canonical round summaries', async () => {
-    const { summarizeComputerUseCaptureRounds } = await import(
-      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
-    );
+  function journeyFrames() {
     const sessionDigest = 'd'.repeat(64),
       actionDigest = 'e'.repeat(64),
       bindingDigest = 'f'.repeat(64);
@@ -137,6 +134,7 @@ describe('Computer Use normal capture framing', () => {
         observation(round + 1),
       );
     }
+    payloads.push({ type: 'stop_requested', sessionDigest, reasonDigest: 'a'.repeat(64) });
     payloads.push({
       type: 'stop_acknowledged',
       sessionDigest,
@@ -144,46 +142,173 @@ describe('Computer Use normal capture framing', () => {
       cancelEpoch: 1,
       inputAttemptCount,
     });
-    const frames = payloads.map((payload) => ({ kind: 'event', payload }));
+    return [
+      { kind: 'hello', payload: { ...hello } as Record<string, string | number | boolean> },
+      ...payloads.map((payload) => ({ kind: 'event', payload })),
+    ];
+  }
+  it('aggregates Unicode scalar receipts into ordered canonical round summaries', async () => {
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
+    );
+    const frames = journeyFrames();
     const summaries = summarizeComputerUseCaptureRounds(frames);
     expect(summaries[0].roundsComplete).toBe(true);
     expect(summaries[0].rounds[0].nativeRequestDigests).toHaveLength(2);
-    expect(summaries[0].rounds[0].nativeActionDigest).toBe(actionDigest);
+    expect(summaries[0].rounds[0].nativeActionDigest).toBe('e'.repeat(64));
     const broken = structuredClone(frames);
     const receipt = broken.find((frame) => frame.payload.type === 'native_finished')!;
     receipt.payload.cancelEpoch = 9;
     expect(summarizeComputerUseCaptureRounds(broken)[0].roundsComplete).toBe(false);
   });
-  it('uses an actual owned Node child pipe without treating it as packaged Windows/macOS acceptance', async () => {
-    const directory = mkdtempSync(resolve(tmpdir(), 'computer-use-pipe-'));
-    directories.push(directory);
-    const child = resolve(directory, 'child.mjs');
-    const wireUrl = pathToFileURL(resolve(root, 'computer-use-capture-wire.mjs')).href;
-    writeFileSync(
-      child,
-      `import {writeSync} from 'node:fs'; import {createCaptureEncoder} from ${JSON.stringify(wireUrl)};
+  it.each([
+    'repeat-preflight',
+    'early-stop',
+    'missing-stop',
+    'stop-during-dispatch',
+    'post-ack-dispatch',
+  ])('refuses a complete journey for %s', async (kind) => {
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
+    );
+    const frames = journeyFrames();
+    if (kind === 'repeat-preflight') frames.splice(4, 0, structuredClone(frames[2]!));
+    else if (kind === 'post-ack-dispatch')
+      frames.push(structuredClone(frames.find((f) => f.payload.type === 'native_started')!));
+    else {
+      const stop = frames.splice(
+        frames.findIndex((f) => f.payload.type === 'stop_requested'),
+        1,
+      )[0]!;
+      if (kind === 'early-stop') frames.splice(2, 0, stop);
+      if (kind === 'stop-during-dispatch')
+        frames.splice(
+          frames.findIndex((f) => f.payload.type === 'native_finished'),
+          0,
+          stop,
+        );
+    }
+    expect(summarizeComputerUseCaptureRounds(frames)[0].roundsComplete).toBe(false);
+  });
+  it('keeps repeated Stop intent monotonic without requiring exactly one Stop request', async () => {
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
+    );
+    const frames = journeyFrames();
+    frames.splice(frames.length - 1, 0, structuredClone(frames[frames.length - 2]!));
+    expect(summarizeComputerUseCaptureRounds(frames)[0].roundsComplete).toBe(true);
+  });
+  it.each(['platform', 'manifestDigest'])('rejects session/hello mismatch: %s', async (key) => {
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
+    );
+    const frames = journeyFrames();
+    frames[1]!.payload[key] = key === 'platform' ? 'win32' : '9'.repeat(64);
+    expect(() => summarizeComputerUseCaptureRounds(frames)).toThrow();
+  });
+  it.each(['missing', 'duplicate'])('rejects %s hello during aggregation', async (kind) => {
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
+    );
+    const frames = journeyFrames();
+    if (kind === 'missing') frames.shift();
+    else frames.splice(1, 0, structuredClone(frames[0]!));
+    expect(() => summarizeComputerUseCaptureRounds(frames)).toThrow();
+  });
+  it('returns detached deeply immutable canonical summaries', async () => {
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href
+    );
+    const frames = journeyFrames();
+    const summaries = summarizeComputerUseCaptureRounds(frames);
+    expect(() => {
+      summaries[0].rounds[0].ttlVerified = false;
+    }).toThrow();
+    expect(() => {
+      summaries[0].rounds[0].nativeRequestDigests.push('a'.repeat(64));
+    }).toThrow();
+    expect(() => {
+      summaries[0].rounds = [];
+    }).toThrow();
+    frames.find((f) => f.payload.type === 'native_started')!.payload.requestDigest = 'a'.repeat(64);
+    expect(summaries[0].rounds[0].nativeRequestDigests[0]).not.toBe('a'.repeat(64));
+  });
+  it.each(['valid', 'platform-mismatch', 'manifest-mismatch'])(
+    'uses an actual owned Node child pipe (%s); not packaged Windows/macOS acceptance',
+    async (kind) => {
+      const directory = mkdtempSync(resolve(tmpdir(), 'computer-use-pipe-'));
+      directories.push(directory);
+      const child = resolve(directory, 'child.mjs');
+      const wireUrl = pathToFileURL(resolve(root, 'computer-use-capture-wire.mjs')).href;
+      const fixtureEvents = journeyFrames()
+        .slice(1)
+        .map(({ payload }) => payload);
+      // Synthetic journey metadata only: this child never invokes a Provider or native input.
+      const fixtureCode =
+        kind === 'valid'
+          ? `if (['darwin','win32'].includes(process.platform)) for (const payload of ${JSON.stringify(fixtureEvents)}) { if(payload.type==='session') payload.platform=process.platform; writeSync(3,encode('event',payload)); }`
+          : `writeSync(3,encode('event',{...${JSON.stringify(event)},platform:${kind === 'platform-mismatch' ? "process.platform === 'win32' ? 'darwin' : 'win32'" : "process.platform === 'win32' ? 'win32' : 'darwin'"},manifestDigest:'${kind === 'manifest-mismatch' ? '9'.repeat(64) : 'c'.repeat(64)}'}));`;
+      writeFileSync(
+        child,
+        `import {writeSync} from 'node:fs'; import {createCaptureEncoder} from ${JSON.stringify(wireUrl)};
 const encode=createCaptureEncoder(process.env.SPRINT_CODER_COMPUTER_USE_CAPTURE_NONCE);
 writeSync(3,encode('hello',{pid:process.pid,parentPid:process.ppid,platform:process.platform,sourceCommit:'b'.repeat(40),nativeManifestDigest:'c'.repeat(64),packaged:false,packageReady:false}));
+${fixtureCode}
 writeSync(3,encode('end',{valid:true}));`,
-    );
-    const collector = await import(
-      pathToFileURL(resolve(root, 'collect-computer-use-runtime.mjs')).href
-    );
-    const capture = collector.startOwnedComputerUseCapture({
-      executable: process.execPath,
-      args: [child],
-      environment: process.env,
-    });
-    try {
-      const hello = await capture.handshake;
-      expect(hello.packaged).toBe(false);
-      const completed = await capture.completed;
-      expect(completed.frameCount).toBe(2);
-      expect(completed.executableSha256).toBe(
-        createHash('sha256').update(readFileSync(process.execPath)).digest('hex'),
       );
-    } finally {
-      capture.stopOwnedChild();
-    }
-  });
+      const collector = await import(
+        pathToFileURL(resolve(root, 'collect-computer-use-runtime.mjs')).href
+      );
+      const capture = collector.startOwnedComputerUseCapture({
+        executable: process.execPath,
+        args: [child],
+        environment: {},
+      });
+      try {
+        const hello = await capture.handshake;
+        expect(hello.packaged).toBe(false);
+        if (kind !== 'valid') {
+          await expect(capture.completed).rejects.toThrow(
+            'Computer Use live capture is incomplete',
+          );
+          return;
+        }
+        const completed = await capture.completed;
+        expect(completed.frameCount).toBe(
+          ['darwin', 'win32'].includes(process.platform) ? fixtureEvents.length + 2 : 2,
+        );
+        if (['darwin', 'win32'].includes(process.platform)) {
+          expect(completed.sessions[0].roundsComplete).toBe(true);
+          expect(() => {
+            completed.sessions[0].rounds[0].ttlVerified = false;
+          }).toThrow();
+          expect(() => {
+            completed.sessions[0].rounds = [];
+          }).toThrow();
+          const identity = completed.frames.find(
+            (frame: { payload: { type?: string } }) => frame.payload.type === 'session',
+          );
+          expect(() => {
+            identity.payload.appDigest = 'a'.repeat(64);
+          }).toThrow();
+        }
+        const verifiedDigest = completed.eventChainDigest;
+        expect(() => {
+          completed.hello.sourceCommit = 'e'.repeat(40);
+        }).toThrow();
+        expect(() => {
+          completed.frames[0].payload.nativeManifestDigest = 'f'.repeat(64);
+        }).toThrow();
+        expect(() => {
+          completed.sessions.push({});
+        }).toThrow();
+        expect(completed.eventChainDigest).toBe(verifiedDigest);
+        expect(completed.executableSha256).toBe(
+          createHash('sha256').update(readFileSync(process.execPath)).digest('hex'),
+        );
+      } finally {
+        capture.stopOwnedChild();
+      }
+    },
+  );
 });
