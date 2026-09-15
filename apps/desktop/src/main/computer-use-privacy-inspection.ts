@@ -21,7 +21,7 @@ export const COMPUTER_USE_PRIVATE_PAYLOADS = [
 ] as const;
 type Surface = (typeof COMPUTER_USE_PRIVACY_SURFACES)[number];
 type Payload = (typeof COMPUTER_USE_PRIVATE_PAYLOADS)[number];
-type InspectionState = 'inspected' | 'contaminated' | 'unavailable';
+type InspectionState = 'raw_bytes_scanned' | 'contaminated' | 'unavailable';
 
 /**
  * A protected, local acceptance runner supplies exact files after flushing/closing the tested
@@ -39,6 +39,7 @@ export function inspectComputerUsePrivacySurfaces(
   const surfaces = COMPUTER_USE_PRIVACY_SURFACES.map((surface) => ({
     surface,
     state: 'unavailable' as InspectionState,
+    logicalValuesInspected: false as const,
     filesInspected: 0,
     bytesInspected: 0,
     contentDigests: [] as string[],
@@ -82,13 +83,13 @@ export function inspectComputerUsePrivacySurfaces(
       const raw = Buffer.from(bytes);
       needles.push({ kind, bytes: raw });
       // Screens may be binary, base64, or embedded in a JSON string. Text sinks can use
-      // UTF-8/UTF-16LE or escaped JSON; all copies are disposed in finally below.
+      // UTF-8/UTF-16LE or escaped JSON. Owned Buffers are cleared in finally; temporary JS
+      // strings are only released for GC, so this does not guarantee complete memory erasure.
       const text = kind === 'screenshot' ? raw.toString('base64') : raw.toString('utf8');
       needles.push({ kind, bytes: Buffer.from(text) });
       needles.push({ kind, bytes: Buffer.from(text, 'utf16le') });
       needles.push({ kind, bytes: Buffer.from(JSON.stringify(text).slice(1, -1)) });
     }
-    const overlapSize = Math.max(...needles.map(({ bytes }) => bytes.length)) - 1;
     let totalBytes = 0;
     const seen = new Set<string>();
     for (const result of surfaces) {
@@ -97,8 +98,7 @@ export function inspectComputerUsePrivacySurfaces(
       let unavailable = false;
       for (const file of files) {
         let fd: number | undefined;
-        let overlap = Buffer.alloc(0);
-        const chunk = Buffer.alloc(64 * 1024);
+        let fileBytes: Buffer | undefined;
         try {
           const path = resolve(file.path);
           const child = relative(root, path);
@@ -122,27 +122,19 @@ export function inspectComputerUsePrivacySurfaces(
             totalBytes + before.size > 64 * 1024 * 1024
           )
             throw new Error();
-          const hash = createHash('sha256');
+          // One bounded file buffer avoids copying a multi-MiB image overlap on every 64KiB read.
+          fileBytes = Buffer.alloc(before.size);
           let bytesRead = 0;
-          for (;;) {
-            const count = readSync(fd, chunk, 0, chunk.length, null);
+          while (bytesRead < before.size) {
+            const count = readSync(fd, fileBytes, bytesRead, before.size - bytesRead, null);
             if (count === 0) break;
             bytesRead += count;
             totalBytes += count;
             if (bytesRead > before.size || totalBytes > 64 * 1024 * 1024) throw new Error();
-            const current = chunk.subarray(0, count);
-            hash.update(current);
-            const combined = Buffer.concat([overlap, current]);
-            overlap.fill(0);
-            try {
-              for (const needle of needles) {
-                if (combined.includes(needle.bytes) && !result.matchedKinds.includes(needle.kind))
-                  result.matchedKinds.push(needle.kind);
-              }
-              overlap = Buffer.from(combined.subarray(Math.max(0, combined.length - overlapSize)));
-            } finally {
-              combined.fill(0);
-            }
+          }
+          for (const needle of needles) {
+            if (fileBytes.includes(needle.bytes) && !result.matchedKinds.includes(needle.kind))
+              result.matchedKinds.push(needle.kind);
           }
           const after = fstatSync(fd);
           if (
@@ -154,12 +146,11 @@ export function inspectComputerUsePrivacySurfaces(
             throw new Error();
           result.filesInspected += 1;
           result.bytesInspected += bytesRead;
-          result.contentDigests.push(hash.digest('hex'));
+          result.contentDigests.push(createHash('sha256').update(fileBytes).digest('hex'));
         } catch {
           unavailable = true;
         } finally {
-          chunk.fill(0);
-          overlap.fill(0);
+          fileBytes?.fill(0);
           if (fd !== undefined) {
             try {
               closeSync(fd);
@@ -170,7 +161,11 @@ export function inspectComputerUsePrivacySurfaces(
         }
       }
       result.state =
-        result.matchedKinds.length > 0 ? 'contaminated' : unavailable ? 'unavailable' : 'inspected';
+        result.matchedKinds.length > 0
+          ? 'contaminated'
+          : unavailable
+            ? 'unavailable'
+            : 'raw_bytes_scanned';
     }
     return report();
   } finally {
