@@ -1,6 +1,6 @@
 import { previewGraphSource } from './graph-source-preview';
 import { reviewGraphWorkspace } from './graph-workspace-review';
-import { assertGraphWriteCoverage } from './graph-write-coverage';
+import { assertGraphWriteCoverage, assertGraphWritePathCoverage } from './graph-write-coverage';
 import { graphMissionContextFor, prepareGraphStepWriteFootprints } from './graph-mission-review';
 import type { GraphMissionCommitInput, GraphMissionRecord } from './graph-mission-record';
 import type { GraphResourceReservation } from './graph-resource';
@@ -21,6 +21,9 @@ import {
   type TeamMissionCheckpoint,
   type TeamMissionSummary,
   type GraphWorkspaceReview,
+  type GraphMissionUpdateInput,
+  type GraphMissionUpdateReview,
+  type GraphMissionUpdateAgreement,
   type TeamExecutionIsolation,
   type TeamSendMessageInput,
   type ExecutionResolution,
@@ -118,7 +121,7 @@ export type ManagerHirePolicy = Readonly<{
 }>;
 
 type ExecutionInterruptionControl = Readonly<{
-  kind: 'steer' | 'cancel';
+  kind: 'steer' | 'cancel' | 'graph-update';
   instruction: string | null;
   resolve(value: TeamExecutionSubmission): void;
   reject(error: Error): void;
@@ -1243,6 +1246,14 @@ export class TeamCoordinator {
     let report: ReturnType<typeof workerReportSchema.parse> | null = null;
     let runtimeSettled = false;
     try {
+      if (!this.persistence.getGraphStepAgreement)
+        throw new Error('Graph owner consent lookup is unavailable');
+      graph = this.persistence.getGraphStepAgreement(
+        graph.missionId,
+        stepKey,
+        owner.generation,
+        owner.id,
+      );
       if (!leader || !storedWorker || !['ready', 'waiting'].includes(storedWorker.state))
         throw new Error('Graph Worker is not ready');
       await this.verifyWorkspace?.(graph.taskId);
@@ -1643,6 +1654,265 @@ export class TeamCoordinator {
     });
   }
 
+  async requestGraphConstraintUpdate(
+    input: GraphMissionUpdateInput,
+    requestId: string,
+    validate: () => void,
+  ): Promise<GraphMissionUpdateReview> {
+    return this.enqueue(input.taskId, async () => {
+      validate();
+      if (!this.persistence.stageGraphConstraintUpdate)
+        throw new Error('Graph updates are unavailable');
+      const existing = this.persistence.getGraphPendingUpdate?.(input.missionId);
+      const pending =
+        (existing?.renderRevision === input.renderRevision ? existing : null) ??
+        this.persistence.stageGraphConstraintUpdate({
+          taskId: input.taskId,
+          missionId: input.missionId,
+          expectedSemanticRevision: input.expectedSemanticRevision,
+          renderRevision: input.renderRevision,
+          requestId,
+          now: this.isoNow(),
+        });
+      if (
+        pending.taskId !== input.taskId ||
+        pending.renderRevision !== input.renderRevision ||
+        pending.expectedSemanticRevision !== input.expectedSemanticRevision
+      )
+        throw new Error('Another graph update is already pending');
+      const graph = this.persistence.getGraphTeamMission(input.missionId)!;
+      const stopped = await Promise.allSettled(
+        pending.affectedKeys.map(async (key) => {
+          const mapping = graph.steps.find((step) => step.key === key)!;
+          const execution = this.persistence.getTeamExecution(mapping.executionId);
+          if (execution.state === 'running') {
+            await this.interruptRunningExecution(execution, 'graph-update', null);
+            return;
+          }
+          if (!['assigned', 'queued', 'waiting_resume'].includes(execution.state))
+            throw new Error('Affected graph step cannot be stopped for an update');
+          this.executionScheduler.cancelQueued(execution.id);
+          this.persistence.transitionTeamExecution({
+            executionId: execution.id,
+            to: 'waiting_resume',
+            now: this.isoNow(),
+          });
+          if (!this.executionScheduler.snapshot().activeExecutionIds.includes(execution.id)) {
+            this.graphScheduledExecutions.delete(execution.id);
+            const owners = this.graphIntegrationHoldFor(input.missionId, execution.id);
+            if (owners.hold) throw new Error('Sealed graph work requires integration');
+            if (owners.owners.some((owner) => owner.attemptId !== null)) {
+              if (
+                this.executionScheduler
+                  .snapshot()
+                  .activeExecutionIds.some(
+                    (id) =>
+                      this.persistence.getTeamExecution(id).assigneeAgentId ===
+                      execution.assigneeAgentId,
+                  )
+              )
+                throw new Error('Graph Worker is active in another step');
+              await this.runtime.stop(execution.assigneeAgentId);
+            }
+            for (const owner of owners.owners)
+              this.persistence.releaseGraphResources({
+                reservationId: owner.id,
+                executionId: execution.id,
+                generation: owner.generation,
+                confirmation: owner.attemptId
+                  ? { kind: 'attempt-stopped', attemptId: owner.attemptId }
+                  : { kind: 'not-dispatched' },
+                now: this.isoNow(),
+              });
+          }
+        }),
+      );
+      const failed = stopped.find((result) => result.status === 'rejected');
+      this.emit(input.taskId, this.persistence.getTeamMission(input.missionId).teamId);
+      if (failed?.status === 'rejected') throw failed.reason;
+      const affectedIds = new Set(
+        graph.steps
+          .filter((step) => pending.affectedKeys.includes(step.key))
+          .map((step) => step.executionId),
+      );
+      const deadline = Date.now() + 30000;
+      while (
+        this.executionScheduler.snapshot().activeExecutionIds.some((id) => affectedIds.has(id))
+      ) {
+        if (Date.now() >= deadline)
+          throw new Error('Affected graph work has not confirmed stopping');
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      validate();
+      return this.inspectGraphConstraintUpdate(input);
+    });
+  }
+
+  async reviewGraphConstraintUpdate(
+    input: GraphMissionUpdateInput,
+  ): Promise<GraphMissionUpdateReview> {
+    // Read-only status must remain observable while a requested stop waits for its runtime.
+    return this.inspectGraphConstraintUpdate(input);
+  }
+
+  private async inspectGraphConstraintUpdate(
+    input: GraphMissionUpdateInput,
+  ): Promise<GraphMissionUpdateReview> {
+    const pending = this.persistence.getGraphPendingUpdate?.(input.missionId);
+    const graph = this.persistence.getGraphTeamMission(input.missionId);
+    const proposed = this.persistence.getGraphDocument(input.taskId);
+    if (
+      !pending ||
+      !graph ||
+      graph.taskId !== input.taskId ||
+      pending.renderRevision !== input.renderRevision ||
+      pending.expectedSemanticRevision !== input.expectedSemanticRevision ||
+      graph.semanticRevision !== input.expectedSemanticRevision ||
+      !proposed?.missionPlan ||
+      proposed.renderRevision !== input.renderRevision ||
+      proposed.id !== graph.graphId ||
+      ['completed', 'failed', 'canceled'].includes(
+        this.persistence.getTeamMission(graph.missionId).state,
+      )
+    )
+      throw new Error('Graph update proposal or agreement changed');
+    const context = () => graphMissionContextFor(this.persistence, input.taskId);
+    const candidate = { ...graph, plan: proposed.missionPlan };
+    const images: { stepKey: string; digest: string }[] = [];
+    for (const key of pending.affectedKeys) {
+      const mapping = graph.steps.find((step) => step.key === key)!;
+      const execution = this.persistence.getTeamExecution(mapping.executionId);
+      if (
+        execution.state !== 'waiting_resume' ||
+        this.graphScheduledExecutions.has(execution.id) ||
+        this.executionInterruptions.has(execution.id) ||
+        this.graphIntegrationWorkers.has(execution.assigneeAgentId) ||
+        this.persistence
+          .listGraphResourceReservations(graph.missionId)
+          .some((owner) => owner.executionId === execution.id && owner.state !== 'released') ||
+        this.persistence
+          .listTeamAttempts(execution.id)
+          .some(
+            (attempt) =>
+              !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state),
+          )
+      )
+        throw new Error('Affected graph work has not confirmed stopping');
+      await prepareGraphStepWriteFootprints(graph, key, context);
+      const newFootprints = await prepareGraphStepWriteFootprints(candidate, key, context);
+      const worktree = this.persistence.getTeamMissionWorktree(execution.id);
+      const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+      if (worktree || isolation) {
+        const image = await this.inspectGraphWorkspace(
+          input.taskId,
+          input.missionId,
+          key,
+          false,
+          true,
+        );
+        const originalOwner = this.persistence
+          .listGraphResourceReservations(graph.missionId)
+          .filter((owner) => owner.executionId === execution.id)
+          .at(-1);
+        if (!originalOwner) throw new Error('Original write scope is unavailable');
+        const repositories = worktree
+          ? [{ ordinal: 1, repoPath: worktree.repoPath }]
+          : isolation!.repositories;
+        for (const repository of repositories) {
+          const paths = image.files
+            .filter((file) => file.repository === repository.ordinal)
+            .map((file) => file.path);
+          await assertGraphWritePathCoverage(
+            graph,
+            key,
+            originalOwner.writeFootprints,
+            repository.repoPath,
+            paths,
+          );
+          await assertGraphWritePathCoverage(
+            candidate,
+            key,
+            newFootprints,
+            repository.repoPath,
+            paths,
+          );
+        }
+        images.push({ stepKey: key, digest: image.digest });
+      }
+    }
+    for (const source of proposed.sources) {
+      const current = context();
+      if (
+        (
+          await previewGraphSource(
+            source,
+            current.workspace.roots.find((root) => root.rootId === source.rootId)?.path ?? null,
+            current.policyEpoch,
+          )
+        ).status !== 'current'
+      )
+        throw new Error('Graph source evidence changed before re-agreement');
+    }
+    if (
+      context().policyEpoch !== graph.policyEpoch ||
+      context().workspace.digest !== graph.workspaceDigest ||
+      this.persistence.getGraphDocument(input.taskId)?.renderRevision !== input.renderRevision ||
+      this.persistence.getGraphPendingUpdate?.(input.missionId)?.requestId !== pending.requestId ||
+      this.persistence.getGraphTeamMission(input.missionId)?.semanticRevision !==
+        input.expectedSemanticRevision
+    )
+      throw new Error('Graph update context changed during review');
+    return {
+      ...input,
+      requestId: pending.requestId,
+      changedKeys: pending.changedKeys,
+      affectedKeys: pending.affectedKeys,
+      beforeRenderRevision: graph.renderRevision,
+      contextDigest: createHash('sha256')
+        .update(JSON.stringify([pending, proposed.semanticDigest, graph.contextDigest, images]))
+        .digest('hex'),
+    };
+  }
+
+  async agreeGraphConstraintUpdate(
+    input: GraphMissionUpdateAgreement,
+    consentId: string,
+    validate: () => void,
+  ): Promise<TeamMissionSummary> {
+    return this.enqueue(input.taskId, async () => {
+      validate();
+      const { requestId: _requestId, contextDigest: _digest, ...request } = input;
+      const review = await this.inspectGraphConstraintUpdate(request);
+      if (review.requestId !== input.requestId || review.contextDigest !== input.contextDigest)
+        throw new Error('Graph update review changed; inspect the difference again');
+      validate();
+      if (!this.persistence.commitGraphConstraintUpdate)
+        throw new Error('Graph updates are unavailable');
+      const graph = this.persistence.commitGraphConstraintUpdate({
+        taskId: input.taskId,
+        missionId: input.missionId,
+        requestId: input.requestId,
+        consentId,
+        now: this.isoNow(),
+      });
+      for (const key of review.affectedKeys) {
+        const executionId = graph.steps.find((step) => step.key === key)!.executionId;
+        if (
+          this.persistence.getTeamMissionWorktree(executionId) ||
+          this.persistence.getTeamExecutionIsolation(executionId)
+        ) {
+          const image = await this.inspectGraphWorkspace(input.taskId, input.missionId, key);
+          if (this.persistence.getTeamExecutionIsolation(executionId))
+            this.persistence.resumeGraphExecutionIsolation?.(executionId, this.isoNow());
+          this.graphWorkspaceResumeDigests.set(executionId, image.digest);
+        }
+        await this.scheduleGraphMission(input.taskId, input.missionId, key);
+      }
+      this.emit(input.taskId, this.persistence.getTeamMission(input.missionId).teamId);
+      return this.missionSummary(this.persistence.getTeamMission(input.missionId));
+    });
+  }
+
   async reviewGraphPreservedWorkspace(
     taskId: string,
     missionId: string,
@@ -1656,6 +1926,7 @@ export class TeamCoordinator {
     missionId: string,
     stepKey: string,
     admission = false,
+    updating = false,
   ): Promise<GraphWorkspaceReview> {
     const graph = this.persistence.getGraphTeamMission(missionId);
     const mapping = graph?.steps.find((step) => step.key === stepKey);
@@ -1687,8 +1958,16 @@ export class TeamCoordinator {
       throw new Error('Graph workspace Worker is still active');
     if (this.graphIntegrationHoldFor(missionId, execution.id).hold)
       throw new Error('Completed graph work must resume integration');
-    if (this.persistence.getGraphDocument(taskId)?.semanticDigest !== graph.semanticDigest)
+    if (
+      !updating &&
+      this.persistence.getGraphDocument(taskId)?.semanticDigest !== graph.semanticDigest
+    )
       throw new Error('Graph agreement changed');
+    if (
+      updating &&
+      !this.persistence.getGraphPendingUpdate?.(missionId)?.affectedKeys.includes(stepKey)
+    )
+      throw new Error('Graph update was not requested for this step');
     await this.verifyWorkspace?.(taskId);
     await prepareGraphStepWriteFootprints(graph, stepKey, () =>
       graphMissionContextFor(this.persistence, taskId),
@@ -4414,8 +4693,14 @@ export class TeamCoordinator {
         graph.workspaceDigest !== this.persistence.getEffectiveWorkspaceSet(graph.taskId).digest
       )
         throw new Error('Graph integration ownership or authority changed');
-      const authorized =
-        this.persistence.getGraphStepAgreement?.(mission.id, step.key, step.generation) ?? graph;
+      if (!this.persistence.getGraphStepAgreement)
+        throw new Error('Graph owner consent lookup is unavailable');
+      const authorized = this.persistence.getGraphStepAgreement(
+        mission.id,
+        step.key,
+        step.generation,
+        owner.id,
+      );
       return { graph: authorized, step, owner };
     };
     const initial = readOwner();

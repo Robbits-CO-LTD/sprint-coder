@@ -12,6 +12,7 @@ import type {
 import { useAppStore } from '../store/appStore';
 import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
 import { useGraphDisclosure } from '../lib/graph-view-preference';
+import { GraphMissionUpdatePanel } from './GraphMissionUpdatePanel';
 
 const executionLabels: Record<TeamMissionStepSummary['state'], string> = {
   assigned: '開始待ち',
@@ -43,9 +44,17 @@ export function GraphMissionPlanPanel({
   const taskId = view.taskId;
   const [open, setOpen] = useGraphDisclosure(view, 'planOpen');
   const team = useAppStore((state) => state.teamByTask[taskId]);
-  const mission = team?.missions.find(
-    (mission) => mission.graph?.id === view.id && mission.graph.semanticRevision === view.revision,
-  );
+  const mission =
+    team?.missions.find(
+      (mission) =>
+        mission.graph?.id === view.id && mission.graph.semanticRevision === view.revision,
+    ) ??
+    team?.missions.find(
+      (mission) =>
+        mission.graph?.id === view.id &&
+        !['completed', 'failed', 'canceled'].includes(mission.state),
+    );
+  const updating = Boolean(mission?.graph && mission.graph.semanticRevision !== view.revision);
   const workers = plan.steps.map((step) => {
     const worker = team?.workers.find((worker) => worker.id === step.workerId);
     return [
@@ -67,9 +76,22 @@ export function GraphMissionPlanPanel({
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary>
-        {mission ? '実行状況' : '実行計画案'} · {plan.steps.length}工程
+        {updating ? '実行計画の変更案' : mission ? '実行状況' : '実行計画案'} · {plan.steps.length}
+        工程
       </summary>
       <div className="graph-history-content">
+        {updating && mission?.graph ? (
+          <GraphMissionUpdatePanel
+            key={`${view.instanceId}:${view.renderRevision}:${mission.id}:${mission.graph.semanticRevision}`}
+            input={{
+              taskId,
+              instanceId: view.instanceId,
+              renderRevision: view.renderRevision,
+              missionId: mission.id,
+              expectedSemanticRevision: mission.graph.semanticRevision,
+            }}
+          />
+        ) : null}
         {!mission ? (
           <GraphMissionReviewNotice
             input={{ taskId, instanceId: view.instanceId, renderRevision: view.renderRevision }}
@@ -120,8 +142,9 @@ export function GraphMissionPlanPanel({
                             ? ' · 資源を保持して停止確認待ち'
                             : ''}
                         </p>
-                        {execution.graph?.integrationResumeAvailable ||
-                        execution.graph?.stepResumeAvailable ? (
+                        {!updating &&
+                        (execution.graph?.integrationResumeAvailable ||
+                          execution.graph?.stepResumeAvailable) ? (
                           <GraphResumeButton
                             // The mode is part of the identity: a pending/error left over from one
                             // resume must not carry into the other.

@@ -4043,6 +4043,30 @@ export const graphWorkspaceReviewSchema = z
   })
   .strict();
 export type GraphWorkspaceReview = z.infer<typeof graphWorkspaceReviewSchema>;
+export const graphMissionUpdateInputSchema = graphSourceCheckInputSchema
+  .extend({
+    missionId: idSchema,
+    expectedSemanticRevision: z.number().int().positive(),
+  })
+  .strict();
+export type GraphMissionUpdateInput = z.infer<typeof graphMissionUpdateInputSchema>;
+export const graphMissionUpdateReviewSchema = graphMissionUpdateInputSchema
+  .extend({
+    requestId: z.string().uuid(),
+    contextDigest: digestSchema,
+    beforeRenderRevision: z.number().int().positive(),
+    changedKeys: z.array(graphMissionKeySchema).max(12),
+    affectedKeys: z.array(graphMissionKeySchema).max(12),
+  })
+  .strict();
+export type GraphMissionUpdateReview = z.infer<typeof graphMissionUpdateReviewSchema>;
+export const graphMissionUpdateAgreementSchema = graphMissionUpdateInputSchema
+  .extend({
+    requestId: z.string().uuid(),
+    contextDigest: digestSchema,
+  })
+  .strict();
+export type GraphMissionUpdateAgreement = z.infer<typeof graphMissionUpdateAgreementSchema>;
 export const graphMissionStartInputSchema = graphSourceCheckInputSchema
   .extend({ contextDigest: digestSchema })
   .strict();
@@ -5744,6 +5768,9 @@ export interface SprintCoderApi {
     resumeIntegration(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
     resumeStep(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
     reviewWorkspace(input: GraphMissionResumeInput): Promise<GraphWorkspaceReview>;
+    requestUpdate(input: GraphMissionUpdateInput): Promise<GraphMissionUpdateReview>;
+    reviewUpdate(input: GraphMissionUpdateInput): Promise<GraphMissionUpdateReview>;
+    agreeUpdate(input: GraphMissionUpdateAgreement): Promise<TeamMissionSummary>;
     subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
@@ -6090,6 +6117,9 @@ export const IPC_CHANNELS = {
   graphsMissionResumeIntegration: 'sprint-coder:graphs:mission-resume-integration',
   graphsMissionResumeStep: 'sprint-coder:graphs:mission-resume-step',
   graphsWorkspaceReview: 'sprint-coder:graphs:workspace-review',
+  graphsRequestUpdate: 'sprint-coder:graphs:request-update',
+  graphsReviewUpdate: 'sprint-coder:graphs:review-update',
+  graphsAgreeUpdate: 'sprint-coder:graphs:agree-update',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

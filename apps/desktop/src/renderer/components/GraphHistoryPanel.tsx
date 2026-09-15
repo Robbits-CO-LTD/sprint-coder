@@ -224,7 +224,7 @@ export function GraphHistoryPanel({ view }: { view: GraphView }) {
   );
 }
 
-function GraphDifference({ diff }: { diff: GraphDiff }) {
+export function GraphDifference({ diff }: { diff: GraphDiff }) {
   return (
     <div data-testid="graph-diff" aria-live="polite">
       {!diff.contentChanged ? (

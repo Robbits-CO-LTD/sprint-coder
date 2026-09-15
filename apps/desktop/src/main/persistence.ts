@@ -4051,7 +4051,7 @@ const migrations = [
   },
   {
     version: 91,
-    checksum: 'graph-updates-v91-pending-consent-history',
+    checksum: 'graph-updates-v91-owned-consent-history',
     sql: `
       CREATE TABLE team_graph_pending_updates (
         mission_id TEXT PRIMARY KEY REFERENCES team_graph_missions(mission_id) ON DELETE CASCADE,
@@ -4067,6 +4067,13 @@ const migrations = [
       );
       CREATE TRIGGER graph_agreement_history_immutable BEFORE UPDATE ON team_graph_agreement_history
         BEGIN SELECT RAISE(ABORT, 'Graph agreement history is immutable'); END;
+      ALTER TABLE team_graph_resource_reservations ADD COLUMN agreement_consent_id TEXT;
+      UPDATE team_graph_resource_reservations SET agreement_consent_id=(
+        SELECT g.consent_id FROM team_graph_missions g WHERE g.mission_id=team_graph_resource_reservations.mission_id
+      );
+      CREATE TRIGGER graph_owner_consent_immutable BEFORE UPDATE OF agreement_consent_id ON team_graph_resource_reservations
+        WHEN NEW.agreement_consent_id IS NOT OLD.agreement_consent_id
+        BEGIN SELECT RAISE(ABORT, 'Graph owner consent is immutable'); END;
     `,
   },
 ];
@@ -4663,6 +4670,7 @@ export interface PersistenceClient {
     missionId: string,
     stepKey: string,
     generation: number,
+    reservationId: string,
   ): GraphMissionRecord;
   stageGraphConstraintUpdate?(input: GraphUpdateRequest): GraphPendingUpdate;
   getGraphPendingUpdate?(missionId: string): GraphPendingUpdate | null;
@@ -9654,8 +9662,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const id = randomUUID();
       this.db
         .prepare(
-          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json,write_claims_json,write_claims_digest)
-        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?,?,?)`,
+          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json,write_claims_json,write_claims_digest,agreement_consent_id)
+        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?,?,?,?)`,
         )
         .run(
           id,
@@ -9666,6 +9674,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           canonicalGraphJson(resources),
           writeJson,
           writeDigest,
+          graph.consentId,
         );
       for (const resource of resources)
         this.db
@@ -10757,16 +10766,41 @@ export class SqlitePersistenceClient implements PersistenceClient {
     missionId: string,
     stepKey: string,
     generation: number,
+    reservationId: string,
   ): GraphMissionRecord {
     const current = this.getGraphTeamMission(missionId);
     const step = current?.steps.find((step) => step.key === stepKey);
     if (!current || !step || step.generation !== generation)
       throw new Error('Graph step agreement generation changed');
+    const owner = this.db
+      .prepare(
+        'SELECT mission_id,execution_id,generation,agreement_consent_id FROM team_graph_resource_reservations WHERE id=?',
+      )
+      .get(reservationId) as
+      | {
+          mission_id: string;
+          execution_id: string;
+          generation: number;
+          agreement_consent_id: string | null;
+        }
+      | undefined;
+    if (
+      !owner ||
+      owner.mission_id !== missionId ||
+      owner.execution_id !== step.executionId ||
+      owner.generation !== generation ||
+      !owner.agreement_consent_id
+    )
+      throw new Error('Graph owner consent snapshot is unavailable; recovery is required');
+    if (owner.agreement_consent_id === current.consentId) return current;
     const rows = this.db
       .prepare(
-        'SELECT snapshot_json,snapshot_digest FROM team_graph_agreement_history WHERE mission_id=? ORDER BY semantic_revision',
+        'SELECT snapshot_json,snapshot_digest FROM team_graph_agreement_history WHERE mission_id=? AND consent_id=?',
       )
-      .all(missionId) as { snapshot_json: string; snapshot_digest: string }[];
+      .all(missionId, owner.agreement_consent_id) as {
+      snapshot_json: string;
+      snapshot_digest: string;
+    }[];
     for (const row of rows) {
       if (
         Buffer.byteLength(row.snapshot_json) > 512 * 1024 ||
@@ -10780,6 +10814,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         record.missionId !== missionId ||
         record.taskId !== current.taskId ||
         record.graphId !== current.graphId ||
+        record.consentId !== owner.agreement_consent_id ||
         original.executionId !== step.executionId ||
         record.contextDigest !== current.contextDigest ||
         graphMissionConstraintUpdate(record.plan, current.plan, new Set()).affectedKeys.includes(
@@ -10789,7 +10824,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         throw new Error('Graph step agreement ownership or declaration changed');
       return record;
     }
-    return current;
+    throw new Error('Graph owner consent snapshot is missing');
   }
 
   getGraphPendingUpdate(missionId: string): GraphPendingUpdate | null {
@@ -10838,7 +10873,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
           .map((step) => step.key),
       );
       const delta = graphMissionConstraintUpdate(graph.plan, proposed.missionPlan, completed);
-      for (const key of delta.affectedKeys) {
+      const previous = this.getGraphPendingUpdate(mission.id);
+      if (
+        previous &&
+        (previous.taskId !== input.taskId ||
+          previous.expectedSemanticRevision !== input.expectedSemanticRevision)
+      )
+        throw new Error('Graph pending update base changed');
+      const affectedKeys = graph.steps
+        .filter(
+          (step) =>
+            delta.affectedKeys.includes(step.key) || previous?.affectedKeys.includes(step.key),
+        )
+        .map((step) => step.key);
+      for (const key of affectedKeys) {
         const step = graph.steps.find((step) => step.key === key)!;
         const execution = this.getTeamExecution(step.executionId);
         if (['completed', 'failed', 'canceled'].includes(execution.state))
@@ -10856,13 +10904,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
           throw new Error('Sealed graph work must complete integration before an update');
       }
-      if (this.getGraphPendingUpdate(mission.id))
-        throw new Error('Graph already has a pending update');
-      const pending = graphPendingUpdateSchema.parse({ ...input, ...delta });
+      const pending = graphPendingUpdateSchema.parse({ ...input, ...delta, affectedKeys });
       const payload = canonicalGraphJson(pending);
       this.db
         .prepare(
-          'INSERT INTO team_graph_pending_updates(mission_id,request_id,payload_json,payload_digest) VALUES (?,?,?,?)',
+          `INSERT INTO team_graph_pending_updates(mission_id,request_id,payload_json,payload_digest) VALUES (?,?,?,?)
+           ON CONFLICT(mission_id) DO UPDATE SET request_id=excluded.request_id,payload_json=excluded.payload_json,payload_digest=excluded.payload_digest`,
         )
         .run(
           mission.id,
@@ -10901,7 +10948,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           .map((step) => step.key),
       );
       const delta = graphMissionConstraintUpdate(graph.plan, proposed.missionPlan, completed);
-      if (canonicalGraphJson(delta.affectedKeys) !== canonicalGraphJson(pending.affectedKeys))
+      if (delta.affectedKeys.some((key) => !pending.affectedKeys.includes(key)))
         throw new Error('Graph affected steps changed');
       const context = graphMissionContextFor(this, input.taskId);
       const agreed = graphMissionStoredContextSchema.parse(JSON.parse(graph.contextJson));

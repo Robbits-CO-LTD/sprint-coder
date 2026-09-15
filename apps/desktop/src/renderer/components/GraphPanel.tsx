@@ -34,13 +34,20 @@ function GraphPanelForTask({ taskId, onClose }: { taskId: string; onClose: () =>
   const generationSequence = useRef(0);
   const frame = useRef<HTMLIFrameElement>(null);
   const team = useAppStore((state) => state.teamByTask[taskId]);
-  const graphMission = team?.missions.find(
-    (mission) =>
-      view !== null &&
-      mission.graph !== undefined &&
-      mission.graph.id === view.id &&
-      mission.graph.semanticRevision === view.revision,
-  );
+  const graphMission =
+    team?.missions.find(
+      (mission) =>
+        view !== null &&
+        mission.graph !== undefined &&
+        mission.graph.id === view.id &&
+        mission.graph.semanticRevision === view.revision,
+    ) ??
+    team?.missions.find(
+      (mission) =>
+        view &&
+        mission.graph?.id === view.id &&
+        !['completed', 'failed', 'canceled'].includes(mission.state),
+    );
   const sendExecutionState = useCallback(() => {
     if (!view) return;
     frame.current?.contentWindow?.postMessage(

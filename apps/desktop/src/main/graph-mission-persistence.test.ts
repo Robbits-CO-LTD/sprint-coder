@@ -340,6 +340,445 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('keeps a running independent WRITE branch on its original owner consent through sealed integration after re-agreement', async () => {
+      const f = fixture(undefined, true, ['a', 'b', 'c']);
+      const workspace = join(dirname(f.path), 'workspace');
+      mkdirSync(workspace);
+      writeFileSync(join(workspace, 'b.ts'), 'before\n');
+      for (const args of [
+        ['init', '-q', workspace],
+        ['-C', workspace, 'add', 'b.ts'],
+        [
+          '-C',
+          workspace,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit',
+          '-qm',
+          'base',
+        ],
+      ])
+        expect(spawnSync('git', args).status).toBe(0);
+      const binding = await workspaceMutationBinding(workspace);
+      f.persistence.setWorkspaceBinding(f.task.id, {
+        path: binding.canonicalPath,
+        workspaceKey: binding.workspaceKey,
+        rootIdentityDigest: binding.rootIdentityDigest,
+      });
+      const context = graphMissionContextFor(f.persistence, f.task.id);
+      const plan = structuredClone(f.plan);
+      plan.steps[1]!.dependsOn = [];
+      plan.steps[1]!.access = 'workspace-write';
+      plan.steps[1]!.writeClaims = [
+        { rootId: context.workspace.primaryRootId!, path: 'b.ts', semanticKeys: [] },
+      ];
+      plan.steps[2]!.dependsOn = ['a', 'b'];
+      const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(initial, 1);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const original = runtime.execute.bind(runtime);
+      const starts: string[] = [];
+      const releases = new Map<string, () => void>();
+      vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+        const first = !starts.includes(input.worker.role);
+        starts.push(input.worker.role);
+        if (input.worker.role === 'b')
+          writeFileSync(join(input.workspacePath!, 'b.ts'), 'sealed independent B\n');
+        if (first && input.worker.role !== 'c')
+          await new Promise<void>((resolve) => releases.set(input.worker.role, resolve));
+        return original(input);
+      });
+      const stop = vi
+        .spyOn(runtime, 'stop')
+        .mockImplementation(async (id) =>
+          releases.get(f.workers.find((worker) => worker.id === id)!.role)?.(),
+        );
+      const scheduler = new TeamExecutionScheduler(2);
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot: join(dirname(f.path), 'worktrees'),
+      });
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        manager,
+      );
+      try {
+        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+          ...f.input,
+          renderRevision: initial.renderRevision,
+          semanticRevision: initial.semanticRevision,
+          semanticDigest: initial.semanticDigest,
+          workspaceDigest: context.workspace.digest,
+          policyEpoch: context.policyEpoch,
+          contextDigest: graphMissionContextDigest(
+            context,
+            new Set(f.workers.map((worker) => worker.id)),
+          ),
+        }));
+        await vi.waitFor(() => expect(starts).toEqual(['a', 'b']));
+        const bExecution = mission.steps[1]!.executionId;
+        const owner = f.persistence
+          .listGraphResourceReservations(mission.id)
+          .find((owner) => owner.executionId === bExecution)!;
+        const originalConsent = f.persistence.getGraphStepAgreement(
+          mission.id,
+          'b',
+          1,
+          owner.id,
+        ).consentId;
+        const next = structuredClone(plan);
+        next.steps[0]!.dependsOn = ['b'];
+        const proposed = nextGraphDocument(f.task.id, f.diagram, initial, [], [], next);
+        f.persistence.saveGraphDocument(proposed, initial.renderRevision);
+        expect(stop).not.toHaveBeenCalled();
+        const input = {
+          taskId: f.task.id,
+          missionId: mission.id,
+          instanceId: randomUUID(),
+          renderRevision: proposed.renderRevision,
+          expectedSemanticRevision: initial.semanticRevision,
+        };
+        const review = await coordinator.requestGraphConstraintUpdate(
+          input,
+          randomUUID(),
+          () => undefined,
+        );
+        await coordinator.agreeGraphConstraintUpdate(
+          { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+          randomUUID(),
+          () => undefined,
+        );
+        expect(stop).toHaveBeenCalledExactlyOnceWith(f.workers[0]!.id);
+        expect(f.persistence.getGraphTeamMission(mission.id)!.consentId).not.toBe(originalConsent);
+        expect(f.persistence.getGraphStepAgreement(mission.id, 'b', 1, owner.id).consentId).toBe(
+          originalConsent,
+        );
+        expect(
+          f.persistence.listGraphResourceReservations(mission.id).find((row) => row.id === owner.id)
+            ?.state,
+        ).toBe('active');
+        releases.get('b')!();
+        await vi.waitFor(
+          () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+          { timeout: 10000 },
+        );
+        expect(readFileSync(join(binding.canonicalPath, 'b.ts'), 'utf8')).toBe(
+          'sealed independent B\n',
+        );
+        expect(f.persistence.getTeamMissionWorktree(bExecution)?.workerHead).not.toBe(
+          f.persistence.getTeamMissionWorktree(bExecution)?.baseHead,
+        );
+        expect(f.persistence.listTeamAttempts(bExecution)).toHaveLength(1);
+        expect(
+          f.persistence
+            .listGraphResourceReservations(mission.id)
+            .find((row) => row.id === owner.id),
+        ).toMatchObject({ state: 'released', generation: 1 });
+        expect(starts).toEqual(['a', 'b', 'a', 'c']);
+        expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      } finally {
+        for (const release of releases.values()) release();
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        f.persistence.close();
+      }
+    });
+
+    it('migrates public v90 owner data to immutable consent bindings without changing its identity', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const owner = reserve(f, mission.id);
+      f.persistence.close();
+      const legacy = new Database(f.path);
+      legacy.exec(`DROP TRIGGER graph_owner_consent_immutable;
+        ALTER TABLE team_graph_resource_reservations DROP COLUMN agreement_consent_id;
+        DROP TABLE team_graph_pending_updates; DROP TABLE team_graph_agreement_history;
+        DELETE FROM schema_migrations WHERE version=91;`);
+      legacy.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      try {
+        expect(restored.listGraphResourceReservations(mission.id)[0]!.id).toBe(owner.id);
+        expect(restored.getGraphStepAgreement(mission.id, 'a', 1, owner.id).consentId).toBe(
+          f.input.consentId,
+        );
+        expect(() => restored.getGraphStepAgreement(mission.id, 'b', 1, owner.id)).toThrow(
+          'unavailable',
+        );
+        const database = new Database(f.path);
+        try {
+          expect(() =>
+            database
+              .prepare(
+                'UPDATE team_graph_resource_reservations SET agreement_consent_id=? WHERE id=?',
+              )
+              .run(randomUUID(), owner.id),
+          ).toThrow('immutable');
+        } finally {
+          database.close();
+        }
+      } finally {
+        restored.close();
+      }
+    });
+    it('resolves the consent actually captured by an owner acquired after a constraint update', () => {
+      const f = fixture();
+      try {
+        const plan = structuredClone(f.plan);
+        plan.steps[1]!.dependsOn = [];
+        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(initial, 1);
+        const mission = f.persistence.createGraphTeamMission({
+          ...f.input,
+          renderRevision: initial.renderRevision,
+          semanticRevision: initial.semanticRevision,
+          semanticDigest: initial.semanticDigest,
+        });
+        const changed = structuredClone(plan);
+        changed.steps[0]!.resourceClaims = [
+          { scope: 'machine', rootId: null, key: 'new-resource' },
+        ];
+        const proposed = nextGraphDocument(f.task.id, f.diagram, initial, [], [], changed);
+        f.persistence.saveGraphDocument(proposed, initial.renderRevision);
+        const pending = f.persistence.stageGraphConstraintUpdate({
+          taskId: f.task.id,
+          missionId: mission.id,
+          expectedSemanticRevision: initial.semanticRevision,
+          renderRevision: proposed.renderRevision,
+          requestId: randomUUID(),
+          now,
+        });
+        f.persistence.transitionTeamExecution({
+          executionId: mission.steps[0]!.executionId,
+          to: 'waiting_resume',
+          now,
+        });
+        const consentId = randomUUID();
+        f.persistence.commitGraphConstraintUpdate({
+          taskId: f.task.id,
+          missionId: mission.id,
+          requestId: pending.requestId,
+          consentId,
+          now,
+        });
+        const owner = reserve(f, mission.id, 'b');
+        const agreement = f.persistence.getGraphStepAgreement(mission.id, 'b', 1, owner.id);
+        expect(agreement.consentId).toBe(consentId);
+      } finally {
+        f.persistence.close();
+      }
+    });
+    it.each(['agree', 'cancel', 'policy', 'proposal', 'delayed-stop'] as const)(
+      'requests stopping only affected runtime steps before fresh re-agreement: %s',
+      async (action) => {
+        const f = fixture(undefined, false, ['a', 'b', 'c']);
+        const plan = structuredClone(f.plan);
+        plan.steps[1]!.dependsOn = [];
+        plan.steps[2]!.dependsOn = ['a', 'b'];
+        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(initial, 1);
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const original = runtime.execute.bind(runtime);
+        const starts: string[] = [];
+        const releases = new Map<string, () => void>();
+        vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+          const role = input.worker.role;
+          const first = !starts.includes(role);
+          starts.push(role);
+          if (first && role !== 'c')
+            await new Promise<void>((resolve) => releases.set(role, resolve));
+          return original(input);
+        });
+        let acknowledgeStop: (() => void) | undefined;
+        const stop = vi.spyOn(runtime, 'stop').mockImplementation(async (id) => {
+          if (action === 'delayed-stop')
+            await new Promise<void>((resolve) => {
+              acknowledgeStop = resolve;
+            });
+          releases.get(f.workers.find((worker) => worker.id === id)!.role)?.();
+        });
+        const scheduler = new TeamExecutionScheduler(2);
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+        );
+        try {
+          const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+            ...f.input,
+            renderRevision: initial.renderRevision,
+            semanticRevision: initial.semanticRevision,
+            semanticDigest: initial.semanticDigest,
+          }));
+          await vi.waitFor(() => expect(starts).toEqual(['a', 'b']));
+          const next = structuredClone(plan);
+          next.steps[0]!.dependsOn = ['b'];
+          const proposed = nextGraphDocument(f.task.id, f.diagram, initial, [], [], next);
+          f.persistence.saveGraphDocument(proposed, initial.renderRevision);
+          expect(stop).not.toHaveBeenCalled();
+          expect(f.persistence.getTeamExecution(mission.steps[0]!.executionId).state).toBe(
+            'running',
+          );
+          let input = {
+            taskId: f.task.id,
+            missionId: mission.id,
+            instanceId: randomUUID(),
+            renderRevision: proposed.renderRevision,
+            expectedSemanticRevision: initial.semanticRevision,
+          };
+          const requested = coordinator.requestGraphConstraintUpdate(
+            input,
+            randomUUID(),
+            () => undefined,
+          );
+          if (action === 'delayed-stop') {
+            await vi.waitFor(() =>
+              expect(f.persistence.getGraphPendingUpdate(mission.id)).not.toBeNull(),
+            );
+            await expect(coordinator.reviewGraphConstraintUpdate(input)).rejects.toThrow(
+              'not confirmed stopping',
+            );
+            acknowledgeStop!();
+          }
+          let review = await requested;
+          expect(review.affectedKeys).toEqual(['a', 'c']);
+          expect(stop).toHaveBeenCalledExactlyOnceWith(f.workers[0]!.id);
+          expect(f.persistence.getTeamExecution(mission.steps[1]!.executionId).state).toBe(
+            'running',
+          );
+          expect(f.persistence.getGraphTeamMission(mission.id)!.semanticRevision).toBe(
+            initial.semanticRevision,
+          );
+          if (action !== 'agree' && action !== 'delayed-stop') {
+            if (action === 'cancel')
+              await coordinator.cancelExecution(f.task.id, mission.steps[0]!.executionId);
+            if (action === 'policy') f.persistence.setAccessPreset(f.task.id, 'ask');
+            if (action === 'proposal') {
+              const newer = nextGraphDocument(f.task.id, f.diagram, proposed, [], [], next);
+              f.persistence.saveGraphDocument(newer, proposed.renderRevision);
+            }
+            await expect(
+              coordinator.agreeGraphConstraintUpdate(
+                { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+                randomUUID(),
+                () => undefined,
+              ),
+            ).rejects.toThrow();
+            expect(f.persistence.getGraphTeamMission(mission.id)!.semanticRevision).toBe(
+              initial.semanticRevision,
+            );
+            expect(starts).toEqual(['a', 'b']);
+            if (action !== 'proposal') return;
+            input = {
+              ...input,
+              renderRevision: f.persistence.getGraphDocument(f.task.id)!.renderRevision,
+            };
+            const oldRequest = review.requestId;
+            review = await coordinator.requestGraphConstraintUpdate(
+              input,
+              randomUUID(),
+              () => undefined,
+            );
+            expect(review.requestId).not.toBe(oldRequest);
+          }
+          await coordinator.agreeGraphConstraintUpdate(
+            { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+            randomUUID(),
+            () => undefined,
+          );
+          const bOwner = f.persistence
+            .listGraphResourceReservations(mission.id)
+            .find((owner) => owner.executionId === mission.steps[1]!.executionId)!;
+          expect(f.persistence.getGraphStepAgreement(mission.id, 'b', 1, bOwner.id).consentId).toBe(
+            f.input.consentId,
+          );
+          expect(starts).toEqual(['a', 'b']);
+          releases.get('b')!();
+          await vi.waitFor(() =>
+            expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+          );
+          expect(starts).toEqual(['a', 'b', 'a', 'c']);
+          expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+        } finally {
+          acknowledgeStop?.();
+          for (const release of releases.values()) release();
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          f.persistence.close();
+        }
+      },
+    );
+
+    it.each(['shrink', 'undeclared'] as const)(
+      'holds a constraint update when retained writes violate %s coverage',
+      async (mode) => {
+        const { f, a, run, manager, worktree } = await retainedWriteFixture();
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+        try {
+          await installNativeGraphObserver(f.persistence, dirname(f.path));
+          f.persistence.interruptGraphStep({
+            missionId: a.mission.id,
+            stepKey: 'a',
+            generation: 1,
+            reservationId: run.reservation.id,
+            attemptId: run.attempt.id,
+            outcome: 'failed',
+            reason: 'interrupted',
+            confirmation: { kind: 'unconfirmed' },
+            now,
+          });
+          f.persistence.updateTeamMissionWorktree({
+            executionId: run.execution.id,
+            to: 'quarantined',
+            now,
+          });
+          const current = f.persistence.getGraphDocument(f.task.id)!;
+          const plan = structuredClone(current.missionPlan!);
+          plan.steps[0]!.writeClaims[0]!.path = mode === 'shrink' ? 'different.ts' : null;
+          if (mode === 'undeclared') writeFileSync(join(worktree.path, 'outside.ts'), 'unapproved');
+          const proposed = nextGraphDocument(f.task.id, f.diagram, current, [], [], plan);
+          f.persistence.saveGraphDocument(proposed, current.renderRevision);
+          const input = {
+            taskId: f.task.id,
+            missionId: a.mission.id,
+            instanceId: randomUUID(),
+            renderRevision: proposed.renderRevision,
+            expectedSemanticRevision: current.semanticRevision,
+          };
+          await expect(
+            coordinator.requestGraphConstraintUpdate(input, randomUUID(), () => undefined),
+          ).rejects.toThrow('outside the declared');
+          expect(execute).not.toHaveBeenCalled();
+          expect(f.persistence.getGraphTeamMission(a.mission.id)!.semanticRevision).toBe(
+            current.semanticRevision,
+          );
+          expect(f.persistence.getGraphPendingUpdate(a.mission.id)).not.toBeNull();
+          expect(readFileSync(join(worktree.path, 'shared.ts'), 'utf8')).toBe('integrated\n');
+        } finally {
+          f.persistence.close();
+        }
+      },
+    );
     it.each([false, true])(
       'fences only a requested update and preserves independent completion (complete before commit: %s)',
       (completeBeforeCommit) => {
@@ -418,21 +857,21 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           expect(f.persistence.getGraphPendingUpdate(mission.id)).not.toBeNull();
           const updated = f.persistence.commitGraphConstraintUpdate(commit);
           expect(updated.steps.map((step) => step.generation)).toEqual([2, 1, 2]);
-          expect(f.persistence.getGraphStepAgreement(mission.id, 'b', 1).consentId).toBe(
-            f.input.consentId,
-          );
-          expect(f.persistence.getGraphStepAgreement(mission.id, 'a', 2).consentId).toBe(
-            commit.consentId,
-          );
-          expect(() => f.persistence.getGraphStepAgreement(mission.id, 'a', 1)).toThrow(
-            'generation',
-          );
+          expect(
+            f.persistence.getGraphStepAgreement(mission.id, 'b', 1, b.reservation.id).consentId,
+          ).toBe(f.input.consentId);
+          expect(() =>
+            f.persistence.getGraphStepAgreement(mission.id, 'a', 1, a.reservation.id),
+          ).toThrow('generation');
           expect(f.persistence.getTeamMission(mission.id).steps[1]!.checkpoint).toEqual(checkpoint);
           if (!completeBeforeCommit) {
             f.persistence.completeGraphStep(completion(mission.id, 'b', b));
             expect(f.persistence.getTeamExecution(b.execution.id).state).toBe('completed');
             expect(f.persistence.listTeamAttempts(b.execution.id)).toHaveLength(1);
           }
+          expect(() => f.persistence.completeGraphStep(completion(mission.id, 'b', b))).toThrow(
+            'owner mismatch',
+          );
           expect(f.persistence.getGraphPendingUpdate(mission.id)).toBeNull();
           expect(() => f.persistence.commitGraphConstraintUpdate(commit)).toThrow('changed');
           expect(() => f.persistence.completeGraphStep(completion(mission.id, 'a', a))).toThrow(
@@ -2727,7 +3166,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       f.persistence.close();
       const old = new Database(f.path);
       old.exec(
-        'DROP TABLE team_graph_resource_leases; DROP TABLE team_graph_resource_reservations; DROP TABLE team_graph_mission_steps; DROP TABLE team_graph_missions; ALTER TABLE team_missions DROP COLUMN mode; DELETE FROM schema_migrations WHERE version IN (86, 87, 88);',
+        'DROP TABLE team_graph_pending_updates; DROP TABLE team_graph_agreement_history; DROP TABLE team_graph_resource_leases; DROP TABLE team_graph_resource_reservations; DROP TABLE team_graph_mission_steps; DROP TABLE team_graph_missions; ALTER TABLE team_missions DROP COLUMN mode; DELETE FROM schema_migrations WHERE version IN (86, 87, 88, 91);',
       );
       old.close();
       const migrated = new SqlitePersistenceClient(f.path);
