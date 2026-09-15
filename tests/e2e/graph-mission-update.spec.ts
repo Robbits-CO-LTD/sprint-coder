@@ -128,10 +128,14 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
       .poll(async () => (await mission(page))?.steps.map((step) => step.state), { timeout: 30000 })
       .toEqual(['running', 'running', 'queued']);
     const initial = await mission(page);
+    const plan = page.getByTestId('graph-mission-plan');
+    await expect(plan).toHaveAttribute('open', '');
+    await plan.locator('summary').click();
     const frame = page.frameLocator('[data-testid="graph-frame"]');
     await expect(page.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     await frame.locator('[data-node-id="client"]').first().click();
     await expect(page.getByTestId('graph-selection')).toContainText('client');
+    await expect(page.getByRole('textbox', { name: 'この箇所への指示' })).toBeVisible();
     await page
       .getByRole('textbox', { name: 'この箇所への指示' })
       .fill('[fixture:graph-update-mission]');
@@ -295,8 +299,10 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
           };
         })
         .catch(() => ({ diagnosticUnavailable: true }));
+      const metadataPath = testInfo.outputPath('graph-update-pre-cleanup-dom.json');
+      await writeFile(metadataPath, JSON.stringify(metadata, null, 2));
       await testInfo.attach('graph-update-pre-cleanup-dom', {
-        body: JSON.stringify(metadata),
+        path: metadataPath,
         contentType: 'application/json',
       });
       const screenshot = testInfo.outputPath('graph-update-before-cleanup.png');
