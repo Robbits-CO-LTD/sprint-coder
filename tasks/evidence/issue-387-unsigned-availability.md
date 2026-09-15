@@ -93,9 +93,12 @@ Both remote and checked-in evidence bytes have SHA-256
 hash is `a2fe7571dad331d00d06c4bd53670001a8132db9f6628526bbb89fcf9ea8a0a4`. A final process query
 also found zero executable paths under the entire dedicated #387 directory.
 
-This directly verifies the behavior described by `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` for these
-published unsigned bytes. The JSON is a local diagnostic result, **not** the schema-v3 attested
-canonical transcript; it must not be submitted or relabelled as the complete final-gate artifact.
+This directly observes the behavior described by `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` at the
+`availability()` boundary, for the published beta.3 (`5b20208`) unsigned bytes only. It does not
+satisfy that row: the canonical evidence code `UNSIGNED_WINDOWS_FAIL_CLOSED_V1` requires the frozen
+integrated SHA and a schema-v3 attested transcript. The JSON is a local diagnostic result, **not**
+the schema-v3 attested canonical transcript; it must not be submitted or relabelled as the complete
+final-gate artifact.
 
 ## Main: exact replay
 
