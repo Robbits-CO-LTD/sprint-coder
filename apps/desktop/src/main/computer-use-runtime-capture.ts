@@ -24,9 +24,28 @@ const eventSchema = z.discriminatedUnion('type', [
       type: z.literal('preflight_started'),
       bindingDigest: digest,
       isOpenRouter: z.boolean(),
+      // Optional until the planner emits them: the aggregator resolves no binding without the
+      // complete set, and never completes a partial one from elsewhere.
+      connectionIdDigest: digest.optional(),
+      modelIdDigest: digest.optional(),
+      endpointDigest: digest.optional(),
+      catalogDigest: digest.optional(),
+      policyEpoch: integer.optional(),
+      selectedFromCurrentTask: z.boolean().optional(),
+      fallbackUsed: z.boolean().optional(),
+      credentialChanged: z.boolean().optional(),
     })
     .strict(),
   z.object({ ...base, type: z.literal('preflight_passed'), bindingDigest: digest }).strict(),
+  z.object({ ...base, type: z.literal('egress_authorized'), egressDigest: digest }).strict(),
+  z
+    .object({
+      ...base,
+      type: z.literal('cost_limit_bound'),
+      costLimitDigest: digest,
+      maxRounds: integer,
+    })
+    .strict(),
   z
     .object({
       ...base,

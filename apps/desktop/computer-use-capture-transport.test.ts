@@ -29,6 +29,14 @@ const event = {
   windowDigest: 'f'.repeat(64),
   manifestDigest: 'c'.repeat(64),
 };
+type JourneyOptions = {
+  bindingDigest?: string;
+  identity?: Record<string, string | number | boolean>;
+  egress?: boolean;
+  cost?: boolean;
+  lateCost?: boolean;
+  secondEgressDigest?: string;
+};
 
 describe('Computer Use normal capture framing', () => {
   it('accepts fragmented metadata frames and requires a valid terminal frame', () => {
@@ -65,10 +73,22 @@ describe('Computer Use normal capture framing', () => {
     encode('hello', hello);
     expect(() => encode('event', { ...event, rawBody: 'PRIVATE_FIXTURE' })).toThrow();
   });
-  function journeyFrames() {
+  const bindingIdentity: Record<string, string | number | boolean> = {
+    connectionIdDigest: '1'.repeat(64),
+    modelIdDigest: '2'.repeat(64),
+    endpointDigest: '3'.repeat(64),
+    catalogDigest: '4'.repeat(64),
+    policyEpoch: 7,
+    selectedFromCurrentTask: true,
+    fallbackUsed: false,
+    credentialChanged: false,
+  };
+  const egressDigest = '5'.repeat(64);
+  const costLimitDigest = '6'.repeat(64);
+  function journeyFrames(options: JourneyOptions = {}) {
     const sessionDigest = 'd'.repeat(64),
       actionDigest = 'e'.repeat(64),
-      bindingDigest = 'f'.repeat(64);
+      bindingDigest = options.bindingDigest ?? 'f'.repeat(64);
     const observation = (revision: number) => ({
       type: 'observation',
       sessionDigest,
@@ -77,28 +97,51 @@ describe('Computer Use normal capture framing', () => {
       revision,
       ttlVerified: true,
     });
+    const costEvent = { type: 'cost_limit_bound', sessionDigest, costLimitDigest, maxRounds: 25 };
     const payloads: Record<string, string | number | boolean>[] = [
       { ...event, cancelEpoch: 0, inputAttemptCount: 0 },
-      { type: 'preflight_started', sessionDigest, bindingDigest, isOpenRouter: false },
+      {
+        type: 'preflight_started',
+        sessionDigest,
+        bindingDigest,
+        isOpenRouter: false,
+        ...(options.identity ?? {}),
+      },
       { type: 'preflight_passed', sessionDigest, bindingDigest },
+      ...(options.egress ? [{ type: 'egress_authorized', sessionDigest, egressDigest }] : []),
+      ...(options.secondEgressDigest === undefined
+        ? []
+        : [
+            {
+              type: 'egress_authorized',
+              sessionDigest,
+              egressDigest: options.secondEgressDigest,
+            },
+          ]),
+      ...(options.cost && !options.lateCost ? [costEvent] : []),
       observation(1),
     ];
     let inputAttemptCount = 0;
     for (let round = 1; round <= 3; round++) {
-      payloads.push(
-        { type: 'round_started', sessionDigest, round, revision: round, bindingDigest },
-        {
-          type: 'parsed',
-          sessionDigest,
-          round,
-          revision: round,
-          bindingDigest,
-          actionDigest,
-          actionClass: round === 1 ? 'type' : 'invoke',
-          latencyMs: 10,
-          ttlVerified: true,
-        },
-      );
+      payloads.push({
+        type: 'round_started',
+        sessionDigest,
+        round,
+        revision: round,
+        bindingDigest,
+      });
+      if (options.lateCost && round === 1) payloads.push(costEvent);
+      payloads.push({
+        type: 'parsed',
+        sessionDigest,
+        round,
+        revision: round,
+        bindingDigest,
+        actionDigest,
+        actionClass: round === 1 ? 'type' : 'invoke',
+        latencyMs: 10,
+        ttlVerified: true,
+      });
       for (let scalar = 0; scalar < (round === 1 ? 2 : 1); scalar++) {
         const requestDigest = createHash('sha256').update(`${round}:${scalar}`).digest('hex');
         payloads.push(
@@ -161,6 +204,78 @@ describe('Computer Use normal capture framing', () => {
     receipt.payload.cancelEpoch = 9;
     expect(summarizeComputerUseCaptureRounds(broken)[0].roundsComplete).toBe(false);
   });
+  async function captureRounds() {
+    return await import(pathToFileURL(resolve(root, 'computer-use-capture-rounds.mjs')).href);
+  }
+
+  it('derives the provider binding from measured rounds, consent and cost bounds', async () => {
+    const rounds = await captureRounds();
+    const bindingDigest = rounds.computerUseCaptureBindingDigest(bindingIdentity);
+    const [summary] = rounds.summarizeComputerUseCaptureRounds(
+      journeyFrames({ bindingDigest, identity: bindingIdentity, egress: true, cost: true }),
+    );
+    expect(summary.roundsComplete).toBe(true);
+    expect(summary.egressConsentDigest).toBe(egressDigest);
+    expect(summary.costLimitDigest).toBe(costLimitDigest);
+    expect(summary.maxRounds).toBe(25);
+    expect(summary.roundsAttempted).toBe(3);
+    // Every field is measured from the owned stream or fixed by the module version; none of it
+    // is transcribed from a producer-supplied binding object.
+    expect(summary.binding).toEqual({
+      ...bindingIdentity,
+      adapterVersion: 'computer-use-v1',
+      sessionIdDigest: 'd'.repeat(64),
+      bindingStable: true,
+      preflightAttempts: 1,
+      preflightPassed: true,
+      roundsAttempted: 3,
+      roundsCompleted: 3,
+      isOpenRouter: false,
+    });
+  });
+
+  it.each([
+    'no-egress',
+    'no-cost',
+    'no-identity',
+    'partial-identity',
+    'identity-digest-mismatch',
+    'changed-egress',
+    'late-cost',
+    'incomplete-journey',
+  ])('does not resolve a measured binding for %s', async (kind) => {
+    const rounds = await captureRounds();
+    const bindingDigest = rounds.computerUseCaptureBindingDigest(bindingIdentity);
+    const options: JourneyOptions = {
+      bindingDigest,
+      identity: bindingIdentity,
+      egress: true,
+      cost: true,
+    };
+    if (kind === 'no-egress') options.egress = false;
+    else if (kind === 'no-cost') options.cost = false;
+    else if (kind === 'no-identity') delete options.identity;
+    else if (kind === 'partial-identity')
+      options.identity = Object.fromEntries(
+        Object.entries(bindingIdentity).filter(([key]) => key !== 'policyEpoch'),
+      );
+    else if (kind === 'identity-digest-mismatch') options.bindingDigest = 'f'.repeat(64);
+    else if (kind === 'changed-egress') options.secondEgressDigest = '7'.repeat(64);
+    else if (kind === 'late-cost') options.lateCost = true;
+    const frames = journeyFrames(options);
+    if (kind === 'incomplete-journey')
+      frames.splice(
+        frames.findIndex((frame) => frame.payload.type === 'stop_acknowledged'),
+        1,
+      );
+    const [summary] = rounds.summarizeComputerUseCaptureRounds(frames);
+    expect(summary.binding).toBe(null);
+    if (kind === 'no-egress') expect(summary.egressConsentDigest).toBe(null);
+    if (kind === 'no-cost') expect(summary.costLimitDigest).toBe(null);
+    if (kind === 'changed-egress' || kind === 'late-cost' || kind === 'partial-identity')
+      expect(summary.roundsComplete).toBe(false);
+  });
+
   it.each([
     'repeat-preflight',
     'early-stop',

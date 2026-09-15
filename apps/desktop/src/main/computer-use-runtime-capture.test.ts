@@ -200,6 +200,82 @@ describe('Computer Use runtime observation (unit fixtures are never acceptance)'
     });
   });
 
+  it('records bounded egress consent and cost bound metadata but no policy body', () => {
+    const capture = captureFixture();
+    capture.record({ type: 'egress_authorized', sessionDigest, egressDigest: '5'.repeat(64) });
+    capture.record({
+      type: 'cost_limit_bound',
+      sessionDigest,
+      costLimitDigest: '6'.repeat(64),
+      maxRounds: 25,
+    });
+    expect(capture.snapshot().invalid).toBe(false);
+    expect(capture.snapshot().events.map(({ type }) => type)).toEqual([
+      'session',
+      'preflight_started',
+      'preflight_passed',
+      'observation',
+      'egress_authorized',
+      'cost_limit_bound',
+    ]);
+  });
+
+  it.each(['missing-cost-limit', 'body-bearing-egress', 'unbounded-cost'])(
+    'invalidates malformed consent and cost metadata: %s',
+    (kind) => {
+      const capture = captureFixture();
+      capture.record(
+        (kind === 'missing-cost-limit'
+          ? { type: 'cost_limit_bound', sessionDigest, costLimitDigest: '6'.repeat(64) }
+          : kind === 'body-bearing-egress'
+            ? {
+                type: 'egress_authorized',
+                sessionDigest,
+                egressDigest: '5'.repeat(64),
+                prompt: 'PRIVATE_FIXTURE_PROMPT',
+              }
+            : {
+                type: 'cost_limit_bound',
+                sessionDigest,
+                costLimitDigest: '6'.repeat(64),
+                maxRounds: -1,
+              }) as unknown as ComputerUseRuntimeEvent,
+      );
+      expect(capture.snapshot().invalid).toBe(true);
+      expect(JSON.stringify(capture.snapshot())).not.toContain('PRIVATE_FIXTURE_PROMPT');
+    },
+  );
+
+  it('accepts optional measured binding identity on preflight without requiring it', () => {
+    const capture = new ComputerUseRuntimeCapture();
+    capture.start({
+      type: 'session',
+      sessionDigest,
+      appDigest,
+      windowDigest,
+      manifestDigest: 'f'.repeat(64),
+      platform: 'darwin',
+    });
+    capture.record({
+      type: 'preflight_started',
+      sessionDigest,
+      bindingDigest,
+      isOpenRouter: false,
+      connectionIdDigest: '1'.repeat(64),
+      modelIdDigest: '2'.repeat(64),
+      endpointDigest: '3'.repeat(64),
+      catalogDigest: '4'.repeat(64),
+      policyEpoch: 7,
+      selectedFromCurrentTask: true,
+      fallbackUsed: false,
+      credentialChanged: false,
+    });
+    expect(capture.snapshot().invalid).toBe(false);
+    // The existing emitter omits every identity field; that must stay valid until it is wired.
+    const bare = captureFixture();
+    expect(bare.snapshot().invalid).toBe(false);
+  });
+
   it('detaches inputs/snapshots, rejects body-bearing fields, and stays bounded', () => {
     const capture = captureFixture();
     const event = observation(2);

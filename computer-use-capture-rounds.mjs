@@ -4,6 +4,66 @@ const fail = () => {
   throw new Error('Computer Use round evidence is incomplete');
 };
 
+/** Fixed by this module's version, not measured: the schema pins the same adapter contract. */
+export const COMPUTER_USE_CAPTURE_ADAPTER_VERSION = 'computer-use-v1';
+const BINDING_IDENTITY_KEYS = [
+  'connectionIdDigest',
+  'modelIdDigest',
+  'endpointDigest',
+  'catalogDigest',
+  'policyEpoch',
+  'selectedFromCurrentTask',
+  'fallbackUsed',
+  'credentialChanged',
+];
+
+/**
+ * Canonical digest of the Provider binding identity. Every preflight/round/parse event carries a
+ * `bindingDigest`; requiring it to equal this makes the opaque token a checked commitment to the
+ * identity fields, so a claimed identity that the rounds never bound to fails closed.
+ */
+export function computerUseCaptureBindingDigest(identity) {
+  return digest(BINDING_IDENTITY_KEYS.map((key) => identity[key]));
+}
+
+/** `null` when unclaimed, `undefined` when partially claimed (never completed from elsewhere). */
+function bindingIdentity(event) {
+  const present = BINDING_IDENTITY_KEYS.filter((key) => event[key] !== undefined);
+  if (present.length === 0) return null;
+  if (present.length !== BINDING_IDENTITY_KEYS.length) return undefined;
+  return Object.fromEntries(BINDING_IDENTITY_KEYS.map((key) => [key, event[key]]));
+}
+
+/**
+ * Builds the Provider binding out of measured facts only. A missing consent, missing cost bound,
+ * unclaimed or unbound identity, or an incomplete journey yields `null`: an unresolved binding is
+ * left unresolved rather than filled in from a producer-supplied object.
+ */
+function measuredBinding(session, sessionIdDigest, roundsComplete) {
+  const identity = session.bindingIdentity;
+  if (
+    !roundsComplete ||
+    !identity ||
+    session.bindingDigest === null ||
+    session.egressDigest === null ||
+    session.costLimitDigest === null ||
+    !session.bindingStable ||
+    computerUseCaptureBindingDigest(identity) !== session.bindingDigest
+  )
+    return null;
+  return {
+    ...identity,
+    adapterVersion: COMPUTER_USE_CAPTURE_ADAPTER_VERSION,
+    sessionIdDigest,
+    bindingStable: session.bindingStable,
+    preflightAttempts: session.preflightAttempts,
+    preflightPassed: session.preflightPassed,
+    roundsAttempted: session.roundsAttempted,
+    roundsCompleted: session.rounds.length,
+    isOpenRouter: session.isOpenRouter,
+  };
+}
+
 /** Detach bounded JSON metadata before freezing; never freeze caller-owned state. */
 export function immutableCaptureResult(value) {
   const freeze = (item) => {
@@ -43,6 +103,13 @@ export function summarizeComputerUseCaptureRounds(frames) {
         preflightAttempts: 0,
         preflightPassed: false,
         bindingDigest: null,
+        bindingIdentity: null,
+        bindingStable: true,
+        isOpenRouter: null,
+        roundsAttempted: 0,
+        egressDigest: null,
+        costLimitDigest: null,
+        maxRounds: null,
         attemptCount: event.inputAttemptCount ?? null,
       });
       continue;
@@ -61,6 +128,10 @@ export function summarizeComputerUseCaptureRounds(frames) {
     if (event.type === 'preflight_started') {
       session.preflightAttempts += 1;
       session.bindingDigest = event.bindingDigest;
+      session.isOpenRouter = event.isOpenRouter;
+      const identity = bindingIdentity(event);
+      if (identity === undefined) session.invalid = true;
+      else session.bindingIdentity = identity;
       if (
         session.preflightAttempts !== 1 ||
         event.isOpenRouter !== false ||
@@ -69,6 +140,7 @@ export function summarizeComputerUseCaptureRounds(frames) {
       )
         session.invalid = true;
     } else if (event.type === 'preflight_passed') {
+      if (event.bindingDigest !== session.bindingDigest) session.bindingStable = false;
       if (
         session.preflightAttempts !== 1 ||
         session.preflightPassed ||
@@ -76,6 +148,21 @@ export function summarizeComputerUseCaptureRounds(frames) {
       )
         session.invalid = true;
       session.preflightPassed = true;
+    } else if (event.type === 'egress_authorized') {
+      // One consent decision governs the whole run: a later divergent one is not a second run.
+      if (session.rounds.length || pending) session.invalid = true;
+      if (session.egressDigest === null) session.egressDigest = event.egressDigest;
+      else if (session.egressDigest !== event.egressDigest) session.invalid = true;
+    } else if (event.type === 'cost_limit_bound') {
+      if (session.rounds.length || pending || event.maxRounds === undefined) session.invalid = true;
+      if (session.costLimitDigest === null) {
+        session.costLimitDigest = event.costLimitDigest;
+        session.maxRounds = event.maxRounds ?? null;
+      } else if (
+        session.costLimitDigest !== event.costLimitDigest ||
+        session.maxRounds !== (event.maxRounds ?? null)
+      )
+        session.invalid = true;
     } else if (event.type === 'observation') {
       if (
         event.appDigest !== session.identity.appDigest ||
@@ -111,6 +198,8 @@ export function summarizeComputerUseCaptureRounds(frames) {
       } else if (pending) session.invalid = true;
       session.observation = event;
     } else if (event.type === 'round_started') {
+      session.roundsAttempted += 1;
+      if (event.bindingDigest !== session.bindingDigest) session.bindingStable = false;
       if (
         pending ||
         !session.observation ||
@@ -132,6 +221,7 @@ export function summarizeComputerUseCaptureRounds(frames) {
         ttl: session.observation?.ttlVerified === true,
       };
     } else if (event.type === 'parsed') {
+      if (event.bindingDigest !== session.bindingDigest) session.bindingStable = false;
       if (
         !pending ||
         pending.parse ||
@@ -206,12 +296,8 @@ export function summarizeComputerUseCaptureRounds(frames) {
     }
   }
   return immutableCaptureResult(
-    [...sessions.entries()].map(([sessionIdDigest, session]) => ({
-      sessionIdDigest,
-      platform: session.identity.platform,
-      nativeManifestDigest: session.identity.manifestDigest,
-      rounds: session.rounds,
-      roundsComplete:
+    [...sessions.entries()].map(([sessionIdDigest, session]) => {
+      const roundsComplete =
         !session.invalid &&
         session.preflightAttempts === 1 &&
         session.preflightPassed &&
@@ -219,7 +305,20 @@ export function summarizeComputerUseCaptureRounds(frames) {
         session.stopped &&
         session.pending === null &&
         session.rounds.length === 3 &&
-        session.rounds.every(({ ttlVerified }) => ttlVerified),
-    })),
+        session.rounds.every(({ ttlVerified }) => ttlVerified);
+      return {
+        sessionIdDigest,
+        platform: session.identity.platform,
+        nativeManifestDigest: session.identity.manifestDigest,
+        rounds: session.rounds,
+        roundsAttempted: session.roundsAttempted,
+        // `null` means the run never bound one, not that it was unconstrained.
+        egressConsentDigest: session.egressDigest,
+        costLimitDigest: session.costLimitDigest,
+        maxRounds: session.maxRounds,
+        roundsComplete,
+        binding: measuredBinding(session, sessionIdDigest, roundsComplete),
+      };
+    }),
   );
 }

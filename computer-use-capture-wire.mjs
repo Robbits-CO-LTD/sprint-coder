@@ -15,6 +15,8 @@ const events = new Set([
   'action_result',
   'native_started',
   'native_finished',
+  'egress_authorized',
+  'cost_limit_bound',
   'stop_requested',
   'stop_acknowledged',
 ]);
@@ -27,6 +29,8 @@ const numbers = new Set([
   'treeBytes',
   'inputAttemptCount',
   'cancelEpoch',
+  'policyEpoch',
+  'maxRounds',
 ]);
 const digests = new Set([
   'sessionDigest',
@@ -40,7 +44,22 @@ const digests = new Set([
   'treeDigest',
   'reasonDigest',
   'requestDigest',
+  // Consent and cost bounds, plus the binding identity the round digests must resolve to.
+  'egressDigest',
+  'costLimitDigest',
+  'connectionIdDigest',
+  'modelIdDigest',
+  'endpointDigest',
+  'catalogDigest',
 ]);
+const flags = [
+  'isOpenRouter',
+  'nativeAcknowledged',
+  'ttlVerified',
+  'selectedFromCurrentTask',
+  'fallbackUsed',
+  'credentialChanged',
+];
 const actions = new Set([
   'invoke',
   'set_text',
@@ -95,11 +114,7 @@ function validatePayload(kind, payload) {
       if (key === 'type') continue;
       if (digests.has(key) && typeof value === 'string' && digestPattern.test(value)) continue;
       if (numbers.has(key) && Number.isSafeInteger(value) && value >= 0) continue;
-      if (
-        ['isOpenRouter', 'nativeAcknowledged', 'ttlVerified'].includes(key) &&
-        typeof value === 'boolean'
-      )
-        continue;
+      if (flags.includes(key) && typeof value === 'boolean') continue;
       if (key === 'platform' && ['darwin', 'win32'].includes(value)) continue;
       if (key === 'actionClass' && actions.has(value)) continue;
       if (key === 'result' && results.has(value)) continue;
