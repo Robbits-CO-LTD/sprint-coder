@@ -549,13 +549,17 @@ for (const starts of [false, true])
       SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
       ...(starts ? {} : { PATH: '', Path: '' }),
     });
+    let failurePage: Page | null = null;
+    let failureTaskId: string | null = null;
     try {
       const page = await firstWindow(app);
+      failurePage = page;
       await page.getByTestId('sidebar-new-task-button').click();
       await assignCurrentTaskToProjectFolder(page, 'Mission review', workspace);
       const taskId = await page.evaluate(
         async () => (await window.sprintCoder!.tasks.list())[0]!.id,
       );
+      failureTaskId = taskId;
       await page.evaluate(async (id) => {
         for (const role of ['client', 'api', 'store'])
           await window.sprintCoder!.teams.hireWorker({
@@ -656,6 +660,60 @@ for (const starts of [false, true])
         );
         await page.screenshot({ path: test.info().outputPath('mission-review-stale.png') });
       }
+    } catch (error) {
+      // Preserve bounded state before cleanup removes the isolated profile. Never copy Worker
+      // output, instructions, model/connection names, paths or free-form failure messages.
+      if (failurePage && !failurePage.isClosed() && failureTaskId) {
+        const metadata = await failurePage
+          .evaluate(async (id) => {
+            const team = await window.sprintCoder!.teams.get(id);
+            return {
+              missions: team?.missions.map((mission) => ({
+                state: mission.state,
+                steps: mission.steps.map((step) => ({
+                  ordinal: step.ordinal,
+                  executionId: step.executionId,
+                  state: step.state,
+                  generation: step.graph?.generation,
+                  resourceState: step.graph?.resourceState,
+                  waitReason: step.graph?.waitReason,
+                  stepResumePending: step.graph?.stepResumePending,
+                  stepResumeAvailable: step.graph?.stepResumeAvailable,
+                  integrationResumeAvailable: step.graph?.integrationResumeAvailable,
+                })),
+              })),
+              executions: team?.executions.map((execution) => ({
+                id: execution.id,
+                state: execution.state,
+                queueReason: execution.queueReason,
+                attemptStartReason: execution.attemptStartReason,
+                lastProgressAt: execution.lastProgressAt,
+                worktreeState: execution.worktree?.state,
+                isolationPhase: execution.isolation?.phase,
+              })),
+              activities: team?.activities
+                .slice()
+                .sort((left, right) => left.seq - right.seq)
+                .slice(-16)
+                .map((activity) => ({
+                  seq: activity.seq,
+                  type: activity.type,
+                  executionId: activity.executionId,
+                  attemptOrdinal: activity.attemptOrdinal,
+                  queueReason: activity.queueReason,
+                  recordedAt: activity.recordedAt,
+                })),
+            };
+          }, failureTaskId)
+          .catch(() => ({ diagnosticUnavailable: true }));
+        const path = test.info().outputPath('mission-failure-state.json');
+        await writeFile(path, JSON.stringify(metadata, null, 2))
+          .then(() =>
+            test.info().attach('mission-failure-state', { path, contentType: 'application/json' }),
+          )
+          .catch(() => undefined); // Optional diagnostics must not replace the original failure.
+      }
+      throw error;
     } finally {
       await closeApp(app);
       removeUserDataDir(profile);
