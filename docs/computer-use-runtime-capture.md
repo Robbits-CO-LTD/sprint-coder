@@ -65,6 +65,62 @@ observation through the Broker and stops without another Provider plan. Direct t
 three plans / three native calls / four observations for limit 3, and no extra observation when
 Stop or policy revocation wins. This is the same execution path with or without a recorder.
 
+## Normal packaged transport checkpoints (2026-09-15)
+
+These are metadata-only observations from owned children, not canonical Provider evidence or
+generator inputs. All launches used isolated profiles, hidden presentation and CU OFF, with
+allowlisted parent/child environments and ignored raw stdout/stderr. No Provider or native input
+was requested. Existing signed packages, fuses, other applications and user profiles were not changed.
+
+| Host / package source | Startup hello | Source binding | Terminal frame | Acceptance scope |
+| --- | --- | --- | --- | --- |
+| macOS arm64 / `931be52fab93c52b10dca922b5d52e15c002cad4` | Received | **Not established**: CU-OFF disabled binding emitted a zero source | Received | Startup transport only; not source-bound |
+| macOS arm64 / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9` | Received | Hello and packaged native manifest matched this source | Received; 2 frames, 0 events, 0 sessions | Source-bound startup and empty-stream shutdown transport only |
+| Windows x64, `ssh mainpc` / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9` | Not received within 30 seconds | Package manifest matched; no hello binding established | Missing | Build/provenance checkpoint; startup transport **FAIL** |
+| Windows x64, `ssh mainpc` / `1349068cab54941564403c86c6125077507719f1` | Received | Hello and packaged native manifest matched this source | Missing after owned-child termination | Source-bound startup only; `transportCompleted=false` |
+
+In both successful source-bound startups, `packaged=true`, `packageReady=false`, and
+`coreEvidenceComplete=false`. Native API was 2 and its packaged artifact hash matched the manifest.
+macOS used ad-hoc signing with deep/strict verification; Windows app/helper were both `NotSigned`.
+Neither proves the required production signer or real-Provider journey. macOS source `1349068`
+was not repackaged/retested by this lane; these two OS checkpoints are not a same-SHA final gate.
+
+| Artifact SHA-256 | macOS `0e97b72` | Windows `1349068` |
+| --- | --- | --- |
+| Executable | `8b1825fbd4530c2c4e5ac48e2b9c423fc1beeb32e1e09f37c92e76dc2cc8718c` | `0fac48c5147268452f65fb2fb83a7d0848b0829609d57f9aa35de8d203df7e3b` |
+| app.asar | `43183e7f2c0a65fbeedeafd326ba146afb0c52d68cde84fb612950f8ec7a1c6b` | `eaccef15b93c1c9d20e4c39b736d3fd1b9704ac987e1c847c897ed009c6ffdb2` |
+| Native artifact | `4d3d35e9d527b1f8a754229f105d6627f8230fd4bab7c2380b3be89fa9abe226` | `5f62db6415d726002e07a0c1f67feca5e921f2192ad62a28857a08d55f1a03d0` |
+
+The Mac child PID/PPID were 27601/27591; the Windows child PID/PPID were 44124/50964.
+Each PPID matched its collector, and an OS process-path read matched the owned executable.
+These are historical process/path observations, not independent loaded-image attestation.
+Only the owned child handles were terminated. The final Windows GUI handoff check found zero
+processes under the #388 lane, PID 44124 absent, and clean source at `1349068`. Generated compiler
+objects were retained in lane-local checkpoints; isolated startup profiles were retained without
+reading their DB/log bodies. No other lane was stopped or modified.
+
+The Windows fault was reproduced separately in a Node 22.23.2 production-adapter seam on mainpc:
+an inherited pipe had no `fstat` FIFO/socket mode bits, while Socket could open it. After `1349068`,
+the same adapter emitted 824 synthetic metadata bytes; a regular-file descriptor was refused with
+zero file bytes. This is supplemental boundary evidence, not packaged or Provider acceptance.
+Focused regression RED became GREEN; related Mac common tests were 53/53, with typecheck/lint PASS.
+
+### Why the opt-in pipe fix does not change the normal Graph path
+
+`1349068` changes the capture-output descriptor check, its focused test and this document; it does
+not change Graph rendering, IPC, Controller, planner or the native loader. With capture unspecified,
+`createComputerUseCaptureOutput` returns `undefined` before source-pin evaluation, encoder creation
+or Socket construction. The helper is not evaluated as an argument at the Main call site. Therefore
+the removed `fstat` check is unreachable in the ordinary capture-disabled Graph path. This is a
+source/control-flow and focused-test assessment, not a new Graph E2E run. Main's separately reported
+11/11 Graph E2E belongs to its own source/package checkpoint and is not relabeled as this run.
+
+User Provider/signing selections remain pending, and code work also remains: independently verified
+package/signer/running-image facts, collector-to-v4 assertion/closure qualification, full privacy
+sink inventory and logical coverage, and actual-stream proof for non-generated payload categories.
+The generator's blanket Core/Safety PASS refusal is still a code connection to complete; this is
+not an external-gates-only hold. No hand-authored or synthetic PASS sealing is enabled here.
+
 ## Privacy inspection prerequisite
 
 `inspectComputerUsePrivacySurfaces` is a local, read-only helper for a protected acceptance runner.
