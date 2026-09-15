@@ -25,6 +25,7 @@ import {
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
+  type WorkerActivityEvent,
 } from './team-coordinator';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
@@ -69,6 +70,7 @@ describe('DeterministicTeamWorkerRuntime E2E hold', () => {
     runtime: DeterministicTeamWorkerRuntime,
     events: string[],
     signal?: AbortSignal,
+    observe?: (event: WorkerActivityEvent) => void,
   ): Promise<WorkerRuntimeResult> =>
     runtime.execute({
       worker: { id: 'worker-store', role: 'store' } as unknown as AgentRecord,
@@ -78,7 +80,10 @@ describe('DeterministicTeamWorkerRuntime E2E hold', () => {
         targetAgentId: 'worker-store',
       } as unknown as TeamEnvelope,
       content: '結合確認',
-      onEvent: (event) => events.push(event.type),
+      onEvent: (event) => {
+        events.push(event.type);
+        observe?.(event);
+      },
       ...(signal === undefined ? {} : { signal }),
     });
 
@@ -134,6 +139,54 @@ describe('DeterministicTeamWorkerRuntime E2E hold', () => {
     await expect(
       run(new DeterministicTeamWorkerRuntime(), [], AbortSignal.abort()),
     ).rejects.toThrow('Worker execution stopped');
+  });
+
+  it('keeps a live held fixture under the normal heartbeat watchdog until released', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv(HOLD, 'store');
+    const events: string[] = [];
+    const stop = vi.fn(async () => undefined);
+    const outcome = executeWithWatchdog({
+      execute: (observe, signal) =>
+        run(new DeterministicTeamWorkerRuntime(), events, signal, observe),
+      hardTimeoutMs: 30 * 60_000,
+      stop,
+    }).then(
+      () => 'completed',
+      (error: unknown) => (error as { code: string }).code,
+    );
+    await vi.advanceTimersByTimeAsync(61_000);
+    vi.stubEnv(HOLD, '');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await outcome).toBe('completed');
+    expect(stop).not.toHaveBeenCalled();
+    expect(events).toContain('heartbeat');
+    expect(events.filter((event) => event === 'activity')).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { deadline: 30 * 60_000, elapsed: 15 * 60_000, code: 'idle_timeout' },
+    { deadline: 75_000, elapsed: 75_000, code: 'hard_timeout' },
+  ])('still applies $code to a held fixture', async ({ deadline, elapsed, code }) => {
+    vi.useFakeTimers();
+    vi.stubEnv(HOLD, 'store');
+    const events: string[] = [];
+    const stop = vi.fn(async () => undefined);
+    const outcome = executeWithWatchdog({
+      execute: (observe, signal) =>
+        run(new DeterministicTeamWorkerRuntime(), events, signal, observe),
+      hardTimeoutMs: deadline,
+      stop,
+    }).catch((error: unknown) => (error as { code: string }).code);
+    await vi.advanceTimersByTimeAsync(elapsed);
+    expect(await outcome).toBe(code);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(events).not.toContain('completed');
+    const count = events.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(events).toHaveLength(count);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

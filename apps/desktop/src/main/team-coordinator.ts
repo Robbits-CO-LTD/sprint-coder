@@ -204,10 +204,15 @@ function e2eTeamWorkerHeld(role: string): boolean {
  * （`waitForMockStreamRelease`）と同型の100msポーリングだが、abort は「完了扱い」ではなく
  * 失敗として伝える必要があるため reject する。フラグが下りれば通常どおり完了する。
  */
-function waitForE2ETeamWorkerRelease(role: string, signal?: AbortSignal): Promise<void> {
+function waitForE2ETeamWorkerRelease(
+  role: string,
+  signal?: AbortSignal,
+  heartbeat?: () => void,
+): Promise<void> {
   if (!e2eTeamWorkerHeld(role)) return Promise.resolve();
   if (signal?.aborted) return Promise.reject(new Error('Worker execution stopped'));
   return new Promise<void>((resolve, reject) => {
+    let lastHeartbeatAt = Date.now();
     const settle = (finish: () => void): void => {
       clearInterval(timer);
       signal?.removeEventListener('abort', onAbort);
@@ -216,6 +221,12 @@ function waitForE2ETeamWorkerRelease(role: string, signal?: AbortSignal): Promis
     const onAbort = (): void => settle(() => reject(new Error('Worker execution stopped')));
     const timer = setInterval(() => {
       if (!e2eTeamWorkerHeld(role)) settle(resolve);
+      else if (Date.now() - lastHeartbeatAt >= 15_000) {
+        // Holding fixture completion models a live Worker, not a lost runtime. Heartbeats do not
+        // claim semantic progress: the existing idle/hard watchdogs and abort still apply.
+        lastHeartbeatAt = Date.now();
+        heartbeat?.();
+      }
     }, 100);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
@@ -249,7 +260,9 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     });
     // E2E 専用、DeterministicTeamWorkerRuntime 限定の保留点。フラグが立っていない通常運転では
     // 即座に解決するので、製品の挙動は変わらない。
-    await waitForE2ETeamWorkerRelease(input.worker.role, input.signal);
+    await waitForE2ETeamWorkerRelease(input.worker.role, input.signal, () =>
+      input.onEvent?.({ type: 'heartbeat', at: new Date().toISOString() }),
+    );
     const result = {
       claims: {
         deliveryId: input.envelope.deliveryId,

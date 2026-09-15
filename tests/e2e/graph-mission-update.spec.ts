@@ -112,6 +112,24 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
         executions: team?.executions.map((execution) => ({
           id: execution.id,
           state: execution.state,
+          queueReason: execution.queueReason,
+          terminalReason:
+            execution.terminalReason === null
+              ? null
+              : [
+                    'heartbeat_timeout',
+                    'idle_timeout',
+                    'hard_timeout',
+                    'stop_unconfirmed',
+                    'runtime_failure',
+                    'user_canceled',
+                    'steered',
+                  ].includes(execution.terminalReason)
+                ? execution.terminalReason
+                : 'other',
+          startedAt: execution.startedAt,
+          completedAt: execution.completedAt,
+          updatedAt: execution.updatedAt,
           lastProgressAt: execution.lastProgressAt,
           attemptStartReason: execution.attemptStartReason,
         })),
