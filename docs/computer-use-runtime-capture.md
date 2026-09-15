@@ -78,6 +78,7 @@ was requested. Existing signed packages, fuses, other applications and user prof
 | macOS arm64 / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9` | Received | Hello and packaged native manifest matched this source | Received; 2 frames, 0 events, 0 sessions | Source-bound startup and empty-stream shutdown transport only |
 | Windows x64, `ssh mainpc` / `0e97b72b5fabe57e9c72e31d538bbb3ad6c2ebd9` | Not received within 30 seconds | Package manifest matched; no hello binding established | Missing | Build/provenance checkpoint; startup transport **FAIL** |
 | Windows x64, `ssh mainpc` / `1349068cab54941564403c86c6125077507719f1` | Received | Hello and packaged native manifest matched this source | Missing after owned-child termination | Source-bound startup only; `transportCompleted=false` |
+| Windows x64, `ssh mainpc` / same `1349068cab54941564403c86c6125077507719f1`, normal-close follow-up | Received | Same original package; hello source matched | Received after normal Renderer `window.close()`; 2 frames, 0 events, 0 sessions | Empty-stream startup/shutdown transport only; `coreEvidenceComplete=false` |
 
 In both successful source-bound startups, `packaged=true`, `packageReady=false`, and
 `coreEvidenceComplete=false`. Native API was 2 and its packaged artifact hash matched the manifest.
@@ -104,6 +105,34 @@ an inherited pipe had no `fstat` FIFO/socket mode bits, while Socket could open 
 the same adapter emitted 824 synthetic metadata bytes; a regular-file descriptor was refused with
 zero file bytes. This is supplemental boundary evidence, not packaged or Provider acceptance.
 Focused regression RED became GREEN; related Mac common tests were 53/53, with typecheck/lint PASS.
+
+### Windows normal-close follow-up (same original package)
+
+One subsequent run on mainpc used the unchanged Windows `1349068` package, a new isolated profile,
+hidden presentation and CU OFF. The original executable/ASAR hashes above were checked before
+launch. The existing Renderer CDP listener was verified as loopback-only and owned by the spawned
+app PID; its OS process path matched the owned executable. No Node Inspector, fuse change, Main RPC,
+new capture channel, Provider call or native input was used. Renderer `window.close()` was requested
+once, taking the normal Windows close/disposal path; there was no forced cleanup.
+
+The child PID/PPID were 75436/46448, with PPID matching the collector. The same normal collector
+received the terminal frame and confirmed child exit 0: `transportCompleted=true`, `endFrame=true`,
+2 frames, 0 events and 0 sessions. The diagnostic event-chain SHA-256 was
+`96f15f74d518ee2148de4ccdc6367067a73849e52bd7698cfdcea78345eb9dd9`.
+The wrapper also exited 0. Package contents and fuse state were unchanged before/after:
+
+- Package file count: 113; tree SHA-256:
+  `29cfe671fecf6c5ca0e4192ad0811c6031f00a487820d4df3b55025c86677b98`.
+- Fuse-state SHA-256:
+  `f1660f67c087e200cbbc4f2386221a1d3034ff32d4f802b524e763e4b10b585c`.
+- Post-run/reconnection check: #388 lane process count 0; PID 75436 and collector PID 46448 absent;
+  Windows source clean at `1349068`. No new app launch was needed for that check.
+
+The earlier force-kill checkpoint and its missing end frame remain valid separate observations;
+they are not overwritten or relabeled. This follow-up establishes normal **empty-stream** shutdown
+transport, not a Provider journey, signed-package acceptance, full privacy or verified v4 closure.
+`packageReady=false` and `coreEvidenceComplete=false` remain in force. Provider/signing user choices
+and the remaining qualification/privacy code described below are still required.
 
 ### Why the opt-in pipe fix does not change the normal Graph path
 
