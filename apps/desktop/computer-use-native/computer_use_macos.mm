@@ -1898,7 +1898,9 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
       !IsObject(env, argv[0]))
     return ThrowNativeError(env, "INVALID_SESSION", "A native session close request is required");
   std::string session_id;
-  if (!ReadNamedString(env, argv[0], "sessionId", &session_id))
+  std::uint64_t requested_cancel_epoch = 0;
+  if (!ReadNamedString(env, argv[0], "sessionId", &session_id) ||
+      !ReadNamedUInt64(env, argv[0], "cancelEpoch", &requested_cancel_epoch))
     return ThrowNativeError(env, "INVALID_SESSION", "A native session id is required");
   std::shared_ptr<MacComputerUseSession> session;
   {
@@ -1906,27 +1908,31 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
     const auto found = mac_sessions.find(session_id);
     if (found != mac_sessions.end()) {
       session = found->second;
+      if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
+        return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
       mac_sessions.erase(session_id);
     } else {
       const auto pending = mac_pending_sessions.find(session_id);
       if (pending != mac_pending_sessions.end()) {
         session = pending->second;
+        if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
+          return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
         mac_pending_sessions.erase(pending);
       }
     }
   }
   if (session != nullptr) {
     session->closed.store(true, std::memory_order_release);
-    session->cancel_epoch.fetch_add(1, std::memory_order_acq_rel);
+    session->cancel_epoch.store(requested_cancel_epoch, std::memory_order_release);
+    auto current = cancellation_epoch.load(std::memory_order_acquire);
+    while (requested_cancel_epoch > current && !cancellation_epoch.compare_exchange_weak(
+        current, requested_cancel_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
     session->observation_publication_claimed.store(false,
                                                    std::memory_order_release);
     const auto close_epoch = session->cancel_epoch.load(std::memory_order_acquire);
     return QueueNativeStop(env, std::move(session), close_epoch, true);
   }
-  napi_value result;
-  napi_create_object(env, &result);
-  napi_set_named_property(env, result, "result", StringValue(env, "closed"));
-  return result;
+  return ThrowNativeError(env, "SESSION_MISSING", "Native close is unconfirmed");
 }
 
 bool ReadWindowBounds(std::uint32_t window_id, CGRect* bounds) {

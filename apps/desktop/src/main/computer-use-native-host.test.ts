@@ -457,7 +457,16 @@ describe('Computer Use native Main adapter', () => {
           inputAttemptCount: 2,
         };
       }),
-      close: vi.fn(),
+      close: vi.fn((input: unknown): unknown => {
+        const request = input as Record<string, unknown>;
+        return {
+          result: 'closed',
+          drained: true,
+          sessionId: request['sessionId'],
+          cancelEpoch: request['cancelEpoch'],
+          inputAttemptCount: 2,
+        };
+      }),
     };
     const host = createComputerUseNativeHost(binding(addon), 'darwin', { stopTimeoutMs: 10 });
     expect(host.availability()).toMatchObject({
@@ -639,6 +648,36 @@ describe('Computer Use native Main adapter', () => {
     await expect(host.cancel(session, 1)).rejects.toMatchObject({
       reasonCode: 'native_input_receipt_unconfirmed',
     });
+    expect(host.availability().control).toBe(false);
+    const assertQuarantined = async () => {
+      expect(host.availability()).toMatchObject({
+        state: 'native_unavailable',
+        observe: false,
+        control: false,
+        reasonCode: 'native_stop_unconfirmed',
+      });
+      const starts = startSession.mock.calls.length;
+      const inputs = dispatch.mock.calls.length;
+      await expect(
+        host.startSession({ ...startInput, sessionId: 'new-session' }),
+      ).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await expect(
+        host.observe(session, { requestId: 'quarantined-observe', cancelEpoch: 0 }),
+      ).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      await expect(
+        host.dispatch({
+          session,
+          requestId: 'quarantined-input',
+          action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+          observationRevision: 1,
+          cancelEpoch: 0,
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+      expect(startSession).toHaveBeenCalledTimes(starts);
+      expect(dispatch).toHaveBeenCalledTimes(inputs);
+    };
+    await assertQuarantined();
     addon.cancel.mockReturnValueOnce({
       result: 'canceled',
       drained: true,
@@ -662,6 +701,7 @@ describe('Computer Use native Main adapter', () => {
     await expect(host.cancel(session, 1)).rejects.toMatchObject({
       reasonCode: 'native_stop_unconfirmed',
     });
+    await assertQuarantined();
     lateResolve({
       result: 'canceled',
       drained: true,
@@ -669,14 +709,68 @@ describe('Computer Use native Main adapter', () => {
       cancelEpoch: 1,
       inputAttemptCount: 2,
     });
+    await Promise.resolve();
+    await assertQuarantined();
     await expect(host.cancel(session, 1)).resolves.toEqual({
       sessionId: session.sessionId,
       cancelEpoch: 1,
       inputAttemptCount: 2,
     });
+    for (const override of [
+      null,
+      { result: 'unknown_effect' },
+      { drained: false },
+      { sessionId: 'other-session' },
+      { cancelEpoch: 0 },
+      { inputAttemptCount: -1 },
+      { inputAttemptCount: 1 },
+      { inputAttemptCount: undefined },
+      { rawInput: 'fixture' },
+    ]) {
+      addon.close.mockImplementationOnce((input: unknown) => {
+        const request = input as Record<string, unknown>;
+        return override === null
+          ? {}
+          : {
+              result: 'closed',
+              drained: true,
+              sessionId: request['sessionId'],
+              cancelEpoch: request['cancelEpoch'],
+              inputAttemptCount: 2,
+              ...override,
+            };
+      });
+      await expect(host.close(session)).rejects.toBeInstanceOf(Error);
+      await assertQuarantined();
+    }
+    let lateClose!: () => void;
+    addon.close.mockImplementationOnce(
+      (input: unknown) =>
+        new Promise((resolve) => {
+          const request = input as Record<string, unknown>;
+          lateClose = () =>
+            resolve({
+              result: 'closed',
+              drained: true,
+              sessionId: request['sessionId'],
+              cancelEpoch: request['cancelEpoch'],
+              inputAttemptCount: 2,
+            });
+        }),
+    );
+    await expect(host.close(session)).rejects.toMatchObject({
+      reasonCode: 'native_stop_unconfirmed',
+    });
+    await assertQuarantined();
+    lateClose();
+    await Promise.resolve();
+    await assertQuarantined();
     await host.close(session);
     expect(addon.cancel).toHaveBeenCalledTimes(5);
-    expect(addon.close).toHaveBeenCalledTimes(1);
+    expect(addon.close).toHaveBeenCalledTimes(11);
+    await host.close(session);
+    expect(addon.close).toHaveBeenCalledTimes(11);
+    expect(host.availability().control).toBe(true);
   });
 
   it('fails closed when an API1 manifest is mixed with an API2 helper', () => {

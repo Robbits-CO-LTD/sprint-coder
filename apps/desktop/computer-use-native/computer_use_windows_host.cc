@@ -2199,15 +2199,24 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   return true;
 }
 
-bool CloseWindowsSession(const Frame &request, std::string *response) {
+bool CloseWindowsSession(const Frame &request, const std::string& metadata, std::string *response) {
   const auto found = sessions.find(FrameIdKey(request.header.session_id));
-  if (found != sessions.end()) {
+  std::uint64_t requested_epoch = 0;
+  if (found == sessions.end() || !ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch) ||
+      requested_epoch <= found->second.cancel_epoch) return false;
+  {
+    found->second.cancel_epoch = requested_epoch;
+    auto current = cancellation_epoch.load(std::memory_order_acquire);
+    while (requested_epoch > current && !cancellation_epoch.compare_exchange_weak(
+        current, requested_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
+    *response = "{\"result\":\"closed\",\"drained\":true,\"sessionId\":\"" +
+        JsonEscape(found->second.session_id) + "\",\"cancelEpoch\":" + std::to_string(requested_epoch) +
+        ",\"inputAttemptCount\":" + std::to_string(found->second.input_api_attempts->load(std::memory_order_acquire)) + "}";
     last_closed_cancel_epoch =
         std::max(last_closed_cancel_epoch, found->second.cancel_epoch);
     ReleaseWindowsSessionResources(&found->second);
     sessions.erase(found);
   }
-  *response = "{\"result\":\"closed\"}";
   return true;
 }
 
@@ -4528,7 +4537,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     } else if (operation == "start_session") {
       succeeded = StartWindowsSession(request, metadata, &response, &reason);
     } else if (operation == "close_session") {
-      succeeded = CloseWindowsSession(request, &response);
+      succeeded = CloseWindowsSession(request, metadata, &response);
+      if (!succeeded) reason = "native_close_unconfirmed";
     } else {
       reason = "unsupported_operation";
     }

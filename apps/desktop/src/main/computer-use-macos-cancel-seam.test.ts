@@ -114,7 +114,7 @@ int napi_get_cb_info(napi_env, napi_callback_info, size_t* argc, napi_value* arg
 }
 bool IsObject(napi_env, napi_value) { return true; }
 bool ReadNamedString(napi_env, napi_value, const char*, std::string* out) { *out = current->session_id; return true; }
-bool ReadNamedUInt64(napi_env, napi_value, const char*, std::uint64_t* out) { *out = 1; return true; }
+bool ReadNamedUInt64(napi_env, napi_value, const char*, std::uint64_t* out) { *out = current->cancel_epoch.load() + 1; return true; }
 std::shared_ptr<MacComputerUseSession> FindCancelableMacSession(const std::string&) { return current; }
 napi_value ThrowNativeError(napi_env, const char* code, const char*) { throw std::runtime_error(code); }
 void napi_create_object(napi_env, napi_value* out) { *out = &fake; }

@@ -97,6 +97,19 @@ Production-function C++ seams reproduce the pre-fix macOS post-ack calls and est
 the fix, also under ASan/UBSan; Windows SendInput's portable seam distinguishes attempted calls
 from successful effects. These tests execute inert OS seams, not signed-device acceptance.
 
+Close requires a strictly bound `closed` / `drained: true` receipt with the requested next cancel
+epoch and monotonic attempt count. Cancel or Close puts the host into an input quarantine;
+malformed results, errors, and timeouts retain it and the old session. Both availability and the
+actual start/observe/dispatch entry points refuse further input. Only a validated Close releases
+it. Late fulfillment cannot release a timed-out operation. A repeated already-confirmed Close
+does not call native again.
+
+For a clean committed checkout after `node build-computer-use-native.mjs`, run
+`node verify-computer-use-native-offline.mjs` with Node 22 (and an x64 VS developer environment
+on Windows). It verifies the manifest/source/artifact binding and compiles/runs the protocol and
+inert SendInput seam without npm dependencies, GUI, signatures, or real input. Its bounded JSON
+is compile/contract evidence only; it is not accepted by the final-gate generator.
+
 Schema v3's single Provider binding cannot establish two OS runs, five-action full-access runs
 with zero Approval Cards, remembered one-click start, file-picker resume, third-party state change,
 or a supervised bounded-grant journey. These original parent requirements remain mandatory.

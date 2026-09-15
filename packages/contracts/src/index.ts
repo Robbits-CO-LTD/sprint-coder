@@ -5695,6 +5695,9 @@ export const computerUseNativeInputReceiptSchema = z
   })
   .strict();
 export type ComputerUseNativeInputReceipt = z.infer<typeof computerUseNativeInputReceiptSchema>;
+export const computerUseNativeCloseReceiptSchema = computerUseNativeInputReceiptSchema
+  .extend({ result: z.literal('closed'), drained: z.literal(true) })
+  .strict();
 export type ComputerUseHandshake = z.infer<typeof computerUseHandshakeSchema>;
 
 export const COMPUTER_USE_LIMITS = Object.freeze({
