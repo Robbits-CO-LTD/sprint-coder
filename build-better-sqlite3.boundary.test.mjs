@@ -4,7 +4,13 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
-import { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
+import {
+  NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY,
+  nativeBuildFailureDetail,
+  nativeBuildNetworkDiagnostics,
+  nativeBuildTimeoutMs,
+  sanitizedNativeBuildEnvironment,
+} from './native-build-environment.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const target = resolve(root, 'build-better-sqlite3.mjs');
@@ -32,18 +38,30 @@ const environment = Object.freeze({
   npm_config_arch: 'controlled-wrong-arch',
   npm_config_target: 'controlled-wrong-target',
   npm_config_loglevel: 'silly',
+  // node-gyp downloads Electron headers through make-fetch-happen, which reads the proxy
+  // configuration from the child environment. Credential-free settings must survive, a proxy URL
+  // that embeds userinfo must not, and npm_config_* stays blocked because it overrides pinned CLI
+  // build controls.
+  HTTPS_PROXY: 'http://controlled-proxy.invalid:3128',
+  NO_PROXY: 'controlled-proxy.invalid,localhost',
+  HTTP_PROXY: `http://controlled-user:${canary}@controlled-proxy.invalid:3128`,
+  npm_config_proxy: 'http://controlled-npm-proxy.invalid:3128',
 });
 const originalEnvironment = JSON.stringify(environment);
 
 // Evaluate the actual script and pure dependencies, replacing only process creation and artifact
 // existence. No node-gyp, compiler, Electron, real credential, or real environment is executed.
-async function captureBoundaries(failure = '') {
+async function captureBoundaries(failure = '', overrides = undefined) {
+  // Overrides build a separate frozen object so the shared parent environment stays untouched.
+  const activeEnvironment = overrides
+    ? Object.freeze({ ...environment, ...overrides })
+    : environment;
   const calls = [];
   const output = [];
   const exited = {};
   const context = vm.createContext({
     process: {
-      env: environment,
+      env: activeEnvironment,
       execPath: process.execPath,
       arch: 'arm64',
       argv: [process.execPath, target],
@@ -66,7 +84,7 @@ async function captureBoundaries(failure = '') {
       if (url === 'node:child_process')
         values.spawnSync = (command, args, options) => {
           calls.push({ command, args, options });
-          const text = JSON.stringify({ env: options.env ?? environment });
+          const text = JSON.stringify({ env: options.env ?? activeEnvironment });
           if (options.stdio === 'inherit') output.push(text);
           const stage = calls.length === 1 ? 'build' : 'probe';
           const fails = failure.startsWith(stage);
@@ -79,6 +97,8 @@ async function captureBoundaries(failure = '') {
           return {
             status: error ? null : fails ? 17 : 0,
             error,
+            // spawnSync reports the signal it used when a timeout kills the child.
+            signal: fails && failure.endsWith('timeout') ? 'SIGTERM' : null,
             stdout: text,
             stderr: `gyp sill controlled env ${text}`,
           };
@@ -148,17 +168,20 @@ test('SQLite compiler and ABI probe use explicit child allowlists and never inhe
       'LIBPATH',
     ])
       assert.equal(options.env[key], environment[key], 'Required Windows build path must survive');
-    assert.ok(
-      Number.isSafeInteger(options.maxBuffer) &&
-        options.maxBuffer > 0 &&
-        options.maxBuffer <= 16 * 1024 * 1024,
+    // Nothing reads these children's output and it must never be relayed, so it is discarded at the
+    // file-descriptor level instead of captured and thrown away. That is a stronger boundary than a
+    // pipe, and with nothing captured no maxBuffer ceiling can abort a healthy but noisy build.
+    assert.deepEqual(
+      Array.from(options.stdio),
+      ['ignore', 'ignore', 'ignore'],
+      'A native build child must never pipe or inherit its diagnostics',
     );
+    assert.equal(options.maxBuffer, undefined, 'Nothing is captured, so no buffer ceiling applies');
     assert.ok(
       Number.isSafeInteger(options.timeout) &&
         options.timeout > 0 &&
-        options.timeout <= 10 * 60_000,
+        options.timeout <= 4 * 60 * 60_000,
     );
-    assert.deepEqual(Array.from(options.stdio), ['ignore', 'pipe', 'pipe']);
   }
   assert.equal(result.calls[0].options.env.ELECTRON_RUN_AS_NODE, undefined);
   assert.equal(result.calls[1].options.env.ELECTRON_RUN_AS_NODE, '1');
@@ -187,7 +210,10 @@ test('Failed ABI probe also suppresses raw child diagnostics', async () => {
   assert.equal(result.calls.length, 2);
   assert.equal(result.output.includes(canary), false);
   assert.equal(result.output.includes('"env"'), false);
-  assert.match(result.output, /SQLite Electron ABI probe failed \(exit 17\)/u);
+  assert.match(
+    result.output,
+    /SQLite Electron ABI probe failed \(exit 17, error=none, signal=none/u,
+  );
 });
 
 for (const stage of ['build', 'probe']) {
@@ -201,6 +227,187 @@ for (const stage of ['build', 'probe']) {
     });
   }
 }
+
+test('Credential-free proxy settings reach node-gyp while npm build controls stay blocked', async () => {
+  const result = await captureBoundaries();
+  assert.equal(result.calls.length, 2);
+  for (const { options } of result.calls) {
+    assert.equal(
+      options.env.HTTPS_PROXY,
+      environment.HTTPS_PROXY,
+      'A credential-free proxy must reach the Electron header download',
+    );
+    assert.equal(options.env.NO_PROXY, environment.NO_PROXY);
+    assert.equal(
+      options.env.HTTP_PROXY,
+      undefined,
+      'A proxy URL carrying userinfo must never reach the child',
+    );
+    assert.equal(
+      options.env.npm_config_proxy,
+      undefined,
+      'npm_config_* stays blocked because it overrides pinned CLI build controls',
+    );
+  }
+  assert.equal(result.output.includes(canary), false);
+});
+
+test('Sanitizer drops credential-bearing proxy URLs instead of rewriting them', () => {
+  const child = sanitizedNativeBuildEnvironment(environment);
+  assert.equal(child.HTTPS_PROXY, environment.HTTPS_PROXY);
+  assert.equal(child.NO_PROXY, environment.NO_PROXY);
+  assert.equal(child.HTTP_PROXY, undefined);
+  assert.equal(child.npm_config_proxy, undefined);
+  assert.equal(
+    JSON.stringify(child).includes(canary),
+    false,
+    'No credential may survive in any forwarded value',
+  );
+  assert.equal(JSON.stringify(environment) === originalEnvironment, true);
+});
+
+test('Network policy summary names variables only and never discloses a value', () => {
+  const summary = nativeBuildNetworkDiagnostics(environment);
+  assert.equal(
+    summary,
+    'native build network policy: forwarded=HTTPS_PROXY,NO_PROXY withheld=npm_config_proxy withheld-with-credentials=HTTP_PROXY',
+  );
+  assert.equal(summary.includes(canary), false);
+  assert.equal(summary.includes('controlled-proxy.invalid'), false);
+  assert.equal(
+    nativeBuildNetworkDiagnostics({ PATH: '/controlled/compiler-path' }),
+    'native build network policy: forwarded=none withheld=none withheld-with-credentials=none',
+  );
+  assert.equal(
+    nativeBuildNetworkDiagnostics({ OPENROUTER_API_KEY: canary, SECRET_PROXY_TOKEN: canary }),
+    'native build network policy: forwarded=none withheld=none withheld-with-credentials=none',
+    'Only the fixed non-secret name set may ever be reported',
+  );
+});
+
+test('Failed build explains the withheld network variables without leaking any value', async () => {
+  const result = await captureBoundaries('build');
+  assert.match(result.output, /SQLite source build failed \(exit 17, error=none, signal=none/u);
+  assert.match(
+    result.output,
+    /^native build network policy: forwarded=HTTPS_PROXY,NO_PROXY withheld=npm_config_proxy withheld-with-credentials=HTTP_PROXY$/mu,
+  );
+  assert.equal(result.output.includes(canary), false, 'Diagnostics must never include a value');
+  assert.equal(
+    result.output.includes('controlled-proxy.invalid'),
+    false,
+    'Diagnostics must name variables, never their values',
+  );
+  assert.equal(result.output.includes('"env"'), false);
+});
+
+test('Compiler budget is generous by default and adjustable only from the parent environment', async () => {
+  const base = await captureBoundaries();
+  assert.equal(
+    base.calls[0].options.timeout,
+    30 * 60_000,
+    'A full sqlite3.c amalgamation compile must not be killed at ten minutes',
+  );
+  const widened = await captureBoundaries('', {
+    [NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY]: '5400000',
+  });
+  assert.equal(widened.calls[0].options.timeout, 5_400_000);
+  for (const { options } of widened.calls)
+    assert.equal(
+      options.env[NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY],
+      undefined,
+      'The budget configures this process only and must never reach node-gyp',
+    );
+  assert.equal(JSON.stringify(environment) === originalEnvironment, true);
+});
+
+test('A malformed or out-of-range build budget falls back to the generous default', () => {
+  const fallback = 30 * 60_000;
+  assert.equal(nativeBuildTimeoutMs({}), fallback);
+  for (const raw of [
+    '',
+    ' 900000',
+    '900000 ',
+    '30min',
+    '9e8',
+    '0x1000',
+    '-1',
+    '1.5',
+    '0',
+    '59999',
+    '14400001',
+    '999999999999',
+  ])
+    assert.equal(
+      nativeBuildTimeoutMs({ [NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY]: raw }),
+      fallback,
+      `Must reject ${JSON.stringify(raw)}`,
+    );
+  for (const raw of ['60000', '900000', '14400000'])
+    assert.equal(
+      nativeBuildTimeoutMs({ [NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY]: raw }),
+      Number(raw),
+      `Must accept ${JSON.stringify(raw)}`,
+    );
+});
+
+test('A killed build names the errno and signal instead of the child message', async () => {
+  const result = await captureBoundaries('build-timeout');
+  assert.match(
+    result.output,
+    /^SQLite source build failed \(exit 1, error=ETIMEDOUT, signal=SIGTERM, budget=1800000ms\)$/mu,
+  );
+  assert.equal(result.output.includes(canary), false, 'The child message must never be relayed');
+  assert.equal(result.exitCode, 1);
+});
+
+test('Failure detail reports only fixed tokens and never a child-supplied string', () => {
+  assert.equal(
+    nativeBuildFailureDetail({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM' }, 1_800_000),
+    'error=ETIMEDOUT, signal=SIGTERM, budget=1800000ms',
+  );
+  assert.equal(nativeBuildFailureDetail({}), 'error=none, signal=none');
+  assert.equal(
+    nativeBuildFailureDetail({ error: { code: 'ENOBUFS' } }),
+    'error=ENOBUFS, signal=none',
+  );
+  const leaky = nativeBuildFailureDetail({
+    error: { code: `spawn /bin/cc failed: ${canary}` },
+    signal: canary,
+  });
+  assert.equal(leaky, 'error=other, signal=other');
+  assert.equal(leaky.includes(canary), false, 'A non-token code must be reduced, never echoed');
+});
+
+test('Computer Use build failures report the errno rather than inventing an exit code', () => {
+  const source = readFileSync(resolve(root, 'build-computer-use-native.mjs'), 'utf8');
+  assert.equal(
+    source.includes('exit ${result.error ? 1 : (result.status ?? 1)}'),
+    false,
+    'A child that never started has no exit code and must not be reported as exit 1',
+  );
+  assert.ok(
+    source.includes('nativeBuildFailureDetail(result)'),
+    'The Computer Use build must summarize failures with the shared helper',
+  );
+  assert.ok(
+    source.includes("stdio: ['ignore', 'ignore', 'ignore']"),
+    'The build child discards its output at the file descriptor',
+  );
+  // The helper carries the errno for exactly those cases, with no budget and no child message.
+  assert.equal(
+    nativeBuildFailureDetail({ error: { code: 'ENOENT' }, status: null }),
+    'error=ENOENT, signal=none',
+  );
+  assert.equal(
+    nativeBuildFailureDetail({
+      error: Object.assign(new Error(canary), { code: 'ENOBUFS' }),
+      status: null,
+    }),
+    'error=ENOBUFS, signal=none',
+    'The child message must never reach the summary',
+  );
+});
 
 test('Pure helper leaves frozen parent signing configuration intact', () => {
   const child = sanitizedNativeBuildEnvironment(environment);

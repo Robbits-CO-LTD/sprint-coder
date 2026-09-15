@@ -4,7 +4,10 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
+import {
+  nativeBuildFailureDetail,
+  sanitizedNativeBuildEnvironment,
+} from './native-build-environment.mjs';
 export { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
 
 const repositoryDirectory = dirname(fileURLToPath(import.meta.url));
@@ -42,14 +45,19 @@ function run(command, arguments_, environment = process.env) {
   const result = spawnSync(command, arguments_, {
     cwd: repositoryDirectory,
     env: sanitizedNativeBuildEnvironment(environment),
-    encoding: 'utf8',
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // Nothing reads this child's output and it must never be relayed, so discard it at the file
+    // descriptor instead of capturing it only to throw it away. Capturing nothing also removes the
+    // maxBuffer ceiling that would otherwise abort a noisy but healthy compile with ENOBUFS.
+    stdio: ['ignore', 'ignore', 'ignore'],
     windowsHide: true,
   });
   if (result.error || result.status !== 0) {
+    // A child that never started (ENOENT) or was killed has no exit code at all, so report the
+    // status that actually exists rather than inventing "exit 1", and name the errno that tells a
+    // missing compiler apart from a real compile failure. The helper emits fixed tokens only and
+    // never the child's own message.
     throw new Error(
-      `Computer Use native build child failed (exit ${result.error ? 1 : (result.status ?? 1)})`,
+      `Computer Use native build child failed (exit ${result.status ?? 'none'}, ${nativeBuildFailureDetail(result)})`,
     );
   }
 }
