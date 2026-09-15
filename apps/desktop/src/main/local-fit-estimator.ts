@@ -11,6 +11,7 @@ export type LocalFitEstimateInput = Readonly<{
     weightsBytes: number | null;
     kvBytesPerToken: number | null;
     scratchBytes: number | null;
+    gpuOffloadRatio?: number;
   }>;
   weightsBytes: number | null;
   contextTokens: number | null;
@@ -67,9 +68,16 @@ function calculateBreakdown(input: LocalFitEstimateInput): LocalFitMemoryBreakdo
 
   let kvCacheBytes = checkedCeil(contextTokens * kvBytesPerToken);
   if (kvCacheBytes === null) return null;
+  const targetGuardedBytes = checkedCeil(
+    (weightsBytes + kvCacheBytes + scratchBytes) * input.safetyFactor,
+  );
+  if (targetGuardedBytes === null) return null;
+  let draftAcceleratorBytes = 0;
   let draft: LocalFitMemoryBreakdown['draft'];
   if (input.draft !== undefined) {
     const d = input.draft;
+    // The pinned runtime auto-offloads the draft independently of target --n-gpu-layers.
+    const draftRatio = d.gpuOffloadRatio ?? (input.gpuOffloadRatio > 0 ? 1 : 0);
     if (
       d.weightsBytes === null ||
       d.kvBytesPerToken === null ||
@@ -79,11 +87,17 @@ function calculateBreakdown(input: LocalFitEstimateInput): LocalFitMemoryBreakdo
       !Number.isSafeInteger(d.kvBytesPerToken) ||
       d.kvBytesPerToken <= 0 ||
       !Number.isSafeInteger(d.scratchBytes) ||
-      d.scratchBytes < 0
+      d.scratchBytes < 0 ||
+      !Number.isFinite(draftRatio) ||
+      draftRatio < 0 ||
+      draftRatio > 1
     )
       return null;
     const draftKv = checkedCeil(contextTokens * d.kvBytesPerToken);
     if (draftKv === null) return null;
+    const guarded = checkedCeil((d.weightsBytes + draftKv + d.scratchBytes) * input.safetyFactor);
+    if (guarded === null) return null;
+    draftAcceleratorBytes = Math.ceil(guarded * draftRatio);
     draft = { weightsBytes: d.weightsBytes, kvCacheBytes: draftKv, scratchBytes: d.scratchBytes };
     weightsBytes += d.weightsBytes;
     kvCacheBytes += draftKv;
@@ -93,7 +107,12 @@ function calculateBreakdown(input: LocalFitEstimateInput): LocalFitMemoryBreakdo
   const guardedWorkingBytes = checkedCeil(workingBytes * input.safetyFactor);
   if (guardedWorkingBytes === null) return null;
   const safetyMarginBytes = guardedWorkingBytes - workingBytes;
-  const acceleratorWorkingBytes = checkedCeil(guardedWorkingBytes * input.gpuOffloadRatio);
+  const acceleratorWorkingBytes = checkedCeil(
+    Math.min(
+      guardedWorkingBytes,
+      Math.ceil(targetGuardedBytes * input.gpuOffloadRatio) + draftAcceleratorBytes,
+    ),
+  );
   if (acceleratorWorkingBytes === null) return null;
   const requiredHostBytes = guardedWorkingBytes - acceleratorWorkingBytes + runtimeReserveBytes;
   if (!Number.isSafeInteger(requiredHostBytes)) return null;
@@ -142,7 +161,7 @@ export function estimateLocalModelFit(
   const hostAvailable = hardware.memory.availableBytes;
   if (breakdown === null || hostAvailable === null) return UNKNOWN;
 
-  if (input.gpuOffloadRatio > 0) {
+  if (input.gpuOffloadRatio > 0 || (input.draft?.gpuOffloadRatio ?? 0) > 0) {
     if (input.acceleratorBackend === 'unknown') return UNKNOWN;
     if (input.acceleratorBackend === 'available') {
       const acceleratorAvailable = acceleratorAvailableBytes(hardware);

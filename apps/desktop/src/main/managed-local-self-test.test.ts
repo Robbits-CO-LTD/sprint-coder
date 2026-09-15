@@ -18,6 +18,31 @@ afterEach(async () => {
 });
 
 describe('runManagedLocalSelfTest', () => {
+  it('does not promote a declared DFlash pair without deterministic text and real draft counts', async () => {
+    for (const response of [
+      {
+        choices: [{ message: { content: 'unexpected' } }],
+        timings: { draft_n: 12, draft_n_accepted: 9 },
+      },
+      { choices: [{ message: { content: 'one two three four five six seven eight nine ten' } }] },
+    ]) {
+      const onLoaded = vi.fn();
+      const session = {
+        authenticatedFetch: async () => json(response),
+      } as unknown as ManagedLocalRuntimeSession;
+      await expect(
+        runManagedLocalSelfTest({
+          session,
+          modelId: 'a'.repeat(64),
+          scratchRoot: '/unused',
+          nonce: 'unused',
+          onLoaded,
+          requireDraft: true,
+        }),
+      ).rejects.toThrow('did not prove');
+      expect(onLoaded).not.toHaveBeenCalled();
+    }
+  });
   it('cancels an oversized streamed response before recording load evidence', async () => {
     const cancel = vi.fn();
     const body = new ReadableStream<Uint8Array>({

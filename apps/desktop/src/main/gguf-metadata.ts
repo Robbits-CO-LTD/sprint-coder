@@ -187,7 +187,12 @@ export async function readGgufModelMetadata(path: string): Promise<GgufModelMeta
         )
       ) {
         recordDimension(key, await integerValue(reader, type));
-      } else if (key.endsWith('.target_layers') && type === 9) {
+      } else if (key.endsWith('.target_layers')) {
+        if (type !== 9) {
+          await skipValue(reader, type);
+          recordDimension(key, null);
+          continue;
+        }
         const itemType = await reader.uint32();
         const count = await reader.uint64();
         if (![4, 5, 10, 11].includes(itemType) || count > MAX_ARRAY_ITEMS) return null;

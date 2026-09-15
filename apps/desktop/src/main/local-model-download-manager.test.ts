@@ -126,9 +126,14 @@ async function fixture(input?: {
 
 if (runsWithElectronAbi)
   describe('LocalModelDownloadManager', () => {
-    it.each([false, true])(
-      'connects controller settings and pair-bound evidence (v82 migration: %s)',
-      async (legacy) => {
+    it.each([
+      [false, null],
+      [true, null],
+      [true, 'model'],
+      [true, 'mmproj'],
+    ] as const)(
+      'connects controller settings and pair-bound evidence (v82 migration: %s, extra artifact: %s)',
+      async (legacy, extraRole) => {
         const env = await fixture({ bytes: [modelMetadata('llama'), modelMetadata('dflash')] });
         const targetPlan = {
           ...env.plan,
@@ -160,6 +165,21 @@ if (runsWithElectronAbi)
           );
           db.close();
           new SqlitePersistenceClient(join(env.root, 'app.sqlite3')).close();
+        }
+        if (extraRole !== null) {
+          const db = new Database(join(env.root, 'app.sqlite3'));
+          db.prepare(
+            `INSERT INTO local_model_artifacts(model_id, ordinal, filename, sha256, byte_length, role, state, downloaded_bytes)
+            SELECT model_id, 2, 'extra.gguf', sha256, byte_length, ?, state, downloaded_bytes FROM local_model_artifacts WHERE model_id = ? AND ordinal = 1`,
+          ).run(extraRole, draft.modelId);
+          db.prepare(
+            'UPDATE local_model_download_jobs SET downloaded_bytes = downloaded_bytes * 2, completed_artifacts = 2 WHERE model_id = ?',
+          ).run(draft.modelId);
+          db.prepare(
+            'UPDATE local_models SET artifact_count = 2, total_bytes = total_bytes * 2 WHERE id = ?',
+          ).run(draft.modelId);
+          db.close();
+          await writeFile(env.store.installedPath(draft.modelId, 2), env.bytes[1]!);
         }
         const catalog = new PublicModelCatalogService(globalThis.fetch);
         const resolveBase = vi.spyOn(catalog, 'resolveBaseModelId').mockResolvedValue('owner/base');
@@ -292,6 +312,43 @@ if (runsWithElectronAbi)
             ),
           ).toBe(false);
           const view = await controller.getSpeculativeSettings(target.modelId);
+          if (extraRole !== null) {
+            expect(view.eligibleDrafts).toEqual([]);
+            const settings = {
+              type: 'draft-dflash',
+              draftModelId: draft.modelId,
+              draftTokensMax: 3,
+            } as const;
+            const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+            // Even a matching remote declaration cannot authorize this legacy bundle shape.
+            repository.backfillBaseModelId(
+              draft.modelId,
+              draftPlan.sourceId,
+              draftPlan.immutableRevision,
+              'owner/base',
+            );
+            expect(() => repository.setSpeculativeSettings(target.modelId, settings)).toThrow(
+              'compatible',
+            );
+            repository.close();
+            await expect(
+              controller.setSpeculativeSettings(target.modelId, settings),
+            ).rejects.toThrow('compatible');
+            const db = new Database(join(env.root, 'app.sqlite3'));
+            db.prepare(
+              'INSERT OR REPLACE INTO settings(key, value, updated_at) VALUES (?, ?, ?)',
+            ).run(
+              'managed-local.speculative-settings',
+              JSON.stringify({ [target.modelId]: settings }),
+              new Date().toISOString(),
+            );
+            db.close();
+            await expect(
+              controller.acquireRuntime(target.modelId, false, new AbortController().signal),
+            ).rejects.toThrow('compatible');
+            expect(starts).toEqual([]);
+            return;
+          }
           if (legacy)
             expect(resolveBase).toHaveBeenCalledWith(
               draftPlan.sourceId,

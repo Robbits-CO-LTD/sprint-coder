@@ -214,6 +214,7 @@ export class ManagedLocalController {
       (model) =>
         model.state === 'installed' &&
         model.purpose === 'draft-dflash' &&
+        this.repository.hasUsableDraftArtifact(model.id) &&
         model.baseModelId === null &&
         model.source === 'hugging_face',
     )) {
@@ -243,6 +244,7 @@ export class ManagedLocalController {
               (model) =>
                 model.state === 'installed' &&
                 model.purpose === 'draft-dflash' &&
+                this.repository.hasUsableDraftArtifact(model.id) &&
                 model.baseModelId === target.baseModelId,
             )
             .slice(0, 256)
@@ -302,6 +304,7 @@ export class ManagedLocalController {
       target.baseModelId === null ||
       draft?.state !== 'installed' ||
       draft.purpose !== 'draft-dflash' ||
+      !this.repository.hasUsableDraftArtifact(draft.id) ||
       target.id === draft.id ||
       target.baseModelId !== draft.baseModelId ||
       this.manager.artifactExpectations(modelId).some(({ role }) => role === 'mmproj')
@@ -544,6 +547,7 @@ export class ManagedLocalController {
             : {
                 draft: {
                   weightsBytes: draftModel.totalBytes,
+                  gpuOffloadRatio: launch.backend === 'cpu' ? 0 : 1,
                   kvBytesPerToken: draftMetadata?.kvBytesPerToken ?? null,
                   scratchBytes:
                     draftMetadata?.hiddenBytesPerToken === undefined
