@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +29,39 @@ test('binds an authorized file read and detects changed source bytes after resta
     PATH: '',
     Path: '',
   });
+  const graphFailures: unknown[] = [];
+  let stdout = '';
+  app.process().stdout?.on('data', (chunk: Buffer) => {
+    stdout = (stdout + chunk.toString('utf8')).slice(-32_768);
+    let newline = stdout.indexOf('\n');
+    while (newline >= 0) {
+      const line = stdout.slice(0, newline);
+      stdout = stdout.slice(newline + 1);
+      try {
+        const event = JSON.parse(line) as {
+          level?: string;
+          message?: string;
+          context?: {
+            failureStage?: string;
+            errorCode?: string;
+            error?: { name?: string; message?: string };
+          };
+        };
+        if (event.level === 'error')
+          graphFailures.push({
+            message: event.message,
+            failureStage: event.context?.failureStage,
+            errorCode: event.context?.errorCode,
+            error: event.context?.error?.name,
+            detail: event.context?.error?.message?.slice(0, 500),
+          });
+        if (graphFailures.length > 20) graphFailures.shift();
+      } catch {
+        /* Only structured, bounded failure metadata belongs in the artifact. */
+      }
+      newline = stdout.indexOf('\n');
+    }
+  });
   try {
     const page = await firstWindow(app);
     await page.addInitScript(() => {
@@ -53,9 +86,33 @@ test('binds an authorized file read and detects changed source bytes after resta
     await page.getByTestId('composer-textarea').fill('[fixture:graph-source-proposal]');
     await page.getByTestId('composer-send-button').click();
     await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
-    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
-      timeout: 30000,
-    });
+    await expect(page.getByTestId('assistant-message'))
+      .toContainText('GRAPH_TOOL_FLOW_OK', {
+        timeout: 30000,
+      })
+      .catch(async (error: unknown) => {
+        const diagnostic = await page
+          .evaluate(async (id) => {
+            const raw = await window.sprintCoder!.runtime.getFailureDiagnostic({ taskId: id });
+            const value = raw ? JSON.parse(raw) : null;
+            const generation = await window.sprintCoder!.graphs.generation(id);
+            return {
+              failureStage: value?.failureStage,
+              category: value?.category,
+              providerCode: value?.providerCode,
+              graphState: generation?.state,
+              graphFailureStage: generation?.failureStage,
+            };
+          }, taskId)
+          .catch(() => null);
+        const failurePath = testInfo.outputPath('graph-source-failure.json');
+        await writeFile(failurePath, JSON.stringify({ failures: graphFailures, diagnostic }));
+        await testInfo.attach('graph-source-failure', {
+          path: failurePath,
+          contentType: 'application/json',
+        });
+        throw error;
+      });
     if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });
@@ -205,6 +262,52 @@ test('binds an authorized file read and detects changed source bytes after resta
   }
 });
 
+function installGraphInputProbe(): void {
+  const events: Record<string, unknown>[] = [];
+  Reflect.set(window, '__sprintGraphInputProbe', events);
+  for (const type of ['pointerdown', 'pointerup', 'click']) {
+    document.addEventListener(
+      type,
+      (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        const chip = document.getElementById('focus-chip');
+        const button = document.getElementById('btn-focus-clear');
+        const rect = button?.getBoundingClientRect();
+        const frameRect = document
+          .querySelector('[data-testid="graph-frame"]')
+          ?.getBoundingClientRect();
+        events.push({
+          type,
+          time: performance.now(),
+          target: target?.id || target?.tagName,
+          trusted: event.isTrusted,
+          node: target?.closest('[data-node-id]')?.getAttribute('data-node-id'),
+          hidden: chip?.hidden,
+          documentHidden: document.hidden,
+          x: (event as MouseEvent).clientX,
+          y: (event as MouseEvent).clientY,
+          button: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
+          frame: frameRect
+            ? { x: frameRect.x, y: frameRect.y, width: frameRect.width, height: frameRect.height }
+            : null,
+        });
+        if (events.length > 80) events.shift();
+        if (type === 'click') {
+          setTimeout(() => {
+            events.push({
+              type: 'after-click',
+              time: performance.now(),
+              hidden: document.getElementById('focus-chip')?.hidden,
+            });
+            if (events.length > 80) events.shift();
+          }, 0);
+        }
+      },
+      true,
+    );
+  }
+}
+
 test('the model tool path proposes and reads back a draft through the real Main service', async () => {
   const profile = createUserDataDir('graph-tool-proposal');
   let app = await launchApp(profile, undefined, {
@@ -212,8 +315,13 @@ test('the model tool path proposes and reads back a draft through the real Main 
     PATH: '',
     Path: '',
   });
+  let probePage: Page | null = null;
+  let completed = false;
   try {
     const page = await firstWindow(app);
+    probePage = page;
+    await page.addInitScript(installGraphInputProbe);
+    await page.evaluate(installGraphInputProbe);
     if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });
@@ -300,7 +408,25 @@ test('the model tool path proposes and reads back a draft through the real Main 
       .click();
     await expect(reopened.getByTestId('graph-evidence-kind')).toHaveText('推定');
     await expect(reopened.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
+    completed = true;
   } finally {
+    if (!completed && probePage && !probePage.isClosed()) {
+      const events = await Promise.all(
+        probePage
+          .frames()
+          .map((frame) =>
+            frame
+              .evaluate(() => Reflect.get(window, '__sprintGraphInputProbe') ?? [])
+              .catch(() => []),
+          ),
+      );
+      const eventPath = test.info().outputPath('graph-input-events.json');
+      await writeFile(eventPath, JSON.stringify(events));
+      await test
+        .info()
+        .attach('graph-input-events', { path: eventPath, contentType: 'application/json' });
+      await probePage.screenshot({ path: test.info().outputPath('graph-input-failure.png') });
+    }
     await closeApp(app);
     removeUserDataDir(profile);
   }

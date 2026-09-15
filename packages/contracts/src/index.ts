@@ -4318,6 +4318,21 @@ export const graphReadySchema = z
   })
   .strict();
 export type GraphReady = z.infer<typeof graphReadySchema>;
+
+export const GRAPH_WORKER_OUTPUT_MAX_BYTES = 256 * 1024;
+/** A private Graph utility-process result; Main acknowledges receipt before the worker exits. */
+export const graphWorkerResultSchema = z
+  .object({
+    type: z.literal('sprint-graph-result'),
+    output: z.string().max(GRAPH_WORKER_OUTPUT_MAX_BYTES),
+    exitCode: z.number().int().min(0).max(255),
+    stderrBytes: z.number().int().min(0).max(GRAPH_WORKER_OUTPUT_MAX_BYTES),
+  })
+  .strict();
+export type GraphWorkerResult = z.infer<typeof graphWorkerResultSchema>;
+export const graphWorkerAckSchema = z
+  .object({ type: z.literal('sprint-graph-result-ack') })
+  .strict();
 /**
  * A click the parent received on the graph `<iframe>` element itself, forwarded to the artifact in
  * frame-relative coordinates. The graph artifact runs out of process, and until Chromium has

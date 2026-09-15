@@ -1,6 +1,8 @@
 #include <node_api.h>
 #include <windows.h>
 #include <aclapi.h>
+#include <wincrypt.h>
+#include <winternl.h>
 
 #include <algorithm>
 #include <charconv>
@@ -9,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1086,6 +1089,348 @@ napi_value DirectoryCaseSensitive(napi_env env, napi_callback_info info) {
   return result;
 }
 
+struct ReadHandleCloser {
+  void operator()(void* handle) const {
+    if (handle != nullptr && handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+  }
+};
+using ReadHandle = std::unique_ptr<void, ReadHandleCloser>;
+
+struct ReadSession {
+  napi_env owner;
+  // Retain every ancestor, not just the last parent: no directory in the namespace may be
+  // renamed or turned into a reparse point while its descendant is being observed.
+  std::vector<ReadHandle> directories;
+  HANDLE root = INVALID_HANDLE_VALUE;
+  ReadHandle lock;
+};
+std::mutex read_sessions_mutex;
+std::unordered_map<std::string, std::shared_ptr<ReadSession>> read_sessions;
+
+napi_value ReadFailure(napi_env env, const char* code, const char* message) {
+  napi_throw_error(env, code, message);
+  return nullptr;
+}
+
+bool ReadNamedString(napi_env env, napi_value object, const char* key, std::string* output) {
+  napi_value value;
+  return napi_get_named_property(env, object, key, &value) == napi_ok &&
+         ReadString(env, value, output) && output->size() <= 32767;
+}
+
+bool ReadSafeSegment(const std::wstring& segment) {
+  if (segment.empty() || segment.size() > 255 || segment == L"." || segment == L".." ||
+      segment.back() == L'.' || segment.back() == L' ' ||
+      segment.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos)
+    return false;
+  return std::none_of(segment.begin(), segment.end(), [](wchar_t c) { return c < 32; });
+}
+
+NTSTATUS ReadRelative(HANDLE parent, const std::wstring& name, ULONG options, ULONG disposition,
+                      HANDLE* output) {
+  using NtCreateFileFn = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES,
+      PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+  const auto create = reinterpret_cast<NtCreateFileFn>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateFile"));
+  if (create == nullptr) return static_cast<NTSTATUS>(0xC0000002L);
+  UNICODE_STRING unicode{};
+  unicode.Buffer = const_cast<PWSTR>(name.data());
+  unicode.Length = static_cast<USHORT>(name.size() * sizeof(wchar_t));
+  unicode.MaximumLength = unicode.Length;
+  OBJECT_ATTRIBUTES attributes{};
+  // Match mutation lookup; Windows still honors a directory's explicit case-sensitive flag.
+  InitializeObjectAttributes(&attributes, &unicode, OBJ_CASE_INSENSITIVE, parent, nullptr);
+  IO_STATUS_BLOCK status{};
+  // FILE_SHARE_READ excludes existing and future writers/deleters. Together with
+  // FILE_OPEN_REPARSE_POINT this closes the check/open and rename/junction windows.
+  return create(output, FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                &attributes, &status, nullptr, FILE_ATTRIBUTE_HIDDEN, FILE_SHARE_READ,
+                disposition, options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+                nullptr, 0);
+}
+
+bool SafeReadDirectory(HANDLE handle) {
+  BY_HANDLE_FILE_INFORMATION info{};
+  return GetFileInformationByHandle(handle, &info) &&
+         (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+         (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+bool PinReadDirectory(HANDLE parent, const std::wstring& segment,
+                      std::vector<ReadHandle>* directories) {
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  if (!ReadSafeSegment(segment) ||
+      ReadRelative(parent, segment, FILE_DIRECTORY_FILE, FILE_OPEN, &raw) < 0)
+    return false;
+  ReadHandle next(raw);
+  if (!SafeReadDirectory(next.get())) return false;
+  directories->push_back(std::move(next));
+  return true;
+}
+
+bool PinReadAbsolutePath(const std::string& utf8, std::vector<ReadHandle>* directories) {
+  std::wstring path;
+  if (!Utf8ToWide(utf8, &path)) return false;
+  std::replace(path.begin(), path.end(), L'/', L'\\');
+  if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) path = L"\\\\" + path.substr(8);
+  else if (path.rfind(L"\\\\?\\", 0) == 0) path = path.substr(4);
+  size_t root_length = 0;
+  if (path.size() >= 3 && ((path[0] >= L'A' && path[0] <= L'Z') ||
+                          (path[0] >= L'a' && path[0] <= L'z')) &&
+      path[1] == L':' && path[2] == L'\\') {
+    root_length = 3;
+  } else if (path.rfind(L"\\\\", 0) == 0) {
+    const size_t server_end = path.find(L'\\', 2);
+    if (server_end == std::wstring::npos || !ReadSafeSegment(path.substr(2, server_end - 2)))
+      return false;
+    const size_t share_end = path.find(L'\\', server_end + 1);
+    const size_t end = share_end == std::wstring::npos ? path.size() : share_end;
+    if (!ReadSafeSegment(path.substr(server_end + 1, end - server_end - 1))) return false;
+    root_length = share_end == std::wstring::npos ? end : end + 1;
+  } else {
+    return false;
+  }
+  ReadHandle volume(CreateFileW(path.substr(0, root_length).c_str(),
+      FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  if (!volume || !SafeReadDirectory(volume.get())) return false;
+  directories->push_back(std::move(volume));
+  size_t start = root_length;
+  while (start < path.size()) {
+    const size_t slash = path.find(L'\\', start);
+    const size_t end = slash == std::wstring::npos ? path.size() : slash;
+    if (!PinReadDirectory(directories->back().get(), path.substr(start, end - start), directories))
+      return false;
+    start = end + 1;
+  }
+  return true;
+}
+
+std::string ReadHex(const BYTE* bytes, size_t length) {
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string result(length * 2, '0');
+  for (size_t i = 0; i < length; ++i) {
+    result[i * 2] = hex[bytes[i] >> 4];
+    result[i * 2 + 1] = hex[bytes[i] & 15];
+  }
+  return result;
+}
+
+struct ReadCrypto {
+  HCRYPTPROV provider = 0;
+  HCRYPTHASH hash = 0;
+  ReadCrypto() {
+    if (CryptAcquireContextW(&provider, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+      CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash);
+  }
+  ~ReadCrypto() {
+    if (hash) CryptDestroyHash(hash);
+    if (provider) CryptReleaseContext(provider, 0);
+  }
+  bool digest(const BYTE* bytes, DWORD length, std::string* result) {
+    BYTE digest[32]{};
+    DWORD size = sizeof(digest);
+    if (!hash || !CryptHashData(hash, bytes, length, 0) ||
+        !CryptGetHashParam(hash, HP_HASHVAL, digest, &size, 0) || size != sizeof(digest))
+      return false;
+    *result = ReadHex(digest, size);
+    return true;
+  }
+};
+
+napi_value OpenReadSession(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string root_id, workspace, dev, ino, key, lock_path;
+  if (argc != 1 || !ReadNamedString(env, argv[0], "rootId", &root_id) ||
+      !ReadNamedString(env, argv[0], "workspacePath", &workspace) ||
+      !ReadNamedString(env, argv[0], "rootDev", &dev) ||
+      !ReadNamedString(env, argv[0], "rootIno", &ino) ||
+      !ReadNamedString(env, argv[0], "workspaceKey", &key) || key.size() != 64 ||
+      key.find_first_not_of("0123456789abcdef") != std::string::npos ||
+      !ReadNamedString(env, argv[0], "lockDirectoryPath", &lock_path))
+    return ReadFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs read session input");
+  auto session = std::make_shared<ReadSession>();
+  session->owner = env;
+  if (!PinReadAbsolutePath(workspace, &session->directories))
+    return ReadFailure(env, "UNSAFE_PATH", "Cannot pin workspace directory chain");
+  session->root = session->directories.back().get();
+  BY_HANDLE_FILE_INFORMATION identity{};
+  if (!GetFileInformationByHandle(session->root, &identity))
+    return ReadFailure(env, "NATIVE_FAILURE", "Cannot read workspace identity");
+  const std::string actual_dev = std::to_string(identity.dwVolumeSerialNumber);
+  const std::string actual_ino = std::to_string(
+      (static_cast<uint64_t>(identity.nFileIndexHigh) << 32) | identity.nFileIndexLow);
+  if (actual_dev != dev || actual_ino != ino)
+    return ReadFailure(env, "ROOT_IDENTITY_CHANGED", "Workspace root identity changed");
+  if (!PinReadAbsolutePath(lock_path, &session->directories))
+    return ReadFailure(env, "UNSAFE_LOCK", "Cannot pin workspace lock directory chain");
+  HANDLE raw_lock = INVALID_HANDLE_VALUE;
+  const std::wstring lock_leaf(key.begin(), key.end());
+  const NTSTATUS status = ReadRelative(session->directories.back().get(), lock_leaf + L".lock",
+      FILE_NON_DIRECTORY_FILE, FILE_OPEN_IF, &raw_lock);
+  if (status == static_cast<NTSTATUS>(0xC0000043L))
+    return ReadFailure(env, "LOCK_BUSY", "NativeSafeFs Workspace lock is busy");
+  if (status < 0)
+    return ReadFailure(env, "UNSAFE_LOCK", "Cannot open shared workspace lock");
+  session->lock.reset(raw_lock);
+  BY_HANDLE_FILE_INFORMATION lock_info{};
+  if (!GetFileInformationByHandle(session->lock.get(), &lock_info) ||
+      (lock_info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) ||
+      lock_info.nNumberOfLinks != 1)
+    return ReadFailure(env, "UNSAFE_LOCK", "Workspace lock is not a unique regular file");
+  // Share the mutation lock file but never read, write or advance its durable fence.
+  ReadCrypto crypto;
+  BYTE random[16]{};
+  if (!crypto.provider || !CryptGenRandom(crypto.provider, sizeof(random), random))
+    return ReadFailure(env, "NATIVE_FAILURE", "Cannot generate a read session id");
+  const std::string id = ReadHex(random, sizeof(random));
+  {
+    std::lock_guard<std::mutex> guard(read_sessions_mutex);
+    if (!read_sessions.emplace(id, session).second)
+      return ReadFailure(env, "NATIVE_FAILURE", "Read session id collided");
+  }
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "id", MakeString(env, id.c_str()));
+  napi_set_named_property(env, result, "rootId", MakeString(env, root_id.c_str()));
+  napi_set_named_property(env, result, "workspaceKey", MakeString(env, key.c_str()));
+  napi_set_named_property(env, result, "rootDev", MakeString(env, actual_dev.c_str()));
+  napi_set_named_property(env, result, "rootIno", MakeString(env, actual_ino.c_str()));
+  return result;
+}
+
+napi_value CloseReadSession(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string id;
+  if (argc != 1 || !ReadNamedString(env, argv[0], "id", &id))
+    return ReadFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs read session handle");
+  {
+    std::lock_guard<std::mutex> guard(read_sessions_mutex);
+    const auto found = read_sessions.find(id);
+    if (found != read_sessions.end() && found->second->owner == env) read_sessions.erase(found);
+  }
+  napi_value result;
+  napi_get_undefined(env, &result);
+  return result;
+}
+
+napi_value ObserveSealedPostImage(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1], paths;
+  napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+  std::string id;
+  bool array = false;
+  uint32_t length = 0;
+  if (argc != 1 || !ReadNamedString(env, argv[0], "sessionId", &id) ||
+      napi_get_named_property(env, argv[0], "pathSegments", &paths) != napi_ok ||
+      napi_is_array(env, paths, &array) != napi_ok || !array ||
+      napi_get_array_length(env, paths, &length) != napi_ok || length == 0 || length > 128)
+    return ReadFailure(env, "INVALID_INPUT", "Invalid sealed endpoint segments");
+  std::vector<std::wstring> segments;
+  for (uint32_t index = 0; index < length; ++index) {
+    napi_value item;
+    std::string utf8;
+    std::wstring wide;
+    if (napi_get_element(env, paths, index, &item) != napi_ok || !ReadString(env, item, &utf8) ||
+        utf8.size() > 1024 || !Utf8ToWide(utf8, &wide) || !ReadSafeSegment(wide))
+      return ReadFailure(env, "INVALID_INPUT", "Invalid sealed endpoint segment");
+    segments.push_back(std::move(wide));
+  }
+  std::shared_ptr<ReadSession> session;
+  {
+    std::lock_guard<std::mutex> guard(read_sessions_mutex);
+    const auto found = read_sessions.find(id);
+    if (found == read_sessions.end() || found->second->owner != env)
+      return ReadFailure(env, "STALE_SESSION", "NativeSafeFs read session is stale");
+    session = found->second;
+  }
+  std::vector<ReadHandle> parents;
+  HANDLE parent = session->root;
+  for (size_t index = 0; index + 1 < segments.size(); ++index) {
+    if (!PinReadDirectory(parent, segments[index], &parents))
+      return ReadFailure(env, "UNSAFE_PATH", "Cannot pin sealed endpoint parent");
+    parent = parents.back().get();
+  }
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  const NTSTATUS status = ReadRelative(parent, segments.back(), 0, FILE_OPEN, &raw);
+  const char* kind = "absent";
+  std::string content_hash, identity_digest;
+  uint64_t size = 0;
+  ReadHandle endpoint;
+  if (status != static_cast<NTSTATUS>(0xC0000034L)) {
+    if (status < 0)
+      return ReadFailure(env, "UNSAFE_PATH", "Cannot open sealed endpoint");
+    endpoint.reset(raw);
+    BY_HANDLE_FILE_INFORMATION before{};
+    FILE_BASIC_INFO basic_before{};
+    if (!GetFileInformationByHandle(endpoint.get(), &before) ||
+        !GetFileInformationByHandleEx(endpoint.get(), FileBasicInfo, &basic_before, sizeof(basic_before)))
+      return ReadFailure(env, "UNSAFE_PATH", "Cannot inspect sealed endpoint");
+    if (before.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) kind = "other";
+    else if (before.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) kind = "directory";
+    else if (before.nNumberOfLinks != 1 || GetFileType(endpoint.get()) != FILE_TYPE_DISK) kind = "other";
+    else {
+      size = (static_cast<uint64_t>(before.nFileSizeHigh) << 32) | before.nFileSizeLow;
+      if (size > 1024 * 1024)
+        return ReadFailure(env, "UNSAFE_PATH", "Sealed endpoint exceeds the mutation byte limit");
+      std::vector<BYTE> bytes(static_cast<size_t>(size));
+      DWORD offset = 0;
+      while (offset < bytes.size()) {
+        DWORD read = 0;
+        if (!ReadFile(endpoint.get(), bytes.data() + offset,
+                      static_cast<DWORD>(bytes.size()) - offset, &read, nullptr) || read == 0)
+          return ReadFailure(env, "UNSAFE_PATH", "Cannot read sealed endpoint bytes");
+        offset += read;
+      }
+      ReadCrypto content;
+      if (!content.digest(bytes.data(), static_cast<DWORD>(bytes.size()), &content_hash))
+        return ReadFailure(env, "NATIVE_FAILURE", "Cannot hash sealed endpoint bytes");
+      // Match the Windows mutation identity formula, including creation time.
+      const std::string identity = std::to_string(before.dwVolumeSerialNumber) + ":" +
+          std::to_string((static_cast<uint64_t>(before.nFileIndexHigh) << 32) | before.nFileIndexLow) + ":" +
+          std::to_string((static_cast<uint64_t>(before.ftCreationTime.dwHighDateTime) << 32) |
+                         before.ftCreationTime.dwLowDateTime);
+      ReadCrypto identity_hash;
+      if (!identity_hash.digest(reinterpret_cast<const BYTE*>(identity.data()),
+                                static_cast<DWORD>(identity.size()), &identity_digest))
+        return ReadFailure(env, "NATIVE_FAILURE", "Cannot hash sealed endpoint identity");
+      BY_HANDLE_FILE_INFORMATION after{};
+      FILE_BASIC_INFO basic_after{};
+      if (!GetFileInformationByHandle(endpoint.get(), &after) ||
+          !GetFileInformationByHandleEx(endpoint.get(), FileBasicInfo, &basic_after, sizeof(basic_after)) ||
+          after.nNumberOfLinks != 1 || before.nFileSizeHigh != after.nFileSizeHigh ||
+          before.nFileSizeLow != after.nFileSizeLow ||
+          basic_before.ChangeTime.QuadPart != basic_after.ChangeTime.QuadPart ||
+          basic_before.LastWriteTime.QuadPart != basic_after.LastWriteTime.QuadPart)
+        return ReadFailure(env, "UNSAFE_PATH", "Sealed endpoint changed while reading");
+      kind = "file";
+    }
+  }
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "kind", MakeString(env, kind));
+  if (!content_hash.empty()) {
+    napi_set_named_property(env, result, "contentHash", MakeString(env, content_hash.c_str()));
+    napi_set_named_property(env, result, "identityDigest", MakeString(env, identity_digest.c_str()));
+    napi_value bytes;
+    napi_create_double(env, static_cast<double>(size), &bytes);
+    napi_set_named_property(env, result, "size", bytes);
+  }
+  return result;
+}
+
+void CleanupReadSessions(void* owner) {
+  std::lock_guard<std::mutex> guard(read_sessions_mutex);
+  for (auto it = read_sessions.begin(); it != read_sessions.end();) {
+    if (it->second->owner == owner) it = read_sessions.erase(it);
+    else ++it;
+  }
+}
+
 napi_value Initialize(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"caseInsensitiveNamesEqual", nullptr, CaseInsensitiveNamesEqual, nullptr, nullptr, nullptr,
@@ -1110,13 +1455,9 @@ napi_value Initialize(napi_env env, napi_value exports) {
       {"cleanupIntentAuxiliary", nullptr, WindowsMutationCleanupIntentAuxiliary, nullptr, nullptr,
        nullptr, napi_default, nullptr},
       {"observeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      // The read-only verification session is POSIX-only so far. Windows has the pieces to build it
-      // — `OpenDirectoryPath`/`ObserveEndpoint` in native_safe_fs_win_mutation.cc walk each segment
-      // with FILE_OPEN_REPARSE_POINT — but it is not wired up yet, so the export is present and
-      // refuses, and the verifier falls back to its path-based reader on this platform.
-      {"openReadSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"closeReadSession", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"observeSealedPostImage", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
+      {"openReadSession", nullptr, OpenReadSession, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"closeReadSession", nullptr, CloseReadSession, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"observeSealedPostImage", nullptr, ObserveSealedPostImage, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"createDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"inspectDirectoryOwnership", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
@@ -1152,6 +1493,7 @@ napi_value Initialize(napi_env env, napi_value exports) {
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
   napi_add_env_cleanup_hook(env, CleanupPreparedExecutionImages, nullptr);
+  napi_add_env_cleanup_hook(env, CleanupReadSessions, env);
   return exports;
 }
 

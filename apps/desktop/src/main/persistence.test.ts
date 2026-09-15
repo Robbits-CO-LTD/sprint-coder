@@ -3582,6 +3582,189 @@ if (runsWithElectronAbi)
       },
     );
 
+    artifactIt.each(['delayed cleanup', 'equal timestamps', 'clock rollback'] as const)(
+      'uses actual Saga commit order despite %s',
+      async (scenario) => {
+        const fixture = await createCommitOrderFixture(scenario);
+        const { persistence, path, workspaceFile, first, second } = fixture;
+        try {
+          // Both commits used the real executor, journal and filesystem. IDs deliberately sort
+          // against commit order; only the first Saga's cleanup is delayed past the second commit.
+          expect.soft(readFileSync(workspaceFile, 'utf8')).toBe('C');
+          const verify = () =>
+            persistence.verifyCommittedEditSagaPostImages({
+              taskId: first.taskId,
+              turnId: first.turnId,
+              createdAt: '2099-07-23T00:00:00.000Z',
+            });
+          expect.soft(verify()).toEqual([]);
+          writeFileSync(workspaceFile, 'B');
+          expect
+            .soft([...verify()].sort())
+            .toEqual([`verification:${first.id}`, `verification:${second.id}`].sort());
+          expect(() => persistence.completeTurn(first.taskId, first.turnId, 'completed')).toThrow(
+            AcceptanceEvidenceMissingError,
+          );
+          persistence.close();
+          const raw = new Database(path);
+          raw.exec('VACUUM');
+          expect(
+            raw
+              .prepare('SELECT id, commit_sequence FROM edit_sagas ORDER BY commit_sequence')
+              .all(),
+          ).toEqual([
+            { id: first.id, commit_sequence: 1 },
+            { id: second.id, commit_sequence: 2 },
+          ]);
+          raw.close();
+          const reopened = new SqlitePersistenceClient(path);
+          try {
+            writeFileSync(workspaceFile, 'C');
+            expect(
+              reopened.verifyCommittedEditSagaPostImages({
+                taskId: first.taskId,
+                turnId: first.turnId,
+                createdAt: '2099-07-23T00:00:01.000Z',
+              }),
+            ).toEqual([]);
+          } finally {
+            reopened.close();
+          }
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
+    artifactIt(
+      'migrates legacy Saga journals without inventing commit order and reopens idempotently',
+      async () => {
+        const { persistence, path, workspaceFile, first, second, artifacts } =
+          await createCommitOrderFixture('delayed cleanup');
+        const separateFile = join(dirname(path), 'separate.txt');
+        writeFileSync(separateFile, 'before');
+        const separate = await new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(separateFile, artifacts),
+          artifacts,
+        ).apply({
+          id: 'legacy-separate',
+          taskId: first.taskId,
+          turnId: first.turnId,
+          operationId: 'legacy-separate',
+          plan: persistedEditPlan('before', 'after', separateFile, separateFile),
+          createdAt: first.createdAt,
+        });
+        const snapshots = [persistence.getEditSaga(first.id), second, separate];
+        const evidence = persistence.listEvidenceRecords(first.taskId, first.turnId);
+        persistence.close();
+        const raw = new Database(path);
+        raw.exec(`
+        DROP INDEX edit_sagas_commit_order;
+        ALTER TABLE edit_sagas DROP COLUMN commit_sequence;
+        DELETE FROM schema_migrations WHERE version = 90;
+      `);
+        raw.close();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const reopened = new SqlitePersistenceClient(path);
+          try {
+            expect(snapshots.map(({ id }) => reopened.getEditSaga(id))).toEqual(snapshots);
+            expect(reopened.listEvidenceRecords(first.taskId, first.turnId)).toEqual(
+              expect.arrayContaining([...evidence]),
+            );
+            for (const content of ['C', 'B']) {
+              writeFileSync(workspaceFile, content);
+              // The disjoint legacy edit still verifies; conflicting legacy writes remain open.
+              expect(
+                [
+                  ...reopened.verifyCommittedEditSagaPostImages({
+                    taskId: first.taskId,
+                    turnId: first.turnId,
+                    createdAt: '2099-07-23T00:00:00.000Z',
+                  }),
+                ].sort(),
+              ).toEqual([`verification:${first.id}`, `verification:${second.id}`].sort());
+            }
+          } finally {
+            reopened.close();
+          }
+        }
+        const migrated = new Database(path);
+        expect(migrated.prepare('SELECT commit_sequence FROM edit_sagas').all()).toEqual([
+          { commit_sequence: null },
+          { commit_sequence: null },
+          { commit_sequence: null },
+        ]);
+        migrated.close();
+        const reopened = new SqlitePersistenceClient(path);
+        try {
+          const committed = await new EditSagaExecutor(
+            new PersistenceEditSagaStore(reopened),
+            fileBoundary(workspaceFile, artifacts, 'B', 'D'),
+            artifacts,
+          ).apply({
+            id: 'new-ordered',
+            taskId: first.taskId,
+            turnId: first.turnId,
+            operationId: 'new-ordered',
+            plan: persistedEditPlan('B', 'D', workspaceFile, workspaceFile),
+            createdAt: first.createdAt,
+          });
+          expect(committed.state).toBe('committed');
+          expect(
+            reopened.verifyCommittedEditSagaPostImages({
+              taskId: first.taskId,
+              turnId: first.turnId,
+              createdAt: '2099-07-23T00:00:01.000Z',
+            }),
+          ).toEqual([]);
+        } finally {
+          reopened.close();
+        }
+      },
+    );
+
+    artifactIt('rolls back the Saga commit sequence with failed commit evidence', async () => {
+      const { persistence, path, workspaceFile, first, artifacts } =
+        await createCommitOrderFixture('delayed cleanup');
+      const raw = new Database(path);
+      const apply = (id: string) =>
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          fileBoundary(workspaceFile, artifacts, 'C', 'D'),
+          artifacts,
+        ).apply({
+          id,
+          taskId: first.taskId,
+          turnId: first.turnId,
+          operationId: id,
+          plan: persistedEditPlan('C', 'D', workspaceFile, workspaceFile),
+          createdAt: first.createdAt,
+        });
+      try {
+        raw.exec(`CREATE TRIGGER reject_commit_evidence BEFORE INSERT ON evidence_records
+          WHEN NEW.kind = 'edit_saga_committed' BEGIN SELECT RAISE(ABORT, 'evidence failure'); END;`);
+        expect(await apply('rejected-commit')).toMatchObject({ state: 'restored' });
+        expect(
+          raw.prepare('SELECT commit_sequence FROM edit_sagas WHERE id = ?').get('rejected-commit'),
+        ).toEqual({ commit_sequence: null });
+        expect(
+          persistence
+            .listEvidenceRecords(first.taskId, first.turnId)
+            .some(({ criterionId }) => criterionId === 'edit-saga:rejected-commit'),
+        ).toBe(false);
+        expect(readFileSync(workspaceFile, 'utf8')).toBe('C');
+        raw.exec('DROP TRIGGER reject_commit_evidence');
+        expect(await apply('next-commit')).toMatchObject({ state: 'committed' });
+        expect(
+          raw.prepare('SELECT commit_sequence FROM edit_sagas WHERE id = ?').get('next-commit'),
+        ).toEqual({ commit_sequence: 3 });
+      } finally {
+        raw.close();
+        persistence.close();
+      }
+    });
+
     artifactIt(
       'verifies through the native read session when one is bound, and refuses a swapped parent',
       async () => {
@@ -8771,6 +8954,7 @@ if (runsWithElectronAbi)
         { version: 87 },
         { version: 88 },
         { version: 89 },
+        { version: 90 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -9171,6 +9355,87 @@ else
       persistenceBridgeTimeoutMs + 5_000,
     );
   });
+
+async function createCommitOrderFixture(
+  scenario: 'delayed cleanup' | 'equal timestamps' | 'clock rollback',
+) {
+  const { persistence, path } = createPersistence();
+  const task = persistence.createTask();
+  const turn = persistence.startTurn(task.id, 'edit A to B to C');
+  const workspaceFile = join(dirname(path), 'commit-order.txt');
+  writeFileSync(workspaceFile, 'A');
+  const artifacts = await EditArtifactStore.open({
+    rootPath: join(dirname(path), 'commit-order-artifacts'),
+    quotaBytes: 4096,
+  });
+  const store = new PersistenceEditSagaStore(persistence);
+  // Prepare the eventual last writer first: preparation order cannot substitute for commit order.
+  store.create(
+    await stageEditSagaRequest(
+      {
+        id: 'a-second',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'a-second-operation',
+        plan: persistedEditPlan('B', 'C', workspaceFile, workspaceFile),
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      artifacts,
+    ),
+  );
+  const clock = vi.spyOn(Date, 'now');
+  const commit = async (id: string, from: string, to: string) => {
+    const executor = new EditSagaExecutor(
+      store,
+      fileBoundary(workspaceFile, artifacts, from, to),
+      artifacts,
+      {
+        hit(point) {
+          if (point.kind === 'afterTerminalBeforeCleanup')
+            throw new EditSagaCrashError('defer cleanup');
+        },
+      },
+    );
+    await expect(
+      executor.apply({
+        id,
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: `${id}-operation`,
+        plan: persistedEditPlan(from, to, workspaceFile, workspaceFile),
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(EditSagaCrashError);
+    return persistence.getEditSaga(id);
+  };
+  try {
+    clock.mockReturnValue(Date.parse('2026-07-23T00:00:02.000Z'));
+    const first = await commit('z-first', 'A', 'B');
+    if (scenario === 'clock rollback')
+      clock.mockReturnValue(Date.parse('2026-07-23T00:00:01.000Z'));
+    if (scenario === 'delayed cleanup')
+      clock.mockReturnValue(Date.parse('2026-07-23T00:00:03.000Z'));
+    const second = await commit('a-second', 'B', 'C');
+    if (scenario === 'delayed cleanup') {
+      expect(Date.parse(first.updatedAt)).toBeLessThan(Date.parse(second.updatedAt));
+      clock.mockReturnValue(Date.parse('2026-07-23T00:00:04.000Z'));
+      await new EditSagaExecutor(store, fileBoundary(workspaceFile, artifacts), artifacts).recover(
+        first.id,
+      );
+      expect(persistence.getEditSaga(first.id).artifactCleanupPending).toBe(false);
+      expect(Date.parse(persistence.getEditSaga(first.id).updatedAt)).toBeGreaterThan(
+        Date.parse(second.updatedAt),
+      );
+    } else if (scenario === 'equal timestamps') {
+      expect(first.updatedAt).toBe(second.updatedAt);
+    } else {
+      expect(Date.parse(first.updatedAt)).toBeGreaterThan(Date.parse(second.updatedAt));
+    }
+    return { persistence, path, workspaceFile, first, second, artifacts };
+  } finally {
+    clock.mockRestore();
+  }
+}
 
 function persistedEditPlan(
   preImage = 'before',

@@ -654,7 +654,25 @@ describe('NativeSafeFs authority boundary', () => {
     });
   });
 
-  describe.skipIf(process.platform === 'win32')('read-only verification session', () => {
+  describe('read-only verification session', () => {
+    it.runIf(process.platform === 'win32')(
+      'passes adversarial Windows native observer cases',
+      async () => {
+        const result = await execFileAsync(
+          process.execPath,
+          ['--test', join(__dirname, '../../native-safe-fs/sealed-observer.win.cases.mjs')],
+          {
+            env: { ...process.env, SPRINT_CODER_NATIVE_SAFE_FS_ADDON: nativeSafeFsAddonPath() },
+            timeout: 15_000,
+          },
+        );
+        expect(result.stdout).toContain('# fail 0');
+        expect(result.stdout).toContain('# tests 11');
+        // The explicit case-sensitive case requires Windows support and permission to enable it.
+        expect(result.stdout).toMatch(/# pass (?:10|11)\b/);
+      },
+    );
+
     async function readSessionWorkspace(): Promise<{
       boundary: ReturnType<typeof loadNativeSafeFs>;
       root: string;
@@ -662,7 +680,8 @@ describe('NativeSafeFs authority boundary', () => {
     }> {
       const root = await realpath(await mkdtemp(join(tmpdir(), 'native-safe-fs-read-session-')));
       cleanup.push(root);
-      const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
+      const lockDirectoryPath = await prepareNativeSafeFsLockDirectory(root);
+      const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath(), lockDirectoryPath });
       const identity = await lstat(root, { bigint: true });
       return {
         boundary,
@@ -711,11 +730,18 @@ describe('NativeSafeFs authority boundary', () => {
       await writeFile(join(decoy, 'one-line.txt'), 'after');
       await mkdir(join(root, 'nested'));
       await writeFile(join(root, 'nested', 'one-line.txt'), 'after');
-
+      // Windows prevents the rename once the read session has pinned the root; install its
+      // adversarial parent first. POSIX still exercises replacement after opening the session.
+      if (process.platform === 'win32') {
+        await rm(join(root, 'nested'), { recursive: true });
+        await symlink(decoy, join(root, 'nested'), 'junction');
+      }
       const session = open();
       try {
-        await rm(join(root, 'nested'), { recursive: true });
-        await symlink(decoy, join(root, 'nested'), 'dir');
+        if (process.platform !== 'win32') {
+          await rm(join(root, 'nested'), { recursive: true });
+          await symlink(decoy, join(root, 'nested'), 'dir');
+        }
         // The bytes behind the link are identical; the openat chain never reaches them.
         expect(() => boundary.observeSealedPostImage(session, ['nested', 'one-line.txt'])).toThrow(
           expect.objectContaining({ code: 'UNSAFE_PATH' }),
@@ -728,7 +754,9 @@ describe('NativeSafeFs authority boundary', () => {
     it('reports a non-regular endpoint as neither a file nor an absence', async () => {
       const { boundary, root, open } = await readSessionWorkspace();
       await writeFile(join(root, 'target.txt'), 'after');
-      await symlink(join(root, 'target.txt'), join(root, 'link.txt'), 'file');
+      if (process.platform === 'win32')
+        await link(join(root, 'target.txt'), join(root, 'link.txt'));
+      else await symlink(join(root, 'target.txt'), join(root, 'link.txt'), 'file');
 
       const session = open();
       try {

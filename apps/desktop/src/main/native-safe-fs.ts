@@ -136,19 +136,19 @@ export interface NativeSafeFs {
   /**
    * Opens a read-only view of a Workspace for verifying sealed post-images.
    *
-   * Not a mutation session: it takes a shared lock on the root and never touches the durable fence,
+   * Not a mutation session: it takes a shared workspace lock and never advances the durable fence,
    * so verifying cannot consume a fence generation or invalidate a live mutation session. A
    * Workspace an exclusive mutation session holds answers `LOCK_BUSY`, which the caller must read
    * as "cannot verify" — never as "verified".
    *
    * Synchronous, so the completion gate can observe inside the transaction that decides the Turn's
-   * outcome. Throws `UNSUPPORTED_PLATFORM` where the backend has no implementation yet (Windows).
+   * outcome. Windows shares the mutation lock file in this boundary's bound lock directory.
    */
   openReadSession(input: NativeSafeFsReadSessionInput): NativeSafeFsReadSession;
   closeReadSession(session: NativeSafeFsReadSession): void;
   /**
    * Observes one endpoint through the same descriptor-relative walk the mutation path writes
-   * through: every parent component is opened from the pinned root with `O_NOFOLLOW|O_DIRECTORY`,
+   * through: every parent component is opened from the pinned root without following links,
    * so the object read is the one that was pinned rather than whatever the path resolves to now.
    */
   observeSealedPostImage(
@@ -248,7 +248,7 @@ type RawAddon = Readonly<{
   applyIntentEffect(input: RawEffectInput): Promise<unknown>;
   cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
   observeDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
-  openReadSession(input: NativeSafeFsReadSessionInput): unknown;
+  openReadSession(input: NativeSafeFsReadSessionInput & { lockDirectoryPath?: string }): unknown;
   closeReadSession(input: { id: string }): unknown;
   observeSealedPostImage(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
   createDirectory(input: RawDirectoryOwnershipInput): unknown;
@@ -594,15 +594,22 @@ export function loadNativeSafeFs(
     },
 
     openReadSession(input: NativeSafeFsReadSessionInput): NativeSafeFsReadSession {
+      if (addon === null)
+        throw new NativeSafeFsError('ADDON_UNAVAILABLE', 'NativeSafeFs addon is unavailable');
+      if (process.platform === 'win32' && lockDirectoryPath === null)
+        throw new NativeSafeFsError('INVALID_INPUT', 'NativeSafeFs lock directory is not bound');
       try {
         return parseReadSession(
-          addon!.openReadSession(
+          addon.openReadSession(
             Object.freeze({
               rootId: input.rootId,
               workspacePath: input.workspacePath,
               rootDev: input.rootDev,
               rootIno: input.rootIno,
               workspaceKey: input.workspaceKey,
+              ...(process.platform === 'win32' && lockDirectoryPath !== null
+                ? { lockDirectoryPath }
+                : {}),
             }),
           ),
         );

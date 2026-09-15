@@ -32,7 +32,7 @@ describe('release signing and notarization', () => {
 
     expect(sandboxBuild).toBeGreaterThan(-1);
     expect(macPackaging).toBeGreaterThan(sandboxBuild);
-    expect(makeJob).toContain('npx --yes @electron/rebuild -f -w better-sqlite3');
+    expect(makeJob).toContain('node ../../build-better-sqlite3.mjs');
     expect(makeJob).toContain('npm run build:native-safe-fs');
     expect(makeJob).not.toContain('actions/cache');
   });

@@ -1,6 +1,8 @@
 import { RetryableActionRegistry } from './retryable-action';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
@@ -187,7 +189,10 @@ import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failu
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
-import { CommandRunnerError } from './command-runner';
+import { CommandRunner, CommandRunnerError, prepareExecutionSpec } from './command-runner';
+import { ManagedCodingHarness } from './provider-workspace-tools';
+import { ManagedCommandSessions } from './managed-command-sessions';
+import { workspaceMutationBinding } from './path-guard';
 import { ToolImageBridge } from './tool-image-bridge';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
@@ -6128,6 +6133,145 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       expect.objectContaining({ state: 'idle', errorCode: null }),
     );
   });
+
+  it.each([
+    ['task-466', 'running', true, true, true],
+    ['another-task', 'running', true, true, true],
+    ['task-466', 'starting', true, true, true],
+    ['another-task', 'starting', true, true, true],
+    ['task-466', 'unconfirmed', true, true, true],
+    ['another-task', 'unconfirmed', true, true, true],
+    ['task-466', 'running', false, true, false],
+    ['another-task', 'running', false, true, false],
+    ['task-466', 'running', true, false, false],
+    ['another-task', 'exited', true, true, false],
+  ] as const)(
+    'gates completion after a finished Turn of %s: %s, same Workspace=%s, edits=%s, refused=%s',
+    async (writerTaskId, commandState, sameWorkspace, committedEditSagas, refused) => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-completion-writer-'));
+      const writerRoot = join(root, 'writer');
+      const editRoot = sameWorkspace ? writerRoot : join(root, 'writer-other');
+      await mkdir(join(writerRoot, 'nested'), { recursive: true });
+      if (!sameWorkspace) await mkdir(editRoot);
+      const binding = await workspaceMutationBinding(editRoot);
+      const workspace = {
+        source: 'project' as const,
+        projectId: 'project-writer',
+        primaryRootId: 'edit-root',
+        roots: [
+          {
+            rootId: 'edit-root',
+            path: binding.canonicalPath,
+            label: 'Workspace',
+            role: 'primary' as const,
+            status: 'available' as const,
+          },
+        ],
+        digest: 'a'.repeat(64),
+      };
+      const tools = new ManagedCodingHarness({
+        workspaceFor: () => workspace,
+        rootIdentityFor: () => binding.rootIdentityDigest,
+        policyEpochFor: () => 1,
+        authorizer: () => ({ decision: 'deny', reason: 'unused' }),
+        command: { persistence: {} as never, publish: () => undefined },
+      });
+      const sessions: unknown = Reflect.get(tools, 'commandSessions');
+      if (!(sessions instanceof ManagedCommandSessions)) throw new Error('Missing sessions');
+      let finishCommand = (): void => undefined;
+      const aborted = vi.fn();
+      const run = vi.spyOn(CommandRunner.prototype, 'run').mockImplementation((_spec, hooks) => {
+        hooks?.signal?.addEventListener('abort', aborted);
+        if (commandState === 'unconfirmed')
+          return Promise.reject(
+            new CommandRunnerError(
+              'PROCESS_TREE_TERMINATION_FAILED',
+              'test termination unconfirmed',
+            ),
+          );
+        if (commandState !== 'starting')
+          hooks?.onStarted?.({
+            executionId: 'writer-execution',
+            pid: 1,
+            startedAt: 1,
+            processStartIdentity: 'writer',
+            executionImageDigest: 'a'.repeat(64),
+            executionImageIdentity: 'writer-image',
+          });
+        return new Promise((resolve) => {
+          finishCommand = () =>
+            resolve({
+              executionId: 'writer-execution',
+              exitCode: 0,
+              signal: null,
+              canceled: false,
+              termination: 'natural',
+              durationMs: 1,
+              outputBytes: 0,
+              truncated: false,
+            });
+        });
+      });
+      const writer = { taskId: writerTaskId, turnId: 'previous-turn' };
+      try {
+        tools.startTurn({ ...writer, workspaceId: workspace.digest, policyEpoch: 1 }, 'codex');
+        const spec = await prepareExecutionSpec({
+          rootId: 'writer-root',
+          workspacePath: writerRoot,
+          cwd: 'nested',
+          executable: process.execPath,
+          argv: ['-e', ''],
+        });
+        const sessionId = '00000000-0000-4000-8000-000000000471';
+        const started = sessions.start(spec, writer, {}, sessionId);
+        if (commandState === 'unconfirmed')
+          await expect(started).rejects.toThrow('test termination unconfirmed');
+        else if (commandState !== 'starting') await started;
+        if (commandState === 'exited') {
+          finishCommand();
+          await sessions.wait(sessionId, writer);
+        }
+        tools.finishTurn(writer.taskId, writer.turnId);
+        const harness = createCompletionHarness([], false, committedEditSagas);
+        harness.router['managedCodingHarness'] = tools;
+
+        await settleCompletedEvent(harness);
+
+        expect(harness.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
+          'task-466',
+          'turn-466',
+          refused ? 'failed' : 'completed',
+          'ファイルを作成しました',
+        );
+        expect(harness.startNextQueued).toHaveBeenCalledTimes(refused ? 0 : 1);
+        expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+        expect(sessions.poll(sessionId, writer).state).toBe(
+          commandState === 'unconfirmed' ? 'failed' : commandState,
+        );
+        expect(aborted).not.toHaveBeenCalled();
+
+        if (commandState === 'running' || commandState === 'starting') {
+          finishCommand();
+          await started;
+          await sessions.wait(sessionId, writer);
+          const retry = createCompletionHarness([]);
+          retry.router['managedCodingHarness'] = tools;
+          await settleCompletedEvent(retry);
+          expect(retry.completeTurnAndFinishGoal).toHaveBeenCalledExactlyOnceWith(
+            'task-466',
+            'turn-466',
+            'completed',
+            'ファイルを作成しました',
+          );
+        }
+      } finally {
+        finishCommand();
+        await tools.dispose();
+        run.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('refuses to complete a Turn that still owns a running command, and leaves it running', async () => {
     const harness = createCompletionHarness([], true);

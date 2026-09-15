@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { isAbsolute, relative, sep } from 'node:path';
 import type { ExecutionSpec } from '@sprint-coder/domain';
+import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 import {
   CommandRunner,
   CommandRunnerError,
+  executionSpecPathGuard,
   type CommandOutputChunk,
   type CommandResult,
   type RunOptions,
@@ -204,17 +207,37 @@ export class ManagedCommandSessions {
     this.sessions.clear();
   }
 
-  /**
-   * Whether this Turn still owns a command that could be writing to the Workspace.
-   *
-   * Synchronous, and deliberately only an observation. The completion gate must not abort these
-   * sessions: a background `exec_command` outlives the Turn that started it by design, and its
-   * completion is delivered at the next safe point. Cancelling one to let a Turn finish would take
-   * a result the user asked for away from them — so the Turn that owns a live command simply does
-   * not complete, and says so.
-   */
+  /** Owner-scoped observation for Turns without a Workspace snapshot. Does not abort sessions. */
   hasActiveTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): boolean {
     return this.activeTurnSessions(owner).length > 0;
+  }
+
+  /** Observe writers across Turn/Task ownership without taking control of their processes. */
+  hasActiveWorkspaceSessions(
+    roots: readonly Readonly<{ path: string; rootIdentityDigest: string | undefined }>[],
+  ): boolean {
+    const targets = roots.map((root) => ({
+      ...root,
+      path: pathComparisonKey(canonicalizeExistingPath(root.path)),
+    }));
+    return [...this.sessions.values()].some((session) => {
+      if (
+        session.state !== 'starting' &&
+        session.state !== 'running' &&
+        !session.terminationUnconfirmed
+      )
+        return false;
+      // The prepared guard pins the Workspace root even when cwd is a nested directory, and
+      // remains reachable through the session after finishTurn releases the owner's tools.
+      const guard = executionSpecPathGuard(session.spec);
+      const path = pathComparisonKey(guard.workspacePath);
+      return targets.some(
+        (root) =>
+          root.rootIdentityDigest === guard.rootIdentityDigest ||
+          containsPath(root.path, path) ||
+          containsPath(path, root.path),
+      );
+    });
   }
 
   private activeTurnSessions(owner: Readonly<{ taskId: string; turnId: string }>): Session[] {
@@ -281,4 +304,9 @@ export class ManagedCommandSessions {
       if (this.sessions.size < this.maxSessions) return;
     }
   }
+}
+
+function containsPath(parent: string, child: string): boolean {
+  const suffix = relative(parent, child);
+  return suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
 }
