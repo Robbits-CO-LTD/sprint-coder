@@ -61,6 +61,7 @@ export type ComputerUseProviderView = Readonly<{
 }>;
 
 export type ComputerUseStartView = Readonly<{
+  maxRounds?: number;
   profileId: string;
   profileRevision: number;
   windowCandidateId: string;
@@ -242,6 +243,9 @@ export function ComputerUseOnboarding({
     providers[0] === undefined ? '' : providerKeyOf(providers[0]),
   );
   const [remember, setRemember] = useState(false);
+  const [roundLimit, setRoundLimit] = useState('25');
+  const maxRounds = Number(roundLimit);
+  const roundLimitValid = Number.isInteger(maxRounds) && maxRounds >= 1 && maxRounds <= 25;
   const [egressConfirmed, setEgressConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -278,6 +282,7 @@ export function ComputerUseOnboarding({
     selectedProfile !== null &&
     selectedProvider !== undefined &&
     selectedWindow !== null &&
+    roundLimitValid &&
     egressConfirmed
       ? serializeComputerUseActivationIntent({
           operation: 'start',
@@ -288,6 +293,7 @@ export function ComputerUseOnboarding({
           modelId: selectedProvider.modelId,
           providerEgressConsent: true,
           remember,
+          maxRounds,
           expectedPolicyEpoch,
           expectedProfileRevision: selectedWindow.profileRevision,
           windowId: selectedWindow.id,
@@ -315,6 +321,7 @@ export function ComputerUseOnboarding({
       modelId: preferred.modelId,
       providerEgressConsent: true,
       remember: true,
+      maxRounds: 25,
       expectedPolicyEpoch,
       expectedProfileRevision: profile.revision,
     });
@@ -430,6 +437,7 @@ export function ComputerUseOnboarding({
         connectionId: preferred.connectionId,
         modelId: preferred.modelId,
         remember: true,
+        maxRounds: 25,
         egressConfirmed: true,
       });
     } catch (cause) {
@@ -452,6 +460,7 @@ export function ComputerUseOnboarding({
       selectedProvider === undefined ||
       selectedWindow === null ||
       windowId === '' ||
+      !roundLimitValid ||
       !egressConfirmed
     )
       return;
@@ -465,6 +474,7 @@ export function ComputerUseOnboarding({
         connectionId: selectedProvider.connectionId,
         modelId: selectedProvider.modelId,
         remember,
+        maxRounds,
         egressConfirmed: true,
       });
     } catch (cause) {
@@ -714,6 +724,31 @@ export function ComputerUseOnboarding({
             <p className="computer-use-native-latency-note" role="note">
               利用料金、送信データの保持期間、学習利用の有無は選択したProviderとの契約・設定に従います。開始前にProvider側の条件を確認してください。
             </p>
+            <details className="computer-use-observe-details">
+              <summary>実行回数の詳細設定</summary>
+              <label className="computer-use-field">
+                <span>最大実行回数</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={25}
+                  step={1}
+                  value={roundLimit}
+                  disabled={busy}
+                  aria-invalid={!roundLimitValid}
+                  aria-describedby="computer-use-round-limit-help"
+                  onChange={(event) => setRoundLimit(event.target.value)}
+                />
+              </label>
+              <p id="computer-use-round-limit-help" className="computer-use-native-latency-note">
+                1〜25回。この回数に達したら最後の画面を確認して停止します。今回の開始だけに適用します。
+              </p>
+              {!roundLimitValid ? (
+                <p className="computer-use-error" role="alert">
+                  1〜25の整数を入力してください。
+                </p>
+              ) : null}
+            </details>
             <label className="computer-use-check">
               <input
                 type="checkbox"
@@ -762,7 +797,10 @@ export function ComputerUseOnboarding({
               busy ||
               (step === 1
                 ? selectedProfile === null || !selectedProfile.available
-                : selectedProvider === undefined || windowId === '' || !egressConfirmed)
+                : selectedProvider === undefined ||
+                  windowId === '' ||
+                  !egressConfirmed ||
+                  !roundLimitValid)
             }
           >
             {busy ? '確認中…' : step === 1 ? '次へ' : '開始'}

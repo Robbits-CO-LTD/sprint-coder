@@ -103,6 +103,10 @@ describe('trusted Computer Use UI activation', () => {
     expect(startActivationIntent(input)).not.toBe(
       startActivationIntent({ ...input, mode: 'full_access_app' }),
     );
+    expect(startActivationIntent(input)).toBe(startActivationIntent({ ...input, maxRounds: 25 }));
+    expect(startActivationIntent({ ...input, maxRounds: 3 })).not.toBe(
+      startActivationIntent(input),
+    );
     expect(
       approvalActivationIntent({
         approvalId: 'approval-1',

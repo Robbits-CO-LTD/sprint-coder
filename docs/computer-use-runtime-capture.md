@@ -30,21 +30,34 @@ Stop without later native calls. Missing/extra rounds, replayed native request I
 unparsed action, non-native wait/finish, rejected/uncertain results, and missing final observation
 cannot satisfy it. This diagnostic boolean never makes `finalGateEligible` true.
 
-The existing normal runtime's limit is 25 and its final action has no subsequent observation.
-A focused Controller regression documents 25 Provider plans / 25 native actions / 25 observations
-followed by `limit_reached`. The capture does not add an observation to conceal that gap.
+Normal session settings now accept an integer limit of 1–25 (default 25), bound to the trusted
+start/quick-start/resume intent and in-memory session/plan grant. This value is not persisted in
+the app profile. After the last completed action, the normal runtime obtains one final fresh
+observation through the Broker and stops without another Provider plan. Direct tests establish
+three plans / three native calls / four observations for limit 3, and no extra observation when
+Stop or policy revocation wins. This is the same execution path with or without a recorder.
 
 ## Privacy inspection prerequisite
 
 `inspectComputerUsePrivacySurfaces` is a local, read-only helper for a protected acceptance runner.
 It requires explicit regular files below one root, and transient payload samples from the tested
-session. It streams DB, log, telemetry, Provider trace, crash, stdout, and stderr files; detects
+session. It reads one bounded 16MiB file at a time (64MiB total corpus), across DB, log, telemetry,
+Provider trace, crash, stdout, and stderr files; detects
 raw, base64 image, UTF-16LE, and JSON string representations, including chunk boundaries; and
 returns only surface enums, bounded counts, file digests, and detected payload categories.
 Missing payload categories, missing/unreadable/changed files, symlinks, duplicate paths, and size
-limits remain uninspected. Owned byte buffers are cleared; caller-owned inputs are not modified.
+limits remain uninspected. Owned byte buffers are explicitly cleared; temporary JavaScript strings
+are released for garbage collection. Complete memory erasure is not guaranteed, and caller-owned
+inputs are not modified. An 8MiB image / 64MiB file-corpus regression bounds copying: the previous
+overlap implementation copied 8.6GB and took 15.1s locally; file-bounded scanning copied no overlap
+and took 276ms in the same fixture. These timings are local diagnostics, not cross-machine limits.
 
-An inspected file is not proof of a complete sink inventory. The protected runner must enumerate
+Each successful physical scan is labelled `raw_bytes_scanned`, with `logicalValuesInspected: false`.
+In particular, SQLite splits BLOB/TEXT across pages: a direct test stores and reads back a 32KiB
+BLOB on 512-byte pages, while whole-payload raw search misses it. The database is therefore never
+labelled logically inspected by this helper. Compressed crash archives have the same limitation.
+A physical scan is not proof that the logical value is absent, nor of a complete sink inventory.
+The protected runner must enumerate
 all relevant files (including SQLite WAL/SHM and rotated files), flush/close the tested processes,
 account for disabled/no-file sinks from independent runtime facts, and exclude later writes.
 Compressed archives, encrypted databases, escaped Unicode variants beyond JSON.stringify, and
@@ -53,16 +66,16 @@ The helper neither scans live user data automatically nor claims final privacy a
 
 ## Remaining required connections
 
-| Requirement                                    | Current evidence                           | Required next boundary                                                                                                                       |
-| ---------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Actual Provider and canonical action           | Production emit sites; direct tests        | Selected non-OpenRouter, fixed-image preflight and exact 3 live rounds separately on each OS                                                 |
-| Bounded runtime / final state                  | Final-update gap reproduced                | User-selected normal session limit, final fresh observation without a fourth Provider request; Stop/policy race tests                        |
-| Semantic plus typing/scroll, TTL, egress, cost | Partial runtime metadata only              | Correlated action-class/TTL/consent/budget assertions, final app state, both OS sessions                                                     |
-| Source/package/signer                          | Native manifest digest observed            | Independent exact-source portable/installer/DMG and signer verification from #387                                                            |
-| Native zero-after-Stop                         | Logical call pairs and cancel/close result | Native OS-input-API attempt counter bound to session/cancel epoch; never infer physical calls from logical dispatch                          |
-| Privacy                                        | Direct tests of explicit-file scanner      | Full sink inventory and transient payload samples from each real package run; independently inspect unsupported formats                      |
-| Safety                                         | Direct Controller/planner regressions      | Original AC/INV proportional direct tests and representative per-OS Core hard-boundary/Stop scenarios in parent map                          |
-| Canonical transcript and protected sealing     | All PASS imports rejected                  | Reviewed assertions consuming source-bound runtime/native/privacy facts, complete original AC coverage, protected collection and attestation |
+| Requirement                                    | Current evidence                                                 | Required next boundary                                                                                                                       |
+| ---------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Actual Provider and canonical action           | Production emit sites; direct tests                              | Selected non-OpenRouter, fixed-image preflight and exact 3 live rounds separately on each OS                                                 |
+| Bounded runtime / final state                  | Normal 1–25 round limit and final observation; direct race tests | Both OS signed-package final state with real Provider                                                                                        |
+| Semantic plus typing/scroll, TTL, egress, cost | Partial runtime metadata only                                    | Correlated action-class/TTL/consent/budget assertions, final app state, both OS sessions                                                     |
+| Source/package/signer                          | Native manifest digest observed                                  | Independent exact-source portable/installer/DMG and signer verification from #387                                                            |
+| Native zero-after-Stop                         | Logical call pairs and cancel/close result                       | Native OS-input-API attempt counter bound to session/cancel epoch; never infer physical calls from logical dispatch                          |
+| Privacy                                        | Direct tests of explicit-file scanner                            | Full sink inventory and transient payload samples from each real package run; independently inspect unsupported formats                      |
+| Safety                                         | Direct Controller/planner regressions                            | Original AC/INV proportional direct tests and representative per-OS Core hard-boundary/Stop scenarios in parent map                          |
+| Canonical transcript and protected sealing     | All PASS imports rejected                                        | Reviewed assertions consuming source-bound runtime/native/privacy facts, complete original AC coverage, protected collection and attestation |
 
 The native probe must count **attempts reaching an OS input API**, not successful effects. A
 SendInput/AX result is a separate outcome. Proposed counters require atomic increments directly

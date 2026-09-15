@@ -11,6 +11,7 @@ import {
   computerUseObservationSchema,
   computerUsePolicyLanguageSchema,
   computerUseSessionStatusSchema,
+  computerUseRoundLimitSchema,
   computerUseWindowCandidateSchema,
   COMPUTER_USE_LIMITS,
   type ComputerAppIdentity,
@@ -211,6 +212,7 @@ export type ComputerUseStartRequest = Readonly<{
   taskId: string;
   turnId?: string | undefined;
   resumeSessionId?: string | undefined;
+  maxRounds?: number | undefined;
   profileId: string;
   windowId: string;
   mode: ComputerUseMode;
@@ -292,6 +294,7 @@ type SessionRecord = {
   stopPromise: Promise<void> | null;
 };
 type PlanGrant = {
+  maxRounds: number;
   actionType: ComputerUseAction['type'];
   actionDigest: string;
   targetId: string;
@@ -605,6 +608,12 @@ export class ComputerUseController {
 
   async start(input: ComputerUseStartRequest): Promise<ComputerUseSessionStatus> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
+    input = {
+      ...input,
+      maxRounds: computerUseRoundLimitSchema.parse(
+        input.maxRounds ?? COMPUTER_USE_LIMITS.maxRounds,
+      ),
+    };
     if (input.resumeSessionId !== undefined) return this.resume(input);
     if (this.sessions.size !== 0 || this.startingSessions.size !== 0 || this.startInProgress)
       throw new Error('Only one Computer Use session is allowed');
@@ -641,6 +650,7 @@ export class ComputerUseController {
       input.profileId !== record.status.profileId ||
       input.windowId !== record.status.windowId ||
       input.mode !== record.status.mode ||
+      input.maxRounds !== record.status.maxRounds ||
       input.connectionId !== record.status.connectionId ||
       input.modelId !== record.status.modelId ||
       input.expectedPolicyEpoch !== record.status.policyEpoch ||
@@ -656,7 +666,7 @@ export class ComputerUseController {
       throw new Error('Computer Use native boundary is unavailable');
     if (this.deps.canStartSession?.(record.status.taskId) === false)
       throw new Error('Computer Use requires an idle Task without active Team work');
-    if (record.status.round >= COMPUTER_USE_LIMITS.maxRounds)
+    if (record.status.round >= record.status.maxRounds)
       throw new Error('Computer Use round limit was reached');
     this.assertSessionLive(record);
     const persistedProfile = this.deps.persistence.getComputerAppProfile(record.profile.id);
@@ -976,7 +986,7 @@ export class ComputerUseController {
       policyEpoch,
       observationRevision: 0,
       round: 0,
-      maxRounds: COMPUTER_USE_LIMITS.maxRounds,
+      maxRounds: input.maxRounds ?? COMPUTER_USE_LIMITS.maxRounds,
       profileRevision: selectedProfile.revision,
       startedAt,
       expiresAt: new Date(
@@ -1444,7 +1454,7 @@ export class ComputerUseController {
     record.status = this.status(record, 'observing', null);
     this.emit(record.status);
     if (record.planner === null) return;
-    for (let round = firstRound; round <= COMPUTER_USE_LIMITS.maxRounds; round += 1) {
+    for (let round = firstRound; round <= record.status.maxRounds; round += 1) {
       this.assertSessionLive(record);
       let observation: ComputerUseNativeObservation;
       try {
@@ -1503,14 +1513,26 @@ export class ComputerUseController {
         record.status = this.status(record, 'awaiting_approval', null, observation.revision, round);
         this.emit(record.status);
       }
+      let result: ComputerUseActionResult;
       try {
-        await this.act(sessionId, action, `${sessionId}:action:${round}`);
+        result = await this.act(sessionId, action, `${sessionId}:action:${round}`);
       } catch (error) {
         if (record.status.state === 'paused' || record.controller.signal.aborted) return;
         throw error;
       }
       if (action.type === 'wait') await waitBounded(action.milliseconds, record.controller.signal);
       if (record.status.state === 'paused') return;
+      if (round === record.status.maxRounds && result.result === 'completed') {
+        // Complete the same observation/action journey at the bound, without a further plan.
+        // Normal Broker/session checks still deny the read if Stop or policy revocation won.
+        this.assertSessionLive(record);
+        await this.observe(sessionId, `${sessionId}:observe:final`);
+        this.assertSessionLive(record);
+        if (!this.observationIsFresh(record)) {
+          await this.stop(sessionId, 'stale_observation');
+          return;
+        }
+      }
     }
     await this.stop(sessionId, 'limit_reached');
   }
@@ -1738,6 +1760,8 @@ export class ComputerUseController {
       requestId: `${sessionId}:observe:${randomUUID()}`,
       cancelEpoch: record.native.cancelEpoch,
     });
+    signal?.throwIfAborted();
+    this.assertSessionLive(record);
     return this.acceptNativeObservation(record, observation);
   }
 
@@ -2128,12 +2152,14 @@ export class ComputerUseController {
     )
       return;
     record.planGrant = {
+      maxRounds: record.status.maxRounds,
       actionType: action.type,
       actionDigest: computerUseActionDigest(action),
       targetId,
       targetSignature: record.observation.targetSignatures[targetId],
       ...authority,
-      remaining: 16,
+      // The approval authorizes the current action; the grant covers only later rounds.
+      remaining: Math.min(16, record.status.maxRounds - Math.max(1, record.status.round)),
       expiresAt: this.now() + 60_000,
       observationRevision: record.observation.revision,
     };
@@ -2142,6 +2168,7 @@ export class ComputerUseController {
   private planGrantMatches(record: SessionRecord, action: ComputerUseAction): boolean {
     const grant = record.planGrant;
     if (grant === null || this.now() >= grant.expiresAt || grant.remaining <= 0) return false;
+    if (grant.maxRounds !== record.status.maxRounds) return false;
     if (!this.observationIsFresh(record)) return false;
     if (!computerUsePlanGrantObservationMatches(grant, record.observation)) {
       record.planGrant = null;
@@ -2228,6 +2255,7 @@ export class ComputerUseController {
       await this.stop(record.status.sessionId, 'emergency_stop');
       throw new Error('Computer Use Stop overlay could not follow the native target');
     }
+    this.assertSessionLive(record);
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) => capture.observe(parsed));
     return parsed;
   }
@@ -2362,7 +2390,7 @@ export class ComputerUseController {
       stopReason: state === 'stopped' ? stopReason : null,
       pendingApproval,
       observationRevision,
-      round: Math.min(COMPUTER_USE_LIMITS.maxRounds, round),
+      round: Math.min(record.status.maxRounds, round),
       lastObservationAt:
         observationRevision > record.status.observationRevision
           ? new Date(this.now()).toISOString()

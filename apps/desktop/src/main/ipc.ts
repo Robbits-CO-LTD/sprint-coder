@@ -4591,6 +4591,7 @@ export class IpcRouter {
         modelId: input.modelId,
         providerEgressConsent: input.providerEgressConsent,
         remember: input.remember,
+        maxRounds: input.maxRounds ?? 25,
         expectedPolicyEpoch: input.expectedPolicyEpoch,
         expectedProfileRevision: latch.activationExpectedProfileRevision,
       });

@@ -2427,6 +2427,13 @@ describe('Computer Use contracts', () => {
       pendingApproval: null,
     });
     expect(status.pendingApproval).toBeNull();
+    expect(contracts.computerUseRoundLimitSchema.parse(3)).toBe(3);
+    for (const maxRounds of [0, 26, 1.5, NaN])
+      expect(contracts.computerUseRoundLimitSchema.safeParse(maxRounds).success).toBe(false);
+    expect(
+      contracts.computerUseSessionStatusSchema.safeParse({ ...status, maxRounds: 3, round: 4 })
+        .success,
+    ).toBe(false);
     expect(() =>
       contracts.computerUseSessionStatusSchema.parse({
         ...status,
