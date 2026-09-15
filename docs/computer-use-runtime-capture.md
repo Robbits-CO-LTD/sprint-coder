@@ -29,6 +29,10 @@ events, with no probe-only CLI, Renderer command, arbitrary fd/path selector, or
 Main uses bounded asynchronous writes, never waits for drain, and unrefs the pipe. Missing,
 closed, overflowing or broken pipes invalidate capture only. Recorder overflow also invalidates
 the stream, so a truncated recorder cannot acquire a valid terminal frame.
+For packaged startup with CU OFF, the native loader intentionally returns a disabled binding.
+The hello source comes from the existing Main-embedded build pin, not that binding's zero source;
+native manifest availability/readiness remain unchanged. Missing or mismatched pins invalidate
+capture only. This metadata does not enable native loading or establish signer authenticity.
 
 `collect-computer-use-runtime.mjs` owns the spawned child and receives only that pipe, checking
 pid/ppid/platform and executable bytes. stdout/stderr are ignored rather than persisted. Nonce,

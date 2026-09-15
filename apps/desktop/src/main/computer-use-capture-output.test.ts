@@ -53,12 +53,69 @@ const hello = {
   packageReady: false,
 };
 beforeEach(() => {
+  vi.unstubAllGlobals();
   state.pipe = true;
   state.queued = 0;
   state.throws = false;
   sockets.length = 0;
 });
 describe('normal Main capture output has no control authority', () => {
+  const compiledPin = {
+    version: 1,
+    sourceCommit: 'b'.repeat(40),
+    platform: 'darwin',
+    architecture: process.arch,
+    artifactDigest: 'd'.repeat(64),
+    manifestDigest: 'c'.repeat(64),
+  };
+  it('binds packaged CU-OFF hello to the compiled source without enabling the native host', () => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', compiledPin);
+    const output = createComputerUseCaptureOutput({
+      environment,
+      hello: {
+        ...hello,
+        packaged: true,
+        sourceCommit: '0'.repeat(40),
+        nativeManifestDigest: '0'.repeat(64),
+      },
+    })!;
+    expect(output.invalid()).toBe(false);
+    expect(JSON.parse(sockets[0]!.writes[0]!).payload).toMatchObject({
+      sourceCommit: compiledPin.sourceCommit,
+      nativeManifestDigest: '0'.repeat(64),
+      packageReady: false,
+    });
+  });
+  it('preserves a ready source-bound hello without changing caller metadata', () => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__', compiledPin);
+    const metadata = Object.freeze({ ...hello, packaged: true, packageReady: true });
+    const output = createComputerUseCaptureOutput({ environment, hello: metadata })!;
+    expect(output.invalid()).toBe(false);
+    expect(JSON.parse(sockets[0]!.writes[0]!).payload).toEqual(metadata);
+  });
+  it.each(['missing', 'invalid', 'wrong-platform', 'wrong-source', 'unbound-ready'])(
+    'invalidates packaged hello with %s source pin, without throwing',
+    (kind) => {
+      if (kind !== 'missing')
+        vi.stubGlobal(
+          '__SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__',
+          kind === 'invalid'
+            ? null
+            : { ...compiledPin, platform: kind === 'wrong-platform' ? 'win32' : 'darwin' },
+        );
+      const output = createComputerUseCaptureOutput({
+        environment,
+        hello: {
+          ...hello,
+          packaged: true,
+          sourceCommit: kind === 'wrong-source' ? 'e'.repeat(40) : '0'.repeat(40),
+          packageReady: kind === 'unbound-ready',
+        },
+      })!;
+      expect(output.invalid()).toBe(true);
+      expect(sockets.every((socket) => socket.writes.length === 0)).toBe(true);
+    },
+  );
   it('is opt-in and never exposes a writable path or fd selector', () => {
     expect(createComputerUseCaptureOutput({ environment: {}, hello })).toBeUndefined();
     expect(
