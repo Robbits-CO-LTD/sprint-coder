@@ -38,7 +38,10 @@ Validation of this preparation change:
   paths, missing artifacts, and changing digests. OS doubles are synthetic; no test signature was
   created. The source and suite were streamed through SSH for execution without remote file writes.
   Two later cases, for provider-based relative path resolution and for an empty native-library
-  scan, bring the suite to 21; they have not been executed on Windows yet.
+  scan, bring the suite to 21, measured as 21 passed on `mainpc` (Windows PowerShell 5.1.26100).
+  That run also required the suite to import the shadowed modules before defining its doubles: an
+  unloaded module is autoloaded on the first call and its exported function then outranks a
+  script-scope double, which is why the real `Get-FileHash` ran until the import was made explicit.
 - A read-only real System32 Notepad signature was valid and the preflight assertion rejected it
   with `SIGNER_MISMATCH` against a different expected identity. This is a verifier check, not proof
   of the product's native input denial.

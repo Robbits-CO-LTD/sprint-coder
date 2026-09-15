@@ -1,5 +1,10 @@
 # Dependency-free headless unit tests; no certificates, files, or GUI are changed.
 . "$PSScriptRoot/verify-signatures.ps1"
+# The doubles below shadow the real cmdlets only once their modules are loaded: a script-scope
+# function outranks an already-imported module's exported function, but an unloaded module is
+# autoloaded on the first call and the real command then wins. Whether these modules are preloaded
+# differs between Windows builds and hosts, so import them explicitly before defining any double.
+Import-Module Microsoft.PowerShell.Utility, Microsoft.PowerShell.Security, Microsoft.PowerShell.Management -ErrorAction Stop
 $ErrorActionPreference = 'Stop'
 $testThumbprint = 'A' * 40
 $testSubject = 'CN=Fixture Test Publisher'
