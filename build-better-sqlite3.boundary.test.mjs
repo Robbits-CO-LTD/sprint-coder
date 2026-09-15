@@ -379,6 +379,36 @@ test('Failure detail reports only fixed tokens and never a child-supplied string
   assert.equal(leaky.includes(canary), false, 'A non-token code must be reduced, never echoed');
 });
 
+test('Computer Use build failures report the errno rather than inventing an exit code', () => {
+  const source = readFileSync(resolve(root, 'build-computer-use-native.mjs'), 'utf8');
+  assert.equal(
+    source.includes('exit ${result.error ? 1 : (result.status ?? 1)}'),
+    false,
+    'A child that never started has no exit code and must not be reported as exit 1',
+  );
+  assert.ok(
+    source.includes('nativeBuildFailureDetail(result)'),
+    'The Computer Use build must summarize failures with the shared helper',
+  );
+  assert.ok(
+    source.includes("stdio: ['ignore', 'ignore', 'ignore']"),
+    'The build child discards its output at the file descriptor',
+  );
+  // The helper carries the errno for exactly those cases, with no budget and no child message.
+  assert.equal(
+    nativeBuildFailureDetail({ error: { code: 'ENOENT' }, status: null }),
+    'error=ENOENT, signal=none',
+  );
+  assert.equal(
+    nativeBuildFailureDetail({
+      error: Object.assign(new Error(canary), { code: 'ENOBUFS' }),
+      status: null,
+    }),
+    'error=ENOBUFS, signal=none',
+    'The child message must never reach the summary',
+  );
+});
+
 test('Pure helper leaves frozen parent signing configuration intact', () => {
   const child = sanitizedNativeBuildEnvironment(environment);
   assert.equal(JSON.stringify(environment) === originalEnvironment, true);
