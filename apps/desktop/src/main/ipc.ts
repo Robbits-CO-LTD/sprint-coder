@@ -332,6 +332,7 @@ import {
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
+import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
 import { ComputerUseEmergencyStop } from './computer-use-emergency-stop';
 import {
   ComputerUseUserActivationGate,
@@ -983,6 +984,7 @@ export class IpcRouter {
   private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
   private disposed = false;
   private readonly computerUseController: ComputerUseController;
+  private readonly computerUseRuntimeCapture = new ComputerUseRuntimeCapture();
   private readonly computerUseNative: ComputerUseNativeHost;
   private readonly computerUseActivationGate: ComputerUseUserActivationGate;
   private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
@@ -1766,6 +1768,7 @@ export class IpcRouter {
       },
     });
     this.computerUseController = new ComputerUseController({
+      runtimeCapture: this.computerUseRuntimeCapture,
       persistence: this.persistence,
       native: computerUseNative,
       featureEnabled: () => computerUseDesktopV1Enabled(),
@@ -1808,6 +1811,7 @@ export class IpcRouter {
         const endpointTrust = this.providerEgressTrustForConnection(verified);
         const catalogRevision = this.modelCatalog.revision;
         const plannerBaseDeps = {
+          runtimeCapture: this.computerUseRuntimeCapture,
           runtime: this.providerRegistry.resolve(verified),
           connection: verified,
           modelId,

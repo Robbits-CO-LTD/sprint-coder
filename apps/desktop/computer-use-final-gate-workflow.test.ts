@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { ComputerUseRuntimeCapture } from './src/main/computer-use-runtime-capture';
 
 type EvidenceRow = {
   id: string;
@@ -524,6 +525,37 @@ describe('Computer Use external final gate', () => {
     const result = validateFixture(complete, missingMacHash, true, false);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('--macos-sha256 is required');
+  });
+
+  it('rejects in-process runtime observations as standalone evidence, including hand-added PASS rows', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-runtime-'));
+    const capturePath = resolve(root, 'computer-use-machine-transcript.json');
+    const capture = new ComputerUseRuntimeCapture();
+    capture.start({
+      type: 'session',
+      platform: 'darwin',
+      sessionDigest: '1'.repeat(64),
+      appDigest: '2'.repeat(64),
+      windowDigest: '3'.repeat(64),
+      manifestDigest: '4'.repeat(64),
+    });
+    try {
+      for (const snapshot of [
+        capture.snapshot(),
+        { ...capture.snapshot(), journeys: passingEvidence().ac28Core },
+      ]) {
+        writeFileSync(capturePath, JSON.stringify(snapshot), { encoding: 'utf8', mode: 0o600 });
+        const result = spawnSync(
+          process.execPath,
+          [generatorPath, '--capture', capturePath, '--validate-capture-only'],
+          { encoding: 'utf8' },
+        );
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('capture keys must be exactly');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('refuses synthetic PASS capture and can only seal incomplete CLOSE_HOLD evidence', () => {

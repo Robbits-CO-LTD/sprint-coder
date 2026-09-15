@@ -5,6 +5,10 @@ import type { ProviderConnection, TaskSummary } from '@sprint-coder/contracts';
 import type { PermissionBroker } from './permission-broker';
 import type { ProviderRuntime } from './provider-runtime';
 import {
+  ComputerUseRuntimeCapture,
+  computerUseCaptureDigest,
+} from './computer-use-runtime-capture';
+import {
   COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
   COMPUTER_USE_PREFLIGHT_MARKER_PNG_BASE64,
   computerUseProviderEndpointRevision,
@@ -174,6 +178,85 @@ describe('Computer Use planner parser', () => {
 });
 
 describe('Computer Use provider preflight', () => {
+  it('captures only executed preflight and strict parser outcomes, never response bodies', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    runtimeCapture.start({
+      type: 'session',
+      sessionDigest: computerUseCaptureDigest('session-1'),
+      platform: 'darwin',
+      appDigest: observation.appIdentityDigest,
+      windowDigest: observation.windowIdentityDigest,
+      manifestDigest: 'f'.repeat(64),
+    });
+    const base = {
+      ...deps(runtimeFor(() => undefined, '{"type":"click","x":0.75,"y":0.25,"button":"left"}')),
+      runtimeCapture,
+    };
+    const permit = await preflightComputerUseProvider(
+      { ...base, sessionId: 'session-1' },
+      new AbortController().signal,
+    );
+    const response = '{"type":"type","text":"PRIVATE_FIXTURE_TEXT"}';
+    const planner = new ProviderComputerUsePlanner({
+      ...base,
+      compatibilityPermit: permit,
+      runtime: runtimeFor(() => undefined, response),
+    });
+    await planner.plan({ observation, round: 1, signal: new AbortController().signal });
+    const snapshot = runtimeCapture.snapshot();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      'session',
+      'preflight_started',
+      'preflight_passed',
+      'round_started',
+      'parsed',
+    ]);
+    expect(snapshot.events.at(-1)).toMatchObject({
+      type: 'parsed',
+      actionClass: 'type',
+      responseDigest: computerUseCaptureDigest(response),
+      responseBytes: Buffer.byteLength(response),
+    });
+    const serialized = JSON.stringify(snapshot);
+    for (const body of [
+      'PRIVATE_FIXTURE_TEXT',
+      response,
+      observation.images[0]!.base64,
+      'session-1',
+      'connection-1',
+      'model-1',
+    ])
+      expect(serialized).not.toContain(body);
+    expect(snapshot.finalGateEligible).toBe(false);
+  });
+
+  it('does not emit preflight success for parser failure or changed resolution', async () => {
+    for (const output of [
+      '{"type":"finish"}',
+      '{"type":"click","x":0.75,"y":0.25,"button":"left","extra":true}',
+    ]) {
+      const runtimeCapture = new ComputerUseRuntimeCapture();
+      runtimeCapture.start({
+        type: 'session',
+        sessionDigest: computerUseCaptureDigest('session-1'),
+        platform: 'darwin',
+        appDigest: observation.appIdentityDigest,
+        windowDigest: observation.windowIdentityDigest,
+        manifestDigest: 'f'.repeat(64),
+      });
+      await expect(
+        preflightComputerUseProvider(
+          { ...deps(runtimeFor(() => undefined, output)), sessionId: 'session-1', runtimeCapture },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow();
+      expect(runtimeCapture.snapshot().events.map((event) => event.type)).toEqual([
+        'session',
+        'preflight_started',
+      ]);
+    }
+  });
+
   it('ships a valid 64px PNG with the red marker at the required normalized position', () => {
     const png = Buffer.from(COMPUTER_USE_PREFLIGHT_MARKER_PNG_BASE64, 'base64');
     const decoded = decodeUnfilteredRgbaPng(png);

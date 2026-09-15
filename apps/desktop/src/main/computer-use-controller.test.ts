@@ -23,6 +23,7 @@ import {
   type ComputerUseNativeSession,
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
+import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -117,6 +118,7 @@ function observation(
 
 function createFixture(
   options: {
+    runtimeCapture?: ComputerUseRuntimeCapture;
     mode?: 'observe_only' | 'supervised' | 'full_access_app';
     observationOverrides?: Partial<ComputerUseObservation>;
     observationOverridesForRevision?: (revision: number) => Partial<ComputerUseObservation>;
@@ -391,6 +393,7 @@ function createFixture(
   const controller = new ComputerUseController({
     persistence,
     native,
+    ...(options.runtimeCapture === undefined ? {} : { runtimeCapture: options.runtimeCapture }),
     ...(options.planner === undefined ? {} : { planner: options.planner }),
     featureEnabled: () => true,
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -431,6 +434,7 @@ function createFixture(
       policyEpoch = next;
     },
     dispatchCount: () => dispatchCount,
+    observationCount: () => revision,
     dispatchedActions: () => dispatchedActions,
     nativeStartWindowIds: () => nativeStartWindowIds,
     nativeCancelCount: () => nativeCancelCount,
@@ -471,6 +475,74 @@ const click: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left'
 const plainType: ComputerUseAction = { type: 'type', text: 'hello' };
 
 describe('ComputerUseController', () => {
+  it('records actual native calls without giving direct handwritten actions Provider evidence', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    const fixture = createFixture({ runtimeCapture });
+    const session = await start(fixture);
+    await fixture.controller.observe(session.sessionId);
+    await fixture.controller.act(session.sessionId, click, 'direct-fixture-action');
+    await fixture.controller.stop(session.sessionId);
+    const snapshot = runtimeCapture.snapshot();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      'session',
+      'observation',
+      'native_started',
+      'native_finished',
+      'action_result',
+      'stop_requested',
+      'stop_acknowledged',
+    ]);
+    expect(snapshot.exactThreeRoundJourneyObserved).toBe(false);
+    expect(snapshot.finalGateEligible).toBe(false);
+    expect(fixture.dispatchCount()).toBe(1);
+  });
+
+  it('does not change input, Stop, or observation behavior when the observer throws or overflows', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    const fixture = createFixture({ runtimeCapture });
+    const session = await start(fixture);
+    const record = vi.spyOn(runtimeCapture, 'record').mockImplementation(() => {
+      throw new Error('fixture sink failure');
+    });
+    await fixture.controller.observe(session.sessionId);
+    await fixture.controller.act(session.sessionId, click, 'sink-failure-action');
+    await fixture.controller.stop(session.sessionId);
+    expect(runtimeCapture.snapshot().invalid).toBe(true);
+    expect(fixture.dispatchCount()).toBe(1);
+    expect(fixture.nativeCancelCount()).toBe(1);
+    expect(fixture.nativeCloseCount()).toBe(1);
+    await expect(fixture.controller.observe(session.sessionId)).rejects.toThrow();
+    expect(fixture.observationCount()).toBe(1);
+    record.mockRestore();
+    await fixture.controller.dispose();
+  });
+
+  it('does not add capture observations after policy revocation', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    const fixture = createFixture({ runtimeCapture });
+    const session = await start(fixture);
+    await fixture.controller.observe(session.sessionId);
+    fixture.setPolicyEpoch(1);
+    await expect(fixture.controller.act(session.sessionId, click, 'revoked')).rejects.toThrow();
+    await fixture.controller.stop(session.sessionId);
+    expect(fixture.dispatchCount()).toBe(0);
+    expect(fixture.observationCount()).toBe(1);
+    expect(runtimeCapture.snapshot().exactThreeRoundJourneyObserved).toBe(false);
+  });
+
+  it('documents the final bounded action has no updated observation without changing runtime behavior', async () => {
+    const plan = vi.fn(async () => click);
+    const fixture = createFixture({ planner: { plan } });
+    await start(fixture);
+    await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+    expect(plan).toHaveBeenCalledTimes(25);
+    expect(fixture.dispatchCount()).toBe(25);
+    // The final observation was used to plan action 25; it cannot prove that action's outcome.
+    expect(fixture.observationCount()).toBe(25);
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('limit_reached');
+    await fixture.controller.dispose();
+  });
+
   it('refreshes a same-path same-signer Notepad profile before issuing its window permit', async () => {
     const registeredDigest = '1'.repeat(64);
     const updatedDigest = '2'.repeat(64);

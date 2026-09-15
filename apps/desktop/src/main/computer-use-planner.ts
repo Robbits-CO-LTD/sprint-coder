@@ -36,6 +36,11 @@ import type {
   ComputerUsePlannerObservation,
   ComputerUsePlannerPort,
 } from './computer-use-planner-port';
+import {
+  captureComputerUseRuntime,
+  computerUseCaptureDigest,
+  type ComputerUseRuntimeCapture,
+} from './computer-use-runtime-capture';
 
 export { computerUseActionDigest, computerUseActionKind, computerUseActionRoute };
 export type {
@@ -135,6 +140,7 @@ export type ComputerUseCompatibilityBinding = Readonly<{
 }>;
 
 export type ComputerUseProviderPlannerDeps = Readonly<{
+  runtimeCapture?: ComputerUseRuntimeCapture;
   runtime: ProviderRuntime;
   connection: ProviderConnection;
   modelId: string;
@@ -225,6 +231,16 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     let output = '';
     let completed = false;
     let resolved = false;
+    const startedAt = performance.now();
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'round_started',
+        sessionDigest: computerUseCaptureDigest(observation.sessionId),
+        round: input.round,
+        revision: observation.revision,
+        bindingDigest: captureProviderBinding(this.deps.compatibilityPermit),
+      }),
+    );
     try {
       for await (const event of boundedComputerUseProviderEvents(
         this.deps,
@@ -273,6 +289,20 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
       this.deps.modelId,
       this.deps.mode,
       observation.sessionId,
+    );
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'parsed',
+        sessionDigest: computerUseCaptureDigest(observation.sessionId),
+        round: input.round,
+        revision: observation.revision,
+        bindingDigest: captureProviderBinding(this.deps.compatibilityPermit),
+        actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+        actionClass: action.type,
+        responseDigest: computerUseCaptureDigest(output),
+        responseBytes: Buffer.byteLength(output),
+        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      }),
     );
     return action;
   }
@@ -348,6 +378,29 @@ export async function preflightComputerUseProvider(
   let output = '';
   let completed = false;
   let resolved = false;
+  const capturedBinding = {
+    sessionId: deps.sessionId,
+    connectionId: deps.connection.id,
+    providerId: deps.connection.providerId,
+    modelId: deps.modelId,
+    mode: deps.mode,
+    endpointRevision: computerUseProviderEndpointRevision(
+      deps.connection,
+      deps.modelId,
+      deps.endpointTrust,
+    ),
+    catalogRevision: deps.catalogRevision,
+    policyEpoch: deps.policyEpoch,
+    adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+  };
+  captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
+    capture.record({
+      type: 'preflight_started',
+      sessionDigest: computerUseCaptureDigest(deps.sessionId),
+      bindingDigest: captureProviderBinding(capturedBinding),
+      isOpenRouter: deps.connection.providerId === 'openrouter',
+    }),
+  );
   try {
     for await (const event of boundedComputerUseProviderEvents(
       deps,
@@ -398,6 +451,13 @@ export async function preflightComputerUseProvider(
     deps.modelId,
     deps.endpointTrust,
   );
+  captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
+    capture.record({
+      type: 'preflight_passed',
+      sessionDigest: computerUseCaptureDigest(deps.sessionId),
+      bindingDigest: captureProviderBinding({ ...capturedBinding, endpointRevision }),
+    }),
+  );
   return Object.freeze({
     sessionId: deps.sessionId,
     connectionId: deps.connection.id,
@@ -413,6 +473,24 @@ export async function preflightComputerUseProvider(
       Date.now() + COMPUTER_USE_LIMITS.maxSessionHours * 60 * 60_000,
     ).toISOString(),
   });
+}
+
+function captureProviderBinding(
+  binding: Omit<ComputerUseCompatibilityPermit, 'protocolVersion' | 'expiresAt'>,
+): string {
+  return computerUseCaptureDigest(
+    JSON.stringify([
+      binding.sessionId,
+      binding.connectionId,
+      binding.providerId,
+      binding.modelId,
+      binding.mode,
+      binding.endpointRevision,
+      binding.catalogRevision,
+      binding.policyEpoch,
+      binding.adapterVersion,
+    ]),
+  );
 }
 
 function boundedComputerUseProviderEvents(

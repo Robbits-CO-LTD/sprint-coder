@@ -57,6 +57,11 @@ import type {
   ComputerUsePlannerPort,
 } from './computer-use-planner-port';
 import { COMPUTER_USE_ACCESSIBILITY_POLICY_VERSION } from './computer-use-accessibility-tree';
+import {
+  captureComputerUseRuntime,
+  computerUseCaptureDigest,
+  type ComputerUseRuntimeCapture,
+} from './computer-use-runtime-capture';
 
 const COMPUTER_OBSERVE_TOOL = createToolDefinition({
   toolId: createToolId({
@@ -234,6 +239,7 @@ export type ComputerUseAuthorization =
   ToolAuthorizationDecision | Promise<ToolAuthorizationDecision>;
 
 export type ComputerUseControllerDeps = Readonly<{
+  runtimeCapture?: ComputerUseRuntimeCapture;
   persistence: ComputerUseControllerPersistence;
   native: ComputerUseNativeHost;
   planner?: ComputerUsePlannerPort;
@@ -918,6 +924,16 @@ export class ComputerUseController {
       maximumMode,
     );
     let planner: ComputerUsePlannerPort | null;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.start({
+        type: 'session',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        platform: native.platform,
+        appDigest: native.appIdentityDigest,
+        windowDigest: native.windowIdentityDigest,
+        manifestDigest: availability.manifestDigest ?? '0'.repeat(64),
+      }),
+    );
     try {
       planner =
         this.deps.plannerFactory === undefined
@@ -1062,7 +1078,7 @@ export class ComputerUseController {
       }
       return actionResultFromAudit(existing, sessionId, requestId);
     }
-    return (await this.broker.dispatch({
+    const result = (await this.broker.dispatch({
       taskId: record.status.taskId,
       turnId: record.turnId,
       callId: requestId,
@@ -1070,6 +1086,16 @@ export class ComputerUseController {
       input: { sessionId, action: parsed, requestId },
       signal: record.controller.signal,
     })) as ComputerUseActionResult;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.actionResult(
+        sessionId,
+        result.observationRevision,
+        parsed,
+        result.result,
+        result.reasonCode,
+      ),
+    );
+    return result;
   }
 
   async observe(
@@ -1123,6 +1149,13 @@ export class ComputerUseController {
 
   private async completeStop(record: SessionRecord, reason: ComputerUseStopReason): Promise<void> {
     const sessionId = record.status.sessionId;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'stop_requested',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        reasonDigest: computerUseCaptureDigest(reason),
+      }),
+    );
     if (record.expiryTimer !== null) {
       clearTimeout(record.expiryTimer);
       record.expiryTimer = null;
@@ -1132,12 +1165,23 @@ export class ComputerUseController {
     record.controller.abort(new Error(`Computer Use stopped: ${reason}`));
     record.observation = null;
     this.cancelPendingApprovals(sessionId, 'computer_session_ended');
+    let nativeAcknowledged = true;
     try {
       await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
     } catch {
+      nativeAcknowledged = false;
       // Stop remains fail-closed even when native acknowledgement is unavailable.
     }
-    await this.deps.native.close(record.native).catch(() => undefined);
+    await this.deps.native.close(record.native).catch(() => {
+      nativeAcknowledged = false;
+    });
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'stop_acknowledged',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        nativeAcknowledged,
+      }),
+    );
     if (record.planner !== null && record.plannerExecutionId !== null) {
       const planner = record.planner;
       const executionId = record.plannerExecutionId;
@@ -1947,14 +1991,47 @@ export class ComputerUseController {
         atomicActions.length === 1
           ? requestId
           : createHash('sha256').update(`${requestId}\0${index}`).digest('hex');
-      result = await this.deps.native.dispatch({
-        session: record.native,
-        requestId: atomicRequestId,
-        action: atomicAction,
-        observationRevision,
-        cancelEpoch: record.native.cancelEpoch,
-        signal,
-      });
+      captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+        capture.record({
+          type: 'native_started',
+          sessionDigest: computerUseCaptureDigest(record.status.sessionId),
+          requestDigest: computerUseCaptureDigest(atomicRequestId),
+          actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+          revision: observationRevision,
+        }),
+      );
+      try {
+        result = await this.deps.native.dispatch({
+          session: record.native,
+          requestId: atomicRequestId,
+          action: atomicAction,
+          observationRevision,
+          cancelEpoch: record.native.cancelEpoch,
+          signal,
+        });
+      } catch (error) {
+        captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+          capture.record({
+            type: 'native_finished',
+            sessionDigest: computerUseCaptureDigest(record.status.sessionId),
+            requestDigest: computerUseCaptureDigest(atomicRequestId),
+            result: 'unknown_effect',
+            actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+            revision: observationRevision,
+          }),
+        );
+        throw error;
+      }
+      captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+        capture.record({
+          type: 'native_finished',
+          sessionDigest: computerUseCaptureDigest(record.status.sessionId),
+          requestDigest: computerUseCaptureDigest(atomicRequestId),
+          result: result.result,
+          actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+          revision: observationRevision,
+        }),
+      );
       // Once native returned a bounded result, that result is authoritative even if Stop won the
       // next microtask. Downgrading a confirmed completion/rejection to canceled corrupts the
       // durable audit. A partial multi-scalar type still reaches the next loop boundary, where the
@@ -2151,6 +2228,7 @@ export class ComputerUseController {
       await this.stop(record.status.sessionId, 'emergency_stop');
       throw new Error('Computer Use Stop overlay could not follow the native target');
     }
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) => capture.observe(parsed));
     return parsed;
   }
 

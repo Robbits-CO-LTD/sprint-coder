@@ -135,7 +135,7 @@ function main() {
   );
   if (mandatoryRows.some(({ status }) => status === 'PASS'))
     fail(
-      'real runtime journey capture is not implemented; Core/Safety PASS evidence cannot be sealed',
+      'complete real runtime journey capture is not implemented; Core/Safety PASS evidence cannot be sealed',
     );
   const validateCaptureOnly = options['validate-capture-only'] === true;
   if (
