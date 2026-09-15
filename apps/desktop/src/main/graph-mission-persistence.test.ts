@@ -449,12 +449,14 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       const original = runtime.execute.bind(runtime);
       const starts: string[] = [];
       const releases = new Map<string, () => void>();
+      let draining = false;
+      let originalFailure: unknown;
       vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
         const first = !starts.includes(input.worker.role);
         starts.push(input.worker.role);
         if (input.worker.role === 'b')
           writeFileSync(join(input.workspacePath!, 'b.ts'), 'sealed independent B\n');
-        if (first && input.worker.role !== 'c')
+        if (first && input.worker.role !== 'c' && !draining)
           await new Promise<void>((resolve) => releases.set(input.worker.role, resolve));
         return original(input);
       });
@@ -552,10 +554,26 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         ).toMatchObject({ state: 'released', generation: 1 });
         expect(starts).toEqual(['a', 'b', 'a', 'c']);
         expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+      } catch (error) {
+        originalFailure = error;
+        throw error;
       } finally {
+        draining = true;
         for (const release of releases.values()) release();
-        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
-        f.persistence.close();
+        try {
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0), {
+            timeout: 10000,
+          });
+        } catch (cleanupError) {
+          if (originalFailure)
+            throw new AggregateError(
+              [originalFailure, cleanupError],
+              'Graph fixture and cleanup both failed',
+            );
+          throw cleanupError;
+        } finally {
+          f.persistence.close();
+        }
       }
     });
 
