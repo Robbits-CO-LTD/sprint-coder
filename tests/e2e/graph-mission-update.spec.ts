@@ -213,7 +213,8 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     await expect
       .poll(async () => (await mission(page)).steps[2]?.graph?.waitReason, { timeout: 60000 })
       .toBe('resources');
-    await expect(page.getByTestId('graph-step-state').nth(2)).toContainText('共有資源待ち');
+    const resourceWait = page.getByTestId('graph-step-state').nth(2);
+    await expect(resourceWait).toContainText('共有資源待ち');
     expect((await mission(page)).steps.map((step) => step.state)).toEqual([
       'completed',
       'completed',
@@ -229,6 +230,8 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     await expect(
       plan.getByRole('button', { name: '変更を保持して工程を再開', exact: true }),
     ).toHaveCount(0);
+    await resourceWait.scrollIntoViewIfNeeded();
+    await expect(resourceWait).toBeInViewport();
     await page.screenshot({ path: testInfo.outputPath('graph-update-resource-wait.png') });
     await app.evaluate((_electron, flag) => {
       delete process.env[flag];
@@ -242,6 +245,8 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
       'data-execution-state',
       'completed',
     );
+    await page.getByTestId('graph-mission-state').scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('graph-mission-state')).toBeInViewport();
     await page.screenshot({ path: testInfo.outputPath('graph-update-completed.png') });
     await closeApp(app);
     app = await launchApp(profile, undefined, { SPRINT_CODER_REAL_WORKERS: '0' });
@@ -261,6 +266,8 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     );
     await expect(reopened.getByTestId('graph-mission-plan')).toHaveAttribute('open', '');
     await expect(reopened.getByTestId('graph-mission-state')).toContainText('すべての工程が完了');
+    await reopened.getByTestId('graph-mission-state').scrollIntoViewIfNeeded();
+    await expect(reopened.getByTestId('graph-mission-state')).toBeInViewport();
     await reopened.screenshot({ path: testInfo.outputPath('graph-update-restored.png') });
   } catch (error) {
     if (evidencePage && !evidencePage.isClosed()) {
