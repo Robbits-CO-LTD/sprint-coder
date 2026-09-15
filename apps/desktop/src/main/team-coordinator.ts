@@ -1141,8 +1141,11 @@ export class TeamCoordinator {
               expectedGeneration: step.generation,
               writeFootprints: footprints,
             });
+            const previousReason = this.graphWaitReasons.get(execution.id);
             if (availability.available) this.graphWaitReasons.delete(execution.id);
             else this.graphWaitReasons.set(execution.id, availability.reason);
+            if (previousReason !== this.graphWaitReasons.get(execution.id))
+              this.emit(taskId, team.id);
             return (
               !this.graphIntegrationWorkers.has(execution.assigneeAgentId) && availability.available
             );

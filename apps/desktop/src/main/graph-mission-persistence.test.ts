@@ -16,7 +16,7 @@ import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { GraphMissionPlan } from '@sprint-coder/contracts';
+import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
 import { SqlitePersistenceClient } from './persistence';
 import { nextGraphDocument } from './graph-document';
 import {
@@ -340,6 +340,74 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('publishes a queued wait-reason change from dependencies to resources without requiring a UI refresh', async () => {
+      const holder = fixture();
+      const heldMission = resourceMission(holder, 'display-resource');
+      const held = begin(holder, heldMission.id, 'a');
+      const f = fixture({ persistence: holder.persistence, path: holder.path }, false, [
+        'a',
+        'b',
+        'c',
+      ]);
+      const plan = structuredClone(f.plan);
+      plan.steps[1]!.dependsOn = [];
+      plan.steps[2]!.dependsOn = ['a', 'b'];
+      plan.steps[2]!.resourceClaims = [{ scope: 'machine', rootId: null, key: 'display-resource' }];
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = runtime.execute.bind(runtime);
+      const releases = new Map<string, () => void>();
+      vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+        if (input.worker.role !== 'c')
+          await new Promise<void>((resolve) => releases.set(input.worker.role, resolve));
+        return execute(input);
+      });
+      const published: TeamDetail[] = [];
+      const scheduler = new TeamExecutionScheduler(2);
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        (taskId, detail) => {
+          if (taskId === f.task.id) published.push(structuredClone(detail));
+        },
+        undefined,
+        undefined,
+        scheduler,
+      );
+      let missionId: string | undefined;
+      const reason = (detail: TeamDetail | null | undefined) =>
+        detail?.missions.find((mission) => mission.id === missionId)?.steps[2]?.graph?.waitReason;
+      try {
+        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+          ...f.input,
+          renderRevision: document.renderRevision,
+          semanticRevision: document.semanticRevision,
+          semanticDigest: document.semanticDigest,
+        }));
+        missionId = mission.id;
+        await vi.waitFor(() => expect(releases.size).toBe(2));
+        releases.get('a')!();
+        await vi.waitFor(() => expect(reason(coordinator.get(f.task.id))).toBe('dependencies'));
+        releases.get('b')!();
+        await vi.waitFor(() => expect(reason(coordinator.get(f.task.id))).toBe('resources'));
+        expect(reason(published.at(-1))).toBe('resources');
+        const count = published.length;
+        scheduler.notifyReadinessChanged();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(published).toHaveLength(count);
+      } finally {
+        for (const release of releases.values()) release();
+        holder.persistence.completeGraphStep(completion(heldMission.id, 'a', held));
+        scheduler.notifyReadinessChanged();
+        if (missionId)
+          await vi.waitFor(() =>
+            expect(f.persistence.getTeamMission(missionId!).state).toBe('completed'),
+          );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        f.persistence.close();
+      }
+    });
     it('keeps a running independent WRITE branch on its original owner consent through sealed integration after re-agreement', async () => {
       const f = fixture(undefined, true, ['a', 'b', 'c']);
       const workspace = join(dirname(f.path), 'workspace');
