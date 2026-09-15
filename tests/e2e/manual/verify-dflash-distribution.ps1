@@ -1,27 +1,16 @@
 param([Parameter(Mandatory=$true)][string]$Lane)
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zipPath = Join-Path $Lane 'beta3.zip'
-$expectedZip = '663a29379f9908f1f9d0beea1e7d4eb89df526748d8326e198f19fe97cf3daeb'
-if ((Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedZip) { throw 'Release archive mismatch' }
-$archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
-$count = 0
-$differences = @()
-try {
-    foreach ($entry in $archive.Entries) {
-        if ($entry.FullName.EndsWith('/')) { continue }
-        $stream = $entry.Open()
-        $sha = [Security.Cryptography.SHA256]::Create()
-        try { $expected = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','').ToLowerInvariant() }
-        finally { $sha.Dispose(); $stream.Dispose() }
-        $file = Join-Path (Join-Path $Lane 'app') $entry.FullName
-        $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $expected) { $differences += [pscustomobject]@{ path=$entry.FullName; original=$expected; inspected=$actual } }
-        $count++
-    }
-} finally { $archive.Dispose() }
-if ($differences.Count -ne 1 -or $differences[0].path -ne 'Sprint Coder.exe') { throw 'Changes beyond the disposable inspector executable' }
+$node = 'C:\Users\yusei\sc-windows-validation-20260914\node-v22.23.2-win-x64\node.exe'
+$dependencies = 'C:\Users\yusei\sc-windows-validation-20260914\repo'
+# The shared guard verifies ownership before reading the ZIP, then compares equal
+# chunks natively and enumerates byte offsets only inside unequal chunks.
+$proofJson = & $node (Join-Path $PSScriptRoot 'dflash-windows-guard.cjs') $Lane $dependencies --require-inspector
+if ($LASTEXITCODE -ne 0) { throw 'Owned lane or byte-level distribution preflight rejected' }
+$proof = $proofJson | ConvertFrom-Json
+$expectedZip = $proof.archiveSha256
+$count = $proof.archiveFiles
+$differences = @([pscustomobject]@{ path='Sprint Coder.exe'; original=$proof.originalExecutableSha256; inspected=$proof.inspectedExecutableSha256 })
 $root = Join-Path $Lane 'app\resources\managed-local'
 $manifestPath = Get-ChildItem $root -Filter managed-local-manifest.json -Recurse | Select-Object -First 1
 if (-not $manifestPath) { throw 'Bundled runtime manifest missing' }
@@ -37,6 +26,7 @@ $result = [pscustomobject]@{
     upstreamRevision=$manifest.upstreamRevision; runtimeArtifactCount=$manifest.artifacts.Count;
     speculativeDflash=$manifest.speculativeDflash; signedAcceptance='not required by original AC7';
     exactDistributionExecutable=$false
+    byteComparison=$proof.byteComparison; version=$proof.version; source=$proof.source
 }
 $result | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $Lane 'distribution-equivalence.json') -Encoding UTF8
 $result | ConvertTo-Json -Depth 6

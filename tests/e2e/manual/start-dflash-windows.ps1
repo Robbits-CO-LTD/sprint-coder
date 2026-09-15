@@ -2,6 +2,8 @@ param([ValidateSet('download','acceptance','cleanup')][string]$Phase = 'download
 $ErrorActionPreference = 'Stop'
 $lane = 'C:\Users\yusei\sc-issue-434-20260915'
 $taskName = 'SprintCoderDFlash434-20260915'
+& 'C:\Users\yusei\sc-windows-validation-20260914\node-v22.23.2-win-x64\node.exe' (Join-Path $PSScriptRoot 'dflash-windows-guard.cjs') $lane 'C:\Users\yusei\sc-windows-validation-20260914\repo' --ownership-only | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Owned lane/profile preflight rejected' }
 $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($existing -and ($existing.State -eq 'Running' -or $existing.Actions.Arguments -notlike ('*' + $lane + '\run-dflash-windows.ps1*'))) { throw 'Task ownership mismatch or still running' }
 if ($Phase -eq 'download' -and (Get-PSDrive C).Free -lt 23000000000) { throw 'Insufficient disk for the real pair plus rollback headroom' }

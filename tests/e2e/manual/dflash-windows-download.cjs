@@ -2,18 +2,18 @@
 // No model rows, responses, or downloads are mocked or seeded by this runner.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
-const { join, resolve } = require('node:path');
-const { mkdirSync, writeFileSync, readFileSync } = require('node:fs');
+const { join } = require('node:path');
+const { writeFileSync, readFileSync } = require('node:fs');
 const { createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 
-const lane = resolve(process.argv[2]);
-const dependencies = createRequire(join(resolve(process.argv[3]), 'package.json'));
+const { RELEASE, assertOwnedLane, verifyDistribution } = require('./dflash-windows-guard.cjs');
+const { lane, profile, dependencyRoot } = assertOwnedLane(process.argv[2], process.argv[3]);
+const dependencies = createRequire(join(dependencyRoot, 'package.json'));
 const { _electron: electron, expect } = dependencies('@playwright/test');
 const { flipFuses, FuseV1Options, FuseVersion, getCurrentFuseWire } =
   dependencies('@electron/fuses');
 const executable = join(lane, 'app', 'Sprint Coder.exe');
-const profile = join(lane, 'profile');
 const report = { acceptance: 'PARTIAL', signedAcceptance: 'NOT_RUN', steps: [] };
 const evidencePath = join(lane, `download-evidence-${Date.now()}.json`);
 const models = [
@@ -49,7 +49,7 @@ async function run() {
     ).trim(),
   );
   assert.ok(session > 0, 'Interactive desktop session required');
-  mkdirSync(profile, { recursive: true });
+  record('distribution-preflight', await verifyDistribution(lane, dependencyRoot));
   const hash = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
   const beforeHash = hash(executable);
   const fuses = await getCurrentFuseWire(executable);
@@ -60,6 +60,7 @@ async function run() {
     });
   }
   const afterFuses = await getCurrentFuseWire(executable);
+  record('inspector-byte-verification', await verifyDistribution(lane, dependencyRoot, true));
   record('disposable-inspector-copy', {
     beforeSha256: beforeHash,
     afterSha256: hash(executable),
@@ -76,8 +77,10 @@ async function run() {
       SPRINT_CODER_SKILL_HOME: profile,
       SPRINT_CODER_RUNTIME_ADOPT: '0',
       SPRINT_CODER_E2E_BACKGROUND: '1',
+      SPRINT_CODER_E2E_HIDDEN: '0',
     },
   });
+  assert.equal(await app.evaluate(({ app }) => app.getVersion()), RELEASE.version);
   const page = await app.firstWindow();
   page.setDefaultTimeout(30_000);
   await page.waitForLoadState('domcontentloaded');

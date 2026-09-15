@@ -1,8 +1,9 @@
 const { createRequire } = require('node:module');
-const { join, resolve } = require('node:path');
+const { join } = require('node:path');
 const { existsSync, readdirSync, statSync } = require('node:fs');
-const lane = resolve(process.argv[2]);
-const dependencies = createRequire(join(resolve(process.argv[3]), 'package.json'));
+const { assertOwnedLane } = require('./dflash-windows-guard.cjs');
+const { lane, dependencyRoot } = assertOwnedLane(process.argv[2], process.argv[3]);
+const dependencies = createRequire(join(dependencyRoot, 'package.json'));
 const Database = dependencies('better-sqlite3');
 const db = new Database(join(lane, 'profile', 'sprint-coder.sqlite3'), {
   readonly: true,

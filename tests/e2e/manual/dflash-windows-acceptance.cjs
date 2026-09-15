@@ -2,11 +2,12 @@
 // The diagnostic probe stays inside Main: credentials and response bodies never leave it.
 const assert = require('node:assert/strict');
 const { createRequire } = require('node:module');
-const { join, resolve } = require('node:path');
+const { join } = require('node:path');
 const { writeFileSync, readFileSync, readdirSync, existsSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
-const lane = resolve(process.argv[2]);
-const dependencies = createRequire(join(resolve(process.argv[3]), 'package.json'));
+const { RELEASE, assertOwnedLane, verifyDistribution } = require('./dflash-windows-guard.cjs');
+const { lane, profile, dependencyRoot } = assertOwnedLane(process.argv[2], process.argv[3]);
+const dependencies = createRequire(join(dependencyRoot, 'package.json'));
 const { _electron: electron, expect } = dependencies('@playwright/test');
 const evidencePath = join(lane, `acceptance-${Date.now()}.json`);
 const cleanupOnly = process.argv[4] === 'cleanup';
@@ -23,16 +24,19 @@ function record(name, data = {}) {
   console.log(JSON.stringify({ step: name, ...data }));
 }
 async function open() {
+  record('distribution-preflight', await verifyDistribution(lane, dependencyRoot, true));
   app = await electron.launch({
     executablePath: join(lane, 'app', 'Sprint Coder.exe'),
     env: {
       ...process.env,
-      SPRINT_CODER_USER_DATA_DIR: join(lane, 'profile'),
-      SPRINT_CODER_SKILL_HOME: join(lane, 'profile'),
+      SPRINT_CODER_USER_DATA_DIR: profile,
+      SPRINT_CODER_SKILL_HOME: profile,
       SPRINT_CODER_RUNTIME_ADOPT: '0',
       SPRINT_CODER_E2E_BACKGROUND: '1',
+      SPRINT_CODER_E2E_HIDDEN: '0',
     },
   });
+  assert.equal(await app.evaluate(({ app }) => app.getVersion()), RELEASE.version);
   page = await app.firstWindow();
   page.setDefaultTimeout(30_000);
   await page.waitForLoadState('domcontentloaded');
