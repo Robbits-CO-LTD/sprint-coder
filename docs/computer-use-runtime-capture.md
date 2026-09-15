@@ -29,6 +29,8 @@ events, with no probe-only CLI, Renderer command, arbitrary fd/path selector, or
 Main uses bounded asynchronous writes, never waits for drain, and unrefs the pipe. Missing,
 closed, overflowing or broken pipes invalidate capture only. Recorder overflow also invalidates
 the stream, so a truncated recorder cannot acquire a valid terminal frame.
+The fixed fd3 is validated by Node's Socket PIPE/TCP descriptor check. Windows inherited pipes
+can have no `fstat` mode type, so POSIX FIFO/socket mode bits are not used as a cross-platform gate.
 For packaged startup with CU OFF, the native loader intentionally returns a disabled binding.
 The hello source comes from the existing Main-embedded build pin, not that binding's zero source;
 native manifest availability/readiness remain unchanged. Missing or mismatched pins invalidate

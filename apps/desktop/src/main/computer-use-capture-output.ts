@@ -1,4 +1,3 @@
-import { fstatSync } from 'node:fs';
 import { Socket } from 'node:net';
 import {
   createCaptureEncoder,
@@ -76,9 +75,9 @@ export function createComputerUseCaptureOutput(input: {
     const nonce = input.environment['SPRINT_CODER_COMPUTER_USE_CAPTURE_NONCE'];
     if (nonce === undefined || !/^[a-f0-9]{64}$/u.test(nonce)) return unavailable();
     const hello = sourceBoundHello(input.hello);
-    const stat = fstatSync(3);
-    if (!stat.isFIFO() && !stat.isSocket()) return unavailable();
     const encode = createCaptureEncoder(nonce);
+    // Windows inherited pipes can have no fstat mode type. Socket.open validates that
+    // this fixed descriptor is PIPE/TCP and rejects regular files/invalid descriptors.
     socket = new Socket({ fd: 3, readable: false, writable: true });
     socket.unref();
     socket.on('error', fail);

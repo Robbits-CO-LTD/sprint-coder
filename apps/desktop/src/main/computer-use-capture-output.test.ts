@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { createComputerUseCaptureOutput as CaptureOutputFactory } from './computer-use-capture-output';
 
-const state = vi.hoisted(() => ({ pipe: true, queued: 0, throws: false }));
+const state = vi.hoisted(() => ({ pipe: true, classified: true, queued: 0, throws: false }));
 const sockets: FakeSocket[] = [];
 class FakeSocket extends EventEmitter {
   writableLength = state.queued;
@@ -10,6 +10,7 @@ class FakeSocket extends EventEmitter {
   destroyed = false;
   constructor() {
     super();
+    if (!state.pipe) throw new Error('ERR_INVALID_FD_TYPE');
     sockets.push(this);
   }
   unref() {}
@@ -31,7 +32,7 @@ class FakeSocket extends EventEmitter {
 vi.mock('node:fs', () => ({
   fstatSync: () => {
     if (!state.pipe) throw new Error('EBADF');
-    return { isFIFO: () => true, isSocket: () => false };
+    return { isFIFO: () => state.classified, isSocket: () => false };
   },
 }));
 let createComputerUseCaptureOutput: typeof CaptureOutputFactory;
@@ -55,11 +56,18 @@ const hello = {
 beforeEach(() => {
   vi.unstubAllGlobals();
   state.pipe = true;
+  state.classified = true;
   state.queued = 0;
   state.throws = false;
   sockets.length = 0;
 });
 describe('normal Main capture output has no control authority', () => {
+  it('accepts a Socket-validated pipe even when Windows fstat exposes no mode type', () => {
+    state.classified = false;
+    const output = createComputerUseCaptureOutput({ environment, hello })!;
+    expect(output.invalid()).toBe(false);
+    expect(sockets[0]!.writes).toHaveLength(1);
+  });
   const compiledPin = {
     version: 1,
     sourceCommit: 'b'.repeat(40),
