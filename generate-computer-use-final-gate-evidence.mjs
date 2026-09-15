@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { createPendingComputerUseParentClosure } from './computer-use-parent-evidence-schema.mjs';
 import {
   COMPUTER_USE_COMPATIBILITY_IDS,
   COMPUTER_USE_CORE_IDS,
@@ -87,11 +88,18 @@ function main() {
   }
   exactKeys(
     capture,
-    ['schemaVersion', 'completedAt', 'providerBinding', 'privacy', 'journeys'],
+    [
+      'schemaVersion',
+      'completedAt',
+      'providerBinding',
+      'privacy',
+      'journeys',
+      ...(capture.schemaVersion === 2 ? ['parentClosure'] : []),
+    ],
     'capture',
   );
-  if (capture.schemaVersion !== COMPUTER_USE_TRANSCRIPT_SCHEMA_VERSION)
-    fail(`capture.schemaVersion must be ${COMPUTER_USE_TRANSCRIPT_SCHEMA_VERSION}`);
+  if (![COMPUTER_USE_TRANSCRIPT_SCHEMA_VERSION, 2].includes(capture.schemaVersion))
+    fail('capture.schemaVersion must be 1 (pending legacy) or 2 (parent closure)');
   if (!Array.isArray(capture.journeys)) fail('capture.journeys must be an array');
 
   const allIds = [
@@ -195,7 +203,9 @@ function main() {
     };
   });
   const evidence = {
-    schemaVersion: 3,
+    schemaVersion: 4,
+    parentClosure:
+      capture.schemaVersion === 2 ? capture.parentClosure : createPendingComputerUseParentClosure(),
     issue: 333,
     sourceCommit,
     sourceRunId,

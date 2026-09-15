@@ -21,6 +21,7 @@ type CaptureJourney = EvidenceRow & {
 
 type EvidenceTemplate = {
   schemaVersion: number;
+  parentClosure: { providerRuns: { windows: null; macos: null }; coverage: Record<string, null> };
   sourceCommit: string;
   sourceRunId: string;
   completedAt: string;
@@ -746,7 +747,7 @@ describe('Computer Use external final gate', () => {
   });
 
   it('uses the exact complete ordered Core, Safety, and Compatibility journey sets', () => {
-    expect(template.schemaVersion).toBe(3);
+    expect(template.schemaVersion).toBe(4);
     expect(template.ac28Core.map(({ id }) => id)).toEqual(canonical.core.map(({ id }) => id));
     expect(template.ac29Safety.map(({ id }) => id)).toEqual(canonical.safety.map(({ id }) => id));
     expect(template.ac30Compatibility.map(({ id }) => id)).toEqual(
@@ -798,7 +799,9 @@ describe('Computer Use external final gate', () => {
     expect(documentation).toContain('Core and Safety never accept `SKIP`');
 
     const valid = passingEvidence();
-    expect(validateFixture(valid).status).toBe(0);
+    const held = validateFixture(valid);
+    expect(held.status).not.toBe(0);
+    expect(held.stdout).toContain('"status":"CLOSE_HOLD"');
     valid.ac29Safety[0]!.evidenceCode = 'SELF_ATTESTED_PASS';
     const rejected = validateFixture(valid);
     expect(rejected.status).not.toBe(0);

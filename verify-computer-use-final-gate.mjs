@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import {
+  createPendingComputerUseParentClosure,
+  validateComputerUseParentClosure,
+} from './computer-use-parent-evidence-schema.mjs';
 
 const MAX_EVIDENCE_BYTES = 64 * 1024;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -618,6 +622,9 @@ export function validateComputerUseFinalGateEvidence(
     expectedWindowsInstallerName,
     expectedWindowsInstallerSha256,
     expectedMacosSha256,
+    trustedWorkflowAttestationVerified = false,
+    verifiedOwnedRunFacts,
+    verifiedClosureSha256,
   } = {},
 ) {
   const evidence = record(candidate, 'root');
@@ -637,10 +644,17 @@ export function validateComputerUseFinalGateEvidence(
       'ac28Core',
       'ac29Safety',
       'ac30Compatibility',
+      ...(evidence.schemaVersion === 4 ? ['parentClosure'] : []),
     ],
     'root',
   );
-  if (evidence.schemaVersion !== 3 || evidence.issue !== 333) fail('schemaVersion/issue mismatch');
+  if (![3, 4].includes(evidence.schemaVersion) || evidence.issue !== 333)
+    fail('schemaVersion/issue mismatch');
+  if (evidence.schemaVersion === 3) {
+    if (!allowIncomplete)
+      fail('schema v3 completed evidence is retired; schema v4 parent closure is required');
+    assertCanonicalPendingTemplate(evidence);
+  }
   if (!allowIncomplete)
     requireCompletedBindings({
       expectedSourceCommit,
@@ -877,12 +891,54 @@ export function validateComputerUseFinalGateEvidence(
     if (wanted !== undefined && wanted !== actual)
       fail(`${label} does not match the dispatched package`);
 
+  const parent = validateComputerUseParentClosure(
+    evidence.schemaVersion === 4 ? evidence.parentClosure : createPendingComputerUseParentClosure(),
+    {
+      sourceCommit: evidence.sourceCommit,
+      artifacts: evidence.artifacts,
+      primaryProviderBinding: evidence.providerBinding,
+      verifiedOwnedRunFacts,
+      verifiedClosureSha256,
+    },
+  );
+  const rowsComplete =
+    evidence.ac28Core.every((row) => row.status === 'PASS') &&
+    evidence.ac29Safety.every((row) => row.status === 'PASS');
+  const windowsRun =
+    evidence.schemaVersion === 4 ? evidence.parentClosure.providerRuns.windows : null;
+  if (!allowIncomplete && windowsRun !== null) {
+    const selectedPath = evidence.ac30Compatibility.find(
+      (row) =>
+        row.id ===
+        (windowsRun.providerPath === 'structured'
+          ? 'AC-30-PROVIDER-STRUCTURED'
+          : 'AC-30-PROVIDER-JSON'),
+    );
+    if (selectedPath?.status !== 'PASS')
+      fail('Windows Provider compatibility summary does not match its run');
+  }
+  const complete = rowsComplete && parent.referencesComplete;
+  const authenticityVerified =
+    trustedWorkflowAttestationVerified === true && parent.assertionsVerified;
   return Object.freeze({
     issue: evidence.issue,
     sourceCommit: evidence.sourceCommit,
     sourceRunId: evidence.sourceRunId,
-    corePassed: evidence.ac28Core.every((row) => row.status === 'PASS'),
-    safetyPassed: evidence.ac29Safety.every((row) => row.status === 'PASS'),
+    structureValid: true,
+    completeness: Object.freeze({
+      rowsComplete,
+      parentReferencesComplete: parent.referencesComplete,
+    }),
+    authenticityVerified,
+    collectorVerification: Object.freeze({
+      ownedFactsVerified: parent.ownedFactsVerified,
+      assertionsVerified: parent.assertionsVerified,
+    }),
+    finalGateEligible: complete && authenticityVerified,
+    status: complete && authenticityVerified ? 'EVIDENCE_VERIFIED' : 'CLOSE_HOLD',
+    unmeasured: parent.unmeasured,
+    corePassed: complete && authenticityVerified,
+    safetyPassed: complete && authenticityVerified,
     compatibility: Object.freeze({
       passed: evidence.ac30Compatibility.filter((row) => row.status === 'PASS').length,
       failed: evidence.ac30Compatibility.filter((row) => row.status === 'FAIL').length,
@@ -899,7 +955,8 @@ function validFixture() {
     evidenceCode: passEvidenceCode,
   });
   const fixture = {
-    schemaVersion: 3,
+    schemaVersion: 4,
+    parentClosure: createPendingComputerUseParentClosure(),
     issue: 333,
     sourceCommit: 'a'.repeat(40),
     sourceRunId: '1234',
@@ -1007,6 +1064,10 @@ function canonicalPendingTemplate() {
 
 function assertCanonicalPendingTemplate(evidence) {
   const template = canonicalPendingTemplate();
+  if (evidence.schemaVersion === 3) {
+    template.schemaVersion = 3;
+    delete template.parentClosure;
+  }
   if (JSON.stringify(evidence) !== JSON.stringify(template))
     fail('allow-incomplete accepts only the canonical all-pending template');
 }
@@ -1031,7 +1092,8 @@ function selfTest() {
       ...completedBindings,
       ...overrides,
     });
-  assert.equal(validateComplete(fixture).corePassed, true);
+  assert.equal(validateComplete(fixture).corePassed, false);
+  assert.equal(validateComplete(fixture).status, 'CLOSE_HOLD');
   const handAuthored = structuredClone(fixture);
   delete handAuthored.harnessAttestation;
   assert.throws(() => validateComplete(handAuthored), /keys must be exactly.*harnessAttestation/u);
@@ -1185,6 +1247,7 @@ function main() {
     expectedWindowsInstallerName: options['windows-installer-name'],
     expectedWindowsInstallerSha256: options['windows-installer-sha256'],
     expectedMacosSha256: options['macos-sha256'],
+    trustedWorkflowAttestationVerified: options['trusted-workflow-attestation-verified'] === true,
   });
   console.log(
     JSON.stringify({
@@ -1194,8 +1257,16 @@ function main() {
       corePassed: result.corePassed,
       safetyPassed: result.safetyPassed,
       compatibility: result.compatibility,
+      structureValid: result.structureValid,
+      completeness: result.completeness,
+      authenticityVerified: result.authenticityVerified,
+      collectorVerification: result.collectorVerification,
+      finalGateEligible: result.finalGateEligible,
+      status: result.status,
     }),
   );
+  if (options['allow-incomplete'] !== true && !result.finalGateEligible)
+    fail('CLOSE_HOLD: parent closure or protected collector assertion verification is incomplete');
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href)
