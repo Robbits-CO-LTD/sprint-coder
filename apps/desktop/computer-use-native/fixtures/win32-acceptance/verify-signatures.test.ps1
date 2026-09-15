@@ -54,10 +54,20 @@ $testMissingArtifact = $false
 $testChangedDigest = $false
 $script:testHashCalls = 0
 $testUnsignedLibrary = $false
+$testEmptyPackage = $false
+$testLocation = 'C:\unit'
 function Test-Path { param($LiteralPath, $PathType)
   return -not ($testMissingArtifact -and $LiteralPath -eq 'C:\unit\fixture.exe')
 }
+# Stands in for the provider: a relative path resolves against the session location, which is
+# exactly what [IO.Path]::GetFullPath would not do.
+function Convert-Path { param($LiteralPath)
+  if ($LiteralPath -match '^[A-Za-z]:\\') { return $LiteralPath }
+  return (Join-Path $testLocation $LiteralPath)
+}
 function Get-ChildItem { param($LiteralPath, [switch]$Recurse, [switch]$Force)
+  if ($LiteralPath -cne $testLocation) { throw "PACKAGE_ROOT_MISRESOLVED:$LiteralPath" }
+  if ($testEmptyPackage) { return }
   [pscustomobject]@{ Attributes = $testEntryAttributes; PSIsContainer = $false; Extension = '.dll'; FullName = 'C:\unit\native.dll' }
   [pscustomobject]@{ Attributes = 0; PSIsContainer = $false; Extension = '.node'; FullName = 'C:\unit\native.node' }
 }
@@ -85,6 +95,15 @@ $testParams = @{
 $result = Test-ComputerUseSignedArtifacts @testParams
 if ($result.artifacts.Count -ne 6 -or $result.interactiveAcceptance -cne 'NOT_RUN') { throw 'Preflight scope mismatch' }
 if (@($result.artifacts | Where-Object { $_.role -eq 'native-library' }).Count -ne 2) { throw 'Native library omitted' }
+$testCount++
+# A relative -AppPath must resolve against the session location, so the package scan still reaches
+# C:\unit and keeps covering the packaged native libraries.
+$testParams.AppPath = 'app.exe'
+$result = Test-ComputerUseSignedArtifacts @testParams
+if (@($result.artifacts | Where-Object { $_.role -eq 'native-library' }).Count -ne 2) {
+  throw 'Relative app path dropped the native libraries'
+}
+$testParams.AppPath = 'C:\unit\app.exe'
 $testCount++
 function Assert-PreflightRejected([string]$ExpectedCode) {
   $actualCode = ''
@@ -122,6 +141,10 @@ $script:testHashCalls = 0
 Assert-PreflightRejected 'ARTIFACT_CHANGED_DURING_VERIFICATION'
 $testCount++
 $testChangedDigest = $false
+$testEmptyPackage = $true
+Assert-PreflightRejected 'PACKAGE_NATIVE_LIBRARIES_MISSING'
+$testCount++
+$testEmptyPackage = $false
 $testParams.ExpectedThumbprint = 'not-a-thumbprint'
 Assert-PreflightRejected 'EXPECTED_SIGNER_REQUIRED'
 $testCount++

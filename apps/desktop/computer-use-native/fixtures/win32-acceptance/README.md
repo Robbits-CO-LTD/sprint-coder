@@ -34,6 +34,9 @@ Test-ComputerUseSignedArtifacts `
   -ExpectedThumbprint $approvedReleaseThumbprint -ExpectedSubject $approvedReleaseSubject
 ```
 
+Paths may be relative: they are resolved through the PowerShell provider against the current
+location, and the package scan fails closed if it finds no DLL/native Node module at all.
+
 All four files and every packaged DLL/native Node module must have a valid signature from that
 exact signer and a timestamp. SignTool `verify /pa /all /tw` must exit zero; warnings fail closed.
 The verifier records only roles, hashes, and public signer metadata and never launches an artifact.

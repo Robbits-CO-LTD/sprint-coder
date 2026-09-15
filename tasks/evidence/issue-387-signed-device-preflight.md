@@ -37,6 +37,8 @@ Validation of this preparation change:
   absent timestamps, SignTool errors/warnings, unsigned native libraries, reparse points, duplicate
   paths, missing artifacts, and changing digests. OS doubles are synthetic; no test signature was
   created. The source and suite were streamed through SSH for execution without remote file writes.
+  Two later cases, for provider-based relative path resolution and for an empty native-library
+  scan, bring the suite to 21; they have not been executed on Windows yet.
 - A read-only real System32 Notepad signature was valid and the preflight assertion rejected it
   with `SIGNER_MISMATCH` against a different expected identity. This is a verifier check, not proof
   of the product's native input denial.
@@ -81,7 +83,7 @@ process.exit(result.status ?? 1);
 NODE
 ```
 
-Expected exit: `0`; summary: `Signature preflight unit tests: 19 passed; interactive acceptance NOT_RUN`.
+Expected exit: `0`; summary: `Signature preflight unit tests: 21 passed; interactive acceptance NOT_RUN`.
 If Main later synchronizes the source into an approved Windows checkout, the native exact command
 from that checkout root is:
 

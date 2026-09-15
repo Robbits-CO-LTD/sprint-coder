@@ -11,6 +11,6 @@ it.skipIf(process.platform !== 'win32')(
       { encoding: 'utf8', windowsHide: true, timeout: 20_000 },
     );
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toContain('19 passed; interactive acceptance NOT_RUN');
+    expect(result.stdout).toContain('21 passed; interactive acceptance NOT_RUN');
   },
 );

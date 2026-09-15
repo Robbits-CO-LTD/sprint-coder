@@ -42,7 +42,12 @@ function Test-ComputerUseSignedArtifacts {
     @{ Role = 'installer'; Path = $InstallerPath },
     @{ Role = 'fixture'; Path = $FixturePath }
   )
-  $appRoot = Split-Path -Parent ([IO.Path]::GetFullPath($AppPath))
+  # Resolve through the PowerShell provider. [IO.Path]::GetFullPath resolves a relative path
+  # against the .NET process directory, which PowerShell never syncs with Set-Location, so a
+  # relative -AppPath would silently walk a different directory than $PWD while the artifact's own
+  # -LiteralPath checks still succeeded.
+  if (-not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw 'ARTIFACT_MISSING' }
+  $appRoot = Split-Path -Parent (Convert-Path -LiteralPath $AppPath)
   # Validate packaged native libraries too; an app/helper signature does not cover DLL bytes.
   $entries = @(Get-ChildItem -LiteralPath $appRoot -Recurse -Force)
   if (@($entries | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -ne 0) {
@@ -53,7 +58,16 @@ function Test-ComputerUseSignedArtifacts {
       $artifacts += @{ Role = 'native-library'; Path = $entry.FullName }
     }
   }
-  $paths = @($artifacts | ForEach-Object { [IO.Path]::GetFullPath($_.Path).ToUpperInvariant() })
+  # A packaged app always ships native libraries, so an empty scan means the wrong directory was
+  # walked. Fail closed instead of quietly shrinking this gate to the four explicit artifacts.
+  if (@($artifacts | Where-Object { $_.Role -ceq 'native-library' }).Count -eq 0) {
+    throw 'PACKAGE_NATIVE_LIBRARIES_MISSING'
+  }
+  foreach ($artifact in $artifacts) {
+    if (-not (Test-Path -LiteralPath $artifact.Path -PathType Leaf)) { throw 'ARTIFACT_MISSING' }
+    $artifact.Path = Convert-Path -LiteralPath $artifact.Path
+  }
+  $paths = @($artifacts | ForEach-Object { $_.Path.ToUpperInvariant() })
   if (@($paths | Select-Object -Unique).Count -ne $paths.Count) { throw 'ARTIFACT_PATHS_NOT_DISTINCT' }
 
   $results = @()
