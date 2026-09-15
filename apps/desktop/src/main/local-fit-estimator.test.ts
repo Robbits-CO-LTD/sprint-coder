@@ -42,6 +42,38 @@ function hardware(overrides: Partial<LocalHardwareSnapshot>): LocalHardwareSnaps
 }
 
 describe('local fit estimator', () => {
+  it('reserves the full draft GPU cost independently of the partially offloaded target', () => {
+    const gpu = hardware({
+      gpus: [
+        {
+          id: 'gpu-0',
+          active: true,
+          vendorId: null,
+          deviceId: null,
+          vendorName: null,
+          deviceName: null,
+          memory: {
+            dedicatedTotalBytes: 3 * GiB,
+            dedicatedAvailableBytes: 1.5 * GiB,
+            sharedTotalBytes: null,
+            unifiedTotalBytes: null,
+          },
+        },
+      ],
+    });
+    const input = {
+      ...baseInput,
+      weightsBytes: 4 * GiB,
+      contextTokens: 1,
+      kvBytesPerToken: 1,
+      scratchBytes: 0,
+      safetyFactor: 1,
+      gpuOffloadRatio: 0.1,
+      draft: { weightsBytes: 2 * GiB, kvBytesPerToken: 1, scratchBytes: 0 },
+    };
+    // The target alone fits; the independent auto-offloaded draft exceeds available VRAM.
+    expect(estimateLocalModelFit(input, gpu).state).toBe('estimated_cpu');
+  });
   it('accounts for draft weights, KV and scratch without silently dropping unknown draft costs', () => {
     const base = { ...baseInput, gpuOffloadRatio: 0 };
     const result = estimateLocalModelFit(
@@ -60,6 +92,49 @@ describe('local fit estimator', () => {
         hardware({}),
       ).state,
     ).toBe('unknown');
+  });
+  it('keeps CPU pair totals unchanged and accounts for a GPU draft even with zero target offload', () => {
+    const cpu = {
+      ...baseInput,
+      gpuOffloadRatio: 0,
+      draft: { weightsBytes: GiB, kvBytesPerToken: 65536, scratchBytes: GiB, gpuOffloadRatio: 0 },
+    };
+    const result = estimateLocalModelFit(cpu, hardware({}));
+    expect(result.breakdown?.requiredAcceleratorBytes).toBe(0);
+    expect(result.breakdown?.requiredHostBytes).toBe(
+      Math.ceil(7.5 * GiB * baseInput.safetyFactor) + GiB,
+    );
+    const gpuOnlyDraft = { ...cpu, draft: { ...cpu.draft, gpuOffloadRatio: 1 } };
+    // Missing VRAM metadata must fail closed, even though target offload is zero.
+    expect(estimateLocalModelFit(gpuOnlyDraft, hardware({})).state).toBe('unknown');
+    expect(
+      estimateLocalModelFit({ ...cpu, draft: { ...cpu.draft, gpuOffloadRatio: NaN } }, hardware({}))
+        .state,
+    ).toBe('unknown');
+  });
+  it('preserves the recorded Qwen/DFlash Windows CPU memory budget', () => {
+    const result = estimateLocalModelFit(
+      {
+        ...baseInput,
+        weightsBytes: 16464440224,
+        contextTokens: 2048,
+        kvBytesPerToken: 266240,
+        scratchBytes: 1646444023,
+        runtimeReserveBytes: 805306368,
+        gpuOffloadRatio: 0,
+        draft: {
+          weightsBytes: 1143006816,
+          kvBytesPerToken: 20480,
+          scratchBytes: 373293056,
+          gpuOffloadRatio: 0,
+        },
+      },
+      hardware({
+        memory: { totalBytes: 96 * GiB, availableBytes: 64 * GiB, topology: 'discrete' },
+      }),
+    );
+    expect(result.breakdown?.requiredHostBytes).toBe(24051851049);
+    expect(result.breakdown?.requiredAcceleratorBytes).toBe(0);
   });
   it('reports an honest comfortable estimate for Apple unified memory', () => {
     const result = estimateLocalModelFit(
@@ -192,6 +267,19 @@ describe('local fit estimator', () => {
       speculative: { ...speculative, draftArtifactHashes: [...speculative.draftArtifactHashes] },
     };
     const pairedRecord = { ...record, binding: paired };
+    const oldCpu = { ...paired, backend: 'cpu' as const, gpuLayers: 0, gpuOffloadRatio: 0 };
+    const explicitCpu = { ...oldCpu, draftPlacement: 'cpu' as const };
+    expect(
+      applyReusableLocalVerification(estimate, explicitCpu, { ...record, binding: oldCpu }).state,
+    ).toBe(estimate.state);
+    expect(
+      applyReusableLocalVerification(estimate, explicitCpu, { ...record, binding: explicitCpu })
+        .state,
+    ).toBe('verified_tools');
+    const offCpu = { ...binding, backend: 'cpu' as const, gpuLayers: 0, gpuOffloadRatio: 0 };
+    expect(
+      applyReusableLocalVerification(estimate, offCpu, { ...record, binding: offCpu }).state,
+    ).toBe('verified_tools');
     expect(applyReusableLocalVerification(estimate, paired, record).state).toBe(estimate.state);
     expect(applyReusableLocalVerification(estimate, paired, pairedRecord).state).toBe(
       'verified_tools',

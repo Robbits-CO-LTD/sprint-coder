@@ -156,6 +156,36 @@ describe('readGgufModelMetadata', () => {
       ).toBeUndefined();
     }
   });
+  it('invalidates target_layers with wrong-type duplicates in either order', async () => {
+    const array = Buffer.concat([
+      string('dflash.target_layers'),
+      uint32(9),
+      uint32(4),
+      uint64(2),
+      uint32(1),
+      uint32(2),
+    ]);
+    for (const invalid of [
+      metadataUint32('dflash.target_layers', 2),
+      metadataString('dflash.target_layers', '2'),
+    ]) {
+      for (const values of [
+        [array, invalid],
+        [invalid, array],
+      ]) {
+        const metadata = await readGgufModelMetadata(
+          await fixture(
+            gguf([
+              metadataString('general.architecture', 'dflash'),
+              metadataUint32('dflash.embedding_length', 1024),
+              ...values,
+            ]),
+          ),
+        );
+        expect(metadata?.hiddenBytesPerToken).toBeUndefined();
+      }
+    }
+  });
   it('identifies a DFlash draft and its architecture-bound context from the actual GGUF', async () => {
     const path = await fixture(
       gguf([

@@ -440,6 +440,7 @@ export class LocalModelDownloadRepository {
         if (
           draft?.state !== 'installed' ||
           draft.purpose !== 'draft-dflash' ||
+          !this.hasUsableDraftArtifact(draft.id) ||
           target.id === draft.id ||
           target.baseModelId === null ||
           target.baseModelId !== draft.baseModelId ||
@@ -497,6 +498,8 @@ export class LocalModelDownloadRepository {
   }
 
   markInstalledDraft(modelId: string): void {
+    // Classification hides every actual DFlash model from normal providers. Eligibility
+    // additionally requires a single installed model artifact, including for legacy rows.
     this.db.transaction(() => {
       const changed = this.db
         .prepare(
@@ -609,6 +612,11 @@ export class LocalModelDownloadRepository {
     return this.db
       .prepare('SELECT * FROM local_model_artifacts WHERE model_id = ? ORDER BY ordinal')
       .all(modelId) as ArtifactRow[];
+  }
+
+  hasUsableDraftArtifact(modelId: string): boolean {
+    const rows = this.artifacts(modelId);
+    return rows.length === 1 && rows[0]!.role === 'model' && rows[0]!.state === 'installed';
   }
 
   transition(

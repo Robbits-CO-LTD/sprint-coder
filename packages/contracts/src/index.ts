@@ -2392,6 +2392,8 @@ export const localVerificationBindingSchema = z
     immutableRevision: z.string().regex(/^[a-f0-9]{40,64}$/),
     artifactHashes: z.array(digestSchema).min(1).max(256),
     speculative: managedLocalDraftBindingSchema.optional(),
+    /** Legacy records remain readable; new CPU DFlash measurements prove explicit placement. */
+    draftPlacement: z.literal('cpu').optional(),
     quantization: z.string().min(1).max(64),
     contextTokens: z.number().int().positive().max(1_048_576),
     kvCacheType: z.string().min(1).max(64),
@@ -2406,6 +2408,14 @@ export const localVerificationBindingSchema = z
   .superRefine((binding, context) => {
     if (new Set(binding.artifactHashes).size !== binding.artifactHashes.length)
       context.addIssue({ code: 'custom', message: 'Duplicate local artifact hash' });
+    if (
+      binding.draftPlacement !== undefined &&
+      (binding.backend !== 'cpu' || binding.speculative === undefined)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Explicit draft CPU placement requires a CPU speculative pair',
+      });
   });
 export type LocalVerificationBinding = z.infer<typeof localVerificationBindingSchema>;
 export const localVerificationRecordSchema = z

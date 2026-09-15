@@ -93,6 +93,7 @@ function harness(
     startupTimeoutMs?: number;
     ignoreTerm?: boolean;
     speculativeDflash?: boolean;
+    candidateBackends?: VerifiedManagedLocalSidecarBundle['manifest']['candidateBackends'];
   } = {},
 ) {
   const child = new FakeChild(input.ignoreTerm);
@@ -114,7 +115,11 @@ function harness(
   const supervisor = new ManagedLocalRuntimeSupervisor({
     loadBundle: async () => ({
       ...bundle(),
-      manifest: { ...bundle().manifest, speculativeDflash: input.speculativeDflash },
+      manifest: {
+        ...bundle().manifest,
+        speculativeDflash: input.speculativeDflash,
+        candidateBackends: input.candidateBackends ?? bundle().manifest.candidateBackends,
+      },
     }),
     spawnProcess: (_command, args, options) => {
       spawnArgs = [...args];
@@ -140,6 +145,49 @@ function harness(
 }
 
 describe('ManagedLocalRuntimeSupervisor', () => {
+  it('pins the DFlash draft to CPU when the bundle also supports Metal', async () => {
+    const input = await dflashInput();
+    const env = harness({ speculativeDflash: true, candidateBackends: ['cpu', 'metal'] });
+    const session = await env.supervisor.start(input);
+    try {
+      expect(session.snapshot()).toMatchObject({ backend: 'cpu', gpuLayers: 0 });
+      const args = env.spawnArgs();
+      expect(
+        args.slice(args.indexOf('--spec-draft-device'), args.indexOf('--spec-draft-device') + 2),
+      ).toEqual(['--spec-draft-device', 'none']);
+      expect(
+        args.slice(args.indexOf('--spec-draft-ngl'), args.indexOf('--spec-draft-ngl') + 2),
+      ).toEqual(['--spec-draft-ngl', '0']);
+    } finally {
+      await session.stop();
+    }
+  });
+  it('keeps GPU DFlash argv and CPU speculative-off argv free of draft CPU placement flags', async () => {
+    const base = await dflashInput();
+    for (const input of [
+      { ...base, backend: 'metal' as const, gpuLayers: 1 },
+      { ...base, draft: null },
+    ]) {
+      const env = harness({ speculativeDflash: true, candidateBackends: ['cpu', 'metal'] });
+      const session = await env.supervisor.start(input);
+      try {
+        expect(env.spawnArgs()).not.toContain('--spec-draft-device');
+        expect(env.spawnArgs()).not.toContain('--spec-draft-ngl');
+        if (input.draft !== null)
+          expect(env.spawnArgs().slice(-6)).toEqual([
+            '-md',
+            base.draft!.modelPath,
+            '--spec-type',
+            'draft-dflash',
+            '--spec-draft-n-max',
+            '3',
+          ]);
+        else expect(env.spawnArgs()).not.toContain('-md');
+      } finally {
+        await session.stop();
+      }
+    }
+  });
   it('starts DFlash only from separate identity-bound bundles and redacts both paths', async () => {
     const input = await dflashInput();
     const env = harness({ speculativeDflash: true });
