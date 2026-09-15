@@ -92,12 +92,47 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT: 'store',
   });
   let evidencePage: Page | undefined;
+  const evidenceTaskIds: string[] = [];
+  const captureTeamState = async (label: string) => {
+    if (!evidencePage || evidencePage.isClosed()) return;
+    const metadata = await evidencePage.evaluate(async (ids) => {
+      const teams = await Promise.all(ids.map((id) => window.sprintCoder!.teams.get(id)));
+      return teams.map((team) => ({
+        missions: team?.missions.map((mission) => ({
+          state: mission.state,
+          semanticRevision: mission.graph?.semanticRevision,
+          steps: mission.steps.map((step) => ({
+            state: step.state,
+            executionId: step.executionId,
+            generation: step.graph?.generation,
+            waitReason: step.graph?.waitReason,
+            resourceState: step.graph?.resourceState,
+          })),
+        })),
+        executions: team?.executions.map((execution) => ({
+          id: execution.id,
+          state: execution.state,
+          lastProgressAt: execution.lastProgressAt,
+          attemptStartReason: execution.attemptStartReason,
+        })),
+        activities: team?.activities.slice(-16).map((activity) => ({
+          type: activity.type,
+          executionId: activity.executionId,
+          recordedAt: activity.recordedAt,
+        })),
+      }));
+    }, evidenceTaskIds);
+    const path = testInfo.outputPath(`${label}.json`);
+    await writeFile(path, JSON.stringify(metadata, null, 2));
+    await testInfo.attach(label, { path, contentType: 'application/json' });
+  };
   try {
     const page = await firstWindow(app);
     evidencePage = page;
     // A real background Mission holds the same declared machine resource. Its identity does not
     // grant this Task ownership; the tested Mission must visibly wait before its join step.
     const holder = await startFixtureMission(page, workspace);
+    evidenceTaskIds.push(holder.id);
     await expect
       .poll(
         () =>
@@ -119,6 +154,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
       process.env[flag] = '1';
     }, 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT');
     const taskId = (await startFixtureMission(page, workspace, holder.projectId!)).id;
+    evidenceTaskIds.push(taskId);
     const mission = (target: Page) =>
       target.evaluate(
         async (id) => (await window.sprintCoder!.teams.get(id))!.missions[0]!,
@@ -209,6 +245,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
       ),
     ).toBe(true);
     await page.screenshot({ path: testInfo.outputPath('graph-update-awaiting-agreement.png') });
+    await captureTeamState('graph-update-teams-before-agreement');
     await update.getByRole('button', { name: 'この変更に再合意して再開', exact: true }).click();
     await expect
       .poll(async () => (await mission(page)).steps[2]?.graph?.waitReason, { timeout: 60000 })
@@ -270,6 +307,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     await expect(reopened.getByTestId('graph-mission-state')).toBeInViewport();
     await reopened.screenshot({ path: testInfo.outputPath('graph-update-restored.png') });
   } catch (error) {
+    await captureTeamState('graph-update-teams-before-cleanup').catch(() => undefined);
     if (evidencePage && !evidencePage.isClosed()) {
       const metadata = await evidencePage
         .evaluate(() => {
