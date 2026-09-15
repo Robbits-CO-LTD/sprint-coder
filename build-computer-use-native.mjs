@@ -62,7 +62,9 @@ function run(command, arguments_, environment = process.env) {
   }
 }
 
-if (process.argv.includes('--test-environment-sanitizer')) {
+const sanitizerSelfCheckOnly = process.argv.includes('--test-environment-sanitizer');
+
+if (sanitizerSelfCheckOnly) {
   const sanitized = sanitizedNativeBuildEnvironment({
     PATH: '/usr/bin',
     INCLUDE: 'C:\\Windows Kits\\Include',
@@ -139,8 +141,10 @@ if (process.argv.includes('--test-environment-sanitizer')) {
     sanitized.CODEX_THREAD_ID !== undefined
   )
     throw new Error('Computer Use native build environment sanitizer failed');
+  // Leave through the normal exit path: on POSIX a pipe-backed stdout is asynchronous, and this
+  // line is read back through a pipe, so process.exit() could truncate it.
   process.stdout.write('Computer Use native build environment sanitizer: PASS\n');
-  process.exit(0);
+  process.exitCode = 0;
 }
 
 function sha256File(path) {
@@ -167,7 +171,9 @@ function computerUseSourceCommit() {
   return repositoryCommit;
 }
 
-if (target === 'linux') {
+if (sanitizerSelfCheckOnly) {
+  // The self-check above is the whole run; no native artifact is built or verified.
+} else if (target === 'linux') {
   // Linux is intentionally outside the Computer Use platform contract.  Do not emit a manifest
   // that could be mistaken for a supported target; Forge does not package this directory on Linux.
   console.log(`[computer-use-native] ${target}-${architecture}: disabled (PLATFORM_UNSUPPORTED)`);

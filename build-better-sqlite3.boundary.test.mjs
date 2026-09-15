@@ -138,6 +138,8 @@ async function captureBoundaries(failure = '', overrides = undefined) {
     calls,
     output: output.join('\n'),
     exitCode: exited.code ?? context.process.exitCode ?? 0,
+    // process.exit() abandons pending writes, and on POSIX a pipe-backed stderr is asynchronous.
+    exitedExplicitly: 'code' in exited,
   };
 }
 
@@ -407,6 +409,28 @@ test('Computer Use build failures report the errno rather than inventing an exit
     'error=ENOBUFS, signal=none',
     'The child message must never reach the summary',
   );
+});
+
+test('A failed build leaves through the normal exit path so its diagnostics survive', async () => {
+  const result = await captureBoundaries('build');
+  // On POSIX a pipe-backed stderr is asynchronous, so process.exit() can drop the two lines that
+  // are now the only diagnostics a failed build produces. Setting exitCode lets Node flush first.
+  assert.equal(
+    result.exitedExplicitly,
+    false,
+    'A failing build must set process.exitCode rather than call process.exit()',
+  );
+  assert.equal(result.exitCode, 17, 'The failure status must still reach the caller');
+  assert.equal(result.calls.length, 1, 'The ABI probe must still not run after a failed build');
+  assert.match(result.output, /SQLite source build failed \(exit 17/u);
+  assert.match(result.output, /^native build network policy: /mu);
+  // Match a call in statement position so the rule is not satisfied or broken by prose in comments.
+  for (const script of ['build-better-sqlite3.mjs', 'build-computer-use-native.mjs'])
+    assert.equal(
+      /^\s*process\.exit\(/mu.test(readFileSync(resolve(root, script), 'utf8')),
+      false,
+      `${script} must report status through process.exitCode`,
+    );
 });
 
 test('Pure helper leaves frozen parent signing configuration intact', () => {
