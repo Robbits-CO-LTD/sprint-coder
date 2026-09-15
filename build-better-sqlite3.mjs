@@ -2,7 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
+import {
+  nativeBuildNetworkDiagnostics,
+  sanitizedNativeBuildEnvironment,
+} from './native-build-environment.mjs';
 const require = createRequire(import.meta.url);
 const electronVersion = JSON.parse(
   readFileSync(require.resolve('electron/package.json'), 'utf8'),
@@ -33,9 +36,12 @@ const result = spawnSync(
   },
 );
 if (result.error || result.status !== 0) {
-  // Compiler output can contain its environment. Never relay raw child diagnostics.
+  // Compiler output can contain its environment. Never relay raw child diagnostics. The summary
+  // below names only fixed, non-secret network variables, so the most common non-compiler failure
+  // (a header download with no reachable proxy) is diagnosable without echoing a single value.
   const status = result.error ? 1 : (result.status ?? 1);
   process.stderr.write(`SQLite source build failed (exit ${status})\n`);
+  process.stderr.write(`${nativeBuildNetworkDiagnostics(process.env)}\n`);
   process.exit(status);
 }
 const binding = join(sqliteRoot, 'build', 'Release', 'better_sqlite3.node');

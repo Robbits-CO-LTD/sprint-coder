@@ -4,7 +4,10 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 import test from 'node:test';
-import { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
+import {
+  nativeBuildNetworkDiagnostics,
+  sanitizedNativeBuildEnvironment,
+} from './native-build-environment.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const target = resolve(root, 'build-better-sqlite3.mjs');
@@ -32,6 +35,14 @@ const environment = Object.freeze({
   npm_config_arch: 'controlled-wrong-arch',
   npm_config_target: 'controlled-wrong-target',
   npm_config_loglevel: 'silly',
+  // node-gyp downloads Electron headers through make-fetch-happen, which reads the proxy
+  // configuration from the child environment. Credential-free settings must survive, a proxy URL
+  // that embeds userinfo must not, and npm_config_* stays blocked because it overrides pinned CLI
+  // build controls.
+  HTTPS_PROXY: 'http://controlled-proxy.invalid:3128',
+  NO_PROXY: 'controlled-proxy.invalid,localhost',
+  HTTP_PROXY: `http://controlled-user:${canary}@controlled-proxy.invalid:3128`,
+  npm_config_proxy: 'http://controlled-npm-proxy.invalid:3128',
 });
 const originalEnvironment = JSON.stringify(environment);
 
@@ -201,6 +212,79 @@ for (const stage of ['build', 'probe']) {
     });
   }
 }
+
+test('Credential-free proxy settings reach node-gyp while npm build controls stay blocked', async () => {
+  const result = await captureBoundaries();
+  assert.equal(result.calls.length, 2);
+  for (const { options } of result.calls) {
+    assert.equal(
+      options.env.HTTPS_PROXY,
+      environment.HTTPS_PROXY,
+      'A credential-free proxy must reach the Electron header download',
+    );
+    assert.equal(options.env.NO_PROXY, environment.NO_PROXY);
+    assert.equal(
+      options.env.HTTP_PROXY,
+      undefined,
+      'A proxy URL carrying userinfo must never reach the child',
+    );
+    assert.equal(
+      options.env.npm_config_proxy,
+      undefined,
+      'npm_config_* stays blocked because it overrides pinned CLI build controls',
+    );
+  }
+  assert.equal(result.output.includes(canary), false);
+});
+
+test('Sanitizer drops credential-bearing proxy URLs instead of rewriting them', () => {
+  const child = sanitizedNativeBuildEnvironment(environment);
+  assert.equal(child.HTTPS_PROXY, environment.HTTPS_PROXY);
+  assert.equal(child.NO_PROXY, environment.NO_PROXY);
+  assert.equal(child.HTTP_PROXY, undefined);
+  assert.equal(child.npm_config_proxy, undefined);
+  assert.equal(
+    JSON.stringify(child).includes(canary),
+    false,
+    'No credential may survive in any forwarded value',
+  );
+  assert.equal(JSON.stringify(environment) === originalEnvironment, true);
+});
+
+test('Network policy summary names variables only and never discloses a value', () => {
+  const summary = nativeBuildNetworkDiagnostics(environment);
+  assert.equal(
+    summary,
+    'native build network policy: forwarded=HTTPS_PROXY,NO_PROXY withheld=npm_config_proxy withheld-with-credentials=HTTP_PROXY',
+  );
+  assert.equal(summary.includes(canary), false);
+  assert.equal(summary.includes('controlled-proxy.invalid'), false);
+  assert.equal(
+    nativeBuildNetworkDiagnostics({ PATH: '/controlled/compiler-path' }),
+    'native build network policy: forwarded=none withheld=none withheld-with-credentials=none',
+  );
+  assert.equal(
+    nativeBuildNetworkDiagnostics({ OPENROUTER_API_KEY: canary, SECRET_PROXY_TOKEN: canary }),
+    'native build network policy: forwarded=none withheld=none withheld-with-credentials=none',
+    'Only the fixed non-secret name set may ever be reported',
+  );
+});
+
+test('Failed build explains the withheld network variables without leaking any value', async () => {
+  const result = await captureBoundaries('build');
+  assert.match(result.output, /SQLite source build failed \(exit 17\)/u);
+  assert.match(
+    result.output,
+    /^native build network policy: forwarded=HTTPS_PROXY,NO_PROXY withheld=npm_config_proxy withheld-with-credentials=HTTP_PROXY$/mu,
+  );
+  assert.equal(result.output.includes(canary), false, 'Diagnostics must never include a value');
+  assert.equal(
+    result.output.includes('controlled-proxy.invalid'),
+    false,
+    'Diagnostics must name variables, never their values',
+  );
+  assert.equal(result.output.includes('"env"'), false);
+});
 
 test('Pure helper leaves frozen parent signing configuration intact', () => {
   const child = sanitizedNativeBuildEnvironment(environment);
