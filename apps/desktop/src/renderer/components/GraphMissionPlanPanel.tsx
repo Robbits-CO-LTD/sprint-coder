@@ -241,7 +241,7 @@ function GraphResumeButton({
     <div>
       {!integration && reviewRequired ? (
         <>
-          <p>中断前の変更を保持しています。内容の確認後、同じ作業場所で続きを実行します。</p>
+          <p>中断前の変更を保持しています。変更一覧を確認し、同じ作業場所で続きを実行できます。</p>
           <button
             type="button"
             className="settings-secondary-button"
@@ -267,7 +267,7 @@ function GraphResumeButton({
                 .finally(() => setPending(false));
             }}
           >
-            保持した変更を確認
+            保持した変更一覧を確認
           </button>
           {review ? (
             <div data-testid="graph-workspace-review">
@@ -300,7 +300,7 @@ function GraphResumeButton({
           : integration
             ? '完了した変更の統合を再開'
             : reviewRequired
-              ? '確認した変更を保持して再開'
+              ? '変更を保持して工程を再開'
               : 'この工程を再開'}
       </button>
       {error ? <p role="alert">{error}</p> : null}
