@@ -11,6 +11,15 @@ const source = readFileSync(
 describe.skipIf(process.platform === 'win32')(
   'Windows SendInput count portable native seam',
   () => {
+    // This spec spawns a compiler and then an ASan/UBSan-instrumented binary, so its cost is
+    // dominated by process spawn inside the Vitest worker rather than by the tiny translation
+    // unit: ~0.4s when the same steps run straight from Node, ~4s inside a worker on an idle
+    // machine, and 9.4s on a healthy two-core Linux CI shard sharing the host with the rest of the
+    // suite (run 34957326437). Vitest's 20s project default left no room for that spread and turned
+    // an ordinary slow runner into a red build with only "Test timed out" to go on. Like the other
+    // spawn-heavy specs in this repo it therefore declares its own budget, which keeps the bounded
+    // clang++ (30s) and binary (5s) guards below the per-test deadline so a genuinely stuck
+    // compiler still fails first and names the command instead of being masked by the runner.
     it('counts the actual API attempt even when SendInput fails, but not a guard refusal', () => {
       const root = mkdtempSync(join(tmpdir(), 'computer-use-win-input-seam-'));
       try {
@@ -65,6 +74,6 @@ int main() {
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
-    });
+    }, 60_000);
   },
 );
