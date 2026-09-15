@@ -4639,6 +4639,10 @@ export interface PersistenceClient {
     provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
   setSealedPostImageObserver?(observer: SealedPostImageObserver): void;
+  openGraphWorkspaceObservation?(
+    root: Parameters<SealedPostImageObserver>[0],
+  ): SealedPostImageSession;
+  resumeGraphExecutionIsolation?(executionId: string, now: string): void;
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
@@ -6171,6 +6175,52 @@ export class SqlitePersistenceClient implements PersistenceClient {
    */
   setSealedPostImageObserver(observer: SealedPostImageObserver): void {
     this.sealedPostImageObserver = observer;
+  }
+
+  openGraphWorkspaceObservation(
+    root: Parameters<SealedPostImageObserver>[0],
+  ): SealedPostImageSession {
+    const session = this.sealedPostImageObserver?.(root);
+    if (!session) throw new Error('Native workspace review is unavailable');
+    return session;
+  }
+
+  /** Main has reviewed the retained bytes and observed the old runtime stop before this transition. */
+  resumeGraphExecutionIsolation(executionId: string, now: string): void {
+    this.db.transaction(() => {
+      const mission = this.getTeamMissionForExecution(executionId);
+      const execution = this.getTeamExecution(executionId);
+      const isolation = this.requireTeamExecutionIsolation(executionId);
+      if (
+        mission?.mode !== 'graph' ||
+        execution.state !== 'waiting_resume' ||
+        !['running', 'quarantined'].includes(isolation.phase) ||
+        isolation.repositories.some(
+          (repo) =>
+            repo.workerHead ||
+            repo.integratedHead ||
+            ['ready', 'integrated', 'cleaned'].includes(repo.state),
+        ) ||
+        this.listGraphResourceReservations(mission.id).some(
+          (owner) => owner.executionId === executionId && owner.state !== 'released',
+        )
+      )
+        throw new Error('Graph workspace cannot resume before stop and ownership release');
+      const resumed = teamExecutionIsolationSchema.parse({
+        phase: 'running',
+        resumeKind: null,
+        reason: null,
+        roots: isolation.roots,
+        repositories: isolation.repositories.map((repo) => ({ ...repo, state: 'active' })),
+      });
+      const result = this.db
+        .prepare(
+          `UPDATE team_execution_isolations SET phase='running', resume_kind=NULL,
+        reason=NULL, repositories_json=?, revision=revision+1, updated_at=? WHERE execution_id=? AND revision=?`,
+        )
+        .run(JSON.stringify(resumed.repositories), now, executionId, isolation.revision);
+      if (result.changes !== 1) throw new TeamConflictError();
+    })();
   }
 
   /**

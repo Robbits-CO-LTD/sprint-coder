@@ -113,6 +113,26 @@ describe('graph Mission step resume IPC', () => {
     const { handler, consume, resumeGraphStep } = harness();
     consume.mockReturnValue({ intent: graphResumeStepActivationIntent(input) });
     await expect(handler(input, {})).resolves.toEqual({ id: input.missionId });
-    expect(resumeGraphStep).toHaveBeenCalledWith(input.taskId, input.missionId, input.stepKey);
+    expect(resumeGraphStep).toHaveBeenCalledWith(
+      input.taskId,
+      input.missionId,
+      input.stepKey,
+      undefined,
+    );
+  });
+
+  it('binds workspace continuation to the exact review digest in the trusted gesture', async () => {
+    const { handler, consume, resumeGraphStep } = harness();
+    const reviewed = { ...input, workspaceReviewDigest: 'a'.repeat(64) };
+    consume.mockReturnValue({ intent: graphResumeStepActivationIntent(input) });
+    await expect(handler(reviewed, {})).rejects.toThrow('計画の工程再開ボタン');
+    consume.mockReturnValue({ intent: graphResumeStepActivationIntent(reviewed) });
+    await handler(reviewed, {});
+    expect(resumeGraphStep).toHaveBeenCalledWith(
+      input.taskId,
+      input.missionId,
+      input.stepKey,
+      reviewed.workspaceReviewDigest,
+    );
   });
 });

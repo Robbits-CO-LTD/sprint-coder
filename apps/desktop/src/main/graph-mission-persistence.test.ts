@@ -8,6 +8,7 @@ import {
   renameSync,
   existsSync,
   linkSync,
+  lstatSync,
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,6 +32,7 @@ import { WorkerWorktreeManager } from './worker-worktree';
 import { TeamCoordinator, DeterministicTeamWorkerRuntime } from './team-coordinator';
 import { workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
+import { loadNativeSafeFs, prepareNativeSafeFsLockDirectory } from './native-safe-fs';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -259,7 +261,7 @@ async function writeMission(
   return { mission, acquisition, review, workspace: binding.canonicalPath };
 }
 
-async function sealedWriteFixture() {
+async function retainedWriteFixture() {
   const f = fixture(undefined, true);
   const workspace = join(dirname(f.path), 'workspace');
   mkdirSync(workspace);
@@ -297,6 +299,11 @@ async function sealedWriteFixture() {
   });
   f.persistence.updateTeamMissionWorktree({ executionId: run.execution.id, to: 'active', now });
   writeFileSync(join(worktree.path, 'shared.ts'), 'integrated\n');
+  return { f, a, run, manager, worker, worktree };
+}
+
+async function sealedWriteFixture() {
+  const { f, a, run, manager, worker, worktree } = await retainedWriteFixture();
   const sealed = await manager.finalizeChanges({
     ...worker,
     baseHead: worktree.baseHead,
@@ -312,8 +319,122 @@ async function sealedWriteFixture() {
   return { f, a, run, manager, worker, worktree, sealed };
 }
 
+async function installNativeGraphObserver(persistence: SqlitePersistenceClient, directory: string) {
+  const native = loadNativeSafeFs({
+    lockDirectoryPath: await prepareNativeSafeFsLockDirectory(directory),
+  });
+  persistence.setSealedPostImageObserver((binding) => {
+    const identity = lstatSync(binding.workspacePath, { bigint: true });
+    const session = native.openReadSession({
+      ...binding,
+      rootDev: String(identity.dev),
+      rootIno: String(identity.ino),
+    });
+    return {
+      rootIdentityDigest: session.rootIdentityDigest,
+      observe: (segments) => native.observeSealedPostImage(session, segments),
+      close: () => native.closeReadSession(session),
+    };
+  });
+}
+
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it.each(['continue', 'changed', 'unconfirmed'] as const)(
+      'reviews a retained write workspace before resume: %s',
+      async (scenario) => {
+        const { f, a, run, manager, worktree } = await retainedWriteFixture();
+        f.persistence.interruptGraphStep({
+          missionId: a.mission.id,
+          stepKey: 'a',
+          generation: 1,
+          reservationId: run.reservation.id,
+          attemptId: run.attempt.id,
+          outcome: 'failed',
+          reason: 'interrupted fixture',
+          confirmation: { kind: 'unconfirmed' },
+          now,
+        });
+        f.persistence.updateTeamMissionWorktree({
+          executionId: run.execution.id,
+          to: 'quarantined',
+          now,
+        });
+        const native = loadNativeSafeFs({
+          lockDirectoryPath: await prepareNativeSafeFsLockDirectory(dirname(f.path)),
+        });
+        f.persistence.setSealedPostImageObserver((binding) => {
+          const identity = lstatSync(binding.workspacePath, { bigint: true });
+          const session = native.openReadSession({
+            ...binding,
+            rootDev: String(identity.dev),
+            rootIno: String(identity.ino),
+          });
+          return {
+            rootIdentityDigest: session.rootIdentityDigest,
+            observe: (segments) => native.observeSealedPostImage(session, segments),
+            close: () => native.closeReadSession(session),
+          };
+        });
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const stop = vi.spyOn(runtime, 'stop');
+        const scheduler = new TeamExecutionScheduler(2);
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+          undefined,
+          undefined,
+          manager,
+        );
+        try {
+          const review = await coordinator.reviewGraphPreservedWorkspace(
+            f.task.id,
+            a.mission.id,
+            'a',
+          );
+          expect(review.files).toEqual([{ repository: 1, path: 'shared.ts' }]);
+          expect(execute).not.toHaveBeenCalled();
+          await expect(coordinator.resumeGraphStep(f.task.id, a.mission.id, 'a')).rejects.toThrow(
+            'requires review',
+          );
+          if (scenario === 'changed')
+            writeFileSync(join(worktree.path, 'shared.ts'), 'changed after review');
+          if (scenario === 'unconfirmed') stop.mockRejectedValue(new Error('stop unconfirmed'));
+          if (scenario !== 'continue') {
+            await expect(
+              coordinator.resumeGraphStep(f.task.id, a.mission.id, 'a', review.digest),
+            ).rejects.toThrow(scenario === 'changed' ? 'workspace changed' : 'stop unconfirmed');
+            expect(execute).not.toHaveBeenCalled();
+            expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe(
+              'quarantined',
+            );
+            expect(existsSync(worktree.path)).toBe(true);
+            return;
+          }
+          await coordinator.resumeGraphStep(f.task.id, a.mission.id, 'a', review.digest);
+          await expect(
+            coordinator.resumeGraphStep(f.task.id, a.mission.id, 'a', review.digest),
+          ).rejects.toThrow('not waiting');
+          await vi.waitFor(
+            () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
+            { timeout: 10000 },
+          );
+          expect(execute).toHaveBeenCalledTimes(1);
+          expect(execute.mock.calls[0]?.[0].workspacePath).toBe(worktree.path);
+          expect(stop).toHaveBeenCalledWith(run.execution.assigneeAgentId);
+          expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('integrated\n');
+          expect(f.persistence.listTeamAttempts(run.execution.id)).toHaveLength(2);
+        } finally {
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          f.persistence.close();
+        }
+      },
+    );
     it.each([false, true])(
       'dispatches independent graph steps without serializing siblings (cancel first: %s)',
       async (cancelFirst) => {
@@ -941,121 +1062,165 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       },
     );
 
-    it('checks every Project repository before integrating any of them', async () => {
-      const base = fixture();
-      const rootPaths = ['primary', 'secondary'].map((name) => join(dirname(base.path), name));
-      const bindings = [];
-      for (const root of rootPaths) {
-        mkdirSync(join(root, 'allowed'), { recursive: true });
-        writeFileSync(join(root, 'allowed/file.ts'), 'base\n');
-        writeFileSync(join(root, 'outside.ts'), 'outside\n');
-        expect(spawnSync('git', ['init', '-q', root]).status).toBe(0);
-        expect(spawnSync('git', ['-C', root, 'add', '.']).status).toBe(0);
-        expect(
-          spawnSync('git', [
-            '-C',
-            root,
-            '-c',
-            'user.name=Test',
-            '-c',
-            'user.email=test@example.com',
-            'commit',
-            '-qm',
-            'base',
-          ]).status,
-        ).toBe(0);
-        bindings.push(await workspaceMutationBinding(root));
-      }
-      const project = base.persistence.createProject({
-        name: 'Two repositories',
-        folders: bindings.map((binding, i) => ({
-          id: randomUUID(),
-          path: binding.canonicalPath,
-          canonicalPath: binding.canonicalPath,
-          label: `root-${i}`,
-          role: i === 0 ? ('primary' as const) : ('secondary' as const),
-          workspaceKey: binding.workspaceKey,
-          rootIdentityDigest: binding.rootIdentityDigest,
-        })),
-      });
-      const f = fixture(
-        { persistence: base.persistence, path: base.path },
-        true,
-        ['a', 'b'],
-        project.id,
-      );
-      const context = graphMissionContextFor(f.persistence, f.task.id);
-      const plan = structuredClone(f.plan);
-      plan.steps[0]!.access = 'workspace-write';
-      plan.steps[0]!.writeClaims = context.workspace.roots.map((root) => ({
-        rootId: root.rootId,
-        path: 'allowed',
-        semanticKeys: [],
-      }));
-      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
-      f.persistence.saveGraphDocument(document, 1);
-      const review = await reviewGraphMission(
-        { taskId: f.task.id, instanceId: randomUUID(), renderRevision: document.renderRevision },
-        document,
-        () => graphMissionContextFor(f.persistence, f.task.id),
-      );
-      if (!review.writeFootprints) throw new Error('Expected Project claims');
-      const mission = f.persistence.createGraphTeamMission({
-        ...f.input,
-        renderRevision: document.renderRevision,
-        semanticRevision: document.semanticRevision,
-        semanticDigest: document.semanticDigest,
-      });
-      const run = begin(f, mission.id, 'a', review.writeFootprints);
-      const manager = new WorkerWorktreeManager({
-        worktreesRoot: join(dirname(f.path), 'worktrees'),
-      });
-      const coordinator = new TeamCoordinator(
-        f.persistence,
-        new DeterministicTeamWorkerRuntime(),
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        manager,
-      );
-      const isolation = await coordinator['prepareExecutionIsolation'](
-        f.task.id,
-        run.execution.id,
-        run.execution.assigneeAgentId,
-      );
-      for (const repository of isolation.repositories) {
-        const primary = isolation.roots.some(
-          (root) => root.role === 'primary' && root.repositoryOrdinal === repository.ordinal,
+    it.each([false, true])(
+      'checks every Project repository before integrating any of them (resume: %s)',
+      async (resume) => {
+        const base = fixture();
+        const rootPaths = ['primary', 'secondary'].map((name) => join(dirname(base.path), name));
+        const bindings = [];
+        for (const root of rootPaths) {
+          mkdirSync(join(root, 'allowed'), { recursive: true });
+          writeFileSync(join(root, 'allowed/file.ts'), 'base\n');
+          writeFileSync(join(root, 'outside.ts'), 'outside\n');
+          expect(spawnSync('git', ['init', '-q', root]).status).toBe(0);
+          expect(spawnSync('git', ['-C', root, 'add', '.']).status).toBe(0);
+          expect(
+            spawnSync('git', [
+              '-C',
+              root,
+              '-c',
+              'user.name=Test',
+              '-c',
+              'user.email=test@example.com',
+              'commit',
+              '-qm',
+              'base',
+            ]).status,
+          ).toBe(0);
+          bindings.push(await workspaceMutationBinding(root));
+        }
+        const project = base.persistence.createProject({
+          name: 'Two repositories',
+          folders: bindings.map((binding, i) => ({
+            id: randomUUID(),
+            path: binding.canonicalPath,
+            canonicalPath: binding.canonicalPath,
+            label: `root-${i}`,
+            role: i === 0 ? ('primary' as const) : ('secondary' as const),
+            workspaceKey: binding.workspaceKey,
+            rootIdentityDigest: binding.rootIdentityDigest,
+          })),
+        });
+        const f = fixture(
+          { persistence: base.persistence, path: base.path },
+          true,
+          ['a', 'b'],
+          project.id,
         );
-        writeFileSync(
-          join(repository.worktreePath, primary ? 'outside.ts' : 'allowed/file.ts'),
-          'worker\n',
+        const context = graphMissionContextFor(f.persistence, f.task.id);
+        const plan = structuredClone(f.plan);
+        plan.steps[0]!.access = 'workspace-write';
+        plan.steps[0]!.writeClaims = context.workspace.roots.map((root) => ({
+          rootId: root.rootId,
+          path: 'allowed',
+          semanticKeys: [],
+        }));
+        const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(document, 1);
+        const review = await reviewGraphMission(
+          { taskId: f.task.id, instanceId: randomUUID(), renderRevision: document.renderRevision },
+          document,
+          () => graphMissionContextFor(f.persistence, f.task.id),
         );
-      }
-      const sealed = await coordinator['finalizeIsolation']({
-        isolation,
-        agentId: run.execution.assigneeAgentId,
-        missionId: mission.id,
-        stepOrdinal: 1,
-      });
-      await expect(coordinator['queueIsolationIntegration'](sealed.isolation)).rejects.toThrow(
-        'outside the declared write scope',
-      );
-      for (const repository of isolation.repositories)
-        expect(
-          spawnSync('git', ['-C', repository.repoPath, 'rev-parse', 'HEAD'])
-            .stdout.toString()
-            .trim(),
-        ).toBe(repository.baseHead);
-      expect(f.persistence.getTeamExecutionIsolation(run.execution.id)?.phase).toBe(
-        'waiting_resume',
-      );
-      expect(f.persistence.listGraphResourceReservations(mission.id)[0]?.state).toBe('active');
-      f.persistence.close();
-    });
+        if (!review.writeFootprints) throw new Error('Expected Project claims');
+        const mission = f.persistence.createGraphTeamMission({
+          ...f.input,
+          renderRevision: document.renderRevision,
+          semanticRevision: document.semanticRevision,
+          semanticDigest: document.semanticDigest,
+        });
+        const run = begin(f, mission.id, 'a', review.writeFootprints);
+        const manager = new WorkerWorktreeManager({
+          worktreesRoot: join(dirname(f.path), 'worktrees'),
+        });
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          new DeterministicTeamWorkerRuntime(),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+        const isolation = await coordinator['prepareExecutionIsolation'](
+          f.task.id,
+          run.execution.id,
+          run.execution.assigneeAgentId,
+        );
+        if (resume) {
+          await installNativeGraphObserver(f.persistence, dirname(f.path));
+          for (const repository of isolation.repositories)
+            writeFileSync(
+              join(repository.worktreePath, 'allowed/file.ts'),
+              'retained project bytes\n',
+            );
+          f.persistence.interruptGraphStep({
+            missionId: mission.id,
+            stepKey: 'a',
+            generation: 1,
+            reservationId: run.reservation.id,
+            attemptId: run.attempt.id,
+            outcome: 'failed',
+            reason: 'interrupted project fixture',
+            confirmation: { kind: 'unconfirmed' },
+            now,
+          });
+          coordinator['quarantineExecutionIsolation'](run.execution.id, new Error('interrupted'));
+          const review = await coordinator.reviewGraphPreservedWorkspace(
+            f.task.id,
+            mission.id,
+            'a',
+          );
+          expect(review.files).toHaveLength(2);
+          await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
+          await vi.waitFor(
+            () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
+            { timeout: 15000 },
+          );
+          for (const repository of isolation.repositories)
+            expect(readFileSync(join(repository.repoPath, 'allowed/file.ts'), 'utf8')).toBe(
+              'retained project bytes\n',
+            );
+          expect(f.persistence.listTeamAttempts(run.execution.id)).toHaveLength(2);
+          await vi.waitFor(() =>
+            expect(coordinator['executionScheduler'].snapshot().activeCount).toBe(0),
+          );
+          f.persistence.close();
+          return;
+        }
+        for (const repository of isolation.repositories) {
+          const primary = isolation.roots.some(
+            (root) => root.role === 'primary' && root.repositoryOrdinal === repository.ordinal,
+          );
+          writeFileSync(
+            join(repository.worktreePath, primary ? 'outside.ts' : 'allowed/file.ts'),
+            'worker\n',
+          );
+        }
+        const sealed = await coordinator['finalizeIsolation']({
+          isolation,
+          agentId: run.execution.assigneeAgentId,
+          missionId: mission.id,
+          stepOrdinal: 1,
+        });
+        await expect(coordinator['queueIsolationIntegration'](sealed.isolation)).rejects.toThrow(
+          'outside the declared write scope',
+        );
+        for (const repository of isolation.repositories)
+          expect(
+            spawnSync('git', ['-C', repository.repoPath, 'rev-parse', 'HEAD'])
+              .stdout.toString()
+              .trim(),
+          ).toBe(repository.baseHead);
+        expect(f.persistence.getTeamExecutionIsolation(run.execution.id)?.phase).toBe(
+          'waiting_resume',
+        );
+        expect(f.persistence.listGraphResourceReservations(mission.id)[0]?.state).toBe('active');
+        f.persistence.close();
+      },
+    );
 
     it('requires containment rather than mere overlap or hard-link identity for write permission', async () => {
       const f = fixture(undefined, true);

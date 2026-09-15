@@ -23,6 +23,7 @@ import {
   graphMissionReviewSchema,
   graphMissionStartInputSchema,
   graphMissionResumeInputSchema,
+  graphWorkspaceReviewSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -296,6 +297,13 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    reviewWorkspace: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsWorkspaceReview,
+        graphMissionResumeInputSchema,
+        graphWorkspaceReviewSchema,
+        input,
+      ),
     resumeStep: async (input) => {
       const parsed = graphMissionResumeInputSchema.parse(input);
       const activation = trustedComputerUseActivation.consume('graph-resume-step');

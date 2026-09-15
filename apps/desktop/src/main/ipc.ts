@@ -32,6 +32,7 @@ import {
   graphMissionReviewSchema,
   graphMissionStartInputSchema,
   graphMissionResumeInputSchema,
+  graphWorkspaceReviewSchema,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -1900,6 +1901,32 @@ export class IpcRouter {
 
   register(): void {
     this.handle(
+      IPC_CHANNELS.graphsWorkspaceReview,
+      graphMissionResumeInputSchema,
+      graphWorkspaceReviewSchema,
+      async (input) => {
+        const document = this.graphs?.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const graph = this.persistence.getGraphTeamMission(input.missionId);
+        if (
+          !document ||
+          graph?.taskId !== input.taskId ||
+          graph.graphId !== document.id ||
+          graph.semanticRevision !== document.semanticRevision ||
+          graph.steps.find((step) => step.key === input.stepKey)?.generation !== input.generation
+        )
+          throw new Error('Graph workspace review agreement changed');
+        return this.teamCoordinator.reviewGraphPreservedWorkspace(
+          input.taskId,
+          input.missionId,
+          input.stepKey,
+        );
+      },
+    );
+    this.handle(
       IPC_CHANNELS.graphsMissionResumeStep,
       graphMissionResumeInputSchema,
       teamMissionSummarySchema,
@@ -1923,7 +1950,12 @@ export class IpcRouter {
           step?.generation !== input.generation
         )
           throw new Error('Graph integration agreement changed');
-        return this.teamCoordinator.resumeGraphStep(input.taskId, input.missionId, input.stepKey);
+        return this.teamCoordinator.resumeGraphStep(
+          input.taskId,
+          input.missionId,
+          input.stepKey,
+          input.workspaceReviewDigest,
+        );
       },
     );
     this.handle(

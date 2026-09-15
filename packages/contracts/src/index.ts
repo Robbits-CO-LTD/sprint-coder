@@ -896,6 +896,7 @@ export const teamMissionStepSummarySchema = z
           .nullable(),
         integrationResumeAvailable: z.boolean(),
         stepResumeAvailable: z.boolean(),
+        workspaceReviewRequired: z.boolean().optional(),
         /** Already resumed by hand and waiting on the scheduler (dependencies, resources). */
         stepResumePending: z.boolean(),
       })
@@ -4022,9 +4023,26 @@ export const graphMissionResumeInputSchema = graphSourceCheckInputSchema
     missionId: idSchema,
     stepKey: graphMissionKeySchema,
     generation: z.number().int().positive(),
+    workspaceReviewDigest: digestSchema.optional(),
   })
   .strict();
 export type GraphMissionResumeInput = z.infer<typeof graphMissionResumeInputSchema>;
+export const graphWorkspaceReviewSchema = z
+  .object({
+    digest: digestSchema,
+    files: z
+      .array(
+        z
+          .object({
+            repository: z.number().int().min(1).max(16),
+            path: z.string().min(1).max(4096),
+          })
+          .strict(),
+      )
+      .max(500),
+  })
+  .strict();
+export type GraphWorkspaceReview = z.infer<typeof graphWorkspaceReviewSchema>;
 export const graphMissionStartInputSchema = graphSourceCheckInputSchema
   .extend({ contextDigest: digestSchema })
   .strict();
@@ -5725,6 +5743,7 @@ export interface SprintCoderApi {
     startMission(input: GraphMissionStartInput): Promise<TeamMissionSummary>;
     resumeIntegration(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
     resumeStep(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
+    reviewWorkspace(input: GraphMissionResumeInput): Promise<GraphWorkspaceReview>;
     subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
@@ -6070,6 +6089,7 @@ export const IPC_CHANNELS = {
   graphsMissionStart: 'sprint-coder:graphs:mission-start',
   graphsMissionResumeIntegration: 'sprint-coder:graphs:mission-resume-integration',
   graphsMissionResumeStep: 'sprint-coder:graphs:mission-resume-step',
+  graphsWorkspaceReview: 'sprint-coder:graphs:workspace-review',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

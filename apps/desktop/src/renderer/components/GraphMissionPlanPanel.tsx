@@ -3,7 +3,12 @@ import {
   graphResumeActivationIntent,
   graphResumeStepActivationIntent,
 } from '../../graph-activation-intent';
-import type { GraphMissionPlan, GraphView, TeamMissionStepSummary } from '@sprint-coder/contracts';
+import type {
+  GraphMissionPlan,
+  GraphView,
+  TeamMissionStepSummary,
+  GraphWorkspaceReview,
+} from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
 import { useGraphDisclosure } from '../lib/graph-view-preference';
@@ -120,7 +125,7 @@ export function GraphMissionPlanPanel({
                           <GraphResumeButton
                             // The mode is part of the identity: a pending/error left over from one
                             // resume must not carry into the other.
-                            key={`${view.instanceId}:${execution.executionId}:${
+                            key={`${view.instanceId}:${execution.executionId}:${execution.graph.generation}:${
                               execution.graph.integrationResumeAvailable ? 'integration' : 'step'
                             }`}
                             view={view}
@@ -128,6 +133,7 @@ export function GraphMissionPlanPanel({
                             stepKey={step.key}
                             generation={execution.graph.generation}
                             integration={execution.graph.integrationResumeAvailable}
+                            reviewRequired={execution.graph.workspaceReviewRequired ?? false}
                           />
                         ) : null}
                       </>
@@ -194,15 +200,18 @@ function GraphResumeButton({
   stepKey,
   generation,
   integration,
+  reviewRequired,
 }: {
   view: GraphView;
   missionId: string;
   stepKey: string;
   generation: number;
   integration: boolean;
+  reviewRequired: boolean;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [review, setReview] = useState<GraphWorkspaceReview | null>(null);
   const input = {
     taskId: view.taskId,
     instanceId: view.instanceId,
@@ -210,6 +219,7 @@ function GraphResumeButton({
     missionId,
     stepKey,
     generation,
+    ...(!integration && review ? { workspaceReviewDigest: review.digest } : {}),
   };
   const resume = async () => {
     if (pending) return;
@@ -221,6 +231,7 @@ function GraphResumeButton({
       if (integration) await api.resumeIntegration(input);
       else await api.resumeStep(input);
     } catch (error) {
+      setReview(null);
       setError(error instanceof Error ? error.message : '再開できませんでした。');
     } finally {
       setPending(false);
@@ -228,17 +239,69 @@ function GraphResumeButton({
   };
   return (
     <div>
+      {!integration && reviewRequired ? (
+        <>
+          <p>中断前の変更を保持しています。内容の確認後、同じ作業場所で続きを実行します。</p>
+          <button
+            type="button"
+            className="settings-secondary-button"
+            disabled={pending}
+            onClick={() => {
+              setPending(true);
+              setError(null);
+              setReview(null);
+              const api = window.sprintCoder?.graphs;
+              if (!api) {
+                setError('アプリとの接続を確認できませんでした。');
+                setPending(false);
+                return;
+              }
+              void api
+                .reviewWorkspace(input)
+                .then(setReview)
+                .catch(() => {
+                  setError(
+                    '保持した変更を確認できませんでした。停止状態と作業場所を確認してください。',
+                  );
+                })
+                .finally(() => setPending(false));
+            }}
+          >
+            保持した変更を確認
+          </button>
+          {review ? (
+            <div data-testid="graph-workspace-review">
+              <p>
+                {review.files.length}ファイルの変更を保持しています。完了・統合済みではありません。
+              </p>
+              <ul>
+                {review.files.map((file) => (
+                  <li key={`${file.repository}:${file.path}`}>
+                    リポジトリ {file.repository}: {file.path}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </>
+      ) : null}
       <button
         type="button"
         className="button"
-        disabled={pending}
+        disabled={pending || (!integration && reviewRequired && !review)}
         data-computer-use-activation={integration ? 'graph-resume' : 'graph-resume-step'}
         data-computer-use-intent={
           integration ? graphResumeActivationIntent(input) : graphResumeStepActivationIntent(input)
         }
         onClick={() => void resume()}
       >
-        {pending ? '再開しています…' : integration ? '完了した変更の統合を再開' : 'この工程を再開'}
+        {pending
+          ? '確認しています…'
+          : integration
+            ? '完了した変更の統合を再開'
+            : reviewRequired
+              ? '確認した変更を保持して再開'
+              : 'この工程を再開'}
       </button>
       {error ? <p role="alert">{error}</p> : null}
     </div>

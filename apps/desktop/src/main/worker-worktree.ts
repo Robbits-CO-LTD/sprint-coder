@@ -259,6 +259,106 @@ export class WorkerWorktreeManager {
     return { path: worktreePath, baseHead: head };
   }
 
+  /** Metadata inventory only. The caller must separately bind the actual bytes and path identities. */
+  async inspectPreserved(input: CreateWorktreeInput & { path: string; baseHead: string }) {
+    validateGitHead(input.baseHead);
+    const worktreeId = input.worktreeId ?? input.agentId;
+    if (!this.ownsWorktreePath(worktreeId, input.path))
+      throw new WorktreeError('invalid_input', 'Preserved worktree path does not match its owner');
+    const path = await realpath(input.path);
+    if ((await this.resolveRepositoryPath(path)) !== path)
+      throw new WorktreeError('invalid_input', 'Preserved worktree was replaced');
+    const common = async (root: string) =>
+      realpath(
+        resolve(
+          root,
+          (
+            await this.runGit(root, ['rev-parse', '--git-common-dir'], 'create_failed')
+          ).stdout.trim(),
+        ),
+      );
+    const commonPath = await common(input.repoPath);
+    if ((await common(path)) !== commonPath)
+      throw new WorktreeError('invalid_input', 'Preserved worktree belongs to another repository');
+    const registered = (
+      await this.runGit(input.repoPath, ['worktree', 'list', '--porcelain', '-z'], 'create_failed')
+    ).stdout;
+    if (!registered.split('\0').includes(`worktree ${path}`))
+      throw new WorktreeError('invalid_input', 'Preserved worktree is not registered');
+    const head = (await this.runGit(path, ['rev-parse', 'HEAD'], 'create_failed')).stdout.trim();
+    validateGitHead(head);
+    if (
+      (
+        await this.runGit(path, ['merge-base', input.baseHead, head], 'create_failed')
+      ).stdout.trim() !== input.baseHead
+    )
+      throw new WorktreeError(
+        'base_changed',
+        'Preserved worktree is no longer based on its recorded base',
+      );
+    const gitPath = async (name: string) =>
+      resolve(
+        path,
+        (await this.runGit(path, ['rev-parse', '--git-path', name], 'create_failed')).stdout.trim(),
+      );
+    for (const marker of [
+      'MERGE_HEAD',
+      'CHERRY_PICK_HEAD',
+      'REVERT_HEAD',
+      'rebase-apply',
+      'rebase-merge',
+    ])
+      if (await pathExists(await gitPath(marker)))
+        throw new WorktreeError(
+          'base_changed',
+          'Preserved worktree has an unfinished Git operation',
+        );
+    const files = async (args: string[]) =>
+      (await this.runGit(path, args, 'create_failed')).stdout.split('\0').filter(Boolean);
+    const changedFiles = [
+      ...new Set([
+        ...(await files([
+          'diff',
+          '--no-ext-diff',
+          '--no-textconv',
+          '--no-renames',
+          '--name-only',
+          '-z',
+          input.baseHead,
+          '--',
+        ])),
+        ...(await files([
+          'diff',
+          '--cached',
+          '--no-ext-diff',
+          '--no-textconv',
+          '--no-renames',
+          '--name-only',
+          '-z',
+          input.baseHead,
+          '--',
+        ])),
+        ...(await files(['ls-files', '--others', '--exclude-standard', '-z'])),
+      ]),
+    ].sort();
+    if (
+      changedFiles.length > 500 ||
+      changedFiles.some((file) => file.length > 4096 || file.includes('\ufffd'))
+    )
+      throw new WorktreeError(
+        'invalid_input',
+        'Preserved file inventory exceeds the review boundary',
+      );
+    return {
+      path,
+      commonPath,
+      head,
+      baseHead: input.baseHead,
+      indexPath: await gitPath('index'),
+      changedFiles,
+    };
+  }
+
   async cleanup({
     agentId,
     repoPath,

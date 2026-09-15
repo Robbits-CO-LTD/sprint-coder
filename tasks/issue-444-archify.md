@@ -12,6 +12,14 @@ Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI 
 
 No AC or INV is retired. GitHub writes and release/version operations belong to Main.
 
+### Retained-write continuation checkpoint
+
+`graphs.reviewWorkspace` reads the registered worktree/repository/base and complete changed-path inventory (rename endpoints, removals, staged and untracked paths). Existing NativeSafeFs read sessions bind actual binary content, file/root identity, `.git` registration bytes and the index, with repeated observations before returning a bounded metadata-only review. Unsupported links/special files and missing native observation fail explicitly. This digest is a continuation review, never a completion checkpoint.
+
+The existing trusted step-resume control binds that digest. Main confirms stopping the previous Attempt, checks the exact current image, then uses existing resource release/reacquisition, scheduler and fresh Attempt dispatch. It checks the image again during admission and before dispatch. Project isolation gets a graph-only continuation transition after release, retains its roots and all repositories, and still integrates every sealed result before checkpointing. Existing sealed-result integration resume remains the only route for completed Worker output. Review and rejected resume do not stage, reset, commit, delete or clean retained user changes.
+
+Local evidence: NativeSafeFs/real-Git review 5 cases, Electron-ABI graph persistence/Coordinator 49 cases (including retained Task and two-repository Project continuation, modified review image and stop-unconfirmed rejection), desktop/contracts typecheck and scoped lint passed. Final follow-up checks cover duplicate admission and root identity refusal. A native observer is required; no weaker fallback is used. Current-head UI recovery, Windows and full AC-17 remain unverified. Constraint updates/re-agreement are the next implementation slice.
+
 ## Current checkpoint: sealed-diff enforcement before integration
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.

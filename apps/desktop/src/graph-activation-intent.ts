@@ -31,5 +31,6 @@ export function graphResumeStepActivationIntent(input: GraphMissionResumeInput):
     missionId: input.missionId,
     stepKey: input.stepKey,
     generation: input.generation,
+    ...(input.workspaceReviewDigest ? { workspaceReviewDigest: input.workspaceReviewDigest } : {}),
   });
 }

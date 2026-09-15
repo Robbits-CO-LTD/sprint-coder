@@ -1,4 +1,5 @@
 import { previewGraphSource } from './graph-source-preview';
+import { reviewGraphWorkspace } from './graph-workspace-review';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { graphMissionContextFor, prepareGraphStepWriteFootprints } from './graph-mission-review';
 import type { GraphMissionCommitInput, GraphMissionRecord } from './graph-mission-record';
@@ -19,6 +20,7 @@ import {
   type TeamAssignMissionInput,
   type TeamMissionCheckpoint,
   type TeamMissionSummary,
+  type GraphWorkspaceReview,
   type TeamExecutionIsolation,
   type TeamSendMessageInput,
   type ExecutionResolution,
@@ -301,6 +303,7 @@ const executionEstimate = Object.freeze({
 });
 
 export class TeamCoordinator {
+  private readonly graphWorkspaceResumeDigests = new Map<string, string>();
   private readonly graphIntegrationWorkers = new Set<string>();
   private readonly graphScheduledExecutions = new Set<string>();
   private readonly graphWaitReasons = new Map<
@@ -1243,6 +1246,17 @@ export class TeamCoordinator {
       if (!leader || !storedWorker || !['ready', 'waiting'].includes(storedWorker.state))
         throw new Error('Graph Worker is not ready');
       await this.verifyWorkspace?.(graph.taskId);
+      const reviewedWorkspace = this.graphWorkspaceResumeDigests.get(execution.id);
+      if (reviewedWorkspace !== undefined) {
+        const review = await this.inspectGraphWorkspace(
+          graph.taskId,
+          graph.missionId,
+          stepKey,
+          true,
+        );
+        if (review.digest !== reviewedWorkspace)
+          throw new Error('Preserved workspace changed before admission; review it again');
+      }
       this.persistence.sealTeamExecutionContext({
         taskId: graph.taskId,
         executionId: execution.id,
@@ -1266,6 +1280,12 @@ export class TeamCoordinator {
       });
       if (!acquired.acquired || acquired.reservation.id !== owner.id)
         throw new Error('Graph admission changed during preflight');
+      if (
+        reviewedWorkspace !== undefined &&
+        (await this.inspectGraphWorkspace(graph.taskId, graph.missionId, stepKey, true)).digest !==
+          reviewedWorkspace
+      )
+        throw new Error('Preserved workspace changed before dispatch; review it again');
       budgets = this.persistence.reserveTeamBudget({
         teamId: execution.teamId,
         entries: [
@@ -1506,6 +1526,7 @@ export class TeamCoordinator {
         });
       }
     } finally {
+      this.graphWorkspaceResumeDigests.delete(execution.id);
       this.releaseReservations(budgets);
       this.executionScheduler.notifyReadinessChanged();
       this.emit(graph.taskId, execution.teamId);
@@ -1523,6 +1544,7 @@ export class TeamCoordinator {
     taskId: string,
     missionId: string,
     stepKey: string,
+    workspaceReviewDigest?: string,
   ): Promise<TeamMissionSummary> {
     return this.enqueue(taskId, async () => {
       const graph = this.persistence.getGraphTeamMission(missionId);
@@ -1542,12 +1564,10 @@ export class TeamCoordinator {
       // A sealed result is agreed work. Re-running the Worker would discard it, so the integration
       // path stays the only way forward.
       if (hold !== null) throw new Error('Completed graph work must resume integration');
-      // An interrupted write step keeps its worktree/isolation. Restarting on top of a preserved
-      // workspace needs its own review slice, so refuse rather than guess.
-      if (
+      const preserved =
         this.persistence.getTeamMissionWorktree(execution.id) ||
-        this.persistence.getTeamExecutionIsolation(execution.id)
-      )
+        this.persistence.getTeamExecutionIsolation(execution.id);
+      if (preserved && !workspaceReviewDigest)
         throw new Error('Interrupted write work requires review of its preserved workspace');
       await this.verifyWorkspace?.(taskId);
       await prepareGraphStepWriteFootprints(graph, stepKey, () =>
@@ -1567,8 +1587,24 @@ export class TeamCoordinator {
       }
       // A restart is not proof that a dispatched runner stopped; make Main observe the stop before
       // the quarantined reservation is released to the new Attempt.
+      if (
+        preserved &&
+        (this.graphIntegrationWorkers.has(execution.assigneeAgentId) ||
+          this.executionScheduler
+            .snapshot()
+            .activeExecutionIds.some(
+              (id) =>
+                this.persistence.getTeamExecution(id).assigneeAgentId === execution.assigneeAgentId,
+            ))
+      )
+        throw new Error('Graph workspace Worker is still active');
       if (owners.some((owner) => owner.attemptId !== null))
         await this.runtime.stop(execution.assigneeAgentId);
+      if (preserved) {
+        const review = await this.inspectGraphWorkspace(taskId, missionId, stepKey);
+        if (review.digest !== workspaceReviewDigest)
+          throw new Error('Preserved workspace changed; review it again');
+      }
       for (const owner of owners)
         this.persistence.releaseGraphResources({
           reservationId: owner.id,
@@ -1581,8 +1617,17 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       try {
+        if (preserved && workspaceReviewDigest) {
+          if (this.persistence.getTeamExecutionIsolation(execution.id)) {
+            if (!this.persistence.resumeGraphExecutionIsolation)
+              throw new Error('Graph workspace continuation is unavailable');
+            this.persistence.resumeGraphExecutionIsolation(execution.id, this.isoNow());
+          }
+          this.graphWorkspaceResumeDigests.set(execution.id, workspaceReviewDigest);
+        }
         await this.scheduleGraphMission(taskId, missionId, stepKey);
       } catch (error) {
+        this.graphWorkspaceResumeDigests.delete(execution.id);
         // The reservations are gone but the step is still `waiting_resume`, so the user can ask
         // again once the reason is fixed. Say what stopped it instead of leaving a silent button.
         this.persistence.setWorkerCurrentActivity(
@@ -1596,6 +1641,127 @@ export class TeamCoordinator {
       this.emit(taskId, execution.teamId);
       return this.missionSummary(this.persistence.getTeamMission(missionId));
     });
+  }
+
+  async reviewGraphPreservedWorkspace(
+    taskId: string,
+    missionId: string,
+    stepKey: string,
+  ): Promise<GraphWorkspaceReview> {
+    return this.enqueue(taskId, () => this.inspectGraphWorkspace(taskId, missionId, stepKey));
+  }
+
+  private async inspectGraphWorkspace(
+    taskId: string,
+    missionId: string,
+    stepKey: string,
+    admission = false,
+  ): Promise<GraphWorkspaceReview> {
+    const graph = this.persistence.getGraphTeamMission(missionId);
+    const mapping = graph?.steps.find((step) => step.key === stepKey);
+    const mission = this.persistence.getTeamMission(missionId);
+    if (
+      !graph ||
+      !mapping ||
+      graph.taskId !== taskId ||
+      ['completed', 'failed', 'canceled'].includes(mission.state)
+    )
+      throw new Error('Graph workspace does not belong to a resumable Mission');
+    const execution = this.persistence.getTeamExecution(mapping.executionId);
+    if (
+      execution.state !== 'waiting_resume' ||
+      (!admission && this.graphScheduledExecutions.has(execution.id)) ||
+      this.executionInterruptions.has(execution.id) ||
+      this.graphIntegrationWorkers.has(execution.assigneeAgentId)
+    )
+      throw new Error('Graph workspace still has active work');
+    if (
+      this.executionScheduler
+        .snapshot()
+        .activeExecutionIds.some(
+          (id) =>
+            (!admission || id !== execution.id) &&
+            this.persistence.getTeamExecution(id).assigneeAgentId === execution.assigneeAgentId,
+        )
+    )
+      throw new Error('Graph workspace Worker is still active');
+    if (this.graphIntegrationHoldFor(missionId, execution.id).hold)
+      throw new Error('Completed graph work must resume integration');
+    if (this.persistence.getGraphDocument(taskId)?.semanticDigest !== graph.semanticDigest)
+      throw new Error('Graph agreement changed');
+    await this.verifyWorkspace?.(taskId);
+    await prepareGraphStepWriteFootprints(graph, stepKey, () =>
+      graphMissionContextFor(this.persistence, taskId),
+    );
+    const worktree = this.persistence.getTeamMissionWorktree(execution.id);
+    const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+    for (const root of isolation?.roots ?? []) {
+      if (
+        !root.isolatedIdentity ||
+        (await workspaceMutationBinding(root.isolatedPath)).rootIdentityDigest !==
+          root.isolatedIdentity
+      )
+        throw new Error('Preserved isolation root identity changed');
+    }
+    const repositories = worktree
+      ? [
+          {
+            ordinal: 1,
+            repoPath: worktree.repoPath,
+            worktreePath: worktree.path,
+            baseHead: worktree.baseHead,
+            workerHead: worktree.workerHead,
+            integratedHead: worktree.integratedHead,
+            state: worktree.state,
+          },
+        ]
+      : isolation?.repositories;
+    if (
+      !this.worktreeManager ||
+      !repositories?.length ||
+      repositories.some(
+        (repo) =>
+          repo.workerHead ||
+          repo.integratedHead ||
+          !['created', 'active', 'quarantined'].includes(repo.state),
+      )
+    )
+      throw new Error('Preserved workspace has sealed or unavailable work');
+    const images = [];
+    for (const repo of repositories) {
+      const image = await reviewGraphWorkspace(
+        this.worktreeManager,
+        {
+          agentId: execution.assigneeAgentId,
+          worktreeId: worktree ? execution.id : isolationWorktreeId(execution.id, repo.ordinal),
+          repoPath: repo.repoPath,
+          path: repo.worktreePath,
+          baseHead: repo.baseHead,
+        },
+        (root) => this.persistence.openGraphWorkspaceObservation?.(root) ?? null,
+      );
+      images.push({ repository: repo.ordinal, ...image });
+    }
+    if (images.reduce((count, image) => count + image.changedFiles.length, 0) > 500)
+      throw new Error('Preserved workspace has too many changes to review');
+    return {
+      digest: createHash('sha256')
+        .update(
+          JSON.stringify([
+            taskId,
+            missionId,
+            mapping.key,
+            mapping.generation,
+            graph.semanticDigest,
+            graph.policyEpoch,
+            images,
+          ]),
+        )
+        .digest('hex'),
+      files: images.flatMap((image) =>
+        image.changedFiles.map((path) => ({ repository: image.repository, path })),
+      ),
+    };
   }
 
   /**
@@ -3718,12 +3884,16 @@ export class TeamCoordinator {
                       : null,
                   stepResumePending,
                   stepResumeAvailable:
+                    !['completed', 'failed', 'canceled'].includes(mission.state) &&
                     execution.state === 'waiting_resume' &&
                     hold === null &&
-                    !stepResumePending &&
-                    !this.persistence.getTeamMissionWorktree(execution.id) &&
-                    !this.persistence.getTeamExecutionIsolation(execution.id),
+                    !stepResumePending,
+                  workspaceReviewRequired: Boolean(
+                    this.persistence.getTeamMissionWorktree(execution.id) ||
+                    this.persistence.getTeamExecutionIsolation(execution.id),
+                  ),
                   integrationResumeAvailable:
+                    !['completed', 'failed', 'canceled'].includes(mission.state) &&
                     execution.state === 'waiting_resume' &&
                     hold !== null &&
                     !hold.integrationActive,
