@@ -3,7 +3,13 @@ $ErrorActionPreference = 'Stop'
 $lane = 'C:\Users\yusei\sc-issue-434-20260915'
 $taskName = 'SprintCoderDFlash434-20260915'
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($task -and ($task.State -eq 'Running' -or $task.Actions.Arguments -notlike ('*' + $lane + '\run-dflash-windows.ps1*'))) { throw 'Owned task running or ownership mismatch' }
+if ($task) {
+    # Actions is an array: a bare -notlike would return the filtered elements, not a boolean.
+    $ownedActions = @($task.Actions | Where-Object { $_.Arguments -like ('*' + $lane + '\run-dflash-windows.ps1*') })
+    if ($task.State -eq 'Running' -or @($task.Actions).Count -ne 1 -or $ownedActions.Count -ne 1) {
+        throw 'Owned task running or ownership mismatch'
+    }
+}
 if ((Get-Content (Join-Path $lane 'cleanup-run.exit')).Trim() -ne '0') { throw 'Cleanup phase did not succeed' }
 $owned = @(Get-CimInstance Win32_Process | Where-Object {
     $_.Name -in @('Sprint Coder.exe','llama-server.exe','node.exe') -and
