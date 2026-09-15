@@ -13,8 +13,13 @@ import { GraphSourcesPanel } from './GraphSourcesPanel';
 import { acceptGraphGeneration } from '../lib/graph-generation';
 import { useGraphSourceStatus } from '../lib/use-graph-source-status';
 import { GraphMissionPlanPanel } from './GraphMissionPlanPanel';
+import { restoreGraphSelection, saveGraphSelection } from '../lib/graph-view-preference';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
+  return <GraphPanelForTask key={taskId} taskId={taskId} onClose={onClose} />;
+}
+
+function GraphPanelForTask({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
   const [selection, setSelection] = useState<GraphSelection | null>(null);
   // The artifact's diagram is painted before its bridge script has registered the selection
@@ -29,13 +34,20 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
   const generationSequence = useRef(0);
   const frame = useRef<HTMLIFrameElement>(null);
   const team = useAppStore((state) => state.teamByTask[taskId]);
-  const graphMission = team?.missions.find(
-    (mission) =>
-      view !== null &&
-      mission.graph !== undefined &&
-      mission.graph.id === view.id &&
-      mission.graph.semanticRevision === view.revision,
-  );
+  const graphMission =
+    team?.missions.find(
+      (mission) =>
+        view !== null &&
+        mission.graph !== undefined &&
+        mission.graph.id === view.id &&
+        mission.graph.semanticRevision === view.revision,
+    ) ??
+    team?.missions.find(
+      (mission) =>
+        view &&
+        mission.graph?.id === view.id &&
+        !['completed', 'failed', 'canceled'].includes(mission.state),
+    );
   const sendExecutionState = useCallback(() => {
     if (!view) return;
     frame.current?.contentWindow?.postMessage(
@@ -53,6 +65,15 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
     );
   }, [view, graphMission]);
   useEffect(sendExecutionState, [sendExecutionState]);
+  useEffect(() => {
+    if (!view || !ready) return;
+    const restored = restoreGraphSelection(view);
+    if (restored)
+      frame.current?.contentWindow?.postMessage(
+        { ...restored, type: 'sprint-graph-restore-selection' },
+        '*',
+      );
+  }, [view, ready]);
   // The graph artifact runs out of process. Until Chromium has registered that frame's hit-test
   // region — roughly the first 100ms of its life — a click aimed at the diagram is delivered to
   // THIS renderer instead, and arrives here as a click on the iframe element. That never happens
@@ -117,7 +138,7 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
       ) {
         currentView.current = next;
         setView(next);
-        setSelection(null);
+        setSelection(restoreGraphSelection(next));
         setReady(false);
         setError(null);
       }
@@ -145,7 +166,10 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
       const expected = frame.current?.contentWindow ?? null;
       if (acceptGraphReady(event.data, event.source, expected, view)) setReady(true);
       const accepted = acceptGraphSelection(event.data, event.source, expected, view);
-      if (accepted !== null) setSelection(accepted);
+      if (accepted !== null) {
+        setSelection(accepted);
+        saveGraphSelection(view, accepted);
+      }
     };
     window.addEventListener('message', listener);
     return () => window.removeEventListener('message', listener);

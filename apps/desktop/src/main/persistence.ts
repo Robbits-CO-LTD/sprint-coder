@@ -1,4 +1,14 @@
 import Database from 'better-sqlite3';
+import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
+import { graphMissionRecordSchema } from './graph-mission-record';
+import {
+  graphUpdateRequestSchema,
+  graphUpdateCommitSchema,
+  graphPendingUpdateSchema,
+  type GraphUpdateRequest,
+  type GraphPendingUpdate,
+  type GraphUpdateCommit,
+} from './graph-mission-update';
 import {
   graphIntegrationPayloadSchema,
   type GraphIntegrationHold,
@@ -4039,6 +4049,33 @@ const migrations = [
       CREATE UNIQUE INDEX edit_sagas_commit_order ON edit_sagas(turn_id, commit_sequence);
     `,
   },
+  {
+    version: 91,
+    checksum: 'graph-updates-v91-owned-consent-history',
+    sql: `
+      CREATE TABLE team_graph_pending_updates (
+        mission_id TEXT PRIMARY KEY REFERENCES team_graph_missions(mission_id) ON DELETE CASCADE,
+        request_id TEXT NOT NULL UNIQUE, payload_json TEXT NOT NULL,
+        payload_digest TEXT NOT NULL CHECK(length(payload_digest)=64)
+      );
+      CREATE TABLE team_graph_agreement_history (
+        mission_id TEXT NOT NULL REFERENCES team_graph_missions(mission_id) ON DELETE CASCADE,
+        graph_id TEXT NOT NULL, semantic_revision INTEGER NOT NULL CHECK(semantic_revision>0),
+        consent_id TEXT NOT NULL UNIQUE, snapshot_json TEXT NOT NULL,
+        snapshot_digest TEXT NOT NULL CHECK(length(snapshot_digest)=64),
+        PRIMARY KEY(mission_id,semantic_revision), UNIQUE(graph_id,semantic_revision)
+      );
+      CREATE TRIGGER graph_agreement_history_immutable BEFORE UPDATE ON team_graph_agreement_history
+        BEGIN SELECT RAISE(ABORT, 'Graph agreement history is immutable'); END;
+      ALTER TABLE team_graph_resource_reservations ADD COLUMN agreement_consent_id TEXT;
+      UPDATE team_graph_resource_reservations SET agreement_consent_id=(
+        SELECT g.consent_id FROM team_graph_missions g WHERE g.mission_id=team_graph_resource_reservations.mission_id
+      );
+      CREATE TRIGGER graph_owner_consent_immutable BEFORE UPDATE OF agreement_consent_id ON team_graph_resource_reservations
+        WHEN NEW.agreement_consent_id IS NOT OLD.agreement_consent_id
+        BEGIN SELECT RAISE(ABORT, 'Graph owner consent is immutable'); END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4629,6 +4666,15 @@ export interface PersistenceClient {
   listGraphResourceReservations(missionId: string): readonly GraphResourceReservation[];
   createGraphTeamMission(input: GraphMissionCommitInput): TeamMissionRecord;
   getGraphTeamMission(missionId: string): GraphMissionRecord | null;
+  getGraphStepAgreement?(
+    missionId: string,
+    stepKey: string,
+    generation: number,
+    reservationId: string,
+  ): GraphMissionRecord;
+  stageGraphConstraintUpdate?(input: GraphUpdateRequest): GraphPendingUpdate;
+  getGraphPendingUpdate?(missionId: string): GraphPendingUpdate | null;
+  commitGraphConstraintUpdate?(input: GraphUpdateCommit): GraphMissionRecord;
   setSkillCatalogContextProvider?(
     provider: (
       selections: readonly TurnSkillSelection[],
@@ -4639,6 +4685,10 @@ export interface PersistenceClient {
     provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
   setSealedPostImageObserver?(observer: SealedPostImageObserver): void;
+  openGraphWorkspaceObservation?(
+    root: Parameters<SealedPostImageObserver>[0],
+  ): SealedPostImageSession;
+  resumeGraphExecutionIsolation?(executionId: string, now: string): void;
   listProviderConnections(): readonly ProviderConnection[];
   getProviderConnection(connectionId: string): ProviderConnection;
   createProviderConnection(connection: ProviderConnection): ProviderConnection;
@@ -6171,6 +6221,52 @@ export class SqlitePersistenceClient implements PersistenceClient {
    */
   setSealedPostImageObserver(observer: SealedPostImageObserver): void {
     this.sealedPostImageObserver = observer;
+  }
+
+  openGraphWorkspaceObservation(
+    root: Parameters<SealedPostImageObserver>[0],
+  ): SealedPostImageSession {
+    const session = this.sealedPostImageObserver?.(root);
+    if (!session) throw new Error('Native workspace review is unavailable');
+    return session;
+  }
+
+  /** Main has reviewed the retained bytes and observed the old runtime stop before this transition. */
+  resumeGraphExecutionIsolation(executionId: string, now: string): void {
+    this.db.transaction(() => {
+      const mission = this.getTeamMissionForExecution(executionId);
+      const execution = this.getTeamExecution(executionId);
+      const isolation = this.requireTeamExecutionIsolation(executionId);
+      if (
+        mission?.mode !== 'graph' ||
+        execution.state !== 'waiting_resume' ||
+        !['running', 'quarantined'].includes(isolation.phase) ||
+        isolation.repositories.some(
+          (repo) =>
+            repo.workerHead ||
+            repo.integratedHead ||
+            ['ready', 'integrated', 'cleaned'].includes(repo.state),
+        ) ||
+        this.listGraphResourceReservations(mission.id).some(
+          (owner) => owner.executionId === executionId && owner.state !== 'released',
+        )
+      )
+        throw new Error('Graph workspace cannot resume before stop and ownership release');
+      const resumed = teamExecutionIsolationSchema.parse({
+        phase: 'running',
+        resumeKind: null,
+        reason: null,
+        roots: isolation.roots,
+        repositories: isolation.repositories.map((repo) => ({ ...repo, state: 'active' })),
+      });
+      const result = this.db
+        .prepare(
+          `UPDATE team_execution_isolations SET phase='running', resume_kind=NULL,
+        reason=NULL, repositories_json=?, revision=revision+1, updated_at=? WHERE execution_id=? AND revision=?`,
+        )
+        .run(JSON.stringify(resumed.repositories), now, executionId, isolation.revision);
+      if (result.changes !== 1) throw new TeamConflictError();
+    })();
   }
 
   /**
@@ -9470,6 +9566,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     writeFootprints?: readonly GraphWriteFootprint[];
   }): GraphResourceAvailability {
     return this.db.transaction((): GraphResourceAvailability => {
+      this.assertGraphUpdateNotPending(input.missionId, input.stepKey);
       const graph = this.getGraphTeamMission(input.missionId);
       if (!graph) throw new Error('Graph Mission required');
       const mission = this.getTeamMission(input.missionId);
@@ -9565,8 +9662,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const id = randomUUID();
       this.db
         .prepare(
-          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json,write_claims_json,write_claims_digest)
-        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?,?,?)`,
+          `INSERT INTO team_graph_resource_reservations(id,mission_id,execution_id,generation,attempt_id,state,created_at,released_at,resources_json,write_claims_json,write_claims_digest,agreement_consent_id)
+        VALUES (?,?,?,?,NULL,'reserved',?,NULL,?,?,?,?)`,
         )
         .run(
           id,
@@ -9577,6 +9674,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           canonicalGraphJson(resources),
           writeJson,
           writeDigest,
+          graph.consentId,
         );
       for (const resource of resources)
         this.db
@@ -9616,6 +9714,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       const reservation = this.readGraphResourceReservation(row);
       const graph = this.getGraphTeamMission(row.mission_id);
       const step = graph?.steps.find((step) => step.executionId === input.executionId);
+      if (step) this.assertGraphUpdateNotPending(row.mission_id, step.key);
       const attempt = this.getTeamAttempt(input.attemptId);
       if (
         step?.generation !== input.generation ||
@@ -9833,6 +9932,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     reservation: GraphResourceReservation;
   } {
     return this.db.transaction(() => {
+      this.assertGraphUpdateNotPending(input.missionId, input.stepKey);
       const graph = this.getGraphTeamMission(input.missionId);
       const step = graph?.steps.find((step) => step.key === input.stepKey);
       if (!graph || !step || step.generation !== input.generation)
@@ -10242,6 +10342,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (report.status !== 'completed')
       throw new Error('Graph completion requires a completed report');
     return this.db.transaction(() => {
+      this.assertGraphUpdateNotPending(input.missionId, input.stepKey);
       const graph = this.getGraphTeamMission(input.missionId);
       const step = graph?.steps.find((step) => step.key === input.stepKey);
       if (!graph || !step || step.generation !== input.generation)
@@ -10500,9 +10601,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (
         this.db
           .prepare(
-            'SELECT 1 FROM team_graph_missions WHERE consent_id = ? OR (graph_id = ? AND semantic_revision = ?)',
+            `SELECT 1 FROM team_graph_missions WHERE consent_id = ? OR (graph_id = ? AND semantic_revision = ?)
+             UNION ALL SELECT 1 FROM team_graph_agreement_history WHERE consent_id = ? OR (graph_id = ? AND semantic_revision = ?)`,
           )
-          .get(input.consentId, input.graphId, input.semanticRevision)
+          .get(
+            input.consentId,
+            input.graphId,
+            input.semanticRevision,
+            input.consentId,
+            input.graphId,
+            input.semanticRevision,
+          )
       )
         throw new Error('Graph agreement was already committed');
       const contextJson = canonicalGraphJson(graphMissionContextSnapshot(context, workerIds));
@@ -10650,6 +10759,281 @@ export class SqlitePersistenceClient implements PersistenceClient {
         generation: mapping.generation,
       })),
     };
+  }
+
+  /** Keep an unchanged running step on the consent that authorized its current generation. */
+  getGraphStepAgreement(
+    missionId: string,
+    stepKey: string,
+    generation: number,
+    reservationId: string,
+  ): GraphMissionRecord {
+    const current = this.getGraphTeamMission(missionId);
+    const step = current?.steps.find((step) => step.key === stepKey);
+    if (!current || !step || step.generation !== generation)
+      throw new Error('Graph step agreement generation changed');
+    const owner = this.db
+      .prepare(
+        'SELECT mission_id,execution_id,generation,agreement_consent_id FROM team_graph_resource_reservations WHERE id=?',
+      )
+      .get(reservationId) as
+      | {
+          mission_id: string;
+          execution_id: string;
+          generation: number;
+          agreement_consent_id: string | null;
+        }
+      | undefined;
+    if (
+      !owner ||
+      owner.mission_id !== missionId ||
+      owner.execution_id !== step.executionId ||
+      owner.generation !== generation ||
+      !owner.agreement_consent_id
+    )
+      throw new Error('Graph owner consent snapshot is unavailable; recovery is required');
+    if (owner.agreement_consent_id === current.consentId) return current;
+    const rows = this.db
+      .prepare(
+        'SELECT snapshot_json,snapshot_digest FROM team_graph_agreement_history WHERE mission_id=? AND consent_id=?',
+      )
+      .all(missionId, owner.agreement_consent_id) as {
+      snapshot_json: string;
+      snapshot_digest: string;
+    }[];
+    for (const row of rows) {
+      if (
+        Buffer.byteLength(row.snapshot_json) > 512 * 1024 ||
+        createHash('sha256').update(row.snapshot_json).digest('hex') !== row.snapshot_digest
+      )
+        throw new Error('Graph agreement history integrity mismatch');
+      const record = graphMissionRecordSchema.parse(JSON.parse(row.snapshot_json));
+      const original = record.steps.find((candidate) => candidate.key === stepKey);
+      if (original?.generation !== generation) continue;
+      if (
+        record.missionId !== missionId ||
+        record.taskId !== current.taskId ||
+        record.graphId !== current.graphId ||
+        record.consentId !== owner.agreement_consent_id ||
+        original.executionId !== step.executionId ||
+        record.contextDigest !== current.contextDigest ||
+        graphMissionConstraintUpdate(record.plan, current.plan, new Set()).affectedKeys.includes(
+          stepKey,
+        )
+      )
+        throw new Error('Graph step agreement ownership or declaration changed');
+      return record;
+    }
+    throw new Error('Graph owner consent snapshot is missing');
+  }
+
+  getGraphPendingUpdate(missionId: string): GraphPendingUpdate | null {
+    const row = this.db
+      .prepare(
+        'SELECT payload_json,payload_digest FROM team_graph_pending_updates WHERE mission_id=?',
+      )
+      .get(missionId) as { payload_json: string; payload_digest: string } | undefined;
+    if (!row) return null;
+    if (
+      Buffer.byteLength(row.payload_json) > 16384 ||
+      createHash('sha256').update(row.payload_json).digest('hex') !== row.payload_digest
+    )
+      throw new Error('Graph pending update integrity mismatch');
+    const pending = graphPendingUpdateSchema.parse(JSON.parse(row.payload_json));
+    if (pending.missionId !== missionId) throw new Error('Graph pending update ownership mismatch');
+    return pending;
+  }
+
+  private assertGraphUpdateNotPending(missionId: string, stepKey: string): void {
+    if (this.getGraphPendingUpdate(missionId)?.affectedKeys.includes(stepKey))
+      throw new Error('Graph update is awaiting stop confirmation and human agreement');
+  }
+
+  /** Only called after a trusted user requests stopping affected steps; saving a proposal never calls this. */
+  stageGraphConstraintUpdate(raw: GraphUpdateRequest): GraphPendingUpdate {
+    const input = graphUpdateRequestSchema.parse(raw);
+    return this.db.transaction(() => {
+      const graph = this.getGraphTeamMission(input.missionId);
+      const mission = this.getTeamMission(input.missionId);
+      const proposed = this.getGraphDocument(input.taskId);
+      if (
+        !graph ||
+        graph.taskId !== input.taskId ||
+        graph.semanticRevision !== input.expectedSemanticRevision ||
+        ['completed', 'failed', 'canceled'].includes(mission.state) ||
+        !proposed?.missionPlan ||
+        proposed.id !== graph.graphId ||
+        proposed.renderRevision !== input.renderRevision ||
+        proposed.semanticRevision <= graph.semanticRevision
+      )
+        throw new Error('Graph update version or Mission changed');
+      const completed = new Set(
+        graph.steps
+          .filter((step) => this.getTeamExecution(step.executionId).state === 'completed')
+          .map((step) => step.key),
+      );
+      const delta = graphMissionConstraintUpdate(graph.plan, proposed.missionPlan, completed);
+      const previous = this.getGraphPendingUpdate(mission.id);
+      if (
+        previous &&
+        (previous.taskId !== input.taskId ||
+          previous.expectedSemanticRevision !== input.expectedSemanticRevision)
+      )
+        throw new Error('Graph pending update base changed');
+      const affectedKeys = graph.steps
+        .filter(
+          (step) =>
+            delta.affectedKeys.includes(step.key) || previous?.affectedKeys.includes(step.key),
+        )
+        .map((step) => step.key);
+      for (const key of affectedKeys) {
+        const step = graph.steps.find((step) => step.key === key)!;
+        const execution = this.getTeamExecution(step.executionId);
+        if (['completed', 'failed', 'canceled'].includes(execution.state))
+          throw new Error('Terminal graph steps cannot be revised');
+        if (
+          execution.state === 'running' &&
+          this.getTeamDelivery(this.getTeamExecutionDispatch(execution.id).messageId)?.state ===
+            'acked'
+        )
+          throw new Error('Graph step is already finalizing; wait for its result');
+        if (
+          this.listGraphResourceReservations(mission.id).some(
+            (owner) => owner.executionId === execution.id && this.getGraphIntegrationHold(owner.id),
+          )
+        )
+          throw new Error('Sealed graph work must complete integration before an update');
+      }
+      const pending = graphPendingUpdateSchema.parse({ ...input, ...delta, affectedKeys });
+      const payload = canonicalGraphJson(pending);
+      this.db
+        .prepare(
+          `INSERT INTO team_graph_pending_updates(mission_id,request_id,payload_json,payload_digest) VALUES (?,?,?,?)
+           ON CONFLICT(mission_id) DO UPDATE SET request_id=excluded.request_id,payload_json=excluded.payload_json,payload_digest=excluded.payload_digest`,
+        )
+        .run(
+          mission.id,
+          input.requestId,
+          payload,
+          createHash('sha256').update(payload).digest('hex'),
+        );
+      return pending;
+    })();
+  }
+
+  /** Storage checkpoint only. Main must freshly verify sources, retained old/new write coverage and stop evidence. */
+  commitGraphConstraintUpdate(input: GraphUpdateCommit): GraphMissionRecord {
+    input = graphUpdateCommitSchema.parse(input);
+    return this.db.transaction(() => {
+      const pending = this.getGraphPendingUpdate(input.missionId);
+      const graph = this.getGraphTeamMission(input.missionId);
+      const mission = this.getTeamMission(input.missionId);
+      const proposed = this.getGraphDocument(input.taskId);
+      if (
+        !pending ||
+        pending.requestId !== input.requestId ||
+        pending.taskId !== input.taskId ||
+        !graph ||
+        graph.taskId !== input.taskId ||
+        graph.semanticRevision !== pending.expectedSemanticRevision ||
+        ['completed', 'failed', 'canceled'].includes(mission.state) ||
+        !proposed?.missionPlan ||
+        proposed.id !== graph.graphId ||
+        proposed.renderRevision !== pending.renderRevision
+      )
+        throw new Error('Graph pending agreement changed');
+      const completed = new Set(
+        graph.steps
+          .filter((step) => this.getTeamExecution(step.executionId).state === 'completed')
+          .map((step) => step.key),
+      );
+      const delta = graphMissionConstraintUpdate(graph.plan, proposed.missionPlan, completed);
+      if (delta.affectedKeys.some((key) => !pending.affectedKeys.includes(key)))
+        throw new Error('Graph affected steps changed');
+      const context = graphMissionContextFor(this, input.taskId);
+      const agreed = graphMissionStoredContextSchema.parse(JSON.parse(graph.contextJson));
+      if (
+        context.policyEpoch !== graph.policyEpoch ||
+        context.workspace.digest !== graph.workspaceDigest ||
+        context.team?.state !== 'active' ||
+        context.team.id !== agreed.team.id ||
+        agreed.roots.some(([id, digest]) => context.rootIdentities.get(id) !== digest) ||
+        agreed.workers.some(
+          (worker) =>
+            context.workers.find((current) => current.id === worker.id)?.authorityDigest !==
+            worker.authorityDigest,
+        )
+      )
+        throw new Error('Graph update authority or roots changed');
+      for (const key of pending.affectedKeys) {
+        const step = graph.steps.find((step) => step.key === key)!;
+        if (
+          this.getTeamExecution(step.executionId).state !== 'waiting_resume' ||
+          this.listTeamAttempts(step.executionId).some(
+            (attempt) =>
+              !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state),
+          ) ||
+          this.listGraphResourceReservations(mission.id).some(
+            (owner) => owner.executionId === step.executionId && owner.state !== 'released',
+          )
+        )
+          throw new Error('Graph affected work has not confirmed its stop and released ownership');
+      }
+      const saveHistory = (record: GraphMissionRecord) => {
+        const snapshot = canonicalGraphJson(record);
+        const existing = this.db
+          .prepare(
+            'SELECT snapshot_json FROM team_graph_agreement_history WHERE mission_id=? AND semantic_revision=?',
+          )
+          .get(record.missionId, record.semanticRevision) as { snapshot_json: string } | undefined;
+        if (existing) {
+          if (existing.snapshot_json !== snapshot)
+            throw new Error('Graph agreement history changed');
+          return;
+        }
+        this.db
+          .prepare(
+            'INSERT INTO team_graph_agreement_history(mission_id,graph_id,semantic_revision,consent_id,snapshot_json,snapshot_digest) VALUES (?,?,?,?,?,?)',
+          )
+          .run(
+            record.missionId,
+            record.graphId,
+            record.semanticRevision,
+            record.consentId,
+            snapshot,
+            createHash('sha256').update(snapshot).digest('hex'),
+          );
+      };
+      saveHistory(graph);
+      const updated = this.db
+        .prepare(
+          `UPDATE team_graph_missions SET render_revision=?,semantic_revision=?,semantic_digest=?,
+        consent_id=?,approved_at=?,definition_json=? WHERE mission_id=? AND semantic_revision=?`,
+        )
+        .run(
+          proposed.renderRevision,
+          proposed.semanticRevision,
+          proposed.semanticDigest,
+          input.consentId,
+          input.now,
+          canonicalGraphJson(proposed.missionPlan),
+          mission.id,
+          graph.semanticRevision,
+        );
+      if (updated.changes !== 1) throw new TeamConflictError();
+      for (const key of pending.affectedKeys)
+        this.db
+          .prepare(
+            'UPDATE team_graph_mission_steps SET generation=generation+1 WHERE mission_id=? AND step_key=?',
+          )
+          .run(mission.id, key);
+      this.db
+        .prepare('DELETE FROM team_graph_pending_updates WHERE mission_id=? AND request_id=?')
+        .run(mission.id, input.requestId);
+      const current = this.getGraphTeamMission(mission.id)!;
+      saveHistory(current);
+      return current;
+    })();
   }
 
   getTeamMission(missionId: string): TeamMissionRecord {

@@ -1,5 +1,6 @@
 import {
   graphStartActivationIntent,
+  graphUpdateActivationIntent,
   graphResumeActivationIntent,
   graphResumeStepActivationIntent,
 } from '../graph-activation-intent';
@@ -23,6 +24,10 @@ import {
   graphMissionReviewSchema,
   graphMissionStartInputSchema,
   graphMissionResumeInputSchema,
+  graphWorkspaceReviewSchema,
+  graphMissionUpdateInputSchema,
+  graphMissionUpdateReviewSchema,
+  graphMissionUpdateAgreementSchema,
   graphReleaseInputSchema,
   graphViewSchema,
   IPC_CHANNELS,
@@ -296,6 +301,48 @@ window.addEventListener(
 
 const api: SprintCoderApi = {
   graphs: {
+    requestUpdate: async (input) => {
+      const parsed = graphMissionUpdateInputSchema.parse(input);
+      if (
+        trustedComputerUseActivation.consume('graph-start')?.intent !==
+        graphUpdateActivationIntent(parsed, 'request')
+      )
+        throw new Error('変更の確認ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsRequestUpdate,
+        graphMissionUpdateInputSchema,
+        graphMissionUpdateReviewSchema,
+        parsed,
+      );
+    },
+    reviewUpdate: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsReviewUpdate,
+        graphMissionUpdateInputSchema,
+        graphMissionUpdateReviewSchema,
+        input,
+      ),
+    agreeUpdate: async (input) => {
+      const parsed = graphMissionUpdateAgreementSchema.parse(input);
+      if (
+        trustedComputerUseActivation.consume('graph-start')?.intent !==
+        graphUpdateActivationIntent(parsed, 'agree')
+      )
+        throw new Error('再合意ボタンから操作してください。');
+      return invoke(
+        IPC_CHANNELS.graphsAgreeUpdate,
+        graphMissionUpdateAgreementSchema,
+        teamMissionSummarySchema,
+        parsed,
+      );
+    },
+    reviewWorkspace: (input) =>
+      invoke(
+        IPC_CHANNELS.graphsWorkspaceReview,
+        graphMissionResumeInputSchema,
+        graphWorkspaceReviewSchema,
+        input,
+      ),
     resumeStep: async (input) => {
       const parsed = graphMissionResumeInputSchema.parse(input);
       const activation = trustedComputerUseActivation.consume('graph-resume-step');

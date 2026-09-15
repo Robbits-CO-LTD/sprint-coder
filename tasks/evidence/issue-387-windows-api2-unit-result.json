@@ -1,0 +1,57 @@
+{
+  "scope": "Windows Node units with synthetic native doubles; not signed device acceptance",
+  "sourceCommit": "708f846472cc7ebdda6bcf5d072dea0f55906445",
+  "platform": "win32",
+  "nodeVersion": "v22.23.2",
+  "testExit": 0,
+  "errorCode": null,
+  "sourceSha256": {
+    "apps/desktop/src/main/computer-use-native.test.ts": "a8c36f7083945783d1bd88c07629f23eafdce85d09ea48adc121dc9576fbd9c2",
+    "apps/desktop/src/main/computer-use-native-host.test.ts": "fca3e0454d6cf985d19b90986dbdf9e28e91f173507452ef0baac77fcbade549",
+    "apps/desktop/src/main/computer-use-controller.test.ts": "8829c47c9941c19f0707f09637a0d4db5e6bd7a2140e170806973f6f130cf9c8",
+    "apps/desktop/src/main/computer-use-native.ts": "7f7cdb753f379f0692ca7299774781c4e7eb37dab1c964f9b4da71aef4db724c",
+    "apps/desktop/src/main/computer-use-native-host.ts": "8faf095d06da61334126f9acf9851f427300f1fe221a2e83ed49647ffb3a5ddf",
+    "apps/desktop/src/main/computer-use-controller.ts": "2285568cdb462b765f8841a89f3b9fdde45742209dcd5820f18f3b7ba25784a0",
+    "apps/desktop/src/main/computer-use-runtime-capture.ts": "7f442a7898608883fa9afb2b9885b148fcb245fb8466b88f7fbff76882077943",
+    "packages/contracts/src/index.ts": "034a2a1e38e7c9e4efad978ed1ba358bb80656d139a4001ab7453deeb656d9a1"
+  },
+  "resolution": {
+    "vitest": "C:\\Users\\yusei\\sc-issue-387-20260915\\units-708f846\\node_modules\\vitest\\index.cjs",
+    "@sprint-coder/contracts": "C:\\Users\\yusei\\sc-issue-387-20260915\\units-708f846\\packages\\contracts\\src\\index.ts",
+    "@sprint-coder/domain": "C:\\Users\\yusei\\sc-issue-387-20260915\\units-708f846\\packages\\domain\\src\\index.ts",
+    "zod": "C:\\Users\\yusei\\sc-issue-387-20260915\\units-708f846\\node_modules\\zod\\index.cjs"
+  },
+  "sharedProtectedFilesUnchanged": true,
+  "protectedSha256": {
+    "vitest/vitest.mjs": "39db22f579acf5639bbb17a261408debbde03f4692c0c439e77e7f13aeba74d6",
+    "electron/dist/electron.exe": "5456b3c5615efb53c6059e82cc775197aa8f9e2c825f1d646b37388e74bed2ad",
+    "better-sqlite3/build/Release/better_sqlite3.node": "24d53634e7a70ecce204f3e61fff3e592e90d5cbb75c18cfa8db76c60b1a7b11"
+  },
+  "reportSha256": "9a1c4395e3d5ac2407b6ef759c3e191dfe3b876705531689994c8025dc39a39e",
+  "passed": 139,
+  "failed": 0,
+  "pending": 0,
+  "suites": [
+    {
+      "file": "computer-use-controller.test.ts",
+      "status": "passed",
+      "passed": 73,
+      "failed": [],
+      "pending": 0
+    },
+    {
+      "file": "computer-use-native-host.test.ts",
+      "status": "passed",
+      "passed": 11,
+      "failed": [],
+      "pending": 0
+    },
+    {
+      "file": "computer-use-native.test.ts",
+      "status": "passed",
+      "passed": 55,
+      "failed": [],
+      "pending": 0
+    }
+  ]
+}

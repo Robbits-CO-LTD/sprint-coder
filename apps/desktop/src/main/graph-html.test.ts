@@ -31,6 +31,7 @@ beforeEach(() => {
 afterEach(() => {
   posted.mockRestore();
   Reflect.deleteProperty(document, 'elementFromPoint');
+  Reflect.deleteProperty(window, 'Archify');
 });
 
 /** jsdom has no layout, so the hit test is the one thing that has to be stood in for. */
@@ -67,6 +68,61 @@ function selections(): unknown[] {
 }
 
 describe('Graph artifact bridge', () => {
+  it('restores node and relationship selection through the pinned viewer API without DOM focus', () => {
+    const set = vi.fn();
+    const inspectRelationshipById = vi.fn();
+    Object.assign(window, { Archify: { focus: { set, inspectRelationshipById } } });
+    document.body.insertAdjacentHTML('beforeend', '<svg><g data-edge-id="request"></g></svg>');
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+    forward({
+      type: 'sprint-graph-restore-selection',
+      x: undefined,
+      y: undefined,
+      kind: 'node',
+      id: 'api',
+    });
+    // Extra click fields are refused even if undefined.
+    expect(set).not.toHaveBeenCalled();
+    const restore = (kind: string, id: string) =>
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          source: window,
+          data: { type: 'sprint-graph-restore-selection', instanceId, graphId, revision, kind, id },
+        }),
+      );
+    restore('node', 'api');
+    restore('edge', 'request');
+    expect(set).toHaveBeenCalledWith('api', { toggle: false, updateUrl: false });
+    expect(inspectRelationshipById).toHaveBeenCalledWith('request', {
+      toggle: false,
+      updateUrl: false,
+    });
+    restore('node', 'missing');
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(focus).not.toHaveBeenCalled();
+    focus.mockRestore();
+  });
+
+  it('waits for the pinned viewer to load and rejects stale or foreign restoration messages', () => {
+    const data = {
+      type: 'sprint-graph-restore-selection',
+      instanceId,
+      graphId,
+      revision,
+      kind: 'node',
+      id: 'api',
+    };
+    window.dispatchEvent(new MessageEvent('message', { source: window, data }));
+    const set = vi.fn();
+    Object.assign(window, { Archify: { focus: { set } } });
+    window.dispatchEvent(new Event('load'));
+    expect(set).toHaveBeenCalledOnce();
+    window.dispatchEvent(new MessageEvent('message', { source: null, data }));
+    window.dispatchEvent(
+      new MessageEvent('message', { source: window, data: { ...data, revision: 99 } }),
+    );
+    expect(set).toHaveBeenCalledOnce();
+  });
   it('announces that its listeners are registered as soon as it runs', () => {
     expect(startup).toEqual([{ type: 'sprint-graph-ready', instanceId, graphId, revision }]);
   });

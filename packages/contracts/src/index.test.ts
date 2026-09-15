@@ -1873,6 +1873,50 @@ describe('Managed Local launch settings contracts', () => {
         false,
       );
   });
+  it('reads legacy draft verification and validates explicit CPU draft placement', () => {
+    const old = {
+      hostCapabilityFingerprint: 'a'.repeat(64),
+      modelRepo: 'owner/model',
+      immutableRevision: 'b'.repeat(40),
+      artifactHashes: ['c'.repeat(64)],
+      speculative: {
+        type: 'draft-dflash',
+        draftModelId: 'd'.repeat(64),
+        draftArtifactHashes: ['e'.repeat(64)],
+        draftTokensMax: 3,
+      },
+      quantization: 'Q4_K_M',
+      contextTokens: 2048,
+      kvCacheType: 'f16',
+      batchSize: 512,
+      gpuLayers: 0,
+      gpuOffloadRatio: 0,
+      sidecarVersion: 'b10809',
+      backend: 'cpu',
+    };
+    expect(contracts.localVerificationBindingSchema.safeParse(old).success).toBe(true);
+    expect(
+      contracts.localVerificationBindingSchema.safeParse({ ...old, draftPlacement: 'cpu' }).success,
+    ).toBe(true);
+    expect(
+      contracts.localVerificationBindingSchema.safeParse({
+        ...old,
+        draftPlacement: 'cpu',
+        backend: 'metal',
+      }).success,
+    ).toBe(false);
+    expect(
+      contracts.localVerificationBindingSchema.safeParse({
+        ...old,
+        draftPlacement: 'cpu',
+        speculative: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      contracts.localVerificationBindingSchema.safeParse({ ...old, draftPlacement: 'auto' })
+        .success,
+    ).toBe(false);
+  });
 
   it('derives the physical micro batch from the effective logical batch', () => {
     expect(managedLocalMicroBatchSize(511)).toBe(511);

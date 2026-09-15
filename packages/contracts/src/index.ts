@@ -896,6 +896,7 @@ export const teamMissionStepSummarySchema = z
           .nullable(),
         integrationResumeAvailable: z.boolean(),
         stepResumeAvailable: z.boolean(),
+        workspaceReviewRequired: z.boolean().optional(),
         /** Already resumed by hand and waiting on the scheduler (dependencies, resources). */
         stepResumePending: z.boolean(),
       })
@@ -2392,6 +2393,8 @@ export const localVerificationBindingSchema = z
     immutableRevision: z.string().regex(/^[a-f0-9]{40,64}$/),
     artifactHashes: z.array(digestSchema).min(1).max(256),
     speculative: managedLocalDraftBindingSchema.optional(),
+    /** Legacy records remain readable; new CPU DFlash measurements prove explicit placement. */
+    draftPlacement: z.literal('cpu').optional(),
     quantization: z.string().min(1).max(64),
     contextTokens: z.number().int().positive().max(1_048_576),
     kvCacheType: z.string().min(1).max(64),
@@ -2406,6 +2409,14 @@ export const localVerificationBindingSchema = z
   .superRefine((binding, context) => {
     if (new Set(binding.artifactHashes).size !== binding.artifactHashes.length)
       context.addIssue({ code: 'custom', message: 'Duplicate local artifact hash' });
+    if (
+      binding.draftPlacement !== undefined &&
+      (binding.backend !== 'cpu' || binding.speculative === undefined)
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'Explicit draft CPU placement requires a CPU speculative pair',
+      });
   });
 export type LocalVerificationBinding = z.infer<typeof localVerificationBindingSchema>;
 export const localVerificationRecordSchema = z
@@ -4022,9 +4033,50 @@ export const graphMissionResumeInputSchema = graphSourceCheckInputSchema
     missionId: idSchema,
     stepKey: graphMissionKeySchema,
     generation: z.number().int().positive(),
+    workspaceReviewDigest: digestSchema.optional(),
   })
   .strict();
 export type GraphMissionResumeInput = z.infer<typeof graphMissionResumeInputSchema>;
+export const graphWorkspaceReviewSchema = z
+  .object({
+    digest: digestSchema,
+    files: z
+      .array(
+        z
+          .object({
+            repository: z.number().int().min(1).max(16),
+            path: z.string().min(1).max(4096),
+          })
+          .strict(),
+      )
+      .max(500),
+  })
+  .strict();
+export type GraphWorkspaceReview = z.infer<typeof graphWorkspaceReviewSchema>;
+export const graphMissionUpdateInputSchema = graphSourceCheckInputSchema
+  .extend({
+    missionId: idSchema,
+    expectedSemanticRevision: z.number().int().positive(),
+  })
+  .strict();
+export type GraphMissionUpdateInput = z.infer<typeof graphMissionUpdateInputSchema>;
+export const graphMissionUpdateReviewSchema = graphMissionUpdateInputSchema
+  .extend({
+    requestId: z.string().uuid(),
+    contextDigest: digestSchema,
+    beforeRenderRevision: z.number().int().positive(),
+    changedKeys: z.array(graphMissionKeySchema).max(12),
+    affectedKeys: z.array(graphMissionKeySchema).max(12),
+  })
+  .strict();
+export type GraphMissionUpdateReview = z.infer<typeof graphMissionUpdateReviewSchema>;
+export const graphMissionUpdateAgreementSchema = graphMissionUpdateInputSchema
+  .extend({
+    requestId: z.string().uuid(),
+    contextDigest: digestSchema,
+  })
+  .strict();
+export type GraphMissionUpdateAgreement = z.infer<typeof graphMissionUpdateAgreementSchema>;
 export const graphMissionStartInputSchema = graphSourceCheckInputSchema
   .extend({ contextDigest: digestSchema })
   .strict();
@@ -5743,6 +5795,10 @@ export interface SprintCoderApi {
     startMission(input: GraphMissionStartInput): Promise<TeamMissionSummary>;
     resumeIntegration(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
     resumeStep(input: GraphMissionResumeInput): Promise<TeamMissionSummary>;
+    reviewWorkspace(input: GraphMissionResumeInput): Promise<GraphWorkspaceReview>;
+    requestUpdate(input: GraphMissionUpdateInput): Promise<GraphMissionUpdateReview>;
+    reviewUpdate(input: GraphMissionUpdateInput): Promise<GraphMissionUpdateReview>;
+    agreeUpdate(input: GraphMissionUpdateAgreement): Promise<TeamMissionSummary>;
     subscribeSources(listener: (status: GraphSourceStatus) => void): () => void;
     render(input: GraphRenderInput): Promise<GraphView>;
     get(taskId: string): Promise<GraphView | null>;
@@ -6088,6 +6144,10 @@ export const IPC_CHANNELS = {
   graphsMissionStart: 'sprint-coder:graphs:mission-start',
   graphsMissionResumeIntegration: 'sprint-coder:graphs:mission-resume-integration',
   graphsMissionResumeStep: 'sprint-coder:graphs:mission-resume-step',
+  graphsWorkspaceReview: 'sprint-coder:graphs:workspace-review',
+  graphsRequestUpdate: 'sprint-coder:graphs:request-update',
+  graphsReviewUpdate: 'sprint-coder:graphs:review-update',
+  graphsAgreeUpdate: 'sprint-coder:graphs:agree-update',
   graphsGenerationUpdated: 'sprint-coder:graphs:generation-updated',
   graphsHistory: 'sprint-coder:graphs:history',
   graphsCompare: 'sprint-coder:graphs:compare',

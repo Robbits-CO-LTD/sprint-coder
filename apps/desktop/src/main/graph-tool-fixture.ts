@@ -6,21 +6,26 @@ export const GRAPH_TOOL_FIXTURE_MARKER = '[fixture:graph-proposal]';
 export const GRAPH_SOURCE_FIXTURE_MARKER = '[fixture:graph-source-proposal]';
 export const GRAPH_MISSION_FIXTURE_MARKER = '[fixture:graph-mission-proposal]';
 export const GRAPH_BOUND_MISSION_FIXTURE_MARKER = '[fixture:graph-bound-mission-proposal]';
+export const GRAPH_UPDATE_MISSION_FIXTURE_MARKER = '[fixture:graph-update-mission]';
+const GRAPH_UPDATE_REFERENCE_PREFIX = `${GRAPH_UPDATE_MISSION_FIXTURE_MARKER}\n\n参照する図の識別情報:\n`;
+export const isGraphUpdateFixtureInput = (input: string): boolean =>
+  input.startsWith(GRAPH_UPDATE_REFERENCE_PREFIX);
 export function isGraphToolFixture(input: string, environment = process.env): boolean {
   return (
     environment['SPRINT_CODER_E2E_GRAPH_FIXTURE'] === '1' &&
-    [
+    ([
       GRAPH_TOOL_FIXTURE_MARKER,
       GRAPH_SOURCE_FIXTURE_MARKER,
       GRAPH_MISSION_FIXTURE_MARKER,
       GRAPH_BOUND_MISSION_FIXTURE_MARKER,
-    ].includes(input)
+    ].includes(input) ||
+      isGraphUpdateFixtureInput(input))
   );
 }
 
 /** An explicit Mock-only model response script; all tool execution remains on the real harness. */
 export const createGraphToolFixtureSampler =
-  (withSource: boolean, withMission = false): ModelSampler =>
+  (withSource: boolean, withMission = false, updateInstruction?: string): ModelSampler =>
   ({ transcript }) => {
     const result = (callId: string): unknown => {
       const item = transcript.find(
@@ -78,6 +83,35 @@ export const createGraphToolFixtureSampler =
     const before = z
       .object({ document: z.object({ renderRevision: z.number().int().positive() }).nullable() })
       .parse(initial);
+    const updatedPlan = (() => {
+      if (updateInstruction === undefined) return null;
+      const selection = z
+        .object({
+          graphId: z.string().uuid(),
+          revision: z.number().int().positive(),
+          kind: z.literal('node'),
+          id: z.literal('client'),
+        })
+        .strict()
+        .parse(JSON.parse(updateInstruction.slice(GRAPH_UPDATE_REFERENCE_PREFIX.length)));
+      const stored = z
+        .object({
+          document: z.object({
+            id: z.string().uuid(),
+            semanticRevision: z.number(),
+            missionPlan: graphMissionPlanSchema,
+          }),
+        })
+        .parse(initial).document;
+      if (selection.graphId !== stored.id || selection.revision !== stored.semanticRevision)
+        throw new Error('Graph update fixture selection is stale');
+      return {
+        ...stored.missionPlan,
+        steps: stored.missionPlan.steps.map((step) =>
+          step.key === selection.id ? { ...step, dependsOn: ['api'] } : step,
+        ),
+      };
+    })();
     const published = result('graph-fixture-propose');
     if (published === undefined)
       return {
@@ -88,49 +122,52 @@ export const createGraphToolFixtureSampler =
             toolName: 'graph_propose_document',
             arguments: {
               expectedRenderRevision: before.document?.renderRevision ?? 0,
-              missionPlan: withMission
-                ? {
-                    mode: 'graph',
-                    objective: '独立した実装と結合確認',
-                    doneCriteria: ['結合テストが成功'],
-                    steps: ['client', 'api', 'store'].map((key, index) => ({
-                      key,
-                      nodeId: key,
-                      workerId: withSource
-                        ? workers.find((worker) => worker.role === key && worker.kind === 'worker')
-                            ?.id
-                        : `candidate-${key}`,
-                      objective: ['実装A', '実装B', '結合確認'][index],
-                      doneCriteria: [
-                        index === 1 && before.document
-                          ? 'APIの互換性テストが成功'
-                          : '対象のテストが成功',
-                      ],
-                      access: index === 2 ? 'read-only' : 'workspace-write',
-                      dependsOn: index === 2 ? ['client', 'api'] : [],
-                      writeClaims:
-                        index === 2
-                          ? []
-                          : [
-                              {
-                                rootId: source?.rootId ?? 'draft-root',
-                                path: `src/${key}.ts`,
-                                semanticKeys: [],
-                              },
-                            ],
-                      resourceClaims:
-                        index === 2
-                          ? [
-                              {
-                                scope: 'machine',
-                                key: before.document ? 'integration-db-v2' : 'integration-db',
-                                rootId: null,
-                              },
-                            ]
-                          : [],
-                    })),
-                  }
-                : null,
+              missionPlan:
+                updatedPlan ??
+                (withMission
+                  ? {
+                      mode: 'graph',
+                      objective: '独立した実装と結合確認',
+                      doneCriteria: ['結合テストが成功'],
+                      steps: ['client', 'api', 'store'].map((key, index) => ({
+                        key,
+                        nodeId: key,
+                        workerId: withSource
+                          ? workers.find(
+                              (worker) => worker.role === key && worker.kind === 'worker',
+                            )?.id
+                          : `candidate-${key}`,
+                        objective: ['実装A', '実装B', '結合確認'][index],
+                        doneCriteria: [
+                          index === 1 && before.document
+                            ? 'APIの互換性テストが成功'
+                            : '対象のテストが成功',
+                        ],
+                        access: index === 2 ? 'read-only' : 'workspace-write',
+                        dependsOn: index === 2 ? ['client', 'api'] : [],
+                        writeClaims:
+                          index === 2
+                            ? []
+                            : [
+                                {
+                                  rootId: source?.rootId ?? 'draft-root',
+                                  path: `src/${key}.ts`,
+                                  semanticKeys: [],
+                                },
+                              ],
+                        resourceClaims:
+                          index === 2
+                            ? [
+                                {
+                                  scope: 'machine',
+                                  key: before.document ? 'integration-db-v2' : 'integration-db',
+                                  rootId: null,
+                                },
+                              ]
+                            : [],
+                      })),
+                    }
+                  : null),
               annotations: source
                 ? []
                 : [
