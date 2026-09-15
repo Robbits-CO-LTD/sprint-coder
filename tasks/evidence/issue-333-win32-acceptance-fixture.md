@@ -26,10 +26,17 @@ the fixture README exposes the required control. Installer/admin/OS-prompt, task
 native crash/parent death, prompt-injection, unsigned-package, and privacy journeys must still be
 run in their documented environment; a fixture Core PASS does not imply any Safety PASS.
 
-Keep package identity, fixture SHA-256, signer binding, window title, action trace, and visible
-control values in the local operator work log only. The uploaded artifact contains just the canonical schema-v3 code
-and package/provider digests. Never upload the fixture executable, screenshots, title, typed value,
-or raw trace.
+Keep only source/package identity, fixture SHA-256, public signer binding, OS, and bounded results
+in the operator record. Inspect window/control state transiently without retaining window titles,
+action traces, or visible/typed values in logs. The uploaded artifact contains just the canonical
+schema-v3 code and package/provider digests. Never upload the fixture executable, screenshots,
+title, typed value, or raw trace.
+
+Before reserving an interactive session, run the read-only `verify-signatures.ps1` procedure in
+the fixture README. It checks the app, installer, helper, fixture, and packaged DLL/native modules
+for the approved signer, timestamps, and digest stability. Its result is explicitly preparation
+only (`interactiveAcceptance: NOT_RUN`), not a schema-v3 Core/Safety PASS. See
+[the #387 preparation handoff](issue-387-signed-device-preflight.md) for the current external gates.
 
 The source/build output is non-production and unsigned by default. Its payment button is inert, its
 password is dummy text, and its file picker does not retain the selected path. A successful compile
