@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runWithDrainedOutput } from './drain-output';
+import { graphWorkerAckSchema } from '@sprint-coder/contracts';
 
 async function run(): Promise<void> {
   // This entry is only forked by Main. Each invocation owns one fixed render/check operation.
@@ -25,4 +26,20 @@ async function run(): Promise<void> {
   await import(/* @vite-ignore */ pathToFileURL(modulePath).href);
 }
 
-void runWithDrainedOutput(run);
+const parentPort = process.parentPort;
+void runWithDrainedOutput(
+  run,
+  parentPort
+    ? (result) =>
+        new Promise<void>((resolve) => {
+          const acknowledge = ({ data }: Electron.MessageEvent) => {
+            if (!graphWorkerAckSchema.safeParse(data).success) return;
+            parentPort.removeListener('message', acknowledge);
+            resolve();
+          };
+          // Main owns the timeout. Register before sending so an immediate ACK cannot be lost.
+          parentPort.on('message', acknowledge);
+          parentPort.postMessage(result);
+        })
+    : undefined,
+);

@@ -91,17 +91,24 @@ test('binds an authorized file read and detects changed source bytes after resta
         timeout: 30000,
       })
       .catch(async (error: unknown) => {
-        const diagnostic = await page.evaluate(async (id) => {
-          const raw = await window.sprintCoder!.runtime.getFailureDiagnostic({ taskId: id });
-          const value = raw ? JSON.parse(raw) : null;
-          return {
-            failureStage: value?.failureStage,
-            category: value?.category,
-            providerCode: value?.providerCode,
-          };
-        }, taskId);
+        const diagnostic = await page
+          .evaluate(async (id) => {
+            const raw = await window.sprintCoder!.runtime.getFailureDiagnostic({ taskId: id });
+            const value = raw ? JSON.parse(raw) : null;
+            const generation = await window.sprintCoder!.graphs.generation(id);
+            return {
+              failureStage: value?.failureStage,
+              category: value?.category,
+              providerCode: value?.providerCode,
+              graphState: generation?.state,
+              graphFailureStage: generation?.failureStage,
+            };
+          }, taskId)
+          .catch(() => null);
+        const failurePath = testInfo.outputPath('graph-source-failure.json');
+        await writeFile(failurePath, JSON.stringify({ failures: graphFailures, diagnostic }));
         await testInfo.attach('graph-source-failure', {
-          body: JSON.stringify({ failures: graphFailures, diagnostic }),
+          path: failurePath,
           contentType: 'application/json',
         });
         throw error;
@@ -309,6 +316,7 @@ test('the model tool path proposes and reads back a draft through the real Main 
     Path: '',
   });
   let probePage: Page | null = null;
+  let completed = false;
   try {
     const page = await firstWindow(app);
     probePage = page;
@@ -400,8 +408,9 @@ test('the model tool path proposes and reads back a draft through the real Main 
       .click();
     await expect(reopened.getByTestId('graph-evidence-kind')).toHaveText('推定');
     await expect(reopened.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
+    completed = true;
   } finally {
-    if (test.info().status !== test.info().expectedStatus && probePage && !probePage.isClosed()) {
+    if (!completed && probePage && !probePage.isClosed()) {
       const events = await Promise.all(
         probePage
           .frames()
@@ -411,10 +420,11 @@ test('the model tool path proposes and reads back a draft through the real Main 
               .catch(() => []),
           ),
       );
-      await test.info().attach('graph-input-events', {
-        body: JSON.stringify(events),
-        contentType: 'application/json',
-      });
+      const eventPath = test.info().outputPath('graph-input-events.json');
+      await writeFile(eventPath, JSON.stringify(events));
+      await test
+        .info()
+        .attach('graph-input-events', { path: eventPath, contentType: 'application/json' });
       await probePage.screenshot({ path: test.info().outputPath('graph-input-failure.png') });
     }
     await closeApp(app);

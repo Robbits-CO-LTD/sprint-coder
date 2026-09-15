@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { GRAPH_WORKER_OUTPUT_MAX_BYTES, graphWorkerResultSchema } from '@sprint-coder/contracts';
 
 const report = { ok: true, payload: 'x'.repeat(160 * 1024) };
 const diagnostic = 'd'.repeat(80 * 1024) + '\n';
@@ -88,6 +90,88 @@ async function runChild(args: string[]) {
 }
 
 describe('graph worker output drain', () => {
+  it.each([
+    {
+      name: 'success',
+      source: `${output}\nprocess.exit(0);`,
+      code: 0,
+      expected: JSON.stringify(report) + '\n',
+      stderr: Buffer.byteLength(diagnostic),
+    },
+    {
+      name: 'nonzero',
+      source: `${output}\nprocess.exit(3);`,
+      code: 3,
+      expected: JSON.stringify(report) + '\n',
+      stderr: Buffer.byteLength(diagnostic),
+    },
+    {
+      name: 'throw',
+      source: `${output}\nthrow new Error('private detail');`,
+      code: 1,
+      expected: JSON.stringify(report) + '\n',
+      stderr: Buffer.byteLength(diagnostic + 'Graph worker failed\n'),
+    },
+    {
+      name: 'limit',
+      source: `process.stdout.write('x'.repeat(${GRAPH_WORKER_OUTPUT_MAX_BYTES + 1}));`,
+      code: 1,
+      expected: '',
+      stderr: 0,
+    },
+  ])(
+    'sends the $name IPC result and waits for a valid ACK before exit',
+    async ({ name, source, code, expected, stderr }) => {
+      const { vendor } = await fixture(`ipc-${name}`, source);
+      const shim = `
+      import { EventEmitter } from 'node:events';
+      const port = process.parentPort = new EventEmitter();
+      port.postMessage = (data) => process.send(data);
+      process.on('message', (data) => port.emit('message', {data}));
+      process.argv = ${JSON.stringify([process.execPath, worker, 'check', 'architecture', vendor, directory])};
+      await import(${JSON.stringify(pathToFileURL(worker).href)});
+    `;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', shim], {
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      });
+      child.stdout?.resume();
+      child.stderr?.resume();
+      const closed = once(child, 'close');
+      const timeout = setTimeout(() => child.kill(), 10_000);
+      try {
+        const [message] = await Promise.race([
+          once(child, 'message'),
+          closed.then(() => {
+            throw new Error('Worker exited before result');
+          }),
+        ]);
+        const result = graphWorkerResultSchema.parse(message);
+        expect(result).toEqual({
+          type: 'sprint-graph-result',
+          output: expected,
+          exitCode: code,
+          stderrBytes: stderr,
+        });
+        expect(Buffer.byteLength(result.output) + result.stderrBytes).toBeLessThanOrEqual(
+          GRAPH_WORKER_OUTPUT_MAX_BYTES,
+        );
+        child.send({ type: 'sprint-graph-result-ack', unexpected: true });
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        expect(child.exitCode).toBeNull();
+        expect(child.signalCode).toBeNull();
+        child.send({ type: 'sprint-graph-result-ack' });
+        const [actualCode] = await closed;
+        expect(actualCode).toBe(code);
+      } finally {
+        clearTimeout(timeout);
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
+          await closed;
+        }
+      }
+    },
+  );
+
   it.each([0, 3])('flushes full JSON and stderr before requested exit %i', async (code) => {
     const { vendor } = await fixture(
       `exit-${code}`,

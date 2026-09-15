@@ -17,6 +17,9 @@ import {
   graphHistorySchema,
   graphCompareInputSchema,
   graphRenderInputSchema,
+  graphWorkerResultSchema,
+  GRAPH_WORKER_OUTPUT_MAX_BYTES,
+  type GraphWorkerResult,
   type GraphHistory,
   type GraphDiff,
 } from '@sprint-coder/contracts';
@@ -476,12 +479,10 @@ export class GraphRenderService {
           },
         },
       );
-      let output = '';
       let bytes = 0;
       let settled = false;
-      let exitCode: number | null = null;
-      let stdoutEnded = child.stdout === null;
-      let stderrEnded = child.stderr === null;
+      let exited = false;
+      let result: GraphWorkerResult | null = null;
       const cleanup = () => {
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
@@ -490,51 +491,54 @@ export class GraphRenderService {
         if (settled) return;
         settled = true;
         cleanup();
-        if (exitCode === null) child.kill();
+        if (!exited) child.kill();
         reject(new Error(`Archify ${mode} failed`));
-      };
-      const finish = () => {
-        // Process exit and pipe EOF are independent events. Returning on exit alone can hand
-        // JSON.parse a partial report even though the worker successfully flushed its writes.
-        if (settled || exitCode === null || !stdoutEnded || !stderrEnded) return;
-        if (signal.aborted || exitCode !== 0) return fail();
-        settled = true;
-        cleanup();
-        resolve(output);
       };
       const timer = setTimeout(fail, 15_000);
       const onAbort = () => fail();
       signal.addEventListener('abort', onAbort, { once: true });
-      child.stdout?.on('data', (chunk: Buffer) => {
+      const watched = new Set<NodeJS.ReadableStream>();
+      const watchPipes = () => {
+        for (const stream of [child.stdout, child.stderr]) {
+          if (!stream || watched.has(stream)) continue;
+          watched.add(stream);
+          stream.on('data', (chunk: Buffer) => {
+            if (settled) return;
+            bytes += chunk.byteLength;
+            if (bytes > GRAPH_WORKER_OUTPUT_MAX_BYTES) fail();
+          });
+          stream.once('error', fail);
+        }
+      };
+      watchPipes();
+      child.once('spawn', watchPipes);
+      child.on('message', (message: unknown) => {
         if (settled) return;
-        bytes += chunk.byteLength;
-        if (bytes > 256 * 1024) fail();
-        else output += chunk.toString('utf8');
-      });
-      child.stderr?.on('data', (chunk: Buffer) => {
-        if (settled) return;
-        bytes += chunk.byteLength;
-        if (bytes > 256 * 1024) fail();
-      });
-      child.stdout?.once('end', () => {
-        stdoutEnded = true;
-        finish();
-      });
-      child.stderr?.once('end', () => {
-        stderrEnded = true;
-        finish();
-      });
-      child.stdout?.once('error', fail);
-      child.stderr?.once('error', fail);
-      child.stdout?.once('close', () => {
-        if (!stdoutEnded) fail();
-      });
-      child.stderr?.once('close', () => {
-        if (!stderrEnded) fail();
+        const parsed = graphWorkerResultSchema.safeParse(message);
+        if (
+          !parsed.success ||
+          result !== null ||
+          Buffer.byteLength(parsed.data.output, 'utf8') + parsed.data.stderrBytes >
+            GRAPH_WORKER_OUTPUT_MAX_BYTES
+        )
+          return fail();
+        result = parsed.data;
+        // UtilityProcess pipes do not emit Node ChildProcess EOF events reliably. Receive the
+        // bounded result over IPC and acknowledge it before allowing the worker to exit.
+        try {
+          child.postMessage({ type: 'sprint-graph-result-ack' });
+        } catch {
+          fail();
+        }
       });
       child.once('exit', (code) => {
-        exitCode = code;
-        finish();
+        exited = true;
+        if (settled) return;
+        if (result === null || code !== result.exitCode || code !== 0 || signal.aborted)
+          return fail();
+        settled = true;
+        cleanup();
+        resolve(result.output);
       });
     });
   }
