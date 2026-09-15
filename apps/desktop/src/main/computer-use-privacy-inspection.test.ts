@@ -1,8 +1,10 @@
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -78,6 +80,127 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     expect(encoded).not.toContain(input.root);
     expect(encoded).not.toContain('PRIVATE_FIXTURE');
     expect(input.payloads[0]!.bytes.toString()).toContain('PRIVATE_FIXTURE');
+  });
+
+  it('derives eligibility from a measured inventory rather than a caller claim', async () => {
+    const input = fixture();
+    const unclaimed = await inspectComputerUsePrivacySurfaces(input);
+    expect(unclaimed.completeSurfaceInventoryVerified).toBe(false);
+    expect(unclaimed.finalGateEligible).toBe(false);
+
+    const verified = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+    });
+    expect(verified.surfaces.every(({ state }) => state === 'raw_bytes_scanned')).toBe(true);
+    expect(verified.completeSurfaceInventoryVerified).toBe(true);
+    expect(verified.uninspectedSurfaces).toEqual([]);
+    expect(verified.contaminatedSurfaces).toEqual([]);
+    expect(verified.finalGateEligible).toBe(true);
+    const encoded = JSON.stringify(verified);
+    expect(encoded).not.toContain(input.root);
+    expect(encoded).not.toContain('PRIVATE_FIXTURE');
+  });
+
+  it('refuses an inventory claim that misses a file actually present under the root', async () => {
+    const input = fixture();
+    writeFileSync(join(input.root, 'unenumerated-sink.log'), 'bounded metadata only');
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+    });
+    expect(result.surfaces.every(({ state }) => state === 'raw_bytes_scanned')).toBe(true);
+    expect(result.completeSurfaceInventoryVerified).toBe(false);
+    expect(result.finalGateEligible).toBe(false);
+  });
+
+  it('refuses an inventory claim with an untraversable tree or an out-of-root claim', async () => {
+    const input = fixture();
+    const other = fixture();
+    symlinkSync(other.files[0]!.path, join(input.root, 'aliased.log'));
+    expect(
+      (await inspectComputerUsePrivacySurfaces({ ...input, enumeratedRoots: [input.root] }))
+        .completeSurfaceInventoryVerified,
+    ).toBe(false);
+    expect(
+      (await inspectComputerUsePrivacySurfaces({ ...other, enumeratedRoots: [input.root] }))
+        .completeSurfaceInventoryVerified,
+    ).toBe(false);
+    expect(
+      (await inspectComputerUsePrivacySurfaces({ ...other, enumeratedRoots: [] }))
+        .completeSurfaceInventoryVerified,
+    ).toBe(false);
+  });
+
+  it('refuses a tidy subdirectory claim that leaves sibling sinks under the root unenumerated', async () => {
+    const input = fixture();
+    const nested = join(input.root, 'inspected');
+    mkdirSync(nested);
+    const files = input.files.map(({ surface, path }) => {
+      const moved = join(nested, `${surface}.bin`);
+      renameSync(path, moved);
+      return { surface, path: moved };
+    });
+    writeFileSync(join(input.root, 'sibling-sink.log'), 'bounded metadata only');
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      files,
+      enumeratedRoots: [nested],
+    });
+    expect(result.surfaces.every(({ state }) => state === 'raw_bytes_scanned')).toBe(true);
+    expect(result.completeSurfaceInventoryVerified).toBe(false);
+    expect(result.finalGateEligible).toBe(false);
+    // Claiming the real root surfaces the sibling and still refuses the inventory.
+    expect(
+      (
+        await inspectComputerUsePrivacySurfaces({
+          ...input,
+          files,
+          enumeratedRoots: [input.root],
+        })
+      ).completeSurfaceInventoryVerified,
+    ).toBe(false);
+  });
+
+  it('never reads a payload class the run did not generate as a clean surface', async () => {
+    const input = fixture();
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+      payloads: input.payloads.slice(1),
+    });
+    expect(result.missingPayloadKinds).toEqual(['screenshot']);
+    // The inventory is genuinely verified here; it still cannot open the gate on its own.
+    expect(result.completeSurfaceInventoryVerified).toBe(true);
+    expect(result.surfaces.every(({ state }) => state === 'unavailable')).toBe(true);
+    expect(result.uninspectedSurfaces).toEqual([...COMPUTER_USE_PRIVACY_SURFACES]);
+    expect(result.contaminatedSurfaces).toEqual([]);
+    expect(result.finalGateEligible).toBe(false);
+  });
+
+  it('keeps one contaminated surface out of the gate despite a verified inventory', async () => {
+    const input = fixture();
+    writeFileSync(input.files[2]!.path, input.payloads[2]!.bytes);
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+    });
+    expect(result.completeSurfaceInventoryVerified).toBe(true);
+    expect(result.contaminatedSurfaces).toEqual(['telemetry']);
+    expect(result.uninspectedSurfaces).toEqual([]);
+    expect(result.finalGateEligible).toBe(false);
+  });
+
+  it('keeps one unreadable surface out of the gate despite a verified inventory', async () => {
+    const input = fixture();
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+      files: input.files.slice(1),
+    });
+    expect(result.completeSurfaceInventoryVerified).toBe(false);
+    expect(result.uninspectedSurfaces).toEqual(['database']);
+    expect(result.finalGateEligible).toBe(false);
   });
 
   it('detects a logical SQLite BLOB split across physical pages', async () => {

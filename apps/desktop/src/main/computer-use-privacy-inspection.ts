@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readSync,
+  readdirSync,
+  realpathSync,
+} from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { inspectComputerUseStoredValues } from './computer-use-privacy-decoders';
 
 export const COMPUTER_USE_PRIVACY_SURFACES = [
@@ -29,17 +37,103 @@ type InspectionState =
   | 'contaminated'
   | 'unavailable';
 
+const MAX_ENUMERATED_FILES = 4096;
+const MAX_ENUMERATED_DEPTH = 32;
+
+/**
+ * Walks the roots the caller claims are the run's complete persistence surface and returns the
+ * real path of every regular file found. A symlink, a non-regular entry, an unreadable directory,
+ * a claim outside `root`, or a tree beyond the bounds returns `undefined`: an incomplete walk is
+ * never reported as a verified inventory. Paths are compared here and never leave this module.
+ *
+ * `root` itself must be claimed. Otherwise a caller could name one tidy subdirectory, match it
+ * exactly, and leave every sibling sink under `root` unenumerated but apparently accounted for.
+ */
+function enumerateClaimedFiles(
+  root: string,
+  claimedRoots: readonly string[],
+): Set<string> | undefined {
+  const pending: { path: string; depth: number }[] = [];
+  let rootClaimed = false;
+  for (const claimed of claimedRoots) {
+    let resolved: string;
+    try {
+      if (typeof claimed !== 'string' || !isAbsolute(claimed)) return undefined;
+      resolved = realpathSync(claimed);
+    } catch {
+      return undefined;
+    }
+    const child = relative(root, resolved);
+    if (child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child)) return undefined;
+    if (child === '') rootClaimed = true;
+    pending.push({ path: resolved, depth: 0 });
+  }
+  if (!rootClaimed) return undefined;
+  const found = new Set<string>();
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    if (directory.depth > MAX_ENUMERATED_DEPTH) return undefined;
+    let entries;
+    try {
+      entries = readdirSync(directory.path, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const entry of entries) {
+      const path = join(directory.path, entry.name);
+      if (entry.isDirectory()) {
+        pending.push({ path, depth: directory.depth + 1 });
+        continue;
+      }
+      // A symlink, socket, FIFO or device could alias or hide a sink this scan cannot read.
+      if (!entry.isFile() || found.size >= MAX_ENUMERATED_FILES) return undefined;
+      found.add(path);
+    }
+  }
+  return found;
+}
+
+/**
+ * True only when the files the caller submitted for inspection are exactly the files that exist
+ * under the claimed roots. The claim itself proves nothing: an empty, wrong or partial claim
+ * simply fails to match the measured tree.
+ */
+function verifyCompleteSurfaceInventory(
+  root: string,
+  files: readonly Readonly<{ surface: Surface; path: string }>[],
+  claimedRoots: readonly string[] | undefined,
+): boolean {
+  if (claimedRoots === undefined) return false;
+  const enumerated = enumerateClaimedFiles(root, claimedRoots);
+  if (enumerated === undefined) return false;
+  const submitted = new Set<string>();
+  for (const file of files) {
+    if (typeof file.path !== 'string' || !isAbsolute(file.path)) return false;
+    submitted.add(resolve(file.path));
+  }
+  if (submitted.size !== enumerated.size) return false;
+  for (const path of submitted) if (!enumerated.has(path)) return false;
+  return true;
+}
+
 /**
  * A protected, local acceptance runner supplies exact files after flushing/closing the tested
  * process, plus transient payloads from that run. No paths, bodies, exceptions, or secret hashes
- * escape. Missing surfaces/payload classes remain uninspected. This scans explicit files only:
- * it does not establish that the caller enumerated every sink or that a live file stayed quiet.
+ * escape. This scans explicit files only.
+ *
+ * Absence is never cleanliness. A surface nobody submitted, a file that could not be read, and a
+ * payload class the run never generated all report as uninspected, and none of them is a pass:
+ * `finalGateEligible` is derived solely from measurement — every payload class present, every
+ * surface actually scanned, nothing contaminated, and the submitted files proven to be the whole
+ * tree under `enumeratedRoots`. No caller flag or boolean can set it.
  */
 export async function inspectComputerUsePrivacySurfaces(
   input: Readonly<{
     root: string;
     files: readonly Readonly<{ surface: Surface; path: string }>[];
     payloads: readonly Readonly<{ kind: Payload; bytes: Uint8Array }>[];
+    /** Roots the caller claims hold every persistence sink of the run; each is walked and compared. */
+    enumeratedRoots?: readonly string[];
   }>,
 ) {
   const surfaces = COMPUTER_USE_PRIVACY_SURFACES.map((surface) => ({
@@ -56,16 +150,51 @@ export async function inspectComputerUsePrivacySurfaces(
   const missingPayloadKinds = COMPUTER_USE_PRIVATE_PAYLOADS.filter(
     (kind) => !input.payloads.some((payload) => payload.kind === kind && payload.bytes.length > 0),
   );
-  const report = () => ({
-    schemaVersion: 1 as const,
-    evidenceKind: 'privacy-surface-inspection-only' as const,
-    finalGateEligible: false as const,
-    completeSurfaceInventoryVerified: false as const,
-    missingPayloadKinds,
-    surfaces,
-  });
-  if (missingPayloadKinds.length > 0 || input.files.length > 128 || input.payloads.length > 32)
+  let root: string | undefined;
+  try {
+    root = realpathSync(input.root);
+  } catch {
+    root = undefined;
+  }
+  // Measured independently of the scan: it constrains eligibility but can never grant it.
+  const completeSurfaceInventoryVerified =
+    root !== undefined && verifyCompleteSurfaceInventory(root, input.files, input.enumeratedRoots);
+  const report = () => {
+    const uninspectedSurfaces = surfaces
+      .filter(({ state }) => state === 'unavailable')
+      .map(({ surface }) => surface);
+    const contaminatedSurfaces = surfaces
+      .filter(({ state }) => state === 'contaminated')
+      .map(({ surface }) => surface);
+    return {
+      schemaVersion: 2 as const,
+      evidenceKind: 'privacy-surface-inspection-only' as const,
+      // Every conjunct is a measurement. Losing any one of them keeps this false.
+      finalGateEligible:
+        missingPayloadKinds.length === 0 &&
+        completeSurfaceInventoryVerified &&
+        uninspectedSurfaces.length === 0 &&
+        contaminatedSurfaces.length === 0,
+      completeSurfaceInventoryVerified,
+      /** Payload classes the run never produced. Their absence proves nothing about any surface. */
+      missingPayloadKinds,
+      /** Surfaces whose bytes were never searched. Not a clean result — an unknown one. */
+      uninspectedSurfaces,
+      contaminatedSurfaces,
+      surfaces,
+    };
+  };
+  // Nothing below the scan may inherit a state by default: say "unavailable" explicitly so an
+  // un-run inspection can never be read as a surface that was searched and found clean.
+  const unscanned = () => {
+    for (const result of surfaces) {
+      result.state = 'unavailable';
+      result.logicalValuesInspected = false;
+    }
     return report();
+  };
+  if (missingPayloadKinds.length > 0 || input.files.length > 128 || input.payloads.length > 32)
+    return unscanned();
   // Limit the ephemeral search corpus. In particular a screen must not become an unbounded
   // buffer through caller-controlled size or repeated base64/JSON transformations.
   if (
@@ -76,15 +205,10 @@ export async function inspectComputerUsePrivacySurfaces(
         !COMPUTER_USE_PRIVATE_PAYLOADS.includes(kind),
     )
   )
-    return report();
+    return unscanned();
   if (input.payloads.reduce((sum, { bytes }) => sum + bytes.length, 0) > 16 * 1024 * 1024)
-    return report();
-  let root: string;
-  try {
-    root = realpathSync(input.root);
-  } catch {
-    return report();
-  }
+    return unscanned();
+  if (root === undefined) return unscanned();
   const needles: Array<{ kind: Payload; bytes: Buffer }> = [];
   try {
     for (const { kind, bytes } of input.payloads) {
