@@ -158,12 +158,36 @@ on signatures. What is now derived from measurement, and what is still unconnect
   every payload class present, every surface scanned, nothing contaminated, and the submitted files
   proven to be the whole tree under the caller's claimed roots; a payload class the run never
   generated reports as uninspected and never as clean.
-- _Done._ The round aggregator records one egress consent and one cost bound per run and builds the
-  Provider `binding` from measured preflight/round facts, returning `null` when consent, cost bound
-  or the bound identity is missing (`computer-use-capture-rounds.mjs`,
-  `computer-use-capture-wire.mjs`). Producer-supplied binding objects are not transcribed. The
-  planner and Controller do not yet emit the new `egress_authorized` / `cost_limit_bound` events or
-  the optional binding identity fields on `preflight_started`, so no live run resolves a binding yet.
+- _Done._ The round aggregator derives the Provider `binding` from measured preflight/round facts
+  and returns `null` when the consent scope, cost bound, binding identity, observed fallback or
+  per-round Task selection is missing (`computer-use-capture-rounds.mjs`,
+  `computer-use-capture-wire.mjs`). Producer-supplied binding objects are not transcribed.
+- _Done._ The planner and Controller emit those facts. The planner records `egress_authorized` once
+  per Provider request — at preflight and again before every round, so four times in a three-round
+  run, not once — carrying a digest of the consent scope rather than the per-request payload; it
+  also records five binding identity fields on `preflight_started`, `fallbackUsed` on
+  `preflight_passed`, and `selectedFromCurrentTask` on each `parsed`. The Controller records
+  `cost_limit_bound` once when the session is registered, before any round can start. Only digests
+  and bounded numbers are emitted; no raw connection or model id, endpoint URL, prompt or
+  credential enters the stream.
+- _Partial._ The aggregator fills fifteen of the schema's sixteen binding fields from measurement.
+  `credentialChanged` is observable at no planner or Controller stage and is deliberately left out,
+  exported as `COMPUTER_USE_RUNNER_OWNED_BINDING_KEYS`; the protected runner must supply it.
+- _Not verified._ The five identity fields are **not** cryptographically bound to `bindingDigest`.
+  The producer's binding digest commits to raw permit identity, and raw identity must never reach
+  this metadata stream, so the two are not mutually recomputable. The identity is tied to the run
+  only by arriving on the single preflight event whose digest every later round repeats unchanged.
+  Treat it as co-emitted, unverified metadata: the protected runner must still verify the
+  connection, model, endpoint and catalog identity independently.
+- _Not measured._ No live run has yet produced a non-null `binding`. Coverage is two separate
+  tests: the real planner's emitted events through the aggregator for one round (which correctly
+  resolves nothing), and a synthetic three-round journey. The join between them is unproven,
+  because reaching three completed rounds plus Stop needs the Controller's run loop driven by the
+  real planner, and no such fixture exists.
+- _Provisional._ The canonical shapes of the egress consent digest (`captureEgressConsent` in
+  `apps/desktop/src/main/computer-use-planner.ts`) and of `costLimitDigest` were defined by this
+  work, not derived from an existing evidence definition. The protected runner must adopt the same
+  shapes, or they must be revised together.
 - _Not connected._ `verify-computer-use-final-gate.mjs` `main()` never supplies `verifiedOwnedRunFacts`
   or `verifiedClosureSha256`, so `finalGateEligible` is structurally false and the completed CLI
   always exits nonzero. As stated above this cannot be fixed with a flag or a JSON field: a
