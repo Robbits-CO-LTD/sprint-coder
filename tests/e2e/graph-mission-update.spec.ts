@@ -176,20 +176,12 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     await update
       .getByRole('button', { name: '影響する工程を停止して変更を確認', exact: true })
       .click();
-    // The hold simulates delayed runtime teardown. Wait for Main's requested-stop fence before
-    // releasing only this test flag; no timer or model-success text stands in for the stop.
+    // This fixture holds normal completion; an abort can acknowledge stopping immediately.
+    // Delayed stop acknowledgement is covered separately by the Coordinator delayed-stop test.
     await expect
-      .poll(() =>
-        page.evaluate(
-          async (input) =>
-            window.sprintCoder!.graphs.reviewUpdate(input).then(
-              () => 'ready',
-              (error) => String(error.message),
-            ),
-          requestInput,
-        ),
-      )
-      .toContain('not confirmed stopping');
+      .poll(async () => (await mission(page)).steps.map((step) => step.state))
+      .toEqual(['waiting_resume', 'running', 'waiting_resume']);
+    expect((await mission(page)).graph!.semanticRevision).toBe(initial.graph!.semanticRevision);
     await app.evaluate((_electron, flag) => {
       process.env[flag] = 'store';
     }, 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT');
