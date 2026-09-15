@@ -46,7 +46,15 @@ const now = '2026-09-11T00:00:00.000Z';
 const gitCheckpointTimeout = process.platform === 'win32' ? 60_000 : 10_000;
 const gitPreflightTimeout = process.platform === 'win32' ? 60_000 : 1_000;
 const gitScenarioTimeout = process.platform === 'win32' ? 120_000 : 20_000;
-const graphBridgeTimeout = process.platform === 'win32' ? 300_000 : 60_000;
+// The bridge child runs this whole suite, real Git worktrees and native image reads included, so
+// its budget tracks hosted-runner speed rather than anything the suite itself decides. On an M-
+// series Mac the child takes 14.6 s; on the hosted macOS runner of job 104595667383 the comparable
+// SQLite bridge child needed 52.6 s for a suite that costs 14.2 s on that same Mac — a 3.7x
+// contention factor that leaves a 60 s budget under 10% of headroom, which is why that run was
+// killed at 60.1 s after a 38.4 s pass on a faster runner. `persistenceBridgeTimeoutMs` met this
+// exact wall first and answered it with 180 s for every platform; a suite of the same measured
+// cost gets the same allowance. Windows keeps its own larger measured budget.
+const graphBridgeTimeout = process.platform === 'win32' ? 300_000 : 180_000;
 function fixture(
   existing?: { persistence: SqlitePersistenceClient; path: string },
   writeCapable = false,
