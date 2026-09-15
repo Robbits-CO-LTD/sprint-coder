@@ -26,6 +26,7 @@ import {
   type ComputerUseSessionStatus,
   type ComputerUseStopReason,
   type ComputerUseWindowCandidate,
+  type ComputerUseNativeInputReceipt,
   type ComputerUseApprovalResolveInput,
 } from '@sprint-coder/contracts';
 import {
@@ -136,6 +137,7 @@ export type ComputerUseNativeWindow = ComputerUseWindowCandidate &
     screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
   }>;
 export type ComputerUseNativeSession = Readonly<{
+  inputReceipt?: ComputerUseNativeInputReceipt;
   sessionId: string;
   platform: 'darwin' | 'win32';
   appIdentityDigest: string;
@@ -151,6 +153,7 @@ export type ComputerUseNativeObservation = ComputerUseObservation;
 export type ComputerUseNativeActionResult = Readonly<{
   result: ComputerUseActionResult['result'];
   reasonCode: string | null;
+  inputReceipt?: ComputerUseNativeInputReceipt;
 }>;
 
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
@@ -188,7 +191,10 @@ export interface ComputerUseNativeHost {
       signal: AbortSignal;
     }>,
   ): Promise<ComputerUseNativeActionResult>;
-  cancel(session: ComputerUseNativeSession, cancelEpoch: number): Promise<void>;
+  cancel(
+    session: ComputerUseNativeSession,
+    cancelEpoch: number,
+  ): Promise<ComputerUseNativeInputReceipt | void>;
   close(session: ComputerUseNativeSession): Promise<void>;
 }
 
@@ -942,6 +948,12 @@ export class ComputerUseController {
         appDigest: native.appIdentityDigest,
         windowDigest: native.windowIdentityDigest,
         manifestDigest: availability.manifestDigest ?? '0'.repeat(64),
+        ...(native.inputReceipt === undefined
+          ? {}
+          : {
+              inputAttemptCount: native.inputReceipt.inputAttemptCount,
+              cancelEpoch: native.inputReceipt.cancelEpoch,
+            }),
       }),
     );
     try {
@@ -1176,8 +1188,9 @@ export class ComputerUseController {
     record.observation = null;
     this.cancelPendingApprovals(sessionId, 'computer_session_ended');
     let nativeAcknowledged = true;
+    let inputReceipt: ComputerUseNativeInputReceipt | void = undefined;
     try {
-      await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
+      inputReceipt = await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
     } catch {
       nativeAcknowledged = false;
       // Stop remains fail-closed even when native acknowledgement is unavailable.
@@ -1190,6 +1203,12 @@ export class ComputerUseController {
         type: 'stop_acknowledged',
         sessionDigest: computerUseCaptureDigest(sessionId),
         nativeAcknowledged,
+        ...(inputReceipt === undefined
+          ? {}
+          : {
+              inputAttemptCount: inputReceipt.inputAttemptCount,
+              cancelEpoch: inputReceipt.cancelEpoch,
+            }),
       }),
     );
     if (record.planner !== null && record.plannerExecutionId !== null) {
@@ -1203,7 +1222,11 @@ export class ComputerUseController {
     }
     this.broker.finishTurn(record.status.taskId, record.turnId);
     await Promise.resolve(this.deps.disarmEmergencyStop?.(sessionId)).catch(() => undefined);
-    record.status = this.status(record, 'stopped', reason);
+    record.status = this.status(
+      record,
+      'stopped',
+      nativeAcknowledged ? reason : 'native_unavailable',
+    );
     this.emit(record.status);
     this.sessions.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
@@ -2052,6 +2075,12 @@ export class ComputerUseController {
           sessionDigest: computerUseCaptureDigest(record.status.sessionId),
           requestDigest: computerUseCaptureDigest(atomicRequestId),
           result: result.result,
+          ...(result.inputReceipt === undefined
+            ? {}
+            : {
+                inputAttemptCount: result.inputReceipt.inputAttemptCount,
+                cancelEpoch: result.inputReceipt.cancelEpoch,
+              }),
           actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
           revision: observationRevision,
         }),

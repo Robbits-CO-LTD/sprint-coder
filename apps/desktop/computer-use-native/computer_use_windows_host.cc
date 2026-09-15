@@ -132,6 +132,9 @@ std::deque<std::string> response_cache_order;
 std::size_t response_cache_bytes = 0;
 
 struct WindowsSession {
+  // Counts API attempts, never inferred successful effects. Shared by session refocus copies.
+  std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
   std::string session_id;
   std::uint32_t pid = 0;
   HWND window = nullptr;
@@ -2006,6 +2009,9 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     return false;
   }
   const auto active_before_focus = sessions.find(session_key);
+  const auto input_api_attempts = active_before_focus == sessions.end()
+      ? std::make_shared<std::atomic<std::uint64_t>>(0)
+      : active_before_focus->second.input_api_attempts;
   if (active_before_focus != sessions.end() &&
       (active_before_focus->second.session_id != session_id ||
        active_before_focus->second.pid != pid ||
@@ -2074,10 +2080,15 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     return false;
   }
   if (GetForegroundWindow() != refocus_window) {
-    if (IsIconic(window))
+    if (IsIconic(window)) {
+      input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
       ShowWindow(window, SW_RESTORE);
-    if (refocus_window != window && IsIconic(refocus_window))
+    }
+    if (refocus_window != window && IsIconic(refocus_window)) {
+      input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
       ShowWindow(refocus_window, SW_RESTORE);
+    }
+    input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
     SetForegroundWindow(refocus_window);
   }
   if (!TargetWindowFacts(pid, refocus_window, &bounds)) {
@@ -2143,6 +2154,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
   }
   if (existing == sessions.end()) {
     WindowsSession session;
+    session.input_api_attempts = input_api_attempts;
     session.session_id = session_id;
     session.pid = pid;
     session.window = window;
@@ -2181,6 +2193,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
               "\",\"screenBounds\":" + RectJson(screen_bounds) +
               ",\"profileRevision\":" + std::to_string(profile_revision) +
               ",\"cancelEpoch\":" + std::to_string(effective_cancel_epoch) +
+              ",\"inputAttemptCount\":" + std::to_string(input_api_attempts->load(std::memory_order_acquire)) +
               ",\"pid\":" + std::to_string(pid) + ",\"windowHandle\":\"" +
               std::to_string(window_value) + "\"}";
   return true;
@@ -3672,6 +3685,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
                                               IID_PPV_ARGS(&pattern))) &&
         pattern != nullptr) {
       *accepted = true;
+      session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
       action_result = pattern->Invoke();
       pattern->Release();
     } else {
@@ -3693,6 +3707,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         *reason = "semantic_action_failed";
       } else {
         *accepted = true;
+        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
         action_result = pattern->SetValue(value);
       }
       if (value != nullptr)
@@ -3719,6 +3734,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
                                                      IID_PPV_ARGS(&pattern))) &&
                pattern != nullptr) {
       *accepted = true;
+      session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
       action_result = pattern->Select();
       pattern->Release();
     } else {
@@ -3744,6 +3760,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         action_result = S_OK;
       } else {
         *accepted = true;
+        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
         action_result = pattern->Toggle();
       }
       pattern->Release();
@@ -3768,6 +3785,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         action_result = S_OK;
       } else {
         *accepted = true;
+        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
         action_result = wants_expand ? pattern->Expand() : pattern->Collapse();
       }
       pattern->Release();
@@ -3840,9 +3858,9 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
-  return RevalidateWindowsTarget(session, expected, expected_epoch)
-             ? SendInput(count, events, sizeof(INPUT))
-             : 0;
+  if (!RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
+  session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+  return SendInput(count, events, sizeof(INPUT));
 }
 
 WORD VirtualKeyForName(std::string_view key) {
@@ -4015,6 +4033,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
         *reason = "stale_target";
       return false;
     }
+    session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
     if (!SetCursorPos(screen_x, screen_y)) {
       *reason = "input_unavailable";
       return false;
@@ -4083,6 +4102,7 @@ bool DispatchWindowsAction(const WindowsSession &session,
         *reason = "stale_target";
       return false;
     }
+    session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
     if (!SetCursorPos(point.x, point.y)) {
       *reason = "input_unavailable";
       return false;
@@ -4541,7 +4561,10 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     // checks the epoch before its next unit and stops; no retry is generated by
     // the native helper.
     if (!RespondAndCache(pipe, request, MessageType::kDispatchResult,
-                         "{\"result\":\"canceled\"}"))
+                         "{\"result\":\"canceled\",\"drained\":true,\"sessionId\":\"" +
+                             JsonEscape(session->session_id) + "\",\"cancelEpoch\":" +
+                             std::to_string(requested_epoch) + ",\"inputAttemptCount\":" +
+                             std::to_string(session->input_api_attempts->load(std::memory_order_acquire)) + "}"))
       return false;
     break;
   }
@@ -4583,7 +4606,10 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     if (!RespondAndCache(
             pipe, request,
             succeeded ? MessageType::kDispatchResult : MessageType::kError,
-            succeeded ? "{\"result\":\"completed\",\"reasonCode\":null}"
+            succeeded ? "{\"result\":\"completed\",\"reasonCode\":null,\"sessionId\":\"" +
+                            JsonEscape(session->session_id) + "\",\"cancelEpoch\":" +
+                            std::to_string(session->cancel_epoch) + ",\"inputAttemptCount\":" +
+                            std::to_string(session->input_api_attempts->load(std::memory_order_acquire)) + "}"
                       : ErrorPayload(reason, accepted))) {
       return false;
     }

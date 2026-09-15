@@ -8,6 +8,7 @@ import {
   computerUseModeSchema,
   computerUsePolicyLanguageSchema,
   computerUseResultSchema,
+  computerUseNativeInputReceiptSchema,
   computerUseWindowCandidateSchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
@@ -15,6 +16,7 @@ import {
   type ComputerUseObservation,
   type ComputerUsePolicyLanguage,
   type ComputerUseMode,
+  type ComputerUseNativeInputReceipt,
 } from '@sprint-coder/contracts';
 import type {
   ComputerUseNativeActionResult,
@@ -54,6 +56,7 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
+  stopTimeoutMs?: number;
   windowsPhysicalBoundsToDip?: (bounds: ComputerUseNativeBounds) => ComputerUseNativeBounds;
 }>;
 
@@ -91,13 +94,40 @@ export function createComputerUseNativeHost(
   // not advertise all package/handshake gates as ready.
   const handshakeReady =
     packageReady &&
+    binding.manifest.protocolVersion === 1 &&
+    binding.manifest.apiVersion === 2 &&
     binding.probe.protocolVersion === 1 &&
-    binding.probe.apiVersion === 1 &&
+    binding.probe.apiVersion === 2 &&
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
+  const inputAttemptsBySession = new Map<string, number>();
+
+  const inputReceipt = (
+    record: Record<string, unknown>,
+    sessionId: string,
+    cancelEpoch: number,
+  ): ComputerUseNativeInputReceipt => {
+    if (!sessions.has(sessionId))
+      throw new ComputerUseNativeUnavailableError('native_input_receipt_unconfirmed');
+    const parsed = computerUseNativeInputReceiptSchema.safeParse({
+      sessionId: record['sessionId'],
+      cancelEpoch: record['cancelEpoch'],
+      inputAttemptCount: record['inputAttemptCount'],
+    });
+    const previous = inputAttemptsBySession.get(sessionId);
+    if (
+      !parsed.success ||
+      parsed.data.sessionId !== sessionId ||
+      parsed.data.cancelEpoch !== cancelEpoch ||
+      (previous !== undefined && parsed.data.inputAttemptCount < previous)
+    )
+      throw new ComputerUseNativeUnavailableError('native_input_receipt_unconfirmed');
+    inputAttemptsBySession.set(sessionId, parsed.data.inputAttemptCount);
+    return parsed.data;
+  };
 
   const unavailableReason = (): string => {
     if (!packageReady) return normalizeReason(binding.probe.reason) || 'unsigned_package';
@@ -128,6 +158,26 @@ export function createComputerUseNativeHost(
 
   const invoke = async (method: NativeMethod, input: unknown): Promise<unknown> =>
     await Promise.resolve(requireMethod(method)(input));
+
+  const stopWithDeadline = async (method: 'cancel' | 'close', input: unknown): Promise<unknown> => {
+    const timeoutMs = options.stopTimeoutMs ?? 1_000;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000)
+      throw new ComputerUseNativeUnavailableError('native_stop_timeout_invalid');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        invoke(method, input),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new ComputerUseNativeUnavailableError('native_stop_unconfirmed')),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
 
   const host: ComputerUseNativeHost = {
     availability: (): ComputerUseAvailability => {
@@ -308,7 +358,17 @@ export function createComputerUseNativeHost(
       sessions.set(session.sessionId, session);
       // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
       // implementation, but it is never returned to the controller or renderer.
-      return publicNativeSession(session);
+      try {
+        return {
+          ...publicNativeSession(session),
+          inputReceipt: inputReceipt(raw, session.sessionId, session.cancelEpoch),
+        };
+      } catch (error) {
+        sessions.delete(session.sessionId);
+        inputAttemptsBySession.delete(session.sessionId);
+        await stopWithDeadline('close', raw).catch(() => undefined);
+        throw error;
+      }
     },
 
     observe: async (session, input): Promise<ComputerUseObservation> => {
@@ -385,22 +445,34 @@ export function createComputerUseNativeHost(
         result,
         reasonCode: reasonCode ?? null,
       });
-      return Object.freeze({ result, reasonCode: reasonCode ?? null });
+      return Object.freeze({
+        result,
+        reasonCode: reasonCode ?? null,
+        inputReceipt: inputReceipt(record, input.session.sessionId, input.cancelEpoch),
+      });
     },
 
-    cancel: async (session, cancelEpoch): Promise<void> => {
+    cancel: async (session, cancelEpoch): Promise<ComputerUseNativeInputReceipt> => {
       const internal = sessions.get(session.sessionId);
-      if (internal === undefined) return;
-      await invoke('cancel', { ...internal.raw, cancelEpoch });
+      if (internal === undefined)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      const result = asRecord(
+        await stopWithDeadline('cancel', { ...internal.raw, cancelEpoch }),
+        'native_stop_unconfirmed',
+      );
+      if (result['result'] !== 'canceled' || result['drained'] !== true)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      return inputReceipt(result, session.sessionId, cancelEpoch);
     },
 
     close: async (session): Promise<void> => {
       const internal = sessions.get(session.sessionId);
       if (internal === undefined) return;
       try {
-        await invoke('close', { ...internal.raw });
+        await stopWithDeadline('close', { ...internal.raw });
       } finally {
         sessions.delete(session.sessionId);
+        inputAttemptsBySession.delete(session.sessionId);
       }
     },
   };
@@ -421,7 +493,7 @@ export function createUnavailableComputerUseNativeHost(
         platform: nativePlatform,
         architecture: platform === 'win32' ? 'x64' : process.arch === 'arm64' ? 'arm64' : 'x64',
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         nativeVersion: 'disabled',
         moduleDigest: zero,
         binaryDigest: zero,
@@ -431,7 +503,7 @@ export function createUnavailableComputerUseNativeHost(
       probe: {
         available: false,
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         backend: `${platform}-unavailable`,
         reason: 'FEATURE_FLAG_DISABLED',
         artifactPath: null,

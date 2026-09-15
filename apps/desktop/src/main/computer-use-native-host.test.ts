@@ -22,7 +22,7 @@ function binding(
       platform,
       architecture: platform === 'win32' ? 'x64' : 'arm64',
       protocolVersion: 1,
-      apiVersion: 1,
+      apiVersion: 2,
       nativeVersion: 'test-native',
       moduleDigest: digest('1'),
       binaryDigest: digest('2'),
@@ -32,7 +32,7 @@ function binding(
     probe: {
       available: true,
       protocolVersion: 1,
-      apiVersion: 1,
+      apiVersion: 2,
       backend: 'test-native',
       reason: '',
       artifactPath: '/Resources/sprint_coder_computer_use_native.node',
@@ -391,9 +391,12 @@ describe('Computer Use native Main adapter', () => {
         sessionId: request['sessionId'],
         observationRevision: request['observationRevision'],
         actionDigest: request['actionDigest'],
+        cancelEpoch: request['cancelEpoch'],
+        inputAttemptCount: 2,
       };
     });
     const startSession = vi.fn(() => ({
+      inputAttemptCount: 0,
       sessionId: 'session-1',
       platform: 'darwin' as const,
       appIdentityDigest,
@@ -444,10 +447,19 @@ describe('Computer Use native Main adapter', () => {
         screenBounds: { x: 0, y: 0, width: 100, height: 80 },
       }),
       dispatch,
-      cancel: vi.fn(),
+      cancel: vi.fn((input: unknown): unknown => {
+        const request = input as Record<string, unknown>;
+        return {
+          result: 'canceled',
+          drained: true,
+          sessionId: request['sessionId'],
+          cancelEpoch: request['cancelEpoch'],
+          inputAttemptCount: 2,
+        };
+      }),
       close: vi.fn(),
     };
-    const host = createComputerUseNativeHost(binding(addon), 'darwin');
+    const host = createComputerUseNativeHost(binding(addon), 'darwin', { stopTimeoutMs: 10 });
     expect(host.availability()).toMatchObject({
       state: 'ready',
       available: true,
@@ -562,7 +574,11 @@ describe('Computer Use native Main adapter', () => {
       cancelEpoch: 0,
       signal: new AbortController().signal,
     });
-    expect(result).toEqual({ result: 'completed', reasonCode: null });
+    expect(result).toEqual({
+      result: 'completed',
+      reasonCode: null,
+      inputReceipt: { sessionId: session.sessionId, cancelEpoch: 0, inputAttemptCount: 2 },
+    });
     expect(dispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         requestId: 'request-2',
@@ -614,10 +630,72 @@ describe('Computer Use native Main adapter', () => {
         signal: new AbortController().signal,
       }),
     ).rejects.toMatchObject({ reasonCode: 'native_action_effect_invalid' });
-    await host.cancel(session, 1);
+    addon.cancel.mockReturnValueOnce({
+      result: 'canceled',
+      drained: true,
+      sessionId: session.sessionId,
+      cancelEpoch: 1,
+    });
+    await expect(host.cancel(session, 1)).rejects.toMatchObject({
+      reasonCode: 'native_input_receipt_unconfirmed',
+    });
+    addon.cancel.mockReturnValueOnce({
+      result: 'canceled',
+      drained: true,
+      sessionId: session.sessionId,
+      cancelEpoch: 1,
+      inputAttemptCount: 1,
+    });
+    await expect(host.cancel(session, 1)).rejects.toMatchObject({
+      reasonCode: 'native_input_receipt_unconfirmed',
+    });
+    addon.cancel.mockImplementationOnce(() => {
+      throw new Error('native drain worker failed');
+    });
+    await expect(host.cancel(session, 1)).rejects.toThrow('native drain worker failed');
+    let lateResolve!: (value: unknown) => void;
+    addon.cancel.mockReturnValueOnce(
+      new Promise((resolve) => {
+        lateResolve = resolve;
+      }),
+    );
+    await expect(host.cancel(session, 1)).rejects.toMatchObject({
+      reasonCode: 'native_stop_unconfirmed',
+    });
+    lateResolve({
+      result: 'canceled',
+      drained: true,
+      sessionId: session.sessionId,
+      cancelEpoch: 1,
+      inputAttemptCount: 2,
+    });
+    await expect(host.cancel(session, 1)).resolves.toEqual({
+      sessionId: session.sessionId,
+      cancelEpoch: 1,
+      inputAttemptCount: 2,
+    });
     await host.close(session);
-    expect(addon.cancel).toHaveBeenCalledTimes(1);
+    expect(addon.cancel).toHaveBeenCalledTimes(5);
     expect(addon.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when an API1 manifest is mixed with an API2 helper', () => {
+    const native = binding({
+      probe: () => ({}),
+      pickApplication: () => ({}),
+      listWindows: () => [],
+      startSession: () => ({}),
+      observe: () => ({}),
+      dispatch: () => ({}),
+      cancel: () => undefined,
+      close: () => undefined,
+    });
+    native.manifest.apiVersion = 1;
+    expect(createComputerUseNativeHost(native, 'darwin').availability()).toMatchObject({
+      handshakeReady: false,
+      observe: false,
+      control: false,
+    });
   });
 
   it('fails closed for unknown, too-deep, and over-node-limit tree shapes', () => {

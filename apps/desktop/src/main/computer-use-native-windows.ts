@@ -217,7 +217,7 @@ class WindowsComputerUseHelperClient {
         });
         const handshake = await this.sendConnected(
           'handshake',
-          { operation: 'handshake', protocolVersion: 1, apiVersion: 1 },
+          { operation: 'handshake', protocolVersion: 1, apiVersion: 2 },
           this.transportSessionId,
           newComputerUseNativeFrameId(),
         );
@@ -401,7 +401,7 @@ export function assertWindowsComputerUseHelperHandshake(
   const handshake = asRecord(value, 'Computer Use Windows helper handshake is invalid');
   if (
     handshake['protocolVersion'] !== 1 ||
-    handshake['apiVersion'] !== 1 ||
+    handshake['apiVersion'] !== 2 ||
     handshake['platform'] !== 'win32'
   )
     throw new Error('Computer Use Windows helper handshake mismatch');

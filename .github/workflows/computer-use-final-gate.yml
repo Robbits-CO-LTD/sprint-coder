@@ -352,7 +352,7 @@ jobs:
             $nativeManifest.architecture -ne 'x64' -or
             $nativeManifest.version -ne 1 -or
             $nativeManifest.protocolVersion -ne 1 -or
-            $nativeManifest.apiVersion -ne 1 -or
+            $nativeManifest.apiVersion -ne 2 -or
             $nativeManifest.sourceCommit -ne $env:SOURCE_COMMIT -or
             -not ($nativeManifest.nativeVersion -is [string]) -or
             $nativeManifest.nativeVersion.Length -lt 1 -or
@@ -560,7 +560,7 @@ jobs:
           [[ "$(/usr/bin/plutil -extract platform raw -o - "${manifest}")" == 'darwin' ]]
           [[ "$(/usr/bin/plutil -extract architecture raw -o - "${manifest}")" == "${expected_architecture}" ]]
           [[ "$(/usr/bin/plutil -extract protocolVersion raw -o - "${manifest}")" == '1' ]]
-          [[ "$(/usr/bin/plutil -extract apiVersion raw -o - "${manifest}")" == '1' ]]
+          [[ "$(/usr/bin/plutil -extract apiVersion raw -o - "${manifest}")" == '2' ]]
           [[ "$(/usr/bin/plutil -extract moduleDigest raw -o - "${manifest}")" == "${module_digest}" ]]
           [[ "$(/usr/bin/plutil -extract binaryDigest raw -o - "${manifest}")" == "${module_digest}" ]]
           [[ "$(/usr/bin/plutil -extract signerDigest raw -o - "${manifest}")" == "${signer_digest}" ]]

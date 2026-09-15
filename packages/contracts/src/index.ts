@@ -5685,6 +5685,16 @@ export const computerUseHandshakeSchema = z
     if (!handshake.accepted && handshake.reasonCode === null)
       context.addIssue({ code: 'custom', message: 'Rejected handshakes require a reason' });
   });
+
+/** Native API 2: attempted OS input API calls, not successful effects. Ephemeral only. */
+export const computerUseNativeInputReceiptSchema = z
+  .object({
+    sessionId: computerUseIdSchema,
+    cancelEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    inputAttemptCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type ComputerUseNativeInputReceipt = z.infer<typeof computerUseNativeInputReceiptSchema>;
 export type ComputerUseHandshake = z.infer<typeof computerUseHandshakeSchema>;
 
 export const COMPUTER_USE_LIMITS = Object.freeze({

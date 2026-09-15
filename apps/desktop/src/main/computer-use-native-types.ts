@@ -5,7 +5,7 @@ export type ComputerUseNativePlatform = 'darwin' | 'win32' | 'linux';
 export type ComputerUseNativeProbe = Readonly<{
   available: boolean;
   protocolVersion: 1;
-  apiVersion: 1;
+  apiVersion: 2;
   backend: string;
   reason: string;
   artifactPath: string | null;

@@ -66,22 +66,36 @@ The helper neither scans live user data automatically nor claims final privacy a
 
 ## Remaining required connections
 
-| Requirement                                    | Current evidence                                                 | Required next boundary                                                                                                                       |
-| ---------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Actual Provider and canonical action           | Production emit sites; direct tests                              | Selected non-OpenRouter, fixed-image preflight and exact 3 live rounds separately on each OS                                                 |
-| Bounded runtime / final state                  | Normal 1–25 round limit and final observation; direct race tests | Both OS signed-package final state with real Provider                                                                                        |
-| Semantic plus typing/scroll, TTL, egress, cost | Partial runtime metadata only                                    | Correlated action-class/TTL/consent/budget assertions, final app state, both OS sessions                                                     |
-| Source/package/signer                          | Native manifest digest observed                                  | Independent exact-source portable/installer/DMG and signer verification from #387                                                            |
-| Native zero-after-Stop                         | Logical call pairs and cancel/close result                       | Native OS-input-API attempt counter bound to session/cancel epoch; never infer physical calls from logical dispatch                          |
-| Privacy                                        | Direct tests of explicit-file scanner                            | Full sink inventory and transient payload samples from each real package run; independently inspect unsupported formats                      |
-| Safety                                         | Direct Controller/planner regressions                            | Original AC/INV proportional direct tests and representative per-OS Core hard-boundary/Stop scenarios in parent map                          |
-| Canonical transcript and protected sealing     | All PASS imports rejected                                        | Reviewed assertions consuming source-bound runtime/native/privacy facts, complete original AC coverage, protected collection and attestation |
+| Requirement                                    | Current evidence                                                          | Required next boundary                                                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Actual Provider and canonical action           | Production emit sites; direct tests                                       | Selected non-OpenRouter, fixed-image preflight and exact 3 live rounds separately on each OS                                                 |
+| Bounded runtime / final state                  | Normal 1–25 round limit and final observation; direct race tests          | Both OS signed-package final state with real Provider                                                                                        |
+| Semantic plus typing/scroll, TTL, egress, cost | Partial runtime metadata only                                             | Correlated action-class/TTL/consent/budget assertions, final app state, both OS sessions                                                     |
+| Source/package/signer                          | Native manifest digest observed                                           | Independent exact-source portable/installer/DMG and signer verification from #387                                                            |
+| Native zero-after-Stop                         | Native API 2 attempt counter, async drain, direct C++/ASan and host tests | Windows build and both OS representative signed-package input/Stop journeys                                                                  |
+| Privacy                                        | Direct tests of explicit-file scanner                                     | Full sink inventory and transient payload samples from each real package run; independently inspect unsupported formats                      |
+| Safety                                         | Direct Controller/planner regressions                                     | Original AC/INV proportional direct tests and representative per-OS Core hard-boundary/Stop scenarios in parent map                          |
+| Canonical transcript and protected sealing     | All PASS imports rejected                                                 | Reviewed assertions consuming source-bound runtime/native/privacy facts, complete original AC coverage, protected collection and attestation |
 
-The native probe must count **attempts reaching an OS input API**, not successful effects. A
-SendInput/AX result is a separate outcome. Proposed counters require atomic increments directly
-before the OS call and a Stop barrier binding acknowledgement to the same session/cancel epoch.
-Their absence stays `null`; an unavailable probe is never zero. Native ABI/protocol changes and
-both OS verification require a separate coordinated implementation checkpoint.
+Native API **2** counts attempts reaching input/focus APIs, not successful effects. An atomic
+counter increments immediately before CGEventPost/AX activation/input calls on macOS and
+SendInput/UIA/cursor/focus calls on Windows. One SendInput call may contain multiple events;
+counts are API attempts, not characters or cross-platform comparable effect counts.
+Receipts bind the count to the same session and cancel epoch. Missing or decreasing counts,
+wrong binding, and an API 1 helper/manifest are refused; unknown count remains `null`.
+
+On macOS, Cancel invalidates the epoch immediately and queues an asynchronous drain behind the
+existing native serial worker. Its acknowledgement occurs after the accepted down/up pair ends.
+Close also queues cleanup, preserving session shared_ptr lifetime without blocking Main on the
+state mutex. Worker failure and the host's bounded stop timeout remain unconfirmed; late completion
+cannot turn that timeout into an accepted receipt. The Controller publishes `native_unavailable`
+instead of a successful user-stop reason when native acknowledgement fails.
+
+The binary frame protocol stays **1** because its header layout is unchanged. Loader, handshake,
+build manifest, Forge package checks and final-gate workflow now require native API **2**.
+Production-function C++ seams reproduce the pre-fix macOS post-ack calls and establish zero after
+the fix, also under ASan/UBSan; Windows SendInput's portable seam distinguishes attempted calls
+from successful effects. These tests execute inert OS seams, not signed-device acceptance.
 
 Schema v3's single Provider binding cannot establish two OS runs, five-action full-access runs
 with zero Approval Cards, remembered one-click start, file-picker resume, third-party state change,

@@ -2428,6 +2428,22 @@ describe('Computer Use contracts', () => {
     });
     expect(status.pendingApproval).toBeNull();
     expect(contracts.computerUseRoundLimitSchema.parse(3)).toBe(3);
+    const receipt = { sessionId: 'native-session', cancelEpoch: 1, inputAttemptCount: 2 };
+    expect(contracts.computerUseNativeInputReceiptSchema.parse(receipt)).toEqual(receipt);
+    expect(
+      contracts.computerUseNativeInputReceiptSchema.safeParse({
+        ...receipt,
+        inputAttemptCount: undefined,
+      }).success,
+    ).toBe(false);
+    expect(
+      contracts.computerUseNativeInputReceiptSchema.safeParse({ ...receipt, inputAttemptCount: -1 })
+        .success,
+    ).toBe(false);
+    expect(
+      contracts.computerUseNativeInputReceiptSchema.safeParse({ ...receipt, rawInput: 'fixture' })
+        .success,
+    ).toBe(false);
     for (const maxRounds of [0, 26, 1.5, NaN])
       expect(contracts.computerUseRoundLimitSchema.safeParse(maxRounds).success).toBe(false);
     expect(

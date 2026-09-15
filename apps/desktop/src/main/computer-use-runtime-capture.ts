@@ -10,6 +10,8 @@ const eventSchema = z.discriminatedUnion('type', [
     .object({
       ...base,
       type: z.literal('session'),
+      inputAttemptCount: integer.optional(),
+      cancelEpoch: integer.optional(),
       platform: z.enum(['darwin', 'win32']),
       appDigest: digest,
       windowDigest: digest,
@@ -96,6 +98,8 @@ const eventSchema = z.discriminatedUnion('type', [
     .object({
       ...base,
       type: z.literal('native_finished'),
+      inputAttemptCount: integer.optional(),
+      cancelEpoch: integer.optional(),
       requestDigest: digest,
       actionDigest: digest,
       revision: integer,
@@ -104,7 +108,13 @@ const eventSchema = z.discriminatedUnion('type', [
     .strict(),
   z.object({ ...base, type: z.literal('stop_requested'), reasonDigest: digest }).strict(),
   z
-    .object({ ...base, type: z.literal('stop_acknowledged'), nativeAcknowledged: z.boolean() })
+    .object({
+      ...base,
+      type: z.literal('stop_acknowledged'),
+      nativeAcknowledged: z.boolean(),
+      inputAttemptCount: integer.optional(),
+      cancelEpoch: integer.optional(),
+    })
     .strict(),
 ]);
 
@@ -239,6 +249,7 @@ export class ComputerUseRuntimeCapture {
     let nativeCompletionsForAction = 0;
     let dispatchesAfterStop = 0;
     let stopping = false;
+    let nativeAttemptCount: number | null = session?.inputAttemptCount ?? null;
     const nativeRequests = new Set<string>();
     const seenNativeRequests = new Set<string>();
     for (const event of events) {
@@ -320,6 +331,11 @@ export class ComputerUseRuntimeCapture {
           nativeInFlight += 1;
           break;
         case 'native_finished':
+          if (event.inputAttemptCount !== undefined) {
+            if (nativeAttemptCount !== null && event.inputAttemptCount < nativeAttemptCount)
+              consistent = false;
+            nativeAttemptCount = event.inputAttemptCount;
+          }
           if (
             !nativeRequests.delete(event.requestDigest) ||
             nativeInFlight === 0 ||
@@ -337,6 +353,11 @@ export class ComputerUseRuntimeCapture {
           stage = 'stopped';
           break;
         case 'stop_acknowledged':
+          if (event.inputAttemptCount !== undefined) {
+            if (nativeAttemptCount !== null && event.inputAttemptCount < nativeAttemptCount)
+              consistent = false;
+            nativeAttemptCount = event.inputAttemptCount;
+          }
           if (!stopping || stopAcknowledged || !event.nativeAcknowledged || nativeInFlight !== 0)
             consistent = false;
           stopAcknowledged = true;
@@ -357,6 +378,7 @@ export class ComputerUseRuntimeCapture {
       roundsCompleted: completed,
       nativeDispatchesAfterStop: dispatchesAfterStop,
       physicalInputCount: null,
+      osInputApiAttemptCount: nativeAttemptCount,
       packageSignerSourceVerified: false,
       persistenceSurfacesInspected: false,
       invalid: this.invalid,

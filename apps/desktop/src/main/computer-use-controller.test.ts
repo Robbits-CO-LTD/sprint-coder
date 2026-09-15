@@ -532,6 +532,26 @@ describe('ComputerUseController', () => {
     expect(runtimeCapture.snapshot().exactThreeRoundJourneyObserved).toBe(false);
   });
 
+  it('reports an unconfirmed native stop instead of a successful user stop', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    let rejectCancel!: (error: Error) => void;
+    const cancelGate = new Promise<void>((_resolve, reject) => {
+      rejectCancel = reject;
+    });
+    const fixture = createFixture({ runtimeCapture, cancelGate });
+    const session = await start(fixture);
+    const stopped = fixture.controller.stop(session.sessionId);
+    rejectCancel(new Error('native drain timeout'));
+    await stopped;
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('native_unavailable');
+    expect(runtimeCapture.snapshot().events.at(-1)).toMatchObject({
+      type: 'stop_acknowledged',
+      nativeAcknowledged: false,
+    });
+    expect(runtimeCapture.snapshot().osInputApiAttemptCount).toBeNull();
+    expect(runtimeCapture.snapshot().finalGateEligible).toBe(false);
+  });
+
   it('observes the final bounded action without adding a Provider plan', async () => {
     const plan = vi.fn(async () => click);
     const fixture = createFixture({ planner: { plan } });
