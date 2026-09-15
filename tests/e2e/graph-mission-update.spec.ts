@@ -91,8 +91,10 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     SPRINT_CODER_REAL_WORKERS: '0',
     SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT: 'store',
   });
+  let evidencePage: Page | undefined;
   try {
     const page = await firstWindow(app);
+    evidencePage = page;
     // A real background Mission holds the same declared machine resource. Its identity does not
     // grant this Task ownership; the tested Mission must visibly wait before its join step.
     const holder = await startFixtureMission(page, workspace);
@@ -238,6 +240,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     await closeApp(app);
     app = await launchApp(profile, undefined, { SPRINT_CODER_REAL_WORKERS: '0' });
     const reopened = await firstWindow(app);
+    evidencePage = reopened;
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
     await reopened.getByTestId('graph-toggle').click();
     await expect.poll(async () => (await mission(reopened)).state).toBe('completed');
@@ -253,6 +256,59 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     await expect(reopened.getByTestId('graph-mission-plan')).toHaveAttribute('open', '');
     await expect(reopened.getByTestId('graph-mission-state')).toContainText('すべての工程が完了');
     await reopened.screenshot({ path: testInfo.outputPath('graph-update-restored.png') });
+  } catch (error) {
+    if (evidencePage && !evidencePage.isClosed()) {
+      const metadata = await evidencePage
+        .evaluate(() => {
+          const panel = document.querySelector('[data-testid="graph-panel"]');
+          const input = panel?.querySelector<HTMLTextAreaElement>('textarea[id^="graph-comment-"]');
+          const label = input
+            ? document.querySelector<HTMLLabelElement>(`label[for="${input.id}"]`)
+            : null;
+          const box = input?.getBoundingClientRect();
+          const style = input ? getComputedStyle(input) : null;
+          const over =
+            box && box.width && box.height
+              ? document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+              : null;
+          return {
+            graphPanel: Boolean(panel),
+            inputPresent: Boolean(input),
+            labelPresent: Boolean(label),
+            labelForMatches: Boolean(input && label?.htmlFor === input.id),
+            disabled: input?.disabled ?? null,
+            ariaHidden: input?.getAttribute('aria-hidden'),
+            display: style?.display,
+            visibility: style?.visibility,
+            box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
+            coveringTag: over?.tagName,
+            coveringTestId: over?.getAttribute('data-testid'),
+            coveringInput: over === input,
+            details: Array.from(panel?.querySelectorAll('details') ?? [])
+              .slice(0, 8)
+              .map((detail) => ({
+                testId: detail.getAttribute('data-testid'),
+                open: detail.open,
+              })),
+          };
+        })
+        .catch(() => ({ diagnosticUnavailable: true }));
+      await testInfo.attach('graph-update-pre-cleanup-dom', {
+        body: JSON.stringify(metadata),
+        contentType: 'application/json',
+      });
+      const screenshot = testInfo.outputPath('graph-update-before-cleanup.png');
+      await evidencePage
+        .screenshot({ path: screenshot })
+        .then(() =>
+          testInfo.attach('graph-update-before-cleanup', {
+            path: screenshot,
+            contentType: 'image/png',
+          }),
+        )
+        .catch(() => undefined);
+    }
+    throw error;
   } finally {
     await closeApp(app);
     removeUserDataDir(profile);
