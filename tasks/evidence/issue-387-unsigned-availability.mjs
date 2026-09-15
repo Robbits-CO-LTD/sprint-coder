@@ -10,6 +10,7 @@ import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { reapOwnedApp } from './issue-387-owned-process-reaper.mjs';
 
 const [appRootArgument, profileArgument, dependencyRoot, outputArgument] = process.argv.slice(2);
 assert.equal(process.platform, 'win32');
@@ -147,10 +148,14 @@ try {
 } catch {
   report.failureStage = stage;
 } finally {
-  // Closing the owned page takes the normal BrowserWindow -> window-all-closed -> app.quit path.
-  if (page && !page.isClosed()) await page.close().catch(() => {});
-  if (browser) await browser.close().catch(() => {});
-  report.normalExit = await Promise.race([exited, delay(20000).then(() => null)]);
+  // Reaching this block without a page (CDP readiness timeout, refused connection) still owns a
+  // running app, so the cleanup is bounded and always ends with the owned process accounted for.
+  const cleanup = await reapOwnedApp({ child, exited, page, browser });
+  report.normalExit = cleanup.normalExit;
+  report.normalCloseAttempted = cleanup.normalCloseAttempted;
+  report.forcedCleanup = cleanup.forcedCleanup;
+  report.forcedExit = cleanup.forcedExit;
+  report.ownedProcessReaped = cleanup.reaped;
   report.packageAfter = packageSnapshot();
   report.fusesAfter = await getCurrentFuseWire(executable);
   report.packageUnchanged =

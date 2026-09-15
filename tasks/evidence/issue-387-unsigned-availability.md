@@ -82,6 +82,12 @@ app.quit shutdown path and exited with code 0. Afterwards, that PID and all app/
 whose executable path belonged to this dedicated extraction were absent. No process was killed.
 The original ZIP, #434's profile/models/app copy, and OS permissions/settings were unchanged.
 
+Cleanup is now bounded on every path, including a failure before the CDP connection exists, where
+no page is available to close: the probe waits for the normal exit, then terminates the owned tree
+and releases it so neither the app nor the probe can outlive the run. Forced termination is
+recorded as `forcedCleanup`/`forcedExit`, never as `normalExit`, so a killed app can never be read
+as this run's clean window-all-closed shutdown.
+
 The metadata-only machine output is preserved unchanged in
 [issue-387-unsigned-availability-result.json](issue-387-unsigned-availability-result.json), copied
 from `C:\Users\yusei\sc-issue-387-20260915\negative-beta3-result-a.json`. It contains capability
@@ -89,9 +95,16 @@ results, package/fuse digests, and the owned PID/exit result, not screenshots, a
 window text, input/prompt bodies, credentials, or raw app stdout/stderr.
 
 Both remote and checked-in evidence bytes have SHA-256
-`a78f55d5c0345b566173b4a1b18b9051e3bc4acd51c55d5ae5ba37a4445726c6`; the executed/checked-in harness
-hash is `a2fe7571dad331d00d06c4bd53670001a8132db9f6628526bbb89fcf9ea8a0a4`. A final process query
+`a78f55d5c0345b566173b4a1b18b9051e3bc4acd51c55d5ae5ba37a4445726c6`; the harness that produced them
+hashed `a2fe7571dad331d00d06c4bd53670001a8132db9f6628526bbb89fcf9ea8a0a4`. A final process query
 also found zero executable paths under the entire dedicated #387 directory.
+
+The checked-in harness has since been amended for the bounded cleanup above and now hashes
+`fbc4d4cd0ddf51f4d36cc15c772e9bf5e23616158db5b43cab3c56ddfe7eb662`, alongside its new
+[reaper module](issue-387-owned-process-reaper.mjs),
+`8bf6829b9d0d75019d52663be163a45557683dd75a5c2b24dbeec6762d4e0406`. The retained JSON therefore
+predates the `normalCloseAttempted`/`forcedCleanup`/`forcedExit`/`ownedProcessReaped` fields; the
+run it records reached a normal exit and is unaffected, but a replay must re-record both hashes.
 
 This directly observes the behavior described by `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` at the
 `availability()` boundary, for the published beta.3 (`5b20208`) unsigned bytes only. It does not
@@ -103,9 +116,11 @@ final-gate artifact.
 ## Main: exact replay
 
 The checked-in [harness](issue-387-unsigned-availability.mjs) was copied to
-`C:\Users\yusei\sc-issue-387-20260915\unsigned-availability.mjs`. On Windows, this command uses
-the unchanged extraction and existing read-only Playwright dependencies. It uses fresh `-b`
-profile/evidence paths and refuses to overwrite them:
+`C:\Users\yusei\sc-issue-387-20260915\unsigned-availability.mjs`. A replay must now copy the
+[reaper module](issue-387-owned-process-reaper.mjs) next to it as
+`issue-387-owned-process-reaper.mjs`, which is where the harness imports it from. On Windows, this
+command uses the unchanged extraction and existing read-only Playwright dependencies. It uses fresh
+`-b` profile/evidence paths and refuses to overwrite them:
 
 ```powershell
 & 'C:\Users\yusei\sc-windows-validation-20260914\node-v22.23.2-win-x64\node.exe' `
