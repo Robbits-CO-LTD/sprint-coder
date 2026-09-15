@@ -40,6 +40,7 @@ const eventSchema = z.discriminatedUnion('type', [
     .object({
       ...base,
       type: z.literal('parsed'),
+      ttlVerified: z.boolean().optional(),
       round: integer,
       revision: integer,
       bindingDigest: digest,
@@ -66,6 +67,7 @@ const eventSchema = z.discriminatedUnion('type', [
     .object({
       ...base,
       type: z.literal('observation'),
+      ttlVerified: z.boolean().optional(),
       appDigest: digest,
       windowDigest: digest,
       revision: integer,
@@ -89,6 +91,8 @@ const eventSchema = z.discriminatedUnion('type', [
     .object({
       ...base,
       type: z.literal('native_started'),
+      cancelEpoch: integer.optional(),
+      ttlVerified: z.boolean().optional(),
       requestDigest: digest,
       actionDigest: digest,
       revision: integer,
@@ -149,13 +153,23 @@ export function captureComputerUseRuntime(
  * inspect physical input and persistence surfaces before any final-gate claim is possible.
  */
 export class ComputerUseRuntimeCapture {
+  constructor(
+    private readonly onEvent?: (event: ComputerUseRuntimeEvent) => void,
+    private readonly onInvalid?: () => void,
+  ) {}
   private events: ComputerUseRuntimeEvent[] = [];
   private invalid = false;
   private sessionDigest: string | null = null;
   private eventBytes = 0;
 
   invalidate(): void {
+    if (this.invalid) return;
     this.invalid = true;
+    try {
+      this.onInvalid?.();
+    } catch {
+      /* No product authority. */
+    }
   }
 
   /** A new user-initiated session replaces the previous bounded, ephemeral capture. */
@@ -166,7 +180,7 @@ export class ComputerUseRuntimeCapture {
     this.sessionDigest = null;
     const parsed = eventSchema.safeParse(event);
     if (!parsed.success || parsed.data.type !== 'session') {
-      this.invalid = true;
+      this.invalidate();
       return;
     }
     this.sessionDigest = parsed.data.sessionDigest;
@@ -180,22 +194,27 @@ export class ComputerUseRuntimeCapture {
       parsed.data.sessionDigest !== this.sessionDigest ||
       this.events.length >= 128
     ) {
-      this.invalid = true;
+      this.invalidate();
       return;
     }
     const bytes = Buffer.byteLength(JSON.stringify(parsed.data));
     if (this.eventBytes + bytes > 56 * 1024) {
-      this.invalid = true;
+      this.invalidate();
       return;
     }
     this.eventBytes += bytes;
     // safeParse produces a detached, allowlisted object; never retain caller-owned payloads.
     this.events.push(parsed.data);
+    this.onEvent?.(structuredClone(parsed.data));
   }
 
   observe(observation: ComputerUseObservation): void {
     this.record({
       type: 'observation',
+      ttlVerified:
+        Date.parse(observation.observedAt) <= Date.now() &&
+        Date.parse(observation.expiresAt) > Date.now() &&
+        Date.parse(observation.expiresAt) - Date.parse(observation.observedAt) <= 30_000,
       sessionDigest: computerUseCaptureDigest(observation.sessionId),
       appDigest: observation.appIdentityDigest,
       windowDigest: observation.windowIdentityDigest,

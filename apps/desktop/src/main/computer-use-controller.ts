@@ -2041,6 +2041,8 @@ export class ComputerUseController {
       captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
         capture.record({
           type: 'native_started',
+          cancelEpoch: record.native.cancelEpoch,
+          ttlVerified: this.observationIsFresh(record),
           sessionDigest: computerUseCaptureDigest(record.status.sessionId),
           requestDigest: computerUseCaptureDigest(atomicRequestId),
           actionDigest: computerUseCaptureDigest(JSON.stringify(action)),

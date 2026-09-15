@@ -23,6 +23,22 @@ failure or overflow invalidates the evidence without interrupting product operat
 The local snapshot is detached from the recorder. Digests provide integrity/correlation, not
 authentication of their source; unit fixtures can produce them and are never runtime acceptance.
 
+Normal startup can opt into a one-way inherited output pipe (`SPRINT_CODER_COMPUTER_USE_CAPTURE_PIPE=1`
+and a per-run nonce). This uses the same bootstrap for startup transport and later recorder
+events, with no probe-only CLI, Renderer command, arbitrary fd/path selector, or input authority.
+Main uses bounded asynchronous writes, never waits for drain, and unrefs the pipe. Missing,
+closed, overflowing or broken pipes invalidate capture only. Recorder overflow also invalidates
+the stream, so a truncated recorder cannot acquire a valid terminal frame.
+
+`collect-computer-use-runtime.mjs` owns the spawned child and receives only that pipe, checking
+pid/ppid/platform and executable bytes. stdout/stderr are ignored rather than persisted. Nonce,
+canonical framing and hash chains detect mixing/tampering but do not authenticate the package:
+the protected runner's independently verified source/package/signer/process facts are still
+required by the parent schema. Collector completion requires the normal shutdown end frame;
+hello followed by owned-child termination is startup transport only, not a completed capture.
+Its consumer aggregates ordered native request/receipt sequences into one canonical round,
+including multiple Unicode-scalar dispatches. Missing TTL/epoch/receipt facts stay incomplete.
+
 `exactThreeRoundJourneyObserved` requires one preflight, matching session/provider binding,
 three ordered parse/action rounds, per-action matched native call pairs bound to action digest
 and observation revision, a later same-window observation after each action, and acknowledged
@@ -70,6 +86,12 @@ account for disabled/no-file sinks from independent runtime facts, and exclude l
 Encrypted databases, unsupported nested formats, escaped Unicode variants beyond JSON.stringify,
 and remote Provider storage are not decoded/scanned by this helper. Their absence cannot be inferred.
 The helper neither scans live user data automatically nor claims final privacy acceptance.
+The present payload-based inspector also requires a nonempty sample for each of six payload
+classes. A Provider that emits no reasoning cannot be marked complete by supplying a dummy
+sample: independent live stream/egress evidence of non-generation must be added by the collector.
+Deleted SQLite values, old WAL frames, full sink inventory, and actual authentication-secret
+nonpersistence are not established by these tests. Actual secrets, screens and prompts must
+never be sent over the metadata pipe to supply scanner samples.
 
 ## Remaining required connections
 

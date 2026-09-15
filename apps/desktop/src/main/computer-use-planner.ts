@@ -293,6 +293,7 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
         type: 'parsed',
+        ttlVerified: Date.parse(observation.expiresAt) > Date.now(),
         sessionDigest: computerUseCaptureDigest(observation.sessionId),
         round: input.round,
         revision: observation.revision,

@@ -82,6 +82,42 @@ function stop(capture: ComputerUseRuntimeCapture) {
 }
 
 describe('Computer Use runtime observation (unit fixtures are never acceptance)', () => {
+  it('accepts multiple scalar dispatches in one canonical typing round', () => {
+    const capture = captureFixture();
+    for (let round = 1; round <= 3; round++) {
+      const events = roundEvents(round);
+      if (round === 1) {
+        const parsed = events[1]!;
+        if (parsed.type === 'parsed') parsed.actionClass = 'type';
+        events.splice(
+          4,
+          0,
+          {
+            type: 'native_started',
+            sessionDigest,
+            requestDigest: '7'.repeat(64),
+            actionDigest,
+            revision: 1,
+          },
+          {
+            type: 'native_finished',
+            sessionDigest,
+            requestDigest: '7'.repeat(64),
+            actionDigest,
+            revision: 1,
+            result: 'completed',
+          },
+        );
+      }
+      events.forEach((event) => capture.record(event));
+    }
+    stop(capture);
+    expect(capture.snapshot().exactThreeRoundJourneyObserved).toBe(true);
+    expect(capture.snapshot().events.filter(({ type }) => type === 'native_started')).toHaveLength(
+      4,
+    );
+    expect(capture.snapshot().roundsCompleted).toBe(3);
+  });
   it('derives exact-three observations without granting package, privacy, or final-gate authority', () => {
     const capture = captureFixture();
     for (let round = 1; round <= 3; round++)

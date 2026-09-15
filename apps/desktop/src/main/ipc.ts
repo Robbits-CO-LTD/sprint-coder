@@ -333,6 +333,7 @@ import {
 import { MockRuntimeAdapter } from './runtime';
 import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
+import type { ComputerUseCaptureOutput } from './computer-use-capture-output';
 import { ComputerUseEmergencyStop } from './computer-use-emergency-stop';
 import {
   ComputerUseUserActivationGate,
@@ -984,7 +985,7 @@ export class IpcRouter {
   private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
   private disposed = false;
   private readonly computerUseController: ComputerUseController;
-  private readonly computerUseRuntimeCapture = new ComputerUseRuntimeCapture();
+  private readonly computerUseRuntimeCapture: ComputerUseRuntimeCapture;
   private readonly computerUseNative: ComputerUseNativeHost;
   private readonly computerUseActivationGate: ComputerUseUserActivationGate;
   private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
@@ -1148,7 +1149,16 @@ export class IpcRouter {
     computerUseNative: ComputerUseNativeHost = createUnavailableComputerUseNativeHost(),
     computerUseActivationGate?: ComputerUseUserActivationGate,
     private readonly graphs: GraphRenderService | null = null,
+    private readonly computerUseCaptureOutput?: ComputerUseCaptureOutput,
   ) {
+    this.computerUseRuntimeCapture = new ComputerUseRuntimeCapture(
+      (event) => {
+        computerUseCaptureOutput?.record(event);
+        if (computerUseCaptureOutput?.invalid()) this.computerUseRuntimeCapture.invalidate();
+      },
+      () => computerUseCaptureOutput?.invalidate(),
+    );
+    computerUseCaptureOutput?.onInvalid(() => this.computerUseRuntimeCapture.invalidate());
     this.graphSourceMonitor = new GraphSourceMonitor({
       document: (input) => {
         this.persistence.getTask(input.taskId);
@@ -4689,6 +4699,7 @@ export class IpcRouter {
     this.attachmentCustodyByTurn.clear();
     this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
+    this.computerUseCaptureOutput?.close();
   }
 
   graphArtifactResponse(url: URL): Response {
