@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { effectiveWorkspaceSetSchema, type GraphMissionPlan } from '@sprint-coder/contracts';
+import {
+  effectiveWorkspaceSetSchema,
+  graphMissionPlanSchema,
+  type GraphMissionPlan,
+} from '@sprint-coder/contracts';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 export const graphMissionStoredContextSchema = z
@@ -51,6 +55,28 @@ export const graphMissionCommitSchema = z
   })
   .strict();
 export type GraphMissionCommitInput = z.infer<typeof graphMissionCommitSchema>;
+export const graphMissionRecordSchema = graphMissionCommitSchema
+  .omit({ now: true })
+  .extend({
+    missionId: z.string().min(1),
+    approvedAt: z.string().datetime(),
+    contextJson: z.string().max(256 * 1024),
+    plan: graphMissionPlanSchema,
+    steps: z
+      .array(
+        z
+          .object({
+            key: z.string().min(1),
+            nodeId: z.string().min(1),
+            executionId: z.string().min(1),
+            generation: z.number().int().positive(),
+          })
+          .strict(),
+      )
+      .min(2)
+      .max(12),
+  })
+  .strict();
 export type GraphMissionRecord = Readonly<{
   missionId: string;
   taskId: string;

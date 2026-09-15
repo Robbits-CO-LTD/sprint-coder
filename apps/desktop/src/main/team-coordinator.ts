@@ -4414,7 +4414,9 @@ export class TeamCoordinator {
         graph.workspaceDigest !== this.persistence.getEffectiveWorkspaceSet(graph.taskId).digest
       )
         throw new Error('Graph integration ownership or authority changed');
-      return { graph, step, owner };
+      const authorized =
+        this.persistence.getGraphStepAgreement?.(mission.id, step.key, step.generation) ?? graph;
+      return { graph: authorized, step, owner };
     };
     const initial = readOwner();
     // Check every repository before the first parent checkout can be changed.

@@ -340,6 +340,160 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it.each([false, true])(
+      'fences only a requested update and preserves independent completion (complete before commit: %s)',
+      (completeBeforeCommit) => {
+        const f = fixture(undefined, false, ['a', 'b', 'c']);
+        try {
+          const plan = structuredClone(f.plan);
+          plan.steps[1]!.dependsOn = [];
+          plan.steps[2]!.dependsOn = ['a', 'b'];
+          const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+          f.persistence.saveGraphDocument(initial, 1);
+          const mission = f.persistence.createGraphTeamMission({
+            ...f.input,
+            renderRevision: initial.renderRevision,
+            semanticRevision: initial.semanticRevision,
+            semanticDigest: initial.semanticDigest,
+          });
+          const a = begin(f, mission.id, 'a');
+          const b = begin(f, mission.id, 'b');
+          const changed = structuredClone(plan);
+          changed.steps[0]!.dependsOn = ['b'];
+          const proposed = nextGraphDocument(f.task.id, f.diagram, initial, [], [], changed);
+          f.persistence.saveGraphDocument(proposed, initial.renderRevision);
+          expect(f.persistence.getGraphPendingUpdate(mission.id)).toBeNull();
+          expect(f.persistence.getTeamExecution(a.execution.id).state).toBe('running');
+          const request = f.persistence.stageGraphConstraintUpdate({
+            taskId: f.task.id,
+            missionId: mission.id,
+            expectedSemanticRevision: initial.semanticRevision,
+            renderRevision: proposed.renderRevision,
+            requestId: randomUUID(),
+            now,
+          });
+          expect(request.affectedKeys).toEqual(['a', 'c']);
+          expect(() =>
+            f.persistence.inspectGraphResources({
+              missionId: mission.id,
+              stepKey: 'c',
+              expectedGeneration: 1,
+            }),
+          ).toThrow('awaiting');
+          expect(() => f.persistence.completeGraphStep(completion(mission.id, 'a', a))).toThrow(
+            'awaiting',
+          );
+          const commit = {
+            taskId: f.task.id,
+            missionId: mission.id,
+            requestId: request.requestId,
+            consentId: randomUUID(),
+            now,
+          };
+          expect(() => f.persistence.commitGraphConstraintUpdate(commit)).toThrow('stop');
+          f.persistence.interruptGraphStep({
+            missionId: mission.id,
+            stepKey: 'a',
+            generation: 1,
+            reservationId: a.reservation.id,
+            attemptId: a.attempt.id,
+            outcome: 'canceled',
+            reason: 'requested update',
+            confirmation: { kind: 'attempt-stopped', attemptId: a.attempt.id },
+            now,
+          });
+          f.persistence.transitionTeamExecution({
+            executionId: mission.steps[2]!.executionId,
+            to: 'waiting_resume',
+            now,
+          });
+          if (completeBeforeCommit) f.persistence.completeGraphStep(completion(mission.id, 'b', b));
+          const checkpoint = f.persistence.getTeamMission(mission.id).steps[1]!.checkpoint;
+          expect(() =>
+            f.persistence.commitGraphConstraintUpdate({ ...commit, consentId: f.input.consentId }),
+          ).toThrow();
+          expect(f.persistence.getGraphTeamMission(mission.id)!.semanticRevision).toBe(
+            initial.semanticRevision,
+          );
+          expect(f.persistence.getGraphPendingUpdate(mission.id)).not.toBeNull();
+          const updated = f.persistence.commitGraphConstraintUpdate(commit);
+          expect(updated.steps.map((step) => step.generation)).toEqual([2, 1, 2]);
+          expect(f.persistence.getGraphStepAgreement(mission.id, 'b', 1).consentId).toBe(
+            f.input.consentId,
+          );
+          expect(f.persistence.getGraphStepAgreement(mission.id, 'a', 2).consentId).toBe(
+            commit.consentId,
+          );
+          expect(() => f.persistence.getGraphStepAgreement(mission.id, 'a', 1)).toThrow(
+            'generation',
+          );
+          expect(f.persistence.getTeamMission(mission.id).steps[1]!.checkpoint).toEqual(checkpoint);
+          if (!completeBeforeCommit) {
+            f.persistence.completeGraphStep(completion(mission.id, 'b', b));
+            expect(f.persistence.getTeamExecution(b.execution.id).state).toBe('completed');
+            expect(f.persistence.listTeamAttempts(b.execution.id)).toHaveLength(1);
+          }
+          expect(f.persistence.getGraphPendingUpdate(mission.id)).toBeNull();
+          expect(() => f.persistence.commitGraphConstraintUpdate(commit)).toThrow('changed');
+          expect(() => f.persistence.completeGraphStep(completion(mission.id, 'a', a))).toThrow(
+            'generation',
+          );
+          expect(() =>
+            f.persistence.releaseGraphResources({
+              reservationId: a.reservation.id,
+              executionId: a.execution.id,
+              generation: 2,
+              confirmation: { kind: 'attempt-stopped', attemptId: a.attempt.id },
+              now,
+            }),
+          ).toThrow();
+          expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+        } finally {
+          f.persistence.close();
+        }
+      },
+    );
+
+    it('restores pending updates without treating a proposal or restart as re-agreement', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const plan = structuredClone(f.plan);
+      plan.steps[1]!.dependsOn = [];
+      const proposed = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(proposed, 1);
+      const pending = f.persistence.stageGraphConstraintUpdate({
+        taskId: f.task.id,
+        missionId: mission.id,
+        expectedSemanticRevision: 1,
+        renderRevision: proposed.renderRevision,
+        requestId: randomUUID(),
+        now,
+      });
+      f.persistence.close();
+      const restored = new SqlitePersistenceClient(f.path);
+      try {
+        restored.recoverInterruptedTeamExecutions(now);
+        expect(restored.getGraphPendingUpdate(mission.id)).toEqual(pending);
+        expect(restored.getGraphTeamMission(mission.id)!.semanticRevision).toBe(1);
+        expect(() =>
+          restored.acquireGraphResources({
+            missionId: mission.id,
+            stepKey: 'b',
+            expectedGeneration: 1,
+            now,
+          }),
+        ).toThrow('awaiting');
+        expect(
+          restored.inspectGraphResources({
+            missionId: mission.id,
+            stepKey: 'a',
+            expectedGeneration: 1,
+          }).available,
+        ).toBe(true);
+      } finally {
+        restored.close();
+      }
+    });
     it.each(['continue', 'changed', 'unconfirmed'] as const)(
       'reviews a retained write workspace before resume: %s',
       async (scenario) => {
