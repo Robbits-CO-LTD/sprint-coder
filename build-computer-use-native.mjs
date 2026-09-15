@@ -4,6 +4,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
+export { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
 
 const repositoryDirectory = dirname(fileURLToPath(import.meta.url));
 const nativeDirectory = join(repositoryDirectory, 'apps', 'desktop', 'computer-use-native');
@@ -45,60 +47,11 @@ function run(command, arguments_, environment = process.env) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const diagnostic = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-      .split(/\r?\n/u)
-      .filter(
-        (line) =>
-          !line.startsWith('gyp verb') &&
-          !line.startsWith('gyp sill') &&
-          !line.includes('execFile: opts = {"env"'),
-      )
-      .slice(-200)
-      .join('\n')
-      .trim();
-    if (diagnostic !== '') process.stderr.write(`${diagnostic}\n`);
-    throw new Error(`${command} exited with status ${String(result.status ?? 1)}`);
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Computer Use native build child failed (exit ${result.error ? 1 : (result.status ?? 1)})`,
+    );
   }
-}
-
-export function sanitizedNativeBuildEnvironment(environment) {
-  // Node-gyp consumes npm_config_* after its CLI arguments, so even non-secret ambient
-  // values can replace the pinned Electron target, architecture, or header source. Keep
-  // every build control on the explicit command line and inject only a fixed log level.
-  const allowed =
-    /^(?:PATH|HOME|HOMEDRIVE|HOMEPATH|USER|USERNAME|LOGNAME|SHELL|COMSPEC|PATHEXT|PWD|INIT_CWD|TMPDIR|TEMP|TMP|TERM|LANG|LC_ALL|LC_CTYPE|NODE|PYTHON|CC|CXX|SDKROOT|DEVELOPER_DIR|MACOSX_DEPLOYMENT_TARGET|SYSTEMROOT|WINDIR|OS|PROCESSOR_[A-Z0-9_]+|NUMBER_OF_PROCESSORS|PROGRAMDATA|PROGRAMFILES(?:\(X86\))?|COMMONPROGRAMFILES(?:\(X86\))?|DRIVERDATA|COMMANDPROMPTTYPE|PLATFORM|PLATFORMTARGET|PREFERREDTOOLARCHITECTURE|INCLUDE|EXTERNAL_INCLUDE|LIB|LIBPATH|IFCPATH|VSINSTALLDIR|VISUALSTUDIOVERSION|DEVENVDIR|VCINSTALLDIR|VCTOOLSINSTALLDIR|VCTOOLSREDISTDIR|WINDOWSLIBPATH|WINDOWSSDKDIR|WINDOWSSDKVERSION|WINDOWSSDKLIBVERSION|WINDOWSSDKVERBINPATH|UCRTVERSION|UNIVERSALCRTSDKDIR|EXTENSIONSDKDIR|FRAMEWORKDIR|FRAMEWORKDIR32|FRAMEWORKVERSION|FRAMEWORKVERSION32|FRAMEWORK40VERSION|NETFXSDKDIR|VSCMD_[A-Z0-9_]+|__VSCMD_PREINIT_PATH)$/iu;
-  return {
-    ...Object.fromEntries(
-      Object.entries(environment).filter(
-        ([key, value]) =>
-          value !== undefined && allowed.test(key) && !isSecretLikeEnvironmentKey(key),
-      ),
-    ),
-    npm_config_loglevel: 'error',
-  };
-}
-
-function isSecretLikeEnvironmentKey(key) {
-  const canonical = key.toUpperCase().replace(/[^A-Z0-9]/gu, '');
-  return [
-    'APIKEY',
-    'ACCESSKEY',
-    'TOKEN',
-    'OTP',
-    'SECRET',
-    'PASSWORD',
-    'PASS',
-    'PRIVATEKEY',
-    'KEY',
-    'CREDENTIAL',
-    'AUTH',
-    'COOKIE',
-    'SESSION',
-    'CERT',
-    'CERTIFICATE',
-  ].some((marker) => canonical.includes(marker));
 }
 
 if (process.argv.includes('--test-environment-sanitizer')) {
@@ -189,11 +142,12 @@ function sha256File(path) {
 function computerUseSourceCommit() {
   const result = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: repositoryDirectory,
+    env: sanitizedNativeBuildEnvironment(process.env),
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  if (result.error) throw result.error;
+  if (result.error) throw new Error('Computer Use source commit lookup failed');
   const repositoryCommit = result.status === 0 ? result.stdout.trim() : '';
   if (!/^[0-9a-f]{40}$/u.test(repositoryCommit))
     throw new Error('Computer Use source commit is unavailable');
