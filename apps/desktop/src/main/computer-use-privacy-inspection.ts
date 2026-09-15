@@ -281,7 +281,8 @@ export async function inspectComputerUsePrivacySurfaces(
           });
           result.decodedBytes += decoded.decodedBytes;
           result.valuesScanned += decoded.valuesScanned;
-          if (decoded.kind !== 'raw' && !decoded.complete) unavailable = true;
+          // Incomplete now includes a raw-looking container the decoder could not open.
+          if (!decoded.complete) unavailable = true;
           if (decoded.complete && decoded.kind === 'sqlite') logicalFiles += 1;
           if (decoded.complete && (decoded.kind === 'gzip' || decoded.kind === 'zip'))
             decodedFiles += 1;

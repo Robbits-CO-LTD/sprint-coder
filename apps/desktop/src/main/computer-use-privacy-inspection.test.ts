@@ -293,6 +293,63 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     },
   );
 
+  it.each(['double-gzip', 'zip-of-gzip', 'gzip-of-zip'])(
+    'finds a known payload nested inside %s',
+    async (kind) => {
+      const input = fixture();
+      const payload = input.payloads.find(({ kind: name }) => name === 'provider_response')!.bytes;
+      writeFileSync(
+        input.files[4]!.path,
+        kind === 'double-gzip'
+          ? gzipSync(gzipSync(payload))
+          : kind === 'zip-of-gzip'
+            ? zipFixture(gzipSync(payload))
+            : gzipSync(zipFixture(payload)),
+      );
+      const result = await inspectComputerUsePrivacySurfaces({
+        ...input,
+        enumeratedRoots: [input.root],
+      });
+      expect(result.surfaces[4]).toMatchObject({
+        state: 'contaminated',
+        matchedKinds: ['provider_response'],
+      });
+      expect(result.contaminatedSurfaces).toEqual(['crash_artifact']);
+      // The reviewer's scenario: everything else is clean and the inventory is verified.
+      expect(result.completeSurfaceInventoryVerified).toBe(true);
+      expect(result.finalGateEligible).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(payload.toString());
+    },
+  );
+
+  it('refuses to call a surface complete when nesting exceeds the bounded depth', async () => {
+    const input = fixture();
+    const payload = input.payloads.find(({ kind }) => kind === 'provider_response')!.bytes;
+    let nested = gzipSync(payload);
+    for (let depth = 0; depth < 6; depth += 1) nested = gzipSync(nested);
+    writeFileSync(input.files[4]!.path, nested);
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+    });
+    // Unreached payload must never read as a scanned, clean surface.
+    expect(result.surfaces[4]!.state).toBe('unavailable');
+    expect(result.uninspectedSurfaces).toEqual(['crash_artifact']);
+    expect(result.finalGateEligible).toBe(false);
+  });
+
+  it('refuses a container format it cannot open rather than calling it scanned', async () => {
+    const input = fixture();
+    // A bzip2 stream: not decoded here, so its contents were never searched.
+    writeFileSync(input.files[4]!.path, Buffer.concat([Buffer.from('BZh9'), Buffer.alloc(64, 7)]));
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+    });
+    expect(result.surfaces[4]!.state).toBe('unavailable');
+    expect(result.finalGateEligible).toBe(false);
+  });
+
   it('rejects a decompression bomb, broken zip CRC and truncated gzip', async () => {
     const input = fixture();
     for (const bytes of [

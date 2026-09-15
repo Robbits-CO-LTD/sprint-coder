@@ -8,6 +8,30 @@ const MAX_DECODED_BYTES = 64 * 1024 * 1024;
 const MAX_ROWS = 10_000;
 const MAX_TABLES = 128;
 const MAX_COLUMNS = 128;
+/** Same bounded budget as the ZIP entry cap: nesting must not widen the corpus. */
+const MAX_NESTED_DEPTH = 4;
+const MAX_NESTED_ARCHIVES = 128;
+
+const isGzip = (bytes: Buffer) => bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+const isZip = (bytes: Buffer) => bytes.length >= 2 && bytes.readUInt16LE(0) === 0x4b50;
+/**
+ * Containers this decoder cannot open. Searching only their compressed bytes would leave a stored
+ * payload unexamined, so seeing one makes the surface incomplete rather than clean. The zlib test
+ * is the real header rule (CM=8 and a valid FCHECK), not a bare magic byte.
+ */
+function isUninspectableContainer(bytes: Buffer): boolean {
+  if (bytes.length < 4) return false;
+  if (bytes[0] === 0x78 && (bytes[0]! * 256 + bytes[1]!) % 31 === 0) return true;
+  for (const magic of [
+    [0x42, 0x5a, 0x68], // bzip2
+    [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00], // xz
+    [0x28, 0xb5, 0x2f, 0xfd], // zstd
+    [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c], // 7z
+    [0x04, 0x22, 0x4d, 0x18], // lz4
+  ])
+    if (magic.every((byte, index) => bytes[index] === byte)) return true;
+  return false;
+}
 
 type Result = {
   kind: 'raw' | 'sqlite' | 'gzip' | 'zip';
@@ -26,7 +50,11 @@ export async function inspectComputerUseStoredValues(
   if (bytes.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')))
     return inspectSqlite(filePath, visit);
   const result: Result = { kind: 'raw', complete: false, valuesScanned: 0, decodedBytes: 0 };
-  const account = (decoded: Buffer) => {
+  // Expanded bytes that are themselves an archive are queued instead of being treated as the
+  // final content: searching only the inner compressed bytes would miss a stored payload.
+  const queue: { bytes: Buffer; depth: number }[] = [];
+  let queuedBytes = 0;
+  const account = (decoded: Buffer, depth: number) => {
     if (
       decoded.length > MAX_VALUE_BYTES ||
       result.decodedBytes + decoded.length > MAX_DECODED_BYTES
@@ -35,28 +63,53 @@ export async function inspectComputerUseStoredValues(
     result.decodedBytes += decoded.length;
     result.valuesScanned += 1;
     visit(decoded);
+    if (isUninspectableContainer(decoded)) throw new Error('uninspectable_nested_format');
+    if (!isGzip(decoded) && !isZip(decoded)) return;
+    if (
+      depth >= MAX_NESTED_DEPTH ||
+      queue.length >= MAX_NESTED_ARCHIVES ||
+      queuedBytes + decoded.length > MAX_DECODED_BYTES
+    )
+      throw new Error('nesting_limit');
+    queuedBytes += decoded.length;
+    queue.push({ bytes: Buffer.from(decoded), depth: depth + 1 });
   };
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
-    result.kind = 'gzip';
-    let decoded: Buffer | undefined;
+  const expand = async (archive: Buffer, depth: number) => {
+    if (isGzip(archive)) {
+      let decoded: Buffer | undefined;
+      try {
+        decoded = gunzipSync(archive, { maxOutputLength: MAX_VALUE_BYTES });
+        account(decoded, depth);
+      } finally {
+        decoded?.fill(0);
+      }
+      return;
+    }
+    await inspectZip(archive, (decoded) => account(decoded, depth));
+  };
+  if (isGzip(bytes) || isZip(bytes)) {
+    result.kind = isGzip(bytes) ? 'gzip' : 'zip';
     try {
-      decoded = gunzipSync(bytes, { maxOutputLength: MAX_VALUE_BYTES });
-      account(decoded);
+      await expand(bytes, 0);
+      while (queue.length > 0) {
+        const nested = queue.shift()!;
+        try {
+          await expand(nested.bytes, nested.depth);
+        } finally {
+          nested.bytes.fill(0);
+        }
+      }
       result.complete = true;
     } catch {
       result.complete = false;
     } finally {
-      decoded?.fill(0);
+      for (const nested of queue) nested.bytes.fill(0);
+      queue.length = 0;
     }
-  } else if (bytes.length >= 2 && bytes.readUInt16LE(0) === 0x4b50) {
-    result.kind = 'zip';
-    try {
-      await inspectZip(bytes, account);
-      result.complete = true;
-    } catch {
-      result.complete = false;
-    }
-  }
+  } else
+    // Plain bytes are fully searched as they are. A container this decoder cannot open is not:
+    // nothing inside it was examined, so it must not read as a scanned surface.
+    result.complete = !isUninspectableContainer(bytes);
   return result;
 }
 
