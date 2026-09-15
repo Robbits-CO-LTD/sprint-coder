@@ -450,7 +450,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       const starts: string[] = [];
       const releases = new Map<string, () => void>();
       let draining = false;
-      let originalFailure: unknown;
+      const failures: unknown[] = [];
       vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
         const first = !starts.includes(input.worker.role);
         starts.push(input.worker.role);
@@ -555,8 +555,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         expect(starts).toEqual(['a', 'b', 'a', 'c']);
         expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
       } catch (error) {
-        originalFailure = error;
-        throw error;
+        failures.push(error);
       } finally {
         draining = true;
         for (const release of releases.values()) release();
@@ -565,16 +564,16 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
             timeout: 10000,
           });
         } catch (cleanupError) {
-          if (originalFailure)
-            throw new AggregateError(
-              [originalFailure, cleanupError],
-              'Graph fixture and cleanup both failed',
-            );
-          throw cleanupError;
+          failures.push(cleanupError);
         } finally {
           f.persistence.close();
         }
       }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, 'Graph fixture and cleanup both failed', {
+          cause: failures[0],
+        });
     });
 
     it('migrates public v90 owner data to immutable consent bindings without changing its identity', () => {
