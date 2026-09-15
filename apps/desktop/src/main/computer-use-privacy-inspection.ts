@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { inspectComputerUseStoredValues } from './computer-use-privacy-decoders';
 
 export const COMPUTER_USE_PRIVACY_SURFACES = [
   'database',
@@ -21,7 +22,12 @@ export const COMPUTER_USE_PRIVATE_PAYLOADS = [
 ] as const;
 type Surface = (typeof COMPUTER_USE_PRIVACY_SURFACES)[number];
 type Payload = (typeof COMPUTER_USE_PRIVATE_PAYLOADS)[number];
-type InspectionState = 'raw_bytes_scanned' | 'contaminated' | 'unavailable';
+type InspectionState =
+  | 'raw_bytes_scanned'
+  | 'logical_values_scanned'
+  | 'decoded_bytes_scanned'
+  | 'contaminated'
+  | 'unavailable';
 
 /**
  * A protected, local acceptance runner supplies exact files after flushing/closing the tested
@@ -29,7 +35,7 @@ type InspectionState = 'raw_bytes_scanned' | 'contaminated' | 'unavailable';
  * escape. Missing surfaces/payload classes remain uninspected. This scans explicit files only:
  * it does not establish that the caller enumerated every sink or that a live file stayed quiet.
  */
-export function inspectComputerUsePrivacySurfaces(
+export async function inspectComputerUsePrivacySurfaces(
   input: Readonly<{
     root: string;
     files: readonly Readonly<{ surface: Surface; path: string }>[];
@@ -39,7 +45,9 @@ export function inspectComputerUsePrivacySurfaces(
   const surfaces = COMPUTER_USE_PRIVACY_SURFACES.map((surface) => ({
     surface,
     state: 'unavailable' as InspectionState,
-    logicalValuesInspected: false as const,
+    logicalValuesInspected: false,
+    decodedBytes: 0,
+    valuesScanned: 0,
     filesInspected: 0,
     bytesInspected: 0,
     contentDigests: [] as string[],
@@ -91,11 +99,14 @@ export function inspectComputerUsePrivacySurfaces(
       needles.push({ kind, bytes: Buffer.from(JSON.stringify(text).slice(1, -1)) });
     }
     let totalBytes = 0;
+    let totalDecodedBytes = 0;
     const seen = new Set<string>();
     for (const result of surfaces) {
       const files = input.files.filter(({ surface }) => surface === result.surface);
       if (files.length === 0) continue;
       let unavailable = false;
+      let logicalFiles = 0;
+      let decodedFiles = 0;
       for (const file of files) {
         let fd: number | undefined;
         let fileBytes: Buffer | undefined;
@@ -136,6 +147,20 @@ export function inspectComputerUsePrivacySurfaces(
             if (fileBytes.includes(needle.bytes) && !result.matchedKinds.includes(needle.kind))
               result.matchedKinds.push(needle.kind);
           }
+          const decoded = await inspectComputerUseStoredValues(path, fileBytes, (value) => {
+            totalDecodedBytes += value.byteLength;
+            if (totalDecodedBytes > 64 * 1024 * 1024) throw new Error('decoded_total_limit');
+            for (const needle of needles) {
+              if (value.includes(needle.bytes) && !result.matchedKinds.includes(needle.kind))
+                result.matchedKinds.push(needle.kind);
+            }
+          });
+          result.decodedBytes += decoded.decodedBytes;
+          result.valuesScanned += decoded.valuesScanned;
+          if (decoded.kind !== 'raw' && !decoded.complete) unavailable = true;
+          if (decoded.complete && decoded.kind === 'sqlite') logicalFiles += 1;
+          if (decoded.complete && (decoded.kind === 'gzip' || decoded.kind === 'zip'))
+            decodedFiles += 1;
           const after = fstatSync(fd);
           if (
             bytesRead !== before.size ||
@@ -165,7 +190,12 @@ export function inspectComputerUsePrivacySurfaces(
           ? 'contaminated'
           : unavailable
             ? 'unavailable'
-            : 'raw_bytes_scanned';
+            : logicalFiles === files.length
+              ? 'logical_values_scanned'
+              : decodedFiles === files.length
+                ? 'decoded_bytes_scanned'
+                : 'raw_bytes_scanned';
+      result.logicalValuesInspected = !unavailable && logicalFiles === files.length;
     }
     return report();
   } finally {

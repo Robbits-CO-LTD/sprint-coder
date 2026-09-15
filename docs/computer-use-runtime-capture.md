@@ -52,16 +52,23 @@ inputs are not modified. An 8MiB image / 64MiB file-corpus regression bounds cop
 overlap implementation copied 8.6GB and took 15.1s locally; file-bounded scanning copied no overlap
 and took 276ms in the same fixture. These timings are local diagnostics, not cross-machine limits.
 
-Each successful physical scan is labelled `raw_bytes_scanned`, with `logicalValuesInspected: false`.
-In particular, SQLite splits BLOB/TEXT across pages: a direct test stores and reads back a 32KiB
-BLOB on 512-byte pages, while whole-payload raw search misses it. The database is therefore never
-labelled logically inspected by this helper. Compressed crash archives have the same limitation.
-A physical scan is not proof that the logical value is absent, nor of a complete sink inventory.
+Physical scans remain `raw_bytes_scanned`. SQLite is additionally opened read-only, with
+`query_only` and `trusted_schema=OFF`, to inspect bounded stored BLOB/TEXT values in real tables.
+The existing 32KiB BLOB / 512-byte-page regression now detects the leak; committed WAL values
+are read through SQLite, not by a custom WAL parser. Views are not executed, virtual/generated
+tables, missing WAL index, recovery journals, locks and unsupported layouts remain uninspected.
+Reader handles are always closed. `logical_values_scanned` reports completed logical inspection;
+`contaminated` takes priority whenever a known payload was found.
+
+Gzip uses bounded Node zlib output; ZIP uses the existing yauzl dependency with entry/size/total
+bounds, encryption/type refusal and CRC verification. Nothing is extracted to disk. These return
+`decoded_bytes_scanned`, which does not claim to interpret arbitrary inner minidump structures.
+A physical or decoded-byte scan is not proof of logical absence or of a complete sink inventory.
 The protected runner must enumerate
 all relevant files (including SQLite WAL/SHM and rotated files), flush/close the tested processes,
 account for disabled/no-file sinks from independent runtime facts, and exclude later writes.
-Compressed archives, encrypted databases, escaped Unicode variants beyond JSON.stringify, and
-remote Provider storage are not decoded/scanned by this helper. Their absence cannot be inferred.
+Encrypted databases, unsupported nested formats, escaped Unicode variants beyond JSON.stringify,
+and remote Provider storage are not decoded/scanned by this helper. Their absence cannot be inferred.
 The helper neither scans live user data automatically nor claims final privacy acceptance.
 
 ## Remaining required connections
