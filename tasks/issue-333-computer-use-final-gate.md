@@ -83,6 +83,14 @@ manifest/session/event-chain digests, `privacyReportDigest`, `egressConsentDiges
   current Task, one successful preflight, exactly three attempted/completed rounds, stable binding,
   no OpenRouter/fallback/credential change. The legacy top-level `providerBinding` is the Windows
   compatibility summary only and must be strictly deep-equal to `providerRuns.windows.binding`.
+  Likewise, the two legacy `AC-30-PROVIDER-*` rows describe **Windows primary only**. Their
+  `PROVIDER_PATH_NOT_SELECTED` SKIP means not selected on Windows, not unused or unsupported on
+  macOS. macOS may select a different `providerPath`. The verifier reports
+  `compatibility.legacyProviderSummaryScope: windows` and separate `compatibility.providerPaths`
+  for both OSes; consumers must not infer macOS support from the legacy Windows row/count.
+  This is the v4 migration scope of those two rows, not a new same-path constraint. It follows
+  generation-4 AC-30's environment-specific support claims and AC-21's independently selected
+  real Connection/Model on each OS. Each claimed OS path still needs its own verified run.
 - Every round has `round`, `revision`, `updatedRevision`, `actionClass`, `actionDigest`,
   `nativeActionDigest`, `nativeRequestDigests`, `nativeReceiptDigest`, `brokerDecisionDigest`,
   `latencyMs`, `ttlVerified`, and `result`. It requires ordered fresh revisions, matched action
@@ -206,8 +214,10 @@ the gate machine exposes only that unsupported proxy, the Core row is `FAIL`, no
 - Raw evidence stays local during interactive acceptance. The protected machine harness emits only
   canonical event codes and per-event digests; the trusted workflow derives and attests the bounded
   JSON. A hand-edited PASS JSON is never an accepted input.
-- Exactly one Provider compatibility path is selected: Structured or bounded JSON must `PASS`, and
-  the unselected path must use its canonical `SKIP`. Two `PASS` rows or two unselected rows fail.
+- Exactly one Windows-primary Provider compatibility path is selected in the two legacy rows:
+  Structured or bounded JSON must `PASS`, and the Windows-unselected path uses canonical `SKIP`.
+  Two `PASS` rows or two unselected rows fail. This restriction is not applied across OSes; the
+  macOS selection is independently represented by `parentClosure.providerRuns.macos.providerPath`.
 
 ## AC-28 Core
 
@@ -273,6 +283,10 @@ pre-populate a mandatory external Safety PASS.
 | `AC-29-ADHOC-MACOS-FAIL-CLOSED`      | Ad-hoc macOS package exposes neither observe nor control capability                                                                | `ADHOC_MACOS_FAIL_CLOSED_V1`         |
 
 ## AC-30 Compatibility
+
+The `AC-30-PROVIDER-STRUCTURED` and `AC-30-PROVIDER-JSON` rows below are Windows-primary summaries
+only. A macOS run selecting JSON does not conflict with the Windows JSON row's
+`PROVIDER_PATH_NOT_SELECTED`; consult the separate per-OS paths described above.
 
 | ID                                    | Scenario                                                                                                                                 | Current | Canonical reason/evidence                                                                                                                      |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |

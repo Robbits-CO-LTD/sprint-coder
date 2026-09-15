@@ -681,7 +681,9 @@ describe('Computer Use external final gate', () => {
     expect(workflow).toContain('notarized_macos_artifact:');
     expect(workflow).toContain('evidence_artifact:');
     expect(workflow).toContain('confirm_external_gate:');
-    expect(workflow).toContain('schema-v3 machine transcript');
+    expect(workflow).toContain('schema-v4 evidence');
+    expect(evidenceWorkflow).toContain('Derive package-bound schema-v4 evidence');
+    expect(workflow).toContain('Legacy Provider path rows summarize Windows only');
     expect(workflow).toContain('run-id: ${{ inputs.package_run_id }}');
     expect(workflow).toContain('run-id: ${{ inputs.evidence_run_id }}');
     expect(workflow).toContain('Evidence and package runs must use the same source commit.');

@@ -940,6 +940,14 @@ export function validateComputerUseFinalGateEvidence(
     corePassed: complete && authenticityVerified,
     safetyPassed: complete && authenticityVerified,
     compatibility: Object.freeze({
+      legacyProviderSummaryScope: 'windows',
+      providerPaths: Object.freeze({
+        windows: windowsRun?.providerPath ?? null,
+        macos:
+          evidence.schemaVersion === 4
+            ? (evidence.parentClosure.providerRuns.macos?.providerPath ?? null)
+            : null,
+      }),
       passed: evidence.ac30Compatibility.filter((row) => row.status === 'PASS').length,
       failed: evidence.ac30Compatibility.filter((row) => row.status === 'FAIL').length,
       skipped: evidence.ac30Compatibility.filter((row) => row.status === 'SKIP').length,

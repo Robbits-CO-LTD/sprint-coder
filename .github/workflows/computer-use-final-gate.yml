@@ -24,7 +24,7 @@ on:
         required: true
         type: string
       confirm_external_gate:
-        description: I confirm the schema-v3 machine transcript came from these exact packages and the selected current-Task Provider
+        description: I confirm the schema-v4 evidence came from these exact packages and the selected current-Task Provider on each OS
         required: true
         default: false
         type: boolean
@@ -678,7 +678,7 @@ jobs:
           {
             echo '## Computer Use external final gate'
             echo
-            echo 'Validated independently hashed signed packages, trusted workflow attestation, and the exact ordered schema-v3 AC-28 Core, AC-29 Safety, and AC-30 Compatibility journey transcript.'
+            echo 'Validated independently hashed signed packages, trusted workflow attestation, and schema-v4 parent closure with the ordered AC-28 Core, AC-29 Safety, and AC-30 Compatibility transcript. Legacy Provider path rows summarize Windows only; each OS path is reported separately.'
             echo
             printf '`%s`\n' "${summary}"
             echo

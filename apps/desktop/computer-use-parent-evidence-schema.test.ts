@@ -268,6 +268,48 @@ describe('canonical parent evidence closure', () => {
     expect(() => helper.validateComputerUseParentClosure(closure, context)).toThrow();
   });
 
+  it.each([
+    ['structured', 'bounded_json'],
+    ['bounded_json', 'structured'],
+  ])('reports Windows %s and macOS %s without imposing a shared path', (windowsPath, macosPath) => {
+    const { closure, context } = fixture();
+    closure.providerRuns.windows.providerPath = windowsPath!;
+    closure.providerRuns.macos.providerPath = macosPath!;
+    const source = { sourceCommit: context.sourceCommit, sourceRunId: '1' };
+    const result = verifier.validateComputerUseFinalGateEvidence(
+      {
+        ...pending,
+        ...source,
+        parentClosure: closure,
+        providerBinding: closure.providerRuns.windows.binding,
+        artifacts: {
+          windows: {
+            ...pending.artifacts.windows,
+            ...source,
+            portable: {
+              ...pending.artifacts.windows.portable,
+              sha256: context.artifacts.windows.portable.sha256,
+            },
+          },
+          macos: {
+            ...pending.artifacts.macos,
+            ...source,
+            packageSha256: context.artifacts.macos.packageSha256,
+          },
+        },
+      },
+      { allowIncomplete: true },
+    );
+    expect(result).toMatchObject({
+      status: 'CLOSE_HOLD',
+      finalGateEligible: false,
+      compatibility: {
+        legacyProviderSummaryScope: 'windows',
+        providerPaths: { windows: windowsPath, macos: macosPath },
+      },
+    });
+  });
+
   it('keeps unmapped canonical requirements separate from legacy row PASS', () => {
     const { closure, context } = fixture();
     for (const spec of helper.COMPUTER_USE_PARENT_COVERAGE) {
