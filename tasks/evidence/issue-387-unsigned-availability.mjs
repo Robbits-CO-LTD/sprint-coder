@@ -10,7 +10,7 @@ import { createServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { reapOwnedApp } from './issue-387-owned-process-reaper.mjs';
+import { reapOwnedApp, withDeadline } from './issue-387-owned-process-reaper.mjs';
 
 const [appRootArgument, profileArgument, dependencyRoot, outputArgument] = process.argv.slice(2);
 assert.equal(process.platform, 'win32');
@@ -124,11 +124,18 @@ try {
     { timeout: 15000 },
   );
   stage = 'official-preload-availability';
-  const observed = await page.evaluate(async () => {
-    const info = await globalThis.sprintCoder.app.getInfo();
-    const availability = await globalThis.sprintCoder.computerUse.availability();
-    return { version: info.version, platform: info.platform, availability };
-  });
+  // Two cheap preload round trips, but evaluate() has no timeout and neither does the
+  // ipcRenderer.invoke() behind it, so bound them on the Node side with the same 15s the
+  // preload-readiness waits above use. Exceeding it throws into the cleanup instead of hanging.
+  const observed = await withDeadline(
+    page.evaluate(async () => {
+      const info = await globalThis.sprintCoder.app.getInfo();
+      const availability = await globalThis.sprintCoder.computerUse.availability();
+      return { version: info.version, platform: info.platform, availability };
+    }),
+    15000,
+    stage,
+  );
   report.observed = observed;
   assert.equal(observed.version, '0.7.0-beta.3');
   assert.equal(observed.platform, 'win32');

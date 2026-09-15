@@ -87,7 +87,10 @@ no page is available to close, and an unresponsive app whose close request never
 close requests and the wait for the normal exit share one deadline, after which the probe
 terminates the owned tree and releases it so neither the app nor the probe can outlive the run.
 Forced termination is recorded as `forcedCleanup`/`forcedExit`, never as `normalExit`, so a killed
-app can never be read as this run's clean window-all-closed shutdown.
+app can never be read as this run's clean window-all-closed shutdown. The availability evaluation
+itself carries the same 15s Node-side deadline as the preload-readiness waits, because neither
+Playwright's `evaluate()` nor the preload's `ipcRenderer.invoke()` bounds it: a Main that stops
+answering fails the run at `official-preload-availability` instead of parking it before cleanup.
 
 The metadata-only machine output is preserved unchanged in
 [issue-387-unsigned-availability-result.json](issue-387-unsigned-availability-result.json), copied
@@ -101,9 +104,9 @@ hashed `a2fe7571dad331d00d06c4bd53670001a8132db9f6628526bbb89fcf9ea8a0a4`. A fin
 also found zero executable paths under the entire dedicated #387 directory.
 
 The checked-in harness has since been amended for the bounded cleanup above and now hashes
-`fbc4d4cd0ddf51f4d36cc15c772e9bf5e23616158db5b43cab3c56ddfe7eb662`, alongside its new
+`20f5af06bef0e5d90b726a9b9b4aa81f59b8979f9a178774a592e97eb086c392`, alongside its new
 [reaper module](issue-387-owned-process-reaper.mjs),
-`f7ca8316bbc9a4fc7707eee9b25abd43e1ae98ea9a06ac390dad614a7e30c08e`. The retained JSON therefore
+`95b063a38146b541e29752d8c0df28e8f2daf9426381d5f5d1ca9e4873f5f533`. The retained JSON therefore
 predates the `normalCloseAttempted`/`forcedCleanup`/`forcedExit`/`ownedProcessReaped` fields; the
 run it records reached a normal exit and is unaffected, but a replay must re-record both hashes.
 

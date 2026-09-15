@@ -1,9 +1,28 @@
-// Bounded cleanup for the owned application started by the #387 unsigned-availability probe.
-// Extracted from the harness so the failure paths that never reach a page or a CDP connection can
-// be exercised without launching a real app.
+// Bounded waits and cleanup for the owned application started by the #387 unsigned-availability
+// probe. Extracted from the harness so the failure paths that never reach a page or a CDP
+// connection can be exercised without launching a real app.
 import { execFileSync } from 'node:child_process';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+
+const EXPIRED = Symbol('deadline-expired');
+
+/**
+ * Await an already-started request under a Node-side deadline.
+ *
+ * Playwright's `evaluate()` carries no timeout of its own and the preload's `ipcRenderer.invoke()`
+ * waits on Main without one either, so a Main or renderer that stops answering would park the
+ * probe forever and never reach the cleanup below. Rejecting on the deadline hands control back to
+ * the harness's catch/finally, which records the stage and reaps the owned app.
+ */
+export async function withDeadline(work, deadlineMs, label) {
+  // Promise.race subscribes to `work`, so a rejection that arrives after the deadline is already
+  // handled; the explicit catch keeps that true even if this stops racing the same promise.
+  void Promise.resolve(work).catch(() => {});
+  const settled = await Promise.race([work, delay(deadlineMs, EXPIRED, { ref: false })]);
+  if (settled === EXPIRED) throw new Error(`Deadline exceeded: ${label}`);
+  return settled;
+}
 
 // Windows has no signals and the probe owns an Electron tree, so mirror tests/e2e/helpers.ts and
 // terminate the exact owned tree with taskkill /T /F. Never target a PID after Node has observed
