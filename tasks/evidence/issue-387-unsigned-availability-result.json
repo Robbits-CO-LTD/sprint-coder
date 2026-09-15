@@ -1,0 +1,63 @@
+{
+  "scope": "unsigned-package-availability-only",
+  "status": "PASS",
+  "sourceCommit": "5b20208eb7b4f7697105dca2bf9436da3aeec910",
+  "featureOptIn": true,
+  "nativeInputAttempted": false,
+  "fuseChanges": [],
+  "packageBefore": {
+    "fileCount": 113,
+    "treeSha256": "5a5bc57681adadd2d7e6ac783620842071f5f161a9df774d2f27bb3f3290a3de"
+  },
+  "fusesBefore": {
+    "0": 48,
+    "1": 49,
+    "2": 48,
+    "3": 48,
+    "4": 49,
+    "5": 49,
+    "6": 48,
+    "7": 49,
+    "8": 49,
+    "version": "1"
+  },
+  "ownedMainPid": 55112,
+  "observed": {
+    "version": "0.7.0-beta.3",
+    "platform": "win32",
+    "availability": {
+      "platform": "win32",
+      "state": "unsigned_package",
+      "featureEnabled": true,
+      "packageReady": false,
+      "handshakeReady": false,
+      "observe": false,
+      "control": false,
+      "available": false,
+      "reasonCode": "windows_signature_required",
+      "manifestDigest": null
+    }
+  },
+  "normalExit": {
+    "code": 0,
+    "signal": null
+  },
+  "packageAfter": {
+    "fileCount": 113,
+    "treeSha256": "5a5bc57681adadd2d7e6ac783620842071f5f161a9df774d2f27bb3f3290a3de"
+  },
+  "fusesAfter": {
+    "0": 48,
+    "1": 49,
+    "2": 48,
+    "3": 48,
+    "4": 49,
+    "5": 49,
+    "6": 48,
+    "7": 49,
+    "8": 49,
+    "version": "1"
+  },
+  "packageUnchanged": true,
+  "fusesUnchanged": true
+}

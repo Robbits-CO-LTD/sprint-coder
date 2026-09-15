@@ -21,6 +21,35 @@ app and Computer Use helper, then verify all three signer identities match. Nati
 unsigned fixture or one signed by a different certificate before attach; compile/contract-check
 alone never grants a Computer Use mode.
 
+Before GUI allocation, use the read-only signature preflight on the extracted package and the
+already-signed fixture. Supply the approved release certificate's exact public subject and
+thumbprint; do not substitute a locally trusted development certificate. No private key or PIN is
+needed by this verifier.
+
+```powershell
+. ./apps/desktop/computer-use-native/fixtures/win32-acceptance/verify-signatures.ps1
+Test-ComputerUseSignedArtifacts `
+  -AppPath $appPath -HelperPath $helperPath -InstallerPath $installerPath `
+  -FixturePath $fixturePath -SignToolPath $signToolPath `
+  -ExpectedThumbprint $approvedReleaseThumbprint -ExpectedSubject $approvedReleaseSubject
+```
+
+Paths may be relative: they are resolved through the PowerShell provider against the current
+location, and the package scan fails closed if it finds no DLL/native Node module at all.
+
+All four files and every packaged DLL/native Node module must have a valid signature from that
+exact signer and a timestamp. SignTool `verify /pa /all /tw` must exit zero; warnings fail closed.
+The verifier records only roles, hashes, and public signer metadata and never launches an artifact.
+Its `signature-preflight-only` result always says `interactiveAcceptance: NOT_RUN`. It supplements
+the final workflow's architecture, source/manifest/package binding and attestation checks; it does
+not replace them, fixture `--contract-check`, or any canonical interactive journey.
+
+Headless unit tests (synthetic signatures, not signed-package acceptance):
+
+```powershell
+& ./apps/desktop/computer-use-native/fixtures/win32-acceptance/verify-signatures.test.ps1
+```
+
 The window title is `Sprint Coder Computer Use Fixture v1`. Interactive control IDs are stable:
 
 |   ID | Control                               | Acceptance meaning                                                          |
@@ -40,8 +69,9 @@ The window title is `Sprint Coder Computer Use Fixture v1`. Interactive control 
 
 Start each run with Reset and the `READY` status. A successful normal-control run may change IDs
 1001–1004 and must leave the payment button untouched. Password input, payment invocation, and
-automated interaction inside the file picker are failures. Record the package identity, fixture
-SHA-256, fixture window title, and PASS/FAIL result in the manual final-gate evidence.
+automated interaction inside the file picker are failures. Record only the package/source binding,
+fixture SHA-256, public signer identity, and bounded PASS/FAIL result. Inspect visible control values
+transiently; do not retain window titles, screenshots, typed values, or raw action traces in logs.
 
 The fixture's custom `SprintCoderComputerUseSafeDialogV1` class is the supported same-owner
 application-dialog case. The shell file picker remains a `#32770` native dialog and must produce
