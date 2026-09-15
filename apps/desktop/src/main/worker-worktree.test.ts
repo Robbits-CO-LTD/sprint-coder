@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile, rename } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+  rename,
+  symlink,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -36,6 +46,28 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
 
     expect(result.baseHead).toBe(head);
     expect((await stat(result.path)).isDirectory()).toBe(true);
+  });
+
+  it('recognizes its registered retained checkout using the host path spelling', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const worktree = await manager.create({ agentId: 'registered', repoPath });
+    await expect(
+      manager.inspectPreserved({ agentId: 'registered', repoPath, ...worktree }),
+    ).resolves.toMatchObject({
+      path: await realpath(worktree.path),
+      baseHead: head,
+      changedFiles: [],
+    });
+  });
+
+  it('refuses a retained worktree path replaced by a link to the primary checkout', async () => {
+    const { repoPath, head, manager, worktreesRoot } = await fixture();
+    await mkdir(worktreesRoot, { recursive: true });
+    const path = manager.worktreePathFor('linked');
+    await symlink(repoPath, path, process.platform === 'win32' ? 'junction' : 'dir');
+    await expect(
+      manager.inspectPreserved({ agentId: 'linked', repoPath, path, baseHead: head }),
+    ).rejects.toThrow('own directory');
   });
 
   it('reads both rename endpoints and preserves quoted Unicode and control characters from sealed commits', async () => {

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, realpath, stat } from 'node:fs/promises';
+import { lstat, mkdir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeGitExec } from './safe-git';
 
@@ -265,6 +265,8 @@ export class WorkerWorktreeManager {
     const worktreeId = input.worktreeId ?? input.agentId;
     if (!this.ownsWorktreePath(worktreeId, input.path))
       throw new WorktreeError('invalid_input', 'Preserved worktree path does not match its owner');
+    if (!(await lstat(input.path)).isDirectory())
+      throw new WorktreeError('invalid_input', 'Preserved worktree must be its own directory');
     const path = await realpath(input.path);
     if ((await this.resolveRepositoryPath(path)) !== path)
       throw new WorktreeError('invalid_input', 'Preserved worktree was replaced');
@@ -283,7 +285,17 @@ export class WorkerWorktreeManager {
     const registered = (
       await this.runGit(input.repoPath, ['worktree', 'list', '--porcelain', '-z'], 'create_failed')
     ).stdout;
-    if (!registered.split('\0').includes(`worktree ${path}`))
+    // Git uses forward slashes on Windows. Normalize that spelling without folding case or
+    // accepting another checkout, and recheck the matching entry's actual filesystem target.
+    const entry = registered
+      .split('\0')
+      .find(
+        (line) =>
+          line.startsWith('worktree ') &&
+          isAbsolute(line.slice(9)) &&
+          resolve(line.slice(9)) === path,
+      );
+    if (!entry || (await realpath(entry.slice(9))) !== path)
       throw new WorktreeError('invalid_input', 'Preserved worktree is not registered');
     const head = (await this.runGit(path, ['rev-parse', 'HEAD'], 'create_failed')).stdout.trim();
     validateGitHead(head);
