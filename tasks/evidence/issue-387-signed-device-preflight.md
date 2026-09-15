@@ -2,8 +2,9 @@
 
 Status: `CLOSE_HOLD`. Last verified: 2026-09-15. Source baseline:
 `5b20208eb7b4f7697105dca2bf9436da3aeec910` (`v0.7.0-beta.3`).
-This record contains read-only preparation results, not interactive acceptance. Original Core,
-Safety, and Compatibility requirements in `tasks/issue-333-computer-use-final-gate.md` still apply.
+This record contains signature/compile preparation plus a bounded real unsigned-availability
+check. Signed interactive acceptance is pending. Original Core, Safety, and Compatibility
+requirements in `tasks/issue-333-computer-use-final-gate.md` still apply.
 
 ## Verified preparation
 
@@ -45,7 +46,10 @@ Validation of this preparation change:
   Vitest wrapper is skipped on macOS; its PowerShell suite was exercised on Windows as above.
 
 Required signed Windows fixture/package input journeys and notarized macOS interactive journeys
-remain `FAIL / EXTERNAL_GATE_NOT_RUN`. No mandatory Core/Safety PASS is claimed.
+remain `FAIL / EXTERNAL_GATE_NOT_RUN`. The separately authorized
+[real unsigned-package availability check](issue-387-unsigned-availability.md) passed locally:
+explicit opt-in, `observe/control/available=false`, `windows_signature_required`, unchanged
+published bytes, normal owned-process exit. Canonical attested final-gate evidence remains pending.
 
 ## Main: exact headless Windows test replay
 
@@ -117,5 +121,6 @@ available.
 
 Source: [Issue #387](https://github.com/Robbits-CO-LTD/sprint-coder/issues/387), its latest comments,
 the repository final-gate/fixture contracts, read-only OS signature checks, certificate-store public
-metadata, and repository Actions/variables APIs. No GitHub mutation, signing, installation, GUI
-launch, or credential/security change was performed by this preparation task.
+metadata, repository Actions/variables APIs, and the bounded unsigned-package IPC result linked
+above. No GitHub mutation, signing, installation, native input, or credential/security change was
+performed by this preparation task.
