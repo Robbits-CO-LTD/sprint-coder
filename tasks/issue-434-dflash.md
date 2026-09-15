@@ -1,7 +1,7 @@
 # Issue #434: DFlash2 speculative decoding
 
-Source: https://github.com/Robbits-CO-LTD/sprint-coder/issues/434 (current plan revision 5, read 2026-09-11).
-Base integration: main e386048. The feature remains in its dedicated worktree and includes the current Local AI settings tab.
+Source: https://github.com/Robbits-CO-LTD/sprint-coder/issues/434#issuecomment-5545683733 (plan revision 5, re-read 2026-09-15).
+Acceptance source: main / v0.7.0-beta.3 at `5b20208eb7b4f7697105dca2bf9436da3aeec910`. Feature PR #453 merged as `844a40f7b81866549ace28d14d0bd707beb5c6cf`.
 
 ## Required outcome
 
@@ -18,23 +18,40 @@ UI model download → target/draft selection → persisted settings → verified
 
 | Requirement | State |
 | --- | --- |
-| AC-1 persistence and restart | Controller/IPC/preload/UI connected; collapsed cards do not backfill other models. Repository reopen/migration and UI save/off/recovery tests pass. Real-model restart acceptance remains. |
-| AC-2 draft-only model | Actual metadata-before-publish, draft badge/search entry, provider/start/settings exclusion connected. Synthetic model tests and hidden Electron UI pass. |
-| AC-3 fixed argv | Supervisor validates both ID-owned roots, private GGUF paths and context; literal DFlash argv tested. Manifest/pin capability agreement enforced. Linux real-pair generation passed; Windows product execution remains. |
-| AC-4 invalid pair rejection | Store/controller/supervisor checks connected, including mmproj/context/integrity/capability. Rejection tests pass; real-model negative journeys remain. |
-| AC-5 binding and reuse | Combined fit includes draft KV/hidden-state scratch; unknown metadata stays unknown. Pair hash/token binding, exact descriptor reuse, deterministic response and structured draft counts are required for verification. Integrated fake-runtime/real-SQLite tests and the Linux real-pair product self-test pass; Windows acceptance remains. |
-| AC-6 ownership and recovery | Shared references/deletion ordering, target operation queue, both-model runtime ownership, off/edit idle-stop, recovery and no stale verification connected. Integration tests pass. |
-| AC-7 release and real E2E | Candidate b10809 has six pinned assets and is 151 commits ahead of DFlash2 merge b10f9ca. All six native candidate jobs passed in run 34502685442 at 6deb182, including hash/version/help/loopback/auth/stop. The default release config is promoted to that exact b10809 candidate. Windows Qwen/DFlash inference and signed packaging remain. |
+| AC-1 persistence and restart | Controller/IPC/preload/UI connected; collapsed cards do not backfill other models. Repository reopen/migration tests pass. Windows real-model UI save and same-profile application restart preserved DFlash selection and token limit 3. |
+| AC-2 draft-only model | Actual metadata-before-publish, draft badge/search entry, provider/start/settings exclusion connected. Windows real HF UI download passed full product integrity validation and showed draft-only status with standalone verify disabled. |
+| AC-3 fixed argv | Supervisor validates both ID-owned roots, private GGUF paths and context; literal DFlash argv tested. Manifest/pin capability agreement enforced. Windows product OFF/ON execution passed with CPU runtime snapshots and actual draft generation evidence. |
+| AC-4 invalid pair rejection | Store/controller/supervisor checks connected, including mmproj/context/integrity/capability. Rejection tests pass. Windows real-model UI rejected token limits 0/65; other invalid-pair boundaries retain their focused unit/integration evidence. |
+| AC-5 binding and reuse | Combined fit includes draft KV/hidden-state scratch; unknown metadata stays unknown. Pair hash/token binding and exact descriptor reuse have integration coverage. Windows real product self-test passed in both modes; ON snapshot bound the actual draft hash and token limit, and the same deterministic probe returned identical OFF/ON response hashes with draft counts 9/8. |
+| AC-6 ownership and recovery | Shared references/deletion ordering, operation queue, both-model ownership and recovery have integration coverage. Windows UI rejected referenced draft deletion, recovered an interrupted target deletion, removed target then draft, and paused/canceled a real download without remaining partial/model files or owned processes. |
+| AC-7 release and real E2E | Six native candidate jobs in run 34504423488 at e2d36bf passed; the release pin file is unchanged between that head and beta.3. Windows actual UI journeys, OFF/ON inference and distribution-file equivalence are now evidenced below. Main's independent final review remains. |
 
 The plan's v78 migration number was stale: main already has migrations through v82. This branch uses additive v83 and retains model identities, existing artifact roles and separate legacy launch settings. HF declarations are only compatibility candidates; they do not constitute pair verification.
 
 ## Validation boundary
 
-Tests use temporary GGUF fixtures, real SQLite, fake inference responses, and hidden Electron UI. A separate six-target CI run proves native router startup/authentication/stop without loading model weights. The Linux real-pair evidence below additionally proves inference and the product self-test; it does not prove Windows UI acceptance, signed packaging, or all acceptance criteria. Do not merge or close the Issue at this checkpoint. Required independent reviews and final check remain unfulfilled.
+Tests use temporary GGUF fixtures, real SQLite, fake inference responses, and hidden Electron UI. A separate six-target CI run proves native router startup/authentication/stop without loading model weights. The Linux real-pair evidence below additionally proves inference and the product self-test; it does not prove Windows UI acceptance, distribution equivalence, or all acceptance criteria. The feature merged in PR #453; Issue completion still requires the remaining acceptance and independent final check.
+
+The original AC-7 requires a distribution-equivalent Windows x64 CPU build, and implementation step 9 requires preserving existing signature/package boundaries. Neither adds a Windows signing requirement. The later progress comments' signed-Windows hold exceeded that original scope. On 2026-09-15 Main confirmed that the normal unsigned Windows distribution policy applies to #434 independently of #387. For inspector-enabled test copies, record the original/copy executable digests, exact fuse change, unchanged app.asar/runtime/native digests, and the actual interactive session; do not claim that the modified executable is the exact distributed executable.
 
 ## Next action
 
-Verify the promoted-head CI, then run actual target/draft inference and Windows product E2E with structured timings. The UI smoke uses synthetic installed rows and verifies support/selection plus rejection of missing model files, not real generation. Obtain independent reviews/final check before ready/merge/close.
+Main performs the independent final check and Issue closeout using the Windows evidence below. No new version, publication, or #387 signing dependency is required for this Issue.
+
+## Windows acceptance lane (2026-09-15)
+
+Owned lane: `C:\Users\yusei\sc-issue-434-20260915`; dedicated `profile` reused for restart. Never write to `C:\Users\yusei\sprint-coder` or the previous validation checkout. The previous validation checkout supplies read-only Playwright dependencies and portable Node 22.23.2; no dependency install or native rebuild is needed. GUI runs as user yusei in an Interactive ScheduledTask, session 1, using background window presentation.
+
+| Case | Real user path / expected evidence | Initial state |
+| --- | --- | --- |
+| W1 / AC-2,7 | Search HF with source/purpose filters, select immutable target/draft GGUF, acknowledge license, download. Full product hash validation, installed purpose, draft-only UI and disabled standalone verify. | Fresh owned profile; no seeded rows. |
+| W2 / AC-1,3,5,7 | Select CPU/context/batch in UI; OFF then ON UI self-test. Product self-test proves tools; same fixed deterministic diagnostic request through the product-owned loopback runtime records only equality/hash/timings. | Both real weights installed; no fake runtime. |
+| W3 / AC-1,4 | Reject 0/65 tokens in UI; save 3; normal quit/reopen same profile; recheck selected draft and token count. | ON relation saved through UI. |
+| W4 / AC-6 | Attempt referenced draft deletion and verify rejection; delete target then draft through confirmation UI; verify owned model directories removed. | Pair verification complete; cleanup affects only this lane. |
+| W5 / AC-6,7 | Start an actual draft download again, observe nonzero bytes, pause and cancel through UI, verify no partial/final artifact remains. | Both owned models removed by W4. |
+| W6 / INV-7 | Compare all release ZIP entries with the inspected copy, verify bundled manifest artifact size/SHA, record fuse change and 6-target native CI evidence. | Original ZIP preserved unchanged. |
+
+Runners live in `tests/e2e/manual/`; they are opt-in and are not part of routine/mock CI. Preserve each timestamped evidence JSON and report failures as failures. They never emit prompt/response bodies, authorization, or environment dumps. The Main-only diagnostic request records no session credentials outside the process and does not replace UI installation, configuration or the real product self-test. Do not label the Windows acceptance complete before W1-W6 and process/task cleanup are verified.
 
 ## Actual artifact metadata preflight
 
@@ -44,4 +61,19 @@ Read bounded prefixes (not complete models, not full-file hash verification) fro
 
 [Linux evidence](https://github.com/Robbits-CO-LTD/sprint-coder/issues/434#issuecomment-5634661913) verifies complete target UD-Q4_K_M and draft Q4_K_M weights against the immutable HF SHA-256 values, with the fixed b10809 runtime. OFF/ON both produced the exact expected deterministic response; ON reported 14 draft tokens and 9 accepted tokens. The unchanged product managed-local-self-test.ts passed all three real-model requests, including a tool call, isolated nonce write/readback/removal, and the response after its tool result. Owned runtimes exited normally. This short four-thread CPU run did not demonstrate acceleration (OFF 12.04s / ON 12.32s). Cold-load storage limitations and the separate test-harness readiness allowance are recorded in the linked evidence, without changing product deadlines.
 
-After integrating current main, the existing settings and DFlash UI tests pass with the dedicated Local AI tab, normal/narrow layouts and the missing-artifact rejection. Windows actual UI download/settings/restart/cancel/delete journeys and final independent review remain mandatory before ready/merge/close.
+After integrating current main, the existing settings and DFlash UI tests pass with the dedicated Local AI tab, normal/narrow layouts and the missing-artifact rejection. The Windows journeys below add real-model evidence; independent final review remains Main's responsibility.
+
+## Windows result (2026-09-15)
+
+Windows 11 build 26200, Core Ultra 7, 96 GB RAM; Node 22.23.2; interactive session 1, background window presentation (`focused=false`). Original beta.3 ZIP SHA-256: `663a29379f9908f1f9d0beea1e7d4eb89df526748d8326e198f19fe97cf3daeb`.
+
+- W1 PASS: actual UI catalog selection and full downloads of target UD-Q4_K_M (16,464,440,224 bytes; SHA `322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482`) and draft Q4_K_M (1,143,006,816 bytes; SHA `1a25c56858e1ebe93f2718ac1d49d1151f9323325c1bbfd6209370f4db131ebd`) at the immutable revisions above; no installed-row fixture or fake runtime. Target's UI quantization label is `Q4_K_M`.
+- W2 PASS: both OFF and DFlash ON completed the UI's real coding-tool self-test, including the product nonce write/readback/removal and post-tool response. CPU, GPU layers 0, context 2048, batch 512, draft limit 3. An additional identical deterministic request inside Main used each product-created loopback session without exporting credentials or response text. Both response SHA-256 values equal `92632e6f05f3fd972257dc8cbd0261b175cc575839b57bcde07858471d6406f8`; ON reported `draft_n=9`, `draft_n_accepted=8`. ON's prompt cache differed from OFF; these short requests are not a speedup benchmark.
+- W3 PASS: UI token limits 0/65 rejected; full quit/reopen of the same profile retained DFlash selection and limit 3.
+- W4/W5 PASS: referenced draft deletion rejected. Target deletion then draft deletion and nonzero-byte real download → pause → cancel removed all owned model and partial files. The first deletion runner mistook `deleting` for completed removal and quit early; read-only inspection found the target's weight removed, an empty directory, and DB state `deleting`. The corrected runner waited for the row and directory to disappear, and UI retry on the same profile completed recovery. This harness failure remains recorded; it is not relabeled as a clean first-pass deletion.
+- W6 PASS with explicit inspection boundary: all 113 ZIP entries compared; only `Sprint Coder.exe` differs. Its SHA changed from `3474789e77d36afd93df6226d2095733e3e504877d5815c39caa32ca6f229cdd` to `2a10d3f982febfbe4a1951f67ca4df43fe8c14d8a3c949eab3d5f982ab4ef5b1`; only fuse index 3 changed from 48 to 49. The other 112 files, including app.asar (`24a1211a83a8f082880b490a4c87de7d4b8d0ff81d7ac3fa85eddcface813d1b`), Runtime and native code, match the release archive. All 24 bundled b10809 runtime artifacts match manifest size/SHA. [Six-target native run](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/34504423488) was re-read as six successful jobs; the fixed release JSON has no diff from its head to beta.3.
+- Cleanup PASS: owned app/runtime process count 0, model-directory count 0, partial-file count 0, owned ScheduledTask removed. The 17.61 GB pair was reclaimed; the original ZIP, isolated profile and evidence remain. No existing checkout, profile, certificate or credentials were modified.
+
+Evidence in the owned Windows lane and the local worktree's ignored `test-results/issue-434-windows/`: `download-evidence-1789455151657.json` (draft install; target selector harness failure), `download-evidence-1789455349764.json` (target install and draft-only UI), `acceptance-1789456053644.json` (real OFF/ON, restart, rejection; interrupted deletion), `acceptance-1789456401784.json` (UI cleanup continuation, exit 0), `distribution-equivalence.json`, `final-cleanup.json`. Earlier harness failures are preserved alongside these files. The final evidence combines completed cases across these explicitly linked sessions; it does not assert a single uninterrupted all-PASS run.
+
+Local validation: desktop typecheck PASS; self-test and speculative-settings component tests 8 PASS; runner syntax/format and diff checks PASS. Production source, contracts, graph and Computer Use code were not changed. All GitHub writes, independent review and Issue completion are reserved for Main.
