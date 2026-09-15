@@ -83,10 +83,11 @@ whose executable path belonged to this dedicated extraction were absent. No proc
 The original ZIP, #434's profile/models/app copy, and OS permissions/settings were unchanged.
 
 Cleanup is now bounded on every path, including a failure before the CDP connection exists, where
-no page is available to close: the probe waits for the normal exit, then terminates the owned tree
-and releases it so neither the app nor the probe can outlive the run. Forced termination is
-recorded as `forcedCleanup`/`forcedExit`, never as `normalExit`, so a killed app can never be read
-as this run's clean window-all-closed shutdown.
+no page is available to close, and an unresponsive app whose close request never completes: the
+close requests and the wait for the normal exit share one deadline, after which the probe
+terminates the owned tree and releases it so neither the app nor the probe can outlive the run.
+Forced termination is recorded as `forcedCleanup`/`forcedExit`, never as `normalExit`, so a killed
+app can never be read as this run's clean window-all-closed shutdown.
 
 The metadata-only machine output is preserved unchanged in
 [issue-387-unsigned-availability-result.json](issue-387-unsigned-availability-result.json), copied
@@ -102,7 +103,7 @@ also found zero executable paths under the entire dedicated #387 directory.
 The checked-in harness has since been amended for the bounded cleanup above and now hashes
 `fbc4d4cd0ddf51f4d36cc15c772e9bf5e23616158db5b43cab3c56ddfe7eb662`, alongside its new
 [reaper module](issue-387-owned-process-reaper.mjs),
-`8bf6829b9d0d75019d52663be163a45557683dd75a5c2b24dbeec6762d4e0406`. The retained JSON therefore
+`f7ca8316bbc9a4fc7707eee9b25abd43e1ae98ea9a06ac390dad614a7e30c08e`. The retained JSON therefore
 predates the `normalCloseAttempted`/`forcedCleanup`/`forcedExit`/`ownedProcessReaped` fields; the
 run it records reached a normal exit and is unaffected, but a replay must re-record both hashes.
 

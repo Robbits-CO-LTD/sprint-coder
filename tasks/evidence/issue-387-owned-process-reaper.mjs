@@ -46,16 +46,21 @@ export async function reapOwnedApp({
   forcedExitMs = 10_000,
   kill = killOwnedProcessTree,
 }) {
+  // One unreferenced budget for the whole normal-shutdown phase. An unresponsive Electron can
+  // leave close() pending forever, and `.catch()` never settles such a request, so every close is
+  // raced against this budget instead of awaited: the deadline and the forced termination after it
+  // must start on time no matter what the app does. A pending timer never keeps the probe alive.
+  const budget = Promise.race([exited, delay(normalCloseMs, null, { ref: false })]);
+
   let normalCloseAttempted = false;
   if (page && !page.isClosed()) {
     normalCloseAttempted = true;
     // Closing the owned page takes the normal BrowserWindow -> window-all-closed -> app.quit path.
-    await page.close().catch(() => {});
+    await Promise.race([page.close().catch(() => {}), budget]);
   }
-  if (browser) await browser.close().catch(() => {});
+  if (browser) await Promise.race([browser.close().catch(() => {}), budget]);
 
-  // Unreferenced deadlines: a pending timer must not be what keeps this probe alive.
-  const normalExit = await Promise.race([exited, delay(normalCloseMs, null, { ref: false })]);
+  const normalExit = await budget;
   if (normalExit)
     return {
       normalExit,

@@ -95,6 +95,56 @@ describe('#387 unsigned-availability owned process reaper', () => {
     expect(result.reaped).toBe(true);
   });
 
+  it('still reaps the app when a hung Electron never settles page.close()', async () => {
+    const child = fakeChild();
+    const kill = vi.fn();
+    // A renderer that stops responding: the close request is issued but never completes.
+    const page = { isClosed: () => false, close: vi.fn(() => new Promise(() => {})) };
+    const started = Date.now();
+
+    const result = await reapOwnedApp({
+      child,
+      exited: new Promise(() => {}),
+      page,
+      browser: undefined,
+      normalCloseMs: 5,
+      forcedExitMs: 5,
+      kill,
+    });
+
+    expect(page.close).toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledWith(child);
+    expect(child.unref).toHaveBeenCalled();
+    expect(result.normalCloseAttempted).toBe(true);
+    expect(result.normalExit).toBeNull();
+    expect(result.forcedCleanup).toBe(true);
+    expect(result.reaped).toBe(false);
+    // The pending close must not extend the run past its own deadlines.
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('still reaps the app when browser.close() never settles', async () => {
+    const child = fakeChild();
+    const kill = vi.fn();
+    const browser = { close: vi.fn(() => new Promise(() => {})) };
+    const started = Date.now();
+
+    const result = await reapOwnedApp({
+      child,
+      exited: new Promise(() => {}),
+      page: fakePage(),
+      browser,
+      normalCloseMs: 5,
+      forcedExitMs: 5,
+      kill,
+    });
+
+    expect(browser.close).toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledWith(child);
+    expect(result.forcedCleanup).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
   it('skips the normal close for an already closed page but still reaps the app', async () => {
     const child = fakeChild();
     const kill = vi.fn();
