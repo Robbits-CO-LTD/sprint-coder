@@ -203,11 +203,10 @@ test('binds an authorized file read and detects changed source bytes after resta
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
     await reopened.getByTestId('graph-toggle').click();
     await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
-    await reopened
-      .frameLocator('[data-testid="graph-frame"]')
-      .locator('[data-node-id="api"]')
-      .first()
-      .click();
+    // The selected node and its inspector now survive restart; a second click would toggle it.
+    await expect(
+      reopened.frameLocator('[data-testid="graph-frame"]').locator('[data-node-id="api"]').first(),
+    ).toHaveAttribute('aria-pressed', 'true');
     const restored = reopened.getByTestId('graph-sources');
     await restored.locator('summary').click();
     await expect(restored).toContainText('return "config"');
@@ -401,13 +400,14 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
     await reopened.getByTestId('graph-toggle').click();
     await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
-    await reopened
-      .frameLocator('[data-testid="graph-frame"]')
-      .locator('[data-node-id="api"]')
-      .first()
-      .click();
-    await expect(reopened.getByTestId('graph-evidence-kind')).toHaveText('推定');
-    await expect(reopened.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
+    await expect(
+      reopened
+        .frameLocator('[data-testid="graph-frame"]')
+        .locator('.relationship-hit-target[data-relationship-id="persist"]'),
+    ).toHaveAttribute('aria-pressed', 'true');
+    await expect(reopened.getByTestId('graph-selection')).toContainText('persist');
+    await expect(reopened.getByTestId('graph-evidence-kind')).toHaveText('追加案');
+    await expect(reopened.getByTestId('graph-sources')).toContainText('保存処理を追加する案です。');
     completed = true;
   } finally {
     if (!completed && probePage && !probePage.isClosed()) {
@@ -865,7 +865,7 @@ test('resumes one interrupted graph step by hand after a relaunch', async ({}, t
     });
     expect(parked.mission).not.toBe('completed');
     await restarted.getByTestId('graph-toggle').click();
-    await restarted.getByTestId('graph-mission-plan').locator('summary').click();
+    await expect(restarted.getByTestId('graph-mission-plan')).toHaveAttribute('open', '');
     await expect(restarted.getByTestId('graph-step-state').nth(2)).toHaveText('再開待ち');
     const resumeStep = restarted.getByRole('button', { name: 'この工程を再開', exact: true });
     await expect(resumeStep).toHaveCount(1);
@@ -1085,7 +1085,8 @@ for (const kind of ['architecture', 'workflow'] as const) {
       );
       expect(redrawn.revision).toBe(changed.revision);
       await expect(history).toHaveAttribute('data-render-revision', String(redrawn.renderRevision));
-      await history.locator('summary').click();
+      // A layout-only redraw keeps the semantic revision and its disclosure preference.
+      await expect(history).toHaveAttribute('open', '');
       await expect(page.getByTestId('graph-diff')).toContainText('配置・表示のみ変わっています');
       await history
         .getByRole('combobox', { name: '比較する保存版' })

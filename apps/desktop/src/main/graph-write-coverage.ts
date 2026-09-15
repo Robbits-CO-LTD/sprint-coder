@@ -114,6 +114,23 @@ export async function assertGraphWriteCoverage(
   repositoryPath: string,
   changes: readonly SealedWorktreeChange[],
 ): Promise<void> {
+  return assertGraphWritePathCoverage(
+    graph,
+    stepKey,
+    footprints,
+    repositoryPath,
+    changes.map((change) => change.path),
+  );
+}
+
+/** The same scope check for a native-observed retained image; it makes no completion claim. */
+export async function assertGraphWritePathCoverage(
+  graph: GraphMissionRecord,
+  stepKey: string,
+  footprints: readonly GraphWriteFootprint[],
+  repositoryPath: string,
+  paths: readonly string[],
+): Promise<void> {
   validateGraphWriteInventory(graph, stepKey, footprints);
   const context = graphMissionStoredContextSchema.parse(JSON.parse(graph.contextJson));
   const identities = new Map(context.roots);
@@ -124,7 +141,8 @@ export async function assertGraphWriteCoverage(
   }
   const repo = await realpath(repositoryPath);
   const undeclared: string[] = [];
-  for (const change of changes) {
+  for (const path of paths) {
+    const change = { path };
     const parts = change.path.split('/');
     if (
       isAbsolute(change.path) ||

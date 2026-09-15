@@ -28,6 +28,21 @@ const FORBIDDEN_TAGS = new Set([
 // the hole.
 export const GRAPH_BRIDGE_SCRIPT = `(() => {
   const root = document.documentElement;
+  let pendingSelection = null;
+  const restoreSelection = () => {
+    const data = pendingSelection;
+    const focus = window.Archify && window.Archify.focus;
+    if (!data || !focus) return;
+    const selector = data.kind === 'node' ? '[data-node-id]' : '[data-edge-id],[data-relationship-hit-key][data-relationship-id]';
+    const found = Array.from(document.querySelectorAll(selector)).some(element =>
+      (data.kind === 'node' ? element.getAttribute('data-node-id') : element.getAttribute('data-edge-id') || element.getAttribute('data-relationship-id')) === data.id);
+    pendingSelection = null;
+    if (!found) return;
+    // Use the pinned viewer's own idempotent selection, including its highlight and details.
+    // No DOM focus, URL navigation, IPC or execution capability is granted by restoration.
+    if (data.kind === 'node') focus.set(data.id, { toggle: false, updateUrl: false });
+    else focus.inspectRelationshipById(data.id, { toggle: false, updateUrl: false });
+  };
   const send = (event) => {
     const element = event.target instanceof Element ? event.target.closest('[data-node-id],[data-edge-id],[data-relationship-hit-key][data-relationship-id]') : null;
     if (!element) return;
@@ -45,6 +60,13 @@ export const GRAPH_BRIDGE_SCRIPT = `(() => {
     const data = event.data;
     // Only the embedding renderer, and only for the artifact this document actually is.
     if (event.source !== parent || !data || data.instanceId !== root.dataset.graphInstance || data.graphId !== root.dataset.graphId || data.revision !== Number(root.dataset.graphRevision)) return;
+    if (data.type === 'sprint-graph-restore-selection') {
+      if (!['node','edge'].includes(data.kind) || typeof data.id !== 'string' || !data.id || data.id.length > 128 ||
+          Object.keys(data).some(key => !['type','instanceId','graphId','revision','kind','id'].includes(key))) return;
+      pendingSelection = data;
+      restoreSelection();
+      return;
+    }
     if (data.type === 'sprint-graph-click') {
       // A click Chromium delivered to the parent instead of to this out-of-process frame. Replaying
       // it on the element under the point puts it back on its normal path, so this bridge's own
@@ -89,6 +111,7 @@ export const GRAPH_BRIDGE_SCRIPT = `(() => {
   // load one cannot lose the race against the parent registering its own message listener.
   announce();
   window.addEventListener('load', announce);
+  window.addEventListener('load', restoreSelection);
 })();`;
 
 function walk(node: Node, visit: (element: Element) => void): void {

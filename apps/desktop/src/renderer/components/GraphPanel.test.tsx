@@ -75,6 +75,8 @@ let container: HTMLDivElement;
 let service: FakeGraphService;
 
 beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  window.localStorage.clear();
   service = new FakeGraphService();
   const graphs = {
     get: vi.fn(async () => service.get()),
@@ -99,6 +101,7 @@ afterEach(async () => {
   root = undefined;
   document.body.replaceChildren();
   delete window.sprintCoder;
+  vi.unstubAllGlobals();
 });
 
 async function mount(strict: boolean): Promise<void> {
@@ -288,4 +291,76 @@ it('rejects a selection whose artifact instance is not the displayed one', async
     id: 'api',
   });
   expect(container.querySelector('[data-testid="graph-sources"]')).toBeNull();
+});
+
+it('restores selection on reopen with a fresh frame identity', async () => {
+  await mount(false);
+  await clickNodeInFrame('api');
+  await act(async () => root!.unmount());
+  root = undefined;
+  await mount(false);
+  expect(service.minted).toHaveLength(2);
+  const posted = vi.spyOn(displayedFrame().contentWindow!, 'postMessage');
+  await announceReady();
+  expect(posted).toHaveBeenCalledWith(
+    {
+      type: 'sprint-graph-restore-selection',
+      kind: 'node',
+      id: 'api',
+      instanceId: service.minted[1],
+      graphId,
+      revision: 1,
+    },
+    '*',
+  );
+  expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).toContain('api');
+  const stored = window.localStorage.getItem(window.localStorage.key(0)!);
+  expect(stored).not.toContain(service.minted[0]);
+  expect(stored).not.toContain('artifactUrl');
+});
+
+it('does not restore selection on a different semantic revision or after node removal', async () => {
+  await mount(false);
+  await clickNodeInFrame('api');
+  const push = vi.mocked(window.sprintCoder!.graphs.subscribe).mock.calls[0]![0];
+  await act(async () => push({ ...service.get(), revision: 2 }));
+  expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).not.toContain(
+    'api',
+  );
+  await act(async () => push({ ...service.get(), nodeIds: ['client', 'store'] }));
+  expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).not.toContain(
+    'api',
+  );
+});
+
+it('ignores corrupt preferences and continues accepting selections when storage is unavailable', async () => {
+  window.localStorage.setItem(`sprint-coder:graph-view:v1:${taskId}:${graphId}:1`, '{');
+  await mount(false);
+  const blocked = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    throw new Error('quota');
+  });
+  await clickNodeInFrame('api');
+  expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).toContain('api');
+  blocked.mockRestore();
+});
+
+it('isolates selection and generation subscriptions on Task switching even with lower view sequence', async () => {
+  await mount(false);
+  await clickNodeInFrame('api');
+  const oldPush = vi.mocked(window.sprintCoder!.graphs.subscribe).mock.calls[0]![0];
+  const otherTask = '00000000-0000-4000-8000-000000000099';
+  vi.mocked(window.sprintCoder!.graphs.get).mockImplementation(async () => ({
+    ...service.get(),
+    taskId: otherTask,
+    viewRevision: 1,
+  }));
+  await act(async () => root!.render(<GraphPanel taskId={otherTask} onClose={() => undefined} />));
+  expect(container.querySelector('iframe')).not.toBeNull();
+  expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).not.toContain(
+    'api',
+  );
+  await act(async () => oldPush(service.get()));
+  expect(container.querySelector('[data-testid="graph-selection"]')?.textContent).not.toContain(
+    'api',
+  );
 });

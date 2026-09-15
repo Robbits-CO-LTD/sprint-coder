@@ -22,6 +22,7 @@ import { createTeamScenarioSampler, isTeamScenarioFixtureInput } from './team-to
 import {
   createGraphToolFixtureSampler,
   isGraphToolFixture,
+  isGraphUpdateFixtureInput,
   GRAPH_SOURCE_FIXTURE_MARKER,
   GRAPH_MISSION_FIXTURE_MARKER,
   GRAPH_BOUND_MISSION_FIXTURE_MARKER,
@@ -306,9 +307,12 @@ export class MockRuntimeAdapter {
           this.managedHarness !== undefined && isGraphToolFixture(input)
             ? createGraphToolFixtureSampler(
                 input === GRAPH_SOURCE_FIXTURE_MARKER ||
-                  input === GRAPH_BOUND_MISSION_FIXTURE_MARKER,
+                  input === GRAPH_BOUND_MISSION_FIXTURE_MARKER ||
+                  isGraphUpdateFixtureInput(input),
                 input === GRAPH_MISSION_FIXTURE_MARKER ||
-                  input === GRAPH_BOUND_MISSION_FIXTURE_MARKER,
+                  input === GRAPH_BOUND_MISSION_FIXTURE_MARKER ||
+                  isGraphUpdateFixtureInput(input),
+                isGraphUpdateFixtureInput(input) ? input : undefined,
               )
             : teamFixtureActive
               ? createTeamScenarioSampler(input)

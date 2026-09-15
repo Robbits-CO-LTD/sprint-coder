@@ -38,6 +38,7 @@ function seed(graph: {
   stepResumeAvailable: boolean;
   integrationResumeAvailable: boolean;
   stepResumePending?: boolean;
+  workspaceReviewRequired?: boolean;
   waitReason?: 'dependencies' | 'resources' | 'write-conflicts' | 'owner-active';
 }) {
   useAppStore.setState({
@@ -110,6 +111,45 @@ it('offers a step resume that dispatches only the requested step', async () => {
     });
     // Re-running a finished Worker is a different operation and must not be reachable from here.
     expect(resumeIntegration).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it('requires workspace review before exposing the digest-bound continuation gesture', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const reviewWorkspace = vi.fn(async () => ({
+    digest: 'a'.repeat(64),
+    files: [{ repository: 1, path: 'retained.ts' }],
+  }));
+  const resumeStep = vi.fn(async () => undefined);
+  vi.stubGlobal('sprintCoder', { graphs: { resumeStep, reviewWorkspace } });
+  seed({
+    stepResumeAvailable: true,
+    integrationResumeAvailable: false,
+    workspaceReviewRequired: true,
+  });
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    const resume = container.querySelector<HTMLButtonElement>('[data-computer-use-activation]')!;
+    expect(resume.disabled).toBe(true);
+    await act(async () => container.querySelector('button')!.click());
+    expect(
+      container.querySelector('[data-testid="graph-workspace-review"]')?.textContent,
+    ).toContain('retained.ts');
+    expect(resume.disabled).toBe(false);
+    expect(JSON.parse(resume.dataset['computerUseIntent']!)).toMatchObject({
+      workspaceReviewDigest: 'a'.repeat(64),
+    });
+    expect(resumeStep).not.toHaveBeenCalled();
+    await act(async () => resume.click());
+    expect(resumeStep).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceReviewDigest: 'a'.repeat(64) }),
+    );
   } finally {
     await act(async () => root.unmount());
   }

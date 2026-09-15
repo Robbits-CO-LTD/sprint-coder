@@ -1,5 +1,6 @@
 import {
   graphStartActivationIntent,
+  graphUpdateActivationIntent,
   graphResumeActivationIntent,
   graphResumeStepActivationIntent,
 } from '../graph-activation-intent';
@@ -32,6 +33,11 @@ import {
   graphMissionReviewSchema,
   graphMissionStartInputSchema,
   graphMissionResumeInputSchema,
+  graphWorkspaceReviewSchema,
+  graphMissionUpdateInputSchema,
+  graphMissionUpdateReviewSchema,
+  graphMissionUpdateAgreementSchema,
+  type GraphMissionUpdateInput,
   graphReleaseInputSchema,
   graphViewSchema,
 } from '@sprint-coder/contracts';
@@ -1899,6 +1905,85 @@ export class IpcRouter {
   }
 
   register(): void {
+    const validateGraphUpdate = (input: GraphMissionUpdateInput) => {
+      const document = this.graphs?.liveDocument(
+        input.taskId,
+        input.instanceId,
+        input.renderRevision,
+      );
+      const graph = this.persistence.getGraphTeamMission(input.missionId);
+      if (
+        !document ||
+        !graph ||
+        graph.taskId !== input.taskId ||
+        graph.graphId !== document.id ||
+        graph.semanticRevision !== input.expectedSemanticRevision
+      )
+        throw new Error('Graph update view or agreement changed');
+    };
+    this.handle(
+      IPC_CHANNELS.graphsRequestUpdate,
+      graphMissionUpdateInputSchema,
+      graphMissionUpdateReviewSchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
+        if (!activation || activation.intent !== graphUpdateActivationIntent(input, 'request'))
+          throw new Error('変更の確認ボタンから操作してください。');
+        return this.teamCoordinator.requestGraphConstraintUpdate(input, activation.token, () =>
+          validateGraphUpdate(input),
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsReviewUpdate,
+      graphMissionUpdateInputSchema,
+      graphMissionUpdateReviewSchema,
+      async (input) => {
+        validateGraphUpdate(input);
+        const review = await this.teamCoordinator.reviewGraphConstraintUpdate(input);
+        validateGraphUpdate(input);
+        return review;
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsAgreeUpdate,
+      graphMissionUpdateAgreementSchema,
+      teamMissionSummarySchema,
+      async (input, event) => {
+        const activation = this.computerUseActivationGate.consume(event, 'graph-start');
+        if (!activation || activation.intent !== graphUpdateActivationIntent(input, 'agree'))
+          throw new Error('再合意ボタンから操作してください。');
+        return this.teamCoordinator.agreeGraphConstraintUpdate(input, activation.token, () =>
+          validateGraphUpdate(input),
+        );
+      },
+    );
+    this.handle(
+      IPC_CHANNELS.graphsWorkspaceReview,
+      graphMissionResumeInputSchema,
+      graphWorkspaceReviewSchema,
+      async (input) => {
+        const document = this.graphs?.liveDocument(
+          input.taskId,
+          input.instanceId,
+          input.renderRevision,
+        );
+        const graph = this.persistence.getGraphTeamMission(input.missionId);
+        if (
+          !document ||
+          graph?.taskId !== input.taskId ||
+          graph.graphId !== document.id ||
+          graph.semanticRevision !== document.semanticRevision ||
+          graph.steps.find((step) => step.key === input.stepKey)?.generation !== input.generation
+        )
+          throw new Error('Graph workspace review agreement changed');
+        return this.teamCoordinator.reviewGraphPreservedWorkspace(
+          input.taskId,
+          input.missionId,
+          input.stepKey,
+        );
+      },
+    );
     this.handle(
       IPC_CHANNELS.graphsMissionResumeStep,
       graphMissionResumeInputSchema,
@@ -1923,7 +2008,12 @@ export class IpcRouter {
           step?.generation !== input.generation
         )
           throw new Error('Graph integration agreement changed');
-        return this.teamCoordinator.resumeGraphStep(input.taskId, input.missionId, input.stepKey);
+        return this.teamCoordinator.resumeGraphStep(
+          input.taskId,
+          input.missionId,
+          input.stepKey,
+          input.workspaceReviewDigest,
+        );
       },
     );
     this.handle(

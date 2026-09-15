@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { GraphDiff, GraphVersionSummary, GraphView } from '@sprint-coder/contracts';
+import { useGraphDisclosure } from '../lib/graph-view-preference';
 
 const kindLabels = {
   node: 'ノード',
@@ -68,6 +69,7 @@ const fieldLabels = new Map(
 
 /** Keyed by document/render revision in GraphPanel; a view lease refresh does not reset the comparison. */
 export function GraphHistoryPanel({ view }: { view: GraphView }) {
+  const [open, setOpen] = useGraphDisclosure(view, 'historyOpen');
   const available =
     Number.isSafeInteger(view.renderRevision) &&
     typeof window.sprintCoder?.graphs?.history === 'function' &&
@@ -163,6 +165,8 @@ export function GraphHistoryPanel({ view }: { view: GraphView }) {
   const currentComparison = comparison?.revision === selected ? comparison : null;
   return (
     <details
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
       className="graph-history"
       data-testid="graph-history"
       data-render-revision={renderRevision}
@@ -220,7 +224,7 @@ export function GraphHistoryPanel({ view }: { view: GraphView }) {
   );
 }
 
-function GraphDifference({ diff }: { diff: GraphDiff }) {
+export function GraphDifference({ diff }: { diff: GraphDiff }) {
   return (
     <div data-testid="graph-diff" aria-live="polite">
       {!diff.contentChanged ? (
