@@ -1760,7 +1760,7 @@ export class TeamCoordinator {
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
       validate();
-      return this.inspectGraphConstraintUpdate(input);
+      return (await this.inspectGraphConstraintUpdate(input)).review;
     });
   }
 
@@ -1768,12 +1768,19 @@ export class TeamCoordinator {
     input: GraphMissionUpdateInput,
   ): Promise<GraphMissionUpdateReview> {
     // Read-only status must remain observable while a requested stop waits for its runtime.
-    return this.inspectGraphConstraintUpdate(input);
+    return (await this.inspectGraphConstraintUpdate(input)).review;
   }
 
+  /**
+   * `workspaces` carries the content digest of every retained workspace this review actually read
+   * and checked against both write scopes, keyed by step. Re-agreement commits before it can read
+   * those workspaces again, and the commit moves the generation, semantic digest and policy epoch
+   * that `digest` binds — so this content-only digest is the only thing that can prove the bytes
+   * being resumed are still the reviewed bytes.
+   */
   private async inspectGraphConstraintUpdate(
     input: GraphMissionUpdateInput,
-  ): Promise<GraphMissionUpdateReview> {
+  ): Promise<{ review: GraphMissionUpdateReview; workspaces: Map<string, string> }> {
     const pending = this.persistence.getGraphPendingUpdate?.(input.missionId);
     const graph = this.persistence.getGraphTeamMission(input.missionId);
     const proposed = this.persistence.getGraphDocument(input.taskId);
@@ -1795,6 +1802,7 @@ export class TeamCoordinator {
     const context = () => graphMissionContextFor(this.persistence, input.taskId);
     const candidate = { ...graph, plan: proposed.missionPlan };
     const images: { stepKey: string; digest: string }[] = [];
+    const workspaces = new Map<string, string>();
     for (const key of pending.affectedKeys) {
       const mapping = graph.steps.find((step) => step.key === key)!;
       const execution = this.persistence.getTeamExecution(mapping.executionId);
@@ -1854,6 +1862,7 @@ export class TeamCoordinator {
           );
         }
         images.push({ stepKey: key, digest: image.digest });
+        workspaces.set(key, image.contentDigest);
       }
     }
     for (const source of proposed.sources) {
@@ -1879,14 +1888,17 @@ export class TeamCoordinator {
     )
       throw new Error('Graph update context changed during review');
     return {
-      ...input,
-      requestId: pending.requestId,
-      changedKeys: pending.changedKeys,
-      affectedKeys: pending.affectedKeys,
-      beforeRenderRevision: graph.renderRevision,
-      contextDigest: createHash('sha256')
-        .update(JSON.stringify([pending, proposed.semanticDigest, graph.contextDigest, images]))
-        .digest('hex'),
+      review: {
+        ...input,
+        requestId: pending.requestId,
+        changedKeys: pending.changedKeys,
+        affectedKeys: pending.affectedKeys,
+        beforeRenderRevision: graph.renderRevision,
+        contextDigest: createHash('sha256')
+          .update(JSON.stringify([pending, proposed.semanticDigest, graph.contextDigest, images]))
+          .digest('hex'),
+      },
+      workspaces,
     };
   }
 
@@ -1898,7 +1910,7 @@ export class TeamCoordinator {
     return this.enqueue(input.taskId, async () => {
       validate();
       const { requestId: _requestId, contextDigest: _digest, ...request } = input;
-      const review = await this.inspectGraphConstraintUpdate(request);
+      const { review, workspaces } = await this.inspectGraphConstraintUpdate(request);
       if (review.requestId !== input.requestId || review.contextDigest !== input.contextDigest)
         throw new Error('Graph update review changed; inspect the difference again');
       validate();
@@ -1911,20 +1923,50 @@ export class TeamCoordinator {
         consentId,
         now: this.isoNow(),
       });
+      // The update is committed, so one step that cannot resume must not strand the others on
+      // `waiting_resume` with a resume digest nobody will clear. Each step is attempted on its own
+      // and reports its own reason, exactly as `resumeGraphMissionStep` does for a single step.
+      const stranded: string[] = [];
       for (const key of review.affectedKeys) {
         const executionId = graph.steps.find((step) => step.key === key)!.executionId;
-        if (
-          this.persistence.getTeamMissionWorktree(executionId) ||
-          this.persistence.getTeamExecutionIsolation(executionId)
-        ) {
-          const image = await this.inspectGraphWorkspace(input.taskId, input.missionId, key);
-          if (this.persistence.getTeamExecutionIsolation(executionId))
-            this.persistence.resumeGraphExecutionIsolation?.(executionId, this.isoNow());
-          this.graphWorkspaceResumeDigests.set(executionId, image.digest);
+        try {
+          const preserved = Boolean(
+            this.persistence.getTeamMissionWorktree(executionId) ||
+            this.persistence.getTeamExecutionIsolation(executionId),
+          );
+          const reviewed = workspaces.get(key);
+          // Re-reading after the commit is not a review: nothing here re-checks the retained paths
+          // against the write scope the owner actually held. Resume only what the review read and
+          // approved, so neither an edit made during the commit nor a file that only the widened
+          // scope would cover can enter the workspace unexamined.
+          if (preserved !== (reviewed !== undefined))
+            throw new Error(
+              'Preserved graph workspace changed during re-agreement; review it again',
+            );
+          if (preserved) {
+            const image = await this.inspectGraphWorkspace(input.taskId, input.missionId, key);
+            if (image.contentDigest !== reviewed)
+              throw new Error(
+                'Preserved graph workspace changed during re-agreement; review it again',
+              );
+            if (this.persistence.getTeamExecutionIsolation(executionId))
+              this.persistence.resumeGraphExecutionIsolation?.(executionId, this.isoNow());
+            this.graphWorkspaceResumeDigests.set(executionId, image.digest);
+          }
+          await this.scheduleGraphMission(input.taskId, input.missionId, key);
+        } catch (error) {
+          this.graphWorkspaceResumeDigests.delete(executionId);
+          stranded.push(key);
+          this.persistence.setWorkerCurrentActivity(
+            this.persistence.getTeamExecution(executionId).assigneeAgentId,
+            (error instanceof Error ? error.message : 'Graph step resume failed').slice(0, 2000),
+            this.isoNow(),
+          );
         }
-        await this.scheduleGraphMission(input.taskId, input.missionId, key);
       }
       this.emit(input.taskId, this.persistence.getTeamMission(input.missionId).teamId);
+      if (stranded.length)
+        throw new Error(`Graph steps could not resume after the update: ${stranded.join(', ')}`);
       return this.missionSummary(this.persistence.getTeamMission(input.missionId));
     });
   }
@@ -1934,7 +1976,12 @@ export class TeamCoordinator {
     missionId: string,
     stepKey: string,
   ): Promise<GraphWorkspaceReview> {
-    return this.enqueue(taskId, () => this.inspectGraphWorkspace(taskId, missionId, stepKey));
+    return this.enqueue(taskId, async () => {
+      // `graphWorkspaceReviewSchema` is strict, and the content digest is a Main-side comparison
+      // key rather than anything the Renderer agrees to, so it never leaves this process.
+      const { digest, files } = await this.inspectGraphWorkspace(taskId, missionId, stepKey);
+      return { digest, files };
+    });
   }
 
   private async inspectGraphWorkspace(
@@ -1943,7 +1990,7 @@ export class TeamCoordinator {
     stepKey: string,
     admission = false,
     updating = false,
-  ): Promise<GraphWorkspaceReview> {
+  ): Promise<GraphWorkspaceReview & { contentDigest: string }> {
     const graph = this.persistence.getGraphTeamMission(missionId);
     const mapping = graph?.steps.find((step) => step.key === stepKey);
     const mission = this.persistence.getTeamMission(missionId);
@@ -2052,6 +2099,13 @@ export class TeamCoordinator {
             images,
           ]),
         )
+        .digest('hex'),
+      // `digest` also binds the generation, semantic digest and policy epoch, every one of which a
+      // committed constraint update moves, so it can only ever compare two reads of the same
+      // agreement. This covers the retained bytes alone — still tied to the step they were read
+      // from — and is what a re-agreement compares across its own commit.
+      contentDigest: createHash('sha256')
+        .update(JSON.stringify([taskId, missionId, mapping.key, images]))
         .digest('hex'),
       files: images.flatMap((image) =>
         image.changedFiles.map((path) => ({ repository: image.repository, path })),

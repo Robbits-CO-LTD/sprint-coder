@@ -67,7 +67,9 @@ describe('graph Mission constraint revision', () => {
   it('does not invalidate checkpoints for reordered dependency or semantic-key declarations', () => {
     const previous = plan();
     const proposed = plan();
-    proposed.steps[2]!.dependsOn.reverse();
+    // `plan()` copies each step shallowly, so `previous` and `proposed` share this array: reversing
+    // it in place would reorder both sides and pass whether or not the comparison sorts.
+    proposed.steps[2]!.dependsOn = [...proposed.steps[2]!.dependsOn].reverse();
     expect(graphMissionConstraintUpdate(previous, proposed, new Set(['a', 'b', 'c']))).toEqual({
       changedKeys: [],
       affectedKeys: [],

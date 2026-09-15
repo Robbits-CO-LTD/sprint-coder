@@ -879,6 +879,101 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         }
       },
     );
+
+    // Re-agreement reads the retained workspace once to review it, then commits, then reads it
+    // again to decide what to resume. Nothing in that second read re-checks the retained paths
+    // against the write scope the owner actually held, so whatever lands in the window between the
+    // two reads would be resumed unexamined: an edit nobody reviewed, or a file that only the
+    // widened scope covers and the original owner was never allowed to touch.
+    it.each(['edited', 'widened'] as const)(
+      'refuses to resume a retained workspace %s between the reviewed agreement and its commit',
+      async (tamper) => {
+        const { f, a, run, manager, worktree } = await retainedWriteFixture();
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+        try {
+          await installNativeGraphObserver(f.persistence, dirname(f.path));
+          f.persistence.interruptGraphStep({
+            missionId: a.mission.id,
+            stepKey: 'a',
+            generation: 1,
+            reservationId: run.reservation.id,
+            attemptId: run.attempt.id,
+            outcome: 'failed',
+            reason: 'interrupted',
+            confirmation: { kind: 'unconfirmed' },
+            now,
+          });
+          f.persistence.updateTeamMissionWorktree({
+            executionId: run.execution.id,
+            to: 'quarantined',
+            now,
+          });
+          const current = f.persistence.getGraphDocument(f.task.id)!;
+          const plan = structuredClone(current.missionPlan!);
+          // A legitimate widening: the retained `shared.ts` stays covered by the scope the owner
+          // held and by the proposed one, so the update itself passes every coverage check.
+          plan.steps[0]!.writeClaims = [
+            ...plan.steps[0]!.writeClaims,
+            { ...plan.steps[0]!.writeClaims[0]!, path: 'widened.ts' },
+          ];
+          const proposed = nextGraphDocument(f.task.id, f.diagram, current, [], [], plan);
+          f.persistence.saveGraphDocument(proposed, current.renderRevision);
+          const input = {
+            taskId: f.task.id,
+            missionId: a.mission.id,
+            instanceId: randomUUID(),
+            renderRevision: proposed.renderRevision,
+            expectedSemanticRevision: current.semanticRevision,
+          };
+          const review = await coordinator.requestGraphConstraintUpdate(
+            input,
+            randomUUID(),
+            () => undefined,
+          );
+          expect(review.affectedKeys).toContain('a');
+          // `agreeGraphConstraintUpdate` re-validates once the review is in hand and before it
+          // commits, which is precisely the window an external editor would write into.
+          let checks = 0;
+          const editDuringCommit = () => {
+            if (++checks !== 2) return;
+            if (tamper === 'edited') writeFileSync(join(worktree.path, 'shared.ts'), 'tampered\n');
+            else writeFileSync(join(worktree.path, 'widened.ts'), 'never reviewed\n');
+          };
+          await expect(
+            coordinator.agreeGraphConstraintUpdate(
+              { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+              randomUUID(),
+              editDuringCommit,
+            ),
+          ).rejects.toThrow('could not resume after the update: a');
+          expect(checks).toBe(2);
+          // Reaching the aggregated refusal at all proves the loop kept going after the step that
+          // failed instead of abandoning the rest of the affected closure mid-way.
+          expect(execute).not.toHaveBeenCalled();
+          expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('waiting_resume');
+          expect(
+            f.persistence
+              .getTeamSnapshot(a.mission.teamId)
+              .agents.find((agent) => agent.id === run.execution.assigneeAgentId)?.currentActivity,
+          ).toContain('changed during re-agreement');
+        } finally {
+          f.persistence.close();
+        }
+      },
+    );
+
     it.each([false, true])(
       'fences only a requested update and preserves independent completion (complete before commit: %s)',
       (completeBeforeCommit) => {
