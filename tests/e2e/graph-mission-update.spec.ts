@@ -217,8 +217,18 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     expect((await mission(page)).steps.map((step) => step.state)).toEqual([
       'completed',
       'completed',
-      'queued',
+      'waiting_resume',
     ]);
+    expect((await mission(page)).steps[2]!.graph).toMatchObject({
+      stepResumePending: true,
+      stepResumeAvailable: false,
+      integrationResumeAvailable: false,
+      waitReason: 'resources',
+    });
+    await expect(plan.getByRole('button', { name: 'この工程を再開', exact: true })).toHaveCount(0);
+    await expect(
+      plan.getByRole('button', { name: '変更を保持して工程を再開', exact: true }),
+    ).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath('graph-update-resource-wait.png') });
     await app.evaluate((_electron, flag) => {
       delete process.env[flag];
