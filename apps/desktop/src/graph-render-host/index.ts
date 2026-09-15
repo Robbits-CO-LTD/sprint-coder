@@ -1,5 +1,6 @@
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { runWithDrainedOutput } from './drain-output';
 
 async function run(): Promise<void> {
   // This entry is only forked by Main. Each invocation owns one fixed render/check operation.
@@ -22,10 +23,6 @@ async function run(): Promise<void> {
       ? [process.execPath, modulePath, join(work, 'diagram.html')]
       : [process.execPath, modulePath, join(work, 'input.json'), join(work, 'diagram.html')];
   await import(/* @vite-ignore */ pathToFileURL(modulePath).href);
-  process.exit(0);
 }
 
-void run().catch(() => {
-  console.error('Graph worker failed');
-  process.exit(1);
-});
+void runWithDrainedOutput(run);

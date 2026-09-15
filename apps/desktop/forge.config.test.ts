@@ -432,7 +432,7 @@ describe('release artifacts', () => {
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(macPackageJob).not.toContain('if: github.event_name');
     expect(macResultJob).toContain('test "${MACOS_PACKAGE_RESULT}" = \'success\'');
-    expect(ciWorkflow).toContain('build-(native-safe-fs|managed-local-sidecar)');
+    expect(ciWorkflow).toContain('build-(better-sqlite3|native-safe-fs|managed-local-sidecar)');
     expect(ciWorkflow.match(/Managed Local transport smoke/gu)).toHaveLength(3);
     expect(ciWorkflow.match(/SPRINT_CODER_MANAGED_LOCAL_LIVE/gu)).toHaveLength(3);
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');

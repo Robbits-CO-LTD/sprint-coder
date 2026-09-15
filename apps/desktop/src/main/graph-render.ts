@@ -478,28 +478,63 @@ export class GraphRenderService {
       );
       let output = '';
       let bytes = 0;
-      let rejected = false;
+      let settled = false;
+      let exitCode: number | null = null;
+      let stdoutEnded = child.stdout === null;
+      let stderrEnded = child.stderr === null;
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+      };
       const fail = () => {
-        rejected = true;
-        child.kill();
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (exitCode === null) child.kill();
+        reject(new Error(`Archify ${mode} failed`));
+      };
+      const finish = () => {
+        // Process exit and pipe EOF are independent events. Returning on exit alone can hand
+        // JSON.parse a partial report even though the worker successfully flushed its writes.
+        if (settled || exitCode === null || !stdoutEnded || !stderrEnded) return;
+        if (signal.aborted || exitCode !== 0) return fail();
+        settled = true;
+        cleanup();
+        resolve(output);
       };
       const timer = setTimeout(fail, 15_000);
       const onAbort = () => fail();
       signal.addEventListener('abort', onAbort, { once: true });
       child.stdout?.on('data', (chunk: Buffer) => {
+        if (settled) return;
         bytes += chunk.byteLength;
         if (bytes > 256 * 1024) fail();
         else output += chunk.toString('utf8');
       });
       child.stderr?.on('data', (chunk: Buffer) => {
+        if (settled) return;
         bytes += chunk.byteLength;
         if (bytes > 256 * 1024) fail();
       });
+      child.stdout?.once('end', () => {
+        stdoutEnded = true;
+        finish();
+      });
+      child.stderr?.once('end', () => {
+        stderrEnded = true;
+        finish();
+      });
+      child.stdout?.once('error', fail);
+      child.stderr?.once('error', fail);
+      child.stdout?.once('close', () => {
+        if (!stdoutEnded) fail();
+      });
+      child.stderr?.once('close', () => {
+        if (!stderrEnded) fail();
+      });
       child.once('exit', (code) => {
-        clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
-        if (rejected || signal.aborted || code !== 0) reject(new Error(`Archify ${mode} failed`));
-        else resolve(output);
+        exitCode = code;
+        finish();
       });
     });
   }

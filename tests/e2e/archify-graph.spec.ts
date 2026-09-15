@@ -29,6 +29,39 @@ test('binds an authorized file read and detects changed source bytes after resta
     PATH: '',
     Path: '',
   });
+  const graphFailures: unknown[] = [];
+  let stdout = '';
+  app.process().stdout?.on('data', (chunk: Buffer) => {
+    stdout = (stdout + chunk.toString('utf8')).slice(-32_768);
+    let newline = stdout.indexOf('\n');
+    while (newline >= 0) {
+      const line = stdout.slice(0, newline);
+      stdout = stdout.slice(newline + 1);
+      try {
+        const event = JSON.parse(line) as {
+          level?: string;
+          message?: string;
+          context?: {
+            failureStage?: string;
+            errorCode?: string;
+            error?: { name?: string; message?: string };
+          };
+        };
+        if (event.level === 'error')
+          graphFailures.push({
+            message: event.message,
+            failureStage: event.context?.failureStage,
+            errorCode: event.context?.errorCode,
+            error: event.context?.error?.name,
+            detail: event.context?.error?.message?.slice(0, 500),
+          });
+        if (graphFailures.length > 20) graphFailures.shift();
+      } catch {
+        /* Only structured, bounded failure metadata belongs in the artifact. */
+      }
+      newline = stdout.indexOf('\n');
+    }
+  });
   try {
     const page = await firstWindow(app);
     await page.addInitScript(() => {
@@ -53,9 +86,26 @@ test('binds an authorized file read and detects changed source bytes after resta
     await page.getByTestId('composer-textarea').fill('[fixture:graph-source-proposal]');
     await page.getByTestId('composer-send-button').click();
     await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
-    await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
-      timeout: 30000,
-    });
+    await expect(page.getByTestId('assistant-message'))
+      .toContainText('GRAPH_TOOL_FLOW_OK', {
+        timeout: 30000,
+      })
+      .catch(async (error: unknown) => {
+        const diagnostic = await page.evaluate(async (id) => {
+          const raw = await window.sprintCoder!.runtime.getFailureDiagnostic({ taskId: id });
+          const value = raw ? JSON.parse(raw) : null;
+          return {
+            failureStage: value?.failureStage,
+            category: value?.category,
+            providerCode: value?.providerCode,
+          };
+        }, taskId);
+        await testInfo.attach('graph-source-failure', {
+          body: JSON.stringify({ failures: graphFailures, diagnostic }),
+          contentType: 'application/json',
+        });
+        throw error;
+      });
     if (process.env['GITHUB_ACTIONS'] === 'true') {
       await app.evaluate(({ app: nativeApp, BrowserWindow }) => {
         nativeApp.focus({ steal: true });

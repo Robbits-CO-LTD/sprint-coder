@@ -7,6 +7,7 @@
 - Windowsのlibuv終了クラッシュ: Electron 43.2.0から既知修正を含む43.5.0へ。実機では旧新版ともGraph Mission 45件×10回、最小終了シナリオ100回が通ったため、CIクラッシュと上流修正の同一原因は断定しない。CIで再検証。
 - Electron 43.5.0用に旧better-sqlite3 12.11.1を再buildすると、StatementのGCで`RemoveEnvironmentCleanupHook: env != nullptr`がローカル・macOS/Linux CIで再現。N-API化とworker終了修正を含む13.0.3を採用し、同じDB試験・package起動で解消を検証する。出典: WiseLibs/better-sqlite3 v13.0.0、v13.0.2、v13.0.3 release。
 - mainのmacOS Archify packaged CI: ノード選択後のclear操作が詳細表示を閉じない失敗を再現・修正。
+- Windowsのgraph-propose後の失敗: pinned CLIのprocess.exitがpipeを切り詰める経路と、親がpipe EOF前にexitだけで結果を返す経路を回帰試験で再現。workerの出力drainとMainのexit+EOF待ちを追加し、非zero・cancel・timeout・出力上限の拒否を維持する。
 - PR #471の保留Warning: Turn跨ぎ/同Workspaceのbackground command、Saga commit順の検証、Windowsのnative post-image観測。
 
 関係のない新機能や既存Issue全件の再実装は対象外。未到達の署名済みComputer Use等の別gateは成功扱いしない。
