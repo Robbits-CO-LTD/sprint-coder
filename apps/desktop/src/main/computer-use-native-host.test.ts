@@ -773,6 +773,155 @@ describe('Computer Use native Main adapter', () => {
     expect(host.availability().control).toBe(true);
   });
 
+  it('lets a slow native close drain instead of quarantining the host after one second', async () => {
+    const appIdentityDigest = digest('a');
+    const executableDigest = digest('b');
+    const windowIdentityDigest = digest('c');
+    const cancel = vi.fn();
+    const close = vi.fn();
+    const addon = {
+      probe: () => ({}),
+      pickApplication: () => ({
+        platform: 'darwin' as const,
+        identityDigest: appIdentityDigest,
+        executablePath: '/Applications/Target.app/Contents/MacOS/Target',
+        executableDigest,
+        bundleId: 'com.example.Target',
+        teamId: null,
+        signingIdentifier: null,
+        cdHash: null,
+        displayName: 'Target',
+        policyLanguage: 'ja',
+        maximumMode: 'full_access_app',
+        pid: 42,
+      }),
+      listWindows: () => [
+        {
+          pid: 42,
+          windowId: 'window-1',
+          platform: 'darwin' as const,
+          appIdentityDigest,
+          windowIdentityDigest,
+          title: 'Target',
+          bounds: { x: 0, y: 0, width: 100, height: 80 },
+          screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+          focused: true,
+          eligible: true,
+          ownerKind: 'application' as const,
+          modal: false,
+          revision: 4,
+          policyLanguage: 'ja',
+          maximumMode: 'full_access_app',
+        },
+      ],
+      startSession: () => ({
+        inputAttemptCount: 0,
+        sessionId: 'session-1',
+        platform: 'darwin' as const,
+        appIdentityDigest,
+        windowIdentityDigest,
+        windowId: 'window-1',
+        profileRevision: 3,
+        cancelEpoch: 0,
+        policyLanguage: 'ja',
+        maximumMode: 'full_access_app',
+        screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+        pid: 42,
+      }),
+      observe: () => ({}),
+      dispatch: () => ({}),
+      cancel,
+      close,
+    };
+
+    vi.useFakeTimers();
+    try {
+      const host = createComputerUseNativeHost(binding(addon), 'darwin');
+      const identity = await host.pickApplication({
+        activationToken: 'main-issued-token',
+        pickerKind: 'application',
+      });
+      const profile = {
+        id: 'profile-1',
+        platform: 'darwin' as const,
+        kind: 'macos-bundle' as const,
+        label: 'Target',
+        canonicalPath: '/Applications/Target.app/Contents/MacOS/Target',
+        appUrl: null,
+        identity: identity!,
+        identityDigest: appIdentityDigest,
+        version: null,
+        executableDigest,
+        mode: 'full_access_app' as const,
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: true,
+        remember: false,
+        revision: 3,
+        createdAt: '2026-08-29T00:00:00.000Z',
+        updatedAt: '2026-08-29T00:00:00.000Z',
+      };
+      const session = await host.startSession({
+        profile,
+        windowId: 'window-1',
+        sessionId: 'session-1',
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+      });
+
+      // Emergency cancel only waits for the native input epoch to be invalidated, so it keeps the
+      // short acknowledgement deadline.
+      cancel.mockImplementationOnce(() => new Promise(() => {}));
+      const canceled = host.cancel(session, 1);
+      const cancelSettled = vi.fn();
+      void canceled.then(cancelSettled, cancelSettled);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(cancelSettled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(canceled).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+
+      // Close additionally waits for the native stop lane to drain. Declaring that unconfirmed
+      // after a second would keep the whole host quarantined for an ordinary drain, because only a
+      // verified close releases the quarantine and the Controller drops the session handle.
+      let resolveClose!: () => void;
+      close.mockImplementationOnce(
+        (input: unknown) =>
+          new Promise((resolve) => {
+            const request = input as Record<string, unknown>;
+            resolveClose = () =>
+              resolve({
+                result: 'closed',
+                drained: true,
+                sessionId: request['sessionId'],
+                cancelEpoch: request['cancelEpoch'],
+                inputAttemptCount: 0,
+              });
+          }),
+      );
+      const closed = host.close(session);
+      const closeSettled = vi.fn();
+      void closed.then(closeSettled, closeSettled);
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(closeSettled).not.toHaveBeenCalled();
+      expect(host.availability()).toMatchObject({
+        observe: false,
+        control: false,
+        reasonCode: 'native_stop_unconfirmed',
+      });
+
+      resolveClose();
+      await expect(closed).resolves.toBeUndefined();
+      expect(host.availability()).toMatchObject({
+        state: 'ready',
+        observe: true,
+        control: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('fails closed when an API1 manifest is mixed with an API2 helper', () => {
     const native = binding({
       probe: () => ({}),

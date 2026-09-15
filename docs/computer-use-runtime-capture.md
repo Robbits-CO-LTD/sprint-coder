@@ -228,7 +228,12 @@ epoch and monotonic attempt count. Cancel or Close puts the host into an input q
 malformed results, errors, and timeouts retain it and the old session. Both availability and the
 actual start/observe/dispatch entry points refuse further input. Only a validated Close releases
 it. Late fulfillment cannot release a timed-out operation. A repeated already-confirmed Close
-does not call native again.
+does not call native again. Cancel and Close use different bounded deadlines: Cancel only needs the
+native input epoch invalidated, while Close also waits for the native stop lane to drain, so its
+default deadline follows the native close budget (the macOS stop work shares the serial dispatch
+lock and has no internal timeout; the Windows helper transport budgets 10s for a close round trip)
+instead of the shorter Cancel acknowledgement deadline. Only a Close that exceeds that budget is
+unconfirmed, and the quarantine it leaves is intentional.
 
 For a clean committed checkout after `node build-computer-use-native.mjs`, run
 `node verify-computer-use-native-offline.mjs` with Node 22 (and an x64 VS developer environment

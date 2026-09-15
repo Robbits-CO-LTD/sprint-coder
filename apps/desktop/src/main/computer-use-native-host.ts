@@ -36,6 +36,22 @@ import { computerUseActionDigest } from './computer-use-action';
 export const COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE = 'native_picker_unavailable' as const;
 export const COMPUTER_USE_NATIVE_CONTROLLER_UNAVAILABLE = 'native_controller_unavailable' as const;
 
+/**
+ * Cancel only waits for native to invalidate the input epoch, so it keeps a short emergency
+ * acknowledgement deadline. Close additionally waits for the native stop lane to drain, and only a
+ * verified close receipt releases the process-local input quarantine. The drain budget therefore
+ * has to come from the native side: on macOS `ExecuteNativeStop` takes the same serial dispatch
+ * lock as start/observe/dispatch and has no internal timeout of its own
+ * (computer-use-native/computer_use_macos.mm), and the Windows helper transport already budgets
+ * 10s for a close round trip (`operationTimeoutMilliseconds` in computer-use-native-windows.ts).
+ * A shorter close deadline turns an ordinary drain into `native_stop_unconfirmed`, which disables
+ * observe/control for the whole host until restart because the Controller drops the session handle
+ * after a failed close. Quarantine on a genuinely unconfirmed stop is intentional; tripping on a
+ * slow but successful drain is not.
+ */
+const COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = 1_000;
+const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
+
 export class ComputerUseNativeUnavailableError extends Error {
   constructor(readonly reasonCode: string) {
     super(reasonCode);
@@ -168,7 +184,11 @@ export function createComputerUseNativeHost(
     await Promise.resolve(requireMethod(method)(input));
 
   const stopWithDeadline = async (method: 'cancel' | 'close', input: unknown): Promise<unknown> => {
-    const timeoutMs = options.stopTimeoutMs ?? 1_000;
+    const timeoutMs =
+      options.stopTimeoutMs ??
+      (method === 'close'
+        ? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS
+        : COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS);
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000)
       throw new ComputerUseNativeUnavailableError('native_stop_timeout_invalid');
     let timer: ReturnType<typeof setTimeout> | undefined;
