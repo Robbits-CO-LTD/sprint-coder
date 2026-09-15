@@ -3,6 +3,15 @@
 Canonical requirements: https://github.com/Robbits-CO-LTD/sprint-coder/issues/444, revised plan generation 2 (AC-1–AC-17, INV-1–INV-14). All requirements remain in scope.
 Base: main 51f5705. Original main checkout and its five uncommitted Local AI UI files are preserved.
 
+## Completion slices (2026-09-15, base 5b20208)
+
+1. AC-14 / INV-11,14: persist Task/graph/semantic-revision scoped selected IDs and history/plan disclosure preferences. Rebind only existing IDs to the fresh viewer; never persist viewer capabilities, source text or agreement. Key the panel by Task so late updates and lower per-Task sequences cannot leak state across Tasks. Unit coverage includes reopen, removed IDs, new semantic revision, corrupt/unavailable storage and Task switching. This is a UI-preference checkpoint, not complete camera/view recovery or Electron acceptance.
+2. AC-6,14 / INV-5,6: review and continue interrupted writes in their retained worktree, preserving the existing stop acknowledgement, pending admission and sealed integration paths. Bind review to registered repository/worktree/base/index, guarded file identities and bytes. Revalidate on consent and admission. No automatic cleanup or resource release on restart.
+3. AC-5,13 / INV-3,12: propose constraint changes through the existing graph document path, suppress affected steps, confirm stopping them, show differences and require new trusted agreement. Atomically advance affected generations; preserve independent branches and confirmed checkpoints.
+4. AC-17: actual Electron discussion/diff/agreement, concurrent branches, shared-resource wait, join and restart/recovery on the resulting head. Existing Mac/Windows packaged 8/8 results are a base regression reference only. Current-head packaging, full acceptance and independent review remain gates owned with Main.
+
+No AC or INV is retired. GitHub writes and release/version operations belong to Main.
+
 ## Current checkpoint: sealed-diff enforcement before integration
 
 - Vendored Archify ed7f4d4b48d4424d36edfed8043de3de8dea6b45 / 2.17.0-dev.1 with both copyright holders and notices; 33 files are pinned by a compiled manifest hash.

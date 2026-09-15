@@ -13,8 +13,13 @@ import { GraphSourcesPanel } from './GraphSourcesPanel';
 import { acceptGraphGeneration } from '../lib/graph-generation';
 import { useGraphSourceStatus } from '../lib/use-graph-source-status';
 import { GraphMissionPlanPanel } from './GraphMissionPlanPanel';
+import { restoreGraphSelection, saveGraphSelection } from '../lib/graph-view-preference';
 
 export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () => void }) {
+  return <GraphPanelForTask key={taskId} taskId={taskId} onClose={onClose} />;
+}
+
+function GraphPanelForTask({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [view, setView] = useState<GraphView | null>(null);
   const [selection, setSelection] = useState<GraphSelection | null>(null);
   // The artifact's diagram is painted before its bridge script has registered the selection
@@ -117,7 +122,7 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
       ) {
         currentView.current = next;
         setView(next);
-        setSelection(null);
+        setSelection(restoreGraphSelection(next));
         setReady(false);
         setError(null);
       }
@@ -145,7 +150,10 @@ export function GraphPanel({ taskId, onClose }: { taskId: string; onClose: () =>
       const expected = frame.current?.contentWindow ?? null;
       if (acceptGraphReady(event.data, event.source, expected, view)) setReady(true);
       const accepted = acceptGraphSelection(event.data, event.source, expected, view);
-      if (accepted !== null) setSelection(accepted);
+      if (accepted !== null) {
+        setSelection(accepted);
+        saveGraphSelection(view, accepted);
+      }
     };
     window.addEventListener('message', listener);
     return () => window.removeEventListener('message', listener);

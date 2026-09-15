@@ -6,6 +6,7 @@ import {
 import type { GraphMissionPlan, GraphView, TeamMissionStepSummary } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
+import { useGraphDisclosure } from '../lib/graph-view-preference';
 
 const executionLabels: Record<TeamMissionStepSummary['state'], string> = {
   assigned: '開始待ち',
@@ -35,6 +36,7 @@ export function GraphMissionPlanPanel({
   sourceStamp: string | null;
 }) {
   const taskId = view.taskId;
+  const [open, setOpen] = useGraphDisclosure(view, 'planOpen');
   const team = useAppStore((state) => state.teamByTask[taskId]);
   const mission = team?.missions.find(
     (mission) => mission.graph?.id === view.id && mission.graph.semanticRevision === view.revision,
@@ -53,7 +55,12 @@ export function GraphMissionPlanPanel({
     ];
   });
   return (
-    <details className="graph-history" data-testid="graph-mission-plan">
+    <details
+      className="graph-history"
+      data-testid="graph-mission-plan"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
         {mission ? '実行状況' : '実行計画案'} · {plan.steps.length}工程
       </summary>

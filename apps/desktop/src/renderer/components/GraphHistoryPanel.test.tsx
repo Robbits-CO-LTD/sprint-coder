@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphDiff, GraphVersionSummary, GraphView } from '@sprint-coder/contracts';
 import { GraphHistoryPanel } from './GraphHistoryPanel';
 
@@ -53,6 +53,7 @@ function difference(n: number): GraphDiff {
 }
 let root: Root | undefined;
 let container: HTMLDivElement;
+beforeEach(() => window.localStorage.clear());
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   root = undefined;
@@ -70,6 +71,20 @@ async function mount(graphs: object, currentView = view) {
 }
 
 describe('graph history comparison', () => {
+  it('restores disclosure after unmount and keeps other Tasks closed', async () => {
+    await mount({});
+    const details = container.querySelector('details')!;
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event('toggle'));
+    });
+    await act(async () => root!.unmount());
+    root = undefined;
+    await mount({});
+    expect(container.querySelector('details')!.open).toBe(true);
+    await act(async () => root!.render(<GraphHistoryPanel view={{ ...view, taskId: 'other' }} />));
+    expect(container.querySelector('details')!.open).toBe(false);
+  });
   it('does not replace a newly selected comparison with a late older response', async () => {
     let resolveOlder!: (value: GraphDiff) => void;
     const older = new Promise<GraphDiff>((resolve) => {
