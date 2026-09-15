@@ -71,6 +71,46 @@ export function nativeBuildNetworkDiagnostics(environment) {
   return `native build network policy: forwarded=${list(forwarded)} withheld=${list(withheld)} withheld-with-credentials=${list(withheldWithCredentials)}`;
 }
 
+// better-sqlite3 compiles the whole sqlite3.c amalgamation with optimizations enabled. On a
+// two-core CI runner, under Windows/MSBuild, or when the Electron headers still have to come down
+// through a proxy, that legitimately runs past ten minutes, and spawnSync answers a timeout by
+// killing the child and reporting an error — turning a healthy build into a reported compiler
+// failure. Keep a generous default and let an operator widen it, but read the budget only in the
+// parent: this key is deliberately absent from the child allowlist above, so it configures this
+// process and never reaches node-gyp.
+export const NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY = 'SPRINT_CODER_NATIVE_BUILD_TIMEOUT_MS';
+const DEFAULT_NATIVE_BUILD_TIMEOUT_MS = 30 * 60_000;
+const MINIMUM_NATIVE_BUILD_TIMEOUT_MS = 60_000;
+const MAXIMUM_NATIVE_BUILD_TIMEOUT_MS = 4 * 60 * 60_000;
+
+export function nativeBuildTimeoutMs(environment) {
+  const raw = environment?.[NATIVE_BUILD_TIMEOUT_ENVIRONMENT_KEY];
+  // Only a plain decimal integer counts. Padding, exponents, hex, signs, and fractions are rejected
+  // outright rather than coerced, so a typo falls back to the default instead of silently producing
+  // a tiny budget that would kill every build.
+  if (typeof raw !== 'string' || !/^\d{1,9}$/u.test(raw)) return DEFAULT_NATIVE_BUILD_TIMEOUT_MS;
+  const requested = Number(raw);
+  if (requested < MINIMUM_NATIVE_BUILD_TIMEOUT_MS || requested > MAXIMUM_NATIVE_BUILD_TIMEOUT_MS)
+    return DEFAULT_NATIVE_BUILD_TIMEOUT_MS;
+  return requested;
+}
+
+// Node's errno identifier is what separates a real compiler failure from a child this script killed
+// (ETIMEDOUT) or a capture ceiling (ENOBUFS), and without it those are indistinguishable once raw
+// output is discarded. Both the errno and the signal name are fixed tokens; anything that does not
+// look like one — a child-supplied message above all — is reduced to "other" so nothing rides along.
+export function nativeBuildFailureDetail(result, timeoutMs) {
+  const budget = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? `, budget=${timeoutMs}ms` : '';
+  const code = fixedToken(result?.error?.code, /^[A-Z][A-Z0-9_]{1,31}$/u);
+  const signal = fixedToken(result?.signal, /^SIG[A-Z0-9]{1,15}$/u);
+  return `error=${code}, signal=${signal}${budget}`;
+}
+
+function fixedToken(value, shape) {
+  if (value === undefined || value === null) return 'none';
+  return shape.test(String(value)) ? String(value) : 'other';
+}
+
 function isSecretLikeEnvironmentKey(key) {
   const canonical = key.toUpperCase().replace(/[^A-Z0-9]/gu, '');
   return [
