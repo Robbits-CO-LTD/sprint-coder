@@ -175,6 +175,7 @@ import {
   type PermissionEvaluation,
   type PermissionOperation,
   type PermissionRequest,
+  type PathClassification,
   type PermissionRule,
   type ProviderEgress,
   type ReasoningEffort,
@@ -273,6 +274,7 @@ import {
   type PersistedFailureDiagnostic,
 } from './provider-failure-diagnostic';
 import { pathComparisonKey, pathsEquivalent } from '../path-comparison';
+import { legacyExpandAccessPreset } from './permission-preset-legacy-rules';
 import { displayWorkspaceRootLabel } from './workspace-root-resolution';
 import {
   canonicalizeWorkspaceFileChangePath,
@@ -6185,6 +6187,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.backfillLegacyNativeEditSagaRevisions();
       this.backfillLegacyEditSagaRootBindings();
       this.backfillAcceptanceContracts();
+      this.rematerializeLegacyPresetRules();
       this.interruptActiveCommands();
       this.quarantinePendingComputerActionAudits(new Date().toISOString());
       this.contextLedger = new ContextLedger(this, (taskId, turnId) =>
@@ -7266,6 +7269,126 @@ export class SqlitePersistenceClient implements PersistenceClient {
         for (const saga of sagas) if (saga.state === 'committed') this.recordEditSagaEvidence(saga);
       }
     })();
+  }
+
+  /**
+   * `getPermissionPolicy` requires the stored rules to equal the current `expandAccessPreset`
+   * output and falls back to Ask otherwise, which is what keeps a modified database from granting
+   * anything. The cost is that changing a preset's expansion — as Issue #487 does by adding the
+   * Provider-disclosure rules — makes every database written by the previous build look modified,
+   * silently dropping the user's Access preset.
+   *
+   * So at open, a Task whose stored rows are *exactly* the previous expansion (the frozen
+   * 3260f08 snapshot, never the current one) has its rules re-written to the current expansion and
+   * keeps its preset. Anything else still falls back to Ask, unchanged. An expansion that turns
+   * out not to have changed rewrites nothing, so this cannot bump epochs on every start.
+   *
+   * The rules the engine evaluates under are not the ones the Task's grants were issued against,
+   * so the epoch moves and those grants are revoked, exactly as `bumpProjectTaskPolicyEpochs`
+   * does when a Project folder change re-derives Task policy. No `permission_audit` row is
+   * written: that table records evaluations of requests, and no request was evaluated here.
+   */
+  private rematerializeLegacyPresetRules(): void {
+    const states = this.db
+      .prepare(
+        `SELECT task_id, preset_label, approval_policy, approval_reason, policy_epoch
+         FROM permission_policy_state ORDER BY task_id`,
+      )
+      .all() as (PermissionPolicyRow & { task_id: string })[];
+    if (states.length === 0) return;
+    const ruleQuery = this.db.prepare(
+      `SELECT effect, capability, resource_json, operations_json, audit_reason
+       FROM permission_rules WHERE task_id = ? ORDER BY rowid`,
+    );
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      for (const state of states) {
+        // `legacyExpandAccessPreset` treats anything that is not ask/auto as Full, so never hand
+        // it a label this build does not recognize, CHECK constraint or not.
+        if (!(['ask', 'auto', 'full'] as const).includes(state.preset_label)) continue;
+        const legacy = legacyExpandAccessPreset(state.preset_label);
+        if (
+          state.approval_policy !== legacy.approvalPolicy ||
+          state.approval_reason !== legacy.approvalReason
+        )
+          continue;
+        let storedKey: string;
+        try {
+          storedKey = permissionRuleSetKey(
+            (ruleQuery.all(state.task_id) as PermissionRuleRow[]).map(parsePermissionRuleRow),
+          );
+        } catch {
+          // Rows this build cannot even parse are not the previous expansion. Leave them to the
+          // fail-closed path rather than treating an unreadable database as a known one.
+          continue;
+        }
+        const canonical = expandAccessPreset(state.preset_label);
+        const canonicalKey = permissionRuleSetKey([
+          ...canonical.allowRules.map((rule) => ({ effect: 'allow' as const, rule })),
+          ...(canonical.immutableDeny ?? []).map((rule) => ({
+            effect: 'immutable-deny' as const,
+            rule,
+          })),
+        ]);
+        if (storedKey === canonicalKey) continue;
+        const legacyKey = permissionRuleSetKey([
+          ...legacy.allowRules.map((rule) => ({ effect: 'allow' as const, rule })),
+          ...legacy.immutableDeny.map((rule) => ({ effect: 'immutable-deny' as const, rule })),
+        ]);
+        if (storedKey !== legacyKey) continue;
+        this.writePresetRules(state.task_id, canonical, now);
+        const policyEpoch = state.policy_epoch + 1;
+        this.db
+          .prepare(
+            `UPDATE permission_policy_state
+             SET approval_policy = ?, approval_reason = ?, policy_epoch = ?, updated_at = ?
+             WHERE task_id = ?`,
+          )
+          .run(
+            canonical.approvalPolicy,
+            canonical.approvalReason ?? null,
+            policyEpoch,
+            now,
+            state.task_id,
+          );
+        this.db
+          .prepare(
+            'UPDATE permission_grants SET revoked_at = COALESCE(revoked_at, ?) WHERE task_id = ?',
+          )
+          .run(now, state.task_id);
+        this.enqueuePermissionPolicyEpoch(state.task_id, policyEpoch, now);
+      }
+    })();
+  }
+
+  /** Replaces a Task's stored preset rows with the supplied expansion. Caller owns the epoch. */
+  private writePresetRules(
+    taskId: string,
+    expanded: Pick<ExpandedAccessPolicy, 'allowRules' | 'immutableDeny'>,
+    now: string,
+  ): void {
+    this.db.prepare('DELETE FROM permission_rules WHERE task_id = ?').run(taskId);
+    const insert = this.db.prepare(
+      `INSERT INTO permission_rules(
+        id, task_id, source, effect, capability, resource_json,
+        operations_json, audit_reason, created_at
+      ) VALUES (?, ?, 'preset', ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const [effect, rules] of [
+      ['allow', expanded.allowRules],
+      ['immutable-deny', expanded.immutableDeny ?? []],
+    ] as const)
+      for (const rule of rules)
+        insert.run(
+          randomUUID(),
+          taskId,
+          effect,
+          rule.capability,
+          JSON.stringify(rule.resourceSet),
+          JSON.stringify(rule.operations),
+          rule.auditReason ?? null,
+          now,
+        );
   }
 
   listTasks(): TaskSummary[] {
@@ -14647,8 +14770,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     if (
       state.approval_policy !== canonical.approvalPolicy ||
       state.approval_reason !== (canonical.approvalReason ?? null) ||
-      JSON.stringify(parsed.map(permissionRuleKey).sort()) !==
-        JSON.stringify(expectedRules.map(permissionRuleKey).sort())
+      permissionRuleSetKey(parsed) !== permissionRuleSetKey(expectedRules)
     )
       return {
         preset: 'ask',
@@ -14697,28 +14819,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           policyEpoch,
           now,
         );
-      this.db.prepare('DELETE FROM permission_rules WHERE task_id = ?').run(taskId);
-      const insert = this.db.prepare(
-        `INSERT INTO permission_rules(
-          id, task_id, source, effect, capability, resource_json,
-          operations_json, audit_reason, created_at
-        ) VALUES (?, ?, 'preset', ?, ?, ?, ?, ?, ?)`,
-      );
-      for (const [effect, rules] of [
-        ['allow', expanded.allowRules],
-        ['immutable-deny', expanded.immutableDeny ?? []],
-      ] as const)
-        for (const rule of rules)
-          insert.run(
-            randomUUID(),
-            taskId,
-            effect,
-            rule.capability,
-            JSON.stringify(rule.resourceSet),
-            JSON.stringify(rule.operations),
-            rule.auditReason ?? null,
-            now,
-          );
+      this.writePresetRules(taskId, expanded, now);
       this.quarantineHeldMutationForTask(taskId, 'policy_epoch_changed', now);
       this.enqueuePermissionPolicyEpoch(taskId, policyEpoch, now);
       return {
@@ -22426,6 +22527,34 @@ function parseResourceSet(json: string): ResourceSet {
       kind: 'path-classification',
       classifications: record['classifications'] as ResourceSet & string[],
     } as ResourceSet;
+  if (
+    record['kind'] === 'provider-disclosure' &&
+    Object.keys(record).every(
+      (key) => key === 'kind' || key === 'pathClassifications' || key === 'classifications',
+    ) &&
+    Array.isArray(record['pathClassifications']) &&
+    record['pathClassifications'].length > 0 &&
+    record['pathClassifications'].every((item) =>
+      [
+        'workspace',
+        'external',
+        'app-private',
+        'os-protected',
+        'credential',
+        'signing-key',
+        'update-key',
+        'unclassified',
+      ].includes(item as string),
+    ) &&
+    Array.isArray(record['classifications']) &&
+    record['classifications'].length > 0 &&
+    record['classifications'].every((item) => item === 'sensitive' || item === 'uncertain')
+  )
+    return {
+      kind: 'provider-disclosure',
+      pathClassifications: record['pathClassifications'] as PathClassification[],
+      classifications: record['classifications'] as ('sensitive' | 'uncertain')[],
+    };
   if (record['kind'] === 'network-origin' && typeof record['origin'] === 'string')
     return { kind: 'network-origin', origin: record['origin'] };
   if (record['kind'] === 'secret-exact' && typeof record['secretId'] === 'string')
@@ -22532,6 +22661,13 @@ function parseResourceSet(json: string): ResourceSet {
         record['attachmentByteCount'] === undefined ? 0 : (record['attachmentByteCount'] as number),
     };
   throw new Error('Invalid stored resource set');
+}
+
+/** Order-independent identity of a stored or expanded preset rule set. */
+function permissionRuleSetKey(
+  entries: readonly { effect: 'allow' | 'immutable-deny'; rule: PermissionRule }[],
+): string {
+  return JSON.stringify(entries.map(permissionRuleKey).sort());
 }
 
 function permissionRuleKey(input: {

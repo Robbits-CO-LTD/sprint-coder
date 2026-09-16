@@ -636,6 +636,219 @@ describe('access preset expansion', () => {
     });
   });
 
+  describe('Provider disclosure of a Workspace file', () => {
+    const disclosureResource = {
+      kind: 'provider-disclosure',
+      providerId: 'openai',
+      canonicalPath: '/workspace/src/notes.txt',
+      sourceDigest: 'd'.repeat(64),
+      disclosedDigest: 'e'.repeat(64),
+      classification: 'sensitive',
+      pathClassification: 'workspace',
+      reasons: ['known-secret-pattern'],
+      classifierVersion: 'provider-disclosure-v4',
+    } as const satisfies Extract<PermissionRequest['resource'], { kind: 'provider-disclosure' }>;
+
+    const disclosureRequestFor = (
+      resource: Extract<PermissionRequest['resource'], { kind: 'provider-disclosure' }>,
+    ) =>
+      ({
+        taskId: 'task-1',
+        subjectId: 'tool:builtin/provider-workspace/read@1',
+        capability: 'workspace.read',
+        resource,
+        operation: 'read',
+        providerEgress: 'none',
+        sandboxProfile: 'read-only',
+        executionSpecDigest: EXECUTION_DIGEST,
+        reviewerInputDigest: REVIEWER_INPUT_DIGEST,
+        risk: 'low',
+      }) as const satisfies PermissionRequest;
+
+    // Main builds the ceiling from the exact disclosure facts, so the preset rule is the only
+    // stage that can separate Full from Auto/Ask here.
+    const disclosureCeiling = (
+      resource: Extract<PermissionRequest['resource'], { kind: 'provider-disclosure' }>,
+    ) =>
+      ({
+        entries: [
+          {
+            capability: 'workspace.read',
+            resourceSet: {
+              kind: 'provider-disclosure-exact',
+              providerId: resource.providerId,
+              canonicalPath: resource.canonicalPath,
+              sourceDigest: resource.sourceDigest,
+              disclosedDigest: resource.disclosedDigest,
+              classifierVersion: resource.classifierVersion,
+            },
+            operations: ['read'],
+            expiresAt: '2026-07-22T13:00:00.000Z',
+            providerEgress: ['none'],
+            sandboxProfiles: ['read-only'],
+          },
+        ],
+        maxWorkerDepth: 0,
+        maxConcurrentWorkers: 0,
+      }) as const satisfies CapabilityCeiling;
+
+    const disclosurePolicy = (
+      preset: AccessPreset,
+      resource: Extract<PermissionRequest['resource'], { kind: 'provider-disclosure' }>,
+    ) => ({
+      managedDeny: [],
+      projectDeny: [],
+      parentCeiling: disclosureCeiling(resource),
+      modeCeiling: disclosureCeiling(resource),
+      sandbox: { feasible: true, profile: 'read-only' as const },
+      rememberedGrants: [],
+      policyEpoch: 4,
+      ...expandAccessPreset(preset),
+    });
+
+    it('discloses a sensitive Workspace file under Full without asking again', () => {
+      expect(
+        evaluatePermissionPolicy({
+          request: disclosureRequestFor(disclosureResource),
+          policy: disclosurePolicy('full', disclosureResource),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'allow', reason: 'preset_full_disclosure' });
+    });
+
+    it('discloses an uncertain Workspace file under Full without asking again', () => {
+      const uncertain = { ...disclosureResource, classification: 'uncertain' } as const;
+      expect(
+        evaluatePermissionPolicy({
+          request: disclosureRequestFor(uncertain),
+          policy: disclosurePolicy('full', uncertain),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'allow', reason: 'preset_full_disclosure' });
+    });
+
+    it('still asks under Auto and Ask', () => {
+      expect(
+        evaluatePermissionPolicy({
+          request: disclosureRequestFor(disclosureResource),
+          policy: disclosurePolicy('auto', disclosureResource),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'approval_required', reason: 'preset_auto_unknown' });
+      expect(
+        evaluatePermissionPolicy({
+          request: disclosureRequestFor(disclosureResource),
+          policy: disclosurePolicy('ask', disclosureResource),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'approval_required', reason: 'approval_policy_ask' });
+    });
+
+    // The disclosure resource carries the guard's path classification precisely so the immutable
+    // deny cannot be bypassed by routing a protected file through the disclosure lane.
+    it('denies a protected path under every preset, disclosure lane included', () => {
+      for (const pathClassification of [
+        'app-private',
+        'os-protected',
+        'credential',
+        'signing-key',
+        'update-key',
+        'unclassified',
+      ] as const) {
+        const resource = { ...disclosureResource, pathClassification } as const;
+        for (const preset of ['ask', 'auto', 'full'] as const)
+          expect(
+            evaluatePermissionPolicy({
+              request: disclosureRequestFor(resource),
+              policy: disclosurePolicy(preset, resource),
+              now: NOW,
+            }),
+          ).toMatchObject({ decision: 'deny', reason: 'immutable_protected_resource' });
+      }
+    });
+
+    it('rejects a disclosure request whose path classification is missing or invalid', () => {
+      const { pathClassification: _omitted, ...withoutClassification } = disclosureResource;
+      for (const resource of [
+        withoutClassification,
+        { ...disclosureResource, pathClassification: 'not-a-classification' },
+      ])
+        expect(
+          evaluatePermissionPolicy({
+            request: disclosureRequestFor(
+              resource as Extract<PermissionRequest['resource'], { kind: 'provider-disclosure' }>,
+            ),
+            policy: disclosurePolicy('full', disclosureResource),
+            now: NOW,
+          }),
+        ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
+    });
+
+    it('binds the Full disclosure rule to disclosure resources only', () => {
+      const disclosureSet = expandAccessPreset('full').allowRules.find(
+        (rule) => rule.auditReason === 'preset_full_disclosure',
+      )?.resourceSet;
+      expect(disclosureSet).toMatchObject({ kind: 'provider-disclosure' });
+      expect(resourceContains(disclosureSet!, disclosureResource)).toBe(true);
+      expect(
+        resourceContains(disclosureSet!, {
+          ...disclosureResource,
+          pathClassification: 'credential',
+        }),
+      ).toBe(false);
+      expect(resourceContains(disclosureSet!, workspaceWriteRequest.resource)).toBe(false);
+      expect(
+        resourceContains(disclosureSet!, {
+          kind: 'external-path',
+          canonicalPath: '/Users/example/notes.txt',
+          identityDigest: PATH_DIGEST,
+          classification: 'external',
+        }),
+      ).toBe(false);
+    });
+
+    it('leaves the Full external filesystem read rule unchanged', () => {
+      const externalRead = {
+        ...workspaceWriteRequest,
+        capability: 'filesystem.external.read',
+        operation: 'read',
+        resource: {
+          kind: 'external-path',
+          canonicalPath: '/Users/example/notes.txt',
+          identityDigest: PATH_DIGEST,
+          classification: 'external',
+        },
+      } as const satisfies PermissionRequest;
+      const externalCeiling = {
+        entries: [
+          {
+            capability: 'filesystem.external.read',
+            resourceSet: { kind: 'path-classification', classifications: ['external'] },
+            operations: ['read'],
+            expiresAt: '2026-07-22T13:00:00.000Z',
+            providerEgress: ['none'],
+            sandboxProfiles: ['workspace-write'],
+          },
+        ],
+        maxWorkerDepth: 0,
+        maxConcurrentWorkers: 0,
+      } as const satisfies CapabilityCeiling;
+
+      expect(
+        evaluatePermissionPolicy({
+          request: externalRead,
+          policy: {
+            ...basePolicy(),
+            parentCeiling: externalCeiling,
+            modeCeiling: externalCeiling,
+            ...expandAccessPreset('full'),
+          },
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'allow', reason: 'preset_full' });
+    });
+  });
+
   it('keeps protected resources and provider egress denied even under Full', () => {
     const protectedWrite = {
       ...workspaceWriteRequest,

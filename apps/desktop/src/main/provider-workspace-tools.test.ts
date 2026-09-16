@@ -74,6 +74,21 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+/**
+ * A Workspace root for a test that asserts what a path classifies as. Windows temp lives under
+ * `AppData`, which `classifyWorkspacePath` deliberately calls app-private, so a fixture there
+ * would never classify as an ordinary Workspace file; the CI checkout is the ordinary path on
+ * Windows. POSIX uses the system temp because local worktrees may themselves sit under a
+ * protected directory such as `~/.codex`. Same idiom as path-guard.test.ts and
+ * permission-broker.test.ts. Tests that do not assert a classification keep using `tmpdir()`.
+ */
+async function classifiablePathFixtureRoot(prefix: string): Promise<string> {
+  const fixtureBase = process.platform === 'win32' ? process.cwd() : tmpdir();
+  const root = await mkdtemp(join(fixtureBase, prefix));
+  roots.push(root);
+  return root;
+}
+
 async function harness(
   options: { beforeExecute?: (root: string) => boolean; project?: boolean } = {},
 ) {
@@ -954,8 +969,7 @@ describe('Provider workspace read tools', () => {
   });
 
   it('presents only a bounded redacted disclosure preview to the authorizer', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-disclosure-'));
-    roots.push(root);
+    const root = await classifiablePathFixtureRoot('.sprint-coder-provider-disclosure-');
     await writeFile(join(root, '.env'), 'DATABASE_URL=postgres://alice:hunter2@example.com/db\n');
     const workspace: EffectiveWorkspaceSet = {
       source: 'task',
@@ -1005,8 +1019,118 @@ describe('Provider workspace read tools', () => {
         kind: 'provider-disclosure',
         sourceDigest: facts?.sourceDigest,
         disclosedDigest: facts?.disclosedDigest,
+        // `.env` is a credential path: the disclosure resource must carry that classification so
+        // the immutable protected-path deny still applies on this lane.
+        pathClassification: 'credential',
       },
       resourceSet: { kind: 'provider-disclosure-exact' },
+    });
+  });
+
+  it('classifies the disclosure of an ordinary Workspace file as a Workspace path', async () => {
+    const root = await classifiablePathFixtureRoot('.sprint-coder-disclosure-workspace-');
+    await writeFile(join(root, 'notes.txt'), 'password=hunter2\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'e'.repeat(64),
+    };
+    let permissionFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        permissionFacts = approvalFactsForTool(request, 'workspace.read');
+        return { decision: 'deny', reason: 'user_denied' };
+      },
+    });
+    const context = {
+      taskId: 'task-disclosure-workspace',
+      turnId: 'turn-disclosure-workspace',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'openai');
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-workspace-disclosure',
+        providerName: 'read_file',
+        input: { path: 'notes.txt' },
+      }),
+    ).rejects.toThrow(/authorization deny/u);
+    expect(permissionFacts).toMatchObject({
+      resource: {
+        kind: 'provider-disclosure',
+        classification: 'sensitive',
+        pathClassification: 'workspace',
+      },
+    });
+  });
+
+  it('classifies a sealed Team Worker disclosure by its isolation-relative path', async () => {
+    const root = await classifiablePathFixtureRoot('.sprint-coder-disclosure-sealed-');
+    // A managed Worker Workspace lives under the app's own private directory, so without the
+    // sealed-isolation authority every file in it would classify as app-private and be denied.
+    // The `AppData` segment is the fixture's own on every platform, so the sealed and unsealed
+    // answers come from this path rather than from where the platform happens to put temp files.
+    const sealedRoot = join(root, 'AppData', 'team-worker');
+    await mkdir(sealedRoot, { recursive: true });
+    await writeFile(join(sealedRoot, 'notes.txt'), 'password=hunter2\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        {
+          rootId: 'root-a',
+          path: sealedRoot,
+          label: 'Worker',
+          role: 'primary',
+          status: 'available',
+        },
+      ],
+      digest: 'f'.repeat(64),
+    };
+    let sealedFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    let unsealedFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        sealedFacts = approvalFactsForTool(request, 'workspace.read', 'sealed-team-isolation');
+        unsealedFacts = approvalFactsForTool(request, 'workspace.read');
+        return { decision: 'deny', reason: 'user_denied' };
+      },
+    });
+    const context = {
+      taskId: 'task-disclosure-sealed',
+      turnId: 'turn-disclosure-sealed',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'openai');
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-sealed-disclosure',
+        providerName: 'read_file',
+        input: { path: 'notes.txt' },
+      }),
+    ).rejects.toThrow(/authorization deny/u);
+    expect(sealedFacts).toMatchObject({
+      resource: { kind: 'provider-disclosure', pathClassification: 'workspace' },
+    });
+    expect(unsealedFacts).toMatchObject({
+      resource: { kind: 'provider-disclosure', pathClassification: 'app-private' },
     });
   });
 
