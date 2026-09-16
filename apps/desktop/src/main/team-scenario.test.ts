@@ -12,7 +12,30 @@ import { TEAM_SCENARIO_TRIGGER } from './team-tools';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
-const scenarioWaitTimeoutMs = process.platform === 'win32' ? 15_000 : 5_000;
+// Measured on an M-series Mac (M5, Node 22), three consecutive runs of the Electron child: the
+// three-hire scenario below costs 4.40 s / 4.40 s / 4.48 s, because the mock Runtime walks it
+// through a long chain of 8-12 ms `pause` hops rather than any single slow call. Against that, the
+// old 5 s non-Windows budget left ~11% of headroom on the fastest hardware this repo runs on, and
+// main's job 104811263452 (macOS test shard 1/3) spent it: the scenario expired at the 5 s
+// deadline. That is a budget shortfall, not a hang — the other two scenarios in the same child
+// passed there (1.20 s and 1.02 s against 0.72 s and 0.69 s on this Mac) and the per-test ceiling
+// was never reached. Every wait here is state-based (`waitFor` polls `published`, never a fixed
+// sleep) and the pauses it waits on belong to the mock Runtime, so the allowance is the only lever
+// this file has.
+//
+// The sibling SQLite bridge children of that same job degraded 2.9-4.0x against this Mac
+// (user-file-save-saga 1.31 -> 3.91 s, team-persistence 1.60 -> 4.66 s,
+// team-coordinator-persistence 1.69 -> 6.35 s, team-execution-persistence 1.78 -> 6.82 s,
+// project-persistence 2.10 -> 8.38 s), inside the 3.7-7.3x that PR #483 measured for hosted macOS
+// runners. 4.5 s at that worst observed 4.0x projects to 18 s, so 30 s covers the scenario at
+// 6.7x: past the 5.1x #483 measured for the pure-SQLite children and into its 7.3x tail. Windows
+// keeps the 15 s its own runs measured and have never exceeded; scaling that column by a factor
+// measured on macOS runners would only blunt a real hang there.
+//
+// The 45 s per-test ceilings below must stay above this budget: a ceiling under it would make
+// `scenarioWaitTimeoutMs` unreachable and report vitest's opaque timeout instead of
+// `waitFor timed out`. 45 s leaves room for the SQLite setup and assertions around each wait.
+const scenarioWaitTimeoutMs = process.platform === 'win32' ? 15_000 : 30_000;
 
 afterEach(() => {
   for (const directory of cleanup.splice(0))
@@ -105,7 +128,7 @@ if (runsWithElectronAbi)
       expect(finalText).toContain('実装');
       expect(finalText).toContain('レビュー');
       persistence.close();
-    }, 20_000);
+    }, 45_000);
 
     it('does not start the team scenario for ordinary input', async () => {
       const persistence = createPersistence();
@@ -128,7 +151,7 @@ if (runsWithElectronAbi)
       await waitFor(() => published.some((event) => event.type === 'turn.completed'));
       expect(persistence.getTeamByTask(task.id)).toBeNull();
       persistence.close();
-    }, 20_000);
+    }, 45_000);
 
     it('fails closed instead of running the fixed scenario for a natural Team continuation', async () => {
       const persistence = createPersistence();
@@ -164,7 +187,7 @@ if (runsWithElectronAbi)
       expect(finalText).toContain('組み込みTeam Skillを利用できない');
       expect(finalText).toContain('架空のメンバーや別のsubagentには置き換えていません');
       persistence.close();
-    }, 20_000);
+    }, 45_000);
   });
 else
   describe('Deterministic mock team scenario Electron ABI bridge', () => {
@@ -180,9 +203,15 @@ else
           cwd: process.cwd(),
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          timeout: 60_000,
+          // The child runs all three scenarios above, so this has to clear their 45 s ceilings
+          // rather than the 14.2 s the child actually took in job 104811263452 (6.8 s on this
+          // Mac). At 60 s a single hung scenario would be killed by the spawn before its own
+          // ceiling could report which wait expired. 180 s is what `persistenceBridgeTimeoutMs`
+          // and `graphBridgeTimeout` (PR #483) already allow the same class of child, and it
+          // still bounds a genuine process-level hang.
+          timeout: 180_000,
         },
       );
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    }, 65_000);
+    }, 185_000);
   });
