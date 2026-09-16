@@ -26,7 +26,7 @@ constexpr bool IsTypeTextScalar(std::uint32_t scalar) noexcept {
 }
 
 constexpr std::uint16_t kProtocolVersion = 1;
-constexpr std::uint16_t kApiVersion = 1;
+constexpr std::uint16_t kApiVersion = 2;
 constexpr std::uint32_t kMaxMetadataBytes = 64 * 1024;
 constexpr std::uint32_t kMaxBinaryBytes = 16 * 1024 * 1024;
 constexpr std::uint32_t kMaxFrameBytes = kMaxMetadataBytes + kMaxBinaryBytes;

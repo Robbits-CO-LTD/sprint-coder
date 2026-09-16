@@ -66,7 +66,7 @@ function packageFixture(
       platform,
       architecture: platform === 'darwin' ? 'arm64' : 'x64',
       protocolVersion: 1,
-      apiVersion: 1,
+      apiVersion: 2,
       nativeVersion: 'computer-use-native-gate0-1',
       moduleDigest: createHash('sha256').update(bytes).digest('hex'),
       binaryDigest: createHash('sha256').update(bytes).digest('hex'),
@@ -319,7 +319,7 @@ describe('Windows native helper compile boundary', () => {
       assertWindowsComputerUseHelperHandshake(
         {
           protocolVersion: 1,
-          apiVersion: 1,
+          apiVersion: 2,
           platform: 'win32',
           sourceCommit: 'd'.repeat(40),
         },
@@ -1311,7 +1311,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       protocolVersion: 1,
-      apiVersion: 1,
+      apiVersion: 2,
       nativeVersion: 'computer-use-native-gate0-1',
       moduleDigest: 'a'.repeat(64),
       binaryDigest: 'a'.repeat(64),
@@ -1332,7 +1332,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       platform: 'darwin',
       architecture: 'arm64',
       requireAddon: () => ({
-        probe: () => ({ protocolVersion: 1, apiVersion: 1, available: true, backend: 'fixture' }),
+        probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
       }),
     });
     expect(binding.probe.available).toBe(false);
@@ -1342,8 +1342,8 @@ describe('Computer Use native manifest and runtime gate', () => {
   it('requires the feature flag, packaged path, digest, and native handshake', () => {
     const fixture = packageFixture();
     const addon = {
-      probe: () => ({ protocolVersion: 1, apiVersion: 1, available: true, backend: 'fixture' }),
-      handshake: () => ({ protocolVersion: 1, apiVersion: 1, platform: 'darwin', napiVersion: 10 }),
+      probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+      handshake: () => ({ protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 }),
     };
     const binding = loadComputerUseNative({
       environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
@@ -1396,7 +1396,7 @@ describe('Computer Use native manifest and runtime gate', () => {
           return {
             probe: () => ({
               protocolVersion: 1,
-              apiVersion: 1,
+              apiVersion: 2,
               available: true,
               backend: 'fixture',
             }),
@@ -1404,7 +1404,7 @@ describe('Computer Use native manifest and runtime gate', () => {
         },
         probeHelper: () => {
           loaded = true;
-          return { protocolVersion: 1, apiVersion: 1, available: true, backend: 'fixture' };
+          return { protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' };
         },
       });
       expect(binding.probe.available).toBe(false);
@@ -1424,7 +1424,7 @@ describe('Computer Use native manifest and runtime gate', () => {
         packaged: true,
         platform: 'darwin',
         manifest,
-        probe: { protocolVersion: 1, apiVersion: 1, available: false, backend: 'fixture' },
+        probe: { protocolVersion: 1, apiVersion: 2, available: false, backend: 'fixture' },
         artifactDigest: manifest['moduleDigest'],
       }).available,
     ).toBe(false);
@@ -1435,11 +1435,11 @@ describe('Computer Use native manifest and runtime gate', () => {
     const addon = {
       probe: () => ({
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         available: false,
         backend: 'fixture',
       }),
-      handshake: () => ({ protocolVersion: 1, apiVersion: 1, platform: 'darwin', napiVersion: 10 }),
+      handshake: () => ({ protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 }),
     };
     const binding = loadComputerUseNative({
       environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
@@ -1469,7 +1469,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       verifySignature: () => 'a'.repeat(64),
       probeHelper: () => ({
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         sourceCommit: 'f'.repeat(40),
         platform: 'win32',
         napiVersion: 10,
@@ -1513,7 +1513,7 @@ describe('Computer Use native manifest and runtime gate', () => {
       verifySignature: () => 'a'.repeat(64),
       probeHelper: () => ({
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         sourceCommit: 'e'.repeat(40),
         platform: 'win32',
         napiVersion: 10,

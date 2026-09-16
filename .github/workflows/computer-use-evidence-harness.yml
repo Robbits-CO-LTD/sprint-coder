@@ -178,7 +178,7 @@ jobs:
           run-id: ${{ inputs.package_run_id }}
           github-token: ${{ github.token }}
 
-      - name: Derive package-bound schema-v3 evidence from machine events
+      - name: Derive package-bound schema-v4 evidence from machine events
         id: seal
         shell: bash
         env:

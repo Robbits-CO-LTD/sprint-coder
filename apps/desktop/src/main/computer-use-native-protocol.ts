@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 export const COMPUTER_USE_NATIVE_PROTOCOL_VERSION = 1 as const;
-export const COMPUTER_USE_NATIVE_API_VERSION = 1 as const;
+export const COMPUTER_USE_NATIVE_API_VERSION = 2 as const;
 export const COMPUTER_USE_NATIVE_NAPI_VERSION = 10 as const;
 export const COMPUTER_USE_NATIVE_MAX_METADATA_BYTES = 64 * 1024;
 export const COMPUTER_USE_NATIVE_MAX_BINARY_BYTES = 16 * 1024 * 1024;

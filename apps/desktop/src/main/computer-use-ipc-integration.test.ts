@@ -346,6 +346,24 @@ describe('Computer Use Main IPC integration', () => {
     );
   });
 
+  it('rejects changing a round limit after the trusted start gesture', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;
+    const input = { ...quickStartInput(), maxRounds: 3 };
+    fixture.activation.consume.mockReturnValueOnce({
+      token: 'bounded-start',
+      intent: startActivationIntent(input),
+    });
+    await expect(handler({ ...input, maxRounds: 25 }, {}, {})).rejects.toBeTruthy();
+    expect(fixture.controller.start).not.toHaveBeenCalled();
+    fixture.activation.consume.mockReturnValueOnce({
+      token: 'bounded-start',
+      intent: startActivationIntent(input),
+    });
+    await handler(input, {}, {});
+    expect(fixture.controller.start).toHaveBeenCalledWith(input);
+  });
+
   it('does not authorize target full access from the Sprint Coder application locale', async () => {
     const fixture = captureComputerUseHandlers();
     const startHandler = fixture.handlers.get(IPC_CHANNELS.computerUseStart)!;

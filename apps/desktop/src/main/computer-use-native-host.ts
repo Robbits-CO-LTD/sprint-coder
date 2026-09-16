@@ -8,6 +8,8 @@ import {
   computerUseModeSchema,
   computerUsePolicyLanguageSchema,
   computerUseResultSchema,
+  computerUseNativeInputReceiptSchema,
+  computerUseNativeCloseReceiptSchema,
   computerUseWindowCandidateSchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
@@ -15,6 +17,7 @@ import {
   type ComputerUseObservation,
   type ComputerUsePolicyLanguage,
   type ComputerUseMode,
+  type ComputerUseNativeInputReceipt,
 } from '@sprint-coder/contracts';
 import type {
   ComputerUseNativeActionResult,
@@ -32,6 +35,22 @@ import { computerUseActionDigest } from './computer-use-action';
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
 export const COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE = 'native_picker_unavailable' as const;
 export const COMPUTER_USE_NATIVE_CONTROLLER_UNAVAILABLE = 'native_controller_unavailable' as const;
+
+/**
+ * Cancel only waits for native to invalidate the input epoch, so it keeps a short emergency
+ * acknowledgement deadline. Close additionally waits for the native stop lane to drain, and only a
+ * verified close receipt releases the process-local input quarantine. The drain budget therefore
+ * has to come from the native side: on macOS `ExecuteNativeStop` takes the same serial dispatch
+ * lock as start/observe/dispatch and has no internal timeout of its own
+ * (computer-use-native/computer_use_macos.mm), and the Windows helper transport already budgets
+ * 10s for a close round trip (`operationTimeoutMilliseconds` in computer-use-native-windows.ts).
+ * A shorter close deadline turns an ordinary drain into `native_stop_unconfirmed`, which disables
+ * observe/control for the whole host until restart because the Controller drops the session handle
+ * after a failed close. Quarantine on a genuinely unconfirmed stop is intentional; tripping on a
+ * slow but successful drain is not.
+ */
+const COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = 1_000;
+const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
 
 export class ComputerUseNativeUnavailableError extends Error {
   constructor(readonly reasonCode: string) {
@@ -54,6 +73,7 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
+  stopTimeoutMs?: number;
   windowsPhysicalBoundsToDip?: (bounds: ComputerUseNativeBounds) => ComputerUseNativeBounds;
 }>;
 
@@ -91,19 +111,50 @@ export function createComputerUseNativeHost(
   // not advertise all package/handshake gates as ready.
   const handshakeReady =
     packageReady &&
+    binding.manifest.protocolVersion === 1 &&
+    binding.manifest.apiVersion === 2 &&
     binding.probe.protocolVersion === 1 &&
-    binding.probe.apiVersion === 1 &&
+    binding.probe.apiVersion === 2 &&
     addon !== null &&
     controllerReady;
   const sessions = new Map<string, InternalNativeSession>();
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
+  const inputAttemptsBySession = new Map<string, number>();
+  const stopEpochs = new Map<string, number>();
+  const confirmedClosed = new Set<string>();
+  let inputQuarantined = false;
+
+  const inputReceipt = (
+    record: Record<string, unknown>,
+    sessionId: string,
+    cancelEpoch: number,
+  ): ComputerUseNativeInputReceipt => {
+    if (!sessions.has(sessionId))
+      throw new ComputerUseNativeUnavailableError('native_input_receipt_unconfirmed');
+    const parsed = computerUseNativeInputReceiptSchema.safeParse({
+      sessionId: record['sessionId'],
+      cancelEpoch: record['cancelEpoch'],
+      inputAttemptCount: record['inputAttemptCount'],
+    });
+    const previous = inputAttemptsBySession.get(sessionId);
+    if (
+      !parsed.success ||
+      parsed.data.sessionId !== sessionId ||
+      parsed.data.cancelEpoch !== cancelEpoch ||
+      (previous !== undefined && parsed.data.inputAttemptCount < previous)
+    )
+      throw new ComputerUseNativeUnavailableError('native_input_receipt_unconfirmed');
+    inputAttemptsBySession.set(sessionId, parsed.data.inputAttemptCount);
+    return parsed.data;
+  };
 
   const unavailableReason = (): string => {
     if (!packageReady) return normalizeReason(binding.probe.reason) || 'unsigned_package';
     if (!pickerReady) return COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE;
     if (!controllerReady) return COMPUTER_USE_NATIVE_CONTROLLER_UNAVAILABLE;
     if (!handshakeReady) return normalizeReason(binding.probe.reason) || 'handshake_failed';
+    if (inputQuarantined) return 'native_stop_unconfirmed';
     if (!probeReady) return normalizeReason(binding.probe.reason) || 'native_unavailable';
     return normalizeReason(binding.probe.reason) || 'native_unavailable';
   };
@@ -121,7 +172,10 @@ export function createComputerUseNativeHost(
           ? COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE
           : unavailableReason(),
       );
-    if (!probeReady && (method === 'startSession' || method === 'observe' || method === 'dispatch'))
+    if (
+      (!probeReady || inputQuarantined) &&
+      (method === 'startSession' || method === 'observe' || method === 'dispatch')
+    )
       throw new ComputerUseNativeUnavailableError(unavailableReason());
     return (input: unknown) => addon[method](input);
   };
@@ -129,9 +183,34 @@ export function createComputerUseNativeHost(
   const invoke = async (method: NativeMethod, input: unknown): Promise<unknown> =>
     await Promise.resolve(requireMethod(method)(input));
 
+  const stopWithDeadline = async (method: 'cancel' | 'close', input: unknown): Promise<unknown> => {
+    const timeoutMs =
+      options.stopTimeoutMs ??
+      (method === 'close'
+        ? COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS
+        : COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000)
+      throw new ComputerUseNativeUnavailableError('native_stop_timeout_invalid');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        invoke(method, input),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new ComputerUseNativeUnavailableError('native_stop_unconfirmed')),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
   const host: ComputerUseNativeHost = {
     availability: (): ComputerUseAvailability => {
-      const nativeAvailable = binding.probe.available && binding.probe.capabilities.observe;
+      const nativeAvailable =
+        binding.probe.available && binding.probe.capabilities.observe && !inputQuarantined;
       const observe = packageReady && handshakeReady && nativeAvailable && controllerReady;
       const control = observe && binding.probe.capabilities.control && hasMethod(addon, 'dispatch');
       const state = !packageReady
@@ -308,7 +387,15 @@ export function createComputerUseNativeHost(
       sessions.set(session.sessionId, session);
       // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
       // implementation, but it is never returned to the controller or renderer.
-      return publicNativeSession(session);
+      try {
+        return {
+          ...publicNativeSession(session),
+          inputReceipt: inputReceipt(raw, session.sessionId, session.cancelEpoch),
+        };
+      } catch (error) {
+        await host.close(session).catch(() => undefined);
+        throw error;
+      }
     },
 
     observe: async (session, input): Promise<ComputerUseObservation> => {
@@ -385,23 +472,55 @@ export function createComputerUseNativeHost(
         result,
         reasonCode: reasonCode ?? null,
       });
-      return Object.freeze({ result, reasonCode: reasonCode ?? null });
+      return Object.freeze({
+        result,
+        reasonCode: reasonCode ?? null,
+        inputReceipt: inputReceipt(record, input.session.sessionId, input.cancelEpoch),
+      });
     },
 
-    cancel: async (session, cancelEpoch): Promise<void> => {
+    cancel: async (session, cancelEpoch): Promise<ComputerUseNativeInputReceipt> => {
       const internal = sessions.get(session.sessionId);
-      if (internal === undefined) return;
-      await invoke('cancel', { ...internal.raw, cancelEpoch });
+      if (internal === undefined)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      inputQuarantined = true;
+      stopEpochs.set(
+        session.sessionId,
+        Math.max(stopEpochs.get(session.sessionId) ?? internal.cancelEpoch, cancelEpoch),
+      );
+      const result = asRecord(
+        await stopWithDeadline('cancel', { ...internal.raw, cancelEpoch }),
+        'native_stop_unconfirmed',
+      );
+      if (result['result'] !== 'canceled' || result['drained'] !== true)
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      return inputReceipt(result, session.sessionId, cancelEpoch);
     },
 
     close: async (session): Promise<void> => {
       const internal = sessions.get(session.sessionId);
-      if (internal === undefined) return;
-      try {
-        await invoke('close', { ...internal.raw });
-      } finally {
-        sessions.delete(session.sessionId);
+      if (internal === undefined) {
+        if (confirmedClosed.has(session.sessionId)) return;
+        throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       }
+      inputQuarantined = true;
+      const cancelEpoch = (stopEpochs.get(session.sessionId) ?? internal.cancelEpoch) + 1;
+      stopEpochs.set(session.sessionId, cancelEpoch);
+      const parsed = computerUseNativeCloseReceiptSchema.safeParse(
+        await stopWithDeadline('close', { ...internal.raw, cancelEpoch }),
+      );
+      if (!parsed.success) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
+      inputReceipt(parsed.data, session.sessionId, cancelEpoch);
+      sessions.delete(session.sessionId);
+      inputAttemptsBySession.delete(session.sessionId);
+      stopEpochs.delete(session.sessionId);
+      revisionsBySession.delete(session.sessionId);
+      confirmedClosed.add(session.sessionId);
+      if (confirmedClosed.size > 128)
+        confirmedClosed.delete(confirmedClosed.values().next().value!);
+      // Only a verified close releases the process-local quarantine. Late/failed completion
+      // leaves the old session tracked and cannot open a new input lane.
+      inputQuarantined = sessions.size !== 0;
     },
   };
   return Object.freeze(host);
@@ -421,7 +540,7 @@ export function createUnavailableComputerUseNativeHost(
         platform: nativePlatform,
         architecture: platform === 'win32' ? 'x64' : process.arch === 'arm64' ? 'arm64' : 'x64',
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         nativeVersion: 'disabled',
         moduleDigest: zero,
         binaryDigest: zero,
@@ -431,7 +550,7 @@ export function createUnavailableComputerUseNativeHost(
       probe: {
         available: false,
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         backend: `${platform}-unavailable`,
         reason: 'FEATURE_FLAG_DISABLED',
         artifactPath: null,

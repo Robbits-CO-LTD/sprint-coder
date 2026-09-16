@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { ComputerUseRuntimeCapture } from './src/main/computer-use-runtime-capture';
 
 type EvidenceRow = {
   id: string;
@@ -20,6 +21,7 @@ type CaptureJourney = EvidenceRow & {
 
 type EvidenceTemplate = {
   schemaVersion: number;
+  parentClosure: { providerRuns: { windows: null; macos: null }; coverage: Record<string, null> };
   sourceCommit: string;
   sourceRunId: string;
   completedAt: string;
@@ -526,6 +528,37 @@ describe('Computer Use external final gate', () => {
     expect(result.stderr).toContain('--macos-sha256 is required');
   });
 
+  it('rejects in-process runtime observations as standalone evidence, including hand-added PASS rows', () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-runtime-'));
+    const capturePath = resolve(root, 'computer-use-machine-transcript.json');
+    const capture = new ComputerUseRuntimeCapture();
+    capture.start({
+      type: 'session',
+      platform: 'darwin',
+      sessionDigest: '1'.repeat(64),
+      appDigest: '2'.repeat(64),
+      windowDigest: '3'.repeat(64),
+      manifestDigest: '4'.repeat(64),
+    });
+    try {
+      for (const snapshot of [
+        capture.snapshot(),
+        { ...capture.snapshot(), journeys: passingEvidence().ac28Core },
+      ]) {
+        writeFileSync(capturePath, JSON.stringify(snapshot), { encoding: 'utf8', mode: 0o600 });
+        const result = spawnSync(
+          process.execPath,
+          [generatorPath, '--capture', capturePath, '--validate-capture-only'],
+          { encoding: 'utf8' },
+        );
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain('capture keys must be exactly');
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('refuses synthetic PASS capture and can only seal incomplete CLOSE_HOLD evidence', () => {
     const expected = passingEvidence();
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-cu-harness-'));
@@ -648,7 +681,9 @@ describe('Computer Use external final gate', () => {
     expect(workflow).toContain('notarized_macos_artifact:');
     expect(workflow).toContain('evidence_artifact:');
     expect(workflow).toContain('confirm_external_gate:');
-    expect(workflow).toContain('schema-v3 machine transcript');
+    expect(workflow).toContain('schema-v4 evidence');
+    expect(evidenceWorkflow).toContain('Derive package-bound schema-v4 evidence');
+    expect(workflow).toContain('Legacy Provider path rows summarize Windows only');
     expect(workflow).toContain('run-id: ${{ inputs.package_run_id }}');
     expect(workflow).toContain('run-id: ${{ inputs.evidence_run_id }}');
     expect(workflow).toContain('Evidence and package runs must use the same source commit.');
@@ -714,7 +749,7 @@ describe('Computer Use external final gate', () => {
   });
 
   it('uses the exact complete ordered Core, Safety, and Compatibility journey sets', () => {
-    expect(template.schemaVersion).toBe(3);
+    expect(template.schemaVersion).toBe(4);
     expect(template.ac28Core.map(({ id }) => id)).toEqual(canonical.core.map(({ id }) => id));
     expect(template.ac29Safety.map(({ id }) => id)).toEqual(canonical.safety.map(({ id }) => id));
     expect(template.ac30Compatibility.map(({ id }) => id)).toEqual(
@@ -766,7 +801,9 @@ describe('Computer Use external final gate', () => {
     expect(documentation).toContain('Core and Safety never accept `SKIP`');
 
     const valid = passingEvidence();
-    expect(validateFixture(valid).status).toBe(0);
+    const held = validateFixture(valid);
+    expect(held.status).not.toBe(0);
+    expect(held.stdout).toContain('"status":"CLOSE_HOLD"');
     valid.ac29Safety[0]!.evidenceCode = 'SELF_ATTESTED_PASS';
     const rejected = validateFixture(valid);
     expect(rejected.status).not.toBe(0);

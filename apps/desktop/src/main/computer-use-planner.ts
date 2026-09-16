@@ -36,6 +36,11 @@ import type {
   ComputerUsePlannerObservation,
   ComputerUsePlannerPort,
 } from './computer-use-planner-port';
+import {
+  captureComputerUseRuntime,
+  computerUseCaptureDigest,
+  type ComputerUseRuntimeCapture,
+} from './computer-use-runtime-capture';
 
 export { computerUseActionDigest, computerUseActionKind, computerUseActionRoute };
 export type {
@@ -135,6 +140,7 @@ export type ComputerUseCompatibilityBinding = Readonly<{
 }>;
 
 export type ComputerUseProviderPlannerDeps = Readonly<{
+  runtimeCapture?: ComputerUseRuntimeCapture;
   runtime: ProviderRuntime;
   connection: ProviderConnection;
   modelId: string;
@@ -200,6 +206,21 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     } as const;
     const egress = (this.deps.egress ?? authorizeComputerUseProviderEgress)(egressInput);
     if (!egress.allowed) throw new ComputerUsePlannerError('provider_egress_denied');
+    // Only an allowed request is an authorization. The aggregator counts these events, so a
+    // denial recorded here would be indistinguishable from a granted one in the count.
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'egress_authorized',
+        sessionDigest: computerUseCaptureDigest(observation.sessionId),
+        egressDigest: captureEgressConsent({
+          decision: egress,
+          providerId: this.deps.connection.providerId,
+          connectionId: this.deps.connection.id,
+          modelId: this.deps.modelId,
+          endpointTrust: this.deps.endpointTrust,
+        }),
+      }),
+    );
     const requestInput = {
       executionId,
       connectionId: this.deps.connection.id,
@@ -225,6 +246,16 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     let output = '';
     let completed = false;
     let resolved = false;
+    const startedAt = performance.now();
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'round_started',
+        sessionDigest: computerUseCaptureDigest(observation.sessionId),
+        round: input.round,
+        revision: observation.revision,
+        bindingDigest: captureProviderBinding(this.deps.compatibilityPermit),
+      }),
+    );
     try {
       for await (const event of boundedComputerUseProviderEvents(
         this.deps,
@@ -273,6 +304,23 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
       this.deps.modelId,
       this.deps.mode,
       observation.sessionId,
+    );
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'parsed',
+        ttlVerified: Date.parse(observation.expiresAt) > Date.now(),
+        // The permit was re-asserted against the Task's live compatibility binding just above.
+        selectedFromCurrentTask: true,
+        sessionDigest: computerUseCaptureDigest(observation.sessionId),
+        round: input.round,
+        revision: observation.revision,
+        bindingDigest: captureProviderBinding(this.deps.compatibilityPermit),
+        actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+        actionClass: action.type,
+        responseDigest: computerUseCaptureDigest(output),
+        responseBytes: Buffer.byteLength(output),
+        latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      }),
     );
     return action;
   }
@@ -332,6 +380,19 @@ export async function preflightComputerUseProvider(
   } as const;
   const egress = (deps.egress ?? authorizeComputerUseProviderEgress)(egressInput);
   if (!egress.allowed) throw new ComputerUsePlannerError('preflight_provider_egress_denied');
+  captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
+    capture.record({
+      type: 'egress_authorized',
+      sessionDigest: computerUseCaptureDigest(deps.sessionId),
+      egressDigest: captureEgressConsent({
+        decision: egress,
+        providerId: deps.connection.providerId,
+        connectionId: deps.connection.id,
+        modelId: deps.modelId,
+        endpointTrust: deps.endpointTrust,
+      }),
+    }),
+  );
   const executionId = `computer-preflight:${deps.sessionId}:${randomId()}`;
   const request = providerExecutionRequestSchema.parse({
     executionId,
@@ -348,6 +409,35 @@ export async function preflightComputerUseProvider(
   let output = '';
   let completed = false;
   let resolved = false;
+  const capturedBinding = {
+    sessionId: deps.sessionId,
+    connectionId: deps.connection.id,
+    providerId: deps.connection.providerId,
+    modelId: deps.modelId,
+    mode: deps.mode,
+    endpointRevision: computerUseProviderEndpointRevision(
+      deps.connection,
+      deps.modelId,
+      deps.endpointTrust,
+    ),
+    catalogRevision: deps.catalogRevision,
+    policyEpoch: deps.policyEpoch,
+    adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+  };
+  captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
+    capture.record({
+      type: 'preflight_started',
+      sessionDigest: computerUseCaptureDigest(deps.sessionId),
+      bindingDigest: captureProviderBinding(capturedBinding),
+      isOpenRouter: deps.connection.providerId === 'openrouter',
+      // Digests only: the raw connection/model id and endpoint never enter this stream.
+      connectionIdDigest: computerUseCaptureDigest(deps.connection.id),
+      modelIdDigest: computerUseCaptureDigest(deps.modelId),
+      endpointDigest: computerUseCaptureDigest(String(capturedBinding.endpointRevision)),
+      catalogDigest: computerUseCaptureDigest(String(deps.catalogRevision)),
+      policyEpoch: deps.policyEpoch,
+    }),
+  );
   try {
     for await (const event of boundedComputerUseProviderEvents(
       deps,
@@ -398,6 +488,16 @@ export async function preflightComputerUseProvider(
     deps.modelId,
     deps.endpointTrust,
   );
+  captureComputerUseRuntime(deps.runtimeCapture, (capture) =>
+    capture.record({
+      type: 'preflight_passed',
+      sessionDigest: computerUseCaptureDigest(deps.sessionId),
+      bindingDigest: captureProviderBinding({ ...capturedBinding, endpointRevision }),
+      // Reaching here means the stream resolved to this exact provider and model above; any
+      // other resolution threw preflight_provider_binding_mismatch instead of recording success.
+      fallbackUsed: false,
+    }),
+  );
   return Object.freeze({
     sessionId: deps.sessionId,
     connectionId: deps.connection.id,
@@ -413,6 +513,52 @@ export async function preflightComputerUseProvider(
       Date.now() + COMPUTER_USE_LIMITS.maxSessionHours * 60 * 60_000,
     ).toISOString(),
   });
+}
+
+/**
+ * The consent SCOPE, not the per-request payload. Egress is authorized once per Provider request
+ * (preflight and every round), and each request carries a different prompt/screenshot. What one
+ * run must hold constant is the decision and the connection/model/trust it was granted against, so
+ * a mid-run policy epoch change or connection swap produces a different digest. No prompt,
+ * screenshot, endpoint URL, credential or raw identifier is an input here.
+ */
+function captureEgressConsent(input: {
+  decision: ProviderEgressDecision;
+  providerId: string;
+  connectionId: string;
+  modelId: string;
+  endpointTrust: 'trusted-local' | 'trusted-remote' | 'untrusted' | undefined;
+}): string {
+  return computerUseCaptureDigest(
+    JSON.stringify([
+      input.decision.allowed,
+      input.decision.evaluation.decision,
+      input.decision.evaluation.policyEpoch,
+      input.providerId,
+      computerUseCaptureDigest(input.connectionId),
+      computerUseCaptureDigest(input.modelId),
+      input.endpointTrust ?? 'trusted-remote',
+      COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
+    ]),
+  );
+}
+
+function captureProviderBinding(
+  binding: Omit<ComputerUseCompatibilityPermit, 'protocolVersion' | 'expiresAt'>,
+): string {
+  return computerUseCaptureDigest(
+    JSON.stringify([
+      binding.sessionId,
+      binding.connectionId,
+      binding.providerId,
+      binding.modelId,
+      binding.mode,
+      binding.endpointRevision,
+      binding.catalogRevision,
+      binding.policyEpoch,
+      binding.adapterVersion,
+    ]),
+  );
 }
 
 function boundedComputerUseProviderEvents(

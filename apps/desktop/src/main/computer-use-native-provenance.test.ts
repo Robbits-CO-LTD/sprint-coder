@@ -22,7 +22,7 @@ describe('Computer Use native compiled provenance', () => {
       platform: 'win32',
       architecture: 'x64',
       protocolVersion: 1,
-      apiVersion: 1,
+      apiVersion: 2,
       nativeVersion: 'computer-use-native-gate0-1',
       moduleDigest: sha256('b'),
       binaryDigest: sha256('b'),
@@ -37,7 +37,7 @@ describe('Computer Use native compiled provenance', () => {
       manifest,
       probe: {
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         sourceCommit: commit('a'),
         available: true,
         backend: 'windows-uia-graphics-capture-sendinput',
@@ -73,7 +73,7 @@ describe('Computer Use native compiled provenance', () => {
         platform: 'win32',
         architecture: 'x64',
         protocolVersion: 1,
-        apiVersion: 1,
+        apiVersion: 2,
         nativeVersion: 'computer-use-native-gate0-1',
         moduleDigest: artifactDigest,
         binaryDigest: artifactDigest,
@@ -95,7 +95,7 @@ describe('Computer Use native compiled provenance', () => {
             probed += 1;
             return {
               protocolVersion: 1,
-              apiVersion: 1,
+              apiVersion: 2,
               sourceCommit: commit('a'),
               platform: 'win32',
               napiVersion: 10,

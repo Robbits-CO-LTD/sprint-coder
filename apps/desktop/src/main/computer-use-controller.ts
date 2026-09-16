@@ -11,6 +11,7 @@ import {
   computerUseObservationSchema,
   computerUsePolicyLanguageSchema,
   computerUseSessionStatusSchema,
+  computerUseRoundLimitSchema,
   computerUseWindowCandidateSchema,
   COMPUTER_USE_LIMITS,
   type ComputerAppIdentity,
@@ -25,6 +26,7 @@ import {
   type ComputerUseSessionStatus,
   type ComputerUseStopReason,
   type ComputerUseWindowCandidate,
+  type ComputerUseNativeInputReceipt,
   type ComputerUseApprovalResolveInput,
 } from '@sprint-coder/contracts';
 import {
@@ -57,6 +59,11 @@ import type {
   ComputerUsePlannerPort,
 } from './computer-use-planner-port';
 import { COMPUTER_USE_ACCESSIBILITY_POLICY_VERSION } from './computer-use-accessibility-tree';
+import {
+  captureComputerUseRuntime,
+  computerUseCaptureDigest,
+  type ComputerUseRuntimeCapture,
+} from './computer-use-runtime-capture';
 
 const COMPUTER_OBSERVE_TOOL = createToolDefinition({
   toolId: createToolId({
@@ -130,6 +137,7 @@ export type ComputerUseNativeWindow = ComputerUseWindowCandidate &
     screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
   }>;
 export type ComputerUseNativeSession = Readonly<{
+  inputReceipt?: ComputerUseNativeInputReceipt;
   sessionId: string;
   platform: 'darwin' | 'win32';
   appIdentityDigest: string;
@@ -145,6 +153,7 @@ export type ComputerUseNativeObservation = ComputerUseObservation;
 export type ComputerUseNativeActionResult = Readonly<{
   result: ComputerUseActionResult['result'];
   reasonCode: string | null;
+  inputReceipt?: ComputerUseNativeInputReceipt;
 }>;
 
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
@@ -182,7 +191,10 @@ export interface ComputerUseNativeHost {
       signal: AbortSignal;
     }>,
   ): Promise<ComputerUseNativeActionResult>;
-  cancel(session: ComputerUseNativeSession, cancelEpoch: number): Promise<void>;
+  cancel(
+    session: ComputerUseNativeSession,
+    cancelEpoch: number,
+  ): Promise<ComputerUseNativeInputReceipt | void>;
   close(session: ComputerUseNativeSession): Promise<void>;
 }
 
@@ -206,6 +218,7 @@ export type ComputerUseStartRequest = Readonly<{
   taskId: string;
   turnId?: string | undefined;
   resumeSessionId?: string | undefined;
+  maxRounds?: number | undefined;
   profileId: string;
   windowId: string;
   mode: ComputerUseMode;
@@ -234,6 +247,7 @@ export type ComputerUseAuthorization =
   ToolAuthorizationDecision | Promise<ToolAuthorizationDecision>;
 
 export type ComputerUseControllerDeps = Readonly<{
+  runtimeCapture?: ComputerUseRuntimeCapture;
   persistence: ComputerUseControllerPersistence;
   native: ComputerUseNativeHost;
   planner?: ComputerUsePlannerPort;
@@ -286,6 +300,7 @@ type SessionRecord = {
   stopPromise: Promise<void> | null;
 };
 type PlanGrant = {
+  maxRounds: number;
   actionType: ComputerUseAction['type'];
   actionDigest: string;
   targetId: string;
@@ -599,6 +614,12 @@ export class ComputerUseController {
 
   async start(input: ComputerUseStartRequest): Promise<ComputerUseSessionStatus> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
+    input = {
+      ...input,
+      maxRounds: computerUseRoundLimitSchema.parse(
+        input.maxRounds ?? COMPUTER_USE_LIMITS.maxRounds,
+      ),
+    };
     if (input.resumeSessionId !== undefined) return this.resume(input);
     if (this.sessions.size !== 0 || this.startingSessions.size !== 0 || this.startInProgress)
       throw new Error('Only one Computer Use session is allowed');
@@ -635,6 +656,7 @@ export class ComputerUseController {
       input.profileId !== record.status.profileId ||
       input.windowId !== record.status.windowId ||
       input.mode !== record.status.mode ||
+      input.maxRounds !== record.status.maxRounds ||
       input.connectionId !== record.status.connectionId ||
       input.modelId !== record.status.modelId ||
       input.expectedPolicyEpoch !== record.status.policyEpoch ||
@@ -650,7 +672,7 @@ export class ComputerUseController {
       throw new Error('Computer Use native boundary is unavailable');
     if (this.deps.canStartSession?.(record.status.taskId) === false)
       throw new Error('Computer Use requires an idle Task without active Team work');
-    if (record.status.round >= COMPUTER_USE_LIMITS.maxRounds)
+    if (record.status.round >= record.status.maxRounds)
       throw new Error('Computer Use round limit was reached');
     this.assertSessionLive(record);
     const persistedProfile = this.deps.persistence.getComputerAppProfile(record.profile.id);
@@ -918,6 +940,22 @@ export class ComputerUseController {
       maximumMode,
     );
     let planner: ComputerUsePlannerPort | null;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.start({
+        type: 'session',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        platform: native.platform,
+        appDigest: native.appIdentityDigest,
+        windowDigest: native.windowIdentityDigest,
+        manifestDigest: availability.manifestDigest ?? '0'.repeat(64),
+        ...(native.inputReceipt === undefined
+          ? {}
+          : {
+              inputAttemptCount: native.inputReceipt.inputAttemptCount,
+              cancelEpoch: native.inputReceipt.cancelEpoch,
+            }),
+      }),
+    );
     try {
       planner =
         this.deps.plannerFactory === undefined
@@ -960,7 +998,7 @@ export class ComputerUseController {
       policyEpoch,
       observationRevision: 0,
       round: 0,
-      maxRounds: COMPUTER_USE_LIMITS.maxRounds,
+      maxRounds: input.maxRounds ?? COMPUTER_USE_LIMITS.maxRounds,
       profileRevision: selectedProfile.revision,
       startedAt,
       expiresAt: new Date(
@@ -987,6 +1025,22 @@ export class ComputerUseController {
     };
     this.sessions.set(sessionId, record);
     this.startingSessions.delete(sessionId);
+    // Bound before any round can start. Digest of the limits only; no policy body or identifier.
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'cost_limit_bound',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        costLimitDigest: computerUseCaptureDigest(
+          JSON.stringify([
+            status.maxRounds,
+            COMPUTER_USE_LIMITS.maxRounds,
+            COMPUTER_USE_LIMITS.maxSessionHours,
+            status.policyEpoch,
+          ]),
+        ),
+        maxRounds: status.maxRounds,
+      }),
+    );
     record.expiryTimer = setTimeout(
       () => void this.stop(sessionId, 'limit_reached'),
       Math.max(1, Date.parse(status.expiresAt) - this.now()),
@@ -1062,7 +1116,7 @@ export class ComputerUseController {
       }
       return actionResultFromAudit(existing, sessionId, requestId);
     }
-    return (await this.broker.dispatch({
+    const result = (await this.broker.dispatch({
       taskId: record.status.taskId,
       turnId: record.turnId,
       callId: requestId,
@@ -1070,6 +1124,16 @@ export class ComputerUseController {
       input: { sessionId, action: parsed, requestId },
       signal: record.controller.signal,
     })) as ComputerUseActionResult;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.actionResult(
+        sessionId,
+        result.observationRevision,
+        parsed,
+        result.result,
+        result.reasonCode,
+      ),
+    );
+    return result;
   }
 
   async observe(
@@ -1123,6 +1187,13 @@ export class ComputerUseController {
 
   private async completeStop(record: SessionRecord, reason: ComputerUseStopReason): Promise<void> {
     const sessionId = record.status.sessionId;
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'stop_requested',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        reasonDigest: computerUseCaptureDigest(reason),
+      }),
+    );
     if (record.expiryTimer !== null) {
       clearTimeout(record.expiryTimer);
       record.expiryTimer = null;
@@ -1132,12 +1203,30 @@ export class ComputerUseController {
     record.controller.abort(new Error(`Computer Use stopped: ${reason}`));
     record.observation = null;
     this.cancelPendingApprovals(sessionId, 'computer_session_ended');
+    let nativeAcknowledged = true;
+    let inputReceipt: ComputerUseNativeInputReceipt | void = undefined;
     try {
-      await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
+      inputReceipt = await this.deps.native.cancel(record.native, record.native.cancelEpoch + 1);
     } catch {
+      nativeAcknowledged = false;
       // Stop remains fail-closed even when native acknowledgement is unavailable.
     }
-    await this.deps.native.close(record.native).catch(() => undefined);
+    await this.deps.native.close(record.native).catch(() => {
+      nativeAcknowledged = false;
+    });
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+      capture.record({
+        type: 'stop_acknowledged',
+        sessionDigest: computerUseCaptureDigest(sessionId),
+        nativeAcknowledged,
+        ...(inputReceipt === undefined
+          ? {}
+          : {
+              inputAttemptCount: inputReceipt.inputAttemptCount,
+              cancelEpoch: inputReceipt.cancelEpoch,
+            }),
+      }),
+    );
     if (record.planner !== null && record.plannerExecutionId !== null) {
       const planner = record.planner;
       const executionId = record.plannerExecutionId;
@@ -1149,7 +1238,11 @@ export class ComputerUseController {
     }
     this.broker.finishTurn(record.status.taskId, record.turnId);
     await Promise.resolve(this.deps.disarmEmergencyStop?.(sessionId)).catch(() => undefined);
-    record.status = this.status(record, 'stopped', reason);
+    record.status = this.status(
+      record,
+      'stopped',
+      nativeAcknowledged ? reason : 'native_unavailable',
+    );
     this.emit(record.status);
     this.sessions.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
@@ -1400,7 +1493,7 @@ export class ComputerUseController {
     record.status = this.status(record, 'observing', null);
     this.emit(record.status);
     if (record.planner === null) return;
-    for (let round = firstRound; round <= COMPUTER_USE_LIMITS.maxRounds; round += 1) {
+    for (let round = firstRound; round <= record.status.maxRounds; round += 1) {
       this.assertSessionLive(record);
       let observation: ComputerUseNativeObservation;
       try {
@@ -1459,14 +1552,26 @@ export class ComputerUseController {
         record.status = this.status(record, 'awaiting_approval', null, observation.revision, round);
         this.emit(record.status);
       }
+      let result: ComputerUseActionResult;
       try {
-        await this.act(sessionId, action, `${sessionId}:action:${round}`);
+        result = await this.act(sessionId, action, `${sessionId}:action:${round}`);
       } catch (error) {
         if (record.status.state === 'paused' || record.controller.signal.aborted) return;
         throw error;
       }
       if (action.type === 'wait') await waitBounded(action.milliseconds, record.controller.signal);
       if (record.status.state === 'paused') return;
+      if (round === record.status.maxRounds && result.result === 'completed') {
+        // Complete the same observation/action journey at the bound, without a further plan.
+        // Normal Broker/session checks still deny the read if Stop or policy revocation won.
+        this.assertSessionLive(record);
+        await this.observe(sessionId, `${sessionId}:observe:final`);
+        this.assertSessionLive(record);
+        if (!this.observationIsFresh(record)) {
+          await this.stop(sessionId, 'stale_observation');
+          return;
+        }
+      }
     }
     await this.stop(sessionId, 'limit_reached');
   }
@@ -1694,6 +1799,8 @@ export class ComputerUseController {
       requestId: `${sessionId}:observe:${randomUUID()}`,
       cancelEpoch: record.native.cancelEpoch,
     });
+    signal?.throwIfAborted();
+    this.assertSessionLive(record);
     return this.acceptNativeObservation(record, observation);
   }
 
@@ -1947,14 +2054,55 @@ export class ComputerUseController {
         atomicActions.length === 1
           ? requestId
           : createHash('sha256').update(`${requestId}\0${index}`).digest('hex');
-      result = await this.deps.native.dispatch({
-        session: record.native,
-        requestId: atomicRequestId,
-        action: atomicAction,
-        observationRevision,
-        cancelEpoch: record.native.cancelEpoch,
-        signal,
-      });
+      captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+        capture.record({
+          type: 'native_started',
+          cancelEpoch: record.native.cancelEpoch,
+          ttlVerified: this.observationIsFresh(record),
+          sessionDigest: computerUseCaptureDigest(record.status.sessionId),
+          requestDigest: computerUseCaptureDigest(atomicRequestId),
+          actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+          revision: observationRevision,
+        }),
+      );
+      try {
+        result = await this.deps.native.dispatch({
+          session: record.native,
+          requestId: atomicRequestId,
+          action: atomicAction,
+          observationRevision,
+          cancelEpoch: record.native.cancelEpoch,
+          signal,
+        });
+      } catch (error) {
+        captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+          capture.record({
+            type: 'native_finished',
+            sessionDigest: computerUseCaptureDigest(record.status.sessionId),
+            requestDigest: computerUseCaptureDigest(atomicRequestId),
+            result: 'unknown_effect',
+            actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+            revision: observationRevision,
+          }),
+        );
+        throw error;
+      }
+      captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
+        capture.record({
+          type: 'native_finished',
+          sessionDigest: computerUseCaptureDigest(record.status.sessionId),
+          requestDigest: computerUseCaptureDigest(atomicRequestId),
+          result: result.result,
+          ...(result.inputReceipt === undefined
+            ? {}
+            : {
+                inputAttemptCount: result.inputReceipt.inputAttemptCount,
+                cancelEpoch: result.inputReceipt.cancelEpoch,
+              }),
+          actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+          revision: observationRevision,
+        }),
+      );
       // Once native returned a bounded result, that result is authoritative even if Stop won the
       // next microtask. Downgrading a confirmed completion/rejection to canceled corrupts the
       // durable audit. A partial multi-scalar type still reaches the next loop boundary, where the
@@ -2051,12 +2199,14 @@ export class ComputerUseController {
     )
       return;
     record.planGrant = {
+      maxRounds: record.status.maxRounds,
       actionType: action.type,
       actionDigest: computerUseActionDigest(action),
       targetId,
       targetSignature: record.observation.targetSignatures[targetId],
       ...authority,
-      remaining: 16,
+      // The approval authorizes the current action; the grant covers only later rounds.
+      remaining: Math.min(16, record.status.maxRounds - Math.max(1, record.status.round)),
       expiresAt: this.now() + 60_000,
       observationRevision: record.observation.revision,
     };
@@ -2065,6 +2215,7 @@ export class ComputerUseController {
   private planGrantMatches(record: SessionRecord, action: ComputerUseAction): boolean {
     const grant = record.planGrant;
     if (grant === null || this.now() >= grant.expiresAt || grant.remaining <= 0) return false;
+    if (grant.maxRounds !== record.status.maxRounds) return false;
     if (!this.observationIsFresh(record)) return false;
     if (!computerUsePlanGrantObservationMatches(grant, record.observation)) {
       record.planGrant = null;
@@ -2151,6 +2302,8 @@ export class ComputerUseController {
       await this.stop(record.status.sessionId, 'emergency_stop');
       throw new Error('Computer Use Stop overlay could not follow the native target');
     }
+    this.assertSessionLive(record);
+    captureComputerUseRuntime(this.deps.runtimeCapture, (capture) => capture.observe(parsed));
     return parsed;
   }
 
@@ -2284,7 +2437,7 @@ export class ComputerUseController {
       stopReason: state === 'stopped' ? stopReason : null,
       pendingApproval,
       observationRevision,
-      round: Math.min(COMPUTER_USE_LIMITS.maxRounds, round),
+      round: Math.min(record.status.maxRounds, round),
       lastObservationAt:
         observationRevision > record.status.observationRevision
           ? new Date(this.now()).toISOString()

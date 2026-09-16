@@ -5195,11 +5195,14 @@ export type ComputerUseWindowCandidatesResult = z.infer<
   typeof computerUseWindowCandidatesResultSchema
 >;
 
+export const computerUseRoundLimitSchema = z.number().int().min(1).max(25);
+
 export const computerUseStartInputSchema = z
   .object({
     taskId: computerUseIdSchema,
     /** Reuses the start consent lane to resume the exact paused ephemeral session. */
     resumeSessionId: computerUseIdSchema.optional(),
+    maxRounds: computerUseRoundLimitSchema.optional(),
     profileId: computerUseIdSchema,
     windowId: computerUseIdSchema,
     mode: computerUseModeSchema.default('full_access_app'),
@@ -5267,7 +5270,7 @@ export const computerUseSessionStatusSchema = z
     policyEpoch: z.number().int().nonnegative(),
     observationRevision: z.number().int().nonnegative(),
     round: z.number().int().nonnegative().max(25),
-    maxRounds: z.literal(25),
+    maxRounds: computerUseRoundLimitSchema,
     startedAt: timestampSchema,
     expiresAt: timestampSchema,
     lastObservationAt: timestampSchema.nullable(),
@@ -5280,6 +5283,8 @@ export const computerUseSessionStatusSchema = z
   })
   .strict()
   .superRefine((status, context) => {
+    if (status.round > status.maxRounds)
+      context.addIssue({ code: 'custom', message: 'Round exceeds the session limit' });
     const startedAt = Date.parse(status.startedAt);
     const expiresAt = Date.parse(status.expiresAt);
     if (expiresAt <= startedAt)
@@ -5732,6 +5737,19 @@ export const computerUseHandshakeSchema = z
     if (!handshake.accepted && handshake.reasonCode === null)
       context.addIssue({ code: 'custom', message: 'Rejected handshakes require a reason' });
   });
+
+/** Native API 2: attempted OS input API calls, not successful effects. Ephemeral only. */
+export const computerUseNativeInputReceiptSchema = z
+  .object({
+    sessionId: computerUseIdSchema,
+    cancelEpoch: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    inputAttemptCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type ComputerUseNativeInputReceipt = z.infer<typeof computerUseNativeInputReceiptSchema>;
+export const computerUseNativeCloseReceiptSchema = computerUseNativeInputReceiptSchema
+  .extend({ result: z.literal('closed'), drained: z.literal(true) })
+  .strict();
 export type ComputerUseHandshake = z.infer<typeof computerUseHandshakeSchema>;
 
 export const COMPUTER_USE_LIMITS = Object.freeze({

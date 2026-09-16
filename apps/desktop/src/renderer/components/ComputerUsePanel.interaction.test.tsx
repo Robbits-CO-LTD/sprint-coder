@@ -156,6 +156,35 @@ function restoreDescriptor(
 }
 
 describe('Computer Use onboarding interaction', () => {
+  it('binds the valid numeric round limit to both the start gesture and request', async () => {
+    const onStart = vi.fn(async () => {});
+    const { container } = await renderOnboarding({ onStart });
+    await submitWithEnter(container, '次へ');
+    const input = required(container.querySelector<HTMLInputElement>('input[type="number"]'));
+    const start = required(
+      container.querySelector<HTMLButtonElement>('button[data-computer-use-activation="start"]'),
+    );
+    expect(input.parentElement?.textContent).toContain('最大実行回数');
+    expect(input.value).toBe('25');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    for (const value of ['', '0', '26', '1.5']) {
+      await act(async () => {
+        setter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(start.disabled).toBe(true);
+      expect(input.getAttribute('aria-invalid')).toBe('true');
+    }
+    await act(async () => {
+      setter.call(input, '3');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(start.disabled).toBe(false);
+    expect(start.dataset.computerUseIntent).toContain('"maxRounds":3');
+    await submitWithEnter(container, '開始');
+    expect(onStart).toHaveBeenCalledWith(expect.objectContaining({ maxRounds: 3 }));
+  });
+
   it('completes both screens by keyboard with full access as the first default', async () => {
     const onResolveWindows = vi.fn(async () => [targetWindow]);
     const onStart = vi.fn(async () => {});
@@ -211,6 +240,7 @@ describe('Computer Use onboarding interaction', () => {
       connectionId: 'connection-1',
       modelId: 'vision-model',
       remember: false,
+      maxRounds: 25,
       egressConfirmed: true,
     });
   });

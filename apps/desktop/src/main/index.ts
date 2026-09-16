@@ -30,6 +30,7 @@ import {
 } from './native-safe-fs';
 import { loadComputerUseNative } from './computer-use-native';
 import { createComputerUseNativeHost } from './computer-use-native-host';
+import { createComputerUseCaptureOutput } from './computer-use-capture-output';
 import {
   SealedPostImageUnsupportedError,
   SqliteEditSagaLeaseGuard,
@@ -168,8 +169,9 @@ if (squirrelStartup || !hasLock) {
       // The Computer Use host is always injected through the signed/packaged loader. In source
       // builds this produces a visible unavailable capability; no PATH or renderer fallback is
       // permitted to make desktop input reachable.
+      const computerUseBinding = loadComputerUseNative();
       const computerUseNativeHost = createComputerUseNativeHost(
-        loadComputerUseNative(),
+        computerUseBinding,
         process.platform,
         process.platform === 'win32'
           ? {
@@ -239,6 +241,19 @@ if (squirrelStartup || !hasLock) {
           workRoot: join(app.getPath('userData'), 'graph-render'),
           workerPath: join(__dirname, 'graph-render-host.js'),
           parentOrigin: trustedOrigin,
+        }),
+        createComputerUseCaptureOutput({
+          environment: process.env,
+          hello: {
+            pid: process.pid,
+            parentPid: process.ppid,
+            platform: process.platform,
+            sourceCommit: computerUseBinding.manifest.sourceCommit,
+            nativeManifestDigest:
+              computerUseNativeHost.availability().manifestDigest ?? '0'.repeat(64),
+            packaged: app.isPackaged,
+            packageReady: computerUseNativeHost.availability().packageReady,
+          },
         }),
       );
       await router.initialize();
