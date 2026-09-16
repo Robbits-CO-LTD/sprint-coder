@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import type * as NodeFs from 'node:fs';
-import { gzipSync, deflateRawSync, crc32 } from 'node:zlib';
+import { gzipSync, deflateRawSync, deflateSync, crc32 } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -456,6 +456,62 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
       vi.doUnmock('node:fs');
       vi.resetModules();
     }
+  });
+
+  it.each(['file', 'sqlite-blob'])(
+    'refuses a small-window zlib stream stored as a %s',
+    async (placement) => {
+      const input = fixture();
+      const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+      // CINFO 1, so the header starts 0x18 rather than the common 0x78.
+      const compressed = deflateSync(payload.bytes, { windowBits: 9 });
+      expect(compressed[0]).toBe(0x18);
+      const path = input.files[0]!.path;
+      if (placement === 'file') writeFileSync(path, compressed);
+      else {
+        rmSync(path);
+        const database = new Database(path);
+        try {
+          database.exec('CREATE TABLE capture (body BLOB);');
+          database.prepare('INSERT INTO capture VALUES (?)').run(compressed);
+        } finally {
+          database.close();
+        }
+      }
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]!.state).toBe('unavailable');
+      expect(result.finalGateEligible).toBe(false);
+    },
+  );
+
+  it.each([0, 1, 2, 3, 4, 5, 6, 7])(
+    'treats a zlib header with CINFO %i as an uninspectable container',
+    async (cinfo) => {
+      const input = fixture();
+      const cmf = (cinfo << 4) | 8;
+      const flg = (31 - ((cmf * 256) % 31)) % 31;
+      writeFileSync(
+        input.files[0]!.path,
+        Buffer.concat([Buffer.from([cmf, flg]), Buffer.alloc(64, 7)]),
+      );
+      expect((await inspectComputerUsePrivacySurfaces(input)).surfaces[0]!.state).toBe(
+        'unavailable',
+      );
+    },
+  );
+
+  it('does not mistake a failing zlib check byte pair for a container', async () => {
+    const input = fixture();
+    const cmf = 0x78;
+    const flg = (((31 - ((cmf * 256) % 31)) % 31) + 1) % 31;
+    expect((cmf * 256 + flg) % 31).not.toBe(0);
+    writeFileSync(
+      input.files[0]!.path,
+      Buffer.concat([Buffer.from([cmf, flg]), Buffer.alloc(64, 7)]),
+    );
+    expect((await inspectComputerUsePrivacySurfaces(input)).surfaces[0]!.state).toBe(
+      'raw_bytes_scanned',
+    );
   });
 
   it('refuses a container format it cannot open rather than calling it scanned', async () => {

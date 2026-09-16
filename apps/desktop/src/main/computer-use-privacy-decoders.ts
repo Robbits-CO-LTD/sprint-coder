@@ -17,13 +17,24 @@ const isGzip = (bytes: Buffer) => bytes.length >= 2 && bytes[0] === 0x1f && byte
 const isZip = (bytes: Buffer) => bytes.length >= 2 && bytes.readUInt16LE(0) === 0x4b50;
 const isSqlite = (bytes: Buffer) => bytes.subarray(0, 16).equals(SQLITE_MAGIC);
 /**
+/**
+ * A zlib stream has no magic number: CMF holds CM in its low nibble and CINFO in its high one,
+ * and CMF/FLG together must be a multiple of 31. Matching only 0x78 would see just CINFO=7 and
+ * miss every smaller window size, so all three rules are applied to the two-byte header.
+ */
+function isZlib(bytes: Buffer): boolean {
+  if (bytes.length < 2) return false;
+  const cmf = bytes[0]!;
+  return (cmf & 0x0f) === 8 && cmf >>> 4 <= 7 && (cmf * 256 + bytes[1]!) % 31 === 0;
+}
+
+/**
  * Containers this decoder cannot open. Searching only their compressed bytes would leave a stored
- * payload unexamined, so seeing one makes the surface incomplete rather than clean. The zlib test
- * is the real header rule (CM=8 and a valid FCHECK), not a bare magic byte.
+ * payload unexamined, so seeing one makes the surface incomplete rather than clean. Each magic is
+ * compared positionally, which already fails on a buffer too short to hold it.
  */
 function isUninspectableContainer(bytes: Buffer): boolean {
-  if (bytes.length < 4) return false;
-  if (bytes[0] === 0x78 && (bytes[0]! * 256 + bytes[1]!) % 31 === 0) return true;
+  if (isZlib(bytes)) return true;
   for (const magic of [
     [0x42, 0x5a, 0x68], // bzip2
     [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00], // xz
