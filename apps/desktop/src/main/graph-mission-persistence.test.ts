@@ -43,9 +43,22 @@ afterEach(async () => {
 const now = '2026-09-11T00:00:00.000Z';
 // mainpc: three real guarded Git/native-image reads take 25.4s; write continuation uses four
 // images plus integration. These are fixture I/O allowances, not production lifecycle deadlines.
-const gitCheckpointTimeout = process.platform === 'win32' ? 60_000 : 10_000;
-const gitPreflightTimeout = process.platform === 'win32' ? 60_000 : 1_000;
-const gitScenarioTimeout = process.platform === 'win32' ? 120_000 : 20_000;
+//
+// Only the win32 column was ever measured; the rest were sized against a developer Mac, and that
+// is what broke. Measured here on an M-series Mac: the two-root dispatch below waits 101-106 ms,
+// the write-branch re-agreement case costs 616 ms and the two-repository integration case 2.21 s.
+// The hosted macOS runners of jobs 104616511378 and 104603430488 ran this same child at 94.4 s and
+// 106.9 s against 14.6 s locally — 6.5x and 7.3x — and degraded harder than the pure-SQLite bridge
+// beside them in those same jobs (4.2x, 5.1x), because real `git` spawns and fsyncs lose the most
+// under runner contention. Both CI failures were this margin and nothing else: the 1 s dispatch
+// wait expired at line 512 with only `['a']` dispatched, and the 2.21 s case reached the 20 s
+// ceiling at ~16 s of projected cost. Every wait here is already state-based (`vi.waitFor`, never a
+// fixed sleep), so the allowance is the only lever. Each one now covers its measured local cost
+// times that contention factor with room for the tail, and `graphBridgeTimeout` still bounds a
+// genuine hang at 180 s — well above the 107 s this suite has actually needed.
+const gitCheckpointTimeout = process.platform === 'win32' ? 60_000 : 30_000;
+const gitPreflightTimeout = process.platform === 'win32' ? 60_000 : 15_000;
+const gitScenarioTimeout = process.platform === 'win32' ? 120_000 : 60_000;
 // The bridge child runs this whole suite, real Git worktrees and native image reads included, so
 // its budget tracks hosted-runner speed rather than anything the suite itself decides. On an M-
 // series Mac the child takes 14.6 s; on the hosted macOS runner of job 104595667383 the comparable
