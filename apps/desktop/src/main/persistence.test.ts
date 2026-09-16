@@ -26,7 +26,10 @@ import {
   createSessionGrant,
   createToolDefinition,
   createToolId,
+  expandAccessPreset,
+  type AccessPreset,
 } from '@sprint-coder/domain';
+import { legacyExpandAccessPreset } from './permission-preset-legacy-rules';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
 import {
@@ -6877,6 +6880,201 @@ if (runsWithElectronAbi)
       const reopened = new SqlitePersistenceClient(path);
       expect(reopened.hasAcknowledgedFullAccessRisk()).toBe(true);
       reopened.close();
+    });
+
+    // Adding a rule to an Access preset changes what `expandAccessPreset` produces, so every
+    // database written by the previous build stops matching the canonical expansion and would
+    // otherwise fall back to Ask. Opening the database re-materializes the rules of a Task whose
+    // stored rows are exactly the previous expansion, and only that one.
+    describe('legacy preset rule re-materialization', () => {
+      const storedRuleKeys = (path: string, taskId: string) => {
+        const database = new Database(path);
+        const rows = database
+          .prepare(
+            `SELECT effect, capability, resource_json, operations_json, audit_reason
+             FROM permission_rules WHERE task_id = ?`,
+          )
+          .all(taskId) as {
+          effect: string;
+          capability: string;
+          resource_json: string;
+          operations_json: string;
+          audit_reason: string | null;
+        }[];
+        database.close();
+        return rows
+          .map((row) =>
+            JSON.stringify([
+              row.effect,
+              row.capability,
+              JSON.parse(row.resource_json),
+              JSON.parse(row.operations_json),
+              row.audit_reason,
+            ]),
+          )
+          .sort();
+      };
+
+      const writeLegacyRules = (path: string, taskId: string, preset: AccessPreset) => {
+        const legacy = legacyExpandAccessPreset(preset);
+        const database = new Database(path);
+        database.prepare('DELETE FROM permission_rules WHERE task_id = ?').run(taskId);
+        const insert = database.prepare(
+          `INSERT INTO permission_rules(
+            id, task_id, source, effect, capability, resource_json,
+            operations_json, audit_reason, created_at
+          ) VALUES (?, ?, 'preset', ?, ?, ?, ?, ?, ?)`,
+        );
+        for (const [effect, rules] of [
+          ['allow', legacy.allowRules],
+          ['immutable-deny', legacy.immutableDeny],
+        ] as const)
+          for (const rule of rules)
+            insert.run(
+              randomUUID(),
+              taskId,
+              effect,
+              rule.capability,
+              JSON.stringify(rule.resourceSet),
+              JSON.stringify(rule.operations),
+              rule.auditReason ?? null,
+              '2026-09-01T00:00:00.000Z',
+            );
+        database.close();
+        return legacy;
+      };
+
+      const expectedRuleKeys = (preset: AccessPreset) => {
+        const canonical = expandAccessPreset(preset);
+        return [
+          ...canonical.allowRules.map((rule) => ['allow', rule] as const),
+          ...(canonical.immutableDeny ?? []).map((rule) => ['immutable-deny', rule] as const),
+        ]
+          .map(([effect, rule]) =>
+            JSON.stringify([
+              effect,
+              rule.capability,
+              rule.resourceSet,
+              [...rule.operations],
+              rule.auditReason ?? null,
+            ]),
+          )
+          .sort();
+      };
+
+      it.each(['full', 'auto', 'ask'] as const)(
+        'keeps the %s preset and re-materializes rules written by the previous build',
+        (preset) => {
+          const { persistence, path } = createPersistence();
+          const task = persistence.createTask();
+          persistence.setAccessPreset(task.id, preset);
+          const epochBefore = persistence.getPermissionPolicy(task.id).policyEpoch;
+          persistence.close();
+          writeLegacyRules(path, task.id, preset);
+
+          const reopened = new SqlitePersistenceClient(path);
+          const policy = reopened.getPermissionPolicy(task.id);
+          expect(policy.preset).toBe(preset);
+          // Rules the policy engine evaluated under are no longer the stored ones, so the epoch
+          // moves exactly as it does when a Project folder change re-derives Task policy.
+          expect(policy.policyEpoch).toBe(epochBefore + 1);
+          expect(storedRuleKeys(path, task.id)).toEqual(expectedRuleKeys(preset));
+          reopened.close();
+        },
+      );
+
+      it('revokes grants issued under the previous rules and announces the new epoch', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.setAccessPreset(task.id, 'full');
+        const policyEpoch = persistence.getPermissionPolicy(task.id).policyEpoch;
+        persistence.savePermissionGrant(task.id, {
+          id: 'grant-legacy',
+          subjectId: 'leader',
+          capability: 'workspace.read',
+          resourceSet: { kind: 'path-prefix', canonicalPath: '/workspace' },
+          operations: ['read'],
+          scope: 'task',
+          expiresAt: '2099-01-01T00:00:00.000Z',
+          policyEpoch,
+          providerEgress: ['none'],
+          sandboxProfiles: ['read-only'],
+        });
+        persistence.close();
+        writeLegacyRules(path, task.id, 'full');
+
+        const reopened = new SqlitePersistenceClient(path);
+        expect(
+          reopened.listPermissionGrants(task.id, 'leader', '2026-09-16T00:00:00.000Z'),
+        ).toEqual([]);
+        expect(reopened.listPendingPermissionPolicyEpochs()).toContainEqual(
+          expect.objectContaining({ taskId: task.id, policyEpoch: policyEpoch + 1 }),
+        );
+        reopened.close();
+      });
+
+      it('leaves an already canonical Task untouched across reopens', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.setAccessPreset(task.id, 'full');
+        const epoch = persistence.getPermissionPolicy(task.id).policyEpoch;
+        persistence.close();
+
+        for (const _attempt of [0, 1]) {
+          const reopened = new SqlitePersistenceClient(path);
+          expect(reopened.getPermissionPolicy(task.id)).toMatchObject({
+            preset: 'full',
+            policyEpoch: epoch,
+          });
+          reopened.close();
+        }
+      });
+
+      it('still fails closed for rules matching neither the previous nor the current expansion', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.setAccessPreset(task.id, 'full');
+        const epoch = persistence.getPermissionPolicy(task.id).policyEpoch;
+        persistence.close();
+        writeLegacyRules(path, task.id, 'full');
+        const tamper = new Database(path);
+        tamper
+          .prepare(
+            `UPDATE permission_rules SET capability = 'shell.execute',
+             resource_json = '{"kind":"all"}', operations_json = '["execute"]'
+             WHERE task_id = ? AND capability = 'workspace.read' AND effect = 'allow'`,
+          )
+          .run(task.id);
+        tamper.close();
+
+        const reopened = new SqlitePersistenceClient(path);
+        expect(reopened.getPermissionPolicy(task.id)).toMatchObject({
+          preset: 'ask',
+          policyEpoch: epoch,
+          expandedPolicy: { approvalPolicy: 'ask', allowRules: [] },
+        });
+        reopened.close();
+      });
+
+      it('leaves a Task whose stored rules cannot be parsed to the fail-closed path', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        persistence.setAccessPreset(task.id, 'full');
+        persistence.close();
+        const tamper = new Database(path);
+        tamper
+          .prepare(
+            `UPDATE permission_rules SET resource_json = '{"kind":"not-a-resource-set"}'
+             WHERE task_id = ?`,
+          )
+          .run(task.id);
+        tamper.close();
+
+        // Opening must not throw on a database it cannot interpret.
+        const reopened = new SqlitePersistenceClient(path);
+        expect(() => reopened.getPermissionPolicy(task.id)).toThrow();
+        reopened.close();
+      });
     });
 
     it('fails closed when stored preset rows are syntactically valid but non-canonical', () => {
