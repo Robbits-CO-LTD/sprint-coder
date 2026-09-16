@@ -17,9 +17,11 @@ observation, permission, or persistence operation.
 
 Events contain strict enum values, numbers, and SHA-256 digests. No screen, accessibility text,
 prompt, action body, response/reasoning, endpoint, connection/model name, or secret is retained.
-The latest session replaces the previous capture; the events kept in Main memory are bounded by
-the product's own round limit rather than by a fixed count. There is no file writer,
-replay/import interface, Renderer IPC endpoint, or automatic upload. Observer
+The latest session replaces the previous capture; the events kept in Main memory are bounded by the
+product's own round and text-action limits rather than by a fixed count, because a `type` action
+records a native receipt pair per Unicode scalar. The metadata stream is budgeted the same way and
+resets that budget on each session, so neither bound depends on process uptime. There is no file
+writer, replay/import interface, Renderer IPC endpoint, or automatic upload. Observer
 failure or overflow invalidates that session: it stops contributing events, so the session reads
 as truncated rather than complete, while the next user-initiated session still starts clean. None
 of that interrupts product operations or Stop.

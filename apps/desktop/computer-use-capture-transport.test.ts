@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createCaptureDecoder, createCaptureEncoder } from '../../computer-use-capture-wire.mjs';
+import {
+  createCaptureDecoder,
+  createCaptureEncoder,
+  type CaptureFrame,
+} from '../../computer-use-capture-wire.mjs';
 
 const root = resolve(__dirname, '../..');
 const directories: string[] = [];
@@ -70,6 +74,49 @@ describe('Computer Use normal capture framing', () => {
       }).toThrow('Computer Use capture wire is invalid');
     },
   );
+  it('budgets stream bytes per session instead of per process', () => {
+    const encode = createCaptureEncoder(nonce);
+    const frames: CaptureFrame[] = [];
+    const decoder = createCaptureDecoder(nonce, (frame) => frames.push(frame));
+    const push = (text: string) => decoder.push(Buffer.from(text));
+    push(encode('hello', hello));
+    // Three sessions, each streaming far more than the old process-lifetime budget allowed in
+    // total. A capture pipe that stays open across sessions must not run out of stream.
+    for (let session = 0; session < 3; session++) {
+      const sessionDigest = createHash('sha256').update(`session-${session}`).digest('hex');
+      push(encode('event', { ...event, sessionDigest }));
+      for (let index = 0; index < 1_500; index++)
+        push(
+          encode('event', {
+            type: 'native_started',
+            sessionDigest,
+            requestDigest: createHash('sha256').update(`request-${index}`).digest('hex'),
+            actionDigest: 'e'.repeat(64),
+            revision: 1,
+          }),
+        );
+    }
+    push(encode('end', { valid: true }));
+    expect(decoder.finish().frameCount).toBe(3 * 1_501 + 2);
+    expect(frames).toHaveLength(3 * 1_501 + 2);
+  });
+
+  it('keeps one session bounded', () => {
+    const encode = createCaptureEncoder(nonce);
+    encode('hello', hello);
+    encode('event', event);
+    expect(() => {
+      for (let index = 0; index < 200_000; index++)
+        encode('event', {
+          type: 'native_started',
+          sessionDigest: event.sessionDigest,
+          requestDigest: createHash('sha256').update(`bounded-${index}`).digest('hex'),
+          actionDigest: 'e'.repeat(64),
+          revision: 1,
+        });
+    }).toThrow();
+  });
+
   it('refuses fields capable of carrying raw bodies', () => {
     const encode = createCaptureEncoder(nonce);
     encode('hello', hello);

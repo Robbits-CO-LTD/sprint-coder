@@ -2,7 +2,17 @@ import { createHash } from 'node:crypto';
 
 export const CAPTURE_WIRE_VERSION = 1;
 export const CAPTURE_FRAME_LIMIT = 16 * 1024;
-export const CAPTURE_STREAM_LIMIT = 1024 * 1024;
+/**
+ * Per session, not per process. One session may stream COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES
+ * (~9.1 MiB) of events plus a ~288 byte frame envelope each, which is ~16.7 MiB at the
+ * COMPUTER_USE_CAPTURE_MAX_EVENTS ceiling; 24 MiB keeps margin over that without letting a single
+ * session stream without bound. Counting it per process instead would end the stream after a
+ * handful of sessions and silently drop every later one, which is the same truncation the capture
+ * budget itself had. Each `session` event opens a new window, so a long-lived capture pipe is
+ * bounded by one session's worth of bytes rather than by process uptime.
+ * computer-use-runtime-capture.test.ts pins the two budgets against each other.
+ */
+export const CAPTURE_STREAM_LIMIT = 24 * 1024 * 1024;
 const digestPattern = /^[a-f0-9]{64}$/u;
 const zero = '0'.repeat(64);
 const events = new Set([
@@ -140,6 +150,7 @@ export function createCaptureEncoder(nonce) {
     const body = { version: CAPTURE_WIRE_VERSION, nonce, sequence, previousDigest, kind, payload };
     const digest = hash(JSON.stringify(body));
     const frame = `${JSON.stringify({ ...body, digest })}\n`;
+    if (kind === 'event' && payload.type === 'session') bytes = 0;
     bytes += Buffer.byteLength(frame);
     if (Buffer.byteLength(frame) > CAPTURE_FRAME_LIMIT || bytes > CAPTURE_STREAM_LIMIT) fail();
     sequence += 1;
@@ -161,8 +172,8 @@ export function createCaptureDecoder(nonce, onFrame) {
     push(chunk) {
       if (invalid) fail();
       try {
-        bytes += chunk.length;
-        if (bytes > CAPTURE_STREAM_LIMIT) fail();
+        // Bytes are counted per accepted frame, not per chunk, so the budget can follow session
+        // boundaries. An unterminated tail is still bounded by the CAPTURE_FRAME_LIMIT check below.
         pending = Buffer.concat([pending, chunk]);
         for (;;) {
           const end = pending.indexOf(10);
@@ -199,6 +210,9 @@ export function createCaptureDecoder(nonce, onFrame) {
           validatePayload(frame.kind, frame.payload);
           const { digest, ...body } = frame;
           if (hash(JSON.stringify(body)) !== digest) fail();
+          if (frame.kind === 'event' && frame.payload.type === 'session') bytes = 0;
+          bytes += end + 1;
+          if (bytes > CAPTURE_STREAM_LIMIT) fail();
           previousDigest = digest;
           sequence += 1;
           if (frame.kind === 'end') {

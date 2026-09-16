@@ -174,24 +174,40 @@ export function captureComputerUseRuntime(
 }
 
 /**
- * The budget has to follow the product's own round limit, not the three-round journey this capture
- * was first written for. Each round records seven events (egress_authorized, round_started,
- * parsed, native_started, native_finished, action_result, observation) and a session records eight
- * outside its rounds (session, the preflight egress_authorized, preflight_started,
- * preflight_passed, cost_limit_bound, the first observation, stop_requested, stop_acknowledged).
- * At COMPUTER_USE_LIMITS.maxRounds that is 8 + 7 x 25 = 183 events, so a fixed 128 turned an
- * ordinary session into an invalidated one around round 18. Two spare events per round cover a
- * round that re-dispatches, and the session term is doubled for the same reason; the bound stays
- * fixed and small so the capture is still bounded and ephemeral.
+ * The budget has to follow the product's own limits, not the three-round journey this capture was
+ * first written for. Each round records seven events (egress_authorized, round_started, parsed,
+ * native_started, native_finished, action_result, observation) and a session records eight outside
+ * its rounds (session, the preflight egress_authorized, preflight_started, preflight_passed,
+ * cost_limit_bound, the first observation, stop_requested, stop_acknowledged). Two spare events
+ * per round cover a round that re-dispatches, and the session term is doubled for the same reason.
+ *
+ * Typing is the expensive case: ComputerUseController.dispatchNativeAction splits a `type` action
+ * per Unicode scalar and records a native_started/native_finished pair for each, so one action at
+ * COMPUTER_USE_LIMITS.maxTextActionBytes costs 8_192 events on its own. Budgeting that for every
+ * one of the 25 rounds would reserve ~200_000 events, so the typing term covers the three rounds a
+ * journey can certify (computer-use-capture-rounds.mjs requires exactly three) at the full text
+ * limit, on top of every round's ordinary cost. A session that types the maximum in more than
+ * three rounds still invalidates its own capture, which is fail-closed, confined to that session,
+ * and cannot be certified anyway. These are ceilings, not allocations: an ordinary session records
+ * three orders of magnitude fewer events.
  */
 const CAPTURE_SESSION_EVENTS = 8;
 const CAPTURE_ROUND_EVENTS = 7;
 const CAPTURE_ROUND_EVENT_SLACK = 2;
-export const COMPUTER_USE_CAPTURE_MAX_EVENTS =
+const CAPTURE_JOURNEY_ROUNDS = 3;
+const CAPTURE_DISPATCH_EVENTS_PER_SCALAR = 2;
+const CAPTURE_ORDINARY_EVENTS =
   CAPTURE_SESSION_EVENTS * 2 +
   (CAPTURE_ROUND_EVENTS + CAPTURE_ROUND_EVENT_SLACK) * COMPUTER_USE_LIMITS.maxRounds;
-/** The previous 56 KiB / 128 event budget allowed 448 bytes per event; keep that allowance. */
-export const COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES = COMPUTER_USE_CAPTURE_MAX_EVENTS * 448;
+const CAPTURE_TYPING_DISPATCH_EVENTS =
+  CAPTURE_JOURNEY_ROUNDS *
+  CAPTURE_DISPATCH_EVENTS_PER_SCALAR *
+  COMPUTER_USE_LIMITS.maxTextActionBytes;
+export const COMPUTER_USE_CAPTURE_MAX_EVENTS =
+  CAPTURE_ORDINARY_EVENTS + CAPTURE_TYPING_DISPATCH_EVENTS;
+/** Measured worst cases: observation 488 B, native_finished 347 B, native_started 321 B. */
+export const COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES =
+  CAPTURE_ORDINARY_EVENTS * 512 + CAPTURE_TYPING_DISPATCH_EVENTS * 384;
 
 /** Structural subset of ComputerUseCaptureOutput: the one-way metadata sink, if one is opted in. */
 export type ComputerUseRuntimeCaptureSink = Readonly<{

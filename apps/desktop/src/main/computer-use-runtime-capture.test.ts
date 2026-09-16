@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { COMPUTER_USE_LIMITS } from '@sprint-coder/contracts';
 import {
+  CAPTURE_FRAME_LIMIT,
+  CAPTURE_STREAM_LIMIT,
+} from '../../../../computer-use-capture-wire.mjs';
+import {
   captureComputerUseRuntime,
   ComputerUseRuntimeCapture,
   COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES,
@@ -306,6 +310,59 @@ describe('Computer Use runtime observation (unit fixtures are never acceptance)'
     expect(capture.snapshot().invalid).toBe(true);
   });
 
+  it('keeps the wire stream budget above a full session of capture', () => {
+    // The wire module cannot import this TypeScript budget, so the two are pinned here. A frame
+    // carries the event payload plus a ~288 byte envelope; 320 leaves room for the largest one.
+    const envelopeBytes = 320;
+    expect(
+      COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES + envelopeBytes * COMPUTER_USE_CAPTURE_MAX_EVENTS,
+    ).toBeLessThanOrEqual(CAPTURE_STREAM_LIMIT);
+    expect(
+      COMPUTER_USE_CAPTURE_MAX_EVENT_BYTES / COMPUTER_USE_CAPTURE_MAX_EVENTS + envelopeBytes,
+    ).toBeLessThan(CAPTURE_FRAME_LIMIT);
+  });
+
+  it('keeps a three-round journey valid when a round types a whole sentence', () => {
+    const capture = captureFixture();
+    const typedCharacters = 128;
+    for (let round = 1; round <= 3; round++) {
+      const events = roundEvents(round);
+      if (round === 2) {
+        const parsed = events[1]!;
+        if (parsed.type === 'parsed') parsed.actionClass = 'type';
+        // dispatchNativeAction splits a type action per Unicode scalar and records a
+        // native_started/native_finished pair for each one.
+        const scalars = Array.from({ length: typedCharacters - 1 }, (_value, index) => {
+          const requestDigest = computerUseCaptureDigest(`fixture-scalar-${index}`);
+          return [
+            { type: 'native_started', sessionDigest, requestDigest, actionDigest, revision: round },
+            {
+              type: 'native_finished',
+              sessionDigest,
+              requestDigest,
+              actionDigest,
+              revision: round,
+              result: 'completed',
+            },
+          ] satisfies ComputerUseRuntimeEvent[];
+        }).flat();
+        events.splice(4, 0, ...scalars);
+      }
+      events.forEach((event) => capture.record(event));
+    }
+    stop(capture);
+    const snapshot = capture.snapshot();
+    expect(snapshot.invalid).toBe(false);
+    expect(snapshot.events.filter(({ type }) => type === 'native_started')).toHaveLength(
+      typedCharacters + 2,
+    );
+    expect(snapshot.roundsCompleted).toBe(3);
+    // A journey may type the contract maximum in every round it can certify.
+    expect(COMPUTER_USE_CAPTURE_MAX_EVENTS).toBeGreaterThanOrEqual(
+      3 * 2 * COMPUTER_USE_LIMITS.maxTextActionBytes,
+    );
+  });
+
   it('keeps a session at the product round limit inside the capture budget', () => {
     const capture = captureFixture();
     capture.record({
@@ -379,7 +436,8 @@ describe('Computer Use runtime observation (unit fixtures are never acceptance)'
       manifestDigest: 'f'.repeat(64),
       platform: 'darwin',
     });
-    for (let index = 0; index < 4_000; index++) capture.record(observation(index + 1));
+    for (let index = 0; index <= COMPUTER_USE_CAPTURE_MAX_EVENTS; index++)
+      capture.record(observation(index + 1));
     expect(capture.snapshot().invalid).toBe(true);
 
     // Exhausting one session's own budget is not a transport failure, so the next user-initiated
