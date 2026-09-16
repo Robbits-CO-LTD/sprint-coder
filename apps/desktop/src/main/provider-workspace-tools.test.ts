@@ -74,6 +74,21 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+/**
+ * A Workspace root for a test that asserts what a path classifies as. Windows temp lives under
+ * `AppData`, which `classifyWorkspacePath` deliberately calls app-private, so a fixture there
+ * would never classify as an ordinary Workspace file; the CI checkout is the ordinary path on
+ * Windows. POSIX uses the system temp because local worktrees may themselves sit under a
+ * protected directory such as `~/.codex`. Same idiom as path-guard.test.ts and
+ * permission-broker.test.ts. Tests that do not assert a classification keep using `tmpdir()`.
+ */
+async function classifiablePathFixtureRoot(prefix: string): Promise<string> {
+  const fixtureBase = process.platform === 'win32' ? process.cwd() : tmpdir();
+  const root = await mkdtemp(join(fixtureBase, prefix));
+  roots.push(root);
+  return root;
+}
+
 async function harness(
   options: { beforeExecute?: (root: string) => boolean; project?: boolean } = {},
 ) {
@@ -954,8 +969,7 @@ describe('Provider workspace read tools', () => {
   });
 
   it('presents only a bounded redacted disclosure preview to the authorizer', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-disclosure-'));
-    roots.push(root);
+    const root = await classifiablePathFixtureRoot('.sprint-coder-provider-disclosure-');
     await writeFile(join(root, '.env'), 'DATABASE_URL=postgres://alice:hunter2@example.com/db\n');
     const workspace: EffectiveWorkspaceSet = {
       source: 'task',
@@ -1014,8 +1028,7 @@ describe('Provider workspace read tools', () => {
   });
 
   it('classifies the disclosure of an ordinary Workspace file as a Workspace path', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-disclosure-workspace-'));
-    roots.push(root);
+    const root = await classifiablePathFixtureRoot('.sprint-coder-disclosure-workspace-');
     await writeFile(join(root, 'notes.txt'), 'password=hunter2\n');
     const workspace: EffectiveWorkspaceSet = {
       source: 'task',
@@ -1062,10 +1075,11 @@ describe('Provider workspace read tools', () => {
   });
 
   it('classifies a sealed Team Worker disclosure by its isolation-relative path', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-disclosure-sealed-'));
-    roots.push(root);
+    const root = await classifiablePathFixtureRoot('.sprint-coder-disclosure-sealed-');
     // A managed Worker Workspace lives under the app's own private directory, so without the
     // sealed-isolation authority every file in it would classify as app-private and be denied.
+    // The `AppData` segment is the fixture's own on every platform, so the sealed and unsealed
+    // answers come from this path rather than from where the platform happens to put temp files.
     const sealedRoot = join(root, 'AppData', 'team-worker');
     await mkdir(sealedRoot, { recursive: true });
     await writeFile(join(sealedRoot, 'notes.txt'), 'password=hunter2\n');
