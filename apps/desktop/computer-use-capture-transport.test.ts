@@ -42,6 +42,7 @@ type JourneyOptions = {
   secondEgressDigest?: string;
   omitFallbackFact?: boolean;
   unselectedRound?: number;
+  omitDigests?: readonly string[];
 };
 
 describe('Computer Use normal capture framing', () => {
@@ -241,10 +242,14 @@ describe('Computer Use normal capture framing', () => {
       cancelEpoch: 1,
       inputAttemptCount,
     });
-    return [
+    const frames = [
       { kind: 'hello', payload: { ...hello } as Record<string, string | number | boolean> },
       ...payloads.map((payload) => ({ kind: 'event', payload })),
     ];
+    // The wire validates the shape of a digest it carries, never that the stream carries one.
+    for (const key of options.omitDigests ?? [])
+      for (const frame of frames) delete frame.payload[key];
+    return frames;
   }
   it('aggregates Unicode scalar receipts into ordered canonical round summaries', async () => {
     const { summarizeComputerUseCaptureRounds } = await import(
@@ -307,6 +312,9 @@ describe('Computer Use normal capture framing', () => {
     'no-fallback-fact',
     'unselected-round',
     'incomplete-journey',
+    'no-binding-digest',
+    'no-egress-digest',
+    'no-cost-digest',
   ])('does not resolve a measured binding for %s', async (kind) => {
     const rounds = await captureRounds();
     const options: JourneyOptions = { identity: bindingIdentity, egress: true, cost: true };
@@ -321,6 +329,9 @@ describe('Computer Use normal capture framing', () => {
     else if (kind === 'late-cost') options.lateCost = true;
     else if (kind === 'no-fallback-fact') options.omitFallbackFact = true;
     else if (kind === 'unselected-round') options.unselectedRound = 2;
+    else if (kind === 'no-binding-digest') options.omitDigests = ['bindingDigest'];
+    else if (kind === 'no-egress-digest') options.omitDigests = ['egressDigest'];
+    else if (kind === 'no-cost-digest') options.omitDigests = ['costLimitDigest'];
     const frames = journeyFrames(options);
     if (kind === 'drifted-binding')
       Reflect.set(
@@ -341,6 +352,9 @@ describe('Computer Use normal capture framing', () => {
       expect(summary.roundsComplete).toBe(false);
     // A drifted round binding must fail closed without the journey itself looking complete.
     if (kind === 'drifted-binding') expect(summary.roundsComplete).toBe(false);
+    // A stream that never carries a digest must not read as a run that bound one: `undefined`
+    // compares equal to `undefined` on every later event, so absence has to be normalized.
+    if (kind.endsWith('-digest')) expect(summary.roundsComplete).toBe(false);
   });
 
   it.each([

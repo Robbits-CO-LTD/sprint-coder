@@ -132,13 +132,19 @@ export function summarizeComputerUseCaptureRounds(frames) {
     const pending = session.pending;
     if (event.type === 'preflight_started') {
       session.preflightAttempts += 1;
-      session.bindingDigest = event.bindingDigest;
+      // The wire validates the shape of a digest a frame carries, never that the frame carries
+      // one. An absent digest must become `null` like every other unclaimed fact: left as
+      // `undefined` it reads as unclaimed to `measuredBinding` yet still compares equal to the
+      // `undefined` on every later event, so a stream with no binding digest at all would resolve
+      // a stable binding it never had.
+      session.bindingDigest = event.bindingDigest ?? null;
       session.isOpenRouter = event.isOpenRouter;
       const identity = bindingIdentity(event);
       if (identity === undefined) session.invalid = true;
       else session.bindingIdentity = identity;
       if (
         session.preflightAttempts !== 1 ||
+        session.bindingDigest === null ||
         event.isOpenRouter !== false ||
         session.rounds.length ||
         pending
@@ -161,13 +167,20 @@ export function summarizeComputerUseCaptureRounds(frames) {
       // every round (computer-use-planner.ts:364 and :207). So these arrive interleaved with
       // completed rounds and must NOT be constrained to the pre-round window. What one run must
       // hold is a single consent scope: a later divergent decision is a different authorization.
-      if (session.egressDigest === null) session.egressDigest = event.egressDigest;
+      if (event.egressDigest === undefined) session.invalid = true;
+      else if (session.egressDigest === null) session.egressDigest = event.egressDigest;
       else if (session.egressDigest !== event.egressDigest) session.invalid = true;
       session.egressAuthorizations += 1;
     } else if (event.type === 'cost_limit_bound') {
-      if (session.rounds.length || pending || event.maxRounds === undefined) session.invalid = true;
+      if (
+        session.rounds.length ||
+        pending ||
+        event.maxRounds === undefined ||
+        event.costLimitDigest === undefined
+      )
+        session.invalid = true;
       if (session.costLimitDigest === null) {
-        session.costLimitDigest = event.costLimitDigest;
+        session.costLimitDigest = event.costLimitDigest ?? null;
         session.maxRounds = event.maxRounds ?? null;
       } else if (
         session.costLimitDigest !== event.costLimitDigest ||
