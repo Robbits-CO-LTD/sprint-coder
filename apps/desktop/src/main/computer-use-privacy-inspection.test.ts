@@ -525,6 +525,38 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     });
   });
 
+  it.each(['file', 'sqlite-blob'])(
+    'recovers a payload from a truncated zlib stream stored as a %s',
+    async (placement) => {
+      const input = fixture();
+      const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+      // Only the trailing Adler-32 is missing, as a crash-cut compressed log would be: the whole
+      // payload is still recoverable, so it must not pass as a scanned surface holding nothing.
+      const truncated = deflateSync(payload.bytes).subarray(0, -4);
+      const path = input.files[0]!.path;
+      if (placement === 'file') writeFileSync(path, truncated);
+      else writeDatabaseValue(path, truncated);
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]).toMatchObject({
+        state: 'contaminated',
+        matchedKinds: ['typed_text'],
+      });
+      expect(result.finalGateEligible).toBe(false);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+    },
+  );
+
+  it('keeps a truncated zlib surface incomplete even when nothing matched', async () => {
+    const input = fixture();
+    const truncated = deflateSync(Buffer.from('ordinary log line\n'.repeat(64))).subarray(0, -4);
+    writeFileSync(input.files[0]!.path, truncated);
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    // A stream whose tail is missing was not fully read, so it is unknown rather than clean.
+    expect(result.surfaces[0]!.state).toBe('unavailable');
+    expect(result.uninspectedSurfaces).toEqual(['database']);
+    expect(result.finalGateEligible).toBe(false);
+  });
+
   it('refuses a zlib stream whose expansion exceeds the bounded budget', async () => {
     const input = fixture();
     writeFileSync(input.files[0]!.path, deflateSync(Buffer.alloc(16 * 1024 * 1024 + 1)));

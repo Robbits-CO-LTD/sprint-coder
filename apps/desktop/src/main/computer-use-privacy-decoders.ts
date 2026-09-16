@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { lstatSync } from 'node:fs';
-import { crc32, gunzipSync, inflateSync } from 'node:zlib';
+import { constants as zlibConstants, crc32, gunzipSync, inflateSync } from 'node:zlib';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
 
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
@@ -65,6 +65,9 @@ type Scanner = ReturnType<typeof createBoundedScanner>;
 function createBoundedScanner(result: Result, visit: Visit) {
   const queue: { bytes: Buffer; depth: number }[] = [];
   let queuedBytes = 0;
+  // A stream that ended early can still be read up to the cut. Its recoverable prefix is scanned,
+  // but the surface must not claim to have been fully read afterwards.
+  let truncated = false;
   const account = (decoded: Buffer, depth: number) => {
     if (
       decoded.length > MAX_VALUE_BYTES ||
@@ -98,11 +101,34 @@ function createBoundedScanner(result: Result, visit: Visit) {
           : inflateSync(archive, { maxOutputLength: MAX_VALUE_BYTES });
       } catch (error) {
         // Output that outgrows the budget is always a refusal, and gzip's magic is specific
-        // enough that failing to open one stays a refusal too. A zlib header is two weak bytes,
-        // so failing to inflate one simply means it was never a stream: its raw bytes were
-        // already searched by the visit that queued it, and the surface stays inspected.
-        if (isGzip(archive) || (error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
-          throw error;
+        // enough that failing to open one stays a refusal too.
+        const code = (error as { code?: string }).code;
+        if (isGzip(archive) || code === 'ERR_BUFFER_TOO_LARGE') throw error;
+        // Z_BUF_ERROR means a real stream ended early — a crash-cut compressed log still holds
+        // everything written before the cut. Read that prefix and scan it, then leave the
+        // surface incomplete, because the bytes after the cut were never seen.
+        if (code === 'Z_BUF_ERROR') {
+          truncated = true;
+          let recovered: Buffer;
+          try {
+            recovered = inflateSync(archive, {
+              finishFlush: zlibConstants.Z_SYNC_FLUSH,
+              maxOutputLength: MAX_VALUE_BYTES,
+            });
+          } catch (recoveryError) {
+            if ((recoveryError as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
+              throw recoveryError;
+            return;
+          }
+          try {
+            if (recovered.length > 0) account(recovered, depth);
+          } finally {
+            recovered.fill(0);
+          }
+          return;
+        }
+        // Any other failure means the two weak header bytes were never a stream at all: the raw
+        // bytes were already searched by the visit that queued it, so the surface stays scanned.
         return;
       }
       try {
@@ -117,6 +143,8 @@ function createBoundedScanner(result: Result, visit: Visit) {
   return {
     account,
     expand,
+    /** True once any stream was read only up to an early cut. */
+    wasTruncated: () => truncated,
     async drain() {
       while (queue.length > 0) {
         const nested = queue.shift()!;
@@ -169,7 +197,7 @@ async function inspectBytes(
     try {
       await expand(bytes, 0);
       await drain();
-      result.complete = true;
+      result.complete = !scanner.wasTruncated();
     } catch {
       result.complete = false;
     }
@@ -297,7 +325,7 @@ async function inspectSqlite(filePath: string, result: Result, scanner: Scanner)
     // Drained only after the database is closed, so no archive is expanded while a read
     // transaction is still open on it.
     await scanner.drain();
-    result.complete = true;
+    result.complete = !scanner.wasTruncated();
   } catch {
     result.complete = false;
   } finally {
