@@ -231,6 +231,55 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     expect(result.finalGateEligible).toBe(false);
   });
 
+  it('decodes a compressed value stored inside SQLite', async () => {
+    const input = fixture();
+    const path = input.files[0]!.path;
+    rmSync(path);
+    const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+    const database = new Database(path);
+    try {
+      database.exec('PRAGMA page_size=512; VACUUM; CREATE TABLE capture (body BLOB);');
+      database.prepare('INSERT INTO capture VALUES (?)').run(gzipSync(payload.bytes));
+    } finally {
+      database.close();
+    }
+    // Present neither in the physical pages nor in the logical value as stored.
+    expect(readFileSync(path).includes(payload.bytes)).toBe(false);
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[0]).toMatchObject({
+      state: 'contaminated',
+      matchedKinds: ['typed_text'],
+    });
+    expect(result.finalGateEligible).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+  });
+
+  it.each(['uninspectable-container', 'nested-database'])(
+    'refuses a SQLite value it cannot open: %s',
+    async (kind) => {
+      const input = fixture();
+      const path = input.files[0]!.path;
+      rmSync(path);
+      const nested =
+        kind === 'uninspectable-container'
+          ? Buffer.concat([Buffer.from('BZh9'), Buffer.alloc(64, 7)])
+          : Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(64, 7)]);
+      const database = new Database(path);
+      try {
+        database.exec('CREATE TABLE capture (body BLOB);');
+        database.prepare('INSERT INTO capture VALUES (?)').run(nested);
+      } finally {
+        database.close();
+      }
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]).toMatchObject({
+        state: 'unavailable',
+        logicalValuesInspected: false,
+      });
+      expect(result.finalGateEligible).toBe(false);
+    },
+  );
+
   it('reads committed WAL values without changing main/WAL bytes or executing a view', async () => {
     const input = fixture();
     const path = input.files[0]!.path;

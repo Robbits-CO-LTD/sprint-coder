@@ -42,17 +42,15 @@ type Result = {
   decodedBytes: number;
 };
 type Visit = (bytes: Buffer) => void;
+type Scanner = ReturnType<typeof createBoundedScanner>;
 
-/** Only decoded bytes reach the transient matcher. Errors, SQL, names and values never escape. */
-export async function inspectComputerUseStoredValues(
-  filePath: string,
-  bytes: Buffer,
-  visit: Visit,
-): Promise<Result> {
-  if (isSqlite(bytes)) return inspectSqlite(filePath, visit);
-  const result: Result = { kind: 'raw', complete: false, valuesScanned: 0, decodedBytes: 0 };
-  // Expanded bytes that are themselves an archive are queued instead of being treated as the
-  // final content: searching only the inner compressed bytes would miss a stored payload.
+/**
+ * The single bounded inspection every candidate byte string goes through, whether it came from a
+ * file, an archive entry or a logical database value. Bytes that are themselves an archive are
+ * queued rather than treated as final content: searching only the inner compressed bytes would
+ * miss a stored payload. Exceeding any budget throws, which leaves the surface uninspected.
+ */
+function createBoundedScanner(result: Result, visit: Visit) {
   const queue: { bytes: Buffer; depth: number }[] = [];
   let queuedBytes = 0;
   const account = (decoded: Buffer, depth: number) => {
@@ -92,10 +90,10 @@ export async function inspectComputerUseStoredValues(
     }
     await inspectZip(archive, (decoded) => account(decoded, depth));
   };
-  if (isGzip(bytes) || isZip(bytes)) {
-    result.kind = isGzip(bytes) ? 'gzip' : 'zip';
-    try {
-      await expand(bytes, 0);
+  return {
+    account,
+    expand,
+    async drain() {
       while (queue.length > 0) {
         const nested = queue.shift()!;
         try {
@@ -104,12 +102,49 @@ export async function inspectComputerUseStoredValues(
           nested.bytes.fill(0);
         }
       }
+    },
+    dispose() {
+      for (const nested of queue) nested.bytes.fill(0);
+      queue.length = 0;
+    },
+  };
+}
+
+/** Only decoded bytes reach the transient matcher. Errors, SQL, names and values never escape. */
+export async function inspectComputerUseStoredValues(
+  filePath: string,
+  bytes: Buffer,
+  visit: Visit,
+): Promise<Result> {
+  const result: Result = { kind: 'raw', complete: false, valuesScanned: 0, decodedBytes: 0 };
+  const scanner = createBoundedScanner(result, visit);
+  try {
+    return await inspectBytes(filePath, bytes, result, scanner);
+  } finally {
+    scanner.dispose();
+  }
+}
+
+async function inspectBytes(
+  filePath: string,
+  bytes: Buffer,
+  result: Result,
+  scanner: Scanner,
+): Promise<Result> {
+  const { expand, drain } = scanner;
+  if (isSqlite(bytes)) {
+    result.kind = 'sqlite';
+    await inspectSqlite(filePath, result, scanner);
+    return result;
+  }
+  if (isGzip(bytes) || isZip(bytes)) {
+    result.kind = isGzip(bytes) ? 'gzip' : 'zip';
+    try {
+      await expand(bytes, 0);
+      await drain();
       result.complete = true;
     } catch {
       result.complete = false;
-    } finally {
-      for (const nested of queue) nested.bytes.fill(0);
-      queue.length = 0;
     }
   } else
     // Plain bytes are fully searched as they are. A container this decoder cannot open is not:
@@ -118,8 +153,7 @@ export async function inspectComputerUseStoredValues(
   return result;
 }
 
-function inspectSqlite(filePath: string, visit: Visit): Result {
-  const result: Result = { kind: 'sqlite', complete: false, valuesScanned: 0, decodedBytes: 0 };
+async function inspectSqlite(filePath: string, result: Result, scanner: Scanner): Promise<void> {
   let database: Database.Database | undefined;
   try {
     // SQLite owns WAL replay. Never infer logical absence from only the main DB file's pages.
@@ -203,14 +237,9 @@ function inspectSqlite(filePath: string, visit: Visit): Result {
           if (typeof value !== 'string' && !Buffer.isBuffer(value)) continue;
           const decoded = typeof value === 'string' ? Buffer.from(value) : value;
           try {
-            if (
-              decoded.length > MAX_VALUE_BYTES ||
-              result.decodedBytes + decoded.length > MAX_DECODED_BYTES
-            )
-              throw new Error('sqlite_value_limit');
-            result.decodedBytes += decoded.length;
-            result.valuesScanned += 1;
-            visit(decoded);
+            // A stored value gets the same bounded inspection as a file: a compressed BLOB is
+            // decoded and searched rather than counted as scanned on its compressed bytes.
+            scanner.account(decoded, 0);
           } finally {
             decoded.fill(0);
           }
@@ -238,6 +267,9 @@ function inspectSqlite(filePath: string, visit: Visit): Result {
       )
         throw new Error('sqlite_changed');
     }
+    // Drained only after the database is closed, so no archive is expanded while a read
+    // transaction is still open on it.
+    await scanner.drain();
     result.complete = true;
   } catch {
     result.complete = false;
@@ -248,7 +280,6 @@ function inspectSqlite(filePath: string, visit: Visit): Result {
       result.complete = false;
     }
   }
-  return result;
 }
 
 function inspectZip(bytes: Buffer, visit: (decoded: Buffer) => void): Promise<void> {
