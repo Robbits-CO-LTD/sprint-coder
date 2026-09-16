@@ -261,18 +261,23 @@ export async function inspectComputerUsePrivacySurfaces(
           seen.add(path);
           // Reject a link by its own metadata, not only by the realpath comparison above: on
           // Windows the O_NOFOLLOW below is not available to enforce it at open time.
-          const entry = lstatSync(path);
+          // Identity is read as bigint stats throughout: plain stats report dev/ino as 0 on
+          // Windows, which would silently disable the pinning below.
+          const entry = lstatSync(path, { bigint: true });
           if (entry.isSymbolicLink() || !entry.isFile()) throw new Error();
           fd = openSync(path, constants.O_RDONLY | openFlag('O_NOFOLLOW') | openFlag('O_NONBLOCK'));
-          const before = fstatSync(fd);
+          const opened = fstatSync(fd, { bigint: true });
           // Pin the descriptor to the entry that was just stat-ed, closing the window between
-          // realpath/lstat and open. POSIX identifies an entry by dev+ino; where the platform
-          // reports neither (Windows can report 0/0), only the checks above apply.
+          // realpath/lstat and open. POSIX identifies an entry by dev+ino, and Windows reports
+          // the volume serial and file index here. If a platform still yields no identity at
+          // all, refuse the file rather than inspecting one we cannot prove we opened.
           if (
-            (entry.dev !== 0 || entry.ino !== 0) &&
-            (before.dev !== entry.dev || before.ino !== entry.ino)
+            (entry.dev === 0n && entry.ino === 0n) ||
+            entry.dev !== opened.dev ||
+            entry.ino !== opened.ino
           )
             throw new Error();
+          const before = fstatSync(fd);
           if (
             !before.isFile() ||
             before.nlink !== 1 ||

@@ -366,20 +366,33 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     expect(result.finalGateEligible).toBe(false);
   });
 
-  it('refuses a file whose opened descriptor is not the entry that was stat-ed', async () => {
+  it.each([
+    { kind: 'swapped descriptor', lstat: { dev: 7n, ino: 11n }, fstat: { dev: 7n, ino: 12n } },
+    { kind: 'identity unavailable', lstat: { dev: 0n, ino: 0n }, fstat: { dev: 0n, ino: 0n } },
+  ])('refuses a file whose opened descriptor cannot be pinned: $kind', async (scenario) => {
     const input = fixture();
     vi.resetModules();
+    // Identity is compared with bigint stats, so the fakes are platform-independent.
     vi.doMock('node:fs', async () => {
       const actual = await vi.importActual<typeof NodeFs>('node:fs');
+      const override = (stat: object, options: unknown, values: { dev: bigint; ino: bigint }) =>
+        (options as { bigint?: boolean } | undefined)?.bigint === true
+          ? Object.assign(Object.create(Object.getPrototypeOf(stat) as object), stat, values)
+          : stat;
       return {
         ...actual,
-        // Simulate the descriptor being swapped between the pre-open lstat and the open.
-        fstatSync: ((fd: number, options?: unknown) => {
-          const stat = actual.fstatSync(fd, options as never);
-          return Object.assign(Object.create(Object.getPrototypeOf(stat) as object), stat, {
-            ino: stat.ino + 1,
-          }) as ReturnType<typeof actual.fstatSync>;
-        }) as typeof actual.fstatSync,
+        lstatSync: ((path: string, options?: unknown) =>
+          override(
+            actual.lstatSync(path, options as never),
+            options,
+            scenario.lstat,
+          )) as typeof actual.lstatSync,
+        fstatSync: ((fd: number, options?: unknown) =>
+          override(
+            actual.fstatSync(fd, options as never),
+            options,
+            scenario.fstat,
+          )) as typeof actual.fstatSync,
       };
     });
     try {
