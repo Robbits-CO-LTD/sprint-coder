@@ -458,34 +458,83 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     }
   });
 
-  it.each(['file', 'sqlite-blob'])(
-    'refuses a small-window zlib stream stored as a %s',
+  function writeDatabaseValue(path: string, value: Buffer | string): void {
+    rmSync(path);
+    const database = new Database(path);
+    try {
+      database.exec('CREATE TABLE capture (body BLOB);');
+      database.prepare('INSERT INTO capture VALUES (?)').run(value);
+    } finally {
+      database.close();
+    }
+  }
+
+  it.each([
+    { place: 'file', windowBits: 9 },
+    { place: 'file', windowBits: 15 },
+    { place: 'sqlite-blob', windowBits: 9 },
+    { place: 'sqlite-blob', windowBits: 15 },
+  ])('decodes a real zlib stream ($place, windowBits $windowBits)', async (scenario) => {
+    const input = fixture();
+    const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+    const compressed = deflateSync(payload.bytes, { windowBits: scenario.windowBits });
+    expect(compressed[0]).toBe(scenario.windowBits === 9 ? 0x18 : 0x78);
+    const path = input.files[0]!.path;
+    if (scenario.place === 'file') writeFileSync(path, compressed);
+    else writeDatabaseValue(path, compressed);
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[0]).toMatchObject({
+      state: 'contaminated',
+      matchedKinds: ['typed_text'],
+    });
+    expect(result.finalGateEligible).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+  });
+
+  it.each(['file', 'sqlite-text', 'sqlite-blob'])(
+    'scans a zlib look-alike value as raw bytes rather than refusing the surface: %s',
     async (placement) => {
       const input = fixture();
-      const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
-      // CINFO 1, so the header starts 0x18 rather than the common 0x78.
-      const compressed = deflateSync(payload.bytes, { windowBits: 9 });
-      expect(compressed[0]).toBe(0x18);
+      // "(r" satisfies CM/CINFO/FCHECK yet is ordinary text; refusing it would make almost every
+      // real database incomplete, so it must fall back to a raw scan instead.
+      const lookAlike = Buffer.from('(rest of an ordinary logged line');
+      expect((lookAlike[0]! & 0x0f) === 8).toBe(true);
+      expect((lookAlike[0]! * 256 + lookAlike[1]!) % 31).toBe(0);
       const path = input.files[0]!.path;
-      if (placement === 'file') writeFileSync(path, compressed);
-      else {
-        rmSync(path);
-        const database = new Database(path);
-        try {
-          database.exec('CREATE TABLE capture (body BLOB);');
-          database.prepare('INSERT INTO capture VALUES (?)').run(compressed);
-        } finally {
-          database.close();
-        }
-      }
+      if (placement === 'file') writeFileSync(path, lookAlike);
+      else writeDatabaseValue(path, placement === 'sqlite-text' ? lookAlike.toString() : lookAlike);
       const result = await inspectComputerUsePrivacySurfaces(input);
-      expect(result.surfaces[0]!.state).toBe('unavailable');
-      expect(result.finalGateEligible).toBe(false);
+      expect(result.surfaces[0]!.state).toBe(
+        placement === 'file' ? 'raw_bytes_scanned' : 'logical_values_scanned',
+      );
+      expect(result.contaminatedSurfaces).toEqual([]);
+      expect(result.uninspectedSurfaces).toEqual([]);
     },
   );
 
+  it('still finds a payload stored behind a zlib look-alike prefix', async () => {
+    const input = fixture();
+    const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+    const prefix = Buffer.from('80 percent done ');
+    expect((prefix[0]! * 256 + prefix[1]!) % 31).toBe(0);
+    writeFileSync(input.files[0]!.path, Buffer.concat([prefix, payload.bytes]));
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[0]).toMatchObject({
+      state: 'contaminated',
+      matchedKinds: ['typed_text'],
+    });
+  });
+
+  it('refuses a zlib stream whose expansion exceeds the bounded budget', async () => {
+    const input = fixture();
+    writeFileSync(input.files[0]!.path, deflateSync(Buffer.alloc(16 * 1024 * 1024 + 1)));
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[0]!.state).toBe('unavailable');
+    expect(result.finalGateEligible).toBe(false);
+  });
+
   it.each([0, 1, 2, 3, 4, 5, 6, 7])(
-    'treats a zlib header with CINFO %i as an uninspectable container',
+    'scans an unopenable zlib look-alike with CINFO %i as raw bytes',
     async (cinfo) => {
       const input = fixture();
       const cmf = (cinfo << 4) | 8;
@@ -495,7 +544,7 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
         Buffer.concat([Buffer.from([cmf, flg]), Buffer.alloc(64, 7)]),
       );
       expect((await inspectComputerUsePrivacySurfaces(input)).surfaces[0]!.state).toBe(
-        'unavailable',
+        'raw_bytes_scanned',
       );
     },
   );

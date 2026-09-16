@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { lstatSync } from 'node:fs';
-import { crc32, gunzipSync } from 'node:zlib';
+import { crc32, gunzipSync, inflateSync } from 'node:zlib';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
 
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
@@ -19,8 +19,9 @@ const isSqlite = (bytes: Buffer) => bytes.subarray(0, 16).equals(SQLITE_MAGIC);
 /**
 /**
  * A zlib stream has no magic number: CMF holds CM in its low nibble and CINFO in its high one,
- * and CMF/FLG together must be a multiple of 31. Matching only 0x78 would see just CINFO=7 and
- * miss every smaller window size, so all three rules are applied to the two-byte header.
+ * and CMF/FLG together must be a multiple of 31. Two weak bytes are not proof, and ordinary text
+ * satisfies them — "(r" and "80" both do — so this only decides whether inflating is worth
+ * attempting. Whether the bytes really were a stream is settled by the inflate itself.
  */
 function isZlib(bytes: Buffer): boolean {
   if (bytes.length < 2) return false;
@@ -31,10 +32,10 @@ function isZlib(bytes: Buffer): boolean {
 /**
  * Containers this decoder cannot open. Searching only their compressed bytes would leave a stored
  * payload unexamined, so seeing one makes the surface incomplete rather than clean. Each magic is
- * compared positionally, which already fails on a buffer too short to hold it.
+ * compared positionally, which already fails on a buffer too short to hold it. zlib is absent
+ * here because it is inflated instead of refused.
  */
 function isUninspectableContainer(bytes: Buffer): boolean {
-  if (isZlib(bytes)) return true;
   for (const magic of [
     [0x42, 0x5a, 0x68], // bzip2
     [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00], // xz
@@ -78,7 +79,7 @@ function createBoundedScanner(result: Result, visit: Visit) {
     // cannot reassemble. Logical reading needs a file on disk, and this scanner must not write
     // the decompressed private bytes back out to get one, so the surface stays uninspected.
     if (isSqlite(decoded)) throw new Error('uninspectable_nested_sqlite');
-    if (!isGzip(decoded) && !isZip(decoded)) return;
+    if (!isGzip(decoded) && !isZip(decoded) && !isZlib(decoded)) return;
     if (
       depth >= MAX_NESTED_DEPTH ||
       queue.length >= MAX_NESTED_ARCHIVES ||
@@ -89,13 +90,25 @@ function createBoundedScanner(result: Result, visit: Visit) {
     queue.push({ bytes: Buffer.from(decoded), depth: depth + 1 });
   };
   const expand = async (archive: Buffer, depth: number) => {
-    if (isGzip(archive)) {
-      let decoded: Buffer | undefined;
+    if (isGzip(archive) || isZlib(archive)) {
+      let decoded: Buffer;
       try {
-        decoded = gunzipSync(archive, { maxOutputLength: MAX_VALUE_BYTES });
+        decoded = isGzip(archive)
+          ? gunzipSync(archive, { maxOutputLength: MAX_VALUE_BYTES })
+          : inflateSync(archive, { maxOutputLength: MAX_VALUE_BYTES });
+      } catch (error) {
+        // Output that outgrows the budget is always a refusal, and gzip's magic is specific
+        // enough that failing to open one stays a refusal too. A zlib header is two weak bytes,
+        // so failing to inflate one simply means it was never a stream: its raw bytes were
+        // already searched by the visit that queued it, and the surface stays inspected.
+        if (isGzip(archive) || (error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
+          throw error;
+        return;
+      }
+      try {
         account(decoded, depth);
       } finally {
-        decoded?.fill(0);
+        decoded.fill(0);
       }
       return;
     }
@@ -148,8 +161,11 @@ async function inspectBytes(
     await inspectSqlite(filePath, result, scanner);
     return result;
   }
-  if (isGzip(bytes) || isZip(bytes)) {
-    result.kind = isGzip(bytes) ? 'gzip' : 'zip';
+  if (isGzip(bytes) || isZip(bytes) || isZlib(bytes)) {
+    // A zlib-looking file keeps the raw kind: the header may not be a stream at all, and the
+    // outer byte search covers it either way. Only gzip and ZIP claim to have been decoded.
+    if (isGzip(bytes)) result.kind = 'gzip';
+    else if (isZip(bytes)) result.kind = 'zip';
     try {
       await expand(bytes, 0);
       await drain();
