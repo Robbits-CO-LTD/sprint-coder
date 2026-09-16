@@ -175,6 +175,7 @@ import {
   type PermissionEvaluation,
   type PermissionOperation,
   type PermissionRequest,
+  type PathClassification,
   type PermissionRule,
   type ProviderEgress,
   type ReasoningEffort,
@@ -22426,6 +22427,34 @@ function parseResourceSet(json: string): ResourceSet {
       kind: 'path-classification',
       classifications: record['classifications'] as ResourceSet & string[],
     } as ResourceSet;
+  if (
+    record['kind'] === 'provider-disclosure' &&
+    Object.keys(record).every(
+      (key) => key === 'kind' || key === 'pathClassifications' || key === 'classifications',
+    ) &&
+    Array.isArray(record['pathClassifications']) &&
+    record['pathClassifications'].length > 0 &&
+    record['pathClassifications'].every((item) =>
+      [
+        'workspace',
+        'external',
+        'app-private',
+        'os-protected',
+        'credential',
+        'signing-key',
+        'update-key',
+        'unclassified',
+      ].includes(item as string),
+    ) &&
+    Array.isArray(record['classifications']) &&
+    record['classifications'].length > 0 &&
+    record['classifications'].every((item) => item === 'sensitive' || item === 'uncertain')
+  )
+    return {
+      kind: 'provider-disclosure',
+      pathClassifications: record['pathClassifications'] as PathClassification[],
+      classifications: record['classifications'] as ('sensitive' | 'uncertain')[],
+    };
   if (record['kind'] === 'network-origin' && typeof record['origin'] === 'string')
     return { kind: 'network-origin', origin: record['origin'] };
   if (record['kind'] === 'secret-exact' && typeof record['secretId'] === 'string')

@@ -1005,8 +1005,118 @@ describe('Provider workspace read tools', () => {
         kind: 'provider-disclosure',
         sourceDigest: facts?.sourceDigest,
         disclosedDigest: facts?.disclosedDigest,
+        // `.env` is a credential path: the disclosure resource must carry that classification so
+        // the immutable protected-path deny still applies on this lane.
+        pathClassification: 'credential',
       },
       resourceSet: { kind: 'provider-disclosure-exact' },
+    });
+  });
+
+  it('classifies the disclosure of an ordinary Workspace file as a Workspace path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-disclosure-workspace-'));
+    roots.push(root);
+    await writeFile(join(root, 'notes.txt'), 'password=hunter2\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'e'.repeat(64),
+    };
+    let permissionFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        permissionFacts = approvalFactsForTool(request, 'workspace.read');
+        return { decision: 'deny', reason: 'user_denied' };
+      },
+    });
+    const context = {
+      taskId: 'task-disclosure-workspace',
+      turnId: 'turn-disclosure-workspace',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'openai');
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-workspace-disclosure',
+        providerName: 'read_file',
+        input: { path: 'notes.txt' },
+      }),
+    ).rejects.toThrow(/authorization deny/u);
+    expect(permissionFacts).toMatchObject({
+      resource: {
+        kind: 'provider-disclosure',
+        classification: 'sensitive',
+        pathClassification: 'workspace',
+      },
+    });
+  });
+
+  it('classifies a sealed Team Worker disclosure by its isolation-relative path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-disclosure-sealed-'));
+    roots.push(root);
+    // A managed Worker Workspace lives under the app's own private directory, so without the
+    // sealed-isolation authority every file in it would classify as app-private and be denied.
+    const sealedRoot = join(root, 'AppData', 'team-worker');
+    await mkdir(sealedRoot, { recursive: true });
+    await writeFile(join(sealedRoot, 'notes.txt'), 'password=hunter2\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        {
+          rootId: 'root-a',
+          path: sealedRoot,
+          label: 'Worker',
+          role: 'primary',
+          status: 'available',
+        },
+      ],
+      digest: 'f'.repeat(64),
+    };
+    let sealedFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    let unsealedFacts: ReturnType<typeof approvalFactsForTool> | undefined;
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        sealedFacts = approvalFactsForTool(request, 'workspace.read', 'sealed-team-isolation');
+        unsealedFacts = approvalFactsForTool(request, 'workspace.read');
+        return { decision: 'deny', reason: 'user_denied' };
+      },
+    });
+    const context = {
+      taskId: 'task-disclosure-sealed',
+      turnId: 'turn-disclosure-sealed',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'openai');
+
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'call-sealed-disclosure',
+        providerName: 'read_file',
+        input: { path: 'notes.txt' },
+      }),
+    ).rejects.toThrow(/authorization deny/u);
+    expect(sealedFacts).toMatchObject({
+      resource: { kind: 'provider-disclosure', pathClassification: 'workspace' },
+    });
+    expect(unsealedFacts).toMatchObject({
+      resource: { kind: 'provider-disclosure', pathClassification: 'app-private' },
     });
   });
 

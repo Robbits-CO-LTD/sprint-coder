@@ -478,6 +478,7 @@ function operationFor(capability: Capability): PermissionOperation {
 export function approvalFactsForTool(
   request: ToolAuthorizationRequest,
   capability: Capability,
+  workspaceAuthority?: 'sealed-team-isolation',
 ): {
   subjectId: string;
   specDigest: string;
@@ -498,7 +499,9 @@ export function approvalFactsForTool(
       operation === 'read' || operation === 'write' ? operation : undefined,
     );
   const workspaceResource =
-    workspaceGuard === undefined ? undefined : workspacePermissionResourceFromGuard(workspaceGuard);
+    workspaceGuard === undefined
+      ? undefined
+      : workspacePermissionResourceFromGuard(workspaceGuard, workspaceAuthority);
   const commandSpec =
     request.entry.implementationKind === 'command-runner' && validateExecutionSpec(request.input)
       ? (request.input as ExecutionSpec)
@@ -537,6 +540,9 @@ export function approvalFactsForTool(
           sourceDigest: disclosure.sourceDigest,
           disclosedDigest: disclosure.disclosedDigest,
           classification: disclosure.classification,
+          // Carried from the issued guard so the immutable protected-path deny still reaches this
+          // lane. A disclosure without a guard cannot be placed, so it is treated as unclassified.
+          pathClassification: workspaceResource?.classification ?? 'unclassified',
           reasons: disclosure.reasons,
           classifierVersion: disclosure.classifierVersion,
         }

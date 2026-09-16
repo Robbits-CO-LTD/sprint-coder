@@ -630,6 +630,7 @@ import type {
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
+  FULL_PRESET_DISCLOSURE_AUDIT_REASON,
   digestToolCatalogValue,
   permissionRequestFingerprint,
   sessionGrantMatchesPermissionRequest,
@@ -5468,16 +5469,20 @@ export class IpcRouter {
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
     if (capability === 'computer.observe' || capability === 'computer.control')
       return this.evaluateComputerUsePermission(request, capability);
-    const rawFacts = approvalFactsForTool(request, capability);
+    const managedWorkerWorkspace = this.managedWorkerCall.get(
+      JSON.stringify([request.context.turnId, request.callId]),
+    )?.workspace;
+    // A managed Worker's Workspace sits inside the app's own private directory, so its files only
+    // classify as Workspace files relative to that sealed root.
+    const workspaceAuthority =
+      managedWorkerWorkspace === undefined ? undefined : ('sealed-team-isolation' as const);
+    const rawFacts = approvalFactsForTool(request, capability, workspaceAuthority);
     const pathGuard = workspaceToolAuthorizationGuard(
       request.input,
       rawFacts.operation === 'read' || rawFacts.operation === 'write'
         ? rawFacts.operation
         : undefined,
     );
-    const managedWorkerWorkspace = this.managedWorkerCall.get(
-      JSON.stringify([request.context.turnId, request.callId]),
-    )?.workspace;
     const facts =
       managedWorkerWorkspace !== undefined &&
       rawFacts.resource.kind === 'workspace-path' &&
@@ -5639,26 +5644,42 @@ export class IpcRouter {
           now: new Date().toISOString(),
           ...(pathGuard === undefined ? {} : { pathGuard }),
         }).valid;
-      if (capability === 'workspace.read' && disclosure !== undefined)
+      // Whatever the decision, the bytes that were classified must still be the bytes that get
+      // disclosed: the file can be swapped between authorization and execution.
+      const disclosureBoundBeforeExecute =
+        disclosure === undefined
+          ? beforeExecute
+          : () => {
+              const current = providerDisclosureAuthorizationFacts(request.input);
+              return (
+                beforeExecute() &&
+                current?.providerId === disclosure.providerId &&
+                current.canonicalPath === disclosure.canonicalPath &&
+                current.sourceDigest === disclosure.sourceDigest &&
+                current.disclosedDigest === disclosure.disclosedDigest &&
+                current.classifierVersion === disclosure.classifierVersion
+              );
+            };
+      if (
+        providerDisclosureRequiresExplicitApproval({
+          capability,
+          hasDisclosure: disclosure !== undefined,
+          evaluationReason: evaluation.reason,
+        })
+      )
         return {
           decision: 'approval_required' as const,
           reason: 'provider_disclosure_requires_explicit_approval',
-          beforeExecute: () => {
-            const current = providerDisclosureAuthorizationFacts(request.input);
-            return (
-              beforeExecute() &&
-              current?.providerId === disclosure.providerId &&
-              current.canonicalPath === disclosure.canonicalPath &&
-              current.sourceDigest === disclosure.sourceDigest &&
-              current.disclosedDigest === disclosure.disclosedDigest &&
-              current.classifierVersion === disclosure.classifierVersion
-            );
-          },
+          beforeExecute: disclosureBoundBeforeExecute,
         };
       // Provider-issued processes are never covered by a preset-wide silent grant. A policy deny
       // still wins above; only an evaluated allow is upgraded to an explicit user approval.
       return requireExplicitProviderCommandApproval(
-        { decision: 'allow' as const, reason: evaluation.reason, beforeExecute },
+        {
+          decision: 'allow' as const,
+          reason: evaluation.reason,
+          beforeExecute: disclosureBoundBeforeExecute,
+        },
         providerProcessAuthority,
       );
     }
@@ -9423,6 +9444,24 @@ export function managedLocalForcedRoundMessages(
     ...messages.filter(({ role }) => role === 'system'),
     { role: 'user', content: currentUserText },
   ];
+}
+
+/**
+ * Disclosing a Workspace file to the Provider is asked about per file, because the classifier
+ * cannot prove the redacted bytes are safe. The one exception is a Task on the Full preset, where
+ * the policy engine has already allowed this exact disclosure lane (`preset_full_disclosure`) and
+ * asking again would only repeat a question the user answered when they chose Full access.
+ */
+export function providerDisclosureRequiresExplicitApproval(input: {
+  capability: Capability;
+  hasDisclosure: boolean;
+  evaluationReason: string;
+}): boolean {
+  return (
+    input.capability === 'workspace.read' &&
+    input.hasDisclosure &&
+    input.evaluationReason !== FULL_PRESET_DISCLOSURE_AUDIT_REASON
+  );
 }
 
 export function requireExplicitProviderCommandApproval(

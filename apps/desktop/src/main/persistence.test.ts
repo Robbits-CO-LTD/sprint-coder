@@ -6854,6 +6854,15 @@ if (runsWithElectronAbi)
         expandedPolicy: { approvalPolicy: 'ask' },
         revokedCapabilities: ['workspace.read'],
       });
+      // Every resource set the preset expands to has to survive the round trip, or the stored
+      // rules stop matching the canonical ones and the Task silently drops back to Ask.
+      expect(reopened.getPermissionPolicy(task.id).expandedPolicy.allowRules).toContainEqual(
+        expect.objectContaining({
+          capability: 'workspace.read',
+          auditReason: 'preset_full_disclosure',
+          resourceSet: expect.objectContaining({ kind: 'provider-disclosure' }),
+        }),
+      );
       reopened.close();
     });
 

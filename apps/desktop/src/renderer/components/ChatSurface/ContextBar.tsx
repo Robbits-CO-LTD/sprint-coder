@@ -139,8 +139,9 @@ export function PermissionChip({ taskId }: { taskId: string }) {
               <span className="runtime-menu-title">フルアクセスの影響</span>
               <span className="runtime-menu-desc">
                 Workspace操作、Shell、Networkなどをpolicy上は許可します。実際の書込み・コマンド実行は
-                安全な実行境界が完成した機能だけ利用できます。管理deny、秘密情報、provider egress、
-                Renderer非特権は常に維持されます。
+                安全な実行境界が完成した機能だけ利用できます。Workspace内ファイルの読み取りは、秘密情報を
+                含む可能性があるものもredact済みの本文をProviderへ都度確認なしで渡します。管理deny、
+                秘密情報、provider egress、Renderer非特権は常に維持されます。
               </span>
               <button
                 data-testid="access-full-confirm"

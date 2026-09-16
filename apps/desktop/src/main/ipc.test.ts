@@ -155,6 +155,7 @@ import {
   providerMessagesForEgressPolicy,
   providerEventsWithSafeFailure,
   providerWorkspaceToolFailure,
+  providerDisclosureRequiresExplicitApproval,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
@@ -5161,6 +5162,34 @@ describe('Provider workspace tool capability fallback', () => {
       reason: 'provider_command_requires_explicit_approval',
       beforeExecute,
     });
+  });
+
+  it('asks before disclosing a file unless the Full preset already allowed that disclosure', () => {
+    const asks = (evaluationReason: string) =>
+      providerDisclosureRequiresExplicitApproval({
+        capability: 'workspace.read',
+        hasDisclosure: true,
+        evaluationReason,
+      });
+
+    expect(asks('preset_full_unknown')).toBe(true);
+    expect(asks('preset_auto_safe')).toBe(true);
+    expect(asks('narrow_allow')).toBe(true);
+    expect(asks('preset_full_disclosure')).toBe(false);
+    expect(
+      providerDisclosureRequiresExplicitApproval({
+        capability: 'workspace.read',
+        hasDisclosure: false,
+        evaluationReason: 'preset_auto_safe',
+      }),
+    ).toBe(false);
+    expect(
+      providerDisclosureRequiresExplicitApproval({
+        capability: 'workspace.write',
+        hasDisclosure: true,
+        evaluationReason: 'preset_full',
+      }),
+    ).toBe(false);
   });
 });
 

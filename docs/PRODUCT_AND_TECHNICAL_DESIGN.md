@@ -614,7 +614,7 @@ Codex／Claude CLIは推論transportだけを担当し、内蔵File／Shell tool
 | --- | --- |
 | 確認する | read/searchはpolicy評価し、edit・commandはdurable Approval CardでTurn内確認 |
 | 安全時は自動 | Workspace内のNativeSafeFs/Edit Sagaとprobe済みcommand sandboxだけを自動許可 |
-| フルアクセス | 広い操作を許可するが、credential、app-private、signing/update key、provider egress denyは維持 |
+| フルアクセス | 広い操作を許可し、Workspace分類パスのProvider開示（redact済み本文）も都度確認なしで許可する。credential、app-private、signing/update key、provider egress denyは維持 |
 
 Command sandboxはmacOS Seatbelt、Linux bubblewrap、Windows AppContainerを使い、Workspace外writeと未許可networkのnegative probeが成功した環境でだけ`exec_command`をcatalogへ載せる。probe不合格時にunsafe fallbackは行わない。
 

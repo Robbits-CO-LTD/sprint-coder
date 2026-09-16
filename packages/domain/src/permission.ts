@@ -72,6 +72,12 @@ export type PermissionResource =
       sourceDigest: string;
       disclosedDigest: string;
       classification: 'sensitive' | 'uncertain';
+      /**
+       * Classification of the path the bytes came from, carried so the immutable protected-path
+       * deny applies to the disclosure lane too. Without it a protected file could be disclosed
+       * by asking about its redacted content instead of about its path.
+       */
+      pathClassification: PathClassification;
       reasons: readonly string[];
       classifierVersion: string;
     }
@@ -132,6 +138,15 @@ export type ResourceSet =
       sourceDigest: string;
       disclosedDigest: string;
       classifierVersion: string;
+    }
+  /**
+   * Bounded by both axes a disclosure decision turns on: where the bytes came from, and how the
+   * classifier rated them. It never contains a path or egress resource.
+   */
+  | {
+      kind: 'provider-disclosure';
+      pathClassifications: readonly PathClassification[];
+      classifications: readonly ('sensitive' | 'uncertain')[];
     }
   | { kind: 'secret-exact'; secretId: string }
   | { kind: 'external-exact'; target: string }
@@ -323,8 +338,28 @@ const SAFE_AUTO_RULES: readonly PermissionRule[] = [
   },
 ];
 
+/**
+ * Audit reason for the Full preset's Workspace-file disclosure allow. Exported so Main can tell
+ * "the user already allowed this lane" apart from any other allow without matching a bare string.
+ */
+export const FULL_PRESET_DISCLOSURE_AUDIT_REASON = 'preset_full_disclosure';
+
 const FULL_RULES: readonly PermissionRule[] = [
   ...SAFE_AUTO_RULES,
+  // Full access means the user already accepted that this Task's Workspace files reach the
+  // Provider, so a per-file disclosure prompt asks a question they have answered. The content
+  // is redacted either way; only the prompt is removed, and only for Workspace-classified
+  // paths — a protected path stays with the immutable deny below.
+  {
+    capability: 'workspace.read',
+    resourceSet: {
+      kind: 'provider-disclosure',
+      pathClassifications: ['workspace'],
+      classifications: ['sensitive', 'uncertain'],
+    },
+    operations: ['read'],
+    auditReason: FULL_PRESET_DISCLOSURE_AUDIT_REASON,
+  },
   {
     capability: 'workspace.write',
     resourceSet: { kind: 'path-classification', classifications: ['workspace'] },
@@ -363,6 +398,17 @@ const FULL_RULES: readonly PermissionRule[] = [
   },
 ];
 
+const PATH_CLASSIFICATIONS: readonly PathClassification[] = [
+  'workspace',
+  'external',
+  'app-private',
+  'os-protected',
+  'credential',
+  'signing-key',
+  'update-key',
+  'unclassified',
+];
+
 const PROTECTED_PATH_CLASSIFICATIONS: readonly PathClassification[] = [
   'app-private',
   'os-protected',
@@ -391,6 +437,19 @@ const IMMUTABLE_DENY_RULES: readonly PermissionRule[] = [
     operations: ['write'] as const,
     auditReason: 'immutable_protected_resource',
   })),
+  // The same protected paths, denied on the lane that asks about disclosed bytes rather than
+  // about the path. A `path-classification` set only matches path resources, so without this the
+  // protected-path deny would be bypassable by reading the file through a Provider disclosure.
+  {
+    capability: 'workspace.read',
+    resourceSet: {
+      kind: 'provider-disclosure',
+      pathClassifications: PROTECTED_PATH_CLASSIFICATIONS,
+      classifications: ['sensitive', 'uncertain'],
+    },
+    operations: ['read'],
+    auditReason: 'immutable_protected_resource',
+  },
 ];
 
 export function expandAccessPreset(preset: AccessPreset): ExpandedAccessPolicy {
@@ -471,6 +530,12 @@ function cloneResourceSet(resourceSet: ResourceSet): ResourceSet {
   if (resourceSet.kind === 'path-classification')
     return Object.freeze({
       ...resourceSet,
+      classifications: Object.freeze([...resourceSet.classifications]),
+    });
+  if (resourceSet.kind === 'provider-disclosure')
+    return Object.freeze({
+      ...resourceSet,
+      pathClassifications: Object.freeze([...resourceSet.pathClassifications]),
       classifications: Object.freeze([...resourceSet.classifications]),
     });
   return Object.freeze({ ...resourceSet });
@@ -688,6 +753,7 @@ function requestFactsValid(request: PermissionRequest): boolean {
       !/^[a-f0-9]{64}$/.test(request.resource.sourceDigest) ||
       !/^[a-f0-9]{64}$/.test(request.resource.disclosedDigest) ||
       !(['sensitive', 'uncertain'] as const).includes(request.resource.classification) ||
+      !PATH_CLASSIFICATIONS.includes(request.resource.pathClassification) ||
       !Array.isArray(request.resource.reasons) ||
       request.resource.reasons.length === 0 ||
       request.resource.reasons.some(
@@ -705,16 +771,7 @@ function requestFactsValid(request: PermissionRequest): boolean {
       segments.includes('.') ||
       segments.includes('..') ||
       !/^[a-f0-9]{64}$/.test(request.resource.identityDigest) ||
-      ![
-        'workspace',
-        'external',
-        'app-private',
-        'os-protected',
-        'credential',
-        'signing-key',
-        'update-key',
-        'unclassified',
-      ].includes(request.resource.classification)
+      !PATH_CLASSIFICATIONS.includes(request.resource.classification)
     )
       return false;
     if (request.resource.kind === 'workspace-path' && request.resource.workspaceId.length === 0)
@@ -1079,6 +1136,12 @@ export function resourceContains(set: ResourceSet, resource: PermissionResource)
       (!set.requireSecretScanClean || resource.secretScan === 'clean') &&
       (!resource.localOnlyTask || resource.providerTrust === 'trusted-local')
     );
+  if (set.kind === 'provider-disclosure')
+    return (
+      resource.kind === 'provider-disclosure' &&
+      set.pathClassifications.includes(resource.pathClassification) &&
+      set.classifications.includes(resource.classification)
+    );
   if (set.kind === 'provider-disclosure-exact')
     return (
       resource.kind === 'provider-disclosure' &&
@@ -1337,6 +1400,11 @@ export function resourceSetIsSubset(candidate: ResourceSet, parent: ResourceSet)
       (!candidate.allowLocalOnlyTaskRemote || parent.allowLocalOnlyTaskRemote) &&
       candidate.attachmentManifestDigest === parent.attachmentManifestDigest &&
       candidate.attachmentByteCount === parent.attachmentByteCount
+    );
+  if (candidate.kind === 'provider-disclosure' && parent.kind === 'provider-disclosure')
+    return (
+      candidate.pathClassifications.every((value) => parent.pathClassifications.includes(value)) &&
+      candidate.classifications.every((value) => parent.classifications.includes(value))
     );
   if (candidate.kind === 'provider-disclosure-exact' && parent.kind === 'provider-disclosure-exact')
     return (
