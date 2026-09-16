@@ -546,6 +546,39 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     },
   );
 
+  it.each(['file', 'sqlite-blob'])(
+    'recovers a payload from a checksum-damaged zlib stream stored as a %s',
+    async (placement) => {
+      const input = fixture();
+      const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+      // Only the trailing Adler-32 is wrong. The compressed body still yields the whole payload,
+      // so a strict inflate failure must not be read as "this was never a stream".
+      const damaged = Buffer.from(deflateSync(payload.bytes));
+      const last = damaged.length - 1;
+      damaged[last] = damaged[last]! ^ 0x01;
+      const path = input.files[0]!.path;
+      if (placement === 'file') writeFileSync(path, damaged);
+      else writeDatabaseValue(path, damaged);
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]).toMatchObject({
+        state: 'contaminated',
+        matchedKinds: ['typed_text'],
+      });
+      expect(result.finalGateEligible).toBe(false);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+    },
+  );
+
+  it('keeps a body-damaged zlib surface incomplete even when nothing matched', async () => {
+    const input = fixture();
+    const damaged = Buffer.from(deflateSync(Buffer.from('ordinary log line\n'.repeat(64))));
+    damaged[10] = damaged[10]! ^ 0x80;
+    writeFileSync(input.files[0]!.path, damaged);
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[0]!.state).toBe('unavailable');
+    expect(result.finalGateEligible).toBe(false);
+  });
+
   it('keeps a truncated zlib surface incomplete even when nothing matched', async () => {
     const input = fixture();
     const truncated = deflateSync(Buffer.from('ordinary log line\n'.repeat(64))).subarray(0, -4);

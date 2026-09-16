@@ -1,6 +1,12 @@
 import Database from 'better-sqlite3';
 import { lstatSync } from 'node:fs';
-import { constants as zlibConstants, crc32, gunzipSync, inflateSync } from 'node:zlib';
+import {
+  constants as zlibConstants,
+  crc32,
+  gunzipSync,
+  inflateRawSync,
+  inflateSync,
+} from 'node:zlib';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
 
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
@@ -16,7 +22,6 @@ const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
 const isGzip = (bytes: Buffer) => bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 const isZip = (bytes: Buffer) => bytes.length >= 2 && bytes.readUInt16LE(0) === 0x4b50;
 const isSqlite = (bytes: Buffer) => bytes.subarray(0, 16).equals(SQLITE_MAGIC);
-/**
 /**
  * A zlib stream has no magic number: CMF holds CM in its low nibble and CINFO in its high one,
  * and CMF/FLG together must be a multiple of 31. Two weak bytes are not proof, and ordinary text
@@ -65,9 +70,9 @@ type Scanner = ReturnType<typeof createBoundedScanner>;
 function createBoundedScanner(result: Result, visit: Visit) {
   const queue: { bytes: Buffer; depth: number }[] = [];
   let queuedBytes = 0;
-  // A stream that ended early can still be read up to the cut. Its recoverable prefix is scanned,
-  // but the surface must not claim to have been fully read afterwards.
-  let truncated = false;
+  // A stream that was cut short or damaged can still be read up to the damage. Whatever comes
+  // back is scanned, but the surface must not claim to have been fully read afterwards.
+  let damaged = false;
   const account = (decoded: Buffer, depth: number) => {
     if (
       decoded.length > MAX_VALUE_BYTES ||
@@ -102,33 +107,35 @@ function createBoundedScanner(result: Result, visit: Visit) {
       } catch (error) {
         // Output that outgrows the budget is always a refusal, and gzip's magic is specific
         // enough that failing to open one stays a refusal too.
-        const code = (error as { code?: string }).code;
-        if (isGzip(archive) || code === 'ERR_BUFFER_TOO_LARGE') throw error;
-        // Z_BUF_ERROR means a real stream ended early — a crash-cut compressed log still holds
-        // everything written before the cut. Read that prefix and scan it, then leave the
-        // surface incomplete, because the bytes after the cut were never seen.
-        if (code === 'Z_BUF_ERROR') {
-          truncated = true;
-          let recovered: Buffer;
-          try {
-            recovered = inflateSync(archive, {
-              finishFlush: zlibConstants.Z_SYNC_FLUSH,
-              maxOutputLength: MAX_VALUE_BYTES,
-            });
-          } catch (recoveryError) {
-            if ((recoveryError as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
-              throw recoveryError;
-            return;
-          }
-          try {
-            if (recovered.length > 0) account(recovered, depth);
-          } finally {
-            recovered.fill(0);
-          }
+        if (isGzip(archive) || (error as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
+          throw error;
+        // Why a strict inflate failed says little: a cut stream, a flipped checksum bit and a
+        // line of text that happens to match the two header bytes can all report the same code.
+        // What separates them is whether the DEFLATE body still yields anything, so decide on
+        // recoverability instead. Reading it raw skips the zlib framing and its checksum, which
+        // is exactly the part a damaged stream fails on while its content stays readable.
+        let recovered: Buffer;
+        try {
+          recovered = inflateRawSync(archive.subarray(2), {
+            finishFlush: zlibConstants.Z_SYNC_FLUSH,
+            maxOutputLength: MAX_VALUE_BYTES,
+          });
+        } catch (recoveryError) {
+          if ((recoveryError as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
+            throw recoveryError;
           return;
         }
-        // Any other failure means the two weak header bytes were never a stream at all: the raw
-        // bytes were already searched by the visit that queued it, so the surface stays scanned.
+        try {
+          // Nothing came back, so those two bytes were never a stream. The raw bytes were already
+          // searched by the visit that queued this, and the surface stays scanned.
+          if (recovered.length === 0) return;
+          // Something came back, so this was a real stream that strict reading could not finish.
+          // Scan what was recovered and refuse to call the surface completely read.
+          damaged = true;
+          account(recovered, depth);
+        } finally {
+          recovered.fill(0);
+        }
         return;
       }
       try {
@@ -143,8 +150,8 @@ function createBoundedScanner(result: Result, visit: Visit) {
   return {
     account,
     expand,
-    /** True once any stream was read only up to an early cut. */
-    wasTruncated: () => truncated,
+    /** True once any stream could only be read past damage or an early cut. */
+    wasDamaged: () => damaged,
     async drain() {
       while (queue.length > 0) {
         const nested = queue.shift()!;
@@ -197,7 +204,7 @@ async function inspectBytes(
     try {
       await expand(bytes, 0);
       await drain();
-      result.complete = !scanner.wasTruncated();
+      result.complete = !scanner.wasDamaged();
     } catch {
       result.complete = false;
     }
@@ -325,7 +332,7 @@ async function inspectSqlite(filePath: string, result: Result, scanner: Scanner)
     // Drained only after the database is closed, so no archive is expanded while a read
     // transaction is still open on it.
     await scanner.drain();
-    result.complete = !scanner.wasTruncated();
+    result.complete = !scanner.wasDamaged();
   } catch {
     result.complete = false;
   } finally {
