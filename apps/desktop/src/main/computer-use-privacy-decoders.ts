@@ -12,8 +12,10 @@ const MAX_COLUMNS = 128;
 const MAX_NESTED_DEPTH = 4;
 const MAX_NESTED_ARCHIVES = 128;
 
+const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
 const isGzip = (bytes: Buffer) => bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 const isZip = (bytes: Buffer) => bytes.length >= 2 && bytes.readUInt16LE(0) === 0x4b50;
+const isSqlite = (bytes: Buffer) => bytes.subarray(0, 16).equals(SQLITE_MAGIC);
 /**
  * Containers this decoder cannot open. Searching only their compressed bytes would leave a stored
  * payload unexamined, so seeing one makes the surface incomplete rather than clean. The zlib test
@@ -47,8 +49,7 @@ export async function inspectComputerUseStoredValues(
   bytes: Buffer,
   visit: Visit,
 ): Promise<Result> {
-  if (bytes.subarray(0, 16).equals(Buffer.from('SQLite format 3\0')))
-    return inspectSqlite(filePath, visit);
+  if (isSqlite(bytes)) return inspectSqlite(filePath, visit);
   const result: Result = { kind: 'raw', complete: false, valuesScanned: 0, decodedBytes: 0 };
   // Expanded bytes that are themselves an archive are queued instead of being treated as the
   // final content: searching only the inner compressed bytes would miss a stored payload.
@@ -64,6 +65,10 @@ export async function inspectComputerUseStoredValues(
     result.valuesScanned += 1;
     visit(decoded);
     if (isUninspectableContainer(decoded)) throw new Error('uninspectable_nested_format');
+    // A decompressed database can hold values split across pages, which the byte search above
+    // cannot reassemble. Logical reading needs a file on disk, and this scanner must not write
+    // the decompressed private bytes back out to get one, so the surface stays uninspected.
+    if (isSqlite(decoded)) throw new Error('uninspectable_nested_sqlite');
     if (!isGzip(decoded) && !isZip(decoded)) return;
     if (
       depth >= MAX_NESTED_DEPTH ||

@@ -9,6 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import type * as NodeFs from 'node:fs';
 import { gzipSync, deflateRawSync, crc32 } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -336,6 +337,63 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     expect(result.surfaces[4]!.state).toBe('unavailable');
     expect(result.uninspectedSurfaces).toEqual(['crash_artifact']);
     expect(result.finalGateEligible).toBe(false);
+  });
+
+  it('never calls a decompressed SQLite scanned while its page-split values are unread', async () => {
+    const input = fixture();
+    const payload = input.payloads.find(({ kind }) => kind === 'screenshot')!;
+    payload.bytes = Buffer.alloc(32 * 1024, 0x81);
+    const databasePath = join(input.root, 'nested.db');
+    const database = new Database(databasePath);
+    try {
+      database.exec('PRAGMA page_size=512; VACUUM; CREATE TABLE capture (body BLOB);');
+      database.prepare('INSERT INTO capture VALUES (?)').run(payload.bytes);
+    } finally {
+      database.close();
+    }
+    const raw = readFileSync(databasePath);
+    rmSync(databasePath);
+    // The BLOB is split across 512-byte pages, so a byte search of the file cannot find it: only
+    // a logical read can. Compressing it must not turn that gap into a clean result.
+    expect(raw.includes(payload.bytes)).toBe(false);
+    writeFileSync(input.files[4]!.path, gzipSync(raw));
+    const result = await inspectComputerUsePrivacySurfaces({
+      ...input,
+      enumeratedRoots: [input.root],
+    });
+    expect(result.surfaces[4]!.state).toBe('unavailable');
+    expect(result.uninspectedSurfaces).toEqual(['crash_artifact']);
+    expect(result.finalGateEligible).toBe(false);
+  });
+
+  it('refuses a file whose opened descriptor is not the entry that was stat-ed', async () => {
+    const input = fixture();
+    vi.resetModules();
+    vi.doMock('node:fs', async () => {
+      const actual = await vi.importActual<typeof NodeFs>('node:fs');
+      return {
+        ...actual,
+        // Simulate the descriptor being swapped between the pre-open lstat and the open.
+        fstatSync: ((fd: number, options?: unknown) => {
+          const stat = actual.fstatSync(fd, options as never);
+          return Object.assign(Object.create(Object.getPrototypeOf(stat) as object), stat, {
+            ino: stat.ino + 1,
+          }) as ReturnType<typeof actual.fstatSync>;
+        }) as typeof actual.fstatSync,
+      };
+    });
+    try {
+      const module = await import('./computer-use-privacy-inspection');
+      const result = await module.inspectComputerUsePrivacySurfaces({
+        ...input,
+        enumeratedRoots: [input.root],
+      });
+      expect(result.surfaces.every(({ state }) => state === 'unavailable')).toBe(true);
+      expect(result.finalGateEligible).toBe(false);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
   });
 
   it('refuses a container format it cannot open rather than calling it scanned', async () => {

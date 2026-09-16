@@ -3,6 +3,7 @@ import {
   closeSync,
   constants,
   fstatSync,
+  lstatSync,
   openSync,
   readSync,
   readdirSync,
@@ -39,6 +40,16 @@ type InspectionState =
 
 const MAX_ENUMERATED_FILES = 4096;
 const MAX_ENUMERATED_DEPTH = 32;
+
+/**
+ * `O_NOFOLLOW` and `O_NONBLOCK` are absent from Windows' fs.constants, where `undefined` would
+ * silently collapse to a plain `O_RDONLY` open. Resolving them explicitly keeps the POSIX
+ * guarantee visible and makes the Windows gap a stated one rather than a silent regression.
+ */
+function openFlag(name: 'O_NOFOLLOW' | 'O_NONBLOCK'): number {
+  const value = (constants as Partial<Record<string, number>>)[name];
+  return typeof value === 'number' ? value : 0;
+}
 
 /**
  * Walks the roots the caller claims are the run's complete persistence surface and returns the
@@ -248,8 +259,20 @@ export async function inspectComputerUsePrivacySurfaces(
           )
             throw new Error();
           seen.add(path);
-          fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+          // Reject a link by its own metadata, not only by the realpath comparison above: on
+          // Windows the O_NOFOLLOW below is not available to enforce it at open time.
+          const entry = lstatSync(path);
+          if (entry.isSymbolicLink() || !entry.isFile()) throw new Error();
+          fd = openSync(path, constants.O_RDONLY | openFlag('O_NOFOLLOW') | openFlag('O_NONBLOCK'));
           const before = fstatSync(fd);
+          // Pin the descriptor to the entry that was just stat-ed, closing the window between
+          // realpath/lstat and open. POSIX identifies an entry by dev+ino; where the platform
+          // reports neither (Windows can report 0/0), only the checks above apply.
+          if (
+            (entry.dev !== 0 || entry.ino !== 0) &&
+            (before.dev !== entry.dev || before.ino !== entry.ino)
+          )
+            throw new Error();
           if (
             !before.isFile() ||
             before.nlink !== 1 ||
