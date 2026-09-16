@@ -13,6 +13,7 @@ export type ComputerUseStartActivationIntent = Readonly<{
   modelId: string;
   providerEgressConsent: boolean;
   remember: boolean;
+  maxRounds?: number;
   expectedPolicyEpoch: number;
   expectedProfileRevision: number;
   windowId?: string;
@@ -51,6 +52,7 @@ export function startActivationIntent(
     modelId: input.modelId,
     providerEgressConsent: input.providerEgressConsent,
     remember: input.remember,
+    maxRounds: input.maxRounds ?? 25,
     expectedPolicyEpoch: input.expectedPolicyEpoch,
     expectedProfileRevision: input.expectedProfileRevision,
     windowId: input.windowId,
@@ -65,7 +67,8 @@ export function quickStartActivationIntent(
     'operation' | 'windowId' | 'expectedWindowRevision'
   >,
 ): string {
-  return serializeComputerUseActivationIntent({ operation: 'quick_start', ...input });
+  const { maxRounds = 25, ...rest } = input;
+  return serializeComputerUseActivationIntent({ operation: 'quick_start', ...rest, maxRounds });
 }
 
 export function approvalActivationIntent(

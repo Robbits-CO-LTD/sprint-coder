@@ -86,6 +86,8 @@ struct MacComputerUseSession {
   std::uint32_t window_id = 0;
   CGRect expected_bounds{};
   std::atomic<std::uint64_t> cancel_epoch{0};
+  // Counts calls reaching OS input APIs, not successful effects.
+  std::atomic<std::uint64_t> input_api_attempts{0};
   std::atomic<std::uint64_t> observation_publication_epoch{0};
   std::atomic<bool> observation_publication_claimed{false};
   std::atomic<bool> closed{false};
@@ -1243,7 +1245,8 @@ constexpr NSTimeInterval kStartActivationPollIntervalSeconds = 0.05;
 
 bool ActivateAndRaiseSelectedWindow(std::uint32_t pid, std::uint32_t window_id,
                                     const CGRect& expected_bounds,
-                                    std::uint64_t expected_cancel_epoch) {
+                                    std::uint64_t expected_cancel_epoch,
+                                    std::atomic<std::uint64_t>& input_api_attempts) {
   if (!CheckCancellationEpoch(expected_cancel_epoch)) return false;
   NSRunningApplication* application =
       [NSRunningApplication runningApplicationWithProcessIdentifier:static_cast<pid_t>(pid)];
@@ -1252,11 +1255,13 @@ bool ActivateAndRaiseSelectedWindow(std::uint32_t pid, std::uint32_t window_id,
   if (selected_window == nullptr) return false;
   const NSApplicationActivationOptions options =
       NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps;
+  input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
   const bool activated = [application activateWithOptions:options];
-  const AXError raised =
-      activated && CheckCancellationEpoch(expected_cancel_epoch)
-          ? AXUIElementPerformAction(selected_window, kAXRaiseAction)
-          : kAXErrorCannotComplete;
+  AXError raised = kAXErrorCannotComplete;
+  if (activated && CheckCancellationEpoch(expected_cancel_epoch)) {
+    input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
+    raised = AXUIElementPerformAction(selected_window, kAXRaiseAction);
+  }
   CFRelease(selected_window);
   if (!activated || raised != kAXErrorSuccess) return false;
 
@@ -1594,7 +1599,7 @@ bool PerformNativeStartSession(AsyncNativeStartSessionWork* work) {
                 "The selected application process changed");
   if (!ActivateAndRaiseSelectedWindow(pid, activation_window_id,
                                       activation_bounds,
-                                      start_cancel_epoch)) {
+                                      start_cancel_epoch, work->session->input_api_attempts)) {
     if (!cancellation_still_valid())
       return fail("CANCELED", "The native session start was canceled");
     if (!creating_session &&
@@ -1791,6 +1796,8 @@ void CompleteNativeStartSession(napi_env env, napi_status status, void* data) {
     napi_set_named_property(
         env, result, "cancelEpoch",
         NumberValue(env, static_cast<double>(result_cancel_epoch)));
+    napi_set_named_property(env, result, "inputAttemptCount", NumberValue(env,
+        static_cast<double>(work->session->input_api_attempts.load(std::memory_order_acquire))));
     napi_set_named_property(
         env, result, "expectedBoundsX",
         NumberValue(env, work->session->expected_bounds.origin.x));
@@ -1813,6 +1820,77 @@ void CompleteNativeStartSession(napi_env env, napi_status status, void* data) {
   delete work;
 }
 
+struct AsyncNativeStopWork {
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  std::shared_ptr<MacComputerUseSession> session;
+  std::uint64_t cancel_epoch = 0;
+  std::uint64_t input_api_attempts = 0;
+  bool close = false;
+  bool drained = false;
+};
+
+void ExecuteNativeStop(napi_env env, void* data) {
+  (void)env;
+  auto* work = static_cast<AsyncNativeStopWork*>(data);
+  try {
+    // This lock is worker-only. The N-API thread has already invalidated the epoch and returns
+    // a Promise immediately. An accepted down/up pair drains before Stop can be acknowledged.
+    std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);
+    if (work->close) {
+      std::lock_guard<std::mutex> state_lock(work->session->state_mutex);
+      work->session->has_observation = false;
+      work->session->visual_patch_digests.clear();
+      work->session->dispatch_replay_cache.clear();
+      work->session->dispatch_replay_order.clear();
+      work->session->inflight_dispatches.clear();
+    }
+    work->input_api_attempts = work->session->input_api_attempts.load(std::memory_order_acquire);
+    work->drained = true;
+  } catch (...) {
+    work->drained = false;
+  }
+}
+
+void CompleteNativeStop(napi_env env, napi_status status, void* data) {
+  std::unique_ptr<AsyncNativeStopWork> work(static_cast<AsyncNativeStopWork*>(data));
+  if (env == nullptr) return;
+  if (status != napi_ok || !work->drained) {
+    napi_value error;
+    napi_create_error(env, nullptr, StringValue(env, "Native stop drain is unconfirmed"), &error);
+    napi_reject_deferred(env, work->deferred, error);
+  } else {
+    napi_value result;
+    napi_create_object(env, &result);
+    napi_set_named_property(env, result, "result", StringValue(env, work->close ? "closed" : "canceled"));
+    napi_set_named_property(env, result, "sessionId", StringValue(env, work->session->session_id.c_str()));
+    napi_set_named_property(env, result, "cancelEpoch", NumberValue(env, static_cast<double>(work->cancel_epoch)));
+    napi_set_named_property(env, result, "inputAttemptCount", NumberValue(env, static_cast<double>(work->input_api_attempts)));
+    napi_set_named_property(env, result, "drained", BoolValue(env, true));
+    napi_resolve_deferred(env, work->deferred, result);
+  }
+  napi_delete_async_work(env, work->work);
+}
+
+napi_value QueueNativeStop(napi_env env, std::shared_ptr<MacComputerUseSession> session,
+                          std::uint64_t cancel_epoch, bool close) {
+  auto work = std::make_unique<AsyncNativeStopWork>();
+  work->session = std::move(session);
+  work->cancel_epoch = cancel_epoch;
+  work->close = close;
+  napi_value promise;
+  if (napi_create_promise(env, &work->deferred, &promise) != napi_ok)
+    return ThrowNativeError(env, "ASYNC_UNAVAILABLE", "Native stop drain is unconfirmed");
+  if (napi_create_async_work(env, nullptr, StringValue(env, "SprintCoderComputerUseStop"),
+      ExecuteNativeStop, CompleteNativeStop, work.get(), &work->work) != napi_ok ||
+      napi_queue_async_work(env, work->work) != napi_ok) {
+    if (work->work != nullptr) napi_delete_async_work(env, work->work);
+    return ThrowNativeError(env, "ASYNC_UNAVAILABLE", "Native stop drain is unconfirmed");
+  }
+  work.release();
+  return promise;
+}
+
 napi_value CloseSession(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -1820,7 +1898,9 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
       !IsObject(env, argv[0]))
     return ThrowNativeError(env, "INVALID_SESSION", "A native session close request is required");
   std::string session_id;
-  if (!ReadNamedString(env, argv[0], "sessionId", &session_id))
+  std::uint64_t requested_cancel_epoch = 0;
+  if (!ReadNamedString(env, argv[0], "sessionId", &session_id) ||
+      !ReadNamedUInt64(env, argv[0], "cancelEpoch", &requested_cancel_epoch))
     return ThrowNativeError(env, "INVALID_SESSION", "A native session id is required");
   std::shared_ptr<MacComputerUseSession> session;
   {
@@ -1828,31 +1908,31 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
     const auto found = mac_sessions.find(session_id);
     if (found != mac_sessions.end()) {
       session = found->second;
+      if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
+        return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
       mac_sessions.erase(session_id);
     } else {
       const auto pending = mac_pending_sessions.find(session_id);
       if (pending != mac_pending_sessions.end()) {
         session = pending->second;
+        if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
+          return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
         mac_pending_sessions.erase(pending);
       }
     }
   }
   if (session != nullptr) {
     session->closed.store(true, std::memory_order_release);
-    session->cancel_epoch.fetch_add(1, std::memory_order_acq_rel);
+    session->cancel_epoch.store(requested_cancel_epoch, std::memory_order_release);
+    auto current = cancellation_epoch.load(std::memory_order_acquire);
+    while (requested_cancel_epoch > current && !cancellation_epoch.compare_exchange_weak(
+        current, requested_cancel_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
     session->observation_publication_claimed.store(false,
                                                    std::memory_order_release);
-    std::lock_guard<std::mutex> state_lock(session->state_mutex);
-    session->has_observation = false;
-    session->visual_patch_digests.clear();
-    session->dispatch_replay_cache.clear();
-    session->dispatch_replay_order.clear();
-    session->inflight_dispatches.clear();
+    const auto close_epoch = session->cancel_epoch.load(std::memory_order_acquire);
+    return QueueNativeStop(env, std::move(session), close_epoch, true);
   }
-  napi_value result;
-  napi_create_object(env, &result);
-  napi_set_named_property(env, result, "result", StringValue(env, "closed"));
-  return result;
+  return ThrowNativeError(env, "SESSION_MISSING", "Native close is unconfirmed");
 }
 
 bool ReadWindowBounds(std::uint32_t window_id, CGRect* bounds) {
@@ -3967,6 +4047,9 @@ napi_value DispatchResultValue(napi_env env, const NativeDispatchRequest& reques
   napi_set_named_property(env, result, "actionDigest",
                          StringValue(env, request.action_digest.c_str()));
   napi_set_named_property(env, result, "kind", StringValue(env, request.kind.c_str()));
+  napi_set_named_property(env, result, "cancelEpoch", NumberValue(env, static_cast<double>(request.cancel_epoch)));
+  napi_set_named_property(env, result, "inputAttemptCount", NumberValue(env,
+      static_cast<double>(request.session->input_api_attempts.load(std::memory_order_acquire))));
   return result;
 }
 
@@ -4061,6 +4144,7 @@ NativeDispatchOutcome PerformSemanticDispatch(const NativeDispatchRequest& reque
     }
     outcome = MakeDispatchOutcome("unknown_effect", "native_input_effect_unknown", true,
                                   true);
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     const AXError pressed = AXUIElementPerformAction(target, kAXPressAction);
     bool after = false;
     const bool confirmed = pressed == kAXErrorSuccess && read_toggle_state(&after) &&
@@ -4077,6 +4161,7 @@ NativeDispatchOutcome PerformSemanticDispatch(const NativeDispatchRequest& reque
       }
       outcome = MakeDispatchOutcome("unknown_effect", "native_input_effect_unknown", true,
                                     true);
+      request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
       effect = AXUIElementPerformAction(target, kAXPressAction);
       effect_confirmed = effect == kAXErrorSuccess;
     } else if (request.kind == "set_text") {
@@ -4094,6 +4179,7 @@ NativeDispatchOutcome PerformSemanticDispatch(const NativeDispatchRequest& reque
       }
       outcome = MakeDispatchOutcome("unknown_effect", "native_input_effect_unknown", true,
                                     true);
+      request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
       effect = AXUIElementSetAttributeValue(target, kAXValueAttribute, value);
       CFTypeRef after_value = nullptr;
       effect_confirmed =
@@ -4120,6 +4206,7 @@ NativeDispatchOutcome PerformSemanticDispatch(const NativeDispatchRequest& reque
       }
       outcome = MakeDispatchOutcome("unknown_effect", "native_input_effect_unknown", true,
                                     true);
+      request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
       effect = AXUIElementSetAttributeValue(target, kAXSelectedAttribute, kCFBooleanTrue);
       bool selected = false;
       effect_confirmed = effect == kAXErrorSuccess &&
@@ -4133,6 +4220,7 @@ NativeDispatchOutcome PerformSemanticDispatch(const NativeDispatchRequest& reque
       }
       outcome = MakeDispatchOutcome("unknown_effect", "native_input_effect_unknown", true,
                                     true);
+      request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
       effect = AXUIElementSetAttributeValue(
           target, kAXExpandedAttribute,
           request.boolean_value ? kCFBooleanTrue : kCFBooleanFalse);
@@ -4262,11 +4350,13 @@ NativeDispatchOutcome PerformVisualDispatch(const NativeDispatchRequest& request
       CFRelease(up);
       return outcome;
     }
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), down);
     CFRelease(down);
     const NativeTargetValidation between_mouse_events = RevalidateBoundTarget(request);
     // A posted down event may already have changed the target. Always release the button, then
     // classify any subsequent uncertainty as unknown_effect.
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), up);
     CFRelease(up);
     if (between_mouse_events != NativeTargetValidation::kValid)
@@ -4281,6 +4371,7 @@ NativeDispatchOutcome PerformVisualDispatch(const NativeDispatchRequest& request
       CFRelease(event);
       return outcome;
     }
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), event);
     CFRelease(event);
   }
@@ -4320,9 +4411,11 @@ NativeDispatchOutcome PerformFocusedInputDispatch(
       CFRelease(up);
       return OutcomeForValidation(NativeTargetValidation::kCanceled, false);
     }
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), down);
     CFRelease(down);
     const NativeTargetValidation between_key_events = RevalidateBoundTarget(request);
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), up);
     CFRelease(up);
     if (between_key_events != NativeTargetValidation::kValid)
@@ -4343,9 +4436,11 @@ NativeDispatchOutcome PerformFocusedInputDispatch(
       CFRelease(up);
       return OutcomeForValidation(NativeTargetValidation::kCanceled, false);
     }
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), down);
     CFRelease(down);
     const NativeTargetValidation between_key_events = RevalidateBoundTarget(request);
+    request.session->input_api_attempts.fetch_add(1, std::memory_order_acq_rel);
     CGEventPostToPid(static_cast<pid_t>(request.session->pid), up);
     CFRelease(up);
     if (between_key_events != NativeTargetValidation::kValid)
@@ -4673,13 +4768,7 @@ napi_value Cancel(napi_env env, napi_callback_info info) {
                                                std::memory_order_release);
   session->observation_publication_claimed.store(false,
                                                  std::memory_order_release);
-  napi_value result;
-  napi_create_object(env, &result);
-  napi_set_named_property(env, result, "result", StringValue(env, "canceled"));
-  napi_set_named_property(
-      env, result, "cancelEpoch",
-      NumberValue(env, static_cast<double>(requested_cancel_epoch)));
-  return result;
+  return QueueNativeStop(env, session, requested_cancel_epoch, false);
 }
 
 napi_value Init(napi_env env, napi_value exports) {

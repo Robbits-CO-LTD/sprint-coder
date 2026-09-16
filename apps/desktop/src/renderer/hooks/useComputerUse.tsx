@@ -313,6 +313,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
             modelId: input.modelId,
           },
           remember: input.remember,
+          maxRounds: input.maxRounds ?? 25,
           expectedPolicyEpoch,
           expectedWindowRevision: windowCandidate.revision,
           expectedProfileRevision: input.profileRevision,

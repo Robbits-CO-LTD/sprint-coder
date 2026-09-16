@@ -1,9 +1,15 @@
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { ProviderConnection, TaskSummary } from '@sprint-coder/contracts';
 import type { PermissionBroker } from './permission-broker';
 import type { ProviderRuntime } from './provider-runtime';
+import {
+  ComputerUseRuntimeCapture,
+  computerUseCaptureDigest,
+} from './computer-use-runtime-capture';
 import {
   COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
   COMPUTER_USE_PREFLIGHT_MARKER_PNG_BASE64,
@@ -174,6 +180,200 @@ describe('Computer Use planner parser', () => {
 });
 
 describe('Computer Use provider preflight', () => {
+  it('captures only executed preflight and strict parser outcomes, never response bodies', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    runtimeCapture.start({
+      type: 'session',
+      sessionDigest: computerUseCaptureDigest('session-1'),
+      platform: 'darwin',
+      appDigest: observation.appIdentityDigest,
+      windowDigest: observation.windowIdentityDigest,
+      manifestDigest: 'f'.repeat(64),
+    });
+    const base = {
+      ...deps(runtimeFor(() => undefined, '{"type":"click","x":0.75,"y":0.25,"button":"left"}')),
+      runtimeCapture,
+    };
+    const permit = await preflightComputerUseProvider(
+      { ...base, sessionId: 'session-1' },
+      new AbortController().signal,
+    );
+    const response = '{"type":"type","text":"PRIVATE_FIXTURE_TEXT"}';
+    const planner = new ProviderComputerUsePlanner({
+      ...base,
+      compatibilityPermit: permit,
+      runtime: runtimeFor(() => undefined, response),
+    });
+    await planner.plan({ observation, round: 1, signal: new AbortController().signal });
+    const snapshot = runtimeCapture.snapshot();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      'session',
+      'egress_authorized',
+      'preflight_started',
+      'preflight_passed',
+      'egress_authorized',
+      'round_started',
+      'parsed',
+    ]);
+    // One consent scope governs preflight and every round of the same run.
+    const consents = snapshot.events.filter((event) => event.type === 'egress_authorized');
+    expect(new Set(consents.map((event) => Reflect.get(event, 'egressDigest'))).size).toBe(1);
+    expect(snapshot.events.find((event) => event.type === 'preflight_started')).toMatchObject({
+      connectionIdDigest: computerUseCaptureDigest('connection-1'),
+      modelIdDigest: computerUseCaptureDigest('model-1'),
+      policyEpoch: expect.any(Number),
+    });
+    expect(snapshot.events.find((event) => event.type === 'preflight_passed')).toMatchObject({
+      fallbackUsed: false,
+    });
+    expect(snapshot.events.at(-1)).toMatchObject({ selectedFromCurrentTask: true });
+    // The aggregator resolves no identity unless all five arrive together on this one event.
+    const preflight = snapshot.events.find((event) => event.type === 'preflight_started')!;
+    for (const key of [
+      'connectionIdDigest',
+      'modelIdDigest',
+      'endpointDigest',
+      'catalogDigest',
+      'policyEpoch',
+    ])
+      expect(Reflect.get(preflight, key)).toBeDefined();
+    // Feed the real emitter output straight into the aggregator: the field names and shapes must
+    // agree. One round without a Stop is deliberately not a resolved binding.
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(__dirname, '../../../../computer-use-capture-rounds.mjs')).href
+    );
+    const [aggregated] = summarizeComputerUseCaptureRounds([
+      { kind: 'hello', payload: { platform: 'darwin', nativeManifestDigest: 'f'.repeat(64) } },
+      ...snapshot.events.map((payload) => ({ kind: 'event', payload })),
+    ]);
+    expect(aggregated.egressConsentDigest).toBe(
+      Reflect.get(consents[0]!, 'egressDigest') as string,
+    );
+    expect(aggregated.egressAuthorizations).toBe(2);
+    expect(aggregated.roundsAttempted).toBe(1);
+    expect(aggregated.roundsComplete).toBe(false);
+    expect(aggregated.binding).toBe(null);
+    expect(snapshot.events.at(-1)).toMatchObject({
+      type: 'parsed',
+      actionClass: 'type',
+      responseDigest: computerUseCaptureDigest(response),
+      responseBytes: Buffer.byteLength(response),
+    });
+    const serialized = JSON.stringify(snapshot);
+    for (const body of [
+      'PRIVATE_FIXTURE_TEXT',
+      response,
+      observation.images[0]!.base64,
+      'session-1',
+      'connection-1',
+      'model-1',
+    ])
+      expect(serialized).not.toContain(body);
+    expect(snapshot.finalGateEligible).toBe(false);
+  });
+
+  it('records no consent for a denied request, at preflight or mid-run', async () => {
+    const denied = () => ({
+      allowed: false,
+      evaluation: {
+        decision: 'deny' as const,
+        reason: 'fixture_denied',
+        policyEpoch: 1,
+        evaluationTrace: [],
+      },
+    });
+    const startCapture = () => {
+      const runtimeCapture = new ComputerUseRuntimeCapture();
+      runtimeCapture.start({
+        type: 'session',
+        sessionDigest: computerUseCaptureDigest('session-1'),
+        platform: 'darwin',
+        appDigest: observation.appIdentityDigest,
+        windowDigest: observation.windowIdentityDigest,
+        manifestDigest: 'f'.repeat(64),
+      });
+      return runtimeCapture;
+    };
+    // The preflight marker assertion requires this exact click position.
+    const response = '{"type":"click","x":0.75,"y":0.25,"button":"left"}';
+
+    const preflightCapture = startCapture();
+    await expect(
+      preflightComputerUseProvider(
+        {
+          ...deps(runtimeFor(() => undefined, response)),
+          sessionId: 'session-1',
+          runtimeCapture: preflightCapture,
+          egress: denied,
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('preflight_provider_egress_denied');
+    expect(preflightCapture.snapshot().events.map((event) => event.type)).toEqual(['session']);
+
+    // A run whose policy turns mid-flight must not leave an authorization behind either.
+    const roundCapture = startCapture();
+    const base = { ...deps(runtimeFor(() => undefined, response)), runtimeCapture: roundCapture };
+    const permit = await preflightComputerUseProvider(
+      { ...base, sessionId: 'session-1' },
+      new AbortController().signal,
+    );
+    const planner = new ProviderComputerUsePlanner({
+      ...base,
+      compatibilityPermit: permit,
+      runtime: runtimeFor(() => undefined, response),
+      egress: denied,
+    });
+    await expect(
+      planner.plan({ observation, round: 1, signal: new AbortController().signal }),
+    ).rejects.toThrow('provider_egress_denied');
+    const snapshot = roundCapture.snapshot();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      'session',
+      'egress_authorized',
+      'preflight_started',
+      'preflight_passed',
+    ]);
+    const { summarizeComputerUseCaptureRounds } = await import(
+      pathToFileURL(resolve(__dirname, '../../../../computer-use-capture-rounds.mjs')).href
+    );
+    const [aggregated] = summarizeComputerUseCaptureRounds([
+      { kind: 'hello', payload: { platform: 'darwin', nativeManifestDigest: 'f'.repeat(64) } },
+      ...snapshot.events.map((payload) => ({ kind: 'event', payload })),
+    ]);
+    // The denied round must not be counted as an authorization.
+    expect(aggregated.egressAuthorizations).toBe(1);
+    expect(aggregated.roundsAttempted).toBe(0);
+  });
+
+  it('does not emit preflight success for parser failure or changed resolution', async () => {
+    for (const output of [
+      '{"type":"finish"}',
+      '{"type":"click","x":0.75,"y":0.25,"button":"left","extra":true}',
+    ]) {
+      const runtimeCapture = new ComputerUseRuntimeCapture();
+      runtimeCapture.start({
+        type: 'session',
+        sessionDigest: computerUseCaptureDigest('session-1'),
+        platform: 'darwin',
+        appDigest: observation.appIdentityDigest,
+        windowDigest: observation.windowIdentityDigest,
+        manifestDigest: 'f'.repeat(64),
+      });
+      await expect(
+        preflightComputerUseProvider(
+          { ...deps(runtimeFor(() => undefined, output)), sessionId: 'session-1', runtimeCapture },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow();
+      expect(runtimeCapture.snapshot().events.map((event) => event.type)).toEqual([
+        'session',
+        'egress_authorized',
+        'preflight_started',
+      ]);
+    }
+  });
+
   it('ships a valid 64px PNG with the red marker at the required normalized position', () => {
     const png = Buffer.from(COMPUTER_USE_PREFLIGHT_MARKER_PNG_BASE64, 'base64');
     const decoded = decodeUnfilteredRgbaPng(png);

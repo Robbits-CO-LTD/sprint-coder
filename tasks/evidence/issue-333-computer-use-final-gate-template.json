@@ -1,5 +1,40 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
+  "parentClosure": {
+    "providerRuns": {
+      "windows": null,
+      "macos": null
+    },
+    "coverage": {
+      "windows:FULL_ACCESS_FIVE_CARD_ZERO": null,
+      "windows:REMEMBERED_ONE_CLICK": null,
+      "windows:PICKER_RESUME": null,
+      "windows:SCROLL": null,
+      "windows:FOCUS_LOSS": null,
+      "windows:TYPE_MID_STOP": null,
+      "windows:WINDOW_ESCAPE_DENIED": null,
+      "windows:REPRESENTATIVE_HARD_BOUNDARY": null,
+      "macos:FULL_ACCESS_FIVE_CARD_ZERO": null,
+      "macos:REMEMBERED_ONE_CLICK": null,
+      "macos:PICKER_RESUME": null,
+      "macos:SCROLL": null,
+      "macos:FOCUS_LOSS": null,
+      "macos:TYPE_MID_STOP": null,
+      "macos:WINDOW_ESCAPE_DENIED": null,
+      "macos:REPRESENTATIVE_HARD_BOUNDARY": null,
+      "either:THIRD_PARTY_STATE_CHANGE": null,
+      "either:SUPERVISED_BOUNDED_GRANT": null,
+      "tests:PICKER_TOKEN_REPLAY": null,
+      "tests:NATIVE_PREACCEPT_REJECT": null,
+      "tests:GRANT_SESSION_DIALOG_RACE": null,
+      "tests:PROTOCOL_ABI_DIGEST_MISMATCH": null,
+      "tests:CAPTURE_UNAVAILABLE": null,
+      "tests:OS_PERMISSION_DENIED": null,
+      "tests:PROVIDER_MALFORMED": null,
+      "tests:PROVIDER_OVERSIZE": null,
+      "tests:PROVIDER_EXTRA_TEXT": null
+    }
+  },
   "issue": 333,
   "sourceCommit": "0000000000000000000000000000000000000000",
   "sourceRunId": "0",

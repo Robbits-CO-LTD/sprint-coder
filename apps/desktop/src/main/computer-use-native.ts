@@ -31,7 +31,7 @@ export type {
 
 export const COMPUTER_USE_NATIVE_FEATURE_FLAG = 'SPRINT_CODER_COMPUTER_USE_DESKTOP_V1' as const;
 export const COMPUTER_USE_NATIVE_PROTOCOL_VERSION = 1 as const;
-export const COMPUTER_USE_NATIVE_API_VERSION = 1 as const;
+export const COMPUTER_USE_NATIVE_API_VERSION = 2 as const;
 export const COMPUTER_USE_NATIVE_NAPI_VERSION = 10 as const;
 const COMPUTER_USE_NATIVE_MANIFEST_NAME = 'computer-use-native.manifest.json';
 const COMPUTER_USE_NATIVE_MAX_PROBE_BYTES = 64 * 1024;
@@ -169,7 +169,7 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   return Object.freeze({
     available: true,
     protocolVersion: 1,
-    apiVersion: 1,
+    apiVersion: 2,
     backend: probe.backend,
     reason: '',
     artifactPath: typeof value['artifactPath'] === 'string' ? value['artifactPath'] : null,
@@ -180,7 +180,7 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
 
 function isProbe(value: unknown): value is Readonly<{
   protocolVersion: 1;
-  apiVersion: 1;
+  apiVersion: 2;
   backend: string;
   available: boolean;
   sourceCommit?: string | null;
@@ -189,7 +189,7 @@ function isProbe(value: unknown): value is Readonly<{
   const probe = value as Record<string, unknown>;
   return (
     probe['protocolVersion'] === 1 &&
-    probe['apiVersion'] === 1 &&
+    probe['apiVersion'] === 2 &&
     typeof probe['available'] === 'boolean' &&
     (probe['sourceCommit'] === undefined ||
       probe['sourceCommit'] === null ||
@@ -277,7 +277,7 @@ export function loadComputerUseNative(
       return deniedBinding('ARTIFACT_SIGNATURE_MISMATCH', manifest, artifactPath, digest);
     const raw = loadRawBinding(platform, artifactPath, manifest, options);
     const nativeProbe = parseNativeProbe(raw.probe());
-    const handshake = raw.handshake?.({ protocolVersion: 1, apiVersion: 1, featureFlag: true });
+    const handshake = raw.handshake?.({ protocolVersion: 1, apiVersion: 2, featureFlag: true });
     if (handshake === undefined) throw new Error('HANDSHAKE_UNAVAILABLE');
     parseNativeHandshake(handshake, platform);
     const result = evaluateComputerUseNativeGate({
@@ -457,7 +457,7 @@ function isAddon(value: unknown): value is ComputerUseNativeAddon {
 
 function parseNativeProbe(value: unknown): Readonly<{
   protocolVersion: 1;
-  apiVersion: 1;
+  apiVersion: 2;
   backend: string;
   available: boolean;
   sourceCommit: string | null;
@@ -467,7 +467,7 @@ function parseNativeProbe(value: unknown): Readonly<{
   const probe = value as Record<string, unknown>;
   if (
     probe['protocolVersion'] !== 1 ||
-    probe['apiVersion'] !== 1 ||
+    probe['apiVersion'] !== 2 ||
     typeof probe['backend'] !== 'string' ||
     probe['backend'].length === 0 ||
     probe['backend'].length > 128 ||
@@ -478,7 +478,7 @@ function parseNativeProbe(value: unknown): Readonly<{
     throw new Error('HANDSHAKE_INVALID');
   return Object.freeze({
     protocolVersion: 1,
-    apiVersion: 1,
+    apiVersion: 2,
     backend: probe['backend'],
     available: probe['available'],
     sourceCommit: typeof probe['sourceCommit'] === 'string' ? probe['sourceCommit'] : null,
@@ -491,7 +491,7 @@ function parseNativeHandshake(value: unknown, platform: NodeJS.Platform): void {
   const handshake = value as Record<string, unknown>;
   if (
     handshake['protocolVersion'] !== 1 ||
-    handshake['apiVersion'] !== 1 ||
+    handshake['apiVersion'] !== 2 ||
     handshake['platform'] !== platform ||
     handshake['napiVersion'] !== 10
   )
@@ -517,7 +517,7 @@ function disabledManifest(): ComputerUseNativeManifest {
     version: 1,
     sourceCommit: '0'.repeat(40),
     protocolVersion: 1,
-    apiVersion: 1,
+    apiVersion: 2,
     nativeVersion: 'disabled',
     moduleDigest: '0'.repeat(64),
     binaryDigest: '0'.repeat(64),

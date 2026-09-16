@@ -8929,7 +8929,8 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-secondary);
   font-size: 12px;
 }
-.computer-use-field select {
+.computer-use-field select,
+.computer-use-field input[type='number'] {
   width: 100%;
   min-height: 38px;
   padding: 0 10px;

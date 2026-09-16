@@ -5,10 +5,243 @@
 AC-29 Safety journey below is `PASS` for the exact submitted packages. Merge, tag, publish,
 feature enablement, and Issue closure remain separate decisions.
 
-This document records the current repository state as of 2026-08-30. `FAIL` means the required
-external acceptance has not yet produced the canonical evidence code; it does not claim an
-attempted run failed. Core and Safety never accept `SKIP`. Compatibility may be `FAIL` or `SKIP`
-only with the row-specific reason and evidence code accepted by the schema-v3 validator.
+Parent integration audit: 2026-09-15, source baseline
+`5b20208eb7b4f7697105dca2bf9436da3aeec910`. The authoritative requirements are the
+[generation-4 plan, AC-21/28/29/30 and INV-21](https://github.com/Robbits-CO-LTD/sprint-coder/issues/333#issuecomment-5461653008).
+Core journeys require signed/notarized real applications on both OSes. Safety requires the
+direct unit/integration/native contract proof specified by AC-29; it does not require repeating
+every fault as real-application E2E. Add platform E2E only where a failure directly requires it.
+Compatibility must match measured support and the UI/documentation claims.
+
+`FAIL / EXTERNAL_GATE_NOT_RUN` in the pending template means that canonical evidence has not
+been supplied; it does not claim an attempted run failed or that the corresponding automated
+Safety test failed. Core and Safety never accept `SKIP`. Compatibility may be `FAIL` or `SKIP`
+only with its row-specific reason and canonical evidence code. A local automated Safety PASS is
+valid proof for its AC-29 requirement, but cannot be copied into a hand-authored attested JSON.
+
+## Parent acceptance map and close decision
+
+The rows below allocate the original AC/INV; they add no new policy or all-combinations test gate.
+Historical merge/CI evidence is not current signed-device or real-Provider proof. The parent and
+both child Issues remain `OPEN / CLOSE_HOLD` until their mandatory evidence is verified by Main.
+
+| Original requirement                | Owner and required proof                                                                                                                                                                                             | Current integration boundary                                                                                                |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| AC-4/13, INV-3/14                   | #388: bounded capture/tree and raw Provider-output privacy; direct privacy tests plus inspection of DB/log/telemetry/provider trace/crash/E2E output from the real package journeys                                  | All privacy facts must be independently true; successful actions cannot override absent privacy proof                       |
+| AC-10/11/18/25/26, INV-1/4/12/19/20 | #333 integrates Main/IPC/user-activation/Stop tests; #387 supplies both OS Core onboarding, remembered one-click start and full-access journeys                                                                      | Default OFF, no authority from Renderer/model, active grants never persisted; native readiness is not external acceptance   |
+| AC-12/16/20/23, INV-8/10/13/18      | #387 supplies app/window identity and window-only capture; direct native/controller tests cover focus, stale observation, dialog revision and escape rejection                                                       | Unverified identity, unsupported proxy, stale/focus/geometry failures stay denied                                           |
+| AC-14/15, INV-11/15                 | #333 integrates action/permission/controller tests; #387 supplies semantic/visual/Japanese/scroll Core and one supervised bounded-grant journey                                                                      | Duplicate/no-retry/unknown-effect and grant races use direct tests; full-access exceptions remain those defined by AC-25/27 |
+| AC-17, INV-9                        | #387: exact source/package/fixture digests, Windows Authenticode and matching release signer; macOS Developer ID, notarization, stapling and nested closure                                                          | Unsigned/ad-hoc, missing manifest, handshake/protocol/ABI/digest mismatch are denied before native input                    |
+| AC-21, INV-5/17                     | #388 on #387's exact packages: selected current-Task non-OpenRouter Connection/Model; fixed-image preflight and exact three real rounds separately on Windows and macOS                                              | No script/replay/handwritten action, fallback, credential change or implicit retry substitutes for real Provider evidence   |
+| AC-18/27/29, INV-7/12/15            | Direct unit/integration/native proof of every required race, denial, malformed Provider response, prompt injection and zero input after Stop; representative hard boundary and mid-type Stop in each OS Core journey | Safety is not an additional exhaustive GUI run; mandatory tests still require PASS                                          |
+| AC-19/28, INV-19/20/21              | #387/#388 combined: both OS major journeys, five-action full-access sequence, restarts, third-party state change and bounded grant as detailed below                                                                 | Schema-v3 row PASS alone is insufficient; unrepresented original ACs remain mandatory and unmet                             |
+| AC-30, INV-13/18/21                 | #387 measures environment/control compatibility; #388 measures selected Provider path; Main checks UI/docs against results                                                                                           | Only supported claims require PASS; canonical reasoned unsupported SKIP cannot discharge Core/Safety                        |
+
+### Original ACs not established by schema v3 alone
+
+At the audit baseline, the [20 Core rows](https://github.com/Robbits-CO-LTD/sprint-coder/blob/5b20208eb7b4f7697105dca2bf9436da3aeec910/verify-computer-use-final-gate.mjs#L38)
+and [generic event sequence](https://github.com/Robbits-CO-LTD/sprint-coder/blob/5b20208eb7b4f7697105dca2bf9436da3aeec910/verify-computer-use-final-gate.mjs#L374)
+do not validate all of generation 4. These requirements must remain explicitly unmet until
+bounded, source/package-bound evidence covers them; a generic `MIXED` code is not that proof:
+
+- Both OSes: at least five mixed actions in `full_access_app`, with zero Approval Cards. Verify
+  mode, action count and final app state; exact three Provider rounds do not imply five actions.
+- Both OSes: remembered settings followed by one-click start, and file-picker user takeover
+  followed by fresh-observation one-click resume. Pausing at a picker alone proves no resume.
+- Both OSes: scroll, focus-loss pause, mid-type Stop, other-window escape rejection and one
+  representative secure-field or OS/admin hard boundary stopped before physical input. Existing
+  global Safety rows do not by themselves establish the per-OS Core coverage.
+- Both OSes: separate live Provider sessions containing semantic action and typing or scroll,
+  observation/TTL refresh, strict parse, Broker/native result, action class/latency, egress consent,
+  cost bound and final state. The current [single providerBinding](https://github.com/Robbits-CO-LTD/sprint-coder/blob/5b20208eb7b4f7697105dca2bf9436da3aeec910/verify-computer-use-final-gate.mjs#L738)
+  with `roundsCompleted: 3` cannot identify two OS runs or prove their action/native sequence.
+- One selected third-party application: sandbox account/document and one applicable save/send/delete
+  operation with verified state change. A VS Code temporary workspace/Japanese-text PASS alone
+  does not establish this action. Third-party acceptance cannot be SKIP.
+- Either OS: one completed `supervised` bounded-plan-grant journey. Full-access success is not
+  supervised grant proof.
+
+The schema's [corePassed/safetyPassed result](https://github.com/Robbits-CO-LTD/sprint-coder/blob/5b20208eb7b4f7697105dca2bf9436da3aeec910/verify-computer-use-final-gate.mjs#L884)
+summarizes only the legacy rows. Schema v4 now requires the parent closure below as well; unresolved
+assertions still prevent acceptance. Do not rewrite pending rows to PASS or weaken the generator's
+refusal to compensate.
+
+### Connected schema v4 and collector ownership
+
+`computer-use-parent-evidence-schema.mjs` is shared by the current verifier and, through that
+verifier, the current generator. Completed evidence uses schema **4**, retaining the ordered
+20 Core / 28 Safety / 9 Compatibility rows and adding `parentClosure` to the same attested JSON.
+No workflow change, additional artifact, provider selection, policy or product capability is added.
+
+The closure contains exactly `providerRuns: { windows, macos }` and `coverage`. A run is either
+`null` (unmeasured, HOLD) or a closed record; omission of an OS key is malformed. Each non-null
+run contains collector envelope version 1, run/platform/source/package/executable/signer/process/
+manifest/session/event-chain digests, `privacyReportDigest`, `egressConsentDigest`, `costLimitDigest`,
+`providerPath` (`structured` or `bounded_json`), `binding`, and three ordered `rounds`.
+
+- `binding` has the existing v3 Provider binding shape. Each OS independently requires the selected
+  current Task, one successful preflight, exactly three attempted/completed rounds, stable binding,
+  no OpenRouter/fallback/credential change. The legacy top-level `providerBinding` is the Windows
+  compatibility summary only and must be strictly deep-equal to `providerRuns.windows.binding`.
+  Likewise, the two legacy `AC-30-PROVIDER-*` rows describe **Windows primary only**. Their
+  `PROVIDER_PATH_NOT_SELECTED` SKIP means not selected on Windows, not unused or unsupported on
+  macOS. macOS may select a different `providerPath`. The verifier reports
+  `compatibility.legacyProviderSummaryScope: windows` and separate `compatibility.providerPaths`
+  for both OSes; consumers must not infer macOS support from the legacy Windows row/count.
+  This is the v4 migration scope of those two rows, not a new same-path constraint. It follows
+  generation-4 AC-30's environment-specific support claims and AC-21's independently selected
+  real Connection/Model on each OS. Each claimed OS path still needs its own verified run.
+- Every round has `round`, `revision`, `updatedRevision`, `actionClass`, `actionDigest`,
+  `nativeActionDigest`, `nativeRequestDigests`, `nativeReceiptDigest`, `brokerDecisionDigest`,
+  `latencyMs`, `ttlVerified`, and `result`. It requires ordered fresh revisions, matched action
+  digests, unique native request IDs, a completed native action, semantic coverage and typing or
+  scroll in each OS run. Non-native wait/finish cannot substitute for a successful action round.
+  `nativeRequestDigests` is an ordered nonempty list, unique across the run: one logical Unicode
+  typing action can dispatch multiple atomic native requests. `nativeReceiptDigest` binds the
+  corresponding receipt report; the collector verifies every request/action/epoch before hashing it.
+- Both OS runs bind to the top-level source and their respective package hash. Run, session and
+  process identities cannot be reused across OSes. The collector, not these producer fields,
+  establishes actual package signatures and physical process ownership.
+
+`COMPUTER_USE_PARENT_COVERAGE` is the closed assertion-reference map. Every entry is null until
+its evidence exists. A non-null reference contains `sourceCommit`, `platform`, `packageSha256`,
+`evidenceDigest`, `proofKind`. Per-OS Core refs use their respective package and `proofKind: core`;
+the third-party and bounded-grant refs use either OS. Safety refs use `unit`, `integration`, or
+`native` with null platform/package so they do not impose extra signed GUI combinations.
+
+| Existing coverage           | Canonical mapping and unresolved assertions                                                                                                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 17 app-specific Core rows   | AC-28 identity/observation, semantic/visual/mixed/Japanese and selected-app evidence; no automatic assertion of five actions or Card count                                                            |
+| 3 global Provider Core rows | AC-21/#388 must now also resolve independent Windows and macOS runs; global row labels cannot prove both                                                                                              |
+| 28 legacy Safety rows       | Direct AC-29 proof, with representative per-OS Core safety refs kept separately                                                                                                                       |
+| Per-OS closure refs         | Full-access five mixed actions/Card 0; remembered one-click start; picker resume; scroll; focus loss; mid-type Stop; window escape; representative hard boundary                                      |
+| Either-OS closure refs      | Third-party sandbox save/send/delete with state change; supervised bounded grant completion                                                                                                           |
+| Additional direct-test refs | Picker token replay; native pre-acceptance rejection; grant/session/dialog race; protocol/ABI/digest mismatch; capture unavailable; permission denial; malformed/oversized/extra-text Provider output |
+
+A digest reference is not an assertion verifier. #388's collector must verify the referenced facts
+(including count >=5, zero Cards, one click, zero protected input, final app state and logical
+privacy inspection) before producing an independently verified closure digest. The schema only
+checks reference coverage and bounded per-OS structural consistency. It never invents an assertion
+from a generic event name or accepts a producer `attested: true` field.
+
+Parent #333 owns the helper, generator/verifier, pending template, their tests and this document.
+#388 owns collection, logical privacy inspection, owned-child transport and validated assertion
+reports. Its minimal import surface is `validateComputerUseParentClosure`,
+`createPendingComputerUseParentClosure`, `COMPUTER_USE_PARENT_COVERAGE`,
+`COMPUTER_USE_OWNED_RUN_FACT_KEYS`, and `computerUseParentClosureSha256` from the root helper.
+The verifier accepts out-of-band `verifiedOwnedRunFacts` and `verifiedClosureSha256` only from the
+protected runner. The former must match every exported owned-fact key for both runs; the latter
+binds the independently checked assertion closure using the exported serializer/hash function.
+Producer fields, file presence, nonce and hash chains are not authentication. The genuine workflow
+attestation signal remains separate. No CLI flag or JSON field can supply verified owned facts.
+
+The return values separate `structureValid`, `completeness`, `collectorVerification`, and
+`authenticityVerified`. `finalGateEligible`, `corePassed` and `safetyPassed` require complete rows,
+complete parent references, verified owned facts/assertions, and the externally verified workflow
+attestation. Otherwise `status` is `CLOSE_HOLD`; the completed-evidence CLI exits nonzero so an
+unchanged workflow cannot turn HOLD into success. The read-only schema API may return a valid
+partial result for collector diagnostics; this is not completed acceptance.
+
+Migration is intentionally narrow: the exact canonical all-pending v4 template and its legacy
+v3 projection (version 3, without `parentClosure`) are accepted by `--allow-incomplete`. No modified
+v3 or completed v3 evidence is accepted. Generator capture version 1 remains an incomplete-only
+compatibility input with a generated null closure; capture version 2 must supply `parentClosure`.
+Both output schema v4 and are checked by the real verifier. All Core/Safety PASS captures remain
+refused pending the reviewed collector connection.
+
+**Code still incomplete.** Signed packages and real Provider runs would not by themselves make the
+completed CLI pass today: several wiring steps are unfinished, and the gate is not merely waiting
+on signatures. What is now derived from measurement, and what is still unconnected:
+
+- _Done._ Privacy surface inspection derives its own result instead of reporting a fixed `false`
+  (`apps/desktop/src/main/computer-use-privacy-inspection.ts`). `finalGateEligible` there requires
+  every payload class present, every surface scanned, nothing contaminated, and the submitted files
+  proven to be the whole tree under the caller's claimed roots; a payload class the run never
+  generated reports as uninspected and never as clean.
+- _Done._ The round aggregator derives the Provider `binding` from measured preflight/round facts
+  and returns `null` when the consent scope, cost bound, binding identity, observed fallback or
+  per-round Task selection is missing (`computer-use-capture-rounds.mjs`,
+  `computer-use-capture-wire.mjs`). Producer-supplied binding objects are not transcribed.
+- _Done._ The planner and Controller emit those facts. The planner records `egress_authorized` once
+  per allowed Provider request — at preflight and again before every round, so four times in a
+  three-round run, not once — and records nothing when the request is denied, so the aggregator's
+  count is authorizations rather than attempts. The event carries a digest of the consent scope
+  rather than the per-request payload. The planner
+  also records five binding identity fields on `preflight_started`, `fallbackUsed` on
+  `preflight_passed`, and `selectedFromCurrentTask` on each `parsed`. The Controller records
+  `cost_limit_bound` once when the session is registered, before any round can start. Only digests
+  and bounded numbers are emitted; no raw connection or model id, endpoint URL, prompt or
+  credential enters the stream.
+- _Partial._ The aggregator fills fifteen of the schema's sixteen binding fields from measurement.
+  `credentialChanged` is observable at no planner or Controller stage and is deliberately left out,
+  exported as `COMPUTER_USE_RUNNER_OWNED_BINDING_KEYS`; the protected runner must supply it.
+- _Not verified._ The five identity fields are **not** cryptographically bound to `bindingDigest`.
+  The producer's binding digest commits to raw permit identity, and raw identity must never reach
+  this metadata stream, so the two are not mutually recomputable. The identity is tied to the run
+  only by arriving on the single preflight event whose digest every later round repeats unchanged.
+  Treat it as co-emitted, unverified metadata: the protected runner must still verify the
+  connection, model, endpoint and catalog identity independently.
+- _Not measured._ No live run has yet produced a non-null `binding`. Coverage is two separate
+  tests: the real planner's emitted events through the aggregator for one round (which correctly
+  resolves nothing), and a synthetic three-round journey. The join between them is unproven,
+  because reaching three completed rounds plus Stop needs the Controller's run loop driven by the
+  real planner, and no such fixture exists.
+- _Provisional._ The canonical shapes of the egress consent digest (`captureEgressConsent` in
+  `apps/desktop/src/main/computer-use-planner.ts`) and of `costLimitDigest` were defined by this
+  work, not derived from an existing evidence definition. The protected runner must adopt the same
+  shapes, or they must be revised together.
+- _Not connected._ `verify-computer-use-final-gate.mjs` `main()` never supplies `verifiedOwnedRunFacts`
+  or `verifiedClosureSha256`, so `finalGateEligible` is structurally false and the completed CLI
+  always exits nonzero. As stated above this cannot be fixed with a flag or a JSON field: a
+  protected runner must call the verifier as a library.
+- _Not connected._ Of `COMPUTER_USE_OWNED_RUN_FACT_KEYS`, `signerIdentityDigest`,
+  `processIdentityDigest` and `privacyReportDigest` have no producer. The final-gate workflow already
+  computes a signer digest on both OSes and checks it against the native manifest, but neither job
+  exports it, so it is not bound into the closure.
+- _Not connected._ `generate-computer-use-final-gate-evidence.mjs` refuses every Core/Safety PASS and
+  validates only with `allowIncomplete: true`; `parentClosure` is copied from the capture as-is. The
+  27 `COMPUTER_USE_PARENT_COVERAGE` references have no producer outside tests.
+- _Not connected._ `evidence.privacy`'s eleven booleans are still copied from the capture and checked
+  only for being `true`; the inspection result above is not yet their source.
+
+**External measurements still missing:** signed packages, both OS real Provider journeys and all
+original required state changes. These are separate from the code work. Windows
+build/native/real-device checks run only through `ssh mainpc`, coordinated by Main (slot 444);
+local portable/mocked checks are auxiliary evidence only.
+
+### Integration checkpoints for #387 and #388 handoff
+
+1. **Code checkpoint:** run the two parent suites below plus directly affected child tests at the
+   combined source SHA. These are automated regressions, not actual signed-device/Provider runs.
+   `computer-use-parent-integration.test.ts` connects native gate/host/Controller to confirm default
+   OFF, exact opt-in and unsigned/ad-hoc refusal before persistence, Provider access or input.
+   `computer-use-parent-acceptance.test.ts` rejects each missing dependency, each mandatory
+   FAIL/SKIP row, unconfirmed privacy surfaces and Provider binding/round violations.
+2. **#387 handoff:** source SHA, package run and independent portable/installer/DMG digests,
+   fixture digest, signature identities/verification, both OS Core outcomes and compatibility.
+   Compile/native-fixture tests are not signatures or physical-input evidence.
+3. **#388 handoff:** the same exact packages and separately identified Windows/macOS sessions,
+   fixed preflight, three attempted/completed rounds, bound observation/parse/Broker/native facts,
+   privacy inspection and the missing AC-28 facts above. No screen/input/prompt/raw response bytes.
+4. **Parent evidence decision:** verify actual attestation and package binding, both child ACs,
+   every original Core requirement, directly applicable Safety proof, and compatibility claims.
+   Partial handoffs, synthetic schema fixtures, template-validation success and child Issue labels
+   never constitute this checkpoint. Main retains `CLOSE_HOLD` for any missing mandatory proof.
+5. **Main-only closeout:** review latest combined-head checks/review, merge and applicable human
+   acceptance, then perform Issue lifecycle actions. Tests never close Issues, publish, tag or
+   enable the feature. Ordinary beta publication with the feature OFF is not Computer Use preview
+   acceptance. The current `v0.7.0-beta.3` publication does not clear #387/#388.
+
+```bash
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run test --workspace @sprint-coder/desktop -- \
+  computer-use-parent-acceptance.test.ts src/main/computer-use-parent-integration.test.ts --maxWorkers=2
+```
+
+Runtime availability has a separate meaning: [the Controller](https://github.com/Robbits-CO-LTD/sprint-coder/blob/5b20208eb7b4f7697105dca2bf9436da3aeec910/apps/desktop/src/main/computer-use-controller.ts#L410)
+combines explicit opt-in and native readiness so the authorized operator can perform acceptance.
+It does not read GitHub Issue state or attest external acceptance. The ordinary feature flag
+remains OFF before and after these tests. A `ready` response during explicit testing must not be
+reported as general availability or as completion of #333.
 
 The Windows Notepad rows require classic direct-process `notepad.exe` on a supported Windows 10
 environment. Store/UWP Notepad hosted through `ApplicationFrameHost.exe` is not a substitute. If
@@ -33,8 +266,10 @@ the gate machine exposes only that unsupported proxy, the Core row is `FAIL`, no
 - Raw evidence stays local during interactive acceptance. The protected machine harness emits only
   canonical event codes and per-event digests; the trusted workflow derives and attests the bounded
   JSON. A hand-edited PASS JSON is never an accepted input.
-- Exactly one Provider compatibility path is selected: Structured or bounded JSON must `PASS`, and
-  the unselected path must use its canonical `SKIP`. Two `PASS` rows or two unselected rows fail.
+- Exactly one Windows-primary Provider compatibility path is selected in the two legacy rows:
+  Structured or bounded JSON must `PASS`, and the Windows-unselected path uses canonical `SKIP`.
+  Two `PASS` rows or two unselected rows fail. This restriction is not applied across OSes; the
+  macOS selection is independently represented by `parentClosure.providerRuns.macos.providerPath`.
 
 ## AC-28 Core
 
@@ -101,6 +336,10 @@ pre-populate a mandatory external Safety PASS.
 
 ## AC-30 Compatibility
 
+The `AC-30-PROVIDER-STRUCTURED` and `AC-30-PROVIDER-JSON` rows below are Windows-primary summaries
+only. A macOS run selecting JSON does not conflict with the Windows JSON row's
+`PROVIDER_PATH_NOT_SELECTED`; consult the separate per-OS paths described above.
+
 | ID                                    | Scenario                                                                                                                                 | Current | Canonical reason/evidence                                                                                                                      |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AC-30-WINDOWS-18362-X64`             | Windows x64 build 18362 or later                                                                                                         | FAIL    | `SIGNED_RUNTIME_NOT_RUN / WINDOWS_18362_RUNTIME_PENDING_V1`                                                                                    |
@@ -139,7 +378,7 @@ have completed on the exact packages being submitted. The dispatch requires:
      was separately Developer ID-signed, notarized, and stapled by `release-beta.yml`.
 2. A successful run of `.github/workflows/computer-use-evidence-harness.yml` at the same commit and
    its artifact containing **only** the attested `computer-use-final-gate.json`.
-3. Explicit confirmation that the schema-v3 machine transcript came from those exact package bytes
+3. Explicit confirmation that the machine transcript came from those exact package bytes
    and the current Task's selected non-OpenRouter Connection/Model.
 
 Issue #387 setup must add the sentinel to the existing protected `macos-signing` environment and
@@ -204,8 +443,8 @@ applicable persistence/capability probe or observation, guard decision, and nati
 Compatibility rows require a compatibility probe; reasoned SKIP rows require the unsupported
 boundary event. Every sequence ends in the matching assertion and journey-finished events.
 
-This repository revision does not include a trustworthy adapter that can observe every real GUI
-journey and emit those runtime events. Consequently the generator explicitly refuses any
+The runtime observer now records bounded events, but the protected collector/assertion-to-sealing
+connection is not complete. Consequently the generator explicitly refuses any
 Core/Safety PASS capture and can seal only incomplete CLOSE_HOLD evidence. The dedicated workflow
 therefore cannot make the final Gate green in this revision, even if someone stages a hand-edited
 all-PASS capture in the protected directory. A future adapter must be implemented and reviewed at
@@ -213,7 +452,7 @@ a new source revision before this fail-closed guard may change.
 
 Dispatch `.github/workflows/computer-use-evidence-harness.yml` with the exact package run/artifact
 names and capture-session ID. Its GitHub-hosted sealing job independently hashes the portable ZIP,
-installer, and DMG, derives schema-v3 evidence with
+installer, and DMG, derives schema-v4 evidence with
 `generate-computer-use-final-gate-evidence.mjs`, attests the exact bytes, and uploads only
 `computer-use-final-gate.json`. The machine harness must place the digest over the source commit,
 package run, artifact names, and all three package filenames/hashes in every `PACKAGE_BOUND` event.

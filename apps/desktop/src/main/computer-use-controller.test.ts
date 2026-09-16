@@ -23,6 +23,7 @@ import {
   type ComputerUseNativeSession,
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
+import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -117,6 +118,7 @@ function observation(
 
 function createFixture(
   options: {
+    runtimeCapture?: ComputerUseRuntimeCapture;
     mode?: 'observe_only' | 'supervised' | 'full_access_app';
     observationOverrides?: Partial<ComputerUseObservation>;
     observationOverridesForRevision?: (revision: number) => Partial<ComputerUseObservation>;
@@ -391,6 +393,7 @@ function createFixture(
   const controller = new ComputerUseController({
     persistence,
     native,
+    ...(options.runtimeCapture === undefined ? {} : { runtimeCapture: options.runtimeCapture }),
     ...(options.planner === undefined ? {} : { planner: options.planner }),
     featureEnabled: () => true,
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -431,6 +434,7 @@ function createFixture(
       policyEpoch = next;
     },
     dispatchCount: () => dispatchCount,
+    observationCount: () => revision,
     dispatchedActions: () => dispatchedActions,
     nativeStartWindowIds: () => nativeStartWindowIds,
     nativeCancelCount: () => nativeCancelCount,
@@ -446,9 +450,11 @@ async function start(
   mode: 'observe_only' | 'supervised' | 'full_access_app' = 'full_access_app',
   remember = false,
   expectedProfileRevision?: number,
+  maxRounds?: number,
 ) {
   const candidate = (await fixture.controller.listWindows(profile.id))[0]!;
   return fixture.controller.start({
+    ...(maxRounds === undefined ? {} : { maxRounds }),
     taskId: 'task-1',
     profileId: profile.id,
     windowId: candidate.windowId,
@@ -471,6 +477,204 @@ const click: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left'
 const plainType: ComputerUseAction = { type: 'type', text: 'hello' };
 
 describe('ComputerUseController', () => {
+  it('records actual native calls without giving direct handwritten actions Provider evidence', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    const fixture = createFixture({ runtimeCapture });
+    const session = await start(fixture);
+    await fixture.controller.observe(session.sessionId);
+    await fixture.controller.act(session.sessionId, click, 'direct-fixture-action');
+    await fixture.controller.stop(session.sessionId);
+    const snapshot = runtimeCapture.snapshot();
+    expect(snapshot.events.map((event) => event.type)).toEqual([
+      'session',
+      'cost_limit_bound',
+      'observation',
+      'native_started',
+      'native_finished',
+      'action_result',
+      'stop_requested',
+      'stop_acknowledged',
+    ]);
+    // The bound is recorded before any round can start, and carries no raw policy body.
+    expect(snapshot.events[1]).toMatchObject({
+      type: 'cost_limit_bound',
+      maxRounds: expect.any(Number),
+      costLimitDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(snapshot.exactThreeRoundJourneyObserved).toBe(false);
+    expect(snapshot.finalGateEligible).toBe(false);
+    expect(fixture.dispatchCount()).toBe(1);
+  });
+
+  it('does not change input, Stop, or observation behavior when the observer throws or overflows', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    const fixture = createFixture({ runtimeCapture });
+    const session = await start(fixture);
+    const record = vi.spyOn(runtimeCapture, 'record').mockImplementation(() => {
+      throw new Error('fixture sink failure');
+    });
+    await fixture.controller.observe(session.sessionId);
+    await fixture.controller.act(session.sessionId, click, 'sink-failure-action');
+    await fixture.controller.stop(session.sessionId);
+    expect(runtimeCapture.snapshot().invalid).toBe(true);
+    expect(fixture.dispatchCount()).toBe(1);
+    expect(fixture.nativeCancelCount()).toBe(1);
+    expect(fixture.nativeCloseCount()).toBe(1);
+    await expect(fixture.controller.observe(session.sessionId)).rejects.toThrow();
+    expect(fixture.observationCount()).toBe(1);
+    record.mockRestore();
+    await fixture.controller.dispose();
+  });
+
+  it('does not add capture observations after policy revocation', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    const fixture = createFixture({ runtimeCapture });
+    const session = await start(fixture);
+    await fixture.controller.observe(session.sessionId);
+    fixture.setPolicyEpoch(1);
+    await expect(fixture.controller.act(session.sessionId, click, 'revoked')).rejects.toThrow();
+    await fixture.controller.stop(session.sessionId);
+    expect(fixture.dispatchCount()).toBe(0);
+    expect(fixture.observationCount()).toBe(1);
+    expect(runtimeCapture.snapshot().exactThreeRoundJourneyObserved).toBe(false);
+  });
+
+  it('reports an unconfirmed native stop instead of a successful user stop', async () => {
+    const runtimeCapture = new ComputerUseRuntimeCapture();
+    let rejectCancel!: (error: Error) => void;
+    const cancelGate = new Promise<void>((_resolve, reject) => {
+      rejectCancel = reject;
+    });
+    const fixture = createFixture({ runtimeCapture, cancelGate });
+    const session = await start(fixture);
+    const stopped = fixture.controller.stop(session.sessionId);
+    rejectCancel(new Error('native drain timeout'));
+    await stopped;
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('native_unavailable');
+    expect(runtimeCapture.snapshot().events.at(-1)).toMatchObject({
+      type: 'stop_acknowledged',
+      nativeAcknowledged: false,
+    });
+    expect(runtimeCapture.snapshot().osInputApiAttemptCount).toBeNull();
+    expect(runtimeCapture.snapshot().finalGateEligible).toBe(false);
+  });
+
+  it('observes the final bounded action without adding a Provider plan', async () => {
+    const plan = vi.fn(async () => click);
+    const fixture = createFixture({ planner: { plan } });
+    await start(fixture);
+    await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+    expect(plan).toHaveBeenCalledTimes(25);
+    expect(fixture.dispatchCount()).toBe(25);
+    expect(fixture.observationCount()).toBe(26);
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('limit_reached');
+    await fixture.controller.dispose();
+  });
+
+  it('runs exactly three normal user-bounded rounds and observes the final result', async () => {
+    const plan = vi.fn(async () => click);
+    const fixture = createFixture({ planner: { plan } });
+    const session = await start(fixture, 'full_access_app', false, undefined, 3);
+    await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+    expect(session.maxRounds).toBe(3);
+    expect(plan).toHaveBeenCalledTimes(3);
+    expect(fixture.dispatchCount()).toBe(3);
+    expect(fixture.observationCount()).toBe(4);
+    expect(fixture.statuses.at(-1)).toMatchObject({
+      round: 3,
+      maxRounds: 3,
+      stopReason: 'limit_reached',
+    });
+    expect(fixture.currentProfile()).not.toHaveProperty('maxRounds');
+    await fixture.controller.dispose();
+  });
+
+  it('does not report a successful limit stop for an expired final observation', async () => {
+    const fixture = createFixture({
+      planner: { plan: async () => click },
+      observationOverridesForRevision: (revision) =>
+        revision === 4
+          ? {
+              observedAt: new Date(Date.now() - 60_000).toISOString(),
+              expiresAt: new Date(Date.now() - 30_000).toISOString(),
+            }
+          : {},
+    });
+    await start(fixture, 'full_access_app', false, undefined, 3);
+    await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('stale_observation');
+    expect(fixture.dispatchCount()).toBe(3);
+    await fixture.controller.dispose();
+  });
+
+  it.each(['stop', 'policy'] as const)(
+    'does not start the final observation after %s wins',
+    async (cause) => {
+      const plan = vi.fn(async () => click);
+      const fixture = createFixture({
+        planner: { plan },
+        dispatch: async () => {
+          if (fixture.dispatchCount() === 3) {
+            if (cause === 'policy') fixture.setPolicyEpoch(1);
+            else await fixture.controller.stop(fixture.statuses.at(-1)!.sessionId);
+          }
+          return { result: 'completed', reasonCode: null };
+        },
+      });
+      await start(fixture, 'full_access_app', false, undefined, 3);
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(plan).toHaveBeenCalledTimes(3);
+      expect(fixture.observationCount()).toBe(3);
+      expect(fixture.statuses.at(-1)?.stopReason).not.toBe('limit_reached');
+      await fixture.controller.dispose();
+    },
+  );
+
+  it.each([0, 26, 1.5, NaN])(
+    'rejects invalid round limit %s before native start',
+    async (maxRounds) => {
+      const fixture = createFixture();
+      await expect(
+        start(fixture, 'full_access_app', false, undefined, maxRounds),
+      ).rejects.toThrow();
+      expect(fixture.nativeStartWindowIds()).toHaveLength(0);
+      await fixture.controller.dispose();
+    },
+  );
+
+  it('refuses to widen the session round limit on resume', async () => {
+    const fixture = createFixture({ visualActionBlocked: true });
+    const session = await start(fixture, 'full_access_app', false, undefined, 3);
+    await fixture.controller.observe(session.sessionId);
+    await fixture.controller.act(session.sessionId, click, 'pause');
+    const input = {
+      taskId: session.taskId,
+      resumeSessionId: session.sessionId,
+      profileId: session.profileId,
+      windowId: session.windowId,
+      mode: session.mode,
+      connectionId: session.connectionId,
+      modelId: session.modelId,
+      providerEgressConsent: true,
+      providerEgressConsentBinding: {
+        connectionId: session.connectionId,
+        modelId: session.modelId,
+      },
+      remember: false,
+      expectedPolicyEpoch: session.policyEpoch,
+      expectedWindowRevision: 1,
+      expectedProfileRevision: session.profileRevision,
+    };
+    await expect(fixture.controller.start({ ...input, maxRounds: 25 })).rejects.toThrow(
+      'resume binding changed',
+    );
+    expect(fixture.nativeStartWindowIds()).toHaveLength(1);
+    await expect(fixture.controller.start({ ...input, maxRounds: 3 })).resolves.toMatchObject({
+      maxRounds: 3,
+    });
+    await fixture.controller.stop(session.sessionId);
+  });
+
   it('refreshes a same-path same-signer Notepad profile before issuing its window permit', async () => {
     const registeredDigest = '1'.repeat(64);
     const updatedDigest = '2'.repeat(64);
@@ -1222,7 +1426,7 @@ describe('ComputerUseController', () => {
     await fixture.controller.stop(started.sessionId);
   });
 
-  it('creates an ephemeral allow_plan grant only for an exact semantic target', async () => {
+  it('bounds an ephemeral exact-target allow_plan grant by the session limit', async () => {
     const fixture = createFixture({
       mode: 'supervised',
       authorizationRequired: true,
@@ -1231,7 +1435,7 @@ describe('ComputerUseController', () => {
         targetMetadata: { button: { secure: false, highImpact: false } },
       },
     });
-    const started = await start(fixture, 'supervised');
+    const started = await start(fixture, 'supervised', false, undefined, 3);
     await fixture.controller.observe(started.sessionId);
     const action: ComputerUseAction = {
       type: 'invoke',
@@ -1259,7 +1463,18 @@ describe('ComputerUseController', () => {
       result: 'completed',
     });
     expect(fixture.controller.getStatus(started.sessionId)?.pendingApproval).toBeNull();
+    await fixture.controller.observe(started.sessionId, 'plan-refresh-third');
+    await expect(
+      fixture.controller.act(started.sessionId, action, 'plan-third'),
+    ).resolves.toMatchObject({ result: 'completed' });
+    await fixture.controller.observe(started.sessionId, 'plan-refresh-fourth');
+    const fourth = fixture.controller.act(started.sessionId, action, 'plan-fourth');
+    const denied = expect(fourth).rejects.toThrow();
+    await viWait();
+    expect(fixture.controller.getStatus(started.sessionId)?.pendingApproval).not.toBeNull();
+    expect(fixture.dispatchCount()).toBe(3);
     await fixture.controller.stop(started.sessionId);
+    await denied;
   });
 
   it('does not reuse an allow_plan grant for the same semantic target in a new dialog', async () => {
