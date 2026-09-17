@@ -1724,6 +1724,23 @@ button {
   background: var(--bg-panel);
   border-left: 1px solid var(--border-subtle);
   overflow: auto;
+  /* Opened by the graph that was just rendered, so it arrives from the edge it lives on. */
+  animation: graph-panel-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@keyframes graph-panel-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-panel {
+    animation: none;
+  }
 }
 .graph-panel > header {
   position: sticky;
@@ -9179,4 +9196,48 @@ button.composer-permission-chip[aria-expanded='true'] {
     transition: none;
     animation: none;
   }
+}
+
+/* Inline graph anchor: where in an assistant reply a graph was rendered. The diagram itself is in
+   the graph panel beside the chat; this card marks the spot and is the way back to the panel. */
+.inline-graph-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+}
+.inline-graph-mark {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+.inline-graph-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.inline-graph-title {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.inline-graph-meta {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.inline-graph-open {
+  flex-shrink: 0;
+}
+.inline-graph-pending {
+  margin: 10px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
 }

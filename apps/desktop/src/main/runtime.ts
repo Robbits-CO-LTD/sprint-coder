@@ -47,7 +47,10 @@ type ActiveTurn = {
   settled: Promise<void>;
   resolveSettled: () => void;
 };
-type RuntimePersistence = Pick<PersistenceClient, 'changeStage' | 'appendDelta' | 'completeTurn'> &
+type RuntimePersistence = Pick<
+  PersistenceClient,
+  'changeStage' | 'appendDelta' | 'completeTurn' | 'assistantMessageIdFor'
+> &
   Partial<
     Pick<
       PersistenceClient,
@@ -341,7 +344,9 @@ export class MockRuntimeAdapter {
         },
         ...(recorder === undefined ? {} : { recorder }),
       });
-      const messageId = randomUUID();
+      // A tool that ran above may already have anchored itself into this Turn's assistant message
+      // (a rendered graph); the reply continues in that message rather than starting a second one.
+      const messageId = this.persistence.assistantMessageIdFor(taskId, turnId) ?? randomUUID();
       await this.serialize(taskId, () =>
         this.publish(this.persistence.changeStage(taskId, turnId, 'synthesizing')),
       );

@@ -48,4 +48,10 @@ describe('TaskHeader Team button', () => {
     expect(visible).toContain('aria-pressed="true"');
     expect(visible).toContain('Computer Use');
   });
+
+  it('has no manual graph button; a graph opens from the reply that rendered it', () => {
+    const html = renderToStaticMarkup(<TaskHeader task={task} onToggleTeam={() => {}} />);
+    expect(html).not.toContain('graph-toggle');
+    expect(html).not.toContain('グラフ');
+  });
 });

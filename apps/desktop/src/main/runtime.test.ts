@@ -13,6 +13,7 @@ class FakePersistence implements Pick<
   state: 'queued' | TurnStage | 'completed' | 'canceled' = 'queued';
   content = '';
   seq = 1;
+  assistantMessageId: string | null = null;
   readonly steps: StepSnapshot[] = [];
   readonly stepTransitions = new Map<string, IntelligenceStepState[]>();
 
@@ -41,7 +42,12 @@ class FakePersistence implements Pick<
     return this.record({ type: 'stage.changed', taskId, turnId, seq: ++this.seq, stage });
   }
 
+  assistantMessageIdFor(): string | null {
+    return this.assistantMessageId;
+  }
+
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent {
+    this.assistantMessageId ??= messageId;
     this.content += delta;
     return this.record({
       type: 'message.delta',

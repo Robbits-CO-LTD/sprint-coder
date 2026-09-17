@@ -7,8 +7,6 @@ export function TaskHeader({
   task,
   onToggleTeam,
   onOpenComputerUse,
-  onToggleGraph,
-  graphOpen = false,
   computerUseActive = false,
   inert,
   onToggleSidebar,
@@ -19,8 +17,6 @@ export function TaskHeader({
    * of flipping the store directly — see App.tsx's `requestEnterTeam`. */
   onToggleTeam: () => void;
   onOpenComputerUse?: (() => void) | undefined;
-  onToggleGraph?: () => void;
-  graphOpen?: boolean;
   computerUseActive?: boolean;
   inert?: boolean;
   /** Shows/hides the Task history sidebar (issue #12). Lives here rather than inside the sidebar
@@ -130,17 +126,6 @@ export function TaskHeader({
           onClick={onOpenComputerUse}
         >
           <Eye size={14} /> Computer Use
-        </button>
-      ) : null}
-      {onToggleGraph ? (
-        <button
-          type="button"
-          className="team-btn"
-          data-testid="graph-toggle"
-          aria-pressed={graphOpen}
-          onClick={onToggleGraph}
-        >
-          グラフ
         </button>
       ) : null}
       <button

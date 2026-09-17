@@ -52,7 +52,8 @@ async function startFixtureMission(page: Page, workspace: string, projectId?: st
     timeout: 30000,
   });
   await page.getByTestId('team-back').click();
-  await page.getByTestId('graph-toggle').click();
+  // The proposal opened the graph panel during the Turn; leaving Team view reveals it.
+  await expect(page.getByTestId('graph-panel')).toBeVisible();
   await openPlan(page);
   await expect(page.getByTestId('graph-mission-review')).toContainText('参照先を確認しました');
   await page.getByRole('button', { name: 'この計画で開始', exact: true }).click();
@@ -308,7 +309,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
     const reopened = await firstWindow(app);
     evidencePage = reopened;
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
-    await reopened.getByTestId('graph-toggle').click();
+    await reopened.getByTestId('inline-graph-open').last().click();
     await expect.poll(async () => (await mission(reopened)).state).toBe('completed');
     expect(
       (await mission(reopened)).steps.map((step) => [

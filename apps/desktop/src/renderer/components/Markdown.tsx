@@ -2,6 +2,8 @@ import { isValidElement, useEffect, useMemo, useRef, useState } from 'react';
 import type { ComponentPropsWithoutRef, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { GRAPH_INLINE_FENCE_LANG, parseGraphInlineReference } from '@sprint-coder/contracts';
+import { InlineGraphCard } from './InlineGraphCard';
 
 // Assistant Markdown rendering (FR-CHAT-07, §12.3). Raw HTML stays disabled by construction:
 // we deliberately do not use rehype-raw, so react-markdown/remark-rehype drop any embedded HTML
@@ -86,8 +88,29 @@ function mermaidSource(children: ReactNode): string | null {
   return String(children.props.children ?? '').replace(/\n$/, '');
 }
 
+function graphAnchorSource(children: ReactNode): string | null {
+  if (!isValidElement<{ className?: string; children?: ReactNode }>(children)) return null;
+  if (children.props.className !== `language-${GRAPH_INLINE_FENCE_LANG}`) return null;
+  return String(children.props.children ?? '').replace(/\n$/, '');
+}
+
 function PreBlock(props: MarkdownElementProps<'pre'> & { isStreaming: boolean }) {
   const { isStreaming, children, ...rest } = props;
+  const anchor = graphAnchorSource(children);
+  if (anchor !== null) {
+    // Main appends this block when a graph tool renders a diagram mid-reply, so unlike Mermaid it
+    // renders while streaming too: the card belongs beside the text that produced it. A model can
+    // type the same fence, so a body that is not a well-formed reference stays ordinary code, and
+    // the card itself only appears when the reference names a graph this Task really saved.
+    const reference = parseGraphInlineReference(anchor);
+    if (reference !== null)
+      return (
+        <InlineGraphCard
+          reference={reference}
+          fallback={<StandardPreBlock {...rest}>{children}</StandardPreBlock>}
+        />
+      );
+  }
   const source = mermaidSource(children);
   if (source === null || isStreaming)
     return <StandardPreBlock {...rest}>{children}</StandardPreBlock>;

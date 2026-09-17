@@ -39,7 +39,10 @@ import {
   graphMissionUpdateAgreementSchema,
   type GraphMissionUpdateInput,
   graphReleaseInputSchema,
+  formatGraphInlineMarker,
+  graphInlineReference,
   graphViewSchema,
+  type GraphView,
 } from '@sprint-coder/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { GraphRenderService } from './graph-render';
@@ -1021,6 +1024,9 @@ export class IpcRouter {
   };
   private readonly updateInstallMutationGate = new UpdateInstallMutationGate();
   private readonly turnRuntimes = new Map<string, ActiveRuntimeKind>();
+  /** The assistant message each Provider-runtime Turn streams into, registered before its first
+   * delta so a tool that succeeds mid-reply (a rendered graph) can anchor itself in that message. */
+  private readonly turnMessageIds = new Map<string, string>();
   private readonly managedWorkerTurn = new Map<
     string,
     Readonly<{
@@ -1649,9 +1655,10 @@ export class IpcRouter {
         : {
             graphs: createGraphToolBoundary(
               this.graphs,
-              (view) => {
+              (view, context) => {
                 if (!this.window.isDestroyed())
                   this.window.webContents.send(IPC_CHANNELS.graphsUpdated, view);
+                this.anchorGraphInReply(context, view);
               },
               (action) => this.updateInstallMutationGate.run(action),
             ),
@@ -5464,6 +5471,39 @@ export class IpcRouter {
     };
   }
 
+  /**
+   * Marks where in the assistant's reply a graph was rendered. The user reads the diagram beside
+   * the text that produced it, so the anchor is appended to the Turn's assistant message at the
+   * moment the graph tool succeeds — as its own fenced block the Renderer turns into an inline
+   * card — rather than collected at the end of the Turn like other tool cards.
+   *
+   * The message is the one the Provider runtime streams into (registered before its first delta);
+   * the Mock runtime picks its message after its tool loop, and a CLI runtime names its own in
+   * every delta — both adopt the message this anchor created when it came first. Failing to
+   * anchor never fails the tool: the model already has its result and the graph panel opened from
+   * the `graphsUpdated` push, so a Turn that is no longer streaming or has used up its persisted
+   * text budget simply loses the marker.
+   */
+  private anchorGraphInReply(context: { taskId: string; turnId: string }, view: GraphView): void {
+    const messageId =
+      this.turnMessageIds.get(context.turnId) ??
+      this.persistence.assistantMessageIdFor(context.taskId, context.turnId) ??
+      randomUUID();
+    try {
+      this.publish(
+        this.persistence.appendDelta(
+          context.taskId,
+          context.turnId,
+          messageId,
+          formatGraphInlineMarker(graphInlineReference(view)),
+        ),
+      );
+    } catch {
+      // Turn not streaming, persisted-text quota reached, or a message identity this Turn no
+      // longer owns — see above: the marker is a convenience, not the record of the render.
+    }
+  }
+
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
@@ -7632,6 +7672,7 @@ export class IpcRouter {
     this.runtimeDiagnosticContextByTurn.delete(turnId);
     this.providerAbortByTurn.delete(turnId);
     this.providerExecutionIdByTurn.delete(turnId);
+    this.turnMessageIds.delete(turnId);
     this.reasoningByTurn.get(turnId)?.dispose();
     this.reasoningByTurn.delete(turnId);
     this.reasoningRedactorByTurn.delete(turnId);
@@ -7705,6 +7746,7 @@ export class IpcRouter {
     this.providerAbortByTurn.set(started.turnId, controller);
     let synthesizing = false;
     const messageId = randomUUID();
+    this.turnMessageIds.set(started.turnId, messageId);
     let runtime: ProviderRuntime | undefined;
     let modelLease: ProviderModelLease | undefined;
     let diagnosticProvider: Readonly<{ providerId: string; profileId: string }> | undefined;
@@ -8355,6 +8397,7 @@ export class IpcRouter {
       if (this.providerAbortByTurn.get(started.turnId) === controller)
         this.providerAbortByTurn.delete(started.turnId);
       this.providerExecutionIdByTurn.delete(started.turnId);
+      this.turnMessageIds.delete(started.turnId);
     }
   }
 
@@ -8536,7 +8579,9 @@ export class IpcRouter {
             this.persistence.appendDelta(
               taskId,
               turnId,
-              runtimeEvent.messageId,
+              // A graph anchored before the CLI's first delta already owns this Turn's assistant
+              // message; the CLI's own id only names the message until one exists.
+              this.persistence.assistantMessageIdFor(taskId, turnId) ?? runtimeEvent.messageId,
               runtimeEvent.delta,
             ),
           );

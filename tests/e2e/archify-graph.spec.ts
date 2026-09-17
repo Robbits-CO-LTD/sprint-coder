@@ -124,7 +124,8 @@ test('binds an authorized file read and detects changed source bytes after resta
         )
         .toBe(true);
     }
-    await page.getByTestId('graph-toggle').click();
+    // The graph tool opened the panel on its own; there is no button to press.
+    await expect(page.getByTestId('graph-panel')).toBeVisible();
     const frame = page.frameLocator('[data-testid="graph-frame"]');
     // The diagram paints before the artifact's bridge script has registered its selection
     // listeners; clicking in that window delivers the click to a document that drops it. Wait for
@@ -201,7 +202,8 @@ test('binds an authorized file read and detects changed source bytes after resta
         .toBe(true);
     }
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
-    await reopened.getByTestId('graph-toggle').click();
+    // After a restart the way back to the graph is the inline card in the reply that rendered it.
+    await reopened.getByTestId('inline-graph-open').last().click();
     await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     // The selected node and its inspector now survive restart; a second click would toggle it.
     await expect(
@@ -249,7 +251,8 @@ test('binds an authorized file read and detects changed source bytes after resta
     );
     expect(updated.id).toBe(original.id);
     expect(updated.contentHash).not.toBe(original.contentHash);
-    await reopened.getByTestId('graph-toggle').click();
+    // The second proposal re-opened the panel that was closed above.
+    await expect(reopened.getByTestId('graph-panel')).toBeVisible();
     await reopened.getByTestId('graph-history').locator('summary').click();
     await expect(reopened.getByTestId('graph-diff')).toContainText('参照コード');
     await expect(reopened.getByTestId('graph-diff')).toContainText('return "config"');
@@ -350,7 +353,7 @@ test('the model tool path proposes and reads back a draft through the real Main 
       };
     });
     expect(executionState).toEqual({ workers: 0, missions: 0, executions: 0 });
-    await page.getByTestId('graph-toggle').click();
+    await expect(page.getByTestId('graph-panel')).toBeVisible();
     const frame = page.frameLocator('[data-testid="graph-frame"]');
     await expect(frame.locator('svg[role="img"]')).toBeVisible();
     await expect(page.getByTestId('graph-panel')).toContainText('Graph tool proposal');
@@ -398,7 +401,7 @@ test('the model tool path proposes and reads back a draft through the real Main 
         BrowserWindow.getAllWindows()[0]!.focus();
       });
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
-    await reopened.getByTestId('graph-toggle').click();
+    await reopened.getByTestId('inline-graph-open').last().click();
     await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     await expect(
       reopened
@@ -453,7 +456,7 @@ test('reviews and restores a proposed Mission without starting executions', asyn
     await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
       timeout: 30000,
     });
-    await page.getByTestId('graph-toggle').click();
+    await expect(page.getByTestId('graph-panel')).toBeVisible();
     await expect(
       page.frameLocator('[data-testid="graph-frame"]').locator('svg[role="img"]'),
     ).toBeVisible();
@@ -476,7 +479,7 @@ test('reviews and restores a proposed Mission without starting executions', asyn
     await expect(page.getByTestId('assistant-message').last()).toContainText('GRAPH_TOOL_FLOW_OK', {
       timeout: 30000,
     });
-    await page.getByTestId('graph-toggle').click();
+    await expect(page.getByTestId('graph-panel')).toBeVisible();
     await page.getByTestId('graph-history').locator('summary').click();
     await expect(page.getByTestId('graph-diff')).toContainText('完了条件');
     await expect(page.getByTestId('graph-diff')).toContainText('APIの互換性テストが成功');
@@ -502,7 +505,7 @@ test('reviews and restores a proposed Mission without starting executions', asyn
         BrowserWindow.getAllWindows()[0]!.focus();
       });
     await reopened.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
-    await reopened.getByTestId('graph-toggle').click();
+    await reopened.getByTestId('inline-graph-open').last().click();
     await reopened.getByTestId('graph-mission-plan').locator('summary').click();
     await expect(reopened.getByTestId('graph-mission-plan')).toContainText(
       'APIの互換性テストが成功',
@@ -583,7 +586,7 @@ for (const starts of [false, true])
         });
       await page.getByTestId('team-back').click();
       await expect(page.getByTestId('team-list')).toHaveCount(0);
-      await page.getByTestId('graph-toggle').click();
+      await expect(page.getByTestId('graph-panel')).toBeVisible();
       await page.getByTestId('graph-mission-plan').locator('summary').click();
       await expect(page.getByTestId('graph-mission-review')).toContainText('参照先を確認しました');
       expect(
@@ -802,7 +805,7 @@ test('resumes one interrupted graph step by hand after a relaunch', async ({}, t
       });
     await page.getByTestId('team-back').click();
     await expect(page.getByTestId('team-list')).toHaveCount(0);
-    await page.getByTestId('graph-toggle').click();
+    await expect(page.getByTestId('graph-panel')).toBeVisible();
     await page.getByTestId('graph-mission-plan').locator('summary').click();
     await expect(page.getByTestId('graph-mission-review')).toContainText('参照先を確認しました');
     await page.getByRole('button', { name: 'この計画で開始', exact: true }).click();
@@ -864,7 +867,7 @@ test('resumes one interrupted graph step by hand after a relaunch', async ({}, t
       ],
     });
     expect(parked.mission).not.toBe('completed');
-    await restarted.getByTestId('graph-toggle').click();
+    await restarted.getByTestId('inline-graph-open').last().click();
     await expect(restarted.getByTestId('graph-mission-plan')).toHaveAttribute('open', '');
     await expect(restarted.getByTestId('graph-step-state').nth(2)).toHaveText('再開待ち');
     const resumeStep = restarted.getByRole('button', { name: 'この工程を再開', exact: true });
@@ -915,7 +918,11 @@ for (const kind of ['architecture', 'workflow'] as const) {
     const profile = createUserDataDir(`archify-${kind}`);
     // The bundled worker must work without discovering an external Node on PATH.
     // Set both spellings because Windows environment keys are case-insensitive.
-    let app = await launchApp(profile, undefined, { PATH: '', Path: '' });
+    let app = await launchApp(profile, undefined, {
+      SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+      PATH: '',
+      Path: '',
+    });
     try {
       const page = await firstWindow(app);
       await app.evaluate(({ BrowserWindow }) => {
@@ -986,14 +993,29 @@ for (const kind of ['architecture', 'workflow'] as const) {
           ? { components: nodes, connections: edges }
           : { nodes, edges, lanes: [{ id: 'steps', label: 'Steps' }] }),
       };
+      // A first graph from the model's tool leaves the inline card this test later reopens the
+      // panel from; the diagrams under test are then rendered directly, and each render opens the
+      // panel on its own (there is no button).
+      await page
+        .getByTestId('composer-textarea')
+        .fill(
+          kind === 'architecture' ? '[fixture:graph-proposal]' : '[fixture:graph-mission-proposal]',
+        );
+      await page.getByTestId('composer-send-button').click();
+      await expect(page.getByTestId('assistant-message').last()).toContainText(
+        'GRAPH_TOOL_FLOW_OK',
+        { timeout: 30000 },
+      );
+      const panel = page.getByTestId('graph-panel');
+      await expect(panel).toBeVisible();
+      await panel.getByRole('button', { name: '閉じる', exact: true }).click();
+      await page.getByTestId('composer-textarea').fill('existing draft');
+      await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'true');
       const view = await page.evaluate(async (input) => window.sprintCoder!.graphs.render(input), {
         taskId,
         diagram,
       });
-      await page.getByTestId('composer-textarea').fill('existing draft');
-      await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'true');
-      await page.getByTestId('graph-toggle').click();
-      const panel = page.getByTestId('graph-panel');
+      await expect(panel).toBeVisible();
       const frame = page.frameLocator('[data-testid="graph-frame"]');
       await expect(frame.locator('svg[role="img"]')).toBeVisible();
       await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'false');
@@ -1028,7 +1050,7 @@ for (const kind of ['architecture', 'workflow'] as const) {
         await app.evaluate(async ({ net }, url) => (await net.fetch(url!)).status, displayedUrl),
       ).toBe(200);
       await panel.getByRole('button', { name: '閉じる', exact: true }).click();
-      await expect(page.getByTestId('graph-toggle')).toBeFocused();
+      await expect(page.getByTestId('composer-textarea')).toBeFocused();
       await expect(page.getByTestId('sidebar-toggle')).toHaveAttribute('aria-expanded', 'true');
       await expect
         .poll(() =>
@@ -1066,7 +1088,7 @@ for (const kind of ['architecture', 'workflow'] as const) {
         { taskId, diagram: revisedDiagram },
       );
       expect(changed.revision).toBe(view.revision + 1);
-      await page.getByTestId('graph-toggle').click();
+      await expect(panel).toBeVisible();
       const history = page.getByTestId('graph-history');
       await expect(history).toHaveAttribute('data-render-revision', String(changed.renderRevision));
       await history.locator('summary').click();
@@ -1097,7 +1119,7 @@ for (const kind of ['architecture', 'workflow'] as const) {
         .getByTestId('graph-panel')
         .getByRole('button', { name: '閉じる', exact: true })
         .click();
-      await page.getByTestId('graph-toggle').click();
+      await page.getByTestId('inline-graph-open').last().click();
       await expect(
         page.frameLocator('[data-testid="graph-frame"]').locator('svg[role="img"]'),
       ).toBeVisible();
@@ -1135,7 +1157,11 @@ for (const kind of ['architecture', 'workflow'] as const) {
         .poll(() => page.evaluate(async (id) => window.sprintCoder!.tasks.getDraft(id), taskId))
         .toBe(savedDraft);
       await closeApp(app);
-      app = await launchApp(profile, undefined, { PATH: '', Path: '' });
+      app = await launchApp(profile, undefined, {
+        SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
+        PATH: '',
+        Path: '',
+      });
       const restarted = await firstWindow(app);
       if (process.env['GITHUB_ACTIONS'] === 'true') {
         await app.evaluate(({ app: electronApp, BrowserWindow }) => {
@@ -1150,7 +1176,7 @@ for (const kind of ['architecture', 'workflow'] as const) {
       }
       await restarted.locator(`[data-task-id="${taskId}"] button.sb-item`).click();
       await expect(restarted.getByTestId('composer-textarea')).toHaveValue(savedDraft);
-      await restarted.getByTestId('graph-toggle').click();
+      await restarted.getByTestId('inline-graph-open').last().click();
       const restoredFrame = restarted.frameLocator('[data-testid="graph-frame"]');
       await expect(restoredFrame.locator('svg[role="img"]')).toBeVisible();
       await expect(restarted.getByTestId('graph-generation')).toHaveAttribute(

@@ -2519,3 +2519,56 @@ describe('Computer Use contracts', () => {
     ).toThrow();
   });
 });
+
+describe('graph inline anchor', () => {
+  const reference = {
+    graphId: '11111111-1111-4111-8111-111111111111',
+    revision: 2,
+    renderRevision: 3,
+    title: 'Order flow',
+    kind: 'workflow' as const,
+    nodeCount: 3,
+    edgeCount: 2,
+  };
+
+  it('round-trips a reference through the fenced block Main appends to a reply', () => {
+    const marker = contracts.formatGraphInlineMarker(reference);
+    expect(marker.startsWith('\n\n```sprint-graph\n')).toBe(true);
+    expect(marker.endsWith('\n```\n\n')).toBe(true);
+    const body = marker.trim().split('\n').slice(1, -1).join('\n');
+    expect(contracts.parseGraphInlineReference(body)).toEqual(reference);
+  });
+
+  it('lengthens the fence when the title carries backticks, so it cannot close early', () => {
+    const marker = contracts.formatGraphInlineMarker({ ...reference, title: 'a ``` b' });
+    expect(marker.startsWith('\n\n````sprint-graph\n')).toBe(true);
+    expect(marker.endsWith('\n````\n\n')).toBe(true);
+  });
+
+  it('rejects bodies that are not a reference', () => {
+    expect(contracts.parseGraphInlineReference('not json')).toBeNull();
+    expect(contracts.parseGraphInlineReference(JSON.stringify({ graphId: 'x' }))).toBeNull();
+    expect(
+      contracts.parseGraphInlineReference(JSON.stringify({ ...reference, extra: true })),
+    ).toBeNull();
+  });
+
+  it('derives the reference from a rendered view', () => {
+    expect(
+      contracts.graphInlineReference({
+        id: reference.graphId,
+        taskId: 'task-1',
+        revision: 2,
+        renderRevision: 3,
+        title: 'Order flow',
+        kind: 'workflow',
+        digest: 'a'.repeat(64),
+        instanceId: '22222222-2222-4222-8222-222222222222',
+        viewRevision: 1,
+        artifactUrl: 'app://graph/22222222-2222-4222-8222-222222222222?theme=dark',
+        nodeIds: ['client', 'api', 'store'],
+        edgeIds: ['request', 'persist'],
+      }),
+    ).toEqual(reference);
+  });
+});
