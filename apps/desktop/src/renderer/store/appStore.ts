@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  GraphView,
   ModelSelection,
   ResolvedCliCommand,
   SkillCatalogItem,
@@ -227,6 +228,11 @@ type AppState = {
    * for the selected Task the moment a graph tool rendered a diagram, and the inline graph card in
    * the transcript raises one again after the panel was closed. `nonce` distinguishes repeats. */
   graphOpenRequest: { taskId: string; nonce: number } | null;
+  /** Saved graph versions per Task, newest first, loaded with the Task and kept current from
+   * `graphsUpdated`. An inline anchor only becomes a card when it names one of these, and a Task
+   * whose transcript carries no anchor (a graph from before anchors existed) gets a saved-graph
+   * card instead, so no graph is ever unreachable. */
+  graphVersionsByTask: Record<string, GraphVersionRef[] | undefined>;
   teamBusy: boolean;
   projectSwitchingByTask: Record<string, boolean | undefined>;
 
@@ -331,6 +337,8 @@ type AppState = {
   ): Promise<{ ok: true } | { ok: false; message: string }>;
   setDraft(taskId: string, text: string): void;
   requestGraphOpen(taskId: string): void;
+  loadGraphVersions(taskId: string): Promise<void>;
+  noteGraphVersion(view: GraphView): void;
   refreshDraftAttachments(taskId: string): Promise<void>;
   pickDraftAttachment(taskId: string): Promise<void>;
   pasteDraftAttachment(taskId: string): Promise<void>;
@@ -888,6 +896,25 @@ export function handleTurnEvent(
   }
 }
 
+export type GraphVersionRef = Readonly<{
+  id: string;
+  revision: number;
+  renderRevision: number;
+  title: string;
+  kind: 'architecture' | 'workflow';
+}>;
+
+/** Newest render first, one entry per (graph, renderRevision); the incoming set wins on ties. */
+function mergeGraphVersions(
+  existing: readonly GraphVersionRef[],
+  incoming: readonly GraphVersionRef[],
+): GraphVersionRef[] {
+  const byKey = new Map<string, GraphVersionRef>();
+  for (const version of [...existing, ...incoming])
+    byKey.set(`${version.id}:${version.renderRevision}`, version);
+  return [...byKey.values()].sort((left, right) => right.renderRevision - left.renderRevision);
+}
+
 export const useAppStore = create<AppState>((set, get) => {
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
 
@@ -941,6 +968,7 @@ export const useAppStore = create<AppState>((set, get) => {
     teamByTask: {},
     teamViewOpen: false,
     graphOpenRequest: null,
+    graphVersionsByTask: {},
     teamBusy: false,
     projectSwitchingByTask: {},
     runtime: {
@@ -1432,6 +1460,8 @@ export const useAppStore = create<AppState>((set, get) => {
             apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } })),
           )
           .catch(() => undefined);
+
+      void get().loadGraphVersions(taskId);
 
       if (!window.sprintCoder) {
         set({ loadingMessages: false });
@@ -2016,6 +2046,59 @@ export const useAppStore = create<AppState>((set, get) => {
     requestGraphOpen(taskId: string) {
       set((state) => ({
         graphOpenRequest: { taskId, nonce: (state.graphOpenRequest?.nonce ?? 0) + 1 },
+      }));
+    },
+
+    async loadGraphVersions(taskId: string) {
+      const api = window.sprintCoder?.graphs;
+      if (typeof api?.history !== 'function') return;
+      const versions: GraphVersionRef[] = [];
+      let beforeRenderRevision: number | undefined;
+      // History is paged newest-first; a Task rarely has more than one page, and the cap keeps a
+      // misbehaving cursor from looping forever.
+      for (let page = 0; page < 20; page += 1) {
+        let history: Awaited<ReturnType<typeof api.history>>;
+        try {
+          history = await api.history({
+            taskId,
+            ...(beforeRenderRevision === undefined ? {} : { beforeRenderRevision }),
+          });
+        } catch {
+          return;
+        }
+        for (const version of history.versions)
+          versions.push({
+            id: version.id,
+            revision: version.semanticRevision,
+            renderRevision: version.renderRevision,
+            title: version.title,
+            kind: version.kind,
+          });
+        if (history.nextBeforeRenderRevision === null) break;
+        beforeRenderRevision = history.nextBeforeRenderRevision;
+      }
+      set((state) => ({
+        graphVersionsByTask: {
+          ...state.graphVersionsByTask,
+          [taskId]: mergeGraphVersions(state.graphVersionsByTask[taskId] ?? [], versions),
+        },
+      }));
+    },
+
+    noteGraphVersion(view: GraphView) {
+      set((state) => ({
+        graphVersionsByTask: {
+          ...state.graphVersionsByTask,
+          [view.taskId]: mergeGraphVersions(state.graphVersionsByTask[view.taskId] ?? [], [
+            {
+              id: view.id,
+              revision: view.revision,
+              renderRevision: view.renderRevision,
+              title: view.title,
+              kind: view.kind,
+            },
+          ]),
+        },
       }));
     },
 

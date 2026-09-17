@@ -5478,7 +5478,8 @@ export class IpcRouter {
    * card — rather than collected at the end of the Turn like other tool cards.
    *
    * The message is the one the Provider runtime streams into (registered before its first delta);
-   * the Mock runtime picks its message after its tool loop and adopts this one instead. Failing to
+   * the Mock runtime picks its message after its tool loop, and a CLI runtime names its own in
+   * every delta — both adopt the message this anchor created when it came first. Failing to
    * anchor never fails the tool: the model already has its result and the graph panel opened from
    * the `graphsUpdated` push, so a Turn that is no longer streaming or has used up its persisted
    * text budget simply loses the marker.
@@ -8574,7 +8575,9 @@ export class IpcRouter {
             this.persistence.appendDelta(
               taskId,
               turnId,
-              runtimeEvent.messageId,
+              // A graph anchored before the CLI's first delta already owns this Turn's assistant
+              // message; the CLI's own id only names the message until one exists.
+              this.persistence.assistantMessageIdFor(taskId, turnId) ?? runtimeEvent.messageId,
               runtimeEvent.delta,
             ),
           );

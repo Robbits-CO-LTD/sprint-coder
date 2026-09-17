@@ -1,20 +1,52 @@
 import { useContext } from 'react';
+import type { ReactNode } from 'react';
 import type { GraphInlineReference } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
 import { GraphTaskContext } from './GraphTaskContext';
 import { Hexagon } from './icons';
 
+/** An anchor's reference, or a saved version (whose node and edge counts are not recorded). */
+export type InlineGraphCardReference = Omit<GraphInlineReference, 'nodeCount' | 'edgeCount'> &
+  Partial<Pick<GraphInlineReference, 'nodeCount' | 'edgeCount'>>;
+
 /**
  * Where a graph was rendered inside an assistant reply: the anchor Main appends at that moment.
  * The diagram itself lives in the graph panel beside the chat, which opened on its own when the
  * tool ran; this card marks the spot in the reply and is the way back to the panel once closed.
+ *
+ * The card only appears when the reference names a version this Task really saved. Main writes
+ * the anchor, but a model can type the same fence, so an unverified reference renders `fallback`
+ * (the ordinary code block) instead of a card that claims a graph which does not exist.
  */
-export function InlineGraphCard({ reference }: { reference: GraphInlineReference }) {
+export function InlineGraphCard({
+  reference,
+  fallback = null,
+  caption,
+}: {
+  reference: InlineGraphCardReference;
+  fallback?: ReactNode;
+  caption?: string;
+}) {
   const contextTaskId = useContext(GraphTaskContext);
   const selectedTaskId = useAppStore((s) => s.selectedTaskId);
-  const requestGraphOpen = useAppStore((s) => s.requestGraphOpen);
   const taskId = contextTaskId ?? selectedTaskId;
+  const versions = useAppStore((s) =>
+    taskId === null ? undefined : s.graphVersionsByTask[taskId],
+  );
+  const requestGraphOpen = useAppStore((s) => s.requestGraphOpen);
+  const known =
+    versions?.some(
+      (version) =>
+        version.id === reference.graphId &&
+        version.revision === reference.revision &&
+        version.renderRevision === reference.renderRevision,
+    ) ?? false;
+  if (taskId === null || !known) return <>{fallback}</>;
   const kindLabel = reference.kind === 'architecture' ? '構成図' : '作業フロー';
+  const counts =
+    reference.nodeCount === undefined || reference.edgeCount === undefined
+      ? ''
+      : ` · ノード ${reference.nodeCount} · 接続 ${reference.edgeCount}`;
   return (
     <div
       className="inline-graph-card"
@@ -29,17 +61,14 @@ export function InlineGraphCard({ reference }: { reference: GraphInlineReference
       <div className="inline-graph-body">
         <strong className="inline-graph-title">{reference.title}</strong>
         <span className="inline-graph-meta">
-          {`${kindLabel} · 版 ${reference.revision} · ノード ${reference.nodeCount} · 接続 ${reference.edgeCount}`}
+          {`${caption === undefined ? '' : `${caption} · `}${kindLabel} · 版 ${reference.revision}${counts}`}
         </span>
       </div>
       <button
         type="button"
         className="settings-secondary-button inline-graph-open"
         data-testid="inline-graph-open"
-        disabled={taskId === null}
-        onClick={() => {
-          if (taskId !== null) requestGraphOpen(taskId);
-        }}
+        onClick={() => requestGraphOpen(taskId)}
       >
         グラフを開く
       </button>

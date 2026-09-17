@@ -111,6 +111,7 @@ export default function App() {
     if (api === undefined) return;
     return api.subscribe((view) => {
       const store = useAppStore.getState();
+      store.noteGraphVersion(view);
       if (view.taskId === store.selectedTaskId) store.requestGraphOpen(view.taskId);
     });
   }, []);

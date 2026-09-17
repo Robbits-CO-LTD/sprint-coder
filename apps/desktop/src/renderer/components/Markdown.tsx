@@ -100,9 +100,16 @@ function PreBlock(props: MarkdownElementProps<'pre'> & { isStreaming: boolean })
   if (anchor !== null) {
     // Main appends this block when a graph tool renders a diagram mid-reply, so unlike Mermaid it
     // renders while streaming too: the card belongs beside the text that produced it. A model can
-    // type the same fence, so a body that is not a well-formed reference stays ordinary code.
+    // type the same fence, so a body that is not a well-formed reference stays ordinary code, and
+    // the card itself only appears when the reference names a graph this Task really saved.
     const reference = parseGraphInlineReference(anchor);
-    if (reference !== null) return <InlineGraphCard reference={reference} />;
+    if (reference !== null)
+      return (
+        <InlineGraphCard
+          reference={reference}
+          fallback={<StandardPreBlock {...rest}>{children}</StandardPreBlock>}
+        />
+      );
   }
   const source = mermaidSource(children);
   if (source === null || isStreaming)

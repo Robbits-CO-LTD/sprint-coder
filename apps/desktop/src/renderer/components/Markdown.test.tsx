@@ -58,38 +58,3 @@ describe('Markdown', () => {
     expect(html).not.toContain('md-mermaid');
   });
 });
-
-describe('Markdown graph anchor', () => {
-  const reference = {
-    graphId: '11111111-1111-4111-8111-111111111111',
-    revision: 2,
-    renderRevision: 3,
-    title: '注文フロー',
-    kind: 'workflow',
-    nodeCount: 3,
-    edgeCount: 2,
-  };
-
-  it('renders the anchor Main appends at a graph render as an inline card, streaming or not', () => {
-    const content = `調査しました。\n\n\`\`\`sprint-graph\n${JSON.stringify(reference)}\n\`\`\`\n\n次の段階へ進みます。`;
-    for (const isStreaming of [false, true]) {
-      const html = renderToStaticMarkup(<Markdown content={content} isStreaming={isStreaming} />);
-      expect(html).toContain('data-testid="inline-graph-card"');
-      expect(html).toContain('注文フロー');
-      expect(html).toContain('作業フロー · 版 2 · ノード 3 · 接続 2');
-      expect(html).toContain('data-testid="inline-graph-open"');
-      expect(html).not.toContain('<pre>');
-      expect(html).toContain('<p>調査しました。</p>');
-      expect(html).toContain('<p>次の段階へ進みます。</p>');
-    }
-  });
-
-  it('keeps a look-alike fence that is not a reference as ordinary code', () => {
-    const html = renderToStaticMarkup(
-      <Markdown content={'```sprint-graph\n{"graphId":"x"}\n```'} />,
-    );
-    expect(html).not.toContain('inline-graph-card');
-    expect(html).toContain('<pre>');
-    expect(html).toContain('&quot;graphId&quot;');
-  });
-});

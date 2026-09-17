@@ -6373,3 +6373,54 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     expect(status.userMessage).not.toContain('無効なイベント');
   });
 });
+
+describe('CLI runtime deltas and the anchored assistant message', () => {
+  function cliRouter(anchored: string | null) {
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const publish = vi.fn();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      mailbox: { run: (_taskId: string, action: () => unknown) => Promise.resolve(action()) },
+      canceledRuntimeTurns: new Set<string>(),
+      turnRuntimes: new Map([['turn-cli', 'codex']]),
+      persistence: { assistantMessageIdFor: vi.fn(() => anchored), appendDelta },
+      publish,
+    });
+    const handle = Reflect.get(IpcRouter.prototype, 'handleRuntimeEvent') as (
+      this: unknown,
+      kind: 'codex' | 'claude',
+      taskId: string,
+      turnId: string,
+      event: unknown,
+    ) => void;
+    return { appendDelta, publish, handle: handle.bind(router) };
+  }
+
+  it('continue in the assistant message a graph anchored before the first delta', async () => {
+    const { appendDelta, publish, handle } = cliRouter('anchored-message');
+    handle('codex', 'task-cli', 'turn-cli', {
+      type: 'delta',
+      messageId: 'cli-message',
+      delta: '図を描きました。',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(appendDelta).toHaveBeenCalledWith(
+      'task-cli',
+      'turn-cli',
+      'anchored-message',
+      '図を描きました。',
+    );
+    expect(publish).toHaveBeenCalledWith({ type: 'message.delta' });
+  });
+
+  it('name the message with the CLI id until the Turn has an assistant message', async () => {
+    const { appendDelta, handle } = cliRouter(null);
+    handle('codex', 'task-cli', 'turn-cli', {
+      type: 'delta',
+      messageId: 'cli-message',
+      delta: 'a',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(appendDelta).toHaveBeenCalledWith('task-cli', 'turn-cli', 'cli-message', 'a');
+  });
+});
