@@ -560,7 +560,7 @@ Toolの表示名と意味分類を分ける。
 - cwdをWorkspace root配下へcanonicalizeする。
 - environmentはallowlist + Task追加分で構築し、secretをlogへ出さない。
 - 承認対象をimmutable ExecutionSpec `{absoluteExecutable, argv, cwdIdentity, envDelta(redacted), stdinMode, shell, commandBytesHash}` とし、digest変更時は承認を失効する。
-- processのstdinはspawn後も書き込み可能なので、`stdinMode`は実態 `approved-writes` を宣言する。実行開始後のstdin書き込み（`write_stdin`）はcommand本体と同じ`shell.execute`を要求する別の承認対象とし、session所有権だけを境界にしない。
+- processのstdinはspawn後も書き込み可能なので、`stdinMode`は実態 `approved-writes` を宣言する。実行開始後のstdin書き込み（`write_stdin`）はcommand本体と同じ`shell.execute`を要求する別の承認対象とし、session所有権だけを境界にしない。フルアクセスではcommand本体と同じくpolicy allowのまま確認なしで実行する。
 - stdin承認は要約しない。1回の書き込みを承認カードが全文表示できる長さへ制限し、超過は承認要求前にtool errorで返して分割させる。制御文字・bidi/zero-width文字はエスケープ表記して隠れないようにし、literal backslashも二重化して表示を入力と一対一にする。
 - stdinの生文字列はpending承認カードへ渡すだけの非永続値とし、`display_json`とturn eventにはbyte数とMACだけを残す。redact済みでも内容previewは保存しない（secret scannerはラベルや既知token形式しか見つけられず、`sudo -S`へ渡す素のパスワードは平文のまま残るため）。
 - 内容の同一性は無塩hashではなくinstall固有鍵のHMAC-SHA256とする。byte数付きの素のsha256は候補をhashして照合できる検証器になり、低エントロピーのパスワードを復元できてしまう。鍵はuserData配下に32 byte・0600で初回利用時に生成し、SQLiteにもRendererにも入れない。`spec_digest`・permission audit・`allow_task`判定に使うdigestの入力からも生のstdinを外し、同じMACを使う（同一bytesのdedupはMACで成立する）。
@@ -614,7 +614,7 @@ Codex／Claude CLIは推論transportだけを担当し、内蔵File／Shell tool
 | --- | --- |
 | 確認する | read/searchはpolicy評価し、edit・commandはdurable Approval CardでTurn内確認 |
 | 安全時は自動 | Workspace内のNativeSafeFs/Edit Sagaとprobe済みcommand sandboxだけを自動許可 |
-| フルアクセス | 広い操作を許可し、Workspace分類パスのProvider開示（redact済み本文）も都度確認なしで許可する。credential、app-private、signing/update key、provider egress denyは維持 |
+| フルアクセス | 広い操作を許可し、Provider発行プロセス（`exec_command`と実行中コマンドへの`write_stdin`）もWorkspace分類パスのProvider開示（redact済み本文）も都度確認なしで実行する。credential、app-private、signing/update key、provider egress denyは維持 |
 
 保護分類パス（credential、app-private、os-protected、signing/update key、unclassified）のProvider開示は、preset によらず承認要求ではなくimmutable denyで拒否する。開示resourceはpath classificationを持ち、`path-classification`にしかマッチしないimmutable denyを開示lane経由で迂回できないようにする。preset展開を変更したbuildは、DB openで「直前の展開と完全一致する保存済みルール」だけを新しい展開へ書き直しpresetを維持する（それ以外の不一致は従来どおりAskへ落とす）。
 

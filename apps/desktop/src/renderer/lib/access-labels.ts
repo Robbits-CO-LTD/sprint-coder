@@ -24,7 +24,7 @@ export function accessDescription(
   if (preset === 'ask')
     return `読み取りは共通Harnessで実行し、変更とコマンドは実行前に確認します。${sandbox}`;
   if (preset === 'full')
-    return `広い操作を許可しますが、credential・アプリ領域・署名鍵の保護と監査は維持されます。${sandbox}`;
+    return `変更・コマンド・標準入力書き込みを確認なしで実行しますが、credential・アプリ領域・署名鍵の保護と監査は維持されます。${sandbox}`;
   return `Workspace内の編集とprobe済みcommand sandboxだけを自動実行します。${sandbox}`;
 }
 

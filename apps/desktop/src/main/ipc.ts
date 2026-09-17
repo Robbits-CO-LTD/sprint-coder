@@ -5495,7 +5495,7 @@ export class IpcRouter {
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     // Provider-issued process authority covers both starting a command and feeding one that is
     // already running: `write_stdin` carries `shell.execute` without being a command-runner Tool
-    // (Issue #473), and a preset-wide allow must not cover it silently either.
+    // (Issue #473). Outside the Full preset a preset-wide allow must not cover it silently either.
     const providerProcessAuthority =
       request.entry.implementationKind === 'command-runner' || capability === 'shell.execute';
     const sandboxProfile = sandboxProfileForToolAuthorization(
@@ -5571,7 +5571,8 @@ export class IpcRouter {
     };
     let evaluation = evaluate();
     let reviewerDecision: Awaited<ReturnType<AutoReviewer['review']>> | undefined;
-    const autoPreset = this.permissionBroker.getPolicy(request.context.taskId).preset === 'auto';
+    const preset = this.permissionBroker.getPolicy(request.context.taskId).preset;
+    const autoPreset = preset === 'auto';
     const reviewRequestId = randomUUID();
     if (evaluation.decision === 'approval_required' && autoPreset) {
       reviewerDecision = await this.autoReviewer.review({
@@ -5672,8 +5673,9 @@ export class IpcRouter {
           reason: 'provider_disclosure_requires_explicit_approval',
           beforeExecute: disclosureBoundBeforeExecute,
         };
-      // Provider-issued processes are never covered by a preset-wide silent grant. A policy deny
-      // still wins above; only an evaluated allow is upgraded to an explicit user approval.
+      // Outside the Full preset, Provider-issued processes are never covered by a preset-wide
+      // silent grant. A policy deny still wins above; only an evaluated allow is upgraded to an
+      // explicit user approval, and the Full preset keeps that allow as the user chose it.
       return requireExplicitProviderCommandApproval(
         {
           decision: 'allow' as const,
@@ -5681,6 +5683,7 @@ export class IpcRouter {
           beforeExecute: disclosureBoundBeforeExecute,
         },
         providerProcessAuthority,
+        preset,
       );
     }
     return requireExplicitProviderCommandApproval(
@@ -5692,6 +5695,7 @@ export class IpcRouter {
             : evaluation.reason,
       },
       providerProcessAuthority,
+      preset,
     );
   }
 
@@ -9464,11 +9468,20 @@ export function providerDisclosureRequiresExplicitApproval(input: {
   );
 }
 
+/**
+ * A Provider-issued process (`exec_command`, and `write_stdin` feeding one that is already running)
+ * is asked about even when the policy engine allowed it, because the Ask and Auto presets never
+ * promised to run commands unattended. The Full preset did: the user accepted its impact once when
+ * they chose it (FR-COMP-04), so an evaluated allow stays an allow there and the command runs
+ * without a per-call prompt. A policy deny is never touched.
+ */
 export function requireExplicitProviderCommandApproval(
   decision: ToolAuthorizationDecision,
   providerProcessAuthority: boolean,
+  preset: AccessPreset,
 ): ToolAuthorizationDecision {
-  if (!providerProcessAuthority || decision.decision !== 'allow') return decision;
+  if (!providerProcessAuthority || decision.decision !== 'allow' || preset === 'full')
+    return decision;
   return {
     decision: 'approval_required',
     reason: 'provider_command_requires_explicit_approval',
