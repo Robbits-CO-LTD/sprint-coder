@@ -55,6 +55,21 @@ describe('Task graph tools in the managed harness', () => {
     );
     expect(render).not.toHaveBeenCalled();
   });
+  it('publishes a rendered view together with the Turn that proposed it', async () => {
+    const view = { id: 'graph-1', title: 'Draft', revision: 1, renderRevision: 1 };
+    const render = vi.fn(async () => view);
+    const publish = vi.fn();
+    const boundary = createGraphToolBoundary(
+      { render, document: () => null, generation: () => null } as never,
+      publish,
+      (action) => action(),
+    );
+    await expect(boundary.propose(input, context, { callId: 'propose' })).resolves.toMatchObject({
+      graphId: 'graph-1',
+      phase: 'draft',
+    });
+    expect(publish).toHaveBeenCalledWith(view, context);
+  });
   it.each(['codex', 'claude', 'ollama'])(
     'publishes shared schemas for %s and binds calls to the Turn',
     async (provider) => {

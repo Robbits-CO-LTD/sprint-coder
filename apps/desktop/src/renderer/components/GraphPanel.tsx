@@ -245,7 +245,7 @@ function GraphPanelForTask({ taskId, onClose }: { taskId: string; onClose: () =>
         </>
       ) : (
         <p className="settings-hint">
-          作成した図をここで確認できます。図の表示だけでは作業を開始しません。
+          AIが図を作成すると、ここに自動で表示されます。図の表示だけでは作業を開始しません。
         </p>
       )}
       {error ? (

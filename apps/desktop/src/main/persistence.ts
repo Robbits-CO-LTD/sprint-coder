@@ -5520,6 +5520,7 @@ export interface PersistenceClient {
   getActiveTurnId(taskId: string): string | null;
   changeStage(taskId: string, turnId: string, stage: TurnStage): TurnEvent;
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent;
+  assistantMessageIdFor(taskId: string, turnId: string): string | null;
   completeTurn(
     taskId: string,
     turnId: string,
@@ -18082,6 +18083,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.updateTurn(turnId, stage);
       return this.appendEvent({ type: 'stage.changed', taskId, turnId, stage });
     })();
+  }
+
+  /**
+   * The assistant message a Turn has streamed into so far, or null before its first delta. Lets a
+   * runtime that picks its message id late (the Mock runtime, after its tool loop) continue in a
+   * message an earlier tool already anchored something into, instead of tripping the identity
+   * check in `appendDelta`.
+   */
+  assistantMessageIdFor(taskId: string, turnId: string): string | null {
+    const row = this.db
+      .prepare('SELECT assistant_message_id FROM turns WHERE id = ? AND task_id = ?')
+      .get(turnId, taskId) as { assistant_message_id: string | null } | undefined;
+    return row?.assistant_message_id ?? null;
   }
 
   appendDelta(taskId: string, turnId: string, messageId: string, delta: string): TurnEvent {

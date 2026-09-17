@@ -97,7 +97,23 @@ export default function App() {
     readStoredTeamViewPreference,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [graphOpen, setGraphOpen] = useState(false);
+  const graphOpenRequest = useAppStore((s) => s.graphOpenRequest);
+  // The graph panel has no button. It opens when a graph is rendered for the selected Task (Main's
+  // `graphsUpdated` push) or when the inline card in the transcript asks for it again, and closing
+  // it only dismisses that request; switching Tasks leaves it behind with the graph it showed.
+  const [dismissedGraphNonce, setDismissedGraphNonce] = useState(0);
+  const graphOpen =
+    graphOpenRequest !== null &&
+    graphOpenRequest.taskId === selectedTaskId &&
+    graphOpenRequest.nonce > dismissedGraphNonce;
+  useEffect(() => {
+    const api = window.sprintCoder?.graphs;
+    if (api === undefined) return;
+    return api.subscribe((view) => {
+      const store = useAppStore.getState();
+      if (view.taskId === store.selectedTaskId) store.requestGraphOpen(view.taskId);
+    });
+  }, []);
   const [setupComplete] = useState(readSetupComplete);
   const [setupReveal, setSetupReveal] = useState(false);
   const setupWasVisibleRef = useRef(false);
@@ -348,8 +364,6 @@ export default function App() {
             ) : selectedTask ? (
               <>
                 <TaskHeader
-                  graphOpen={graphOpen}
-                  onToggleGraph={() => setGraphOpen((value) => !value)}
                   task={selectedTask}
                   onToggleTeam={requestEnterTeam}
                   {...(computerUse.enabled
@@ -414,9 +428,9 @@ export default function App() {
               key={selectedTask.id}
               taskId={selectedTask.id}
               onClose={() => {
-                setGraphOpen(false);
+                if (graphOpenRequest !== null) setDismissedGraphNonce(graphOpenRequest.nonce);
                 requestAnimationFrame(() =>
-                  document.querySelector<HTMLElement>('[data-testid="graph-toggle"]')?.focus(),
+                  document.querySelector<HTMLElement>('[data-testid="composer-textarea"]')?.focus(),
                 );
               }}
             />

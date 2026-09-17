@@ -4260,6 +4260,58 @@ export const graphViewSchema = z
   })
   .strict();
 export type GraphView = z.infer<typeof graphViewSchema>;
+
+/**
+ * Reserved fenced-code language for the anchor Main appends to an assistant reply at the moment a
+ * graph tool rendered a diagram. The Renderer turns that block into an inline graph card at that
+ * position in the reply; it is app-inserted, never model-written.
+ */
+export const GRAPH_INLINE_FENCE_LANG = 'sprint-graph';
+export const graphInlineReferenceSchema = z
+  .object({
+    graphId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    renderRevision: z.number().int().positive(),
+    title: z.string().min(1).max(160),
+    kind: z.enum(['architecture', 'workflow']),
+    nodeCount: z.number().int().nonnegative().max(64),
+    edgeCount: z.number().int().nonnegative().max(192),
+  })
+  .strict();
+export type GraphInlineReference = z.infer<typeof graphInlineReferenceSchema>;
+export function graphInlineReference(view: GraphView): GraphInlineReference {
+  return {
+    graphId: view.id,
+    revision: view.revision,
+    renderRevision: view.renderRevision,
+    title: view.title,
+    kind: view.kind,
+    nodeCount: view.nodeIds.length,
+    edgeCount: view.edgeIds.length,
+  };
+}
+/**
+ * The anchor as appended to the assistant message: its own paragraph, so the surrounding text keeps
+ * its Markdown structure, with a fence longer than any backtick run inside the JSON so a title can
+ * never close it early.
+ */
+export function formatGraphInlineMarker(reference: GraphInlineReference): string {
+  const body = JSON.stringify(graphInlineReferenceSchema.parse(reference));
+  const longestRun = Math.max(0, ...[...body.matchAll(/`+/gu)].map((match) => match[0].length));
+  const fence = '`'.repeat(Math.max(3, longestRun + 1));
+  return `\n\n${fence}${GRAPH_INLINE_FENCE_LANG}\n${body}\n${fence}\n\n`;
+}
+/** Parses one anchor block's body; anything that is not a well-formed reference renders as code. */
+export function parseGraphInlineReference(source: string): GraphInlineReference | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    return null;
+  }
+  const parsed = graphInlineReferenceSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 export type GraphRenderInput = z.infer<typeof graphRenderInputSchema>;
 export const graphProposeToolInputSchema = z
   .object({

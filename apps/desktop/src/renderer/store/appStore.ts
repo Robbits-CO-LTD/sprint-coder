@@ -223,6 +223,10 @@ type AppState = {
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
   teamViewOpen: boolean;
+  /** The graph panel opens on request, never from a button: Main's `graphsUpdated` push raises one
+   * for the selected Task the moment a graph tool rendered a diagram, and the inline graph card in
+   * the transcript raises one again after the panel was closed. `nonce` distinguishes repeats. */
+  graphOpenRequest: { taskId: string; nonce: number } | null;
   teamBusy: boolean;
   projectSwitchingByTask: Record<string, boolean | undefined>;
 
@@ -326,6 +330,7 @@ type AppState = {
     expectedRevision: number,
   ): Promise<{ ok: true } | { ok: false; message: string }>;
   setDraft(taskId: string, text: string): void;
+  requestGraphOpen(taskId: string): void;
   refreshDraftAttachments(taskId: string): Promise<void>;
   pickDraftAttachment(taskId: string): Promise<void>;
   pasteDraftAttachment(taskId: string): Promise<void>;
@@ -935,6 +940,7 @@ export const useAppStore = create<AppState>((set, get) => {
     pendingOptimisticIdByTask: {},
     teamByTask: {},
     teamViewOpen: false,
+    graphOpenRequest: null,
     teamBusy: false,
     projectSwitchingByTask: {},
     runtime: {
@@ -2005,6 +2011,12 @@ export const useAppStore = create<AppState>((set, get) => {
           message: `保存できませんでした: ${describeError(err)} — Teamの状態が変わっている可能性があります。いったん閉じて最新の内容を読み込んでから、もう一度お試しください。`,
         };
       }
+    },
+
+    requestGraphOpen(taskId: string) {
+      set((state) => ({
+        graphOpenRequest: { taskId, nonce: (state.graphOpenRequest?.nonce ?? 0) + 1 },
+      }));
     },
 
     setDraft(taskId: string, text: string) {

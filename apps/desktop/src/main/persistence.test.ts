@@ -1224,6 +1224,22 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('reports the assistant message a Turn streams into, and nothing before its first delta', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = persistence.startTurn(task.id, '図を作って');
+      for (const stage of ['understanding', 'planning', 'executing'] as const)
+        persistence.changeStage(task.id, turn.turnId, stage);
+      expect(persistence.assistantMessageIdFor(task.id, turn.turnId)).toBeNull();
+
+      const messageId = randomUUID();
+      persistence.appendDelta(task.id, turn.turnId, messageId, '図を描きます。');
+
+      expect(persistence.assistantMessageIdFor(task.id, turn.turnId)).toBe(messageId);
+      expect(persistence.assistantMessageIdFor('other-task', turn.turnId)).toBeNull();
+      persistence.close();
+    });
+
     it('keeps a Provider preamble approval-eligible until final synthesis', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();

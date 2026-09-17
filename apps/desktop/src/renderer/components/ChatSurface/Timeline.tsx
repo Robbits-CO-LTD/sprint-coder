@@ -30,6 +30,7 @@ import {
 } from '../../lib/workspace-change-summary';
 import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png';
 import { ProjectMemoryDialog, type ProjectMemoryDialogSource } from '../ProjectMemoryDialog';
+import { GraphTaskContext } from '../GraphTaskContext';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
@@ -205,248 +206,250 @@ export function Timeline({
   const isEmpty = messages.length === 0 && !turn && activityGroups.leading.length === 0;
 
   return (
-    <div
-      className="timeline-scroll"
-      data-testid="timeline-scroll"
-      ref={scrollRef}
-      onScroll={handleScroll}
-    >
-      <div className="timeline">
-        {isEmpty && (
-          <section
-            className="empty-state timeline-welcome"
-            aria-labelledby="timeline-welcome-title"
-          >
-            <div className="timeline-welcome-content">
-              <div className="timeline-welcome-mark" aria-hidden="true">
-                <img src={sprintCoderIcon} alt="" draggable={false} />
-              </div>
-              <div className="timeline-welcome-copy">
-                <p className="timeline-welcome-kicker">SPRINT CODER · AI CODING WORKSPACE</p>
-                <h2 id="timeline-welcome-title">なんでも相談してください</h2>
-                <p>
-                  相談だけでも大丈夫です。Workspaceでの実行が必要になったときは、事前に確認します。
-                </p>
-              </div>
-              <div className="timeline-welcome-actions" aria-label="入力例">
-                <span className="timeline-welcome-actions-label">入力例</span>
-                <div className="timeline-welcome-suggestions">
-                  {SUGGESTIONS.map((s) => (
-                    <button
-                      key={s}
-                      type="button"
-                      className="timeline-welcome-suggestion"
-                      onClick={() => setDraft(taskId, s)}
-                    >
-                      <span>{s}</span>
-                      <ArrowUp size={15} className="timeline-welcome-suggestion-arrow" />
-                    </button>
-                  ))}
+    <GraphTaskContext.Provider value={taskId}>
+      <div
+        className="timeline-scroll"
+        data-testid="timeline-scroll"
+        ref={scrollRef}
+        onScroll={handleScroll}
+      >
+        <div className="timeline">
+          {isEmpty && (
+            <section
+              className="empty-state timeline-welcome"
+              aria-labelledby="timeline-welcome-title"
+            >
+              <div className="timeline-welcome-content">
+                <div className="timeline-welcome-mark" aria-hidden="true">
+                  <img src={sprintCoderIcon} alt="" draggable={false} />
+                </div>
+                <div className="timeline-welcome-copy">
+                  <p className="timeline-welcome-kicker">SPRINT CODER · AI CODING WORKSPACE</p>
+                  <h2 id="timeline-welcome-title">なんでも相談してください</h2>
+                  <p>
+                    相談だけでも大丈夫です。Workspaceでの実行が必要になったときは、事前に確認します。
+                  </p>
+                </div>
+                <div className="timeline-welcome-actions" aria-label="入力例">
+                  <span className="timeline-welcome-actions-label">入力例</span>
+                  <div className="timeline-welcome-suggestions">
+                    {SUGGESTIONS.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className="timeline-welcome-suggestion"
+                        onClick={() => setDraft(taskId, s)}
+                      >
+                        <span>{s}</span>
+                        <ArrowUp size={15} className="timeline-welcome-suggestion-arrow" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
+          )}
+
+          {activityGroups.leading.map((activity) => (
+            <TeamActivityCard key={activity.id} activity={activity} />
+          ))}
+
+          {messages.map((message) => {
+            const messageActivities = activityGroups.byMessageId[message.id] ?? [];
+            const showRunCardAfter =
+              turn && message.author === 'user' && message.turnId === turn.turnId;
+            const commandCards =
+              message.author === 'user' && message.turnId !== null
+                ? commands.filter(({ command }) => command.turnId === message.turnId)
+                : [];
+            const approvalRows =
+              message.author === 'user' && message.turnId !== null
+                ? approvalHistory.filter((approval) => approval.turnId === message.turnId)
+                : [];
+            const autoDecisionRows =
+              message.author === 'user' && message.turnId !== null
+                ? autoDecisions.filter((decision) => decision.turnId === message.turnId)
+                : [];
+            const turnImages =
+              message.author === 'user' && message.turnId !== null
+                ? images.filter((image) => image.turnId === message.turnId)
+                : [];
+            // One card per tool call rather than one merged list per Turn (issue #37): the order and
+            // grouping are what the Runtime actually did, and collapsing them would turn "edited A,
+            // ran the test, then edited B" into a flat set that reads as a single batch.
+            const turnFileChanges =
+              message.author === 'user' && message.turnId !== null
+                ? fileChanges.filter((entry) => entry.turnId === message.turnId)
+                : [];
+            const turnSkillDrafts =
+              message.author === 'assistant' && message.turnId !== null
+                ? skillDrafts.filter(({ turnId }) => turnId === message.turnId)
+                : [];
+            const runtimeSummary =
+              message.author === 'assistant' && message.turnId !== null
+                ? runtimeSummaryByTurn.get(message.turnId)
+                : undefined;
+            const persistedDiff =
+              message.author === 'assistant' &&
+              message.turnId !== null &&
+              turnDiff?.turnId === message.turnId
+                ? turnDiff
+                : undefined;
+            const workspaceDiff = mergeWorkspaceDiffs(persistedDiff, runtimeSummary?.diff);
+            const workerBreakdown =
+              message.id === latestAssistantMessageId
+                ? (teamDetail?.workers ?? []).map((worker) => ({
+                    role: worker.role,
+                    status: workerStateLabel(worker.state),
+                  }))
+                : [];
+            // A request that produced nothing must not read as success (issue #11). Detected from the
+            // stored message, which is exactly why the directive is kept in the message text rather
+            // than injected invisibly in the adapter.
+            // Only once this message's Turn has actually stopped. The Run Card stays mounted after
+            // completion (with a terminal status), so "is `turn` still about this message" is not the
+            // question — "is it still working" is.
+            const stillRunning =
+              turn !== undefined &&
+              turn.turnId === message.turnId &&
+              (turn.status === 'running' || turn.status === 'canceling');
+            const imageRequestUnfulfilled =
+              message.author === 'user' &&
+              message.turnId !== null &&
+              message.content.startsWith(IMAGEGEN_PREFIX) &&
+              turnImages.length === 0 &&
+              !stillRunning;
+            const activityGroupActive =
+              message.author === 'user' &&
+              message.turnId !== null &&
+              isActive &&
+              turn?.turnId === message.turnId;
+            const activityStartedAtMs =
+              turn?.turnId === message.turnId ? turn.startedAt : Date.parse(message.createdAt);
+            const activityFinishedAtMs =
+              turn?.turnId === message.turnId && turn.finishedAt !== undefined
+                ? turn.finishedAt
+                : message.turnId === null
+                  ? null
+                  : (assistantCreatedAtByTurn.get(message.turnId) ?? null);
+            const workContent =
+              message.author === 'user' && message.turnId !== null
+                ? (assistantWorkContentByTurn.get(message.turnId) ?? null)
+                : null;
+            return (
+              <div key={message.id} style={{ display: 'contents' }}>
+                <MessageBubble
+                  author={message.author}
+                  content={message.content}
+                  attachments={message.attachments}
+                />
+                {message.author === 'assistant' && message.turnId !== null && (
+                  <button
+                    type="button"
+                    className="turn-context-button"
+                    onClick={() => void openMemoryDialog(message)}
+                  >
+                    Projectメモとして保存
+                  </button>
+                )}
+                {showRunCardAfter && (isActive || messageActivities.length === 0) && (
+                  <RunCard
+                    turn={turn}
+                    taskId={taskId}
+                    variant={variant}
+                    onStop={() => void cancelActiveTurn(taskId)}
+                  />
+                )}
+                {approvalRows.map((approval) => (
+                  <ApprovalAuditRow key={approval.id} approval={approval} />
+                ))}
+                {autoDecisionRows.map((decision) => (
+                  <AutoDecisionAuditRow key={decision.id} decision={decision} />
+                ))}
+                {commandCards.map((card) => (
+                  <CommandCard key={card.command.id} taskId={taskId} card={card} />
+                ))}
+                {turnFileChanges.map((entry) => (
+                  <FileChangeCard key={entry.seq} changes={entry.changes} />
+                ))}
+                {turnImages.map((image) => (
+                  <GeneratedImageCard key={image.id} image={image} />
+                ))}
+                {turnSkillDrafts.map(({ draft }) => (
+                  <SkillDraftCard
+                    key={draft.id}
+                    draft={draft}
+                    onInstall={() => void installSkillDraft(taskId, draft)}
+                    onDiscard={() => void discardSkillDraft(taskId, draft.id)}
+                  />
+                ))}
+                {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}
+                {workspaceDiff !== null && (
+                  <TurnDiffCard
+                    diff={workspaceDiff}
+                    lineStats={runtimeSummary?.lineStats ?? null}
+                    workerBreakdown={workerBreakdown}
+                    elapsedMs={
+                      turn?.turnId === workspaceDiff.turnId && turn.finishedAt !== undefined
+                        ? turn.finishedAt - turn.startedAt
+                        : null
+                    }
+                  />
+                )}
+                {(messageActivities.length > 0 || workContent !== null) && (
+                  <TeamActivityGroup
+                    activities={messageActivities}
+                    active={activityGroupActive}
+                    startedAtMs={activityStartedAtMs}
+                    finishedAtMs={activityFinishedAtMs}
+                    workContent={workContent}
+                  />
+                )}
+              </div>
+            );
+          })}
+
+          {isActive && turn && turn.streamingMessageId && (
+            <MessageBubble author="assistant" content={turn.streamingContent} isStreaming />
+          )}
+          {approvals.map((approval) => (
+            <ApprovalCard
+              key={approval.id}
+              approval={approval}
+              busy={resolving[approval.id] === true}
+              onDecision={(decision, userInputSelection) =>
+                void resolveApproval(taskId, approval.id, decision, userInputSelection)
+              }
+            />
+          ))}
+          {memoryError !== null && (
+            <p className="project-context-error" role="alert">
+              {memoryError}
+            </p>
+          )}
+        </div>
+
+        {memoryDialog !== null && (
+          <ProjectMemoryDialog source={memoryDialog} onClose={() => setMemoryDialog(null)} />
         )}
 
-        {activityGroups.leading.map((activity) => (
-          <TeamActivityCard key={activity.id} activity={activity} />
-        ))}
-
-        {messages.map((message) => {
-          const messageActivities = activityGroups.byMessageId[message.id] ?? [];
-          const showRunCardAfter =
-            turn && message.author === 'user' && message.turnId === turn.turnId;
-          const commandCards =
-            message.author === 'user' && message.turnId !== null
-              ? commands.filter(({ command }) => command.turnId === message.turnId)
-              : [];
-          const approvalRows =
-            message.author === 'user' && message.turnId !== null
-              ? approvalHistory.filter((approval) => approval.turnId === message.turnId)
-              : [];
-          const autoDecisionRows =
-            message.author === 'user' && message.turnId !== null
-              ? autoDecisions.filter((decision) => decision.turnId === message.turnId)
-              : [];
-          const turnImages =
-            message.author === 'user' && message.turnId !== null
-              ? images.filter((image) => image.turnId === message.turnId)
-              : [];
-          // One card per tool call rather than one merged list per Turn (issue #37): the order and
-          // grouping are what the Runtime actually did, and collapsing them would turn "edited A,
-          // ran the test, then edited B" into a flat set that reads as a single batch.
-          const turnFileChanges =
-            message.author === 'user' && message.turnId !== null
-              ? fileChanges.filter((entry) => entry.turnId === message.turnId)
-              : [];
-          const turnSkillDrafts =
-            message.author === 'assistant' && message.turnId !== null
-              ? skillDrafts.filter(({ turnId }) => turnId === message.turnId)
-              : [];
-          const runtimeSummary =
-            message.author === 'assistant' && message.turnId !== null
-              ? runtimeSummaryByTurn.get(message.turnId)
-              : undefined;
-          const persistedDiff =
-            message.author === 'assistant' &&
-            message.turnId !== null &&
-            turnDiff?.turnId === message.turnId
-              ? turnDiff
-              : undefined;
-          const workspaceDiff = mergeWorkspaceDiffs(persistedDiff, runtimeSummary?.diff);
-          const workerBreakdown =
-            message.id === latestAssistantMessageId
-              ? (teamDetail?.workers ?? []).map((worker) => ({
-                  role: worker.role,
-                  status: workerStateLabel(worker.state),
-                }))
-              : [];
-          // A request that produced nothing must not read as success (issue #11). Detected from the
-          // stored message, which is exactly why the directive is kept in the message text rather
-          // than injected invisibly in the adapter.
-          // Only once this message's Turn has actually stopped. The Run Card stays mounted after
-          // completion (with a terminal status), so "is `turn` still about this message" is not the
-          // question — "is it still working" is.
-          const stillRunning =
-            turn !== undefined &&
-            turn.turnId === message.turnId &&
-            (turn.status === 'running' || turn.status === 'canceling');
-          const imageRequestUnfulfilled =
-            message.author === 'user' &&
-            message.turnId !== null &&
-            message.content.startsWith(IMAGEGEN_PREFIX) &&
-            turnImages.length === 0 &&
-            !stillRunning;
-          const activityGroupActive =
-            message.author === 'user' &&
-            message.turnId !== null &&
-            isActive &&
-            turn?.turnId === message.turnId;
-          const activityStartedAtMs =
-            turn?.turnId === message.turnId ? turn.startedAt : Date.parse(message.createdAt);
-          const activityFinishedAtMs =
-            turn?.turnId === message.turnId && turn.finishedAt !== undefined
-              ? turn.finishedAt
-              : message.turnId === null
-                ? null
-                : (assistantCreatedAtByTurn.get(message.turnId) ?? null);
-          const workContent =
-            message.author === 'user' && message.turnId !== null
-              ? (assistantWorkContentByTurn.get(message.turnId) ?? null)
-              : null;
-          return (
-            <div key={message.id} style={{ display: 'contents' }}>
-              <MessageBubble
-                author={message.author}
-                content={message.content}
-                attachments={message.attachments}
-              />
-              {message.author === 'assistant' && message.turnId !== null && (
-                <button
-                  type="button"
-                  className="turn-context-button"
-                  onClick={() => void openMemoryDialog(message)}
-                >
-                  Projectメモとして保存
-                </button>
-              )}
-              {showRunCardAfter && (isActive || messageActivities.length === 0) && (
-                <RunCard
-                  turn={turn}
-                  taskId={taskId}
-                  variant={variant}
-                  onStop={() => void cancelActiveTurn(taskId)}
-                />
-              )}
-              {approvalRows.map((approval) => (
-                <ApprovalAuditRow key={approval.id} approval={approval} />
-              ))}
-              {autoDecisionRows.map((decision) => (
-                <AutoDecisionAuditRow key={decision.id} decision={decision} />
-              ))}
-              {commandCards.map((card) => (
-                <CommandCard key={card.command.id} taskId={taskId} card={card} />
-              ))}
-              {turnFileChanges.map((entry) => (
-                <FileChangeCard key={entry.seq} changes={entry.changes} />
-              ))}
-              {turnImages.map((image) => (
-                <GeneratedImageCard key={image.id} image={image} />
-              ))}
-              {turnSkillDrafts.map(({ draft }) => (
-                <SkillDraftCard
-                  key={draft.id}
-                  draft={draft}
-                  onInstall={() => void installSkillDraft(taskId, draft)}
-                  onDiscard={() => void discardSkillDraft(taskId, draft.id)}
-                />
-              ))}
-              {imageRequestUnfulfilled && <MissingGeneratedImageNotice />}
-              {workspaceDiff !== null && (
-                <TurnDiffCard
-                  diff={workspaceDiff}
-                  lineStats={runtimeSummary?.lineStats ?? null}
-                  workerBreakdown={workerBreakdown}
-                  elapsedMs={
-                    turn?.turnId === workspaceDiff.turnId && turn.finishedAt !== undefined
-                      ? turn.finishedAt - turn.startedAt
-                      : null
-                  }
-                />
-              )}
-              {(messageActivities.length > 0 || workContent !== null) && (
-                <TeamActivityGroup
-                  activities={messageActivities}
-                  active={activityGroupActive}
-                  startedAtMs={activityStartedAtMs}
-                  finishedAtMs={activityFinishedAtMs}
-                  workContent={workContent}
-                />
-              )}
-            </div>
-          );
-        })}
-
-        {isActive && turn && turn.streamingMessageId && (
-          <MessageBubble author="assistant" content={turn.streamingContent} isStreaming />
-        )}
-        {approvals.map((approval) => (
-          <ApprovalCard
-            key={approval.id}
-            approval={approval}
-            busy={resolving[approval.id] === true}
-            onDecision={(decision, userInputSelection) =>
-              void resolveApproval(taskId, approval.id, decision, userInputSelection)
-            }
-          />
-        ))}
-        {memoryError !== null && (
-          <p className="project-context-error" role="alert">
-            {memoryError}
-          </p>
-        )}
-      </div>
-
-      {memoryDialog !== null && (
-        <ProjectMemoryDialog source={memoryDialog} onClose={() => setMemoryDialog(null)} />
-      )}
-
-      {/* Sticky, zero-height rail so the button hovers over the tail of the timeline without
+        {/* Sticky, zero-height rail so the button hovers over the tail of the timeline without
           taking layout space or scrolling away. Rendered only while following is off, which also
           means it never appears when there is nothing to scroll. */}
-      {!following && (
-        <div className="timeline-jump">
-          <button
-            type="button"
-            className="timeline-jump-button"
-            data-testid="timeline-jump-latest"
-            onClick={jumpToLatest}
-          >
-            <ArrowDown size={14} /> 最新へ
-          </button>
-        </div>
-      )}
-    </div>
+        {!following && (
+          <div className="timeline-jump">
+            <button
+              type="button"
+              className="timeline-jump-button"
+              data-testid="timeline-jump-latest"
+              onClick={jumpToLatest}
+            >
+              <ArrowDown size={14} /> 最新へ
+            </button>
+          </div>
+        )}
+      </div>
+    </GraphTaskContext.Provider>
   );
 }
 

@@ -2918,6 +2918,7 @@ describe('Provider Team completion and model errors', () => {
       turnRuntimes: new Map([[turnId, 'provider']]),
       providerAbortByTurn: new Map(),
       providerExecutionIdByTurn: new Map(),
+      turnMessageIds: new Map(),
       providerVerification: {
         requireVerifiedForExecution,
       },
@@ -3206,6 +3207,7 @@ describe('Provider Team completion and model errors', () => {
       turnRuntimes: new Map([[turnId, 'provider']]),
       providerAbortByTurn: new Map(),
       providerExecutionIdByTurn: new Map(),
+      turnMessageIds: new Map(),
       managedWorkerTurn: new Map(),
       managedWorkerCall: new Map(),
       providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
@@ -3481,6 +3483,7 @@ describe('Provider Team completion and model errors', () => {
       turnRuntimes: new Map([[turnId, 'provider']]),
       providerAbortByTurn,
       providerExecutionIdByTurn: new Map(),
+      turnMessageIds: new Map(),
       managedWorkerTurn: new Map(),
       managedWorkerCall: new Map(),
       providerVerification: { requireVerifiedForExecution: vi.fn().mockResolvedValue(connection) },
@@ -3741,6 +3744,7 @@ describe('Provider Team completion and model errors', () => {
         turnRuntimes: new Map([[turnId, 'provider']]),
         providerAbortByTurn: new Map(),
         providerExecutionIdByTurn: new Map(),
+        turnMessageIds: new Map(),
         managedWorkerTurn: new Map(),
         managedWorkerCall: new Map(),
         providerVerification: {
@@ -4535,6 +4539,7 @@ describe('Provider Team completion and model errors', () => {
         turnRuntimes: new Map([[turnId, 'provider']]),
         providerAbortByTurn: new Map(),
         providerExecutionIdByTurn: new Map(),
+        turnMessageIds: new Map(),
         managedWorkerTurn: new Map(),
         providerVerification: { requireVerifiedForExecution },
         providerRegistry: {
@@ -5905,6 +5910,7 @@ describe('Ollama empty-round integration', () => {
         turnRuntimes: new Map([[turnId, 'provider']]),
         providerAbortByTurn: new Map(),
         providerExecutionIdByTurn: new Map(),
+        turnMessageIds: new Map(),
         managedWorkerTurn: new Map(),
         managedWorkerCall: new Map(),
         providerVerification: {
