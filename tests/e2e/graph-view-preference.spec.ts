@@ -34,6 +34,10 @@ for (const kind of ['architecture', 'workflow'] as const) {
       await frame.locator('[data-node-id="api"]').first().click();
       await expect(page.getByTestId('graph-selection')).toContainText('api');
       await expect(frame.locator('[data-node-id="api"][data-focus-selected]')).toHaveCount(1);
+      // Selecting a node fetches the evidence status; its line appears below the diagram a moment
+      // later and shrinks the flexed frame above the history disclosure. Let that reflow land before
+      // clicking the summary, or the click can arrive on a row that just moved.
+      await expect(page.getByTestId('graph-source-freshness')).toBeVisible();
       await page.getByTestId('graph-history').locator('summary').click();
       await expect(page.getByTestId('graph-history')).toHaveAttribute('open', '');
       const before = await page.getByTestId('graph-frame').getAttribute('src');
