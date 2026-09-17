@@ -5149,19 +5149,57 @@ describe('Provider workspace tool capability fallback', () => {
 
   it('preserves policy denial and upgrades only command allows to explicit approval', () => {
     expect(
-      requireExplicitProviderCommandApproval({ decision: 'deny', reason: 'immutable_deny' }, true),
+      requireExplicitProviderCommandApproval(
+        { decision: 'deny', reason: 'immutable_deny' },
+        true,
+        'ask',
+      ),
     ).toEqual({ decision: 'deny', reason: 'immutable_deny' });
+    const beforeExecute = () => true;
+    for (const preset of ['ask', 'auto'] as const)
+      expect(
+        requireExplicitProviderCommandApproval(
+          { decision: 'allow', reason: 'remembered_grant', beforeExecute },
+          true,
+          preset,
+        ),
+      ).toEqual({
+        decision: 'approval_required',
+        reason: 'provider_command_requires_explicit_approval',
+        beforeExecute,
+      });
+    expect(
+      requireExplicitProviderCommandApproval(
+        { decision: 'allow', reason: 'preset_auto_safe', beforeExecute },
+        false,
+        'ask',
+      ),
+    ).toEqual({ decision: 'allow', reason: 'preset_auto_safe', beforeExecute });
+  });
+
+  it('runs a command the Full preset allowed without asking again, but keeps its denials', () => {
     const beforeExecute = () => true;
     expect(
       requireExplicitProviderCommandApproval(
         { decision: 'allow', reason: 'preset_full', beforeExecute },
         true,
+        'full',
       ),
-    ).toEqual({
-      decision: 'approval_required',
-      reason: 'provider_command_requires_explicit_approval',
-      beforeExecute,
-    });
+    ).toEqual({ decision: 'allow', reason: 'preset_full', beforeExecute });
+    expect(
+      requireExplicitProviderCommandApproval(
+        { decision: 'deny', reason: 'immutable_deny' },
+        true,
+        'full',
+      ),
+    ).toEqual({ decision: 'deny', reason: 'immutable_deny' });
+    expect(
+      requireExplicitProviderCommandApproval(
+        { decision: 'approval_required', reason: 'preset_full_unknown' },
+        true,
+        'full',
+      ),
+    ).toEqual({ decision: 'approval_required', reason: 'preset_full_unknown' });
   });
 
   it('asks before disclosing a file unless the Full preset already allowed that disclosure', () => {
