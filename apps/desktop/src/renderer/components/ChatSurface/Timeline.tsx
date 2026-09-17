@@ -32,6 +32,7 @@ import sprintCoderIcon from '../../../../assets/sprint-coder-icon-master-v1.png'
 import { ProjectMemoryDialog, type ProjectMemoryDialogSource } from '../ProjectMemoryDialog';
 import { GraphTaskContext } from '../GraphTaskContext';
 import { InlineGraphCard } from '../InlineGraphCard';
+import { hasKnownGraphAnchor } from '../../lib/graph-anchor';
 
 const SUGGESTIONS = ['変更をテストして、結果を要約して', 'このリポジトリの構成を教えて'];
 const NO_MESSAGES: ChatMessage[] = [];
@@ -42,9 +43,6 @@ const NO_IMAGES: ReturnType<typeof useAppStore.getState>['imagesByTask'][string]
 const NO_FILE_CHANGES: ReturnType<typeof useAppStore.getState>['fileChangesByTask'][string] = [];
 const NO_ACTIVITIES: TeamActivitySummary[] = [];
 const NO_SKILL_DRAFTS: ReturnType<typeof useAppStore.getState>['skillDraftsByTask'][string] = [];
-
-/** The fenced block Main appends where a graph was rendered (contracts `formatGraphInlineMarker`). */
-const GRAPH_ANCHOR_PATTERN = /`{3,}sprint-graph\n/u;
 
 export function Timeline({
   taskId,
@@ -214,10 +212,15 @@ export function Timeline({
   const savedGraph = useMemo(() => {
     const latest = graphVersions?.[0];
     if (latest === undefined) return null;
+    // Only an anchor that will actually render as a card counts: assistant-authored, well-formed,
+    // and naming a saved version. A fence typed into a user message (rendered as plain text) or a
+    // forged one in a reply must not take this entry point away.
     const anchored = messages.some(
       (message) =>
-        GRAPH_ANCHOR_PATTERN.test(message.content) ||
-        (typeof message.workContent === 'string' && GRAPH_ANCHOR_PATTERN.test(message.workContent)),
+        message.author === 'assistant' &&
+        (hasKnownGraphAnchor(message.content, graphVersions) ||
+          (typeof message.workContent === 'string' &&
+            hasKnownGraphAnchor(message.workContent, graphVersions))),
     );
     return anchored ? null : latest;
   }, [graphVersions, messages]);

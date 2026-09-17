@@ -40,6 +40,7 @@ beforeEach(() => {
         },
       ],
     },
+    graphVersionsStateByTask: { [taskId]: 'loaded' },
   });
 });
 
@@ -89,6 +90,30 @@ describe('inline graph anchor', () => {
     const html = await render(fence('{"graphId":"x"}'));
     expect(html).not.toContain('inline-graph-card');
     expect(html).toContain('<pre>');
+  });
+
+  it('shows a placeholder instead of the raw anchor while the saved versions are still loading', async () => {
+    useAppStore.setState({
+      graphVersionsByTask: { [taskId]: undefined },
+      graphVersionsStateByTask: { [taskId]: 'loading' },
+    });
+    const html = await render(fence(JSON.stringify(reference)));
+    expect(html).toContain('data-testid="inline-graph-pending"');
+    expect(html).toContain('「注文フロー」の参照を確認しています');
+    expect(html).not.toContain('inline-graph-card');
+    expect(html).not.toContain('<pre>');
+    expect(html).not.toContain('renderRevision');
+  });
+
+  it('says so, without the raw anchor, when the saved versions could not be read', async () => {
+    useAppStore.setState({
+      graphVersionsByTask: { [taskId]: undefined },
+      graphVersionsStateByTask: { [taskId]: 'unavailable' },
+    });
+    const html = await render(fence(JSON.stringify(reference)));
+    expect(html).toContain('保存済みの版を確認できませんでした');
+    expect(html).not.toContain('inline-graph-card');
+    expect(html).not.toContain('renderRevision');
   });
 
   it('keeps a well-formed anchor naming a version this Task never saved as ordinary code', async () => {

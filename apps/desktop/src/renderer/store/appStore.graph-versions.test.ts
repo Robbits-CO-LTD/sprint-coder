@@ -26,7 +26,7 @@ const renderRevisions = () =>
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  useAppStore.setState({ graphVersionsByTask: {} });
+  useAppStore.setState({ graphVersionsByTask: {}, graphVersionsStateByTask: {} });
 });
 
 describe('saved graph versions', () => {
@@ -42,6 +42,7 @@ describe('saved graph versions', () => {
     expect(history).toHaveBeenNthCalledWith(1, { taskId });
     expect(history).toHaveBeenNthCalledWith(2, { taskId, beforeRenderRevision: 2 });
     expect(renderRevisions()).toEqual([3, 2, 1]);
+    expect(useAppStore.getState().graphVersionsStateByTask[taskId]).toBe('loaded');
 
     useAppStore.getState().noteGraphVersion(pushed(4));
     useAppStore.getState().noteGraphVersion(pushed(3));
@@ -61,5 +62,6 @@ describe('saved graph versions', () => {
     });
     await useAppStore.getState().loadGraphVersions(taskId);
     expect(useAppStore.getState().graphVersionsByTask[taskId]).toBeUndefined();
+    expect(useAppStore.getState().graphVersionsStateByTask[taskId]).toBe('unavailable');
   });
 });

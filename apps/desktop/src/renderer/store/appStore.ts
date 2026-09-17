@@ -233,6 +233,10 @@ type AppState = {
    * whose transcript carries no anchor (a graph from before anchors existed) gets a saved-graph
    * card instead, so no graph is ever unreachable. */
   graphVersionsByTask: Record<string, GraphVersionRef[] | undefined>;
+  /** Whether `graphVersionsByTask` can be trusted yet: an anchor is only judged forged once the
+   * history has actually loaded; while it loads, or if it cannot be read, the card shows a
+   * placeholder rather than either a card or the raw anchor. */
+  graphVersionsStateByTask: Record<string, GraphVersionsState | undefined>;
   teamBusy: boolean;
   projectSwitchingByTask: Record<string, boolean | undefined>;
 
@@ -896,6 +900,7 @@ export function handleTurnEvent(
   }
 }
 
+export type GraphVersionsState = 'loading' | 'loaded' | 'unavailable';
 export type GraphVersionRef = Readonly<{
   id: string;
   revision: number;
@@ -969,6 +974,7 @@ export const useAppStore = create<AppState>((set, get) => {
     teamViewOpen: false,
     graphOpenRequest: null,
     graphVersionsByTask: {},
+    graphVersionsStateByTask: {},
     teamBusy: false,
     projectSwitchingByTask: {},
     runtime: {
@@ -2052,6 +2058,18 @@ export const useAppStore = create<AppState>((set, get) => {
     async loadGraphVersions(taskId: string) {
       const api = window.sprintCoder?.graphs;
       if (typeof api?.history !== 'function') return;
+      const markState = (next: GraphVersionsState) =>
+        set((state) => ({
+          graphVersionsStateByTask: {
+            ...state.graphVersionsStateByTask,
+            // A completed load is never downgraded by a later reload that is still in flight or failed.
+            [taskId]:
+              state.graphVersionsStateByTask[taskId] === 'loaded' && next !== 'loaded'
+                ? 'loaded'
+                : next,
+          },
+        }));
+      markState('loading');
       const versions: GraphVersionRef[] = [];
       let beforeRenderRevision: number | undefined;
       // History is paged newest-first; a Task rarely has more than one page, and the cap keeps a
@@ -2064,6 +2082,7 @@ export const useAppStore = create<AppState>((set, get) => {
             ...(beforeRenderRevision === undefined ? {} : { beforeRenderRevision }),
           });
         } catch {
+          markState('unavailable');
           return;
         }
         for (const version of history.versions)
@@ -2083,6 +2102,7 @@ export const useAppStore = create<AppState>((set, get) => {
           [taskId]: mergeGraphVersions(state.graphVersionsByTask[taskId] ?? [], versions),
         },
       }));
+      markState('loaded');
     },
 
     noteGraphVersion(view: GraphView) {

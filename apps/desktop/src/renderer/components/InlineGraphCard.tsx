@@ -2,6 +2,7 @@ import { useContext } from 'react';
 import type { ReactNode } from 'react';
 import type { GraphInlineReference } from '@sprint-coder/contracts';
 import { useAppStore } from '../store/appStore';
+import { knownGraphVersion } from '../lib/graph-anchor';
 import { GraphTaskContext } from './GraphTaskContext';
 import { Hexagon } from './icons';
 
@@ -15,8 +16,10 @@ export type InlineGraphCardReference = Omit<GraphInlineReference, 'nodeCount' | 
  * tool ran; this card marks the spot in the reply and is the way back to the panel once closed.
  *
  * The card only appears when the reference names a version this Task really saved. Main writes
- * the anchor, but a model can type the same fence, so an unverified reference renders `fallback`
- * (the ordinary code block) instead of a card that claims a graph which does not exist.
+ * the anchor, but a model can type the same fence, so a reference the loaded history does not
+ * know renders `fallback` (the ordinary code block) instead of a card that claims a graph which
+ * does not exist. Until that history has loaded — or if it cannot be read — nothing is known
+ * either way, and a quiet placeholder stands in: never the raw anchor JSON, never a false card.
  */
 export function InlineGraphCard({
   reference,
@@ -33,16 +36,21 @@ export function InlineGraphCard({
   const versions = useAppStore((s) =>
     taskId === null ? undefined : s.graphVersionsByTask[taskId],
   );
+  const versionsState = useAppStore((s) =>
+    taskId === null ? undefined : s.graphVersionsStateByTask[taskId],
+  );
   const requestGraphOpen = useAppStore((s) => s.requestGraphOpen);
-  const known =
-    versions?.some(
-      (version) =>
-        version.id === reference.graphId &&
-        version.revision === reference.revision &&
-        version.renderRevision === reference.renderRevision,
-    ) ?? false;
-  if (taskId === null || !known) return <>{fallback}</>;
   const kindLabel = reference.kind === 'architecture' ? '構成図' : '作業フロー';
+  if (taskId === null || !knownGraphVersion(versions, reference)) {
+    if (taskId !== null && versionsState === 'loaded') return <>{fallback}</>;
+    return (
+      <p className="inline-graph-pending" data-testid="inline-graph-pending" role="status">
+        {versionsState === 'unavailable'
+          ? `${kindLabel}「${reference.title}」の保存済みの版を確認できませんでした。`
+          : `${kindLabel}「${reference.title}」の参照を確認しています…`}
+      </p>
+    );
+  }
   const counts =
     reference.nodeCount === undefined || reference.edgeCount === undefined
       ? ''

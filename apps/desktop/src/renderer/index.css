@@ -9236,3 +9236,8 @@ button.composer-permission-chip[aria-expanded='true'] {
 .inline-graph-open {
   flex-shrink: 0;
 }
+.inline-graph-pending {
+  margin: 10px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
