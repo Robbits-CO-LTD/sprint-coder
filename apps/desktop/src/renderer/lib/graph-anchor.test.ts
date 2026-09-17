@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatGraphInlineMarker } from '@sprint-coder/contracts';
-import { hasKnownGraphAnchor, knownGraphVersion } from './graph-anchor';
+import { graphAnchorReferences, hasKnownGraphAnchor, knownGraphVersion } from './graph-anchor';
 
 const versions = [
   {
@@ -34,6 +34,21 @@ describe('graph anchors in a transcript', () => {
     expect(hasKnownGraphAnchor(`\`\`\`sprint-graph\n${forged}\n\`\`\``, versions)).toBe(false);
     expect(hasKnownGraphAnchor(formatGraphInlineMarker(reference), undefined)).toBe(false);
     expect(hasKnownGraphAnchor('no anchors here', versions)).toBe(false);
+  });
+
+  it('agrees with the Markdown renderer about what is a fence', () => {
+    const anchor = formatGraphInlineMarker(reference);
+    // An unclosed ~~~ block swallows the anchor: Markdown shows it as code, so it is no anchor.
+    expect(hasKnownGraphAnchor(`~~~text\nnote${anchor}`, versions)).toBe(false);
+    // Inside a blockquote it still renders as a sprint-graph block, so it still counts.
+    const quoted = anchor
+      .trim()
+      .split('\n')
+      .map((line) => `> ${line}`)
+      .join('\n');
+    expect(hasKnownGraphAnchor(quoted, versions)).toBe(true);
+    expect(graphAnchorReferences(`前${anchor}後${anchor}`)).toHaveLength(2);
+    expect(graphAnchorReferences('```sprint-graph\n{}\n```')).toEqual([]);
   });
 
   it('matches a version on graph id and both revisions', () => {

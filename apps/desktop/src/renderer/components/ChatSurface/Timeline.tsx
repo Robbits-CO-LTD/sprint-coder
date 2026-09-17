@@ -212,6 +212,9 @@ export function Timeline({
   const savedGraph = useMemo(() => {
     const latest = graphVersions?.[0];
     if (latest === undefined) return null;
+    // While a reply is still streaming, its anchor lives in the live bubble rather than in
+    // `messages` and may arrive at any moment; the fallback waits for the Turn to settle.
+    if (isActive && turn?.streamingMessageId) return null;
     // Only an anchor that will actually render as a card counts: assistant-authored, well-formed,
     // and naming a saved version. A fence typed into a user message (rendered as plain text) or a
     // forged one in a reply must not take this entry point away.
@@ -223,7 +226,7 @@ export function Timeline({
             hasKnownGraphAnchor(message.workContent, graphVersions))),
     );
     return anchored ? null : latest;
-  }, [graphVersions, messages]);
+  }, [graphVersions, isActive, messages, turn?.streamingMessageId]);
 
   const isEmpty = messages.length === 0 && !turn && activityGroups.leading.length === 0;
 
