@@ -561,6 +561,32 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     },
   );
 
+  it('refuses a preset-dictionary zlib stream a log file appended after', async () => {
+    const input = fixture();
+    const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+    // A compressed record followed by the next plain line, as an appended log holds it. The
+    // record is still unreadable without its dictionary, so the surface is not a scanned one.
+    let state = 20260918;
+    const noise = Array.from({ length: 8192 }, () => {
+      state = (state * 1103515245 + 12345) >>> 0;
+      return String.fromCharCode(0x20 + ((state >>> 16) % 95));
+    }).join('');
+    const compressed = deflateSync(Buffer.concat([payload.bytes, Buffer.from(noise)]), {
+      dictionary: Buffer.from('PRIVATE_FIXTURE_typed_text preset dictionary'),
+    });
+    // Only a body that ran at least a kilobyte vouches for the bytes stored after it.
+    expect(compressed.length).toBeGreaterThan(1024);
+    writeFileSync(
+      input.files[1]!.path,
+      Buffer.concat([compressed, Buffer.from('2026-09-18 session closed\n')]),
+    );
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[1]!.state).toBe('unavailable');
+    expect(result.uninspectedSurfaces).toEqual(['log']);
+    expect(result.finalGateEligible).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+  });
+
   it('keeps a database of FDICT look-alike text a scanned surface', async () => {
     // FDICT is set by ordinary text as readily as the other header bits, and refusing the whole
     // database over it is what made every value unexamined before. Every prefix printable text

@@ -38,7 +38,8 @@ describe('DEFLATE structural validation', () => {
   it('accepts the body of a stream compressed against a preset dictionary', () => {
     for (const level of [0, 1, 6, 9])
       for (const windowBits of [9, 12, 15])
-        for (const size of [1, 64, 4096, 300 * 1024]) {
+        // Level 0 stores its input, so only there does payload size decide the body size.
+        for (const size of level === 0 ? [1, 64, 4096] : [1, 64, 4096, 300 * 1024]) {
           const payload = Buffer.from(
             'PRIVATE_FIXTURE_typed_text preset dictionary log line '.repeat(size / 20 + 1),
           ).subarray(0, size);
@@ -48,17 +49,49 @@ describe('DEFLATE structural validation', () => {
         }
   });
 
-  it('accepts a raw stream of every block type and rejects one that ends anywhere else', () => {
-    // Only the 4-byte Adler-32 of a zlib body may follow the final block.
+  it('leaves a body larger than the parse budget a look-alike', () => {
+    // The stated limit of bounding the walk: past the budget the parse says nothing, so a real
+    // stream this large falls back to the raw scan it would have had anyway.
+    const stream = deflateSync(Buffer.alloc(128 * 1024, 0x41), {
+      dictionary: DICTIONARY,
+      level: 0,
+    });
+    expect(stream.length - DICTIONARY_HEADER_BYTES).toBeGreaterThan(64 * 1024);
+    expect(isWellFormedDeflateStream(...body(stream))).toBe(false);
+  });
+
+  it('accepts a raw stream that ends as written and rejects one that ends anywhere else', () => {
     for (const level of [0, 1, 9]) {
-      const raw = deflateRawSync(Buffer.from('ordinary log line\n'.repeat(64)), { level });
+      const raw = deflateRawSync(Buffer.from('ordinary log line\n'.repeat(4)), { level });
+      // Level 0 stores; the others compress. Dynamic blocks are covered by the test below.
+      expect((raw[0]! >>> 1) & 3).toBe(level === 0 ? 0 : 1);
       const stream = Buffer.concat([raw, Buffer.alloc(4)]);
       expect(isWellFormedDeflateStream(stream, MAX_WINDOW_BYTES)).toBe(true);
+      // Nothing where the checksum belongs, and a body this short cannot vouch for extra bytes.
       expect(isWellFormedDeflateStream(raw, MAX_WINDOW_BYTES)).toBe(false);
       expect(isWellFormedDeflateStream(Buffer.concat([stream, Buffer.alloc(1)]), 32768)).toBe(
         false,
       );
       expect(isWellFormedDeflateStream(stream.subarray(0, stream.length - 6), 32768)).toBe(false);
+    }
+  });
+
+  it('accepts a long body that a value stores more bytes after', () => {
+    // A log file appends after a compressed record. Only a body long enough to be no accident
+    // vouches for what follows it, so the same stream shortened is refused.
+    const long = deflateSync(Buffer.from(pseudoRandomText(5, 8 * 1024)), {
+      dictionary: DICTIONARY,
+    });
+    expect(long.length - DICTIONARY_HEADER_BYTES).toBeGreaterThan(1024);
+    const short = deflateSync(Buffer.from('ordinary log line\n'.repeat(4)), {
+      dictionary: DICTIONARY,
+    });
+    expect(short.length - DICTIONARY_HEADER_BYTES).toBeLessThan(1024);
+    for (const tail of ['x', 'later log line\n'.repeat(16)]) {
+      const [longBody, window] = body(Buffer.concat([long, Buffer.from(tail)]));
+      expect(isWellFormedDeflateStream(longBody, window)).toBe(true);
+      const [shortBody] = body(Buffer.concat([short, Buffer.from(tail)]));
+      expect(isWellFormedDeflateStream(shortBody, window)).toBe(false);
     }
   });
 
@@ -102,13 +135,27 @@ describe('DEFLATE structural validation', () => {
     expect(rejected).toBe(8);
   });
 
+  it('refuses a repeating byte pattern however long it holds together', () => {
+    // A constant fill decodes into valid symbols for as long as it repeats — 63 of the 256 of
+    // them do, printable ones among them. Such a run is not a written stream, and reaching the
+    // parse budget must never be read as if it were.
+    const accepted = [];
+    for (let byte = 0; byte <= 0xff; byte += 1)
+      if (isWellFormedDeflateStream(Buffer.alloc(70 * 1024, byte), MAX_WINDOW_BYTES))
+        accepted.push(byte);
+    expect(accepted).toEqual([]);
+  });
+
   it('finishes a pathological input in bounded time', () => {
     // Uniform bytes are the cheapest way to hold a parse open, and a large real stream is the
     // slowest legitimate input: both may only cost work proportional to the bits allowed.
     const started = performance.now();
     for (const byte of [0x00, 0x55, 0xaa, 0xff])
-      isWellFormedDeflateStream(Buffer.alloc(1024 * 1024, byte), MAX_WINDOW_BYTES);
+      expect(isWellFormedDeflateStream(Buffer.alloc(1024 * 1024, byte), MAX_WINDOW_BYTES)).toBe(
+        false,
+      );
     const stream = deflateSync(Buffer.alloc(8 * 1024 * 1024, 0x41), { dictionary: DICTIONARY });
+    // Its compressed body stays well under the parse budget, so it is still recognised.
     expect(isWellFormedDeflateStream(...body(stream))).toBe(true);
     expect(performance.now() - started).toBeLessThan(2000);
   });

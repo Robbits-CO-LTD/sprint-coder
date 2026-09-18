@@ -29,18 +29,27 @@ const MAX_CODE_BITS = 15;
 const END_OF_BLOCK = 256;
 const ZLIB_TRAILER_BYTES = 4;
 /**
- * How much of the stream is parsed before a still-valid body is taken at its word. A prefix this
- * long cannot be text that happened to match, and the work stays bounded however large the value
- * is: every symbol consumes at least one bit, so the walk is linear in the bits it is allowed.
+ * How much of a body may be parsed at all. Reaching this is not evidence either way — a periodic
+ * byte pattern decodes into valid symbols for as long as it repeats, and 63 of the 256 constant
+ * fills do — so the walk stops and the value stays a look-alike, exactly as a malformed block
+ * leaves it. That keeps the work bounded however large the value is, at the price of never
+ * recognising a stream whose compressed body is longer than this.
  */
 const MAX_PARSED_BYTES = 64 * 1024;
+/**
+ * A body that ends as a written one does, but with more bytes stored after it, is taken at its
+ * word only once it has run this far. Measured over two million random values with the header
+ * forced: accepting a short body with anything after it misreads 7,962 of them, this threshold
+ * misreads exactly as few as demanding nothing follow the stream at all.
+ */
+const MIN_TRAILED_BODY_BYTES = 1024;
 /** Keeps the bit counter inside 32-bit arithmetic. Callers bound values far below this already. */
 const MAX_STREAM_BYTES = 64 * 1024 * 1024;
 
 /** A canonical Huffman code. `left` is 0 when complete, negative when over-subscribed. */
 type Huffman = { counts: number[]; symbols: number[]; left: number };
-/** How a block ended: as written, against the parse budget, or not as a DEFLATE block at all. */
-type Walk = 'block-end' | 'budget-reached' | 'invalid';
+/** How a block ended: as written, or not as a DEFLATE block this parse will vouch for. */
+type Walk = 'block-end' | 'invalid';
 
 function createBitReader(bytes: Buffer) {
   const totalBits = bytes.length * 8;
@@ -192,8 +201,9 @@ function readDynamicCodes(
   if (lengths[END_OF_BLOCK] === 0) return undefined;
   const literalCode = buildHuffman(lengths, 0, literals);
   const distanceCode = buildHuffman(lengths, literals, distances);
-  // Incomplete codes are legal only in the degenerate case zlib itself allows: a single code of
-  // one bit, every other symbol unused.
+  // Incomplete codes are legal only in the degenerate cases zlib itself allows, which this test
+  // covers together: a single one-bit code, and an alphabet no symbol uses at all — a block with
+  // no back references leaves every distance length zero.
   const usable = (code: Huffman, count: number) =>
     code.left === 0 || (code.left > 0 && count === code.counts[0]! + code.counts[1]!);
   if (!usable(literalCode, literals) || !usable(distanceCode, distances)) return undefined;
@@ -216,7 +226,7 @@ function walkCompressedBlock(
   windowBytes: number,
 ): Walk {
   for (;;) {
-    if (reader.parsedBytes() >= MAX_PARSED_BYTES) return 'budget-reached';
+    if (reader.parsedBytes() >= MAX_PARSED_BYTES) return 'invalid';
     const symbol = decodeSymbol(reader, literals);
     if (symbol < 0) return 'invalid';
     if (symbol === END_OF_BLOCK) return 'block-end';
@@ -240,25 +250,26 @@ function walkCompressedBlock(
 /**
  * True when `bytes` parse as the DEFLATE body of a zlib stream whose window is `windowBytes`:
  * every block header is well formed, every symbol is one the format defines, every reference
- * stays inside the window, and the stream ends exactly where a written one does — on a final
- * block, zero-padded to its last byte, followed by nothing but the 4-byte Adler-32 of RFC 1950
- * §2.2. A body longer than the parse budget is taken at its word once that much of it has held
- * together; text cannot stay well formed for that long.
+ * stays inside the window, and the body ends where a written one does — on a final block,
+ * zero-padded to its last byte, followed by the 4-byte Adler-32 of RFC 1950 §2.2 and, if the value
+ * holds more than that stream, only by bytes that come after a body long enough to be no accident.
  *
- * How it ends is what keeps ordinary text out, and measurably so: text must decode as symbols and
- * then run out at the one position, and on the one bit, a written stream would. Zero padding is
- * not required by RFC 1951, but zlib — the writer behind every stream this app can meet — always
- * pads that way. The cost is that a real stream which was cut short, damaged, or stored with
- * trailing bytes reads as ordinary bytes here, the same trade this decoder already makes for any
- * stream it cannot inflate. Accepting trailing bytes was measured rather than assumed: it costs
- * no text misreads but raises random-binary ones from 24 to 7,525 per two million forced-FDICT
- * values, which is why the ending has to be exact.
+ * How it ends is the whole of what keeps ordinary text out, and measurably so: text must decode as
+ * symbols and then run out at the one position, and on the one bit, a written stream would. Every
+ * other outcome — a malformed block, a cut stream, or a body that runs past the parse budget —
+ * leaves the value a look-alike, scanned as the raw bytes it already was. Nothing is ever taken on
+ * a prefix alone: a repeating byte pattern decodes into valid symbols for as long as it repeats.
+ *
+ * Zero padding is not required by RFC 1951, but zlib and the bit writers derived from it pad that
+ * way. The cost of these rules is that a real stream which was cut short, damaged, padded some
+ * other way, or whose compressed body is larger than the budget reads as ordinary bytes here, the
+ * same trade this decoder already makes for any stream it cannot inflate.
  */
 export function isWellFormedDeflateStream(bytes: Buffer, windowBytes: number): boolean {
   if (bytes.length === 0 || bytes.length > MAX_STREAM_BYTES) return false;
   const reader = createBitReader(bytes);
   for (;;) {
-    if (reader.parsedBytes() >= MAX_PARSED_BYTES) return true;
+    if (reader.parsedBytes() >= MAX_PARSED_BYTES) return false;
     const header = reader.read(3);
     if (header < 0) return false;
     const type = header >>> 1;
@@ -272,8 +283,13 @@ export function isWellFormedDeflateStream(bytes: Buffer, windowBytes: number): b
       walk = walkCompressedBlock(reader, codes.literals, codes.distances, windowBytes);
     }
     if (walk === 'invalid') return false;
-    if (walk === 'budget-reached') return true;
-    if ((header & 1) === 1)
-      return reader.paddingBits() === 0 && reader.remainingBytes() === ZLIB_TRAILER_BYTES;
+    if ((header & 1) !== 1) continue;
+    if (reader.paddingBits() !== 0) return false;
+    const trailing = reader.remainingBytes();
+    if (trailing === ZLIB_TRAILER_BYTES) return true;
+    // The value holds more than this stream. Bytes stored after a checksum are ordinary enough —
+    // a log file appends — but a short body that merely stopped somewhere is not evidence, so
+    // only a body that ran this far vouches for what it claims to be.
+    return trailing > ZLIB_TRAILER_BYTES && reader.parsedBytes() >= MIN_TRAILED_BODY_BYTES;
   }
 }

@@ -187,24 +187,33 @@ rules is inflated under the same bounds, and one that cannot be inflated is left
 that were already scanned. FDICT is the exception: a body compressed against a preset dictionary
 cannot be read here at all, and ordinary text sets that bit as readily as the other header bits
 (`"(rest of an ordinary line"` does). The body behind the 4-byte DICTID therefore decides. It is
-parsed structurally against RFC 1951 — block headers, code-length and literal/distance code
-tables, symbol walk, references bounded by the window CINFO declares, and termination on a final
-block that is zero-padded and followed by exactly the 4-byte Adler-32 — without decompressing
-anything, bounded to the first 64KiB of the body. A body that parses leaves the surface
-`unavailable`; anything else stays a scanned look-alike. The regression asserts no misclassification
-over 29,640 constructed look-alikes (every printable header prefix with FDICT set, every first body
-byte, ordinary log, JSON and Japanese continuations) and 100,000 random printable-ASCII values, all
-with the FDICT header forced. Wider offline sweeps of 2,000,000 random printable-ASCII and 2,000,000
-random Japanese/ASCII values, again with the header forced, misread none either. Uniform random
-**binary** values are the residual: 24 of 2,000,000 parse as written streams and are refused as
-`unavailable`, which the header rules themselves reduce by a further factor of about 2,000.
+parsed structurally against RFC 1951 — block headers, code-length and literal/distance code tables,
+symbol walk, references bounded by the window CINFO declares — without decompressing anything, and
+is accepted only when it ends as a written body ends: on a final block, zero-padded to its last
+byte, followed by the 4-byte Adler-32, or by further stored bytes if the body itself ran at least
+1KiB first. Only an accepted body leaves the surface `unavailable`; every other outcome, including
+running past the 64KiB parse budget, stays a scanned look-alike. Reaching the budget is not
+evidence of anything — 63 of the 256 constant byte fills decode into valid symbols for as long as
+they repeat — so it is refused rather than trusted.
 
-Two costs fall the other way. A real preset-dictionary stream that was cut short, damaged, or
-stored with trailing bytes is not recognised and falls back to a raw scan — the same trade already
-made for any stream that fails to inflate. Accepting trailing bytes was measured rather than
-assumed: it recognises those streams but raises the random-binary misreads from 24 to 7,525 per
-2,000,000, so the exact ending is kept. A producer that pads its final byte with something other
-than zeros — zlib, and therefore everything this app can meet, does not — falls back the same way.
+The regression asserts no misclassification over 29,640 constructed look-alikes (every printable
+header prefix with FDICT set, every first body byte, ordinary log, JSON and Japanese continuations),
+100,000 random printable-ASCII values, and all 256 constant fills past the budget, with the FDICT
+header forced throughout. One-time local sweeps, not checked in and not rerun by CI, covered
+2,000,000 random printable-ASCII and 2,000,000 random Japanese/ASCII values and misread none either.
+Uniform random **binary** values are the residual: 14 of 2,000,000 parse as written streams and are
+refused as `unavailable`, before the header rules themselves cut that by a further factor of about
+2,000. The 1KiB floor for trailing bytes comes from the same sweep: without it, 7,962 of those
+2,000,000 are misread, while with it the count is the same 14 as demanding that nothing follow the
+stream at all.
+
+The costs fall the other way. A real preset-dictionary stream that was cut short, damaged, padded
+with something other than zeros, shorter than 1KiB with bytes stored after it, or whose compressed
+body exceeds the 64KiB budget is not recognised and falls back to a raw scan — the same trade
+already made for any stream that fails to inflate. Note also that `unavailable` is forgeable by
+anyone who can write to an inspected surface, here as elsewhere in this helper (an unopenable
+container magic does it in three bytes). It always means "could not be certified clean", never
+"a payload was found"; only `contaminated` says that.
 
 No persistence path in this app writes a preset-dictionary stream, or any compressed stream. The
 only production source under `apps/*/src` or `packages/*/src` that imports `node:zlib` is this
