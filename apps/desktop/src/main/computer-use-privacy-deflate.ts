@@ -29,11 +29,12 @@ const MAX_CODE_BITS = 15;
 const END_OF_BLOCK = 256;
 const ZLIB_TRAILER_BYTES = 4;
 /**
- * How much of a body may be parsed at all. Reaching this is not evidence either way — a periodic
- * byte pattern decodes into valid symbols for as long as it repeats, and 63 of the 256 constant
- * fills do — so the walk stops and the value stays a look-alike, exactly as a malformed block
- * leaves it. That keeps the work bounded however large the value is, at the price of never
- * recognising a stream whose compressed body is longer than this.
+ * How far into a body the walk may go on. Reaching it is not evidence either way — a periodic byte
+ * pattern decodes into valid symbols for as long as it repeats, and 63 of the 256 constant fills do
+ * — so the walk stops there and the value stays a look-alike, exactly as a malformed block leaves
+ * it. That bounds the work however large the value is, at the price of not recognising a body that
+ * has yet to end by then. It is read between blocks and between symbols, and stored bytes are
+ * stepped over rather than walked, so a body made of stored blocks can end some way past it.
  */
 const MAX_PARSED_BYTES = 64 * 1024;
 /**
@@ -262,7 +263,7 @@ function walkCompressedBlock(
  *
  * Zero padding is not required by RFC 1951, but zlib and the bit writers derived from it pad that
  * way. The cost of these rules is that a real stream which was cut short, damaged, padded some
- * other way, or whose compressed body is larger than the budget reads as ordinary bytes here, the
+ * other way, or still running when the walk spends its budget reads as ordinary bytes here, the
  * same trade this decoder already makes for any stream it cannot inflate.
  */
 export function isWellFormedDeflateStream(bytes: Buffer, windowBytes: number): boolean {

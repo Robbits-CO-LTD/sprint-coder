@@ -208,9 +208,9 @@ refused as `unavailable`, before the header rules themselves cut that by a furth
 stream at all.
 
 The costs fall the other way. A real preset-dictionary stream that was cut short, damaged, padded
-with something other than zeros, shorter than 1KiB with bytes stored after it, or whose compressed
-body exceeds the 64KiB budget is not recognised and falls back to a raw scan — the same trade
-already made for any stream that fails to inflate. Note also that `unavailable` is forgeable by
+with something other than zeros, shorter than 1KiB with bytes stored after it, or still running
+when the walk spends its 64KiB budget is not recognised and falls back to a raw scan — the same
+trade already made for any stream that fails to inflate. Note also that `unavailable` is forgeable by
 anyone who can write to an inspected surface, here as elsewhere in this helper (an unopenable
 container magic does it in three bytes). It always means "could not be certified clean", never
 "a payload was found"; only `contaminated` says that.

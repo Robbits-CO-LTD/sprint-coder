@@ -49,15 +49,21 @@ describe('DEFLATE structural validation', () => {
         }
   });
 
-  it('leaves a body larger than the parse budget a look-alike', () => {
-    // The stated limit of bounding the walk: past the budget the parse says nothing, so a real
-    // stream this large falls back to the raw scan it would have had anyway.
-    const stream = deflateSync(Buffer.alloc(128 * 1024, 0x41), {
-      dictionary: DICTIONARY,
-      level: 0,
-    });
-    expect(stream.length - DICTIONARY_HEADER_BYTES).toBeGreaterThan(64 * 1024);
-    expect(isWellFormedDeflateStream(...body(stream))).toBe(false);
+  it('leaves a body still running when the walk spends its budget a look-alike', () => {
+    // The stated limit of bounding the walk: once the budget is spent the parse says nothing, so
+    // a real stream this large falls back to the raw scan it would have had anyway. Stored bytes
+    // are stepped over rather than walked, so the body that still ends in time is checked too.
+    for (const [payloadBytes, recognised] of [
+      [64 * 1024, true],
+      [512 * 1024, false],
+    ] as const) {
+      const stream = deflateSync(Buffer.alloc(payloadBytes, 0x41), {
+        dictionary: DICTIONARY,
+        level: 0,
+      });
+      expect(stream.length - DICTIONARY_HEADER_BYTES).toBeGreaterThan(64 * 1024);
+      expect(isWellFormedDeflateStream(...body(stream))).toBe(recognised);
+    }
   });
 
   it('accepts a raw stream that ends as written and rejects one that ends anywhere else', () => {
