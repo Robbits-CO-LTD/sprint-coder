@@ -116,14 +116,34 @@ describe('macOS Computer Use asynchronous native boundary', () => {
     // would invert the lock order that every other session lookup follows.
     expect(stopWorker).not.toContain('mac_closed_sessions');
     expect(stopWorker).not.toContain('ConfirmClosedMacSession');
-    // Only the branch that resolves the stop may confirm the close. A rejected stop has to stay
-    // re-drainable, otherwise a repeat close would report a drain that never ran as confirmed.
-    const rejection = stopComplete.indexOf('napi_reject_deferred');
-    const confirmation = stopComplete.indexOf('ConfirmClosedMacSession');
-    const resolution = stopComplete.indexOf('napi_resolve_deferred');
-    expect(rejection).toBeGreaterThan(0);
-    expect(confirmation).toBeGreaterThan(rejection);
-    expect(resolution).toBeGreaterThan(confirmation);
+    // Only the branch that resolves the stop may confirm the close, so assert on the branches
+    // themselves rather than on the order the three calls appear in: a confirmation added next to
+    // the rejection keeps that order while handing a repeat close a drain that never ran.
+    const teardownGuard = 'if (env == nullptr) return;';
+    const unconfirmedGuard = 'if (status != napi_ok || !work->drained) {';
+    const confirmedGuard = '\n  } else {';
+    expect(stopComplete).toContain(teardownGuard);
+    expect(stopComplete).toContain(unconfirmedGuard);
+    expect(stopComplete.split(confirmedGuard)).toHaveLength(2);
+    const beforeTeardownGuard = stopComplete.slice(0, stopComplete.indexOf(teardownGuard));
+    const unconfirmedBranch = stopComplete.slice(
+      stopComplete.indexOf(unconfirmedGuard),
+      stopComplete.indexOf(confirmedGuard),
+    );
+    const confirmedBranch = stopComplete.slice(stopComplete.indexOf(confirmedGuard));
+    // A completion delivered while the environment is tearing down answers nothing, so it must
+    // not leave a confirmation behind either.
+    expect(beforeTeardownGuard).not.toContain('ConfirmClosedMacSession');
+    // The unconfirmed drain rejects and stays re-drainable.
+    expect(unconfirmedBranch).toContain('napi_reject_deferred');
+    expect(unconfirmedBranch).not.toContain('ConfirmClosedMacSession');
+    // The confirmation exists exactly once, inside the resolved branch, ahead of the receipt.
+    expect(stopComplete.match(/ConfirmClosedMacSession\(/gu)).toHaveLength(1);
+    expect(confirmedBranch).not.toContain('napi_reject_deferred');
+    expect(confirmedBranch.indexOf('ConfirmClosedMacSession(')).toBeGreaterThan(0);
+    expect(confirmedBranch.indexOf('napi_resolve_deferred')).toBeGreaterThan(
+      confirmedBranch.indexOf('ConfirmClosedMacSession('),
+    );
     // The session leaves the active maps exactly as before, and the registry records it under the
     // same lock so a repeat close for that id is answerable.
     expect(closeSource.indexOf('RememberClosingMacSession(')).toBeGreaterThan(

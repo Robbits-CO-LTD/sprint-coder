@@ -50,7 +50,16 @@ export const COMPUTER_USE_NATIVE_CONTROLLER_UNAVAILABLE = 'native_controller_una
  * slow but successful drain is not.
  */
 const COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = 1_000;
-const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
+export const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
+
+/**
+ * How many times Stop sends a close for the same session before it gives up and reports the host
+ * as unavailable. It is exported because the transports have to outlast the whole re-send window:
+ * a transport that stops waiting while Main may still re-send would tear the native side down
+ * between the two attempts and make the re-send unanswerable
+ * (`COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS` in computer-use-native-windows.ts).
+ */
+export const COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT = 2;
 
 export class ComputerUseNativeUnavailableError extends Error {
   constructor(readonly reasonCode: string) {

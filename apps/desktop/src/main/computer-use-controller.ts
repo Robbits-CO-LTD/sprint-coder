@@ -54,6 +54,7 @@ import {
   computerUseActionKind,
   computerUseActionRoute,
 } from './computer-use-action';
+import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
 import type {
   ComputerUsePlannerObservation,
   ComputerUsePlannerPort,
@@ -1219,7 +1220,11 @@ export class ComputerUseController {
     // Computer Use disabled until the process restarts. A second unconfirmed answer stays
     // fail-closed and is reported as `native_unavailable`.
     let nativeClosed = false;
-    for (let attempt = 0; attempt < 2 && !nativeClosed; attempt += 1)
+    for (
+      let attempt = 0;
+      attempt < COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT && !nativeClosed;
+      attempt += 1
+    )
       nativeClosed = await this.deps.native.close(record.native).then(
         () => true,
         () => false,
