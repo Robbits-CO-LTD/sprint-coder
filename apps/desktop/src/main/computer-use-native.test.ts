@@ -28,6 +28,7 @@ import {
   isWindowsHelperResponseBound,
   operationTimeoutMilliseconds,
   windowsHelperEnvironment,
+  windowsStopRequestKey,
 } from './computer-use-native-windows';
 
 const roots: string[] = [];
@@ -806,6 +807,21 @@ describe('Windows native helper compile boundary', () => {
   it('gives the helper-owned application picker a bounded human interaction timeout', () => {
     expect(operationTimeoutMilliseconds('pick_application')).toBe(5 * 60_000);
     expect(operationTimeoutMilliseconds('dispatch')).toBe(10_000);
+  });
+
+  it('binds a stop request id to its epoch so a re-sent close reaches the helper', () => {
+    // Main re-sends an unconfirmed close for the same session id with a higher epoch. Reusing the
+    // request id would make the helper answer the changed payload from its response cache with
+    // `request_id_conflict`, and the pending map here would refuse it outright, so the re-sent
+    // close could never reach the helper's close handler.
+    expect(windowsStopRequestKey('close', 'session-1', 1)).toBe('close:session-1:1');
+    expect(windowsStopRequestKey('close', 'session-1', 2)).not.toBe(
+      windowsStopRequestKey('close', 'session-1', 1),
+    );
+    expect(windowsStopRequestKey('cancel', 'session-1', 1)).toBe('cancel:session-1:1');
+    expect(windowsStopRequestKey('cancel', 'session-1', 1)).not.toBe(
+      windowsStopRequestKey('close', 'session-1', 1),
+    );
   });
 
   it('splits the bounded Windows screenshot and UTF-8 tree binary without base64 inflation', () => {

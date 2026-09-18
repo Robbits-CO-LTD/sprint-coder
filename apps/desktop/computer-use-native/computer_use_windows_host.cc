@@ -177,7 +177,10 @@ std::uint64_t last_closed_cancel_epoch = 0;
 // never arrived left the session id unreachable: every repeat close was refused and Main kept the
 // process-local input quarantine for the rest of the helper's life. This bounded record is what
 // answers a repeat close. It is written only where a drained close response is produced, so it
-// cannot turn a stop that never drained into a confirmed one.
+// cannot turn a stop that never drained into a confirmed one. It lives as long as this helper
+// process does, which covers a close Main gave up on before its answer arrived; a close whose
+// transport timed out tears the helper down with it, and carrying the input attempt count across
+// helper processes is a separate change.
 struct ClosedWindowsSessionRecord {
   std::string session_id;
   std::uint64_t cancel_epoch = 0;

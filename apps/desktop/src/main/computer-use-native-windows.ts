@@ -103,14 +103,20 @@ export function createWindowsComputerUseNativeAddon(
         'cancel',
         value,
         sessionId,
-        `cancel:${sessionId}:${String(value['cancelEpoch'])}`,
+        windowsStopRequestKey('cancel', sessionId, value['cancelEpoch']),
       );
     },
     close: async (input) => {
       const value = record(input);
       const sessionId = stringField(value, 'sessionId');
       try {
-        return await client.call('probe', 'close_session', value, sessionId, `close:${sessionId}`);
+        return await client.call(
+          'probe',
+          'close_session',
+          value,
+          sessionId,
+          windowsStopRequestKey('close', sessionId, value['cancelEpoch']),
+        );
       } finally {
         client.shutdown();
       }
@@ -575,6 +581,21 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
     default:
       throw new Error(`Unsupported Computer Use Windows request type: ${requestType}`);
   }
+}
+
+/**
+ * Main re-sends an unconfirmed stop for the same session id with a higher epoch, so the request id
+ * has to carry that epoch. The helper keys its response cache on the request id and answers a
+ * repeat id whose payload changed with `request_id_conflict`, and this client refuses a request id
+ * that is still pending, so a fixed id would stop a re-sent close from ever reaching
+ * CloseWindowsSession.
+ */
+export function windowsStopRequestKey(
+  kind: 'cancel' | 'close',
+  sessionId: string,
+  cancelEpoch: unknown,
+): string {
+  return `${kind}:${sessionId}:${String(cancelEpoch)}`;
 }
 
 export function operationTimeoutMilliseconds(operation: string): number {
