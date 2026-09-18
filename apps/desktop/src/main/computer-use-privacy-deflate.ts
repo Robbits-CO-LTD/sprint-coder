@@ -248,9 +248,11 @@ function walkCompressedBlock(
  * How it ends is what keeps ordinary text out, and measurably so: text must decode as symbols and
  * then run out at the one position, and on the one bit, a written stream would. Zero padding is
  * not required by RFC 1951, but zlib — the writer behind every stream this app can meet — always
- * pads that way. The cost of all three is that a real stream which was cut short, damaged, or
- * stored with trailing bytes reads as ordinary bytes here, the same trade this decoder already
- * makes for any stream it cannot inflate.
+ * pads that way. The cost is that a real stream which was cut short, damaged, or stored with
+ * trailing bytes reads as ordinary bytes here, the same trade this decoder already makes for any
+ * stream it cannot inflate. Accepting trailing bytes was measured rather than assumed: it costs
+ * no text misreads but raises random-binary ones from 24 to 7,525 per two million forced-FDICT
+ * values, which is why the ending has to be exact.
  */
 export function isWellFormedDeflateStream(bytes: Buffer, windowBytes: number): boolean {
   if (bytes.length === 0 || bytes.length > MAX_STREAM_BYTES) return false;

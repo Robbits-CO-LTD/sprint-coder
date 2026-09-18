@@ -191,17 +191,26 @@ parsed structurally against RFC 1951 — block headers, code-length and literal/
 tables, symbol walk, references bounded by the window CINFO declares, and termination on a final
 block that is zero-padded and followed by exactly the 4-byte Adler-32 — without decompressing
 anything, bounded to the first 64KiB of the body. A body that parses leaves the surface
-`unavailable`; anything else stays a scanned look-alike. Measured on that rule: 129,640 constructed
-look-alikes (every printable header prefix with FDICT set, every first body byte, ordinary log,
-JSON and Japanese continuations) and 2,000,000 random printable-ASCII values with a forced FDICT
-header produced no misclassification. The cost is in the other direction: a real preset-dictionary
-stream that was cut short, damaged, or stored with trailing bytes is not recognised and falls back
-to a raw scan, the same trade already made for any stream that fails to inflate.
+`unavailable`; anything else stays a scanned look-alike. The regression asserts no misclassification
+over 29,640 constructed look-alikes (every printable header prefix with FDICT set, every first body
+byte, ordinary log, JSON and Japanese continuations) and 100,000 random printable-ASCII values, all
+with the FDICT header forced. Wider offline sweeps of 2,000,000 random printable-ASCII and 2,000,000
+random Japanese/ASCII values, again with the header forced, misread none either. Uniform random
+**binary** values are the residual: 24 of 2,000,000 parse as written streams and are refused as
+`unavailable`, which the header rules themselves reduce by a further factor of about 2,000.
 
-No persistence path in this app writes a preset-dictionary stream. No production source under
-`apps/*/src` or `packages/*/src` imports `node:zlib` or any compression dependency — only tests
-do — SQLite stores values uncompressed, and no crash reporter is configured, so such a stream on
-an inspected surface would have come from outside the app.
+Two costs fall the other way. A real preset-dictionary stream that was cut short, damaged, or
+stored with trailing bytes is not recognised and falls back to a raw scan — the same trade already
+made for any stream that fails to inflate. Accepting trailing bytes was measured rather than
+assumed: it recognises those streams but raises the random-binary misreads from 24 to 7,525 per
+2,000,000, so the exact ending is kept. A producer that pads its final byte with something other
+than zeros — zlib, and therefore everything this app can meet, does not — falls back the same way.
+
+No persistence path in this app writes a preset-dictionary stream, or any compressed stream. The
+only production source under `apps/*/src` or `packages/*/src` that imports `node:zlib` is this
+read-only inspection decoder, which never compresses; there is no compression dependency, SQLite
+stores values uncompressed, and no crash reporter is configured. Such a stream on an inspected
+surface would have come from outside the app.
 A physical or decoded-byte scan is not proof of logical absence or of a complete sink inventory.
 The protected runner must enumerate
 all relevant files (including SQLite WAL/SHM and rotated files), flush/close the tested processes,
