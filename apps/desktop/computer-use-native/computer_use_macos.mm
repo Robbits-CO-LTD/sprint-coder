@@ -1401,8 +1401,12 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       napi_queue_async_work(env, work->work) != napi_ok) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
     RemovePendingStart(*work);
-    return ThrowNativeError(env, "ASYNC_UNAVAILABLE",
-                            "Could not queue the serial native start");
+    // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
+    // which would leave the caller holding a Promise that can never be resolved or rejected.
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Could not queue the serial native start");
+    napi_reject_deferred(env, work->deferred, error);
+    return promise;
   }
   work.release();
   return promise;
@@ -1885,7 +1889,12 @@ napi_value QueueNativeStop(napi_env env, std::shared_ptr<MacComputerUseSession> 
       ExecuteNativeStop, CompleteNativeStop, work.get(), &work->work) != napi_ok ||
       napi_queue_async_work(env, work->work) != napi_ok) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
-    return ThrowNativeError(env, "ASYNC_UNAVAILABLE", "Native stop drain is unconfirmed");
+    // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
+    // which would leave the caller holding a Promise that can never be resolved or rejected.
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Native stop drain is unconfirmed");
+    napi_reject_deferred(env, work->deferred, error);
+    return promise;
   }
   work.release();
   return promise;
@@ -2746,8 +2755,12 @@ napi_value Observe(napi_env env, napi_callback_info info) {
                              &work->work) != napi_ok ||
       napi_queue_async_work(env, work->work) != napi_ok) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
-    return ThrowNativeError(env, "ASYNC_UNAVAILABLE",
-                            "Could not queue the serial native observation");
+    // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
+    // which would leave the caller holding a Promise that can never be resolved or rejected.
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Could not queue the serial native observation");
+    napi_reject_deferred(env, work->deferred, error);
+    return promise;
   }
   work.release();
   return promise;
@@ -4724,10 +4737,16 @@ napi_value Dispatch(napi_env env, napi_callback_info info) {
                              CompleteNativeDispatch, work.get(), &work->work) != napi_ok ||
       napi_queue_async_work(env, work->work) != napi_ok) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
-    std::lock_guard<std::mutex> state_lock(work->request.session->state_mutex);
-    work->request.session->inflight_dispatches.erase(work->request.request_id);
-    return ThrowNativeError(env, "ASYNC_UNAVAILABLE",
-                            "Could not queue the serial native dispatch");
+    {
+      std::lock_guard<std::mutex> state_lock(work->request.session->state_mutex);
+      work->request.session->inflight_dispatches.erase(work->request.request_id);
+    }
+    // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
+    // which would leave the caller holding a Promise that can never be resolved or rejected.
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Could not queue the serial native dispatch");
+    napi_reject_deferred(env, work->deferred, error);
+    return promise;
   }
   work.release();
   return promise;
