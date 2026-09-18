@@ -37,7 +37,8 @@ import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sp
 
 // Node geometry and default slots live in ./placement (pure, unit-tested). A Team is neither
 // capped at three Workers nor flat any more: `computeHierarchyLayout` lays the recorded agent tree
-// out as depth columns x sibling rows, so Leader -> Manager -> Worker reads left to right.
+// out as department blocks (a parent's leaves in a grid to its right, Managers stacked as blocks),
+// so Leader -> Manager -> Worker reads left to right and a 30-agent org still fits a Fit view.
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

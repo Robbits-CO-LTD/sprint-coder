@@ -4090,9 +4090,10 @@ export const DEFAULT_TASK_TITLE = '新しいタスク';
 export const CANVAS_MIN_SCALE = 0.18;
 export const CANVAS_MAX_SCALE = 1.6;
 export const CANVAS_WORLD_BOUND = 20_000;
-// Domain max is leader + 3 workers; headroom is left for future node kinds (kept in sync with
-// packages/contracts's canvasNodePositionsSchema).
-export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 32;
+// A sanity bound on the payload, not a domain limit — a Team has no headcount cap and the Canvas
+// saves a position for every card it has ever placed (kept in sync with packages/contracts's
+// canvasNodePositionsSchema, which explains the number).
+export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 128;
 // Defends against a pathological serialized payload independent of the entry-count cap above.
 export const CANVAS_VIEW_MAX_SERIALIZED_BYTES = 16 * 1024;
 
