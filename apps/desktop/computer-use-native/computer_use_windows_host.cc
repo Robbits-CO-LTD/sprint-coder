@@ -181,10 +181,10 @@ std::uint64_t last_closed_cancel_epoch = 0;
 // process does, which covers the close Main gave up on before its answer arrived: the transport
 // keeps this helper alive across Main's whole bounded re-send window
 // (COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS in computer-use-native-windows.ts), so the
-// re-send reaches this record. A close this helper never answers at all is a different case: the
-// transport eventually aborts and kills it, the record dies with it, and Main stays quarantined,
-// which is the intended fail-closed outcome. Carrying the input attempt count across helper
-// processes is a separate change.
+// re-send reaches this record. A close this helper never answers at all is a different case: once
+// the last close attempt's transport budget runs out the transport aborts and kills this process,
+// the record dies with it, and Main stays quarantined, which is the intended fail-closed outcome.
+// Carrying the input attempt count across helper processes is a separate change.
 struct ClosedWindowsSessionRecord {
   std::string session_id;
   std::uint64_t cancel_epoch = 0;

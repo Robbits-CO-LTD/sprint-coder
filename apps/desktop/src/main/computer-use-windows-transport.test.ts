@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeNet from 'node:net';
@@ -26,99 +27,75 @@ import {
  * the input quarantine are the production ones. Only `spawn`, the PowerShell attestation and the
  * named pipe are faked; nothing in the transport is stubbed.
  */
-const transport = vi.hoisted(() => {
-  type Listener = (...args: never[]) => void;
-  class FakeEmitter {
-    private readonly listeners = new Map<string, Listener[]>();
-    on(event: string, listener: Listener): this {
-      this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
-      return this;
-    }
-    once(event: string, listener: Listener): this {
-      const wrapper = ((...args: never[]) => {
-        this.off(event, wrapper);
-        listener(...args);
-      }) as Listener;
-      return this.on(event, wrapper);
-    }
-    off(event: string, listener: Listener): this {
-      this.listeners.set(
-        event,
-        (this.listeners.get(event) ?? []).filter((candidate) => candidate !== listener),
-      );
-      return this;
-    }
-    emit(event: string, ...args: unknown[]): void {
-      for (const listener of [...(this.listeners.get(event) ?? [])])
-        (listener as (...values: unknown[]) => void)(...args);
-    }
-  }
-  class FakeHelperSocket extends FakeEmitter {
-    destroyed = false;
-    onWrite: ((frame: Buffer) => void) | null = null;
-    write(chunk: Buffer, callback?: (error?: Error | null) => void): boolean {
-      const written = Buffer.from(chunk);
-      // A real socket never calls back or delivers a response inside `write`.
-      queueMicrotask(() => {
-        callback?.(null);
-        if (!this.destroyed) this.onWrite?.(written);
-      });
-      return true;
-    }
-    destroy(): void {
-      if (this.destroyed) return;
-      this.destroyed = true;
-      queueMicrotask(() => this.emit('close'));
-    }
-  }
-  class FakeHelperChild extends FakeEmitter {
-    readonly pid = 4_242;
-    killed = false;
-    kill(): boolean {
-      if (this.killed) return true;
-      this.killed = true;
-      queueMicrotask(() => this.emit('exit', 0, null));
-      return true;
-    }
-    unref(): void {}
-  }
-  const state = {
-    children: [] as FakeHelperChild[],
-    sockets: [] as FakeHelperSocket[],
-    attestation: '',
-    onSocket: null as ((socket: FakeHelperSocket) => void) | null,
-  };
-  return { state, FakeHelperSocket, FakeHelperChild };
-});
+// The mock factories run before this module's body, so they only reach the fakes through these
+// slots, which the body fills in below.
+const transport = vi.hoisted(() => ({
+  spawnHelper: null as (() => unknown) | null,
+  connectPipe: null as (() => unknown) | null,
+  attestation: '',
+}));
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeChildProcess>();
   return {
     ...actual,
-    spawn: () => {
-      const child = new transport.FakeHelperChild();
-      transport.state.children.push(child);
-      return child;
-    },
-    execFileSync: () => transport.state.attestation,
+    spawn: () => transport.spawnHelper?.(),
+    execFileSync: () => transport.attestation,
   };
 });
 
 vi.mock('node:net', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeNet>();
-  return {
-    ...actual,
-    createConnection: () => {
-      const socket = new transport.FakeHelperSocket();
-      transport.state.sockets.push(socket);
-      transport.state.onSocket?.(socket);
-      queueMicrotask(() => socket.emit('connect'));
-      return socket;
-    },
-  };
+  return { ...actual, createConnection: () => transport.connectPipe?.() };
 });
 
-type FakeSocket = InstanceType<typeof transport.FakeHelperSocket>;
+class FakeHelperSocket extends EventEmitter {
+  destroyed = false;
+  onWrite: ((frame: Buffer) => void) | null = null;
+  write(chunk: Buffer, callback?: (error?: Error | null) => void): boolean {
+    const written = Buffer.from(chunk);
+    // A real socket never calls back or delivers a response inside `write`.
+    queueMicrotask(() => {
+      callback?.(null);
+      if (!this.destroyed) this.onWrite?.(written);
+    });
+    return true;
+  }
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    queueMicrotask(() => this.emit('close'));
+  }
+}
+
+class FakeHelperChild extends EventEmitter {
+  readonly pid = 4_242;
+  killed = false;
+  kill(): boolean {
+    if (this.killed) return true;
+    this.killed = true;
+    queueMicrotask(() => this.emit('exit', 0, null));
+    return true;
+  }
+  unref(): void {}
+}
+
+const children: FakeHelperChild[] = [];
+const sockets: FakeHelperSocket[] = [];
+let onSocket: ((socket: FakeHelperSocket) => void) | null = null;
+transport.spawnHelper = () => {
+  const child = new FakeHelperChild();
+  children.push(child);
+  return child;
+};
+transport.connectPipe = () => {
+  const socket = new FakeHelperSocket();
+  sockets.push(socket);
+  onSocket?.(socket);
+  queueMicrotask(() => socket.emit('connect'));
+  return socket;
+};
+
 type HelperResponse = readonly [ComputerUseNativeMessageType, unknown];
 type Responder = (metadata: Readonly<Record<string, unknown>>) => HelperResponse;
 
@@ -146,14 +123,17 @@ const bounds = Object.freeze({ x: 0, y: 0, width: 800, height: 600 });
  * loop never does that, so it models a helper that answers out of order — which is the only thing
  * the transport's teardown must not depend on, since `shutdownWhenIdle` has a single call site and
  * the request that settles last is not always the close.
+ *
+ * `refuse` answers an operation with the helper's error frame instead of its normal response.
  */
 class FakeWindowsHelper {
   private readonly queue: ComputerUseNativeFrame[] = [];
   private readonly held = new Map<string, 'blocking' | 'skipped'>();
+  private readonly refused = new Set<string>();
   readonly served: string[] = [];
 
   constructor(
-    private readonly socket: FakeSocket,
+    private readonly socket: FakeHelperSocket,
     private readonly responders: Readonly<Record<string, Responder>>,
   ) {
     socket.onWrite = (frame) => {
@@ -168,6 +148,10 @@ class FakeWindowsHelper {
 
   holdOnly(operation: string): void {
     this.held.set(operation, 'skipped');
+  }
+
+  refuse(operation: string): void {
+    this.refused.add(operation);
   }
 
   release(operation: string): void {
@@ -190,7 +174,9 @@ class FakeWindowsHelper {
       this.served.push(operation);
       const responder = this.responders[operation];
       if (responder === undefined) throw new Error(`unexpected helper operation ${operation}`);
-      const [messageType, payload] = responder(metadata);
+      const [messageType, payload] = this.refused.has(operation)
+        ? (['error', { code: 'SESSION_MISSING', accepted: false }] as const)
+        : responder(metadata);
       this.socket.emit(
         'data',
         encodeComputerUseNativeFrame({
@@ -254,6 +240,16 @@ function responders(): Readonly<Record<string, Responder>> {
       },
     ],
     observe: () => ['observe_result', { observed: true }],
+    cancel: (metadata) => [
+      'dispatch_result',
+      {
+        result: 'canceled',
+        drained: true,
+        sessionId: metadata['sessionId'],
+        cancelEpoch: metadata['cancelEpoch'],
+        inputAttemptCount: 0,
+      },
+    ],
     // Native answers a repeat close for a session it has already drained from its bounded
     // closed-session registry, which is the receipt Main needs to release the quarantine.
     close_session: (metadata) => [
@@ -337,7 +333,8 @@ function createTarget(): {
 } {
   let helper: FakeWindowsHelper | null = null;
   const table = responders();
-  transport.state.onSocket = (socket) => {
+  // Every reconnect gets its own fake helper, the way a fresh child process would.
+  onSocket = (socket) => {
     helper = new FakeWindowsHelper(socket, table);
   };
   const addon = createWindowsComputerUseNativeAddon(
@@ -414,10 +411,10 @@ async function closeWithBoundedResend(
 
 describe('Computer Use Windows helper transport', () => {
   beforeEach(() => {
-    transport.state.children.length = 0;
-    transport.state.sockets.length = 0;
-    transport.state.onSocket = null;
-    transport.state.attestation = JSON.stringify({
+    children.length = 0;
+    sockets.length = 0;
+    onSocket = null;
+    transport.attestation = JSON.stringify({
       imagePath: helperPath,
       binaryDigest: expectedTrust.binaryDigest,
       signatureStatus: 'Valid',
@@ -428,7 +425,7 @@ describe('Computer Use Windows helper transport', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-    transport.state.onSocket = null;
+    onSocket = null;
   });
 
   it('keeps the helper reachable so a close re-sent after the Main deadline is confirmed', async () => {
@@ -443,8 +440,8 @@ describe('Computer Use Windows helper transport', () => {
     // Main gives up on the first close and re-sends it with a higher epoch. The re-send queues
     // behind the first close inside the helper, exactly as the single-threaded serve loop does.
     await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
-    expect(transport.state.children).toHaveLength(1);
-    expect(transport.state.children[0]!.killed).toBe(false);
+    expect(children).toHaveLength(1);
+    expect(children[0]!.killed).toBe(false);
 
     // The helper answers the first close two seconds later, then the re-send behind it.
     await vi.advanceTimersByTimeAsync(2_000);
@@ -453,11 +450,11 @@ describe('Computer Use Windows helper transport', () => {
 
     await expect(closed).resolves.toBe(true);
     expect(helper().served.filter((operation) => operation === 'close_session')).toHaveLength(2);
-    expect(transport.state.children).toHaveLength(1);
+    expect(children).toHaveLength(1);
     // The quarantine is released only by the confirmed receipt the re-send brought back.
     expect(host.availability()).toMatchObject({ state: 'ready', observe: true, control: true });
     // Nothing is left pending, so the helper that owned the session is gone.
-    expect(transport.state.children[0]!.killed).toBe(true);
+    expect(children[0]!.killed).toBe(true);
   });
 
   it('stays fail-closed and reaps the helper when the close is never answered', async () => {
@@ -478,11 +475,58 @@ describe('Computer Use Windows helper transport', () => {
       reasonCode: 'native_stop_unconfirmed',
     });
 
-    // The per-request timeout still bounds a helper that never answers: it aborts the transport
-    // and kills the child, so an unanswered close cannot leak a helper process.
-    await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS);
-    expect(transport.state.children[0]!.killed).toBe(true);
+    // The per-request timeouts still bound a helper that never answers, so an unanswered close
+    // cannot leak a helper process. An earlier close's timeout defers to a re-send that is still
+    // on the wire, so the one that reaps the helper is the last attempt's: sent one drain budget
+    // in, and given the same transport budget as the first.
+    const elapsed =
+      COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT;
+    const reapAt =
+      COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * (COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT - 1) +
+      COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
+    await vi.advanceTimersByTimeAsync(reapAt - elapsed - 1);
+    expect(children[0]!.killed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(children[0]!.killed).toBe(true);
     expect(host.availability()).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+  });
+
+  it('keeps the stop reachable when an earlier request times out on the same transport', async () => {
+    const { addon, host, helper } = createTarget();
+    const session = await startSession(host, 'session-1', 'turn-1');
+
+    // The helper is busy with a slow observe, and it serves one request at a time, so everything
+    // Stop sends queues behind that observe.
+    helper().hold('observe');
+    const observed = observeThroughTransport(addon, 'session-1');
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Stop cancels first. Main stops waiting for that acknowledgement after
+    // COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS, but the request keeps a transport budget of its
+    // own that outlives the deadline and would expire in the middle of the close re-send window.
+    const canceled = host.cancel(session, 1).then(
+      () => 'acknowledged',
+      () => 'unconfirmed',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(canceled).resolves.toBe('unconfirmed');
+
+    const closed = closeWithBoundedResend(host, session);
+    // The cancel's transport budget runs out here, while the close is still on the wire. Ending
+    // the transport for it would take the helper — and the session's close receipt — with it.
+    await vi.advanceTimersByTimeAsync(COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS);
+    expect(children[0]!.killed).toBe(false);
+
+    // The helper then works through its queue: the observe it was busy with, and behind it the
+    // re-sent close, which is answered by the same helper and confirms the stop.
+    helper().release('observe');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(closed).resolves.toBe(true);
+    await expect(observed).resolves.toBe('resolved');
+    expect(host.availability()).toMatchObject({ state: 'ready', observe: true, control: true });
+    // One helper throughout: the cancel's expiry never sent Stop to a fresh process that could
+    // not know the session.
+    expect(children).toHaveLength(1);
   });
 
   it('ends the helper once the last request that outlived the close settles', async () => {
@@ -496,12 +540,12 @@ describe('Computer Use Windows helper transport', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     await expect(host.close(session)).resolves.toBeUndefined();
-    expect(transport.state.children[0]!.killed).toBe(false);
+    expect(children[0]!.killed).toBe(false);
 
     helper().release('observe');
     await expect(observed).resolves.toBe('resolved');
     await vi.advanceTimersByTimeAsync(0);
-    expect(transport.state.children[0]!.killed).toBe(true);
+    expect(children[0]!.killed).toBe(true);
   });
 
   it('keeps the helper of a session started after the close from being torn down', async () => {
@@ -520,8 +564,48 @@ describe('Computer Use Windows helper transport', () => {
     helper().release('observe');
     await expect(observed).resolves.toBe('resolved');
     await vi.advanceTimersByTimeAsync(0);
-    expect(transport.state.children[0]!.killed).toBe(false);
-    expect(transport.state.children).toHaveLength(1);
+    expect(children[0]!.killed).toBe(false);
+    expect(children).toHaveLength(1);
+  });
+
+  it('ends the helper when the last outstanding request is refused rather than answered', async () => {
+    const { addon, host, helper } = createTarget();
+    const session = await startSession(host, 'session-1', 'turn-1');
+
+    helper().holdOnly('observe');
+    helper().refuse('observe');
+    const observed = observeThroughTransport(addon, 'session-1');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(host.close(session)).resolves.toBeUndefined();
+    expect(children[0]!.killed).toBe(false);
+
+    // A helper error frame settles the request just as finally as a result does, so it has to run
+    // the teardown the close armed.
+    helper().release('observe');
+    await expect(observed).resolves.toBe('rejected');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(children[0]!.killed).toBe(true);
+  });
+
+  it('does not carry a teardown armed before a transport failure onto the next helper', async () => {
+    const { addon, host, helper } = createTarget();
+    const session = await startSession(host, 'session-1', 'turn-1');
+
+    helper().holdOnly('observe');
+    const observed = observeThroughTransport(addon, 'session-1');
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(host.close(session)).resolves.toBeUndefined();
+
+    // The pipe breaks while the teardown is armed and the observe is still pending. The armed
+    // teardown belongs to that dead transport, not to the helper the next request connects.
+    sockets[0]!.emit('close');
+    await expect(observed).resolves.toBe('rejected');
+
+    const listWindows = addon.listWindows;
+    if (listWindows === undefined) throw new Error('the Windows addon has to expose listWindows');
+    await expect(Promise.resolve(listWindows(profile))).resolves.toBeInstanceOf(Array);
+    expect(children).toHaveLength(2);
+    expect(children[1]!.killed).toBe(false);
   });
 
   it('budgets the close round trip beyond every close deadline Main can still be waiting on', () => {

@@ -36,6 +36,8 @@ type PendingRequest = Readonly<{
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
   sessionId: ComputerUseNativeFrameId;
+  /** Part of Stop's own lane, whose answer is what releases Main's input quarantine. */
+  stopsSession: boolean;
   responseType: ComputerUseNativeMessageType;
   allowBinary: boolean;
 }>;
@@ -152,11 +154,19 @@ class WindowsComputerUseHelperClient {
    * soon as that first attempt settles would reject the re-send through `failAll` before the helper
    * could answer it, and the answer is the only thing that releases Main's input quarantine. So the
    * close only *arms* the teardown: whichever request settles last runs it, whether that is the
-   * re-send, an observe that outlived the stop, or a per-request timeout. The helper therefore ends
-   * with the session either way, and never depends on the order in which the helper answers.
+   * re-send, a per-request timeout, or any other request that was still on the wire. The helper
+   * therefore ends with the session either way, without the teardown depending on the order in
+   * which the helper answers. Today's helper serves one frame at a time
+   * (`ServePipe` in computer-use-native/computer_use_windows_host.cc), so in practice that last
+   * request is the re-send; the point of arming rather than checking once is that the teardown does
+   * not rest on that serve loop staying single-threaded.
    *
    * A session started after that point disarms it again (`call`), because the teardown belongs to
-   * the closed session and must not reach the helper the new session is running on.
+   * the closed session and must not reach the helper the new session is running on. It disarms on
+   * the attempt rather than on the answer: a start that the helper refuses therefore leaves an
+   * idle, session-less helper behind until the next close arms the teardown again or Main exits
+   * (the helper stops itself with its parent). That is the deliberate direction — re-arming on a
+   * refused start would kill the helper of the session a refused *resume* is still running on.
    */
   shutdownWhenIdle(): void {
     this.idleShutdownPending = true;
@@ -165,6 +175,11 @@ class WindowsComputerUseHelperClient {
 
   private shutdownIfIdle(): void {
     if (this.idleShutdownPending && this.pending.size === 0) this.shutdown();
+  }
+
+  private hasPendingStop(): boolean {
+    for (const request of this.pending.values()) if (request.stopsSession) return true;
+    return false;
   }
 
   async call(
@@ -186,6 +201,7 @@ class WindowsComputerUseHelperClient {
         ? newComputerUseNativeFrameId()
         : frameIdFromText(`request:${requestKey}`),
       operationTimeoutMilliseconds(operation),
+      isComputerUseStopOperation(operation),
     );
   }
 
@@ -275,6 +291,7 @@ class WindowsComputerUseHelperClient {
     sessionId: ComputerUseNativeFrameId,
     requestId: ComputerUseNativeFrameId,
     timeoutMilliseconds = 10_000,
+    stopsSession = false,
   ): Promise<unknown> {
     const socket = this.socket;
     if (socket === null)
@@ -295,15 +312,21 @@ class WindowsComputerUseHelperClient {
         this.pending.delete(requestId.hex);
         const error = new Error('Computer Use Windows helper request timed out');
         reject(error);
-        // A request that never came back means the helper is unusable, so this ends it outright
-        // rather than waiting for the transport to fall idle.
-        this.abortTransport(error);
+        // A request that never came back means the helper is unusable, so this normally ends it
+        // outright rather than waiting for the transport to fall idle. The exception is a stop that
+        // is still on the wire: the helper's answer to it is the only thing that can release Main's
+        // input quarantine, and requests that were already in flight when Stop began keep timers of
+        // their own that would otherwise expire inside Stop's window and kill the helper the stop
+        // has to reach. Every stop carries its own bounded timeout, so deferring to it still ends
+        // the transport — the last stop to time out finds no stop pending and aborts here.
+        if (!this.hasPendingStop()) this.abortTransport(error);
       }, timeoutMilliseconds);
       this.pending.set(requestId.hex, {
         resolve,
         reject,
         timeout,
         sessionId,
+        stopsSession,
         responseType: responseTypeFor(messageType),
         allowBinary: messageType === 'observe',
       });
@@ -645,12 +668,21 @@ export function windowsStopRequestKey(
  * re-send through `failAll` — taking the helper's `closed_sessions` receipt with it and leaving
  * the input quarantine permanently on. Outlasting the whole re-send window instead lets the
  * helper answer the first close late and then answer the re-send from that registry, which is the
- * recovery Issue #484 asks for. It stays a bounded deadline: a helper that never answers is still
- * aborted and killed here, one drain budget after Stop has already given up and reported
+ * recovery Issue #484 asks for. It stays a bounded deadline: a helper that never answers any close
+ * is still aborted and killed here, when the last attempt's budget runs out — one transport budget
+ * after that attempt was sent, by which point Stop has long since given up and reported
  * `native_unavailable`.
  */
 export const COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS =
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS * (COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT + 1);
+
+/**
+ * Stop's own lane. Main quarantines input for the whole of it and only a close receipt lifts that,
+ * so these two requests have to survive a timeout raised by anything else on the transport.
+ */
+export function isComputerUseStopOperation(operation: string): boolean {
+  return operation === 'cancel' || operation === 'close_session';
+}
 
 export function operationTimeoutMilliseconds(operation: string): number {
   if (operation === 'pick_application') return 5 * 60_000;
