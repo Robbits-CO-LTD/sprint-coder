@@ -1834,6 +1834,77 @@ struct AsyncNativeStopWork {
   bool drained = false;
 };
 
+// Close removes the session from the active maps before its drain can be confirmed, so observe and
+// dispatch fail immediately. Main keeps the process-local input quarantine until it sees a
+// confirmed close receipt and answers an unconfirmed close by re-sending it for the same session
+// id, which the active maps can no longer serve. This bounded registry is what answers that repeat
+// close: it keeps the session while the drain is unconfirmed so the repeat close re-runs it, and
+// replays the receipt only once a drain actually completed. A stop that never drained therefore
+// cannot be mistaken for a confirmed one.
+struct MacClosedSessionRecord {
+  // Held only while the drain is unconfirmed, so a repeat close can queue another one.
+  std::shared_ptr<MacComputerUseSession> session;
+  std::uint64_t cancel_epoch = 0;
+  std::uint64_t input_api_attempts = 0;
+  bool drained = false;
+};
+
+std::unordered_map<std::string, MacClosedSessionRecord> mac_closed_sessions;
+std::vector<std::string> mac_closed_session_order;
+constexpr std::size_t kMacClosedSessionLimit = 16;
+
+// The caller already holds mac_sessions_mutex: the registry is an extension of the session maps and
+// never takes a lock of its own.
+void RememberClosingMacSession(const std::string& session_id,
+                               const std::shared_ptr<MacComputerUseSession>& session,
+                               std::uint64_t cancel_epoch) {
+  const auto existing = mac_closed_sessions.find(session_id);
+  if (existing != mac_closed_sessions.end()) {
+    existing->second = MacClosedSessionRecord{session, cancel_epoch, 0, false};
+    return;
+  }
+  while (mac_closed_session_order.size() >= kMacClosedSessionLimit) {
+    // An unconfirmed record is the only way back from a close that lost its receipt, so drop a
+    // drain that is already confirmed first.
+    auto victim = std::find_if(
+        mac_closed_session_order.begin(), mac_closed_session_order.end(),
+        [](const std::string& candidate) {
+          const auto record = mac_closed_sessions.find(candidate);
+          return record == mac_closed_sessions.end() || record->second.drained;
+        });
+    if (victim == mac_closed_session_order.end()) victim = mac_closed_session_order.begin();
+    mac_closed_sessions.erase(*victim);
+    mac_closed_session_order.erase(victim);
+  }
+  mac_closed_session_order.push_back(session_id);
+  mac_closed_sessions.emplace(session_id,
+                              MacClosedSessionRecord{session, cancel_epoch, 0, false});
+}
+
+void ConfirmClosedMacSession(const std::string& session_id, std::uint64_t cancel_epoch,
+                             std::uint64_t input_api_attempts) {
+  std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
+  const auto record = mac_closed_sessions.find(session_id);
+  // A newer close already superseded this drain and owns the record.
+  if (record == mac_closed_sessions.end() || record->second.cancel_epoch != cancel_epoch) return;
+  record->second.drained = true;
+  record->second.input_api_attempts = input_api_attempts;
+  // Only the receipt has to survive a confirmed drain.
+  record->second.session.reset();
+}
+
+napi_value NativeStopReceipt(napi_env env, const char* result, const std::string& session_id,
+                             std::uint64_t cancel_epoch, std::uint64_t input_api_attempts) {
+  napi_value receipt;
+  napi_create_object(env, &receipt);
+  napi_set_named_property(env, receipt, "result", StringValue(env, result));
+  napi_set_named_property(env, receipt, "sessionId", StringValue(env, session_id.c_str()));
+  napi_set_named_property(env, receipt, "cancelEpoch", NumberValue(env, static_cast<double>(cancel_epoch)));
+  napi_set_named_property(env, receipt, "inputAttemptCount", NumberValue(env, static_cast<double>(input_api_attempts)));
+  napi_set_named_property(env, receipt, "drained", BoolValue(env, true));
+  return receipt;
+}
+
 void ExecuteNativeStop(napi_env env, void* data) {
   (void)env;
   auto* work = static_cast<AsyncNativeStopWork*>(data);
@@ -1864,13 +1935,13 @@ void CompleteNativeStop(napi_env env, napi_status status, void* data) {
     napi_create_error(env, nullptr, StringValue(env, "Native stop drain is unconfirmed"), &error);
     napi_reject_deferred(env, work->deferred, error);
   } else {
-    napi_value result;
-    napi_create_object(env, &result);
-    napi_set_named_property(env, result, "result", StringValue(env, work->close ? "closed" : "canceled"));
-    napi_set_named_property(env, result, "sessionId", StringValue(env, work->session->session_id.c_str()));
-    napi_set_named_property(env, result, "cancelEpoch", NumberValue(env, static_cast<double>(work->cancel_epoch)));
-    napi_set_named_property(env, result, "inputAttemptCount", NumberValue(env, static_cast<double>(work->input_api_attempts)));
-    napi_set_named_property(env, result, "drained", BoolValue(env, true));
+    // Only a drain that ran to completion may answer a later repeat close as confirmed.
+    if (work->close)
+      ConfirmClosedMacSession(work->session->session_id, work->cancel_epoch,
+                              work->input_api_attempts);
+    napi_value result =
+        NativeStopReceipt(env, work->close ? "closed" : "canceled", work->session->session_id,
+                          work->cancel_epoch, work->input_api_attempts);
     napi_resolve_deferred(env, work->deferred, result);
   }
   napi_delete_async_work(env, work->work);
@@ -1912,6 +1983,9 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
       !ReadNamedUInt64(env, argv[0], "cancelEpoch", &requested_cancel_epoch))
     return ThrowNativeError(env, "INVALID_SESSION", "A native session id is required");
   std::shared_ptr<MacComputerUseSession> session;
+  bool first_close = false;
+  bool drain_confirmed = false;
+  std::uint64_t confirmed_input_api_attempts = 0;
   {
     std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
     const auto found = mac_sessions.find(session_id);
@@ -1920,6 +1994,8 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
       if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
         return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
       mac_sessions.erase(session_id);
+      RememberClosingMacSession(session_id, session, requested_cancel_epoch);
+      first_close = true;
     } else {
       const auto pending = mac_pending_sessions.find(session_id);
       if (pending != mac_pending_sessions.end()) {
@@ -1927,17 +2003,39 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
         if (requested_cancel_epoch <= session->cancel_epoch.load(std::memory_order_acquire))
           return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
         mac_pending_sessions.erase(pending);
+        RememberClosingMacSession(session_id, session, requested_cancel_epoch);
+        first_close = true;
+      } else {
+        // A repeat close for a session the first close already removed. Only the registry can
+        // answer it, and only a drain that completed answers it as confirmed.
+        const auto closed = mac_closed_sessions.find(session_id);
+        if (closed != mac_closed_sessions.end()) {
+          if (requested_cancel_epoch <= closed->second.cancel_epoch)
+            return ThrowNativeError(env, "INVALID_CANCEL", "The close epoch is stale");
+          closed->second.cancel_epoch = requested_cancel_epoch;
+          drain_confirmed = closed->second.drained;
+          confirmed_input_api_attempts = closed->second.input_api_attempts;
+          session = closed->second.session;
+        }
       }
     }
   }
+  if (drain_confirmed)
+    return NativeStopReceipt(env, "closed", session_id, requested_cancel_epoch,
+                             confirmed_input_api_attempts);
   if (session != nullptr) {
     session->closed.store(true, std::memory_order_release);
     session->cancel_epoch.store(requested_cancel_epoch, std::memory_order_release);
-    auto current = cancellation_epoch.load(std::memory_order_acquire);
-    while (requested_cancel_epoch > current && !cancellation_epoch.compare_exchange_weak(
-        current, requested_cancel_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
-    session->observation_publication_claimed.store(false,
-                                                   std::memory_order_release);
+    if (first_close) {
+      // Only the close that took the session out of the active maps owns the global stop epoch and
+      // the observation publication state. A repeat close drains a session that is already gone and
+      // must not invalidate whatever session the process runs now.
+      auto current = cancellation_epoch.load(std::memory_order_acquire);
+      while (requested_cancel_epoch > current && !cancellation_epoch.compare_exchange_weak(
+          current, requested_cancel_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
+      session->observation_publication_claimed.store(false,
+                                                     std::memory_order_release);
+    }
     const auto close_epoch = session->cancel_epoch.load(std::memory_order_acquire);
     return QueueNativeStop(env, std::move(session), close_epoch, true);
   }

@@ -173,6 +173,36 @@ struct WindowsSession {
 std::unordered_map<std::string, WindowsSession> sessions;
 std::uint64_t last_closed_cancel_epoch = 0;
 
+// A close releases the session before Main can acknowledge the response, so a close whose answer
+// never arrived left the session id unreachable: every repeat close was refused and Main kept the
+// process-local input quarantine for the rest of the helper's life. This bounded record is what
+// answers a repeat close. It is written only where a drained close response is produced, so it
+// cannot turn a stop that never drained into a confirmed one.
+struct ClosedWindowsSessionRecord {
+  std::string session_id;
+  std::uint64_t cancel_epoch = 0;
+  std::uint64_t input_api_attempts = 0;
+};
+
+std::unordered_map<std::string, ClosedWindowsSessionRecord> closed_sessions;
+std::deque<std::string> closed_session_order;
+constexpr std::size_t kMaximumClosedSessionRecords = 16;
+
+void RememberClosedWindowsSession(const std::string &session_key,
+                                  const ClosedWindowsSessionRecord &record) {
+  const auto existing = closed_sessions.find(session_key);
+  if (existing != closed_sessions.end()) {
+    existing->second = record;
+    return;
+  }
+  while (closed_session_order.size() >= kMaximumClosedSessionRecords) {
+    closed_sessions.erase(closed_session_order.front());
+    closed_session_order.pop_front();
+  }
+  closed_session_order.push_back(session_key);
+  closed_sessions.emplace(session_key, record);
+}
+
 void ReleaseWindowsSessionResources(WindowsSession *session) {
   if (session == nullptr)
     return;
@@ -2200,23 +2230,39 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
 }
 
 bool CloseWindowsSession(const Frame &request, const std::string& metadata, std::string *response) {
-  const auto found = sessions.find(FrameIdKey(request.header.session_id));
+  const std::string session_key = FrameIdKey(request.header.session_id);
   std::uint64_t requested_epoch = 0;
-  if (found == sessions.end() || !ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch) ||
-      requested_epoch <= found->second.cancel_epoch) return false;
-  {
+  if (!ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch)) return false;
+  const auto found = sessions.find(session_key);
+  ClosedWindowsSessionRecord receipt;
+  if (found == sessions.end()) {
+    // The first close already released the session, so only the record of a close that produced a
+    // drained response can answer this one. Main keeps the host quarantined until it sees a
+    // confirmed close receipt and answers an unconfirmed close by re-sending it for the same
+    // session id with a higher epoch.
+    const auto closed = closed_sessions.find(session_key);
+    if (closed == closed_sessions.end() || requested_epoch <= closed->second.cancel_epoch)
+      return false;
+    closed->second.cancel_epoch = requested_epoch;
+    receipt = closed->second;
+  } else {
+    if (requested_epoch <= found->second.cancel_epoch) return false;
     found->second.cancel_epoch = requested_epoch;
     auto current = cancellation_epoch.load(std::memory_order_acquire);
     while (requested_epoch > current && !cancellation_epoch.compare_exchange_weak(
         current, requested_epoch, std::memory_order_acq_rel, std::memory_order_acquire)) {}
-    *response = "{\"result\":\"closed\",\"drained\":true,\"sessionId\":\"" +
-        JsonEscape(found->second.session_id) + "\",\"cancelEpoch\":" + std::to_string(requested_epoch) +
-        ",\"inputAttemptCount\":" + std::to_string(found->second.input_api_attempts->load(std::memory_order_acquire)) + "}";
+    receipt = ClosedWindowsSessionRecord{
+        found->second.session_id, requested_epoch,
+        found->second.input_api_attempts->load(std::memory_order_acquire)};
     last_closed_cancel_epoch =
         std::max(last_closed_cancel_epoch, found->second.cancel_epoch);
+    RememberClosedWindowsSession(session_key, receipt);
     ReleaseWindowsSessionResources(&found->second);
     sessions.erase(found);
   }
+  *response = "{\"result\":\"closed\",\"drained\":true,\"sessionId\":\"" +
+      JsonEscape(receipt.session_id) + "\",\"cancelEpoch\":" + std::to_string(receipt.cancel_epoch) +
+      ",\"inputAttemptCount\":" + std::to_string(receipt.input_api_attempts) + "}";
   return true;
 }
 

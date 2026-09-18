@@ -106,6 +106,33 @@ describe('macOS Computer Use asynchronous native boundary', () => {
     );
   });
 
+  it('confirms a closed session only from the resolved stop on the N-API thread', () => {
+    const stopWorker = sourceBetween('void ExecuteNativeStop(', 'void CompleteNativeStop(');
+    const stopComplete = sourceBetween('void CompleteNativeStop(', 'napi_value QueueNativeStop(');
+    const closeSource = sourceBetween('napi_value CloseSession(', 'bool ReadWindowBounds(');
+
+    // The closed-session registry is guarded by mac_sessions_mutex like the active session maps.
+    // The stop worker runs with the serial dispatch lock held, so reaching the registry from there
+    // would invert the lock order that every other session lookup follows.
+    expect(stopWorker).not.toContain('mac_closed_sessions');
+    expect(stopWorker).not.toContain('ConfirmClosedMacSession');
+    // Only the branch that resolves the stop may confirm the close. A rejected stop has to stay
+    // re-drainable, otherwise a repeat close would report a drain that never ran as confirmed.
+    const rejection = stopComplete.indexOf('napi_reject_deferred');
+    const confirmation = stopComplete.indexOf('ConfirmClosedMacSession');
+    const resolution = stopComplete.indexOf('napi_resolve_deferred');
+    expect(rejection).toBeGreaterThan(0);
+    expect(confirmation).toBeGreaterThan(rejection);
+    expect(resolution).toBeGreaterThan(confirmation);
+    // The session leaves the active maps exactly as before, and the registry records it under the
+    // same lock so a repeat close for that id is answerable.
+    expect(closeSource.indexOf('RememberClosingMacSession(')).toBeGreaterThan(
+      closeSource.indexOf('mac_sessions.erase(session_id);'),
+    );
+    expect(closeSource.match(/RememberClosingMacSession\(/gu)).toHaveLength(2);
+    expect(closeSource).toContain('ThrowNativeError(env, "SESSION_MISSING"');
+  });
+
   it('captures the start epoch before queueing so a pre-worker cancel is not absorbed', () => {
     const startCallback = sourceBetween(
       'napi_value StartSession(',

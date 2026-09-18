@@ -57,6 +57,13 @@ ${driver}`,
           stopSettledOnCreateFailure: boolean;
           stopSettledOnQueueFailure: boolean;
           stopWorkReleased: boolean;
+          unconfirmedCloseRetained: boolean;
+          retainedCloseConfirms: boolean;
+          unconfirmedCloseRetriesDrain: boolean;
+          confirmedCloseReplaysReceipt: boolean;
+          staleRepeatCloseRejected: boolean;
+          unclosedSessionStillMissing: boolean;
+          closedRegistryBounded: boolean;
           lifetimeReleased: boolean;
         };
         expect(result).toEqual({
@@ -66,6 +73,13 @@ ${driver}`,
           stopSettledOnCreateFailure: true,
           stopSettledOnQueueFailure: true,
           stopWorkReleased: true,
+          unconfirmedCloseRetained: true,
+          retainedCloseConfirms: true,
+          unconfirmedCloseRetriesDrain: true,
+          confirmedCloseReplaysReceipt: true,
+          staleRepeatCloseRejected: true,
+          unclosedSessionStillMissing: true,
+          closedRegistryBounded: true,
           lifetimeReleased: true,
         });
       } finally {
@@ -88,12 +102,25 @@ const preamble = `
 #include <stdexcept>
 #include <string>
 using pid_t = int;
+bool failStopDrain = false;
+// ExecuteNativeStop reads the attempt counter inside its try block, so an inert seam can fail a
+// drain exactly where a real stop worker would and leave the close unconfirmed.
+struct SeamInputAttemptCounter {
+  std::atomic<std::uint64_t> value{0};
+  std::uint64_t load(std::memory_order order) const {
+    if (failStopDrain) throw std::runtime_error("native stop drain failed");
+    return value.load(order);
+  }
+  std::uint64_t fetch_add(std::uint64_t delta, std::memory_order order) {
+    return value.fetch_add(delta, order);
+  }
+};
 struct MacComputerUseSession {
   std::string session_id = "seam";
   int pid = 1;
   std::atomic<bool> closed{false}, observation_publication_claimed{false};
   std::atomic<std::uint64_t> cancel_epoch{0}, observation_publication_epoch{0};
-  std::atomic<std::uint64_t> input_api_attempts{0};
+  SeamInputAttemptCounter input_api_attempts;
   std::mutex state_mutex;
   bool has_observation = false;
   std::vector<std::string> visual_patch_digests, dispatch_replay_order;
@@ -119,12 +146,18 @@ int napi_get_cb_info(napi_env, napi_callback_info, size_t* argc, napi_value* arg
   *argc = 1; argv[0] = &fake; return napi_ok;
 }
 bool IsObject(napi_env, napi_value) { return true; }
-bool ReadNamedString(napi_env, napi_value, const char*, std::string* out) { *out = current->session_id; return true; }
-bool ReadNamedUInt64(napi_env, napi_value, const char*, std::uint64_t* out) { *out = current->cancel_epoch.load() + 1; return true; }
+// Stop requests default to the live session; the repeat-close scenarios address a session id that
+// the first close already removed, so they set the request explicitly.
+bool overrideStopRequest = false;
+std::string requestedSessionId;
+std::uint64_t requestedCancelEpoch = 0;
+bool ReadNamedString(napi_env, napi_value, const char*, std::string* out) { *out = overrideStopRequest ? requestedSessionId : current->session_id; return true; }
+bool ReadNamedUInt64(napi_env, napi_value, const char*, std::uint64_t* out) { *out = overrideStopRequest ? requestedCancelEpoch : current->cancel_epoch.load() + 1; return true; }
 std::shared_ptr<MacComputerUseSession> FindCancelableMacSession(const std::string&) { return current; }
 napi_value ThrowNativeError(napi_env, const char* code, const char*) { throw std::runtime_error(code); }
 void napi_create_object(napi_env, napi_value* out) { *out = &fake; }
-void napi_set_named_property(napi_env, napi_value, const char*, napi_value) {}
+unsigned namedProperties = 0;
+void napi_set_named_property(napi_env, napi_value, const char*, napi_value) { ++namedProperties; }
 napi_value StringValue(napi_env, const char*) { return &fake; }
 napi_value NumberValue(napi_env, double) { return &fake; }
 napi_value BoolValue(napi_env, bool) { return &fake; }
@@ -190,6 +223,28 @@ bool RevalidateVisualPointBeforePost(const NativeDispatchRequest&, CGPoint, Nati
 }
 `;
 const driver = `
+enum class CloseOutcome { kQueued, kReceipt, kSessionMissing, kInvalidCancel, kOther };
+constexpr std::size_t kSeamClosedRecordLimit = 16;
+// One close request against the production CloseSession, classified by what it did: queue a drain,
+// answer straight away with a receipt (5 properties), or refuse the session id.
+CloseOutcome closeRequest(const std::string& sessionId, std::uint64_t cancelEpoch) {
+  overrideStopRequest = true;
+  requestedSessionId = sessionId;
+  requestedCancelEpoch = cancelEpoch;
+  const std::size_t queued = queue.size();
+  namedProperties = 0;
+  try {
+    CloseSession(&fake, nullptr);
+  } catch (const std::runtime_error& error) {
+    const std::string code = error.what();
+    if (code == "SESSION_MISSING") return CloseOutcome::kSessionMissing;
+    if (code == "INVALID_CANCEL") return CloseOutcome::kInvalidCancel;
+    return CloseOutcome::kOther;
+  }
+  if (queue.size() == queued + 1) return CloseOutcome::kQueued;
+  return queue.size() == queued && namedProperties == 5 ? CloseOutcome::kReceipt : CloseOutcome::kOther;
+}
+
 int main() {
   PerformVisualDispatch(NativeDispatchRequest{});
   drain();
@@ -214,6 +269,14 @@ int main() {
   if (lifetime.expired()) return 2;
   drain();
   const bool workerFailureUnconfirmed = rejected && !acknowledged;
+  // Main keeps the host quarantined until it sees a confirmed close receipt and answers by
+  // re-sending the close, so an unconfirmed close has to keep the session id answerable instead of
+  // stranding it. Only the confirmed repeat close may release the session.
+  const bool unconfirmedCloseRetained = !lifetime.expired();
+  completeStatus = 0;
+  const bool retainedCloseConfirms = closeRequest("seam", 3) == CloseOutcome::kQueued;
+  drain();
+  const bool lifetimeReleased = lifetime.expired();
 
   // A Stop that cannot reach the worker still owns a live deferred, so it must reject it and hand
   // back the Promise instead of throwing and abandoning it. Mode 0 fails napi_create_async_work
@@ -245,11 +308,83 @@ int main() {
     if (!stopLifetime.expired() || !queue.empty()) stopWorkReleased = false;
   }
 
+  // A drain that failed must be re-run by the repeat close. Reporting it as confirmed without
+  // draining again would release the Main-side quarantine on a stop that never completed.
+  auto retrySession = std::make_shared<MacComputerUseSession>();
+  retrySession->session_id = "retry";
+  mac_sessions.emplace(retrySession->session_id, retrySession);
+  failStopDrain = true;
+  rejections = 0;
+  resolutions = 0;
+  const bool retryFirstQueued = closeRequest("retry", 1) == CloseOutcome::kQueued;
+  drain();
+  const bool retryFirstUnconfirmed = rejections == 1 && resolutions == 0;
+  rejections = 0;
+  resolutions = 0;
+  const bool retryRedrains = closeRequest("retry", 2) == CloseOutcome::kQueued;
+  drain();
+  const bool retryStillUnconfirmed = rejections == 1 && resolutions == 0;
+  failStopDrain = false;
+  rejections = 0;
+  resolutions = 0;
+  const bool retryConfirmQueued = closeRequest("retry", 3) == CloseOutcome::kQueued;
+  drain();
+  const bool unconfirmedCloseRetriesDrain = retryFirstQueued && retryFirstUnconfirmed &&
+    retryRedrains && retryStillUnconfirmed && retryConfirmQueued &&
+    rejections == 0 && resolutions == 1;
+
+  // A drain that completed after the Main-side close deadline expired has to answer the repeat
+  // close with the same receipt, and nothing may still need the session afterwards.
+  auto replaySession = std::make_shared<MacComputerUseSession>();
+  replaySession->session_id = "replay";
+  replaySession->input_api_attempts.fetch_add(3, std::memory_order_acq_rel);
+  mac_sessions.emplace(replaySession->session_id, replaySession);
+  rejections = 0;
+  resolutions = 0;
+  const bool replayFirstQueued = closeRequest("replay", 1) == CloseOutcome::kQueued;
+  drain();
+  const bool replayDrained = rejections == 0 && resolutions == 1;
+  std::weak_ptr<MacComputerUseSession> replayLifetime = replaySession;
+  replaySession.reset();
+  const bool replayReleased = replayLifetime.expired();
+  const bool replayedOnce = closeRequest("replay", 2) == CloseOutcome::kReceipt;
+  const bool replayedTwice = closeRequest("replay", 3) == CloseOutcome::kReceipt;
+  const bool confirmedCloseReplaysReceipt = replayFirstQueued && replayDrained && replayReleased &&
+    replayedOnce && replayedTwice && queue.empty();
+  const bool staleRepeatCloseRejected = closeRequest("replay", 3) == CloseOutcome::kInvalidCancel;
+  const bool unclosedSessionStillMissing =
+    closeRequest("never-opened", 1) == CloseOutcome::kSessionMissing;
+
+  // Keeping a close answerable is bounded, so a long-lived process cannot accumulate sessions it
+  // can never release.
+  std::vector<std::weak_ptr<MacComputerUseSession>> boundedLifetimes;
+  failStopDrain = true;
+  for (int index = 0; index < 40; ++index) {
+    auto boundedSession = std::make_shared<MacComputerUseSession>();
+    boundedSession->session_id = "bounded-" + std::to_string(index);
+    mac_sessions.emplace(boundedSession->session_id, boundedSession);
+    closeRequest(boundedSession->session_id, 1);
+    drain();
+    boundedLifetimes.push_back(boundedSession);
+  }
+  failStopDrain = false;
+  std::size_t retainedClosedSessions = 0;
+  for (const auto& entry : boundedLifetimes)
+    if (!entry.expired()) ++retainedClosedSessions;
+  const bool closedRegistryBounded = retainedClosedSessions <= kSeamClosedRecordLimit;
+
   std::cout << std::boolalpha << "{\\"afterDown\\":" << afterDown << ",\\"afterValidation\\":" << afterValidation
     << ",\\"workerFailureUnconfirmed\\":" << workerFailureUnconfirmed
     << ",\\"stopSettledOnCreateFailure\\":" << stopSettled[0]
     << ",\\"stopSettledOnQueueFailure\\":" << stopSettled[1]
     << ",\\"stopWorkReleased\\":" << stopWorkReleased
-    << ",\\"lifetimeReleased\\":" << lifetime.expired() << "}";
+    << ",\\"unconfirmedCloseRetained\\":" << unconfirmedCloseRetained
+    << ",\\"retainedCloseConfirms\\":" << retainedCloseConfirms
+    << ",\\"unconfirmedCloseRetriesDrain\\":" << unconfirmedCloseRetriesDrain
+    << ",\\"confirmedCloseReplaysReceipt\\":" << confirmedCloseReplaysReceipt
+    << ",\\"staleRepeatCloseRejected\\":" << staleRepeatCloseRejected
+    << ",\\"unclosedSessionStillMissing\\":" << unclosedSessionStillMissing
+    << ",\\"closedRegistryBounded\\":" << closedRegistryBounded
+    << ",\\"lifetimeReleased\\":" << lifetimeReleased << "}";
 }
 `;
