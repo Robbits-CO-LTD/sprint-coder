@@ -130,20 +130,21 @@ napi_value NumberValue(napi_env, double) { return &fake; }
 napi_value BoolValue(napi_env, bool) { return &fake; }
 int napi_create_promise(napi_env, napi_deferred* deferred, napi_value* promise) { *deferred = &fake; *promise = &fake; return 0; }
 bool failAsyncWorkCreate = false, failAsyncWorkQueue = false;
+unsigned rejections = 0, resolutions = 0, deletedWorks = 0;
 int napi_create_async_work(napi_env, void*, napi_value, void (*execute)(napi_env, void*), void (*complete)(napi_env, napi_status, void*), void* data, napi_async_work* out) {
   if (failAsyncWorkCreate) return 1;
   *out = new FakeWork{execute, complete, data}; return 0;
 }
 int napi_queue_async_work(napi_env, napi_async_work work) { if (failAsyncWorkQueue) return 1; queue.push_back(work); return 0; }
-void napi_delete_async_work(napi_env, napi_async_work work) { delete work; }
+void napi_delete_async_work(napi_env, napi_async_work work) { ++deletedWorks; delete work; }
 void napi_create_error(napi_env, void*, napi_value, napi_value* error) { *error = &fake; }
 napi_value NativeErrorValue(napi_env, const char*, const char*) { return &fake; }
 bool rejected = false;
 int completeStatus = 0;
-void napi_reject_deferred(napi_env, napi_deferred, napi_value) { rejected = true; }
+void napi_reject_deferred(napi_env, napi_deferred, napi_value) { rejected = true; ++rejections; }
 napi_value Cancel(napi_env, napi_callback_info);
 bool acknowledged = false;
-void napi_resolve_deferred(napi_env, napi_deferred, napi_value) { acknowledged = true; }
+void napi_resolve_deferred(napi_env, napi_deferred, napi_value) { acknowledged = true; ++resolutions; }
 bool cancelAfterValidation = false;
 unsigned afterAck = 0;
 void injectCancel() { Cancel(&fake, nullptr); if (acknowledged) throw std::runtime_error("early ack"); }
@@ -215,14 +216,16 @@ int main() {
   const bool workerFailureUnconfirmed = rejected && !acknowledged;
 
   // A Stop that cannot reach the worker still owns a live deferred, so it must reject it and hand
-  // back the Promise instead of throwing and abandoning it.
+  // back the Promise instead of throwing and abandoning it. Mode 0 fails napi_create_async_work
+  // (no async work handle to delete), mode 1 fails napi_queue_async_work (one handle to delete).
   bool stopSettled[2] = {false, false};
   bool stopWorkReleased = true;
   for (int mode = 0; mode < 2; ++mode) {
     auto stopSession = std::make_shared<MacComputerUseSession>();
     std::weak_ptr<MacComputerUseSession> stopLifetime = stopSession;
-    rejected = false;
-    acknowledged = false;
+    rejections = 0;
+    resolutions = 0;
+    deletedWorks = 0;
     failAsyncWorkCreate = mode == 0;
     failAsyncWorkQueue = mode == 1;
     bool threw = false;
@@ -235,7 +238,10 @@ int main() {
     failAsyncWorkCreate = false;
     failAsyncWorkQueue = false;
     stopSession.reset();
-    stopSettled[mode] = rejected && !acknowledged && !threw && stopPromise != nullptr;
+    // Nothing was queued, so draining must not reach a complete callback for the freed work.
+    drain();
+    stopSettled[mode] = rejections == 1 && resolutions == 0 && !threw && stopPromise != nullptr &&
+      deletedWorks == (mode == 0 ? 0u : 1u);
     if (!stopLifetime.expired() || !queue.empty()) stopWorkReleased = false;
   }
 

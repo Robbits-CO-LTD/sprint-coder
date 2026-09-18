@@ -2757,9 +2757,8 @@ napi_value Observe(napi_env env, napi_callback_info info) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
     // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
     // which would leave the caller holding a Promise that can never be resolved or rejected.
-    napi_value error =
-        NativeErrorValue(env, "ASYNC_UNAVAILABLE",
-                         "Could not queue the serial native observation");
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Could not queue the serial native observation");
     napi_reject_deferred(env, work->deferred, error);
     return promise;
   }
