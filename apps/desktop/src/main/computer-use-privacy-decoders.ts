@@ -8,6 +8,7 @@ import {
   inflateSync,
 } from 'node:zlib';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
+import { createDeflateBodyWalk } from './computer-use-privacy-deflate';
 
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
 const MAX_DECODED_BYTES = 64 * 1024 * 1024;
@@ -33,6 +34,9 @@ function isZlib(bytes: Buffer): boolean {
   const cmf = bytes[0]!;
   return (cmf & 0x0f) === 8 && cmf >>> 4 <= 7 && (cmf * 256 + bytes[1]!) % 31 === 0;
 }
+
+/** RFC 1950 §2.2: FDICT adds a 4-byte DICTID, so the DEFLATE body starts at byte 6, not byte 2. */
+const ZLIB_DICTIONARY_HEADER_BYTES = 6;
 
 /**
  * Containers this decoder cannot open. Searching only their compressed bytes would leave a stored
@@ -70,9 +74,32 @@ type Scanner = ReturnType<typeof createBoundedScanner>;
 function createBoundedScanner(result: Result, visit: Visit) {
   const queue: { bytes: Buffer; depth: number }[] = [];
   let queuedBytes = 0;
-  // A stream that was cut short or damaged can still be read up to the damage. Whatever comes
-  // back is scanned, but the surface must not claim to have been fully read afterwards.
-  let damaged = false;
+  // One walk per file, because this scanner is built once per file. Building one per value would
+  // hand each of them a fresh budget and give back the amplification the budget exists to stop;
+  // sharing one across files would spend a later file's budget on an earlier one's bytes.
+  const walkDeflateBody = createDeflateBodyWalk();
+  /**
+   * FDICT in FLG says the stream was compressed against a preset dictionary. The bit is as weak as
+   * the rest of the header, and ordinary text sets it as readily — "(rest of an ordinary line"
+   * does — so the body behind it decides: bytes that parse as a written DEFLATE stream, inside the
+   * window CINFO declares, were compressed, and no dictionary exists here to read them with. Text
+   * that merely matched the header does not parse, and stays a look-alike scanned as raw bytes.
+   *
+   * A body that spends the walk budget settled neither, and an unsettled body counts as a
+   * dictionary here: this decoder treats work it could not finish as unread, never as clean.
+   */
+  const usesPresetDictionary = (bytes: Buffer): boolean =>
+    (bytes[1]! & 0x20) !== 0 &&
+    bytes.length > ZLIB_DICTIONARY_HEADER_BYTES &&
+    walkDeflateBody(
+      bytes.subarray(ZLIB_DICTIONARY_HEADER_BYTES),
+      // RFC 1950 §2.2: CINFO is the base-2 log of the window size, less eight.
+      1 << ((bytes[0]! >>> 4) + 8),
+    ) !== 'look-alike';
+  // A stream that was cut short, damaged, or written against a dictionary this process does not
+  // hold can be read at most up to that point. Whatever comes back is scanned, but the surface
+  // must not claim to have been fully read afterwards.
+  let unread = false;
   const account = (decoded: Buffer, depth: number) => {
     if (
       decoded.length > MAX_VALUE_BYTES ||
@@ -114,12 +141,25 @@ function createBoundedScanner(result: Result, visit: Visit) {
         // What separates them is whether the DEFLATE body still yields anything, so decide on
         // recoverability instead. Reading it raw skips the zlib framing and its checksum, which
         // is exactly the part a damaged stream fails on while its content stays readable.
+        //
+        // A preset dictionary is the one failure the body itself answers for: either it parsed as
+        // a written stream, or the walk ran out of budget before that could be ruled out. Both
+        // count as a dictionary, because work that settled nothing must not read as clean, and
+        // either way the content was compressed against a dictionary that is not in this process.
+        // The surface therefore stays unread whatever the recovery below yields. Its body still
+        // begins after the DICTID, and reading from there recovers whatever precedes the first
+        // reference into the dictionary.
+        const dictionary = usesPresetDictionary(archive);
+        if (dictionary) unread = true;
         let recovered: Buffer;
         try {
-          recovered = inflateRawSync(archive.subarray(2), {
-            finishFlush: zlibConstants.Z_SYNC_FLUSH,
-            maxOutputLength: MAX_VALUE_BYTES,
-          });
+          recovered = inflateRawSync(
+            archive.subarray(dictionary ? ZLIB_DICTIONARY_HEADER_BYTES : 2),
+            {
+              finishFlush: zlibConstants.Z_SYNC_FLUSH,
+              maxOutputLength: MAX_VALUE_BYTES,
+            },
+          );
         } catch (recoveryError) {
           if ((recoveryError as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE')
             throw recoveryError;
@@ -131,7 +171,7 @@ function createBoundedScanner(result: Result, visit: Visit) {
           if (recovered.length === 0) return;
           // Something came back, so this was a real stream that strict reading could not finish.
           // Scan what was recovered and refuse to call the surface completely read.
-          damaged = true;
+          unread = true;
           account(recovered, depth);
         } finally {
           recovered.fill(0);
@@ -150,8 +190,8 @@ function createBoundedScanner(result: Result, visit: Visit) {
   return {
     account,
     expand,
-    /** True once any stream could only be read past damage or an early cut. */
-    wasDamaged: () => damaged,
+    /** True once any stream could not be read whole: damage, an early cut, or a missing dictionary. */
+    wasUnread: () => unread,
     async drain() {
       while (queue.length > 0) {
         const nested = queue.shift()!;
@@ -204,7 +244,7 @@ async function inspectBytes(
     try {
       await expand(bytes, 0);
       await drain();
-      result.complete = !scanner.wasDamaged();
+      result.complete = !scanner.wasUnread();
     } catch {
       result.complete = false;
     }
@@ -332,7 +372,7 @@ async function inspectSqlite(filePath: string, result: Result, scanner: Scanner)
     // Drained only after the database is closed, so no archive is expanded while a read
     // transaction is still open on it.
     await scanner.drain();
-    result.complete = !scanner.wasDamaged();
+    result.complete = !scanner.wasUnread();
   } catch {
     result.complete = false;
   } finally {

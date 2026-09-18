@@ -181,6 +181,76 @@ Reader handles are always closed. `logical_values_scanned` reports completed log
 Gzip uses bounded Node zlib output; ZIP uses the existing yauzl dependency with entry/size/total
 bounds, encryption/type refusal and CRC verification. Nothing is extracted to disk. These return
 `decoded_bytes_scanned`, which does not claim to interpret arbitrary inner minidump structures.
+
+A zlib stream has no magic number, so a value whose two header bytes satisfy the CM/CINFO/FCHECK
+rules is inflated under the same bounds, and one that cannot be inflated is left as the raw bytes
+that were already scanned. FDICT is the exception: a body compressed against a preset dictionary
+cannot be read here at all, and ordinary text sets that bit as readily as the other header bits
+(`"(rest of an ordinary line"` does). The body behind the 4-byte DICTID therefore decides. It is
+parsed structurally against RFC 1951 — block headers, code-length and literal/distance code tables,
+symbol walk, references bounded by the window CINFO declares — without decompressing anything, and
+is accepted only when it ends as a written body ends: on a final block, zero-padded to its last
+byte, followed by the 4-byte Adler-32, or by further stored bytes if the body itself ran at least
+1KiB first. How a body ends is the only thing that decides it — size never is. The walk runs to the
+end of whatever value it is given, up to the 16MiB ceiling every caller already enforces, so a
+stream of a few dozen bytes and one of several megabytes are read by the same rule. Anything that
+fails that rule stays a scanned look-alike, and nothing is ever accepted on a prefix: 63 of the 256
+constant byte fills decode into valid symbols for as long as they repeat, and all 256 are refused at
+70KiB, 256KiB and 1MiB.
+
+One budget remains, and it is a limit on work rather than on size: a single file's inspection may
+walk 32MiB of body in total, across every value it looks at, which is twice the largest value it can
+be handed. Ordinary bytes cannot reach it, because a surface is read only up to 16MiB and no body is
+walked further than it is long; a chain of nested archives can. Spending it settles nothing about
+the body, so it is a refusal — the surface reads `unavailable`, exactly as it does when decompressed
+output outgrows its own budget — and never a clean scan.
+
+The regression asserts no misclassification over 29,640 constructed look-alikes (every printable
+header prefix with FDICT set, every first body byte, ordinary log, JSON and Japanese continuations),
+100,000 random printable-ASCII values, all 256 constant fills at three sizes, and 910 long values —
+every FDICT-capable printable header against 64 bodies of 128KiB each: prose, Japanese, JSON, log
+lines, base64, hex, CSV, source, noise, long runs of a single character, every byte period from 1 to
+16, and those periods running into text and back; and then the shapes among those that hold a walk
+open for every byte they have, repeated to 2MiB, against the narrowest and widest window a
+look-alike header can declare. The FDICT header is forced throughout. One-time local sweeps, not
+checked in and not rerun by CI, covered 2,000,000 random printable-ASCII and
+2,000,000 random Japanese/ASCII values, and 60,000 values of 8–96KiB straddling the size at which
+the walk used to stop, and misread none either. Uniform random **binary** values are the residual:
+14 of 2,000,000 parse as written streams and are refused as `unavailable`, before the header rules
+themselves cut that by a further factor of about 2,000. The 1KiB floor for trailing bytes comes from
+the same sweep: without it, 7,962 of those 2,000,000 are misread, while with it the count is the
+same 14 as demanding that nothing follow the stream at all.
+
+The walk costs one pass over the bits of the value, so it is linear in the value's size. Measured on
+Node 22 on an M-series Mac: about 40MiB/s for a written stream that really is compressed, 190MiB/s
+for a uniform fill, and effectively free for stored blocks, which are stepped over. The floor is
+5–7MiB/s, from a deliberately crafted chain of the smallest dynamic blocks that can be written —
+each re-reads 258 code lengths to emit one bit.
+
+What one whole inspection can be made to spend follows from the byte budgets it already keeps: a run
+reads at most 64MiB from disk and decompresses at most 64MiB, both counted across every surface and
+every file, so at most 128MiB of body can ever be walked however many files are listed. The
+per-file 32MiB budget bounds what one file's nested archives can ask for inside that. Driving both
+to their limit — thirteen crafted files, gzipped so 80MiB of chain costs 4.6MiB on disk, each value
+a minimal-block chain behind an FDICT header — measured 21.9 seconds for the run, against 0.4
+seconds for the same corpus with FDICT cleared. That is the whole cost of this walk at its worst,
+it needs bytes written into an inspected surface on purpose, and every surface it touches comes back
+`unavailable`.
+
+The costs fall the other way. A real preset-dictionary stream that was cut short, damaged, padded
+with something other than zeros, or shorter than 1KiB with bytes stored after it is not recognised
+and falls back to a raw scan — the same trade already made for any stream that fails to inflate. A
+value larger than 16MiB never reaches any of this: the file is refused before it is read, and the
+surface is `unavailable` on that ground alone. Note also that `unavailable` is forgeable by
+anyone who can write to an inspected surface, here as elsewhere in this helper (an unopenable
+container magic does it in three bytes). It always means "could not be certified clean", never
+"a payload was found"; only `contaminated` says that.
+
+No persistence path in this app writes a preset-dictionary stream, or any compressed stream. The
+only production source under `apps/*/src` or `packages/*/src` that imports `node:zlib` is this
+read-only inspection decoder, which never compresses; there is no compression dependency, SQLite
+stores values uncompressed, and no crash reporter is configured. Such a stream on an inspected
+surface would have come from outside the app.
 A physical or decoded-byte scan is not proof of logical absence or of a complete sink inventory.
 The protected runner must enumerate
 all relevant files (including SQLite WAL/SHM and rotated files), flush/close the tested processes,

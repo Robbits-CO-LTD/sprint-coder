@@ -458,15 +458,28 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     }
   });
 
-  function writeDatabaseValue(path: string, value: Buffer | string): void {
+  function writeDatabaseValue(path: string, ...values: (Buffer | string)[]): void {
     rmSync(path);
     const database = new Database(path);
     try {
       database.exec('CREATE TABLE capture (body BLOB);');
-      database.prepare('INSERT INTO capture VALUES (?)').run(value);
+      const insert = database.prepare('INSERT INTO capture VALUES (?)');
+      for (const value of values) insert.run(value);
     } finally {
       database.close();
     }
+  }
+
+  /** Every two-byte prefix of printable text that passes the zlib header rules with FDICT set. */
+  function fdictLookAlikePrefixes(): string[] {
+    const prefixes: string[] = [];
+    for (let cmf = 0x20; cmf <= 0x7e; cmf += 1) {
+      if ((cmf & 0x0f) !== 8 || cmf >>> 4 > 7) continue;
+      for (let flg = 0x20; flg <= 0x7e; flg += 1)
+        if ((cmf * 256 + flg) % 31 === 0 && (flg & 0x20) !== 0)
+          prefixes.push(String.fromCharCode(cmf, flg));
+    }
+    return prefixes;
   }
 
   it.each([
@@ -523,6 +536,112 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
       state: 'contaminated',
       matchedKinds: ['typed_text'],
     });
+  });
+
+  it.each(['file', 'sqlite-blob'])(
+    'refuses a preset-dictionary zlib stream stored as a %s',
+    async (placement) => {
+      const input = fixture();
+      const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+      // Compressed against a dictionary this process does not have: a strict inflate answers
+      // Z_NEED_DICT and no part of the body can be read, so the payload is neither found nor
+      // shown to be absent. Passing as a scanned surface would be a clean result we never got.
+      const compressed = deflateSync(payload.bytes, {
+        dictionary: Buffer.from('PRIVATE_FIXTURE_typed_text preset dictionary'),
+      });
+      expect(compressed[1]! & 0x20).toBe(0x20);
+      const path = input.files[0]!.path;
+      if (placement === 'file') writeFileSync(path, compressed);
+      else writeDatabaseValue(path, compressed);
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]!.state).toBe('unavailable');
+      expect(result.uninspectedSurfaces).toEqual(['database']);
+      expect(result.finalGateEligible).toBe(false);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+    },
+  );
+
+  it.each(['file', 'sqlite-blob'])(
+    'refuses a preset-dictionary zlib stream whose body runs past the old 64KiB cutoff: %s',
+    async (placement) => {
+      const input = fixture();
+      // The same stream, only large: its body runs well past the 64KiB the parse once stopped at,
+      // which used to leave it counted as a scanned surface holding nothing. Xorshift32 keeps the
+      // payload incompressible, and so the body that size; the plain LCG used a few tests below
+      // loses its low bits past 2^53 and compresses away to a few kilobytes.
+      let state = 20260918;
+      const payload = Buffer.alloc(512 * 1024);
+      for (let index = 0; index < payload.length; index += 1) {
+        state = (state ^ (state << 13)) >>> 0;
+        state = state ^ (state >>> 17);
+        state = (state ^ (state << 5)) >>> 0;
+        payload[index] = 0x20 + (state % 95);
+      }
+      const compressed = deflateSync(payload, {
+        dictionary: Buffer.from('PRIVATE_FIXTURE_typed_text preset dictionary'),
+      });
+      expect(compressed[1]! & 0x20).toBe(0x20);
+      expect(compressed.length - 6).toBeGreaterThan(64 * 1024);
+      const path = input.files[0]!.path;
+      if (placement === 'file') writeFileSync(path, compressed);
+      else writeDatabaseValue(path, compressed);
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]!.state).toBe('unavailable');
+      expect(result.uninspectedSurfaces).toEqual(['database']);
+      expect(result.finalGateEligible).toBe(false);
+    },
+  );
+
+  it('refuses a preset-dictionary zlib stream a log file appended after', async () => {
+    const input = fixture();
+    const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;
+    // A compressed record followed by the next plain line, as an appended log holds it. The
+    // record is still unreadable without its dictionary, so the surface is not a scanned one.
+    let state = 20260918;
+    const noise = Array.from({ length: 8192 }, () => {
+      state = (state * 1103515245 + 12345) >>> 0;
+      return String.fromCharCode(0x20 + ((state >>> 16) % 95));
+    }).join('');
+    const compressed = deflateSync(Buffer.concat([payload.bytes, Buffer.from(noise)]), {
+      dictionary: Buffer.from('PRIVATE_FIXTURE_typed_text preset dictionary'),
+    });
+    // Only a body that ran at least a kilobyte vouches for the bytes stored after it.
+    expect(compressed.length).toBeGreaterThan(1024);
+    writeFileSync(
+      input.files[1]!.path,
+      Buffer.concat([compressed, Buffer.from('2026-09-18 session closed\n')]),
+    );
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[1]!.state).toBe('unavailable');
+    expect(result.uninspectedSurfaces).toEqual(['log']);
+    expect(result.finalGateEligible).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FIXTURE');
+  });
+
+  it('keeps a database of FDICT look-alike text a scanned surface', async () => {
+    // FDICT is set by ordinary text as readily as the other header bits, and refusing the whole
+    // database over it is what made every value unexamined before. Every prefix printable text
+    // can start with is stored here, each with the continuations a logged line takes.
+    const input = fixture();
+    const prefixes = fdictLookAlikePrefixes();
+    expect(prefixes.length).toBeGreaterThan(0);
+    const values = prefixes.flatMap((prefix) =>
+      [
+        '',
+        'est of an ordinary logged line',
+        '{"level":"info","message":"session closed"}',
+        'ラウンドが完了しました (round 12)',
+      ].map((tail) => `${prefix}${tail}`),
+    );
+    writeDatabaseValue(
+      input.files[0]!.path,
+      ...values,
+      ...values.map((value) => Buffer.from(value)),
+    );
+    const result = await inspectComputerUsePrivacySurfaces(input);
+    expect(result.surfaces[0]!.state).toBe('logical_values_scanned');
+    expect(result.uninspectedSurfaces).toEqual([]);
+    expect(result.contaminatedSurfaces).toEqual([]);
   });
 
   it.each(['file', 'sqlite-blob'])(
