@@ -1926,7 +1926,10 @@ void ExecuteNativeStop(napi_env env, void* data) {
       work->session->inflight_dispatches.clear();
       // The closed-session registry can hold this session until its close is confirmed, so the
       // per-observation control signatures are dropped here too. Nothing can dispatch against a
-      // closed session, and only the receipt has to outlive the drain.
+      // closed session, and only the receipt has to outlive the drain. Clearing has to happen here
+      // rather than in CloseSession because this is the only place that holds the serial dispatch
+      // lock: a close whose worker could not be queued at all therefore keeps this state until a
+      // repeat close drains it or the bounded registry evicts the record.
       work->session->semantic_control_signatures.clear();
       work->session->visual_control_signatures.clear();
     }

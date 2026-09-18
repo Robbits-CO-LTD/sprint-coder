@@ -932,10 +932,20 @@ describe('Computer Use native Main adapter', () => {
     // an id native cannot confirm stays quarantined, and only a confirmed receipt reopens the host.
     const closeEpochs: unknown[] = [];
     let nativeCloseConfirmed = false;
+    let closesInFlight = 0;
+    let releaseFirstClose!: () => void;
     const close = vi.fn((input: unknown): unknown => {
       const request = input as Record<string, unknown>;
       closeEpochs.push(request['cancelEpoch']);
-      if (closeEpochs.length === 1) return new Promise(() => {});
+      if (closeEpochs.length === 1) {
+        closesInFlight += 1;
+        return new Promise((resolve) => {
+          releaseFirstClose = () => {
+            closesInFlight -= 1;
+            resolve(undefined);
+          };
+        });
+      }
       if (!nativeCloseConfirmed)
         throw Object.assign(new Error('Native close is unconfirmed'), { code: 'SESSION_MISSING' });
       return {
@@ -1056,15 +1066,26 @@ describe('Computer Use native Main adapter', () => {
       ).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
     }
 
-    nativeCloseConfirmed = true;
-    await expect(host.close(session)).resolves.toBeUndefined();
+    // Re-send from the rejection handler, the way ComputerUseController answers an unconfirmed
+    // close, and let native confirm the drain by the time that re-send arrives. The first attempt
+    // is still on the wire throughout, which is what keeps a Windows helper that only ends once no
+    // stop is pending reachable for the re-send.
+    await expect(
+      host.close(session).then(null, async () => {
+        nativeCloseConfirmed = true;
+        return await host.close(session);
+      }),
+    ).resolves.toBeUndefined();
+    expect(closesInFlight).toBe(1);
     expect(host.availability()).toMatchObject({ state: 'ready', observe: true, control: true });
     // Every re-sent close carries a strictly higher epoch, which is what lets native tell a repeat
     // close apart from a stale one.
-    expect(closeEpochs).toEqual([1, 2, 3, 4]);
+    expect(closeEpochs).toEqual([1, 2, 3, 4, 5]);
+    releaseFirstClose();
+    expect(closesInFlight).toBe(0);
     // A confirmed session id stays idempotent without reaching native again.
     await expect(host.close(session)).resolves.toBeUndefined();
-    expect(closeEpochs).toHaveLength(4);
+    expect(closeEpochs).toHaveLength(5);
   });
 
   it('fails closed when an API1 manifest is mixed with an API2 helper', () => {
