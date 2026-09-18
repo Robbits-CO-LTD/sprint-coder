@@ -46,6 +46,7 @@ import {
   MAX_VERIFIABLE_POST_IMAGE_BYTES,
   readVerifiablePostImage,
   SealedPostImageUnsupportedError,
+  CANVAS_NODE_POSITIONS_MAX_ENTRIES,
   CanvasViewConflictError,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
@@ -9381,16 +9382,19 @@ if (runsWithElectronAbi)
         );
       });
 
-      it('caps node positions at 32 entries', () => {
-        const fourEntries: Record<string, { x: number; y: number }> = {};
-        for (let i = 0; i < 4; i++) fourEntries[`agent-${i}`] = { x: i, y: i };
-        expect(() => validateCanvasNodePositions(fourEntries)).not.toThrow();
-
-        const thirtyThreeEntries: Record<string, { x: number; y: number }> = {};
-        for (let i = 0; i < 33; i++) thirtyThreeEntries[`agent-${i}`] = { x: i, y: i };
-        expect(() => validateCanvasNodePositions(thirtyThreeEntries)).toThrow(
-          InvalidCanvasViewError,
-        );
+      it('caps node positions at CANVAS_NODE_POSITIONS_MAX_ENTRIES', () => {
+        const entries = (count: number): Record<string, { x: number; y: number }> =>
+          Object.fromEntries(
+            Array.from({ length: count }, (_, i) => [`agent-${i}`, { x: i, y: i }] as const),
+          );
+        // A Leader + 3 Managers + 27 Workers org is an ordinary Team and has to persist.
+        expect(() => validateCanvasNodePositions(entries(31))).not.toThrow();
+        expect(() =>
+          validateCanvasNodePositions(entries(CANVAS_NODE_POSITIONS_MAX_ENTRIES)),
+        ).not.toThrow();
+        expect(() =>
+          validateCanvasNodePositions(entries(CANVAS_NODE_POSITIONS_MAX_ENTRIES + 1)),
+        ).toThrow(InvalidCanvasViewError);
       });
 
       it('creates then updates a canvas view, bumping revision each save', () => {
@@ -9500,11 +9504,12 @@ if (runsWithElectronAbi)
         persistence.close();
       });
 
-      it('rejects a save with more than 32 node position entries', () => {
+      it('rejects a save with more than CANVAS_NODE_POSITIONS_MAX_ENTRIES node positions', () => {
         const { persistence } = createPersistence();
         const task = persistence.createTask();
         const tooMany: Record<string, { x: number; y: number }> = {};
-        for (let i = 0; i < 33; i++) tooMany[`agent-${i}`] = { x: i, y: i };
+        for (let i = 0; i <= CANVAS_NODE_POSITIONS_MAX_ENTRIES; i++)
+          tooMany[`agent-${i}`] = { x: i, y: i };
         expect(() =>
           persistence.saveCanvasView({
             taskId: task.id,
@@ -9513,6 +9518,24 @@ if (runsWithElectronAbi)
             revision: 0,
           }),
         ).toThrow(InvalidCanvasViewError);
+        persistence.close();
+      });
+
+      it('accepts a save at the entry cap even with worst-case entries', () => {
+        // The entry cap only means something if a full-cap payload also clears the byte cap: uuid
+        // keys and unrounded drag coordinates are the longest entries the Canvas ever sends.
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const full: Record<string, { x: number; y: number }> = {};
+        for (let i = 0; i < CANVAS_NODE_POSITIONS_MAX_ENTRIES; i++)
+          full[randomUUID()] = { x: -12345.678901234567, y: -19876.54321098765 };
+        const saved = persistence.saveCanvasView({
+          taskId: task.id,
+          camera: { x: 0, y: 0, scale: 1 },
+          nodePositions: full,
+          revision: 0,
+        });
+        expect(saved.revision).toBe(1);
         persistence.close();
       });
 

@@ -1175,8 +1175,12 @@ export const canvasNodePositionSchema = z
   .strict();
 export type CanvasNodePosition = z.infer<typeof canvasNodePositionSchema>;
 
-// Domain max is leader + 3 workers, but headroom is left for future node kinds.
-export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 32;
+// A Team has no headcount cap (Managers hire their own Workers — a Leader + 3 Managers + 27 Workers
+// org is an ordinary Team), and the Canvas saves a position for every card it has ever placed, so
+// this is a sanity bound on the payload, not a domain limit. 128 worst-case entries (uuid key,
+// unrounded drag coordinates, ~90 bytes each) stay well inside persistence's 16 KiB
+// CANVAS_VIEW_MAX_SERIALIZED_BYTES.
+export const CANVAS_NODE_POSITIONS_MAX_ENTRIES = 128;
 export const canvasNodePositionsSchema = z
   .record(idSchema, canvasNodePositionSchema)
   .refine((record) => Object.keys(record).length <= CANVAS_NODE_POSITIONS_MAX_ENTRIES, {
