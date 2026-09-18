@@ -110,6 +110,11 @@ describe('builtin Team skill', () => {
       '合計10名（深度0×1・1×3・2×6）を作成して',
       '/team リポジトリを並列調査して',
       '/TEAM\n設計と実装を分担して',
+      '会社のような組織を Team で作れるかのテストです。部長を 3 人雇ってください。',
+      'Team　を組んで調査して',
+      '3 人雇って調査して',
+      '合計10 名構成で検証して',
+      'team 2 り雇って挨拶を交わして',
     ])
       expect(isTeamScenarioInput(input), input).toBe(true);
     for (const input of [
@@ -125,6 +130,9 @@ describe('builtin Team skill', () => {
       '/team',
       '/teamworkについて説明して',
       'READMEに /team 調査して と書いて',
+      'our team is great',
+      'team\t で使える？',
+      'The team で is not Japanese',
     ])
       expect(isTeamScenarioInput(input), input).toBe(false);
   });
@@ -191,6 +199,8 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput('チームで編集してください')).toBe(true);
     expect(requiresTeamWorkersInput('Workerを3名雇ってください')).toBe(true);
     expect(requiresTeamWorkersInput('Teamで実行してほしい')).toBe(true);
+    expect(requiresTeamWorkersInput('Team で実行してほしい')).toBe(true);
+    expect(requiresTeamWorkersInput('3 人雇って調査して')).toBe(true);
     expect(requiresTeamWorkersInput('チームでの編集をお願いします')).toBe(true);
     expect(
       requiresTeamWorkersInput('Workerを3名雇って実装してください。完了後に結果を教えて'),
