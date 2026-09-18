@@ -118,7 +118,7 @@ export function createWindowsComputerUseNativeAddon(
           windowsStopRequestKey('close', sessionId, value['cancelEpoch']),
         );
       } finally {
-        client.shutdown();
+        client.shutdownWhenIdle();
       }
     },
   });
@@ -139,6 +139,18 @@ class WindowsComputerUseHelperClient {
 
   shutdown(): void {
     this.abortTransport(new Error('Computer Use Windows helper closed'));
+  }
+
+  /**
+   * The helper's lifetime ends with the session it owns, but Main re-sends an unconfirmed close for
+   * the same session id while the first attempt is still in flight. Tearing the transport down as
+   * soon as that first attempt settles would reject the re-send through `failAll` before the helper
+   * could answer it, and the answer is the only thing that releases Main's input quarantine. The
+   * re-send's own settlement then finds the transport idle and shuts it down; a request that hangs
+   * is still bounded by the per-request timeout, which aborts the transport and kills the helper.
+   */
+  shutdownWhenIdle(): void {
+    if (this.pending.size === 0) this.shutdown();
   }
 
   async call(

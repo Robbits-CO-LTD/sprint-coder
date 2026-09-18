@@ -1851,10 +1851,10 @@ struct MacClosedSessionRecord {
 
 std::unordered_map<std::string, MacClosedSessionRecord> mac_closed_sessions;
 std::vector<std::string> mac_closed_session_order;
-constexpr std::size_t kMacClosedSessionLimit = 16;
+constexpr std::size_t kMaximumClosedMacSessions = 16;
 
-// The caller already holds mac_sessions_mutex: the registry is an extension of the session maps and
-// never takes a lock of its own.
+// The caller already holds mac_sessions_mutex, so this helper takes no lock of its own: the
+// registry is an extension of the session maps and follows their locking.
 void RememberClosingMacSession(const std::string& session_id,
                                const std::shared_ptr<MacComputerUseSession>& session,
                                std::uint64_t cancel_epoch) {
@@ -1863,9 +1863,12 @@ void RememberClosingMacSession(const std::string& session_id,
     existing->second = MacClosedSessionRecord{session, cancel_epoch, 0, false};
     return;
   }
-  while (mac_closed_session_order.size() >= kMacClosedSessionLimit) {
+  while (mac_closed_session_order.size() >= kMaximumClosedMacSessions) {
     // An unconfirmed record is the only way back from a close that lost its receipt, so drop a
-    // drain that is already confirmed first.
+    // drain that is already confirmed first. Only a process whose drains keep failing across many
+    // sequential sessions can fill every slot with unconfirmed records; evicting the oldest of
+    // those puts that one session id back to answering SESSION_MISSING, which is what keeps the
+    // registry bounded.
     auto victim = std::find_if(
         mac_closed_session_order.begin(), mac_closed_session_order.end(),
         [](const std::string& candidate) {
@@ -1881,6 +1884,8 @@ void RememberClosingMacSession(const std::string& session_id,
                               MacClosedSessionRecord{session, cancel_epoch, 0, false});
 }
 
+// Unlike RememberClosingMacSession this runs from the N-API completion callback, which holds no
+// session lock of its own, so it takes mac_sessions_mutex here.
 void ConfirmClosedMacSession(const std::string& session_id, std::uint64_t cancel_epoch,
                              std::uint64_t input_api_attempts) {
   std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
@@ -1919,6 +1924,11 @@ void ExecuteNativeStop(napi_env env, void* data) {
       work->session->dispatch_replay_cache.clear();
       work->session->dispatch_replay_order.clear();
       work->session->inflight_dispatches.clear();
+      // The closed-session registry can hold this session until its close is confirmed, so the
+      // per-observation control signatures are dropped here too. Nothing can dispatch against a
+      // closed session, and only the receipt has to outlive the drain.
+      work->session->semantic_control_signatures.clear();
+      work->session->visual_control_signatures.clear();
     }
     work->input_api_attempts = work->session->input_api_attempts.load(std::memory_order_acquire);
     work->drained = true;

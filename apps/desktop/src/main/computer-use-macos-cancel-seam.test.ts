@@ -125,6 +125,8 @@ struct MacComputerUseSession {
   bool has_observation = false;
   std::vector<std::string> visual_patch_digests, dispatch_replay_order;
   std::unordered_map<std::string, std::string> dispatch_replay_cache, inflight_dispatches;
+  std::unordered_map<std::string, std::string> semantic_control_signatures;
+  std::set<std::string> visual_control_signatures;
 };
 std::shared_ptr<MacComputerUseSession> current = std::make_shared<MacComputerUseSession>();
 std::atomic<std::uint64_t> cancellation_epoch{0};
@@ -242,6 +244,8 @@ CloseOutcome closeRequest(const std::string& sessionId, std::uint64_t cancelEpoc
     return CloseOutcome::kOther;
   }
   if (queue.size() == queued + 1) return CloseOutcome::kQueued;
+  // NativeStopReceipt sets result, sessionId, cancelEpoch, inputAttemptCount and drained, so a
+  // repeat close answered straight away builds exactly five properties and queues nothing.
   return queue.size() == queued && namedProperties == 5 ? CloseOutcome::kReceipt : CloseOutcome::kOther;
 }
 

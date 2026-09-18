@@ -161,6 +161,7 @@ function createFixture(
     visualActionBlocked?: boolean;
     cancelGate?: Promise<void>;
     closeGate?: Promise<void>;
+    unconfirmedCloseAttempts?: number;
     now?: () => number;
     profileRecord?: ComputerAppProfileRecord;
     windowExecutableDigest?: string | null;
@@ -306,6 +307,8 @@ function createFixture(
     },
     close: async () => {
       nativeCloseCount += 1;
+      if (nativeCloseCount <= (options.unconfirmedCloseAttempts ?? 0))
+        throw new Error('native stop is unconfirmed');
       await options.closeGate;
     },
   };
@@ -873,6 +876,30 @@ describe('ComputerUseController', () => {
     await expect(uiStop).resolves.toBeUndefined();
     expect(plannerCancel).toHaveBeenCalledTimes(1);
     expect(fixture.controller.getStatus(started.sessionId)).toBeNull();
+  });
+
+  it('re-sends an unconfirmed close once so a lost close receipt does not disable Computer Use', async () => {
+    // Native answers a repeat close for the same session id, but Stop drops the session handle
+    // right after this, so the re-send has to happen here or the host stays quarantined for the
+    // rest of the process.
+    const recovered = createFixture({ unconfirmedCloseAttempts: 1 });
+    const started = await start(recovered);
+    await recovered.controller.stop(started.sessionId, 'user_stop');
+    expect(recovered.nativeCloseCount()).toBe(2);
+    expect(recovered.statuses.filter(({ state }) => state === 'stopped')).toMatchObject([
+      { stopReason: 'user_stop' },
+    ]);
+    await recovered.controller.dispose();
+
+    // A second unconfirmed answer stays fail-closed and is not retried further.
+    const unconfirmed = createFixture({ unconfirmedCloseAttempts: 2 });
+    const stuck = await start(unconfirmed);
+    await unconfirmed.controller.stop(stuck.sessionId, 'user_stop');
+    expect(unconfirmed.nativeCloseCount()).toBe(2);
+    expect(unconfirmed.statuses.filter(({ state }) => state === 'stopped')).toMatchObject([
+      { stopReason: 'native_unavailable' },
+    ]);
+    await unconfirmed.controller.dispose();
   });
 
   it('accepts only a one-use opaque Main window token and keeps the native handle internal', async () => {

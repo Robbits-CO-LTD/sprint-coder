@@ -1211,9 +1211,20 @@ export class ComputerUseController {
       nativeAcknowledged = false;
       // Stop remains fail-closed even when native acknowledgement is unavailable.
     }
-    await this.deps.native.close(record.native).catch(() => {
-      nativeAcknowledged = false;
-    });
+    // An unconfirmed close keeps the whole native host quarantined, and the session handle is
+    // dropped at the end of this method, so this is the only place that can still re-send the
+    // close. Native answers a repeat close for the same session id: it replays the receipt of a
+    // drain that completed and re-runs a drain that did not. One bounded re-send therefore turns a
+    // close receipt that was lost or arrived late back into a usable host, instead of leaving
+    // Computer Use disabled until the process restarts. A second unconfirmed answer stays
+    // fail-closed and is reported as `native_unavailable`.
+    let nativeClosed = false;
+    for (let attempt = 0; attempt < 2 && !nativeClosed; attempt += 1)
+      nativeClosed = await this.deps.native.close(record.native).then(
+        () => true,
+        () => false,
+      );
+    if (!nativeClosed) nativeAcknowledged = false;
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
         type: 'stop_acknowledged',
