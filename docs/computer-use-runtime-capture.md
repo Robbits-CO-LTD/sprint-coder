@@ -181,6 +181,27 @@ Reader handles are always closed. `logical_values_scanned` reports completed log
 Gzip uses bounded Node zlib output; ZIP uses the existing yauzl dependency with entry/size/total
 bounds, encryption/type refusal and CRC verification. Nothing is extracted to disk. These return
 `decoded_bytes_scanned`, which does not claim to interpret arbitrary inner minidump structures.
+
+A zlib stream has no magic number, so a value whose two header bytes satisfy the CM/CINFO/FCHECK
+rules is inflated under the same bounds, and one that cannot be inflated is left as the raw bytes
+that were already scanned. FDICT is the exception: a body compressed against a preset dictionary
+cannot be read here at all, and ordinary text sets that bit as readily as the other header bits
+(`"(rest of an ordinary line"` does). The body behind the 4-byte DICTID therefore decides. It is
+parsed structurally against RFC 1951 — block headers, code-length and literal/distance code
+tables, symbol walk, references bounded by the window CINFO declares, and termination on a final
+block that is zero-padded and followed by exactly the 4-byte Adler-32 — without decompressing
+anything, bounded to the first 64KiB of the body. A body that parses leaves the surface
+`unavailable`; anything else stays a scanned look-alike. Measured on that rule: 129,640 constructed
+look-alikes (every printable header prefix with FDICT set, every first body byte, ordinary log,
+JSON and Japanese continuations) and 2,000,000 random printable-ASCII values with a forced FDICT
+header produced no misclassification. The cost is in the other direction: a real preset-dictionary
+stream that was cut short, damaged, or stored with trailing bytes is not recognised and falls back
+to a raw scan, the same trade already made for any stream that fails to inflate.
+
+No persistence path in this app writes a preset-dictionary stream. No production source under
+`apps/*/src` or `packages/*/src` imports `node:zlib` or any compression dependency — only tests
+do — SQLite stores values uncompressed, and no crash reporter is configured, so such a stream on
+an inspected surface would have come from outside the app.
 A physical or decoded-byte scan is not proof of logical absence or of a complete sink inventory.
 The protected runner must enumerate
 all relevant files (including SQLite WAL/SHM and rotated files), flush/close the tested processes,
