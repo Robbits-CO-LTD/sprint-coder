@@ -561,6 +561,37 @@ describe('local Computer Use privacy inspection (fixed unit artifacts)', () => {
     },
   );
 
+  it.each(['file', 'sqlite-blob'])(
+    'refuses a preset-dictionary zlib stream whose body runs past the old 64KiB cutoff: %s',
+    async (placement) => {
+      const input = fixture();
+      // The same stream, only large: its body runs well past the 64KiB the parse once stopped at,
+      // which used to leave it counted as a scanned surface holding nothing. Xorshift32 keeps the
+      // payload incompressible, and so the body that size; the plain LCG used a few tests below
+      // loses its low bits past 2^53 and compresses away to a few kilobytes.
+      let state = 20260918;
+      const payload = Buffer.alloc(512 * 1024);
+      for (let index = 0; index < payload.length; index += 1) {
+        state = (state ^ (state << 13)) >>> 0;
+        state = state ^ (state >>> 17);
+        state = (state ^ (state << 5)) >>> 0;
+        payload[index] = 0x20 + (state % 95);
+      }
+      const compressed = deflateSync(payload, {
+        dictionary: Buffer.from('PRIVATE_FIXTURE_typed_text preset dictionary'),
+      });
+      expect(compressed[1]! & 0x20).toBe(0x20);
+      expect(compressed.length - 6).toBeGreaterThan(64 * 1024);
+      const path = input.files[0]!.path;
+      if (placement === 'file') writeFileSync(path, compressed);
+      else writeDatabaseValue(path, compressed);
+      const result = await inspectComputerUsePrivacySurfaces(input);
+      expect(result.surfaces[0]!.state).toBe('unavailable');
+      expect(result.uninspectedSurfaces).toEqual(['database']);
+      expect(result.finalGateEligible).toBe(false);
+    },
+  );
+
   it('refuses a preset-dictionary zlib stream a log file appended after', async () => {
     const input = fixture();
     const payload = input.payloads.find(({ kind }) => kind === 'typed_text')!;

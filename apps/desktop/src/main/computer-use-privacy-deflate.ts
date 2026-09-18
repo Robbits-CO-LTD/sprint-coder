@@ -29,28 +29,36 @@ const MAX_CODE_BITS = 15;
 const END_OF_BLOCK = 256;
 const ZLIB_TRAILER_BYTES = 4;
 /**
- * How far into a body the walk may go on. Reaching it is not evidence either way — a periodic byte
- * pattern decodes into valid symbols for as long as it repeats, and 63 of the 256 constant fills do
- * — so the walk stops there and the value stays a look-alike, exactly as a malformed block leaves
- * it. That bounds the work however large the value is, at the price of not recognising a body that
- * has yet to end by then. It is read between blocks and between symbols, and stored bytes are
- * stepped over rather than walked, so a body made of stored blocks can end some way past it.
- */
-const MAX_PARSED_BYTES = 64 * 1024;
-/**
  * A body that ends as a written one does, but with more bytes stored after it, is taken at its
  * word only once it has run this far. Measured over two million random values with the header
  * forced: accepting a short body with anything after it misreads 7,962 of them, this threshold
  * misreads exactly as few as demanding nothing follow the stream at all.
  */
 const MIN_TRAILED_BODY_BYTES = 1024;
-/** Keeps the bit counter inside 32-bit arithmetic. Callers bound values far below this already. */
+/**
+ * Keeps the bit counter inside 32-bit arithmetic: 64MiB is 2^29 bits, so every bit position, and
+ * every position plus the 15 bits a single code may still ask for, stays far below 2^31 and the
+ * `>>>` and `&` a bit reader is written with cannot overflow. Callers bound values to 16MiB.
+ */
 const MAX_STREAM_BYTES = 64 * 1024 * 1024;
+/**
+ * How much body one file's inspection may walk in total, across every value it looks at. It is
+ * twice the largest value a caller may hand over, so the ordinary bytes of a surface cannot reach
+ * it: a surface is read only up to 16MiB, and no body is ever walked further than it is long.
+ * What can reach it is a chain of nested archives, whose walks would otherwise multiply, and
+ * spending it there settles nothing about the body — which makes it a refusal, the same answer
+ * this decoder already gives when output outgrows its budget, rather than a clean surface.
+ *
+ * It is read between blocks and between symbols, and a stored block is stepped over rather than
+ * walked, so a walk can end up to one block's 65,535 bytes past it. That overshoot happens once
+ * and does not compound: every walk after it short-circuits before reading anything.
+ */
+const MAX_WALK_BYTES = 32 * 1024 * 1024;
 
 /** A canonical Huffman code. `left` is 0 when complete, negative when over-subscribed. */
 type Huffman = { counts: number[]; symbols: number[]; left: number };
-/** How a block ended: as written, or not as a DEFLATE block this parse will vouch for. */
-type Walk = 'block-end' | 'invalid';
+/** How a block ended: as written, not as a block this parse will vouch for, or undecided. */
+type BlockWalk = 'block-end' | 'invalid' | 'budget-spent';
 
 function createBitReader(bytes: Buffer) {
   const totalBits = bytes.length * 8;
@@ -212,7 +220,7 @@ function readDynamicCodes(
 }
 
 /** RFC 1951 §3.2.4: an uncompressed block carries its length and that length's ones complement. */
-function walkStoredBlock(reader: BitReader): Walk {
+function walkStoredBlock(reader: BitReader): BlockWalk {
   reader.align();
   const length = reader.read(16);
   const complement = reader.read(16);
@@ -225,9 +233,10 @@ function walkCompressedBlock(
   literals: Huffman,
   distances: Huffman,
   windowBytes: number,
-): Walk {
+  budget: number,
+): BlockWalk {
   for (;;) {
-    if (reader.parsedBytes() >= MAX_PARSED_BYTES) return 'invalid';
+    if (reader.parsedBytes() >= budget) return 'budget-spent';
     const symbol = decodeSymbol(reader, literals);
     if (symbol < 0) return 'invalid';
     if (symbol === END_OF_BLOCK) return 'block-end';
@@ -248,49 +257,79 @@ function walkCompressedBlock(
   }
 }
 
-/**
- * True when `bytes` parse as the DEFLATE body of a zlib stream whose window is `windowBytes`:
- * every block header is well formed, every symbol is one the format defines, every reference
- * stays inside the window, and the body ends where a written one does — on a final block,
- * zero-padded to its last byte, followed by the 4-byte Adler-32 of RFC 1950 §2.2 and, if the value
- * holds more than that stream, only by bytes that come after a body long enough to be no accident.
- *
- * How it ends is the whole of what keeps ordinary text out, and measurably so: text must decode as
- * symbols and then run out at the one position, and on the one bit, a written stream would. Every
- * other outcome — a malformed block, a cut stream, or a body that runs past the parse budget —
- * leaves the value a look-alike, scanned as the raw bytes it already was. Nothing is ever taken on
- * a prefix alone: a repeating byte pattern decodes into valid symbols for as long as it repeats.
- *
- * Zero padding is not required by RFC 1951, but zlib and the bit writers derived from it pad that
- * way. The cost of these rules is that a real stream which was cut short, damaged, padded some
- * other way, or still running when the walk spends its budget reads as ordinary bytes here, the
- * same trade this decoder already makes for any stream it cannot inflate.
- */
-export function isWellFormedDeflateStream(bytes: Buffer, windowBytes: number): boolean {
-  if (bytes.length === 0 || bytes.length > MAX_STREAM_BYTES) return false;
-  const reader = createBitReader(bytes);
+/** What a walk settled about a body. Only `look-alike` says the bytes were never a stream. */
+type BodyWalk = 'written-stream' | 'look-alike' | 'budget-spent';
+
+function walkBody(reader: BitReader, windowBytes: number, budget: number): BodyWalk {
   for (;;) {
-    if (reader.parsedBytes() >= MAX_PARSED_BYTES) return false;
+    if (reader.parsedBytes() >= budget) return 'budget-spent';
     const header = reader.read(3);
-    if (header < 0) return false;
+    if (header < 0) return 'look-alike';
     const type = header >>> 1;
     // RFC 1951 §3.2.3 reserves BTYPE 3, so these bytes were never a written block.
-    if (type === 3) return false;
-    let walk: Walk;
-    if (type === 0) walk = walkStoredBlock(reader);
+    if (type === 3) return 'look-alike';
+    let block: BlockWalk;
+    if (type === 0) block = walkStoredBlock(reader);
     else {
       const codes = type === 1 ? FIXED : readDynamicCodes(reader);
-      if (codes === undefined) return false;
-      walk = walkCompressedBlock(reader, codes.literals, codes.distances, windowBytes);
+      if (codes === undefined) return 'look-alike';
+      block = walkCompressedBlock(reader, codes.literals, codes.distances, windowBytes, budget);
     }
-    if (walk === 'invalid') return false;
+    if (block !== 'block-end') return block === 'invalid' ? 'look-alike' : 'budget-spent';
     if ((header & 1) !== 1) continue;
-    if (reader.paddingBits() !== 0) return false;
+    if (reader.paddingBits() !== 0) return 'look-alike';
     const trailing = reader.remainingBytes();
-    if (trailing === ZLIB_TRAILER_BYTES) return true;
+    if (trailing === ZLIB_TRAILER_BYTES) return 'written-stream';
     // The value holds more than this stream. Bytes stored after a checksum are ordinary enough —
     // a log file appends — but a short body that merely stopped somewhere is not evidence, so
     // only a body that ran this far vouches for what it claims to be.
-    return trailing > ZLIB_TRAILER_BYTES && reader.parsedBytes() >= MIN_TRAILED_BODY_BYTES;
+    return trailing > ZLIB_TRAILER_BYTES && reader.parsedBytes() >= MIN_TRAILED_BODY_BYTES
+      ? 'written-stream'
+      : 'look-alike';
   }
+}
+
+/**
+ * Opens a walk that one file's inspection uses for every value it examines, so the work they can
+ * ask for together stays bounded rather than multiplying with nesting.
+ *
+ * A walk answers `written-stream` when `bytes` parse as the DEFLATE body of a zlib stream whose
+ * window is `windowBytes`: every block header is well formed, every symbol is one the format
+ * defines, every reference stays inside the window, and the body ends where a written one does —
+ * on a final block, zero-padded to its last byte, followed by the 4-byte Adler-32 of RFC 1950 §2.2
+ * and, if the value holds more than that stream, only by bytes that come after a body long enough
+ * to be no accident. Size never enters into it: a body is walked to its end however large it is,
+ * up to the value ceiling every caller already enforces.
+ *
+ * How it ends is the whole of what keeps ordinary text out, and measurably so: text must decode as
+ * symbols and then run out at the one position, and on the one bit, a written stream would. A
+ * malformed block or a stream cut short answers `look-alike`, and the value is scanned as the raw
+ * bytes it already was. Nothing is ever taken on a prefix alone: a repeating byte pattern decodes
+ * into valid symbols for as long as it repeats, so only the ending decides.
+ *
+ * `budget-spent` is the third answer, and not a verdict on the bytes at all: the shared budget ran
+ * out with the body undecided, which leaves it unread rather than clean.
+ *
+ * Zero padding is not required by RFC 1951, but zlib and the bit writers derived from it pad that
+ * way. The cost of these rules is that a real stream which was cut short, damaged, or padded some
+ * other way reads as ordinary bytes here, the same trade this decoder already makes for any stream
+ * it cannot inflate.
+ */
+export function createDeflateBodyWalk(): (bytes: Buffer, windowBytes: number) => BodyWalk {
+  let spent = 0;
+  return (bytes, windowBytes) => {
+    // Nothing at all was never a stream. A value past the size the bit counter is proved safe for
+    // is a different matter: no caller can produce one, and refusing to look is not the same as
+    // having looked, so it answers as an unfinished walk rather than as ordinary bytes.
+    if (bytes.length === 0) return 'look-alike';
+    if (bytes.length > MAX_STREAM_BYTES || spent >= MAX_WALK_BYTES) return 'budget-spent';
+    const reader = createBitReader(bytes);
+    try {
+      return walkBody(reader, windowBytes, MAX_WALK_BYTES - spent);
+    } finally {
+      // Charged whichever way the walk ended, so a value that spends work and settles nothing
+      // cannot be repeated for free.
+      spent += reader.parsedBytes();
+    }
+  };
 }

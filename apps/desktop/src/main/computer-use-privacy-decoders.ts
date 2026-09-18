@@ -8,7 +8,7 @@ import {
   inflateSync,
 } from 'node:zlib';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
-import { isWellFormedDeflateStream } from './computer-use-privacy-deflate';
+import { createDeflateBodyWalk } from './computer-use-privacy-deflate';
 
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
 const MAX_DECODED_BYTES = 64 * 1024 * 1024;
@@ -37,25 +37,6 @@ function isZlib(bytes: Buffer): boolean {
 
 /** RFC 1950 §2.2: FDICT adds a 4-byte DICTID, so the DEFLATE body starts at byte 6, not byte 2. */
 const ZLIB_DICTIONARY_HEADER_BYTES = 6;
-
-/**
- * FDICT in FLG says the stream was compressed against a preset dictionary. The bit is as weak as
- * the rest of the header, and ordinary text sets it as readily — "(rest of an ordinary line" does
- * — so the body behind it decides: bytes that parse as a written DEFLATE stream, inside the
- * window CINFO declares, were compressed, and no dictionary exists here to read them with. Text
- * that merely matched the header does not parse, and stays a look-alike scanned as raw bytes.
- */
-function usesPresetDictionary(bytes: Buffer): boolean {
-  return (
-    (bytes[1]! & 0x20) !== 0 &&
-    bytes.length > ZLIB_DICTIONARY_HEADER_BYTES &&
-    isWellFormedDeflateStream(
-      bytes.subarray(ZLIB_DICTIONARY_HEADER_BYTES),
-      // RFC 1950 §2.2: CINFO is the base-2 log of the window size, less eight.
-      1 << ((bytes[0]! >>> 4) + 8),
-    )
-  );
-}
 
 /**
  * Containers this decoder cannot open. Searching only their compressed bytes would leave a stored
@@ -93,6 +74,28 @@ type Scanner = ReturnType<typeof createBoundedScanner>;
 function createBoundedScanner(result: Result, visit: Visit) {
   const queue: { bytes: Buffer; depth: number }[] = [];
   let queuedBytes = 0;
+  // One walk per file, because this scanner is built once per file. Building one per value would
+  // hand each of them a fresh budget and give back the amplification the budget exists to stop;
+  // sharing one across files would spend a later file's budget on an earlier one's bytes.
+  const walkDeflateBody = createDeflateBodyWalk();
+  /**
+   * FDICT in FLG says the stream was compressed against a preset dictionary. The bit is as weak as
+   * the rest of the header, and ordinary text sets it as readily — "(rest of an ordinary line"
+   * does — so the body behind it decides: bytes that parse as a written DEFLATE stream, inside the
+   * window CINFO declares, were compressed, and no dictionary exists here to read them with. Text
+   * that merely matched the header does not parse, and stays a look-alike scanned as raw bytes.
+   *
+   * A body that spends the walk budget settled neither, and an unsettled body counts as a
+   * dictionary here: this decoder treats work it could not finish as unread, never as clean.
+   */
+  const usesPresetDictionary = (bytes: Buffer): boolean =>
+    (bytes[1]! & 0x20) !== 0 &&
+    bytes.length > ZLIB_DICTIONARY_HEADER_BYTES &&
+    walkDeflateBody(
+      bytes.subarray(ZLIB_DICTIONARY_HEADER_BYTES),
+      // RFC 1950 §2.2: CINFO is the base-2 log of the window size, less eight.
+      1 << ((bytes[0]! >>> 4) + 8),
+    ) !== 'look-alike';
   // A stream that was cut short, damaged, or written against a dictionary this process does not
   // hold can be read at most up to that point. Whatever comes back is scanned, but the surface
   // must not claim to have been fully read afterwards.
@@ -139,9 +142,11 @@ function createBoundedScanner(result: Result, visit: Visit) {
         // recoverability instead. Reading it raw skips the zlib framing and its checksum, which
         // is exactly the part a damaged stream fails on while its content stays readable.
         //
-        // A preset dictionary is the one failure the bytes themselves settle: the content was
-        // compressed against a dictionary that is not in this process, so nothing here can read
-        // it and the surface stays unread whatever the recovery below yields. Its body still
+        // A preset dictionary is the one failure the body itself answers for: either it parsed as
+        // a written stream, or the walk ran out of budget before that could be ruled out. Both
+        // count as a dictionary, because work that settled nothing must not read as clean, and
+        // either way the content was compressed against a dictionary that is not in this process.
+        // The surface therefore stays unread whatever the recovery below yields. Its body still
         // begins after the DICTID, and reading from there recovers whatever precedes the first
         // reference into the dictionary.
         const dictionary = usesPresetDictionary(archive);
