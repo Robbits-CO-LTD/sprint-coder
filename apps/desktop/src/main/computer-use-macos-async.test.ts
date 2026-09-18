@@ -53,6 +53,32 @@ describe('macOS Computer Use asynchronous native boundary', () => {
     expect(executeSource).not.toMatch(/\bnapi_[a-z_]+\s*\(/u);
   });
 
+  it('settles every deferred it created when the async work cannot be created or queued', () => {
+    const sites = [...source.matchAll(/napi_create_promise\(env, &work->deferred, &promise\)/gu)];
+    expect(sites).toHaveLength(4);
+
+    for (const site of sites) {
+      const promiseOffset = site.index;
+      const queueOffset = source.indexOf('napi_create_async_work', promiseOffset);
+      const releaseOffset = source.indexOf('work.release();', promiseOffset);
+      expect(queueOffset).toBeGreaterThan(promiseOffset);
+      expect(releaseOffset).toBeGreaterThan(queueOffset);
+      const queueSource = source.slice(queueOffset, releaseOffset);
+
+      expect(queueSource).toContain('napi_queue_async_work');
+      expect(queueSource).toContain(
+        'if (work->work != nullptr) napi_delete_async_work(env, work->work);',
+      );
+      // The deferred exists from here on, so the failure path must settle it exactly once and hand
+      // the caller the rejected Promise. Throwing instead would leave the Promise pending forever,
+      // and rejecting plus throwing would report the same failure twice.
+      expect(queueSource).toContain('NativeErrorValue(env, "ASYNC_UNAVAILABLE",');
+      expect(queueSource).toContain('napi_reject_deferred(env, work->deferred, error);');
+      expect(queueSource).toContain('return promise;');
+      expect(queueSource).not.toContain('ThrowNativeError');
+    }
+  });
+
   it('lets cancel advance epochs without waiting for observation state publication', () => {
     const cancelSource = sourceBetween('napi_value Cancel(', 'napi_value Init(');
     const observeWorker = sourceBetweenLast(
