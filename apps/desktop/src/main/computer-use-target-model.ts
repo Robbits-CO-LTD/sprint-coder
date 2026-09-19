@@ -43,9 +43,11 @@ export function sanitizeUntrustedTargetLabel(
     // C0/C1 controls, newlines and tabs included: each one ends a line, so each becomes a space
     // rather than vanishing — dropping them outright would silently weld two words into one.
     .replace(/\p{Cc}/gu, ' ')
-    // The bidi marks, embeddings, overrides, and isolates reorder the text around them; there is no
-    // separator to preserve, so they are removed.
-    .replace(/[‎‏‪-‮⁦-⁩]/gu, '')
+    // The bidi marks, embeddings, overrides, and isolates reorder the text around them, and the
+    // zero-width characters hide text inside it; there is no separator to preserve, so they are
+    // removed. Written as escapes on purpose: a character class made of invisible characters cannot
+    // be reviewed.
+    .replace(/[\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/gu, '')
     .replace(/\s+/gu, ' ')
     .trim();
   const capped = [...stripped].slice(0, maximum).join('').trim();

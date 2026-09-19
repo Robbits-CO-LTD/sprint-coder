@@ -5152,7 +5152,7 @@ const computerTargetUntrustedTextSchema = z
   .refine(
     // Control characters, newlines, and the Unicode bidi overrides are what let a title close the
     // surrounding JSON framing or reorder itself into something that reads as a separate line.
-    (value) => !/[\p{Cc}‪-‮⁦-⁩]/u.test(value),
+    (value) => !/[\p{Cc}\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/u.test(value),
     'Untrusted target label retains control or direction characters',
   );
 
