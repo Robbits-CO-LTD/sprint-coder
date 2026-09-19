@@ -403,6 +403,16 @@ export type ManagedHarnessTurnOptions = Readonly<{
   projectMemory?: boolean;
   skillDrafts?: boolean;
   skillActivation?: boolean;
+  /**
+   * Whether this Turn is the Leader answering the user, and may therefore see the Computer Use
+   * target tools (ADR v2 §5.2.1).
+   *
+   * The registry's audience filter cannot make this call on its own: Team Worker catalogs are built
+   * from this same harness, so every snapshot it produces is the `chat` audience. Default false, and
+   * opted into only where a person is on the other end of the conversation — a Worker or a graph
+   * Mission step has nobody to authorise desktop control.
+   */
+  computerTargets?: boolean;
   mockFixture?: 'approval' | 'command';
   mockTeamFixture?: boolean;
 }>;
@@ -654,7 +664,7 @@ export class ManagedCodingHarness {
       UPDATE_PLAN_TOOL.toolId,
       REQUEST_USER_INPUT_TOOL.toolId,
       ...(this.deps.graphs ? GRAPH_TOOLS.map((tool) => tool.toolId) : []),
-      ...(this.deps.computerTargets === undefined
+      ...(this.deps.computerTargets === undefined || options.computerTargets !== true
         ? []
         : COMPUTER_TARGET_TOOLS.map((tool) => tool.toolId)),
       ...(mockFixture === 'approval' ? [APPROVAL_PROBE_TOOL.toolId] : []),

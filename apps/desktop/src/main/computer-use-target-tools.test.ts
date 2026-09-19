@@ -413,9 +413,13 @@ describe('agent-facing target tool exposure', () => {
     });
   }
 
-  function providerNames(withTargets: boolean): readonly string[] {
+  function providerNames(withTargets: boolean, leaderTurn = true): readonly string[] {
     return harness(withTargets)
-      .startTurn({ taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 }, 'codex')
+      .startTurn(
+        { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 },
+        'codex',
+        leaderTurn ? { computerTargets: true } : {},
+      )
       .entries.map((entry) => entry.providerName);
   }
 
@@ -425,10 +429,18 @@ describe('agent-facing target tool exposure', () => {
     expect(names).not.toContain('computer_stop');
   });
 
-  it('registers both tools when the boundary is present', () => {
+  it('registers both tools on a Leader Turn when the boundary is present', () => {
     const names = providerNames(true);
     expect(names).toContain('computer_list_targets');
     expect(names).toContain('computer_stop');
+  });
+
+  it('withholds both tools from a Turn that is not the Leader answering the user', () => {
+    // Team Worker and graph Mission catalogs come from this same harness, so the registry audience
+    // filter alone would still show them the tools.
+    const names = providerNames(true, false);
+    expect(names).not.toContain('computer_list_targets');
+    expect(names).not.toContain('computer_stop');
   });
 
   it('carries the untrusted-label instruction only when the tools are exposed', () => {

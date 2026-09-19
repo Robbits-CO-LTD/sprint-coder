@@ -6101,6 +6101,8 @@ export class IpcRouter {
         projectMemory: memoryTurn,
         skillDrafts: skillCreatorTurn,
         skillActivation: autoSkills.length > 0,
+        // The Leader Turn, where the user is present to authorise desktop control.
+        computerTargets: true,
       },
     );
     if (kind === 'claude' && toolCatalogSnapshot.entries.length > 0) {
@@ -7874,6 +7876,8 @@ export class IpcRouter {
               projectMemory: memoryTurn,
               skillDrafts: skillCreatorTurn,
               skillActivation: autoSkills.length > 0,
+              // The Leader Turn, where the user is present to authorise desktop control.
+              computerTargets: true,
             },
           )
         : undefined;

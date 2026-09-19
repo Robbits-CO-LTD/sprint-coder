@@ -816,11 +816,21 @@ export class ComputerUseController {
     return resolved.profileId;
   }
 
+  /**
+   * Drops this Task's tokens, and every expired token of any Task.
+   *
+   * An expired token is already unresolvable, so the sweep is about memory rather than authority: a
+   * Task that lists once and never lists again would otherwise leave its entries in the map for the
+   * lifetime of the process.
+   */
   private revokeTargetTokens(taskId: string): void {
+    const now = this.now();
     for (const [token, record] of this.targetTokens)
-      if (record.binding.taskId === taskId) this.targetTokens.delete(token);
+      if (record.binding.taskId === taskId || now >= record.expiresAt)
+        this.targetTokens.delete(token);
     for (const [token, record] of this.targetAppTokens)
-      if (record.binding.taskId === taskId) this.targetAppTokens.delete(token);
+      if (record.binding.taskId === taskId || now >= record.expiresAt)
+        this.targetAppTokens.delete(token);
   }
 
   async start(input: ComputerUseStartRequest): Promise<ComputerUseSessionStatus> {
