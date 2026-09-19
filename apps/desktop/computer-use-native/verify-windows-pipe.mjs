@@ -80,12 +80,17 @@ async function withHelper(run) {
     assert.ok(socket, 'helper pipe was not created');
     const pending = new Map();
     let buffer = Buffer.alloc(0);
+    let failure = null;
+    let closing = false;
     const fail = (error) => {
-      for (const request of pending.values()) request.reject(error);
+      failure ??= error;
+      for (const request of pending.values()) request.reject(failure);
       pending.clear();
     };
     socket.on('error', fail);
-    socket.on('close', () => fail(new Error('helper pipe closed')));
+    socket.on('close', () => {
+      if (!closing) fail(new Error('helper pipe closed'));
+    });
     socket.on('data', (chunk) => {
       try {
         buffer = Buffer.concat([buffer, chunk]);
@@ -113,6 +118,7 @@ async function withHelper(run) {
       }
     });
     const expect = (bytes) => {
+      if (failure !== null) return Promise.reject(failure);
       const id = bytes.subarray(12, 28).toString('hex');
       const response = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
       void response.catch(() => {});
@@ -128,8 +134,10 @@ async function withHelper(run) {
     assert.equal(handshake.type, 2);
     assert.equal(handshake.metadata.apiVersion, 2);
     await run({ socket, send, expect });
+    closing = true;
     socket.destroy();
     assert.deepEqual(await bounded(exited, 'helper exit'), { code: 0, signal: null });
+    if (failure !== null) throw failure;
   } finally {
     socket?.destroy();
     if (child.exitCode === null && child.signalCode === null) child.kill();
