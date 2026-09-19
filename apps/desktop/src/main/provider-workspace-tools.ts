@@ -17,6 +17,11 @@ import { FileRevisionRegistry } from './file-revision';
 import { GraphReadReceipts } from './graph-sources';
 import { GRAPH_TOOLS, registerGraphTools, type GraphToolBoundary } from './graph-tools';
 import {
+  COMPUTER_TARGET_TOOLS,
+  registerComputerTargetTools,
+  type ComputerTargetToolBoundary,
+} from './computer-use-target-tools';
+import {
   createPathGuard,
   openGuardedExistingFile,
   revalidatePathGuard,
@@ -353,6 +358,9 @@ const descriptions = new Map([
   ...GRAPH_TOOLS.map(
     (tool) => [tool.providerName, tool.description] as [string, string | undefined],
   ),
+  ...COMPUTER_TARGET_TOOLS.map(
+    (tool) => [tool.providerName, tool.description] as [string, string | undefined],
+  ),
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -367,6 +375,12 @@ type WorkspaceToolDeps = Readonly<{
   policyEpochFor(taskId: string): number;
   authorizer: ToolAuthorizer;
   graphs?: GraphToolBoundary;
+  /**
+   * Agent-driven Computer Use target discovery (ADR v2 §5.2). Supplied only when both the master
+   * gate and the v2 flag are on, so with the flags off these tools are never registered and the
+   * model never sees a definition it could call.
+   */
+  computerTargets?: ComputerTargetToolBoundary;
   lifecycle?: (event: ManagedToolLifecycleEvent) => void;
   command?: CommandToolBoundary;
   workspaceEdit?: WorkspacePatchDeps;
@@ -435,6 +449,8 @@ export class ManagedCodingHarness {
     registry.register(REQUEST_USER_INPUT_TOOL);
     registry.register(APPROVAL_PROBE_TOOL);
     if (deps.graphs) for (const tool of GRAPH_TOOLS) registry.register(tool);
+    if (deps.computerTargets !== undefined)
+      for (const tool of COMPUTER_TARGET_TOOLS) registry.register(tool);
     if (deps.command !== undefined) registry.register(COMMAND_RUNNER_TOOL);
     if (deps.command !== undefined)
       for (const definition of [
@@ -464,6 +480,8 @@ export class ManagedCodingHarness {
           deps.workspaceFor(context.taskId, context.turnId, control.callId)?.digest ?? null,
         ),
       );
+    if (deps.computerTargets !== undefined)
+      registerComputerTargetTools(this.broker, deps.computerTargets);
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
       this.commandSessions = sessions;
@@ -636,6 +654,9 @@ export class ManagedCodingHarness {
       UPDATE_PLAN_TOOL.toolId,
       REQUEST_USER_INPUT_TOOL.toolId,
       ...(this.deps.graphs ? GRAPH_TOOLS.map((tool) => tool.toolId) : []),
+      ...(this.deps.computerTargets === undefined
+        ? []
+        : COMPUTER_TARGET_TOOLS.map((tool) => tool.toolId)),
       ...(mockFixture === 'approval' ? [APPROVAL_PROBE_TOOL.toolId] : []),
       ...(mockFixture === 'command' && this.commandSandboxAvailable
         ? [COMMAND_RUNNER_TOOL.toolId]

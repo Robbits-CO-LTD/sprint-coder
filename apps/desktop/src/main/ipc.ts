@@ -757,6 +757,7 @@ import {
 } from './connection-identity';
 import {
   multiProviderModelPickerV2Enabled,
+  computerUseAgentDrivenV2Enabled,
   computerUseDesktopV1Enabled,
   projectMultiFolderUxEnabled,
   settingsWorkspaceV2Enabled,
@@ -1671,6 +1672,19 @@ export class IpcRouter {
               (action) => this.updateInstallMutationGate.run(action),
             ),
           }),
+      // Registered only when both Computer Use gates are on, so with the flags off the outer Task
+      // catalog has no definition for these tools at all (ADR v2 §9). `this.computerUseController`
+      // is constructed after this harness, which is why the boundary defers to it lazily.
+      ...(computerUseAgentDrivenV2Enabled()
+        ? {
+            computerTargets: {
+              listTargets: (input, context) =>
+                this.computerUseController.listTargets(input, context),
+              stop: (sessionId, context) =>
+                this.computerUseController.stopForAgent(sessionId, context),
+            },
+          }
+        : {}),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
       recordPlan: (context, items) =>
         this.persistence.recordManagedTurnPlan({
@@ -1804,6 +1818,20 @@ export class IpcRouter {
       persistence: this.persistence,
       native: computerUseNative,
       featureEnabled: () => computerUseDesktopV1Enabled(),
+      agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
+      // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, so a
+      // window title reaches a provider only where the user already agreed to send that app's
+      // screen to that model.
+      providerEgressBindingFor: (taskId) => {
+        const selection = this.persistence.getTaskModelSelection(taskId);
+        // A Task on the workspace default has no explicit pair to compare against, and guessing one
+        // would be guessing what the user consented to. Unknown withholds the labels.
+        return selection === null ||
+          selection.connectionId === null ||
+          selection.requestedModel === null
+          ? null
+          : { connectionId: selection.connectionId, modelId: selection.requestedModel };
+      },
       currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
       canStartSession: (taskId) =>
         this.persistence.getActiveTurnId(taskId) === null &&

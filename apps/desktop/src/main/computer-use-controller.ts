@@ -13,8 +13,13 @@ import {
   computerUseSessionStatusSchema,
   computerUseRoundLimitSchema,
   computerUseWindowCandidateSchema,
+  computerListTargetsOutputSchema,
+  COMPUTER_TARGET_LIST_LIMIT,
   COMPUTER_USE_LIMITS,
   type ComputerAppIdentity,
+  type ComputerListTargetsOutput,
+  type ComputerTarget,
+  type SelectableComputerTarget,
   type ComputerAppProfile,
   type ComputerUseAction,
   type ComputerUseActionResult,
@@ -36,6 +41,14 @@ import {
   isPlanEligibleComputerUseAction,
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
+import {
+  computerTargetUntrustedLabel,
+  resolveComputerTargetAppToken,
+  resolveComputerTargetToken,
+  COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
+  type ComputerTargetAppTokenRecord,
+  type ComputerTargetTokenRecord,
+} from './computer-use-target-model';
 import {
   ToolBroker as MainToolBroker,
   type ToolAuthorizationRequest,
@@ -126,7 +139,6 @@ const COMPUTER_ACT_TOOL = createToolDefinition({
   parallelism: 'serial',
   supportsCancellation: true,
 });
-const COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS = 5 * 60_000;
 const COMPUTER_USE_PLANNER_CANCEL_CLEANUP_TIMEOUT_MS = 1_000;
 export const COMPUTER_USE_MAIN_POLICY_VERSION = 1 as const;
 
@@ -265,6 +277,19 @@ export type ComputerUseControllerDeps = Readonly<{
     }>,
   ) => Promise<ComputerUsePlannerPort> | ComputerUsePlannerPort;
   featureEnabled?: () => boolean;
+  /**
+   * The second, narrower gate for the agent-driven target tools (ADR v2 §9). Absent means off: a
+   * controller wired without it answers `listTargets` and `stopForAgent` as unavailable, so a
+   * mis-wiring cannot quietly expose desktop enumeration.
+   */
+  agentDrivenEnabled?: () => boolean;
+  /**
+   * The provider this Task is currently bound to, for the same egress consent test `start` already
+   * applies. Null means unknown, which withholds every app-authored label.
+   */
+  providerEgressBindingFor?: (
+    taskId: string,
+  ) => Readonly<{ connectionId: string; modelId: string }> | null;
   now?: () => number;
   currentPolicyEpoch?: (taskId: string) => number;
   canStartSession?: (taskId: string) => boolean;
@@ -384,6 +409,9 @@ export class ComputerUseController {
   private readonly planGrantAuthorizedCalls = new Set<string>();
   private readonly pendingApprovals = new Map<string, PendingComputerApproval>();
   private readonly windowCandidatePermits = new Map<string, WindowCandidatePermit>();
+  /** Agent-facing tokens (ADR v2 §5.3). Never persisted, and rotated on every list call. */
+  private readonly targetTokens = new Map<string, ComputerTargetTokenRecord>();
+  private readonly targetAppTokens = new Map<string, ComputerTargetAppTokenRecord>();
   private readonly statusRevisionBySession = new Map<string, number>();
   private readonly startingSessions = new Map<
     string,
@@ -616,6 +644,184 @@ export class ComputerUseController {
       identity: { ...identity, executableDigest: freshExecutableDigest },
       executableDigest: freshExecutableDigest,
     });
+  }
+
+  /**
+   * The agent-facing enumeration (ADR v2 §5.2).
+   *
+   * S2 does not change native, so the only windows that can be enumerated are those of applications
+   * a person already registered — the V1 allow-list. The shape, the tokens, and the privacy rules
+   * are the v2 ones, so S4/S5 can widen the source without widening what crosses the boundary.
+   *
+   * Every call rotates this Task's tokens. That is not tidiness: a token names one window at one
+   * policy epoch and one profile revision, and letting an older set survive a re-enumeration would
+   * leave the agent holding a reference to a window the list no longer describes.
+   */
+  async listTargets(
+    input: Readonly<{ appToken?: string | undefined; refresh?: boolean | undefined }>,
+    context: ToolExecutionContext,
+  ): Promise<ComputerListTargetsOutput> {
+    if (this.disposed) throw new Error('Computer Use controller is disposed');
+    if (this.deps.agentDrivenEnabled?.() !== true)
+      throw new Error('Computer Use agent-driven targets are unavailable');
+    if (!this.availability().available)
+      throw new Error('Computer Use native boundary is unavailable');
+    const policyEpoch = this.currentPolicyEpoch(context.taskId);
+    if (context.policyEpoch !== policyEpoch) throw new Error('Computer Use policy epoch changed');
+    // `refresh` is accepted for the ADR's tool shape; every call re-enumerates from native anyway,
+    // and a cached answer would be a second source of truth for a security decision.
+    const profiles = this.deps.persistence
+      .listComputerAppProfiles()
+      .filter((profile) => !computerUseAppIdentityIsDenied(profile.identity))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const selectedProfileId =
+      input.appToken === undefined
+        ? null
+        : this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
+    this.revokeTargetTokens(context.taskId);
+    const egressBinding = this.deps.providerEgressBindingFor?.(context.taskId) ?? null;
+    const expiresAt = this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS;
+    const targets: ComputerTarget[] = [];
+    let truncated = false;
+    for (const profile of profiles) {
+      if (selectedProfileId !== null && profile.id !== selectedProfileId) continue;
+      // One unreachable application must not blank the whole list; the agent still needs the rest.
+      const windows = await this.listNativeWindows(profile).catch(() => []);
+      const appToken = randomUUID();
+      const appBinding = {
+        taskId: context.taskId,
+        turnId: context.turnId,
+        policyEpoch,
+        platform: profile.platform,
+        appIdentityDigest: profile.identityDigest,
+        profileRevision: profile.revision,
+      } as const;
+      let issued = false;
+      let windowIndex = 0;
+      for (const window of windows.filter(({ eligible }) => eligible !== false)) {
+        windowIndex += 1;
+        if (targets.length >= COMPUTER_TARGET_LIST_LIMIT) {
+          truncated = true;
+          break;
+        }
+        const targetToken = randomUUID();
+        this.targetTokens.set(
+          targetToken,
+          Object.freeze({
+            binding: Object.freeze({
+              ...appBinding,
+              windowIdentityDigest: window.windowIdentityDigest,
+              nativeWindowId: window.windowId,
+            }),
+            profileId: profile.id,
+            expiresAt,
+          }),
+        );
+        issued = true;
+        targets.push({
+          kind: 'selectable',
+          targetToken,
+          appToken,
+          verified: computerTargetVerifiedIdentity(profile),
+          windowIndex,
+          // Only a registered profile can be listed in S2, and registration already consumed a
+          // trusted user activation, so every listed app is granted by construction. S3 replaces
+          // this with the grant table and can then answer false.
+          granted: true,
+          mode: bindComputerUseMaximumMode(profile.mode, window.maximumMode),
+          untrustedLabel:
+            egressBinding !== null &&
+            profile.providerEgressConsent &&
+            profile.connectionId === egressBinding.connectionId &&
+            profile.modelId === egressBinding.modelId
+              ? computerTargetUntrustedLabel(profile.label, window.title)
+              : null,
+        });
+      }
+      if (issued)
+        this.targetAppTokens.set(
+          appToken,
+          Object.freeze({ binding: appBinding, profileId: profile.id, expiresAt }),
+        );
+      if (truncated) break;
+    }
+    return computerListTargetsOutputSchema.parse({ targets, truncated });
+  }
+
+  /**
+   * `computer_stop` (ADR v2 §5.2), restricted to the calling Task's own sessions.
+   *
+   * An unknown session id and another Task's session id fail identically, so a tool call cannot be
+   * used to probe which sessions exist elsewhere.
+   */
+  async stopForAgent(sessionId: string, context: ToolExecutionContext): Promise<void> {
+    if (this.deps.agentDrivenEnabled?.() !== true)
+      throw new Error('Computer Use agent-driven targets are unavailable');
+    const ownerTaskId =
+      this.sessions.get(sessionId)?.status.taskId ??
+      this.startingSessions.get(sessionId)?.taskId ??
+      null;
+    if (ownerTaskId === null || ownerTaskId !== context.taskId)
+      throw new Error('Computer Use session is not owned by this Task');
+    await this.stop(sessionId, 'agent_stop');
+  }
+
+  /**
+   * Resolution seam for S3 and for the binding tests. Returns null for anything that has drifted.
+   */
+  resolveTargetTokenForTest(token: string): ComputerTargetTokenRecord | null {
+    const record = this.targetTokens.get(token);
+    if (record === undefined) return null;
+    return resolveComputerTargetToken(this.targetTokens, token, record.binding, this.now());
+  }
+
+  /** Test seam: registers a session owner without standing up a native session. */
+  registerSessionOwnerForTest(sessionId: string, taskId: string): void {
+    this.startingSessions.set(sessionId, {
+      controller: new AbortController(),
+      reason: null,
+      taskId,
+    });
+  }
+
+  private resolveTargetAppProfileId(
+    appToken: string,
+    context: ToolExecutionContext,
+    policyEpoch: number,
+    profiles: readonly ComputerAppProfileRecord[],
+  ): string {
+    // The stored profile id only selects which profile to validate against; the binding check below
+    // is what decides whether this token is usable, and it covers the Task, Turn, and epoch.
+    const claimed = this.targetAppTokens.get(appToken);
+    const profile =
+      claimed === undefined
+        ? undefined
+        : profiles.find((candidate) => candidate.id === claimed.profileId);
+    const resolved =
+      profile === undefined
+        ? null
+        : resolveComputerTargetAppToken(
+            this.targetAppTokens,
+            appToken,
+            {
+              taskId: context.taskId,
+              turnId: context.turnId,
+              policyEpoch,
+              platform: profile.platform,
+              appIdentityDigest: profile.identityDigest,
+              profileRevision: profile.revision,
+            },
+            this.now(),
+          );
+    if (resolved === null) throw new Error('Computer Use target token is not valid');
+    return resolved.profileId;
+  }
+
+  private revokeTargetTokens(taskId: string): void {
+    for (const [token, record] of this.targetTokens)
+      if (record.binding.taskId === taskId) this.targetTokens.delete(token);
+    for (const [token, record] of this.targetAppTokens)
+      if (record.binding.taskId === taskId) this.targetAppTokens.delete(token);
   }
 
   async start(input: ComputerUseStartRequest): Promise<ComputerUseSessionStatus> {
@@ -1469,6 +1675,9 @@ export class ComputerUseController {
   }
 
   policyEpochChanged(taskId: string): void {
+    // Tokens are bound to the epoch they were issued under, so they are already unusable; dropping
+    // them here keeps the map from holding references the agent can no longer spend.
+    this.revokeTargetTokens(taskId);
     if (this.startingTaskId === taskId)
       this.startingController?.abort(new Error('Computer Use policy changed while starting'));
     for (const starting of this.startingSessions.values())
@@ -1507,6 +1716,8 @@ export class ComputerUseController {
     this.listeners.clear();
     this.statusRevisionBySession.clear();
     this.windowCandidatePermits.clear();
+    this.targetTokens.clear();
+    this.targetAppTokens.clear();
   }
 
   private async run(record: SessionRecord, firstRound = 1): Promise<void> {
@@ -2510,6 +2721,43 @@ function publicProfile(profile: ComputerAppProfileRecord): ComputerAppProfile {
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
   });
+}
+
+/**
+ * The only facts the agent may weigh when choosing a target (ADR v2 §5.2).
+ *
+ * Derived from the stored identity rather than from any display string, and deliberately missing the
+ * executable path, the cdHash, and the digests: those are re-verification inputs for Main and
+ * native, not selection criteria for a model. On Windows the ADR's publisher CN is not part of the
+ * V1 identity, so this answers null rather than passing off a digest as a publisher name.
+ */
+function computerTargetVerifiedIdentity(
+  profile: ComputerAppProfileRecord,
+): SelectableComputerTarget['verified'] {
+  const identity = profile.identity;
+  const text = (key: string): string | null =>
+    typeof identity[key] === 'string' && identity[key].length > 0 ? identity[key] : null;
+  if (profile.platform === 'darwin')
+    return {
+      platform: 'darwin',
+      identityKind:
+        text('teamId') !== null || text('signingIdentifier') !== null
+          ? 'verified-signed'
+          : 'unverified',
+      publisher: text('teamId'),
+      appId: text('bundleId') ?? profile.identityDigest,
+    };
+  return {
+    platform: 'win32',
+    identityKind: text('signerDigest') !== null ? 'verified-signed' : 'unverified',
+    publisher: null,
+    // The leaf name, never the directory that holds it: ADR v2 §5.2 names the leaf as the app id,
+    // and the V1 invariant keeps paths inside Main.
+    appId:
+      text('packageFamilyName') ??
+      text('executablePath')?.split(/[\\/]/u).at(-1) ??
+      profile.identityDigest,
+  };
 }
 
 function computerUseAppIdentityIsDenied(identity: unknown): boolean {

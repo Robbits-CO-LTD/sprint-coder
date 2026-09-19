@@ -4,10 +4,15 @@ import {
   ComputerUseToolRegistry,
   createToolDefinition,
   createToolId,
+  isComputerTargetToolKind,
+  isComputerUseToolKind,
   parseToolId,
   toolValueMatchesSchema,
   verifyToolCatalogSnapshot,
+  type ToolCatalogSnapshot,
   type ToolDefinitionInput,
+  type ToolKind,
+  type ToolRegistryAudience,
 } from './index';
 
 const ECHO_INPUT = {
@@ -44,6 +49,43 @@ function definition(
     ...override,
   });
 }
+
+/**
+ * `team`, `background`, and `managed-coding` have no registry subclass of their own yet, so the
+ * audience filter is only observable through the protected seam. Probing it here fixes the rule
+ * before a future subclass exists, rather than after one leaks the tools.
+ */
+class AudienceProbeRegistry extends ToolRegistry {
+  snapshotFor(audience: ToolRegistryAudience): ToolCatalogSnapshot {
+    return this.createSnapshotForAudience({ providerId: 'mock', workspaceId: null }, audience);
+  }
+
+  byKindFor(kind: ToolKind, audience: ToolRegistryAudience): readonly unknown[] {
+    return this.getByKindForAudience(kind, audience);
+  }
+}
+
+const TARGET_TOOL = createToolDefinition({
+  toolId: createToolId({
+    provider: 'builtin',
+    namespace: 'computer',
+    name: 'list-targets',
+    version: '1',
+  }),
+  providerName: 'computer_list_targets',
+  kind: 'computerTarget',
+  schemaVersion: 1,
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  outputSchema: { type: 'object' },
+  sideEffect: 'control',
+  risk: 'low',
+  requiredCapabilities: ['computer.observe'],
+  executionTarget: 'main',
+  implementationKind: 'built-in',
+  priority: 10,
+  workspaceBinding: { kind: 'none' },
+  providerCompatibility: ['*'],
+});
 
 describe('Tool Registry domain', () => {
   it('uses a stable four-part ToolId and rejects delimiter/path spoofing', () => {
@@ -392,6 +434,55 @@ describe('Computer Use controller registry', () => {
         kind: 'computer',
         sideEffect: 'control',
         requiredCapabilities: ['workspace.read'],
+      }),
+    ).toThrow('ToolKind, side effect, and capability are inconsistent');
+  });
+
+  it('shows a computerTarget tool to the Task agent and to nobody else', () => {
+    const registry = new AudienceProbeRegistry();
+    registry.register(TARGET_TOOL);
+    expect(registry.createSnapshot({ providerId: 'mock', workspaceId: null }).entries).toHaveLength(
+      1,
+    );
+    expect(registry.getByKind('computerTarget')).toHaveLength(1);
+    for (const audience of ['managed-coding', 'team', 'background', 'computer-controller'] as const)
+      expect(registry.snapshotFor(audience).entries).toEqual([]);
+    for (const audience of ['managed-coding', 'team', 'background', 'computer-controller'] as const)
+      expect(registry.byKindFor('computerTarget', audience)).toEqual([]);
+  });
+
+  it('keeps a computerTarget tool out of the Computer Use controller registry', () => {
+    const registry = new ComputerUseToolRegistry();
+    registry.register(TARGET_TOOL);
+    expect(registry.getByKind('computerTarget')).toEqual([]);
+    expect(registry.createSnapshot({ providerId: 'mock', workspaceId: null }).entries).toEqual([]);
+  });
+
+  it('exposes no computerTarget tool when none is registered', () => {
+    const registry = new ToolRegistry();
+    expect(registry.getByKind('computerTarget')).toEqual([]);
+    expect(registry.createSnapshot({ providerId: 'mock', workspaceId: null }).entries).toEqual([]);
+  });
+
+  it('separates the computerTarget kind from the Computer Use controller kind', () => {
+    expect(isComputerTargetToolKind('computerTarget')).toBe(true);
+    expect(isComputerTargetToolKind('computer')).toBe(false);
+    expect(isComputerUseToolKind('computerTarget')).toBe(false);
+  });
+
+  it('requires a Computer capability for a computerTarget tool', () => {
+    expect(() =>
+      definition({
+        kind: 'computerTarget',
+        sideEffect: 'control',
+        requiredCapabilities: ['workspace.read'],
+      }),
+    ).toThrow('ToolKind, side effect, and capability are inconsistent');
+    expect(() =>
+      definition({
+        kind: 'computerTarget',
+        sideEffect: 'read',
+        requiredCapabilities: ['computer.observe'],
       }),
     ).toThrow('ToolKind, side effect, and capability are inconsistent');
   });
