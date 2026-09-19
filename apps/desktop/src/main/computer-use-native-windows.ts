@@ -22,7 +22,12 @@ import type { ComputerUseNativeAddon } from './computer-use-native-types';
 type NativeRecord = Record<string, unknown>;
 export type WindowsComputerUseHelperTrust = Readonly<{
   binaryDigest: string;
-  signerDigest: string;
+  /**
+   * `null` only in a `windows-unsigned-acceptance` build, where the compiled acceptance constant
+   * waived Authenticode signer identity for a package that carries no signer.  Every other trust
+   * field stays mandatory in both modes.
+   */
+  signerDigest: string | null;
   sourceCommit: string;
 }>;
 export type WindowsComputerUseHelperAttestation = Readonly<{
@@ -442,9 +447,11 @@ export function assertWindowsComputerUseSpawnedHelperAttestation(
   expected: WindowsComputerUseHelperTrust,
   actual: WindowsComputerUseHelperAttestation,
 ): void {
+  // Each field is validated on its own so waiving the signer never relaxes the digest or commit
+  // binding that replaces it as the helper's identity.
   if (
     !/^[0-9a-f]{64}$/u.test(expected.binaryDigest) ||
-    !/^[0-9a-f]{64}$/u.test(expected.signerDigest) ||
+    (expected.signerDigest !== null && !/^[0-9a-f]{64}$/u.test(expected.signerDigest)) ||
     !/^[0-9a-f]{40}$/u.test(expected.sourceCommit)
   )
     throw new Error('Computer Use Windows helper trust binding is invalid');
@@ -452,6 +459,7 @@ export function assertWindowsComputerUseSpawnedHelperAttestation(
     throw new Error('Computer Use Windows helper image path mismatch');
   if (actual.binaryDigest !== expected.binaryDigest)
     throw new Error('Computer Use Windows helper binary digest mismatch');
+  if (expected.signerDigest === null) return;
   if (actual.signatureStatus !== 'Valid' || !/^[0-9A-F]{40}$/u.test(actual.signerThumbprint))
     throw new Error('Computer Use Windows helper signer is invalid');
   const signerDigest = createHash('sha256').update(actual.signerThumbprint, 'utf8').digest('hex');

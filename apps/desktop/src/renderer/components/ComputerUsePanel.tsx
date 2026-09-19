@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   bindComputerUseMaximumMode,
   bindComputerUsePolicyLanguage,
+  type ComputerUseAcceptanceMode,
   type ComputerUseApprovalDecision,
   type ComputerUseMode,
   type ComputerUsePolicyLanguage,
@@ -103,6 +104,28 @@ export type ComputerUseUnavailableView = Readonly<{
   control: boolean;
   reasonCode: string | null;
 }>;
+
+/**
+ * An acceptance-only build waives Windows signer verification, so it must never be mistaken for a
+ * release. The notice stays on screen for the whole Computer Use surface, whatever the availability
+ * state or the feature flag says.
+ */
+export function ComputerUseAcceptanceBuildNotice({
+  acceptanceMode,
+}: {
+  acceptanceMode: ComputerUseAcceptanceMode | null;
+}) {
+  if (acceptanceMode === null) return null;
+  return (
+    <aside className="computer-use-acceptance-build" role="status">
+      <ShieldAlert size={16} />
+      <p>
+        受入れ専用ビルドです。Windowsの署名者検証を免除しています（<code>{acceptanceMode}</code>
+        ）。配布しないでください。
+      </p>
+    </aside>
+  );
+}
 
 export function ComputerUseUnavailableNotice({
   availability,

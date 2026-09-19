@@ -6,8 +6,18 @@ import { join, resolve } from 'node:path';
 import { createPackage as createAsarPackage, uncache as uncacheAsar } from '@electron/asar';
 import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import { describe, expect, it } from 'vitest';
+import {
+  COMPUTER_USE_ACCEPTANCE_BUILD_ENV,
+  COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
+  COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME,
+  computerUseAcceptanceBuildForEnv,
+} from './computer-use-acceptance-build';
+import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './src/main/computer-use-acceptance-mode';
 import config, {
+  assertComputerUseAcceptanceBuildAllowed,
+  assertPackagedComputerUseAcceptanceConsistency,
   assertNativePackagingHost,
+  writeComputerUseAcceptanceBuildReceipt,
   createDMGContents,
   DMG_BACKGROUND_PATH,
   DMG_ICON_SIZE,
@@ -28,6 +38,7 @@ import config, {
 } from './forge.config';
 import {
   macAutoUpdateEligibleForIdentity,
+  computerUseAcceptanceBuildForBuild,
   computerUseNativePinForBuild,
   managedLocalSidecarPinsForBuild,
 } from './vite.main.config';
@@ -518,5 +529,110 @@ describe('release artifacts', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Computer Use acceptance-only build mode', () => {
+  const acceptanceEnvironment = {
+    [COMPUTER_USE_ACCEPTANCE_BUILD_ENV]: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+  };
+
+  it('names the build variable the release workflow must never set', () => {
+    expect(COMPUTER_USE_ACCEPTANCE_BUILD_ENV).toBe('SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD');
+    expect(COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME).toBe('computer-use-acceptance-build.json');
+  });
+
+  it('enables the mode only for the exact value on a Windows build host', () => {
+    expect(computerUseAcceptanceBuildForEnv({}, 'win32')).toBeNull();
+    expect(computerUseAcceptanceBuildForEnv({ ...acceptanceEnvironment }, 'win32')).toEqual({
+      mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+      marker: COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
+    });
+    expect(() =>
+      computerUseAcceptanceBuildForEnv({ [COMPUTER_USE_ACCEPTANCE_BUILD_ENV]: '1' }, 'win32'),
+    ).toThrow('acceptance build mode');
+    expect(() => computerUseAcceptanceBuildForEnv({ ...acceptanceEnvironment }, 'darwin')).toThrow(
+      'Windows build host',
+    );
+  });
+
+  it('bakes the compiled acceptance payload into Main only for an acceptance build', () => {
+    expect(computerUseAcceptanceBuildForBuild({}, 'win32')).toBeNull();
+    expect(computerUseAcceptanceBuildForBuild({ ...acceptanceEnvironment }, 'win32')).toMatchObject(
+      {
+        marker: COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
+      },
+    );
+  });
+
+  it('refuses to produce a release package from an acceptance build', () => {
+    expect(() =>
+      assertComputerUseAcceptanceBuildAllowed(
+        { ...acceptanceEnvironment, SPRINT_CODER_RELEASE: '1' },
+        'win32',
+      ),
+    ).toThrow('release');
+    expect(() =>
+      assertComputerUseAcceptanceBuildAllowed({ SPRINT_CODER_RELEASE: '1' }, 'win32'),
+    ).not.toThrow();
+    expect(() =>
+      assertComputerUseAcceptanceBuildAllowed({ ...acceptanceEnvironment }, 'win32'),
+    ).not.toThrow();
+  });
+
+  it('writes the paste-able receipt only for a Windows acceptance package', () => {
+    const resources = mkdtempSync(resolve(tmpdir(), 'sprint-coder-acceptance-receipt-'));
+    try {
+      const sourceCommit = 'a'.repeat(40);
+      expect(writeComputerUseAcceptanceBuildReceipt(resources, 'darwin', sourceCommit, {})).toBe(
+        false,
+      );
+      expect(writeComputerUseAcceptanceBuildReceipt(resources, 'win32', sourceCommit, {})).toBe(
+        false,
+      );
+      expect(existsSync(resolve(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME))).toBe(
+        false,
+      );
+
+      expect(
+        writeComputerUseAcceptanceBuildReceipt(resources, 'win32', sourceCommit, {
+          ...acceptanceEnvironment,
+        }),
+      ).toBe(true);
+      expect(
+        JSON.parse(
+          readFileSync(resolve(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME), 'utf8'),
+        ),
+      ).toEqual({ mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE, sourceCommit });
+    } finally {
+      rmSync(resources, { recursive: true, force: true });
+    }
+  });
+
+  it('requires the packaged Main bundle and the receipt to agree about the mode', () => {
+    expect(() =>
+      assertPackagedComputerUseAcceptanceConsistency('main-without-marker', false, null),
+    ).not.toThrow();
+    expect(() =>
+      assertPackagedComputerUseAcceptanceConsistency(
+        `main ${COMPUTER_USE_ACCEPTANCE_BUILD_MARKER} bundle`,
+        true,
+        COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertPackagedComputerUseAcceptanceConsistency(
+        `main ${COMPUTER_USE_ACCEPTANCE_BUILD_MARKER} bundle`,
+        false,
+        null,
+      ),
+    ).toThrow('acceptance');
+    expect(() =>
+      assertPackagedComputerUseAcceptanceConsistency(
+        'main-without-marker',
+        true,
+        COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+      ),
+    ).toThrow('acceptance');
   });
 });

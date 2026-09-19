@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './computer-use-acceptance-mode';
 import {
   computerUseNativeCloseReceiptSchema,
   computerUseNativeInputReceiptSchema,
@@ -217,4 +218,62 @@ describe('Issue #333 parent availability integration', () => {
       await controller.dispose();
     },
   );
+});
+
+describe('Issue #387 acceptance-only Windows build mode', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps unsigned Windows denied at Main when the build mode is absent', async () => {
+    const fixture = nativeFixture('win32', false);
+    const { controller, plannerFactory, unexpectedPersistence } = controllerFor(
+      fixture.binding,
+      () => true,
+    );
+
+    expect(controller.availability()).toMatchObject({
+      state: 'unsigned_package',
+      available: false,
+      acceptanceMode: null,
+    });
+    await expect(controller.start(start)).rejects.toThrow('native boundary is unavailable');
+    expect(plannerFactory).not.toHaveBeenCalled();
+    expect(unexpectedPersistence).not.toHaveBeenCalled();
+    await controller.dispose();
+  });
+
+  it('reports the acceptance build to Main while unsigned Windows becomes usable', async () => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__', {
+      mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+      marker: 'compiled-acceptance-build-fixture',
+    });
+    const fixture = nativeFixture('win32', false);
+    const { controller } = controllerFor(fixture.binding, () => true);
+
+    expect(controller.availability()).toMatchObject({
+      state: 'ready',
+      packageReady: true,
+      available: true,
+      control: true,
+      acceptanceMode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+    });
+    await controller.dispose();
+  });
+
+  it('leaves the acceptance build with no effect on ad-hoc macOS', async () => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__', {
+      mode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+      marker: 'compiled-acceptance-build-fixture',
+    });
+    const fixture = nativeFixture('darwin', false);
+    const { controller } = controllerFor(fixture.binding, () => true);
+
+    expect(fixture.binding.probe.reason).toBe('MACOS_SIGNATURE_REQUIRED');
+    expect(controller.availability()).toMatchObject({
+      state: 'unsigned_package',
+      available: false,
+    });
+    await controller.dispose();
+  });
 });

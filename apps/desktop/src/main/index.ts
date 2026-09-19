@@ -28,6 +28,7 @@ import {
   NativeSafeFsError,
   type NativeSafeFs,
 } from './native-safe-fs';
+import { computerUseCompiledAcceptanceMode } from './computer-use-acceptance-mode';
 import { loadComputerUseNative } from './computer-use-native';
 import { createComputerUseNativeHost } from './computer-use-native-host';
 import { createComputerUseCaptureOutput } from './computer-use-capture-output';
@@ -191,6 +192,18 @@ if (squirrelStartup || !hasLock) {
             }
           : {},
       );
+      const computerUseAcceptanceMode = computerUseCompiledAcceptanceMode();
+      if (computerUseAcceptanceMode !== null)
+        secureLogger.warn(
+          'Computer Use acceptance build waives Windows signer verification',
+          {
+            process: 'main',
+            acceptanceMode: computerUseAcceptanceMode,
+            platform: process.platform,
+            sourceCommit: computerUseBinding.manifest.sourceCommit,
+          },
+          { event: 'system.computer-use.acceptance-build', status: 'completed' },
+        );
       const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
       persistence = new SqlitePersistenceClient(
         databasePath,

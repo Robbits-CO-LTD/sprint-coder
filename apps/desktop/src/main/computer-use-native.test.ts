@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE } from './computer-use-acceptance-mode';
 import {
   COMPUTER_USE_NATIVE_FEATURE_FLAG,
   evaluateComputerUseNativeGate,
@@ -1543,5 +1544,288 @@ describe('Computer Use native manifest and runtime gate', () => {
       reason: 'SOURCE_COMMIT_MISMATCH',
     });
     expect(binding.addon).toBeNull();
+  });
+});
+
+describe('Computer Use windows-unsigned-acceptance build mode', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Emulates the Vite `define` that bakes the acceptance mode into the packaged Main bundle.
+  // Production has no other way to set it; no runtime input reaches this constant.
+  const compileAcceptanceBuild = (mode: string = COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE) => {
+    vi.stubGlobal('__SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__', {
+      mode,
+      marker: 'compiled-acceptance-build-fixture',
+    });
+  };
+
+  const windowsProbe = (sourceCommit = 'f'.repeat(40)) => ({
+    protocolVersion: 1,
+    apiVersion: 2,
+    sourceCommit,
+    platform: 'win32',
+    napiVersion: 10,
+    available: true,
+    backend: 'windows-uia-graphics-capture-sendinput',
+  });
+
+  const loadWindowsFixture = (
+    fixture: ReturnType<typeof packageFixture>,
+    overrides: Parameters<typeof loadComputerUseNative>[0] = {},
+  ) =>
+    loadComputerUseNative({
+      environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+      dirname: fixture.packagedDirname,
+      resourcesPath: fixture.resources,
+      platform: 'win32',
+      architecture: 'x64',
+      probeHelper: () => windowsProbe(),
+      ...overrides,
+    });
+
+  it('keeps an ordinary unsigned Windows package fail-closed when the build mode is absent', () => {
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+    const verifySignature = vi.fn(() => 'a'.repeat(64));
+    const binding = loadWindowsFixture(fixture, { verifySignature });
+
+    expect(binding.probe).toMatchObject({
+      available: false,
+      reason: 'WINDOWS_SIGNATURE_REQUIRED',
+    });
+    expect(binding.addon).toBeNull();
+    expect(verifySignature).not.toHaveBeenCalled();
+    expect(
+      createComputerUseNativeHost(binding, 'win32', {
+        windowsPhysicalBoundsToDip: (bounds) => bounds,
+      }).availability(),
+    ).toMatchObject({
+      state: 'unsigned_package',
+      packageReady: false,
+      available: false,
+      acceptanceMode: null,
+    });
+  });
+
+  it.each([
+    [
+      'runtime environment',
+      { SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD: 'windows-unsigned-acceptance' },
+    ],
+    ['legacy opt-in shape', { SPRINT_CODER_COMPUTER_USE_UNSIGNED_WINDOWS_ACCEPTANCE: '1' }],
+  ])('cannot be enabled from the %s alone', (_label, extraEnvironment) => {
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+    const binding = loadWindowsFixture(fixture, {
+      environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1', ...extraEnvironment },
+    });
+
+    expect(binding.probe.reason).toBe('WINDOWS_SIGNATURE_REQUIRED');
+    expect(binding.addon).toBeNull();
+  });
+
+  it('cannot be enabled by rewriting the packaged native manifest', () => {
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+    const manifestPath = join(fixture.resources, 'computer-use-native.manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({ ...manifest, acceptanceMode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE }),
+    );
+
+    expect(loadWindowsFixture(fixture).probe.reason).toBe('MANIFEST_UNAVAILABLE');
+  });
+
+  it('ignores an acceptance mode supplied as gate input', () => {
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+    const manifest = JSON.parse(
+      readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
+    ) as Record<string, unknown>;
+
+    expect(
+      evaluateComputerUseNativeGate({
+        featureFlag: true,
+        packaged: true,
+        platform: 'win32',
+        manifest,
+        acceptanceMode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+        artifactDigest: manifest['binaryDigest'],
+        probe: windowsProbe(),
+      }),
+    ).toMatchObject({ available: false, reason: 'WINDOWS_SIGNATURE_REQUIRED' });
+  });
+
+  it('admits an unsigned Windows helper whose measured bytes match the compiled build', () => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+    const verifySignature = vi.fn(() => 'a'.repeat(64));
+    const binding = loadWindowsFixture(fixture, { verifySignature });
+
+    expect(binding.probe.available).toBe(true);
+    expect(binding.addon).not.toBeNull();
+    // The waiver removes the signer question only; nothing asks Authenticode anything.
+    expect(verifySignature).not.toHaveBeenCalled();
+    expect(
+      createComputerUseNativeHost(binding, 'win32', {
+        windowsPhysicalBoundsToDip: (bounds) => bounds,
+      }).availability(),
+    ).toMatchObject({
+      state: 'ready',
+      packageReady: true,
+      handshakeReady: true,
+      observe: true,
+      control: true,
+      available: true,
+      acceptanceMode: COMPUTER_USE_WINDOWS_UNSIGNED_ACCEPTANCE,
+    });
+  });
+
+  it('still rejects an unsigned Windows helper whose bytes do not match the manifest', () => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+    writeFileSync(fixture.artifactPath, Buffer.from('tampered-native-fixture'));
+
+    expect(loadWindowsFixture(fixture).probe).toMatchObject({
+      available: false,
+      reason: 'ARTIFACT_DIGEST_MISMATCH',
+    });
+  });
+
+  it('still rejects an unsigned Windows helper built from another source commit', () => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+
+    expect(
+      loadWindowsFixture(fixture, { probeHelper: () => windowsProbe('e'.repeat(40)) }).probe,
+    ).toMatchObject({ available: false, reason: 'SOURCE_COMMIT_MISMATCH' });
+  });
+
+  it.each([
+    ['a mismatched signer', () => 'b'.repeat(64), 'ARTIFACT_SIGNATURE_MISMATCH'],
+    ['an unverifiable signer', () => null, 'ARTIFACT_SIGNATURE_MISMATCH'],
+  ])('verifies %s normally when the package is signed', (_label, verifySignature, reason) => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'win32', trust: 'authenticode' });
+    const verify = vi.fn(verifySignature);
+
+    expect(loadWindowsFixture(fixture, { verifySignature: verify }).probe).toMatchObject({
+      available: false,
+      reason,
+    });
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a signed Windows package fully verified even in an acceptance build', () => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'win32', trust: 'authenticode' });
+    const verifySignature = vi.fn(() => 'a'.repeat(64));
+
+    expect(loadWindowsFixture(fixture, { verifySignature }).probe.available).toBe(true);
+    expect(verifySignature).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves ad-hoc macOS packages denied in an acceptance build', () => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'darwin', trust: 'ad-hoc' });
+    const binding = loadComputerUseNative({
+      environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+      dirname: fixture.packagedDirname,
+      resourcesPath: fixture.resources,
+      platform: 'darwin',
+      architecture: 'arm64',
+      requireAddon: () => ({ probe: () => ({}) }),
+      verifySignature: () => 'a'.repeat(64),
+    });
+
+    expect(binding.probe).toMatchObject({
+      available: false,
+      reason: 'MACOS_SIGNATURE_REQUIRED',
+    });
+    expect(binding.addon).toBeNull();
+  });
+
+  it('leaves a source checkout unpackaged in an acceptance build', () => {
+    compileAcceptanceBuild();
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+
+    expect(loadWindowsFixture(fixture, { dirname: fixture.root }).probe.reason).toBe(
+      'PACKAGED_RUNTIME_REQUIRED',
+    );
+  });
+
+  it('ignores an unrecognized compiled acceptance mode', () => {
+    compileAcceptanceBuild('windows-unsigned-acceptance-v2');
+    const fixture = packageFixture({ platform: 'win32', trust: 'unsigned' });
+
+    expect(loadWindowsFixture(fixture).probe.reason).toBe('WINDOWS_SIGNATURE_REQUIRED');
+  });
+
+  it('keeps every non-signer helper trust field mandatory while the signer is waived', () => {
+    const waived = {
+      binaryDigest: 'b'.repeat(64),
+      signerDigest: null,
+      sourceCommit: 'f'.repeat(40),
+    } as const;
+    const attestation = {
+      imagePath: 'C:\\App\\resources\\sprint-coder-computer-use-host.exe',
+      binaryDigest: waived.binaryDigest,
+      signatureStatus: 'NotSigned',
+      signerThumbprint: '',
+    } as const;
+
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(attestation.imagePath, waived, attestation),
+    ).not.toThrow();
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(
+        'C:\\App\\resources\\other-helper.exe',
+        waived,
+        attestation,
+      ),
+    ).toThrow('image path mismatch');
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(attestation.imagePath, waived, {
+        ...attestation,
+        binaryDigest: 'c'.repeat(64),
+      }),
+    ).toThrow('binary digest mismatch');
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(
+        attestation.imagePath,
+        { ...waived, binaryDigest: 'not-a-digest' },
+        attestation,
+      ),
+    ).toThrow('trust binding is invalid');
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(
+        attestation.imagePath,
+        { ...waived, sourceCommit: 'not-a-commit' },
+        attestation,
+      ),
+    ).toThrow('trust binding is invalid');
+    expect(() =>
+      assertWindowsComputerUseHelperHandshake(
+        { protocolVersion: 1, apiVersion: 2, platform: 'win32', sourceCommit: 'e'.repeat(40) },
+        waived,
+      ),
+    ).toThrow('source commit mismatch');
+  });
+
+  it('keeps signer verification mandatory for a signed helper trust binding', () => {
+    const signed = {
+      binaryDigest: 'b'.repeat(64),
+      signerDigest: 'a'.repeat(64),
+      sourceCommit: 'f'.repeat(40),
+    } as const;
+    const imagePath = 'C:\\App\\resources\\sprint-coder-computer-use-host.exe';
+
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(imagePath, signed, {
+        imagePath,
+        binaryDigest: signed.binaryDigest,
+        signatureStatus: 'NotSigned',
+        signerThumbprint: '',
+      }),
+    ).toThrow('signer is invalid');
   });
 });

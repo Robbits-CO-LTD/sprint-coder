@@ -7,6 +7,7 @@ import {
   computerUseNativeManifestSchema,
   type ComputerUseNativeManifest,
 } from '@sprint-coder/contracts';
+import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
   createWindowsComputerUseNativeAddon,
   windowsHelperEnvironment,
@@ -157,7 +158,13 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   }
   if (parsed.signerDigest === null && parsed.platform === 'darwin')
     return DENIED_PROBE('MACOS_SIGNATURE_REQUIRED');
-  if (parsed.signerDigest === null && parsed.platform === 'win32')
+  // The waiver is read from the compiled acceptance constant, never from this input, so no caller
+  // can hand the gate an acceptance mode it was not built with.
+  if (
+    parsed.signerDigest === null &&
+    parsed.platform === 'win32' &&
+    !computerUseWindowsSignerWaived('win32', parsed.signerDigest)
+  )
     return DENIED_PROBE('WINDOWS_SIGNATURE_REQUIRED');
   if (!parsed.capabilities.includes('observe')) return DENIED_PROBE('OBSERVATION_UNSUPPORTED');
   if (!isProbe(probe)) return DENIED_PROBE('HANDSHAKE_INVALID');
@@ -251,7 +258,8 @@ export function loadComputerUseNative(
   }
   if (manifest.signerDigest === null && platform === 'darwin')
     return deniedBinding('MACOS_SIGNATURE_REQUIRED', manifest, artifactPath);
-  if (manifest.signerDigest === null && platform === 'win32')
+  const signerWaived = computerUseWindowsSignerWaived(platform, manifest.signerDigest);
+  if (manifest.signerDigest === null && platform === 'win32' && !signerWaived)
     return deniedBinding('WINDOWS_SIGNATURE_REQUIRED', manifest, artifactPath);
   try {
     const stat = lstatSync(artifactPath);
@@ -267,14 +275,18 @@ export function loadComputerUseNative(
         !computerUseNativeCompiledPinMatches(compiledPin.value, manifest, digest))
     )
       return deniedBinding('COMPILED_PROVENANCE_MISMATCH', manifest, artifactPath, digest);
-    const resourcesPath = options.resourcesPath ?? process.resourcesPath;
-    const verifiedSigner = (options.verifySignature ?? verifyComputerUseNativeSignature)(
-      platform,
-      artifactPath,
-      resourcesPath,
-    );
-    if (verifiedSigner === null || verifiedSigner !== manifest.signerDigest)
-      return deniedBinding('ARTIFACT_SIGNATURE_MISMATCH', manifest, artifactPath, digest);
+    // A signed package keeps the full signer check even in an acceptance build; only a package
+    // that carries no signer at all skips the question it cannot answer.
+    if (!signerWaived) {
+      const resourcesPath = options.resourcesPath ?? process.resourcesPath;
+      const verifiedSigner = (options.verifySignature ?? verifyComputerUseNativeSignature)(
+        platform,
+        artifactPath,
+        resourcesPath,
+      );
+      if (verifiedSigner === null || verifiedSigner !== manifest.signerDigest)
+        return deniedBinding('ARTIFACT_SIGNATURE_MISMATCH', manifest, artifactPath, digest);
+    }
     const raw = loadRawBinding(platform, artifactPath, manifest, options);
     const nativeProbe = parseNativeProbe(raw.probe());
     const handshake = raw.handshake?.({ protocolVersion: 1, apiVersion: 2, featureFlag: true });
@@ -439,7 +451,11 @@ function loadRawBinding(
       return JSON.parse(text) as unknown;
     });
   const value = probeHelper(artifactPath);
-  if (manifest.signerDigest === null) throw new Error('WINDOWS_SIGNATURE_REQUIRED');
+  if (
+    manifest.signerDigest === null &&
+    !computerUseWindowsSignerWaived(platform, manifest.signerDigest)
+  )
+    throw new Error('WINDOWS_SIGNATURE_REQUIRED');
   return createWindowsComputerUseNativeAddon(artifactPath, value, {
     binaryDigest: manifest.binaryDigest,
     signerDigest: manifest.signerDigest,

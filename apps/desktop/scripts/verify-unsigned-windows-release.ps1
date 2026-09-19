@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-  [switch]$RenamePortableZip
+  [switch]$RenamePortableZip,
+  # Acceptance builds must prove the Computer Use helper itself is unsigned, because the
+  # windows-unsigned-acceptance mode waives exactly that helper's signer verification.
+  [switch]$RequireUnsignedComputerUseHelper
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +49,25 @@ if ($appSignature.Status -ne 'NotSigned') {
 }
 if ((Get-Content -Raw -LiteralPath $releasesFile) -notmatch [regex]::Escape($nupkgName)) {
   throw 'RELEASES does not reference the expected full nupkg.'
+}
+
+if ($RequireUnsignedComputerUseHelper) {
+  $packagedResources = Join-Path $desktopRoot 'out\Sprint Coder-win32-x64\resources'
+  $helper = Join-Path $packagedResources 'sprint-coder-computer-use-host.exe'
+  $nativeManifest = Join-Path $packagedResources 'computer-use-native.manifest.json'
+  foreach ($path in @($helper, $nativeManifest)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "Required packaged Computer Use artifact was not found: $path"
+    }
+  }
+  $helperSignature = Get-AuthenticodeSignature -LiteralPath $helper
+  if ($helperSignature.Status -ne 'NotSigned') {
+    throw "Expected an explicitly unsigned Computer Use helper, got $($helperSignature.Status)."
+  }
+  $signerDigest = (Get-Content -Raw -LiteralPath $nativeManifest | ConvertFrom-Json).signerDigest
+  if ($null -ne $signerDigest) {
+    throw 'Packaged Computer Use native manifest records a signer for an unsigned helper.'
+  }
 }
 
 if ($RenamePortableZip -and (Test-Path -LiteralPath $portableSource -PathType Leaf)) {

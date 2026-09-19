@@ -477,6 +477,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows release build failed.' }
           ./scripts/verify-unsigned-windows-release.ps1 -RenamePortableZip
 
+      - name: Reject a Computer Use acceptance build in a release package
+        working-directory: apps/desktop
+        run: node scripts/verify-computer-use-acceptance-build.mjs --expect absent
+
       - name: Remove temporary macOS signing credentials
         if: always() && runner.os == 'macOS'
         shell: bash
@@ -592,6 +596,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Inno Setup verification failed.' }
           npm run make:windows
           if ($LASTEXITCODE -ne 0) { throw 'Signed Windows gate build failed.' }
+
+      - name: Reject a Computer Use acceptance build in a release package
+        working-directory: apps/desktop
+        run: node scripts/verify-computer-use-acceptance-build.mjs --expect absent
 
       - name: Verify signed Windows gate artifacts
         shell: pwsh

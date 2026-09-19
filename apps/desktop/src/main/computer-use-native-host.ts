@@ -25,6 +25,10 @@ import type {
   ComputerUseNativeSession,
   ComputerUseNativeWindow,
 } from './computer-use-controller';
+import {
+  computerUseCompiledAcceptanceMode,
+  computerUseWindowsSignerWaived,
+} from './computer-use-acceptance-mode';
 import type { ComputerUseNativeBinding, ComputerUseNativeAddon } from './computer-use-native';
 import {
   ComputerUseAccessibilityTreeError,
@@ -103,10 +107,12 @@ export function createComputerUseNativeHost(
 ): ComputerUseNativeHost {
   const addon = binding.addon;
   const runtimePlatform = runtimePlatformFor(platform);
+  const acceptanceMode = computerUseCompiledAcceptanceMode();
   const packageReady =
     binding.artifactPath !== null &&
     binding.manifest.nativeVersion !== 'disabled' &&
-    binding.manifest.signerDigest !== null;
+    (binding.manifest.signerDigest !== null ||
+      computerUseWindowsSignerWaived(platform, binding.manifest.signerDigest));
   const pickerReady = hasMethod(addon, 'pickApplication');
   const coordinateReady = platform !== 'win32' || options.windowsPhysicalBoundsToDip !== undefined;
   const controllerReady =
@@ -236,6 +242,7 @@ export function createComputerUseNativeHost(
       return computerUseAvailabilitySchema.parse({
         platform: runtimePlatform,
         state,
+        acceptanceMode,
         // The feature flag itself is evaluated by ComputerUseController. This native seam reports
         // only package/protocol/native facts and leaves the exact opt-in gate to Main.
         featureEnabled: true,
