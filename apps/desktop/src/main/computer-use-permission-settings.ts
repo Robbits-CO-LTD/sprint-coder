@@ -63,15 +63,20 @@ export function createComputerUsePermissionSettingsOpener(
         at - lastOpenedAtMs < COMPUTER_USE_PERMISSION_SETTINGS_MIN_INTERVAL_MS
       )
         return Object.freeze({ opened: false });
+      // Claim the window before awaiting the OS: two clicks that arrive while the first
+      // `openExternal` is still in flight would otherwise both pass the check above.
+      const previousOpenedAtMs = lastOpenedAtMs;
+      lastOpenedAtMs = at;
       for (const url of computerUsePermissionSettingsUrls(platform, permission)) {
         try {
           await options.openExternal(url);
-          lastOpenedAtMs = at;
           return Object.freeze({ opened: true });
         } catch {
           // This spelling is not registered on this OS version; try the next constant.
         }
       }
+      // Nothing opened, so the user's next attempt must not be rate limited by this one.
+      lastOpenedAtMs = previousOpenedAtMs;
       return Object.freeze({ opened: false });
     },
   });

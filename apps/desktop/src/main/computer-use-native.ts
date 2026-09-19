@@ -139,9 +139,7 @@ const DENIED_PROBE = (
     reason,
     artifactPath,
     artifactDigest,
-    capabilities: Object.freeze(
-      nativeCapabilities ?? { observe: false, control: false },
-    ) as ComputerUseNativeProbe['capabilities'],
+    capabilities: Object.freeze(nativeCapabilities ?? { observe: false, control: false }),
   });
 
 /**

@@ -219,7 +219,7 @@ export function ComputerUseUnavailableNotice({
               <p id={descriptionId}>
                 {permissionRows.length === 0
                   ? guidance
-                  : 'macOSの「システム設定」→「プライバシーとセキュリティ」で、Sprint Coderに次の許可を与えてください。許可した後はSprint Coderの再起動が必要な場合があります。'}
+                  : 'macOSの「システム設定」→「プライバシーとセキュリティ」で、Sprint Coderに次の許可を与えてください。許可の反映にはSprint Coderの再起動が必要です。再起動後もこの案内が出る場合は「許可を再確認」してください。'}
               </p>
             </div>
           </div>

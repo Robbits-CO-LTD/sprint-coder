@@ -97,4 +97,40 @@ describe('Computer Use OS permission settings opener', () => {
     await expect(opener.open('screen_recording')).resolves.toEqual({ opened: true });
     expect(openExternal).toHaveBeenCalledTimes(2);
   });
+
+  it('rate limits a second request that arrives while the first is still opening', async () => {
+    let release!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const openExternal = vi.fn(async () => await opened);
+    const opener = createComputerUsePermissionSettingsOpener({
+      platform: 'darwin',
+      openExternal,
+      now: () => 0,
+    });
+
+    const first = opener.open('accessibility');
+    const second = opener.open('accessibility');
+    release();
+
+    expect(await Promise.all([first, second])).toEqual([{ opened: true }, { opened: false }]);
+    expect(openExternal).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rate limit the next attempt after a request that opened nothing', async () => {
+    let failing = true;
+    const openExternal = vi.fn(async () => {
+      if (failing) throw new Error('unsupported');
+    });
+    const opener = createComputerUsePermissionSettingsOpener({
+      platform: 'darwin',
+      openExternal,
+      now: () => 5_000,
+    });
+
+    await expect(opener.open('accessibility')).resolves.toEqual({ opened: false });
+    failing = false;
+    await expect(opener.open('accessibility')).resolves.toEqual({ opened: true });
+  });
 });
