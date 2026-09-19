@@ -240,7 +240,11 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   if (!isProbe(probe)) return DENIED_PROBE('HANDSHAKE_INVALID');
   if (parsed.platform === 'win32' && probe.sourceCommit !== parsed.sourceCommit)
     return DENIED_PROBE('SOURCE_COMMIT_MISMATCH');
-  // The package is trusted at this point, so the native probe's own refusal is the most specific
+  // The measured artifact has to match the manifest *before* anything the probe said is believed.
+  // Otherwise an unverified module's own reason would be the first thing shown to the user.
+  const artifactDigest = parsed.platform === 'darwin' ? parsed.moduleDigest : parsed.binaryDigest;
+  if (value['artifactDigest'] !== artifactDigest) return DENIED_PROBE('ARTIFACT_DIGEST_MISMATCH');
+  // Only now is the package fully verified, so the native probe's own refusal is the most specific
   // fact available. Only a reason this build knows about is forwarded, and it names a closed gate:
   // observe/control stay false either way.
   if (probe.available !== true)
@@ -250,8 +254,6 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
       null,
       nativeProbeCapabilities(probe.capabilities),
     );
-  const artifactDigest = parsed.platform === 'darwin' ? parsed.moduleDigest : parsed.binaryDigest;
-  if (value['artifactDigest'] !== artifactDigest) return DENIED_PROBE('ARTIFACT_DIGEST_MISMATCH');
   return Object.freeze({
     available: true,
     protocolVersion: 1,

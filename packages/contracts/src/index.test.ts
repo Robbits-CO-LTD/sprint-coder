@@ -2264,17 +2264,24 @@ describe('Computer Use contracts', () => {
       }),
     ).toThrow();
     // Only the OS permissions this product knows about are representable.
-    for (const missingPermissions of [['camera'], ['accessibility', 'accessibility'], 'accessibility'])
+    for (const missingPermissions of [
+      ['camera'],
+      ['accessibility', 'accessibility'],
+      'accessibility',
+    ])
       expect(() =>
-        contracts.computerUseAvailabilitySchema.parse({ ...permissionRequired, missingPermissions }),
+        contracts.computerUseAvailabilitySchema.parse({
+          ...permissionRequired,
+          missingPermissions,
+        }),
       ).toThrow();
   });
 
   it('accepts only an OS permission name on the settings channel', () => {
     for (const permission of ['accessibility', 'screen_recording'] as const)
-      expect(
-        contracts.computerUseOpenPermissionSettingsInputSchema.parse({ permission }),
-      ).toEqual({ permission });
+      expect(contracts.computerUseOpenPermissionSettingsInputSchema.parse({ permission })).toEqual({
+        permission,
+      });
     for (const permission of [
       'camera',
       'Accessibility',

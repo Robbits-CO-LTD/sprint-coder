@@ -5182,7 +5182,10 @@ export const computerUseAvailabilitySchema = z
         code: 'custom',
         message: 'A working native boundary cannot report a missing OS permission',
       });
-    if (availability.state === 'permission_required' && availability.missingPermissions.length === 0)
+    if (
+      availability.state === 'permission_required' &&
+      availability.missingPermissions.length === 0
+    )
       context.addIssue({
         code: 'custom',
         message: 'A permission_required state has to name the missing permission',

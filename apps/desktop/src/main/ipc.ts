@@ -10,6 +10,7 @@ import {
   dialog,
   ipcMain,
   MessageChannelMain,
+  shell,
   type BrowserWindow,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
@@ -88,6 +89,8 @@ import {
   commandEnvelopeSchema,
   computerUseApprovalResolveInputSchema,
   computerUseAvailabilitySchema,
+  computerUseOpenPermissionSettingsInputSchema,
+  computerUseOpenPermissionSettingsResultSchema,
   computerUseProfileListInputSchema,
   computerUseProfileListResultSchema,
   computerUseProfileRegisterInputSchema,
@@ -361,6 +364,10 @@ import {
   ComputerUseNativeUnavailableError,
   createUnavailableComputerUseNativeHost,
 } from './computer-use-native-host';
+import {
+  createComputerUsePermissionSettingsOpener,
+  type ComputerUsePermissionSettingsOpener,
+} from './computer-use-permission-settings';
 import type { ManagedLocalController } from './managed-local-controller';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker } from './permission-broker';
@@ -1000,6 +1007,7 @@ export class IpcRouter {
   private readonly computerUseController: ComputerUseController;
   private readonly computerUseRuntimeCapture: ComputerUseRuntimeCapture;
   private readonly computerUseNative: ComputerUseNativeHost;
+  private readonly computerUsePermissionSettings: ComputerUsePermissionSettingsOpener;
   private readonly computerUseActivationGate: ComputerUseUserActivationGate;
   private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
   private readonly computerUseStatusBySession = new Map<string, ComputerUseSessionStatus>();
@@ -1780,6 +1788,10 @@ export class IpcRouter {
       computerUseActivationGate ??
       new ComputerUseUserActivationGate(this.window.webContents, this.window.id);
     this.computerUseNative = computerUseNative;
+    // The URL table lives in this module's constants; Renderer supplies only a permission name.
+    this.computerUsePermissionSettings = createComputerUsePermissionSettingsOpener({
+      openExternal: async (url) => await shell.openExternal(url),
+    });
     this.computerUseEmergencyStop = new ComputerUseEmergencyStop({
       onStop: () => {
         const sessionId = this.computerUseEmergencySessionId;
@@ -2246,6 +2258,18 @@ export class IpcRouter {
       emptyPayloadSchema,
       computerUseAvailabilitySchema,
       () => this.computerUseController.availability(),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.computerUseOpenPermissionSettings,
+      computerUseOpenPermissionSettingsInputSchema,
+      computerUseOpenPermissionSettingsResultSchema,
+      async (input, event) => {
+        // A trusted click inside the Computer Use panel, the permission name as the only input,
+        // and a Main-side rate limit. Nothing here can name a URL, a path, or an application.
+        const activation = this.computerUseActivationGate.consume(event, 'permission-settings');
+        if (activation === null) throw new SecurityError();
+        return await this.computerUsePermissionSettings.open(input.permission);
+      },
     );
     this.handle(
       IPC_CHANNELS.computerUseProfilesList,
@@ -4592,6 +4616,7 @@ export class IpcRouter {
       rawKind !== 'application' &&
       rawKind !== 'start' &&
       rawKind !== 'approval' &&
+      rawKind !== 'permission-settings' &&
       rawKind !== 'graph-start' &&
       rawKind !== 'graph-resume' &&
       rawKind !== 'graph-resume-step'

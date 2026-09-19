@@ -574,7 +574,10 @@ describe('Computer Use Main IPC integration', () => {
     await expect(handler({ permission: 'accessibility' }, {}, {})).rejects.toBeTruthy();
     expect(fixture.permissionSettings.open).not.toHaveBeenCalled();
 
-    fixture.activation.consume.mockReturnValueOnce({ token: 'permission-activation', intent: null });
+    fixture.activation.consume.mockReturnValueOnce({
+      token: 'permission-activation',
+      intent: null,
+    });
     await expect(handler({ permission: 'accessibility' }, {}, {})).resolves.toEqual({
       opened: true,
     });

@@ -49,6 +49,8 @@ import {
   computerAppProfileSchema,
   computerUseApprovalResolveInputSchema,
   computerUseAvailabilitySchema,
+  computerUseOpenPermissionSettingsInputSchema,
+  computerUseOpenPermissionSettingsResultSchema,
   computerUseProfileListInputSchema,
   computerUseProfileListResultSchema,
   computerUseProfileRegisterInputSchema,
@@ -463,6 +465,17 @@ const api: SprintCoderApi = {
         computerUseAvailabilitySchema,
         {},
       ),
+    // Main owns the settings URL table and the rate limit; this seam only proves the click and
+    // forwards the permission name.
+    openPermissionSettings: (input) =>
+      trustedComputerUseActivation.consume('permission-settings')
+        ? invoke(
+            IPC_CHANNELS.computerUseOpenPermissionSettings,
+            computerUseOpenPermissionSettingsInputSchema,
+            computerUseOpenPermissionSettingsResultSchema,
+            input,
+          )
+        : Promise.reject(new Error('Computer Use settings shortcut requires a trusted click')),
     registerProfile: (input) =>
       trustedComputerUseActivation.consume('application')
         ? invoke(

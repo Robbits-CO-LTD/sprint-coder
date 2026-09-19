@@ -217,9 +217,9 @@ describe('Computer Use renderer projection', () => {
     await expect(
       requestComputerUsePermissionSettings({ openPermissionSettings }, 'accessibility'),
     ).resolves.toBe(false);
-    await expect(
-      requestComputerUsePermissionSettings(undefined, 'accessibility'),
-    ).resolves.toBe(false);
+    await expect(requestComputerUsePermissionSettings(undefined, 'accessibility')).resolves.toBe(
+      false,
+    );
     expect(openPermissionSettings).toHaveBeenCalledTimes(2);
   });
 });

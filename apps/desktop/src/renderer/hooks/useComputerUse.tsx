@@ -4,6 +4,7 @@ import type {
   ComputerUseApprovalDecision,
   ComputerUseApi,
   ComputerUseAvailability,
+  ComputerUseOsPermission,
   ComputerUseSessionStatus,
   ComputerUseStartInput,
   ComputerUseWindowCandidate,
@@ -250,6 +251,21 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     }
   }, [loadOnboarding]);
 
+  const openPermissionSettings = useCallback(
+    async (permission: ComputerUseOsPermission): Promise<void> => {
+      setDialogError(null);
+      const opened = await requestComputerUsePermissionSettings(
+        window.sprintCoder?.computerUse,
+        permission,
+      ).catch(() => false);
+      if (!opened)
+        setDialogError(
+          'システム設定を開けませんでした。「システム設定」→「プライバシーとセキュリティ」から手動で許可してください。',
+        );
+    },
+    [],
+  );
+
   const register = useCallback(async (): Promise<void> => {
     const api = window.sprintCoder?.computerUse;
     if (api === undefined || taskId === null) return;
@@ -447,6 +463,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
               error={dialogError}
               onClose={closeDialog}
               onRetry={retryAvailability}
+              onOpenSettings={openPermissionSettings}
             />
           )
         ) : null}
@@ -482,6 +499,17 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       </>
     ),
   };
+}
+
+/**
+ * Main owns the settings URL table and the rate limit; the renderer can only name a permission.
+ */
+export async function requestComputerUsePermissionSettings(
+  api: Pick<ComputerUseApi, 'openPermissionSettings'> | undefined,
+  permission: ComputerUseOsPermission,
+): Promise<boolean> {
+  if (api === undefined) return false;
+  return (await api.openPermissionSettings({ permission })).opened;
 }
 
 export function computerUseEntryVisible(availability: ComputerUseAvailability): boolean {

@@ -2120,6 +2120,32 @@ describe('Computer Use native OS permission reporting', () => {
     ).toBe('HANDSHAKE_INVALID');
   });
 
+  it('believes no reason from a module whose measured bytes do not match the manifest', () => {
+    const fixture = packageFixture();
+    for (const artifactDigest of ['e'.repeat(64), undefined, null, 123])
+      expect(
+        evaluateComputerUseNativeGate({
+          featureFlag: true,
+          packaged: true,
+          platform: 'darwin',
+          manifest: macManifest(fixture),
+          probe: {
+            protocolVersion: 1,
+            apiVersion: 2,
+            available: false,
+            backend: 'fixture',
+            reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+            capabilities: { accessibility: false, screenCapture: false },
+          },
+          artifactDigest,
+        }),
+      ).toMatchObject({
+        available: false,
+        reason: 'ARTIFACT_DIGEST_MISMATCH',
+        capabilities: { observe: false, control: false },
+      });
+  });
+
   it('retains the verified addon seam when only an OS permission is missing', () => {
     const fixture = packageFixture();
     const addon = {
