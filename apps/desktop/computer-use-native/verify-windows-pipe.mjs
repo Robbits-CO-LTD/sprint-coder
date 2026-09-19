@@ -59,6 +59,7 @@ async function withHelper(run) {
   // A launch failure may precede the first await of the exit receipt.
   void exited.catch(() => {});
   let socket;
+  let operationError = null;
   try {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       assert.equal(child.exitCode, null, 'helper exited before connection');
@@ -138,10 +139,24 @@ async function withHelper(run) {
     socket.destroy();
     assert.deepEqual(await bounded(exited, 'helper exit'), { code: 0, signal: null });
     if (failure !== null) throw failure;
+  } catch (error) {
+    operationError = error;
+    throw error;
   } finally {
     socket?.destroy();
     if (child.exitCode === null && child.signalCode === null) child.kill();
-    await bounded(exited, 'cleanup');
+    try {
+      await bounded(exited, 'cleanup');
+    } catch (cleanupError) {
+      child.unref();
+      if (operationError !== null)
+        throw new AggregateError(
+          [operationError, cleanupError],
+          'Helper operation and cleanup both failed',
+          { cause: operationError },
+        );
+      throw cleanupError;
+    }
   }
 }
 
