@@ -922,6 +922,172 @@ describe('Computer Use native Main adapter', () => {
     }
   });
 
+  it('releases the quarantine only once a re-sent close is answered as confirmed', async () => {
+    const appIdentityDigest = digest('a');
+    const executableDigest = digest('b');
+    const windowIdentityDigest = digest('c');
+    // Model the native close bookkeeping. The first close takes the session out of the native
+    // active map and its drain outlives the Main-side deadline, so Main never sees that receipt.
+    // Everything after it depends on how native answers a close re-sent for the same session id:
+    // an id native cannot confirm stays quarantined, and only a confirmed receipt reopens the host.
+    const closeEpochs: unknown[] = [];
+    let nativeCloseConfirmed = false;
+    let closesInFlight = 0;
+    let releaseFirstClose!: () => void;
+    const close = vi.fn((input: unknown): unknown => {
+      const request = input as Record<string, unknown>;
+      closeEpochs.push(request['cancelEpoch']);
+      if (closeEpochs.length === 1) {
+        closesInFlight += 1;
+        return new Promise((resolve) => {
+          releaseFirstClose = () => {
+            closesInFlight -= 1;
+            resolve(undefined);
+          };
+        });
+      }
+      if (!nativeCloseConfirmed)
+        throw Object.assign(new Error('Native close is unconfirmed'), { code: 'SESSION_MISSING' });
+      return {
+        result: 'closed',
+        drained: true,
+        sessionId: request['sessionId'],
+        cancelEpoch: request['cancelEpoch'],
+        inputAttemptCount: 0,
+      };
+    });
+    const addon = {
+      probe: () => ({}),
+      pickApplication: () => ({
+        platform: 'darwin' as const,
+        identityDigest: appIdentityDigest,
+        executablePath: '/Applications/Target.app/Contents/MacOS/Target',
+        executableDigest,
+        bundleId: 'com.example.Target',
+        teamId: null,
+        signingIdentifier: null,
+        cdHash: null,
+        displayName: 'Target',
+        policyLanguage: 'ja',
+        maximumMode: 'full_access_app',
+        pid: 42,
+      }),
+      listWindows: () => [
+        {
+          pid: 42,
+          windowId: 'window-1',
+          platform: 'darwin' as const,
+          appIdentityDigest,
+          windowIdentityDigest,
+          title: 'Target',
+          bounds: { x: 0, y: 0, width: 100, height: 80 },
+          screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+          focused: true,
+          eligible: true,
+          ownerKind: 'application' as const,
+          modal: false,
+          revision: 4,
+          policyLanguage: 'ja',
+          maximumMode: 'full_access_app',
+        },
+      ],
+      startSession: () => ({
+        inputAttemptCount: 0,
+        sessionId: 'session-1',
+        platform: 'darwin' as const,
+        appIdentityDigest,
+        windowIdentityDigest,
+        windowId: 'window-1',
+        profileRevision: 3,
+        cancelEpoch: 0,
+        policyLanguage: 'ja',
+        maximumMode: 'full_access_app',
+        screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+        pid: 42,
+      }),
+      observe: () => ({}),
+      dispatch: () => ({}),
+      cancel: vi.fn(),
+      close,
+    };
+    const host = createComputerUseNativeHost(binding(addon), 'darwin', { stopTimeoutMs: 10 });
+    const identity = await host.pickApplication({
+      activationToken: 'main-issued-token',
+      pickerKind: 'application',
+    });
+    const profile = {
+      id: 'profile-1',
+      platform: 'darwin' as const,
+      kind: 'macos-bundle' as const,
+      label: 'Target',
+      canonicalPath: '/Applications/Target.app/Contents/MacOS/Target',
+      appUrl: null,
+      identity: identity!,
+      identityDigest: appIdentityDigest,
+      version: null,
+      executableDigest,
+      mode: 'full_access_app' as const,
+      connectionId: 'connection-1',
+      modelId: 'model-1',
+      providerEgressConsent: true,
+      remember: false,
+      revision: 3,
+      createdAt: '2026-08-29T00:00:00.000Z',
+      updatedAt: '2026-08-29T00:00:00.000Z',
+    };
+    const session = await host.startSession({
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+    });
+
+    await expect(host.close(session)).rejects.toMatchObject({
+      reasonCode: 'native_stop_unconfirmed',
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(host.close(session)).rejects.toBeInstanceOf(Error);
+      expect(host.availability()).toMatchObject({
+        observe: false,
+        control: false,
+        reasonCode: 'native_stop_unconfirmed',
+      });
+      await expect(
+        host.startSession({
+          profile,
+          windowId: 'window-1',
+          sessionId: 'session-2',
+          taskId: 'task-1',
+          turnId: 'turn-2',
+          cancelEpoch: 0,
+        }),
+      ).rejects.toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    }
+
+    // Re-send from the rejection handler, the way ComputerUseController answers an unconfirmed
+    // close, and let native confirm the drain by the time that re-send arrives. The first attempt
+    // is still on the wire throughout, which is what keeps a Windows helper that only ends once no
+    // stop is pending reachable for the re-send.
+    await expect(
+      host.close(session).then(null, async () => {
+        nativeCloseConfirmed = true;
+        return await host.close(session);
+      }),
+    ).resolves.toBeUndefined();
+    expect(closesInFlight).toBe(1);
+    expect(host.availability()).toMatchObject({ state: 'ready', observe: true, control: true });
+    // Every re-sent close carries a strictly higher epoch, which is what lets native tell a repeat
+    // close apart from a stale one.
+    expect(closeEpochs).toEqual([1, 2, 3, 4, 5]);
+    releaseFirstClose();
+    expect(closesInFlight).toBe(0);
+    // A confirmed session id stays idempotent without reaching native again.
+    await expect(host.close(session)).resolves.toBeUndefined();
+    expect(closeEpochs).toHaveLength(5);
+  });
+
   it('fails closed when an API1 manifest is mixed with an API2 helper', () => {
     const native = binding({
       probe: () => ({}),

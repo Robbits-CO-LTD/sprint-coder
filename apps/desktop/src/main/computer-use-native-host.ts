@@ -42,15 +42,28 @@ export const COMPUTER_USE_NATIVE_CONTROLLER_UNAVAILABLE = 'native_controller_una
  * verified close receipt releases the process-local input quarantine. The drain budget therefore
  * has to come from the native side: on macOS `ExecuteNativeStop` takes the same serial dispatch
  * lock as start/observe/dispatch and has no internal timeout of its own
- * (computer-use-native/computer_use_macos.mm), and the Windows helper transport already budgets
- * 10s for a close round trip (`operationTimeoutMilliseconds` in computer-use-native-windows.ts).
+ * (computer-use-native/computer_use_macos.mm), and the Windows helper transport derives its own
+ * close budget from this deadline so that it always outlasts it
+ * (`COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS` in computer-use-native-windows.ts).
  * A shorter close deadline turns an ordinary drain into `native_stop_unconfirmed`, which disables
  * observe/control for the whole host until restart because the Controller drops the session handle
  * after a failed close. Quarantine on a genuinely unconfirmed stop is intentional; tripping on a
  * slow but successful drain is not.
  */
 const COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = 1_000;
-const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
+export const COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS = 10_000;
+
+/**
+ * How many times Stop sends a close for the same session before it gives up and reports the host
+ * as unavailable (`ComputerUseController.completeStop`). The retry itself belongs to the
+ * controller, but the budget lives next to the deadline it multiplies, because the transports are
+ * what have to outlast the whole re-send window: a transport that stops waiting while Main may
+ * still re-send tears the native side down between the two attempts and makes the re-send
+ * unanswerable (`COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS` in computer-use-native-windows.ts).
+ * Keeping both numbers here lets the transports state that relation as an expression instead of
+ * repeating a literal that only happens to line up.
+ */
+export const COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT = 2;
 
 export class ComputerUseNativeUnavailableError extends Error {
   constructor(readonly reasonCode: string) {
