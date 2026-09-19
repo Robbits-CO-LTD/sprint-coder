@@ -14,6 +14,7 @@ import {
   computerUseRoundLimitSchema,
   computerUseWindowCandidateSchema,
   computerListTargetsOutputSchema,
+  selectableComputerTargetSchema,
   COMPUTER_TARGET_LIST_LIMIT,
   COMPUTER_USE_LIMITS,
   type ComputerAppIdentity,
@@ -74,6 +75,7 @@ import type {
   ComputerUsePlannerPort,
 } from './computer-use-planner-port';
 import { COMPUTER_USE_ACCESSIBILITY_POLICY_VERSION } from './computer-use-accessibility-tree';
+import { secureLogger } from './secure-logger';
 import {
   captureComputerUseRuntime,
   computerUseCaptureDigest,
@@ -285,11 +287,16 @@ export type ComputerUseControllerDeps = Readonly<{
    */
   agentDrivenEnabled?: () => boolean;
   /**
-   * The provider this Task is currently bound to, for the same egress consent test `start` already
-   * applies. Null means unknown, which withholds every app-authored label.
+   * Where the calling Turn actually sends, for the same egress consent test `start` already applies.
+   *
+   * Keyed by Turn, not by Task: the Task's model setting is mutable and can be repointed at a
+   * different connection while a Turn is running, so consenting against it would let a label pass
+   * the check for connection B and then travel to connection A. Null means unknown, which withholds
+   * every app-authored label.
    */
   providerEgressBindingFor?: (
     taskId: string,
+    turnId: string,
   ) => Readonly<{ connectionId: string; modelId: string }> | null;
   now?: () => number;
   currentPolicyEpoch?: (taskId: string) => number;
@@ -680,10 +687,12 @@ export class ComputerUseController {
         ? null
         : this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
     this.revokeTargetTokens(context.taskId);
-    const egressBinding = this.deps.providerEgressBindingFor?.(context.taskId) ?? null;
+    const egressBinding =
+      this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
     const expiresAt = this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS;
     const targets: ComputerTarget[] = [];
     let truncated = false;
+    let dropped = 0;
     for (const profile of profiles) {
       if (selectedProfileId !== null && profile.id !== selectedProfileId) continue;
       // One unreachable application must not blank the whole list; the agent still needs the rest.
@@ -706,20 +715,10 @@ export class ComputerUseController {
           break;
         }
         const targetToken = randomUUID();
-        this.targetTokens.set(
-          targetToken,
-          Object.freeze({
-            binding: Object.freeze({
-              ...appBinding,
-              windowIdentityDigest: window.windowIdentityDigest,
-              nativeWindowId: window.windowId,
-            }),
-            profileId: profile.id,
-            expiresAt,
-          }),
-        );
-        issued = true;
-        targets.push({
+        // Validated per row rather than only in the final envelope. A single malformed profile —
+        // one with no app id, or a path the leaf name cannot be taken from — would otherwise throw
+        // from the envelope parse and take every other application's windows down with it.
+        const row = selectableComputerTargetSchema.safeParse({
           kind: 'selectable',
           targetToken,
           appToken,
@@ -738,6 +737,24 @@ export class ComputerUseController {
               ? computerTargetUntrustedLabel(profile.label, window.title)
               : null,
         });
+        if (!row.success) {
+          dropped += 1;
+          continue;
+        }
+        this.targetTokens.set(
+          targetToken,
+          Object.freeze({
+            binding: Object.freeze({
+              ...appBinding,
+              windowIdentityDigest: window.windowIdentityDigest,
+              nativeWindowId: window.windowId,
+            }),
+            profileId: profile.id,
+            expiresAt,
+          }),
+        );
+        issued = true;
+        targets.push(row.data);
       }
       if (issued)
         this.targetAppTokens.set(
@@ -746,6 +763,13 @@ export class ComputerUseController {
         );
       if (truncated) break;
     }
+    if (dropped > 0)
+      // Counted, never quoted: the reason a row failed is derived from app-authored text, and the
+      // agent is not told that some windows exist but could not be described.
+      secureLogger.warn('Computer Use omitted target rows that could not be described', {
+        taskId: context.taskId,
+        dropped,
+      });
     return computerListTargetsOutputSchema.parse({ targets, truncated });
   }
 
@@ -2744,8 +2768,12 @@ function computerTargetVerifiedIdentity(
   profile: ComputerAppProfileRecord,
 ): SelectableComputerTarget['verified'] {
   const identity = profile.identity;
-  const text = (key: string): string | null =>
-    typeof identity[key] === 'string' && identity[key].length > 0 ? identity[key] : null;
+  const text = (key: string): string | null => {
+    const value = identity[key];
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed === '' ? null : trimmed;
+  };
   if (profile.platform === 'darwin')
     return {
       platform: 'darwin',
@@ -2754,7 +2782,7 @@ function computerTargetVerifiedIdentity(
           ? 'verified-signed'
           : 'unverified',
       publisher: text('teamId'),
-      appId: text('bundleId') ?? profile.identityDigest,
+      appId: text('bundleId') ?? COMPUTER_TARGET_UNKNOWN_APP_ID,
     };
   return {
     platform: 'win32',
@@ -2762,11 +2790,32 @@ function computerTargetVerifiedIdentity(
     publisher: null,
     // The leaf name, never the directory that holds it: ADR v2 §5.2 names the leaf as the app id,
     // and the V1 invariant keeps paths inside Main.
-    appId:
-      text('packageFamilyName') ??
-      text('executablePath')?.split(/[\\/]/u).at(-1) ??
-      profile.identityDigest,
+    appId: text('packageFamilyName') ?? executableLeafName(text('executablePath')),
   };
+}
+
+/**
+ * The stand-in when a profile carries no app id at all.
+ *
+ * It must not be the identity digest. The digest is a re-verification input Main and native own; the
+ * row above promises the agent only selection criteria, and a digest handed to the model travels to
+ * the Provider and stays in the conversation history. An app with no usable id is still selectable
+ * by its `windowIndex` and its signing class, which is all the agent needs.
+ */
+const COMPUTER_TARGET_UNKNOWN_APP_ID = 'unknown';
+
+/**
+ * The last path segment, or the stand-in.
+ *
+ * A path ending in a separator splits to a trailing empty string, which fails the output schema's
+ * `min(1)` — and that exception would take down the whole enumeration over one malformed profile.
+ */
+function executableLeafName(executablePath: string | null): string {
+  const leaf = executablePath
+    ?.split(/[\\/]/u)
+    .filter((segment) => segment !== '')
+    .at(-1);
+  return leaf === undefined || leaf.trim() === '' ? COMPUTER_TARGET_UNKNOWN_APP_ID : leaf.trim();
 }
 
 function computerUseAppIdentityIsDenied(identity: unknown): boolean {

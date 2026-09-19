@@ -159,10 +159,14 @@ function createFixture(
     native,
     featureEnabled: () => true,
     agentDrivenEnabled: () => options.agentDrivenEnabled !== false,
-    providerEgressBindingFor: () =>
-      options.providerBinding === undefined
-        ? { connectionId: 'connection-1', modelId: 'model-1' }
-        : options.providerBinding,
+    providerEgressBindingFor: (_taskId, turnId) =>
+      // Keyed by Turn, matching the real wiring: the destination a Turn actually ships to is fixed
+      // when the Turn starts, so a fixture that answers for an unknown Turn would hide that.
+      turnId !== 'turn-1'
+        ? null
+        : options.providerBinding === undefined
+          ? { connectionId: 'connection-1', modelId: 'model-1' }
+          : options.providerBinding,
     currentPolicyEpoch: () => options.policyEpoch ?? 0,
     repositionEmergencyStop: () => true,
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -251,6 +255,96 @@ describe('computer_list_targets', () => {
       expect(row?.windowIndex).toBe(1);
       expect(row?.verified.appId).toBe('com.example.notes');
     }
+  });
+
+  it('resolves egress consent against the calling Turn, not the mutable Task setting', async () => {
+    const { controller } = createFixture();
+    // A Turn this Main has no destination record for — the case a Task-level lookup would paper
+    // over by answering with whatever the Task row currently says.
+    const other = await controller.listTargets({}, { ...toolContext, turnId: 'turn-2' });
+    expect(selectable(other.targets)[0]?.untrustedLabel).toBeNull();
+    expect(selectable(other.targets)[0]?.verified.appId).toBe('com.example.notes');
+  });
+
+  it('never uses the identity digest as an app id, and survives a profile with no usable one', async () => {
+    const bare = profileRecord(
+      'profile-bare',
+      macIdentity({ identityDigest: '7'.repeat(64) }),
+    ) as ComputerAppProfileRecord & { identity: Record<string, unknown> };
+    const { controller } = createFixture({
+      profiles: [
+        { ...bare, identity: { platform: 'darwin', identityDigest: bare.identityDigest } },
+      ],
+    });
+    const result = await controller.listTargets({}, toolContext);
+    const row = selectable(result.targets)[0];
+    expect(row?.verified).toEqual({
+      platform: 'darwin',
+      identityKind: 'unverified',
+      publisher: null,
+      appId: 'unknown',
+    });
+    // The digest is a re-verification input Main owns; it must not reach the model or the Provider.
+    expect(JSON.stringify(result)).not.toContain('7'.repeat(64));
+  });
+
+  it('falls back for a Windows path that ends in a separator instead of failing the whole list', async () => {
+    const trailing = profileRecord('profile-a-trailing', macIdentity());
+    const { controller } = createFixture({
+      profiles: [
+        {
+          ...trailing,
+          platform: 'win32',
+          kind: 'win32-executable',
+          identity: {
+            platform: 'win32',
+            identityDigest: trailing.identityDigest,
+            executablePath: 'C:\\Program Files\\Weird\\',
+            signerDigest: '9'.repeat(64),
+          },
+        },
+        {
+          ...trailing,
+          id: 'profile-b-separators',
+          platform: 'win32',
+          kind: 'win32-executable',
+          identity: {
+            platform: 'win32',
+            identityDigest: 'f'.repeat(64),
+            executablePath: '\\\\\\',
+            signerDigest: '9'.repeat(64),
+          },
+        },
+        profileRecord('profile-c-normal', macIdentity({ identityDigest: 'e'.repeat(64) })),
+      ],
+    });
+    const rows = selectable((await controller.listTargets({}, toolContext)).targets);
+    // The trailing separator recovers the last real segment instead of an empty string that would
+    // fail `min(1)`; a path with nothing but separators has no leaf and takes the stand-in. Either
+    // way the healthy profile beside them is untouched.
+    expect(rows.map((row) => row.verified.appId)).toEqual([
+      'Weird',
+      'unknown',
+      'com.example.notes',
+    ]);
+    // The directory the leaf came from stays inside Main.
+    expect(JSON.stringify(rows)).not.toContain('Program Files');
+  });
+
+  it('drops a row it cannot describe rather than failing every other application', async () => {
+    const broken = profileRecord('profile-a-broken', macIdentity());
+    const { controller } = createFixture({
+      profiles: [
+        // A mode the target schema does not accept: one row fails to validate, the rest must not.
+        { ...broken, mode: 'bogus-mode' as ComputerAppProfileRecord['mode'] },
+        profileRecord('profile-b-normal', macIdentity({ identityDigest: 'e'.repeat(64) })),
+      ],
+    });
+    const rows = selectable((await controller.listTargets({}, toolContext)).targets);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.verified.identityKind).toBe('verified-signed');
+    // A dropped row leaves no token behind either.
+    expect(controller.targetTokenBinding(rows[0]!.targetToken)).not.toBeNull();
   });
 
   it('caps the list at 50 rows and says so', async () => {

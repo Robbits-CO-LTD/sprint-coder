@@ -590,6 +590,44 @@ describe('Computer Use Main IPC integration', () => {
     expect(fixture.permissionSettings.open).toHaveBeenCalledWith('accessibility');
   });
 
+  it('measures Computer Use egress consent against the Turn destination, not the Task setting', () => {
+    const fixture = captureComputerUseHandlers();
+    const router = fixture.router as unknown as {
+      turnProviderBindingByTurn: Map<
+        string,
+        Readonly<{ taskId: string; connectionId: string; modelId: string }>
+      >;
+      computerUseProviderEgressBindingFor(
+        taskId: string,
+        turnId: string,
+      ): Readonly<{ connectionId: string; modelId: string }> | null;
+    };
+    // The probe builds the router from the prototype, so class field initializers never ran.
+    Object.assign(router, {
+      turnProviderBindingByTurn: new Map([
+        ['turn-1', { taskId: 'task-1', connectionId: 'connection-a', modelId: 'model-a' }],
+      ]),
+    });
+    // The Task row is repointed at another connection mid-Turn. `modelsSetSelection` does not
+    // refuse a running Turn, stop it, or advance the policy epoch, while the Turn keeps sending to
+    // the connection it was dispatched with — so reading the Task row here would consent against B
+    // and then transmit to A.
+    const taskSelection = fixture.persistence['getTaskModelSelection']!;
+    taskSelection.mockReturnValue({
+      connectionId: 'connection-b',
+      requestedProvider: 'openai',
+      requestedModel: 'model-b',
+    });
+    expect(router.computerUseProviderEgressBindingFor('task-1', 'turn-1')).toEqual({
+      connectionId: 'connection-a',
+      modelId: 'model-a',
+    });
+    expect(taskSelection).not.toHaveBeenCalled();
+    // Unknown Turn, finished Turn, and a Turn id owned by another Task all fail closed.
+    expect(router.computerUseProviderEgressBindingFor('task-1', 'turn-unknown')).toBeNull();
+    expect(router.computerUseProviderEgressBindingFor('task-9', 'turn-1')).toBeNull();
+  });
+
   it('authorizes target discovery without a session while keeping the session binding for the rest', async () => {
     const fixture = captureComputerUseHandlers();
     const previewed: unknown[] = [];

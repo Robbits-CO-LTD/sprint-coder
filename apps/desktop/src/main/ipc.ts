@@ -1067,6 +1067,18 @@ export class IpcRouter {
     string,
     Readonly<{ runtime: RuntimeKind; provider?: string }>
   >();
+  /**
+   * Where each live Turn actually sends, fixed when the Turn starts.
+   *
+   * The Task's model selection is a mutable setting: `modelsSetSelection` rewrites it without
+   * refusing a running Turn, without stopping it, and without advancing the policy epoch, while the
+   * Turn keeps shipping to the `started.modelSelection` it was dispatched with. Anything that asks
+   * "may this reach the provider this Turn is talking to?" has to ask this map, not the Task row.
+   */
+  private readonly turnProviderBindingByTurn = new Map<
+    string,
+    Readonly<{ taskId: string; connectionId: string; modelId: string }>
+  >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
@@ -1820,19 +1832,12 @@ export class IpcRouter {
       native: computerUseNative,
       featureEnabled: () => computerUseDesktopV1Enabled(),
       agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
-      // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, so a
-      // window title reaches a provider only where the user already agreed to send that app's
-      // screen to that model.
-      providerEgressBindingFor: (taskId) => {
-        const selection = this.persistence.getTaskModelSelection(taskId);
-        // A Task on the workspace default has no explicit pair to compare against, and guessing one
-        // would be guessing what the user consented to. Unknown withholds the labels.
-        return selection === null ||
-          selection.connectionId === null ||
-          selection.requestedModel === null
-          ? null
-          : { connectionId: selection.connectionId, modelId: selection.requestedModel };
-      },
+      // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, read
+      // from the Turn that is calling rather than from the Task's mutable model setting: the Task
+      // row can be pointed at a different connection mid-Turn while the running Turn keeps sending
+      // to the one it started with, which would consent against B and transmit to A.
+      providerEgressBindingFor: (taskId, turnId) =>
+        this.computerUseProviderEgressBindingFor(taskId, turnId),
       currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
       canStartSession: (taskId) =>
         this.persistence.getActiveTurnId(taskId) === null &&
@@ -5948,6 +5953,7 @@ export class IpcRouter {
         ? {}
         : { provider: started.modelSelection.requestedProvider }),
     });
+    this.rememberTurnProviderBinding(started);
     this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
@@ -5974,6 +5980,7 @@ export class IpcRouter {
         ? {}
         : { provider: transition.started.modelSelection.requestedProvider }),
     });
+    this.rememberTurnProviderBinding(transition.started);
     this.rememberTaskTitleRequest(transition.started);
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
@@ -7516,6 +7523,33 @@ export class IpcRouter {
 
   private taskTitleRuntimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
     return this.taskTitleRuntimes.get(kind);
+  }
+
+  /** Records the destination this Turn was dispatched with, before any setting can move. */
+  private rememberTurnProviderBinding(started: StartedTurn): void {
+    const { connectionId, requestedModel } = started.modelSelection;
+    if (connectionId === null || requestedModel === null) return;
+    this.turnProviderBindingByTurn.set(started.turnId, {
+      taskId: started.event.taskId,
+      connectionId,
+      modelId: requestedModel,
+    });
+  }
+
+  /**
+   * The `{connectionId, modelId}` a Computer Use consent check must be measured against.
+   *
+   * Null whenever this Main cannot say where the Turn sends — an unrecorded Turn, a Turn that has
+   * finished, or a Turn id belonging to another Task. Callers withhold app-authored text on null,
+   * so an unknown destination is treated as an unconsented one.
+   */
+  private computerUseProviderEgressBindingFor(
+    taskId: string,
+    turnId: string,
+  ): Readonly<{ connectionId: string; modelId: string }> | null {
+    const binding = this.turnProviderBindingByTurn.get(turnId);
+    if (binding === undefined || binding.taskId !== taskId) return null;
+    return { connectionId: binding.connectionId, modelId: binding.modelId };
   }
 
   private rememberTaskTitleRequest(started: StartedTurn): void {
@@ -9219,6 +9253,7 @@ export class IpcRouter {
       this.turnLogCategoryByTurn.delete(turnId);
       this.turnLogStartedAtByTurn.delete(turnId);
       this.turnLogRuntimeByTurn.delete(turnId);
+      this.turnProviderBindingByTurn.delete(turnId);
     }
   }
 
