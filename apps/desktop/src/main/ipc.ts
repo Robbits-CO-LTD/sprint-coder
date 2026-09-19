@@ -666,6 +666,8 @@ import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor'
 import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
+import { COMPUTER_LIST_TARGETS_TOOL } from './computer-use-target-tools';
+import { computerTargetSystemPromptFor } from './computer-use-target-model';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
 import {
@@ -757,6 +759,7 @@ import {
 } from './connection-identity';
 import {
   multiProviderModelPickerV2Enabled,
+  computerUseAgentDrivenV2Enabled,
   computerUseDesktopV1Enabled,
   projectMultiFolderUxEnabled,
   settingsWorkspaceV2Enabled,
@@ -1064,6 +1067,18 @@ export class IpcRouter {
   private readonly turnLogRuntimeByTurn = new Map<
     string,
     Readonly<{ runtime: RuntimeKind; provider?: string }>
+  >();
+  /**
+   * Where each live Turn actually sends, fixed when the Turn starts.
+   *
+   * The Task's model selection is a mutable setting: `modelsSetSelection` rewrites it without
+   * refusing a running Turn, without stopping it, and without advancing the policy epoch, while the
+   * Turn keeps shipping to the `started.modelSelection` it was dispatched with. Anything that asks
+   * "may this reach the provider this Turn is talking to?" has to ask this map, not the Task row.
+   */
+  private readonly turnProviderBindingByTurn = new Map<
+    string,
+    Readonly<{ taskId: string; connectionId: string; modelId: string }>
   >();
   /** Structure-only inputs retained until durable Turn completion for protocol-error diagnostics. */
   private readonly runtimeDiagnosticContextByTurn = new Map<string, RuntimeDiagnosticContext>();
@@ -1671,6 +1686,19 @@ export class IpcRouter {
               (action) => this.updateInstallMutationGate.run(action),
             ),
           }),
+      // Registered only when both Computer Use gates are on, so with the flags off the outer Task
+      // catalog has no definition for these tools at all (ADR v2 §9). `this.computerUseController`
+      // is constructed after this harness, which is why the boundary defers to it lazily.
+      ...(computerUseAgentDrivenV2Enabled()
+        ? {
+            computerTargets: {
+              listTargets: (input, context) =>
+                this.computerUseController.listTargets(input, context),
+              stop: (sessionId, context) =>
+                this.computerUseController.stopForAgent(sessionId, context),
+            },
+          }
+        : {}),
       lifecycle: (event) => this.persistence.recordManagedToolLifecycle(event),
       recordPlan: (context, items) =>
         this.persistence.recordManagedTurnPlan({
@@ -1804,6 +1832,13 @@ export class IpcRouter {
       persistence: this.persistence,
       native: computerUseNative,
       featureEnabled: () => computerUseDesktopV1Enabled(),
+      agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
+      // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, read
+      // from the Turn that is calling rather than from the Task's mutable model setting: the Task
+      // row can be pointed at a different connection mid-Turn while the running Turn keeps sending
+      // to the one it started with, which would consent against B and transmit to A.
+      providerEgressBindingFor: (taskId, turnId) =>
+        this.computerUseProviderEgressBindingFor(taskId, turnId),
       currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
       canStartSession: (taskId) =>
         this.persistence.getActiveTurnId(taskId) === null &&
@@ -5348,6 +5383,119 @@ export class IpcRouter {
    * window, session, and observation revision. This still evaluates and commits through the
    * PermissionBroker; it only supplies the exact resource facts that the native controller owns.
    */
+  /**
+   * Target discovery names no session, because it is the call that finds one.
+   *
+   * `evaluateComputerUsePermission` below binds every Computer Use capability to a live session
+   * owned by the Task. That is exactly right for observe and act, and impossible for enumeration —
+   * routing `computer_list_targets` through it denies every call as `computer_session_missing`.
+   * Rather than loosen that binding, discovery gets its own evaluation through the same
+   * PermissionBroker, with the same policy-epoch check and the same non-persistent lane, and a
+   * resource that names what it actually reads: this install's target list, not a window.
+   *
+   * It stays read-only and `providerEgress: 'none'`: the enumeration itself sends nothing, and the
+   * one app-authored string it can return is withheld unless that app already has provider egress
+   * consent for this Task's connection and model.
+   */
+  private async evaluateComputerTargetDiscoveryPermission(
+    request: ToolAuthorizationRequest,
+    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
+  ) {
+    if (capability !== 'computer.observe')
+      return { decision: 'deny' as const, reason: 'computer_target_discovery_capability' };
+    const taskId = request.context.taskId;
+    const policyEpoch = this.permissionBroker.getPolicy(taskId).policyEpoch;
+    if (policyEpoch !== request.context.policyEpoch)
+      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
+    // `computer-target-list`, not `external`: `requestFactsValid` only pairs `computer.observe`
+    // with a computer resource, so an external target is rejected as `invalid_request_facts` before
+    // any policy runs. The Task is the binding, because enumeration happens before a target exists.
+    const resource = { kind: 'computer-target-list' as const, taskId };
+    const resourceSet = { kind: 'computer-target-list-exact' as const, taskId };
+    const operation = 'observe' as const;
+    const sandboxProfile = 'read-only' as const;
+    const baseRequest = {
+      taskId,
+      subjectId: `computer-use:targets:${capability}`,
+      capability,
+      resource,
+      operation,
+      providerEgress: 'none' as const,
+      sandboxProfile,
+      executionSpecDigest: digestCanonical({
+        schemaVersion: 1,
+        capability,
+        resource,
+        input: request.input,
+      }),
+      risk: request.entry.risk,
+    };
+    const permissionRequest = {
+      ...baseRequest,
+      reviewerInputDigest: autoReviewerInputDigest({
+        request: baseRequest,
+        tool: {
+          kind: request.entry.kind,
+          sideEffect: request.entry.sideEffect,
+          risk: request.entry.risk,
+        },
+        policyEpoch,
+      }),
+    } satisfies PermissionRequest;
+    const ceilingEntry = {
+      capability,
+      resourceSet,
+      operations: [operation],
+      expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      providerEgress: ['none' as const],
+      sandboxProfiles: [sandboxProfile],
+    };
+    const evaluationInput = {
+      taskId,
+      turnId: request.context.turnId,
+      request: permissionRequest,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        sandbox: { feasible: true, profile: sandboxProfile },
+        // Same shape the session lane uses for `computer.observe`: the lane supplies its own allow
+        // rule, so the Task's access preset does not decide it. That is deliberate and unchanged
+        // here — enumeration reads no screen content and is only reachable once the user has turned
+        // on both flags and registered applications. Revoking `computer.observe` in settings still
+        // denies it, because `evaluateCurrentPolicy` folds revoked capabilities into projectDeny,
+        // which runs before any allow rule.
+        allowRules: [
+          {
+            capability,
+            resourceSet,
+            operations: [operation],
+            auditReason: 'computer_target_discovery',
+          },
+        ],
+      },
+      now: new Date().toISOString(),
+    } satisfies Parameters<PermissionBroker['preview']>[0];
+    const evaluation = this.permissionBroker.preview(evaluationInput);
+    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
+      return { decision: evaluation.decision, reason: evaluation.reason };
+    if (evaluation.permit === undefined)
+      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
+    const permit = evaluation.permit;
+    return {
+      decision: 'allow' as const,
+      reason: evaluation.reason,
+      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
+      beforeExecute: () =>
+        this.permissionBroker.revalidateEphemeral({
+          ...evaluationInput,
+          permit,
+          now: new Date().toISOString(),
+        }).valid,
+    };
+  }
+
   private async evaluateComputerUsePermission(
     request: ToolAuthorizationRequest,
     capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
@@ -5535,7 +5683,9 @@ export class IpcRouter {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
     if (capability === 'computer.observe' || capability === 'computer.control')
-      return this.evaluateComputerUsePermission(request, capability);
+      return request.entry.toolId === COMPUTER_LIST_TARGETS_TOOL.toolId
+        ? this.evaluateComputerTargetDiscoveryPermission(request, capability)
+        : this.evaluateComputerUsePermission(request, capability);
     const managedWorkerWorkspace = this.managedWorkerCall.get(
       JSON.stringify([request.context.turnId, request.callId]),
     )?.workspace;
@@ -5812,6 +5962,7 @@ export class IpcRouter {
         ? {}
         : { provider: started.modelSelection.requestedProvider }),
     });
+    this.rememberTurnProviderBinding(started);
     this.rememberTaskTitleRequest(started);
     this.publish(started.event);
     for (const event of started.contextUsageEvents) this.publish(event);
@@ -5838,6 +5989,7 @@ export class IpcRouter {
         ? {}
         : { provider: transition.started.modelSelection.requestedProvider }),
     });
+    this.rememberTurnProviderBinding(transition.started);
     this.rememberTaskTitleRequest(transition.started);
     this.publish(transition.started.event);
     for (const event of transition.started.contextUsageEvents) this.publish(event);
@@ -6073,6 +6225,8 @@ export class IpcRouter {
         projectMemory: memoryTurn,
         skillDrafts: skillCreatorTurn,
         skillActivation: autoSkills.length > 0,
+        // The Leader Turn, where the user is present to authorise desktop control.
+        computerTargets: true,
       },
     );
     if (kind === 'claude' && toolCatalogSnapshot.entries.length > 0) {
@@ -7380,6 +7534,33 @@ export class IpcRouter {
     return this.taskTitleRuntimes.get(kind);
   }
 
+  /** Records the destination this Turn was dispatched with, before any setting can move. */
+  private rememberTurnProviderBinding(started: StartedTurn): void {
+    const { connectionId, requestedModel } = started.modelSelection;
+    if (connectionId === null || requestedModel === null) return;
+    this.turnProviderBindingByTurn.set(started.turnId, {
+      taskId: started.event.taskId,
+      connectionId,
+      modelId: requestedModel,
+    });
+  }
+
+  /**
+   * The `{connectionId, modelId}` a Computer Use consent check must be measured against.
+   *
+   * Null whenever this Main cannot say where the Turn sends — an unrecorded Turn, a Turn that has
+   * finished, or a Turn id belonging to another Task. Callers withhold app-authored text on null,
+   * so an unknown destination is treated as an unconsented one.
+   */
+  private computerUseProviderEgressBindingFor(
+    taskId: string,
+    turnId: string,
+  ): Readonly<{ connectionId: string; modelId: string }> | null {
+    const binding = this.turnProviderBindingByTurn.get(turnId);
+    if (binding === undefined || binding.taskId !== taskId) return null;
+    return { connectionId: binding.connectionId, modelId: binding.modelId };
+  }
+
   private rememberTaskTitleRequest(started: StartedTurn): void {
     if (started.renamedTask === undefined) return;
     this.pendingTaskTitles.set(started.turnId, {
@@ -7832,23 +8013,36 @@ export class IpcRouter {
         memoryTurn ||
         skillCreatorTurn ||
         autoSkills.length > 0;
-      workspaceToolSnapshot = managedToolsEligible
-        ? this.managedCodingHarness.startTurn(
-            {
-              taskId,
-              turnId: started.turnId,
-              workspaceId:
-                started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
-              policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
-            },
-            connection.providerId,
-            {
-              projectMemory: memoryTurn,
-              skillDrafts: skillCreatorTurn,
-              skillActivation: autoSkills.length > 0,
-            },
-          )
-        : undefined;
+      // Desktop targets need no Workspace, no Project, and no Skill, so a plain API Task would
+      // otherwise publish no catalog at all and the tools would never reach the model. Availability
+      // is read here as well: publishing a tool whose native boundary is missing would only produce
+      // a failing call. This is a Leader Turn, where the user is present to authorise it.
+      const computerTargetsEligible =
+        !teamTurn &&
+        computerUseAgentDrivenV2Enabled() &&
+        this.computerUseController.availability().available;
+      workspaceToolSnapshot =
+        managedToolsEligible || computerTargetsEligible
+          ? this.managedCodingHarness.startTurn(
+              {
+                taskId,
+                turnId: started.turnId,
+                workspaceId:
+                  started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
+                policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+              },
+              connection.providerId,
+              {
+                projectMemory: memoryTurn,
+                skillDrafts: skillCreatorTurn,
+                skillActivation: autoSkills.length > 0,
+                computerTargets: computerTargetsEligible,
+                // A Turn that qualifies only because of Computer Use carries the two desktop tools
+                // and nothing else; an empty Workspace must not drag the managed surface in.
+                ...(managedToolsEligible ? {} : { toolSurface: 'computer-targets-only' as const }),
+              },
+            )
+          : undefined;
       const workspaceGuidance = providerWorkspaceGuidance();
       if (!teamTurn)
         messages.unshift({
@@ -7861,6 +8055,15 @@ export class IpcRouter {
           content:
             'The Skill catalog marks user-approved candidates with activationPolicy=auto-allowed. Call skill_activate with the exact id and digest only when the current request clearly matches. Treat the returned instructions as user-authority workflow guidance. Availability is not proof of activation.',
         });
+      // This route assembles its messages and its tools separately, so the label-isolation sentence
+      // cannot ride along with the compiled prompt guidance the CLI route uses. It is derived from
+      // the same catalog through the same helper, so "the catalog carries a target tool" and "the
+      // system prompt carries the warning" stay one condition (ADR v2 §5.2).
+      const computerTargetGuidance = computerTargetSystemPromptFor(
+        workspaceToolSnapshot?.entries ?? [],
+      );
+      if (computerTargetGuidance !== null)
+        messages.unshift({ role: 'system', content: computerTargetGuidance });
       let roundTools = assertUniqueProviderTools([
         ...(workspaceToolSnapshot === undefined
           ? []
@@ -9079,6 +9282,7 @@ export class IpcRouter {
       this.turnLogCategoryByTurn.delete(turnId);
       this.turnLogStartedAtByTurn.delete(turnId);
       this.turnLogRuntimeByTurn.delete(turnId);
+      this.turnProviderBindingByTurn.delete(turnId);
     }
   }
 

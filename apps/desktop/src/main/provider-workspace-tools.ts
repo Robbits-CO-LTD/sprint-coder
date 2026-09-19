@@ -17,6 +17,11 @@ import { FileRevisionRegistry } from './file-revision';
 import { GraphReadReceipts } from './graph-sources';
 import { GRAPH_TOOLS, registerGraphTools, type GraphToolBoundary } from './graph-tools';
 import {
+  COMPUTER_TARGET_TOOLS,
+  registerComputerTargetTools,
+  type ComputerTargetToolBoundary,
+} from './computer-use-target-tools';
+import {
   createPathGuard,
   openGuardedExistingFile,
   revalidatePathGuard,
@@ -353,6 +358,9 @@ const descriptions = new Map([
   ...GRAPH_TOOLS.map(
     (tool) => [tool.providerName, tool.description] as [string, string | undefined],
   ),
+  ...COMPUTER_TARGET_TOOLS.map(
+    (tool) => [tool.providerName, tool.description] as [string, string | undefined],
+  ),
 ]);
 
 type WorkspaceToolDeps = Readonly<{
@@ -367,6 +375,12 @@ type WorkspaceToolDeps = Readonly<{
   policyEpochFor(taskId: string): number;
   authorizer: ToolAuthorizer;
   graphs?: GraphToolBoundary;
+  /**
+   * Agent-driven Computer Use target discovery (ADR v2 §5.2). Supplied only when both the master
+   * gate and the v2 flag are on, so with the flags off these tools are never registered and the
+   * model never sees a definition it could call.
+   */
+  computerTargets?: ComputerTargetToolBoundary;
   lifecycle?: (event: ManagedToolLifecycleEvent) => void;
   command?: CommandToolBoundary;
   workspaceEdit?: WorkspacePatchDeps;
@@ -389,6 +403,26 @@ export type ManagedHarnessTurnOptions = Readonly<{
   projectMemory?: boolean;
   skillDrafts?: boolean;
   skillActivation?: boolean;
+  /**
+   * Whether this Turn is the Leader answering the user, and may therefore see the Computer Use
+   * target tools (ADR v2 §5.2.1).
+   *
+   * The registry's audience filter cannot make this call on its own: Team Worker catalogs are built
+   * from this same harness, so every snapshot it produces is the `chat` audience. Default false, and
+   * opted into only where a person is on the other end of the conversation — a Worker or a graph
+   * Mission step has nobody to authorise desktop control.
+   */
+  computerTargets?: boolean;
+  /**
+   * Which tools this Turn may publish at all.
+   *
+   * A Task with no Workspace, no Project, no Team, and no Skills has nothing for the managed coding
+   * tools to act on, and before Computer Use it simply published no catalog. Desktop targets do not
+   * need a Workspace, so such a Turn now needs a catalog — but only for them. `computer-targets-only`
+   * says exactly that, instead of letting an empty Workspace drag `update_plan` and friends into a
+   * Turn that never had them.
+   */
+  toolSurface?: 'managed' | 'computer-targets-only';
   mockFixture?: 'approval' | 'command';
   mockTeamFixture?: boolean;
 }>;
@@ -435,6 +469,8 @@ export class ManagedCodingHarness {
     registry.register(REQUEST_USER_INPUT_TOOL);
     registry.register(APPROVAL_PROBE_TOOL);
     if (deps.graphs) for (const tool of GRAPH_TOOLS) registry.register(tool);
+    if (deps.computerTargets !== undefined)
+      for (const tool of COMPUTER_TARGET_TOOLS) registry.register(tool);
     if (deps.command !== undefined) registry.register(COMMAND_RUNNER_TOOL);
     if (deps.command !== undefined)
       for (const definition of [
@@ -464,6 +500,8 @@ export class ManagedCodingHarness {
           deps.workspaceFor(context.taskId, context.turnId, control.callId)?.digest ?? null,
         ),
       );
+    if (deps.computerTargets !== undefined)
+      registerComputerTargetTools(this.broker, deps.computerTargets);
     if (deps.command !== undefined) {
       const sessions = new ManagedCommandSessions();
       this.commandSessions = sessions;
@@ -628,47 +666,61 @@ export class ManagedCodingHarness {
     options: ManagedHarnessTurnOptions = {},
   ): ToolCatalogSnapshot {
     const mockFixture = providerId === 'mock' ? options.mockFixture : undefined;
-    const snapshot = this.broker.startTurn(context, providerId, [
-      LIST_WORKSPACE_TOOL.toolId,
-      READ_FILE_TOOL.toolId,
-      SEARCH_WORKSPACE_TOOL.toolId,
-      VIEW_IMAGE_TOOL.toolId,
-      UPDATE_PLAN_TOOL.toolId,
-      REQUEST_USER_INPUT_TOOL.toolId,
-      ...(this.deps.graphs ? GRAPH_TOOLS.map((tool) => tool.toolId) : []),
-      ...(mockFixture === 'approval' ? [APPROVAL_PROBE_TOOL.toolId] : []),
-      ...(mockFixture === 'command' && this.commandSandboxAvailable
-        ? [COMMAND_RUNNER_TOOL.toolId]
-        : []),
-      ...(this.commandSandboxAvailable && this.deps.command !== undefined
-        ? [
-            MANAGED_EXEC_COMMAND_TOOL.toolId,
-            POLL_COMMAND_TOOL.toolId,
-            WRITE_STDIN_TOOL.toolId,
-            TERMINATE_COMMAND_TOOL.toolId,
-          ]
-        : []),
-      ...(this.deps.workspaceEdit === undefined
+    const computerTargetToolIds =
+      this.deps.computerTargets === undefined || options.computerTargets !== true
+        ? []
+        : COMPUTER_TARGET_TOOLS.map((tool) => tool.toolId);
+    // Everything the managed coding surface offers, suppressed wholesale when this Turn exists only
+    // to carry the desktop target tools. Listing them here and filtering once keeps the two surfaces
+    // from drifting apart as tools are added.
+    const managedToolIds =
+      options.toolSurface === 'computer-targets-only'
         ? []
         : [
-            WORKSPACE_CREATE_FILE_TOOL.toolId,
-            ...(this.deps.workspaceEdit.supportsPatch === false
+            LIST_WORKSPACE_TOOL.toolId,
+            READ_FILE_TOOL.toolId,
+            SEARCH_WORKSPACE_TOOL.toolId,
+            VIEW_IMAGE_TOOL.toolId,
+            UPDATE_PLAN_TOOL.toolId,
+            REQUEST_USER_INPUT_TOOL.toolId,
+            ...(this.deps.graphs ? GRAPH_TOOLS.map((tool) => tool.toolId) : []),
+            ...(mockFixture === 'approval' ? [APPROVAL_PROBE_TOOL.toolId] : []),
+            ...(mockFixture === 'command' && this.commandSandboxAvailable
+              ? [COMMAND_RUNNER_TOOL.toolId]
+              : []),
+            ...(this.commandSandboxAvailable && this.deps.command !== undefined
+              ? [
+                  MANAGED_EXEC_COMMAND_TOOL.toolId,
+                  POLL_COMMAND_TOOL.toolId,
+                  WRITE_STDIN_TOOL.toolId,
+                  TERMINATE_COMMAND_TOOL.toolId,
+                ]
+              : []),
+            ...(this.deps.workspaceEdit === undefined
               ? []
-              : [WORKSPACE_PATCH_TOOL.toolId]),
-            ...(this.deps.workspaceEdit.createDirectory === undefined
+              : [
+                  WORKSPACE_CREATE_FILE_TOOL.toolId,
+                  ...(this.deps.workspaceEdit.supportsPatch === false
+                    ? []
+                    : [WORKSPACE_PATCH_TOOL.toolId]),
+                  ...(this.deps.workspaceEdit.createDirectory === undefined
+                    ? []
+                    : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),
+                ]),
+            ...(this.deps.team === undefined ? [] : TEAM_TOOLS.map(({ toolId }) => toolId)),
+            ...(this.deps.auxiliary === undefined || options.projectMemory !== true
               ? []
-              : [WORKSPACE_CREATE_DIRECTORY_TOOL.toolId]),
-          ]),
-      ...(this.deps.team === undefined ? [] : TEAM_TOOLS.map(({ toolId }) => toolId)),
-      ...(this.deps.auxiliary === undefined || options.projectMemory !== true
-        ? []
-        : [PROJECT_MEMORY_TOOL.toolId]),
-      ...(this.deps.auxiliary === undefined || options.skillDrafts !== true
-        ? []
-        : [SKILL_DRAFT_TOOL.toolId]),
-      ...(this.deps.auxiliary === undefined || options.skillActivation !== true
-        ? []
-        : [SKILL_ACTIVATE_TOOL.toolId]),
+              : [PROJECT_MEMORY_TOOL.toolId]),
+            ...(this.deps.auxiliary === undefined || options.skillDrafts !== true
+              ? []
+              : [SKILL_DRAFT_TOOL.toolId]),
+            ...(this.deps.auxiliary === undefined || options.skillActivation !== true
+              ? []
+              : [SKILL_ACTIVATE_TOOL.toolId]),
+          ];
+    const snapshot = this.broker.startTurn(context, providerId, [
+      ...managedToolIds,
+      ...computerTargetToolIds,
     ]);
     const key = JSON.stringify([context.taskId, context.turnId]);
     this.providersByTurn.set(key, providerId);

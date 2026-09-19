@@ -5,6 +5,7 @@ import type { RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { digestCanonical } from './context-compiler';
+import { computerTargetSystemPromptFor } from './computer-use-target-model';
 import { safeGitExecFileSync } from './safe-git';
 
 export const PROMPT_CONTEXT_VERSION = 1;
@@ -281,6 +282,10 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
         `- ${tool.name} [id=${tool.id}; kind=${tool.kind}; sideEffect=${tool.sideEffect}]`,
       );
     lines.push('一覧にないツールを利用可能だと仮定しない。');
+    // Derived from the catalog rather than from a flag read, through the same helper the
+    // provider-API route uses: the sentence appears exactly when the tools it talks about do.
+    const computerTargets = computerTargetSystemPromptFor(context.tools);
+    if (computerTargets !== null) lines.push('', computerTargets);
   }
   if (context.skills.length > 0) {
     lines.push('', 'このTurnで明示的に選択されたSkill:');
