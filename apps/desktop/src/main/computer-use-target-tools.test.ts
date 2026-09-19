@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   computerListTargetsOutputSchema,
+  computerTargetUntrustedLabelSchema,
   computerUseAvailabilitySchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
@@ -18,6 +19,7 @@ import {
   COMPUTER_TARGET_SYSTEM_PROMPT,
   COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
   computerTargetTokenBindingMatches,
+  computerTargetUntrustedLabel,
   resolveComputerTargetToken,
   sanitizeUntrustedTargetLabel,
   type ComputerTargetTokenBinding,
@@ -392,6 +394,18 @@ describe('target token model', () => {
     expect(sanitizeUntrustedTargetLabel('‮evil‬')).toBe('evil');
     expect(sanitizeUntrustedTargetLabel('   ')).toBe('unnamed');
     expect(sanitizeUntrustedTargetLabel('y'.repeat(200))).toHaveLength(64);
+  });
+
+  it('counts a truncated label the way the schema does, so astral characters still validate', () => {
+    // 33 emoji survive truncation at 33 codepoints but are 66 UTF-16 code units. A schema counting
+    // units would reject the label and take the whole list down with it.
+    const label = computerTargetUntrustedLabel('Notes', '😀'.repeat(80));
+    expect([...label.windowTitle]).toHaveLength(64);
+    expect(computerTargetUntrustedLabelSchema.parse(label)).toEqual(label);
+    expect(
+      computerTargetUntrustedLabelSchema.safeParse({ ...label, windowTitle: 'z'.repeat(65) })
+        .success,
+    ).toBe(false);
   });
 });
 

@@ -666,6 +666,7 @@ import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor'
 import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
+import { COMPUTER_LIST_TARGETS_TOOL } from './computer-use-target-tools';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
 import {
@@ -5376,6 +5377,111 @@ export class IpcRouter {
    * window, session, and observation revision. This still evaluates and commits through the
    * PermissionBroker; it only supplies the exact resource facts that the native controller owns.
    */
+  /**
+   * Target discovery names no session, because it is the call that finds one.
+   *
+   * `evaluateComputerUsePermission` below binds every Computer Use capability to a live session
+   * owned by the Task. That is exactly right for observe and act, and impossible for enumeration —
+   * routing `computer_list_targets` through it denies every call as `computer_session_missing`.
+   * Rather than loosen that binding, discovery gets its own evaluation through the same
+   * PermissionBroker, with the same policy-epoch check and the same non-persistent lane, and a
+   * resource that names what it actually reads: this install's target list, not a window.
+   *
+   * It stays read-only and `providerEgress: 'none'`: the enumeration itself sends nothing, and the
+   * one app-authored string it can return is withheld unless that app already has provider egress
+   * consent for this Task's connection and model.
+   */
+  private async evaluateComputerTargetDiscoveryPermission(
+    request: ToolAuthorizationRequest,
+    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
+  ) {
+    if (capability !== 'computer.observe')
+      return { decision: 'deny' as const, reason: 'computer_target_discovery_capability' };
+    const taskId = request.context.taskId;
+    const policyEpoch = this.permissionBroker.getPolicy(taskId).policyEpoch;
+    if (policyEpoch !== request.context.policyEpoch)
+      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
+    const target = 'computer-use:target-discovery';
+    const resource = { kind: 'external' as const, target };
+    const resourceSet = { kind: 'external-exact' as const, target };
+    const operation = 'observe' as const;
+    const sandboxProfile = 'read-only' as const;
+    const baseRequest = {
+      taskId,
+      subjectId: `computer-use:targets:${capability}`,
+      capability,
+      resource,
+      operation,
+      providerEgress: 'none' as const,
+      sandboxProfile,
+      executionSpecDigest: digestCanonical({
+        schemaVersion: 1,
+        capability,
+        target,
+        input: request.input,
+      }),
+      risk: request.entry.risk,
+    };
+    const permissionRequest = {
+      ...baseRequest,
+      reviewerInputDigest: autoReviewerInputDigest({
+        request: baseRequest,
+        tool: {
+          kind: request.entry.kind,
+          sideEffect: request.entry.sideEffect,
+          risk: request.entry.risk,
+        },
+        policyEpoch,
+      }),
+    } satisfies PermissionRequest;
+    const ceilingEntry = {
+      capability,
+      resourceSet,
+      operations: [operation],
+      expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      providerEgress: ['none' as const],
+      sandboxProfiles: [sandboxProfile],
+    };
+    const evaluationInput = {
+      taskId,
+      turnId: request.context.turnId,
+      request: permissionRequest,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        sandbox: { feasible: true, profile: sandboxProfile },
+        allowRules: [
+          {
+            capability,
+            resourceSet,
+            operations: [operation],
+            auditReason: 'computer_target_discovery',
+          },
+        ],
+      },
+      now: new Date().toISOString(),
+    } satisfies Parameters<PermissionBroker['preview']>[0];
+    const evaluation = this.permissionBroker.preview(evaluationInput);
+    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
+      return { decision: evaluation.decision, reason: evaluation.reason };
+    if (evaluation.permit === undefined)
+      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
+    const permit = evaluation.permit;
+    return {
+      decision: 'allow' as const,
+      reason: evaluation.reason,
+      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
+      beforeExecute: () =>
+        this.permissionBroker.revalidateEphemeral({
+          ...evaluationInput,
+          permit,
+          now: new Date().toISOString(),
+        }).valid,
+    };
+  }
+
   private async evaluateComputerUsePermission(
     request: ToolAuthorizationRequest,
     capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
@@ -5563,7 +5669,9 @@ export class IpcRouter {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
     if (capability === 'computer.observe' || capability === 'computer.control')
-      return this.evaluateComputerUsePermission(request, capability);
+      return request.entry.toolId === COMPUTER_LIST_TARGETS_TOOL.toolId
+        ? this.evaluateComputerTargetDiscoveryPermission(request, capability)
+        : this.evaluateComputerUsePermission(request, capability);
     const managedWorkerWorkspace = this.managedWorkerCall.get(
       JSON.stringify([request.context.turnId, request.callId]),
     )?.workspace;

@@ -5140,7 +5140,15 @@ export type ComputerTargetUnavailableClass = z.infer<typeof computerTargetUnavai
 
 const computerTargetUntrustedTextSchema = z
   .string()
-  .max(COMPUTER_TARGET_LABEL_MAX_CHARACTERS)
+  // Counted in codepoints, matching how the label is truncated. `.max()` alone counts UTF-16 code
+  // units, so a title of 33 emoji survives truncation at 33 codepoints and then fails validation at
+  // 66 units — which would throw away the whole list, not just the label. The cheap `.max()` below
+  // is the corresponding upper bound (no codepoint exceeds two units) and bounds the regex work.
+  .max(COMPUTER_TARGET_LABEL_MAX_CHARACTERS * 2)
+  .refine(
+    (value) => [...value].length <= COMPUTER_TARGET_LABEL_MAX_CHARACTERS,
+    `Untrusted target label exceeds ${COMPUTER_TARGET_LABEL_MAX_CHARACTERS} characters`,
+  )
   .refine(
     // Control characters, newlines, and the Unicode bidi overrides are what let a title close the
     // surrounding JSON framing or reorder itself into something that reads as a separate line.

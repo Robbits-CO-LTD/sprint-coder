@@ -8,6 +8,7 @@ import {
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
+import { COMPUTER_LIST_TARGETS_TOOL, COMPUTER_STOP_TOOL } from './computer-use-target-tools';
 import {
   approvalActivationIntent,
   quickStartActivationIntent,
@@ -587,5 +588,64 @@ describe('Computer Use Main IPC integration', () => {
     );
     // Main hands the opener the enum only; no URL or path ever crosses the boundary.
     expect(fixture.permissionSettings.open).toHaveBeenCalledWith('accessibility');
+  });
+
+  it('authorizes target discovery without a session while keeping the session binding for the rest', async () => {
+    const fixture = captureComputerUseHandlers();
+    const previewed: unknown[] = [];
+    Object.assign(fixture.router, {
+      permissionBroker: {
+        getPolicy: () => ({ policyEpoch: 3 }),
+        preview: (input: unknown) => {
+          previewed.push(input);
+          return { decision: 'allow', reason: 'computer_target_discovery', permit: { id: 'p' } };
+        },
+        revalidateEphemeral: () => ({ valid: true }),
+      },
+    });
+    const evaluate = (
+      entry: { toolId: string; providerName: string },
+      input: unknown,
+    ): Promise<{ decision: string; reason: string }> =>
+      (
+        fixture.router as unknown as {
+          evaluateToolPermission(
+            request: unknown,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        }
+      ).evaluateToolPermission(
+        {
+          entry: { ...entry, kind: 'computerTarget', sideEffect: 'control', risk: 'low' },
+          input,
+          callId: 'call-1',
+          context: { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 3 },
+        },
+        'computer.observe',
+      );
+
+    // `computer_list_targets` is the call that finds a session, so routing it through the
+    // session-bound evaluation would deny every call as `computer_session_missing`.
+    await expect(
+      evaluate(
+        { toolId: COMPUTER_LIST_TARGETS_TOOL.toolId, providerName: 'computer_list_targets' },
+        {},
+      ),
+    ).resolves.toMatchObject({ decision: 'allow', reason: 'computer_target_discovery' });
+    expect(previewed).toHaveLength(1);
+
+    // Every other Computer Use tool keeps the live-session binding untouched.
+    await expect(
+      evaluate(
+        { toolId: COMPUTER_STOP_TOOL.toolId, providerName: 'computer_stop' },
+        {
+          sessionId: 'session-unknown',
+        },
+      ),
+    ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
+    await expect(
+      evaluate({ toolId: 'builtin:computer:observe@1', providerName: 'computer_observe' }, {}),
+    ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
+    expect(previewed).toHaveLength(1);
   });
 });
