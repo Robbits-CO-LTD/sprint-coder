@@ -4,11 +4,21 @@ import {
   computerAppProfileSchema,
   computerUseAvailabilitySchema,
   computerUseProfileRegisterInputSchema,
+  computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
 import { COMPUTER_LIST_TARGETS_TOOL, COMPUTER_STOP_TOOL } from './computer-use-target-tools';
+import {
+  COMPUTER_TARGET_SYSTEM_PROMPT,
+  computerTargetSystemPromptFor,
+} from './computer-use-target-model';
+import { ComputerUseController } from './computer-use-controller';
+import { ManagedCodingHarness } from './provider-workspace-tools';
+import { PermissionBroker } from './permission-broker';
+import { expandAccessPreset } from '@sprint-coder/domain';
+import type { PermissionPolicyRecord } from './persistence';
 import {
   approvalActivationIntent,
   quickStartActivationIntent,
@@ -685,5 +695,204 @@ describe('Computer Use Main IPC integration', () => {
       evaluate({ toolId: 'builtin:computer:observe@1', providerName: 'computer_observe' }, {}),
     ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
     expect(previewed).toHaveLength(1);
+  });
+});
+
+describe('Computer Use target tools end to end', () => {
+  /**
+   * The whole route a real call takes, with only the Provider missing: harness catalog →
+   * published tool definition → system prompt sentence → tool call → permission evaluation through
+   * a real PermissionBroker and the real policy evaluator → resource claim → controller →
+   * output schema. Each review round has found a break in a different one of these links, so they
+   * are pinned together rather than one at a time.
+   */
+  function endToEnd(options: { preset?: 'ask' | 'auto' | 'full'; revoked?: boolean } = {}) {
+    const preset = options.preset ?? 'full';
+    const policy: PermissionPolicyRecord = {
+      preset,
+      policyEpoch: 0,
+      expandedPolicy: expandAccessPreset(preset),
+      revokedCapabilities: options.revoked === true ? ['computer.observe'] : [],
+    };
+    const permissionBroker = new PermissionBroker({
+      getPermissionPolicy: () => policy,
+      setAccessPreset: () => policy,
+      listPermissionGrants: () => [],
+      revokePermissionCapability: () => 0,
+      getEffectiveWorkspaceSet: () => null,
+      readTurnWorkspaceSetForTask: () => null,
+      getTurnWorkspaceRootIdentities: () => new Map(),
+      commitPermissionEvaluation: () => undefined,
+    } as unknown as ConstructorParameters<typeof PermissionBroker>[0]);
+    const profile = {
+      id: 'profile-1',
+      platform: 'darwin' as const,
+      kind: 'macos-bundle' as const,
+      label: 'Notes',
+      canonicalPath: '/Applications/Notes.app/Contents/MacOS/Notes',
+      appUrl: null,
+      identity: {
+        platform: 'darwin',
+        identityDigest: 'a'.repeat(64),
+        bundleId: 'com.example.notes',
+        executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
+        executableDigest: 'b'.repeat(64),
+        teamId: 'TEAMID1234',
+        signingIdentifier: 'com.example.notes',
+        cdHash: null,
+        displayName: 'Notes',
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+      },
+      identityDigest: 'a'.repeat(64),
+      version: null,
+      executableDigest: 'b'.repeat(64),
+      mode: 'full_access_app' as const,
+      connectionId: 'connection-1',
+      modelId: 'model-1',
+      providerEgressConsent: true,
+      remember: true,
+      revision: 3,
+      createdAt: '2026-09-19T00:00:00.000Z',
+      updatedAt: '2026-09-19T00:00:00.000Z',
+    };
+    const controller = new ComputerUseController({
+      persistence: {
+        listComputerAppProfiles: () => [profile],
+        getComputerAppProfile: () => profile,
+        getActiveTurnId: () => null,
+        getPermissionPolicy: () => ({ policyEpoch: 0 }),
+        listComputerActionAudits: () => [],
+      } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
+      native: {
+        availability: () => available,
+        pickApplication: async () => null,
+        listWindows: async () => [
+          {
+            platform: 'darwin',
+            windowId: 'native-window-1',
+            appIdentityDigest: profile.identityDigest,
+            windowIdentityDigest: 'd'.repeat(64),
+            title: 'Meeting notes',
+            bounds: { x: 0, y: 0, width: 800, height: 600 },
+            screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+            focused: true,
+            eligible: true,
+            ownerKind: 'application',
+            modal: false,
+            revision: 1,
+            policyLanguage: 'en',
+            maximumMode: 'full_access_app',
+          },
+        ],
+        startSession: async () => ({}) as never,
+        observe: async () => ({}) as never,
+        dispatch: async () => ({ result: 'completed', reasonCode: null }),
+        cancel: async () => undefined,
+        close: async () => undefined,
+      } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
+      featureEnabled: () => true,
+      agentDrivenEnabled: () => true,
+      providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
+      currentPolicyEpoch: () => 0,
+      repositionEmergencyStop: () => true,
+    });
+    const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
+    Object.assign(router, { permissionBroker, computerUseController: controller });
+    const harness = new ManagedCodingHarness({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 0,
+      authorizer: (request) =>
+        (
+          router as unknown as {
+            evaluateToolPermission(request: unknown, capability: string): Promise<unknown>;
+          }
+        ).evaluateToolPermission(request, request.entry.requiredCapabilities[0]!) as never,
+      computerTargets: {
+        listTargets: (input, context) => controller.listTargets(input, context),
+        stop: (sessionId, context) => controller.stopForAgent(sessionId, context),
+      },
+    });
+    return { harness, controller, permissionBroker };
+  }
+
+  const turnContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+
+  it('publishes, guards, authorizes, and executes computer_list_targets with no Workspace', async () => {
+    const { harness } = endToEnd();
+    // A Task with no Workspace at all: the surface carries the desktop tools and nothing else.
+    const snapshot = harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    expect(snapshot.entries.map((entry) => entry.providerName).sort()).toEqual([
+      'computer_list_targets',
+      'computer_stop',
+    ]);
+    // The catalog carries a target tool, so the warning sentence must accompany it.
+    expect(computerTargetSystemPromptFor(snapshot.entries)).toBe(COMPUTER_TARGET_SYSTEM_PROMPT);
+    const result = (await harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-1',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; untrustedLabel: { windowTitle: string } | null }[] };
+    expect(computerListTargetsOutputSchema.parse(result)).toEqual(result);
+    expect(result.targets).toHaveLength(1);
+    expect(result.targets[0]?.untrustedLabel?.windowTitle).toBe('Meeting notes');
+  });
+
+  it('reaches the enumeration under every access preset and stops at a revoked capability', async () => {
+    for (const preset of ['ask', 'auto', 'full'] as const) {
+      const { harness } = endToEnd({ preset });
+      harness.startTurn(turnContext, 'codex', {
+        computerTargets: true,
+        toolSurface: 'computer-targets-only',
+      });
+      await expect(
+        harness.broker.dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          callId: 'call-1',
+          providerName: 'computer_list_targets',
+          input: {},
+        }),
+      ).resolves.toMatchObject({ truncated: false });
+    }
+    const revoked = endToEnd({ revoked: true });
+    revoked.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    await expect(
+      revoked.harness.broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-1',
+        providerName: 'computer_list_targets',
+        input: {},
+      }),
+    ).rejects.toThrow(/capability_revoked/u);
+  });
+
+  it('refuses computer_stop for a session this Task does not own', async () => {
+    const { harness } = endToEnd();
+    harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    // No live session exists, so the session-bound permission lane denies before the controller
+    // is reached — the same answer a session owned by another Task would get.
+    await expect(
+      harness.broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-1',
+        providerName: 'computer_stop',
+        input: { sessionId: 'session-elsewhere' },
+      }),
+    ).rejects.toThrow(/computer_session_missing/u);
   });
 });

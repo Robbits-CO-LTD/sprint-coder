@@ -18,6 +18,7 @@ import {
 import {
   COMPUTER_TARGET_SYSTEM_PROMPT,
   COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
+  computerTargetSystemPromptFor,
   computerTargetTokenBindingMatches,
   computerTargetUntrustedLabel,
   resolveComputerTargetToken,
@@ -555,6 +556,67 @@ describe('agent-facing target tool exposure', () => {
     const names = providerNames(true, false);
     expect(names).not.toContain('computer_list_targets');
     expect(names).not.toContain('computer_stop');
+  });
+
+  it('publishes only the two desktop tools on a Turn that has no Workspace', () => {
+    const names = harness(true)
+      .startTurn(
+        { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 },
+        'codex',
+        {
+          computerTargets: true,
+          toolSurface: 'computer-targets-only',
+        },
+      )
+      .entries.map((entry) => entry.providerName)
+      .sort();
+    // Not `update_plan` or `request_user_input`: an empty Workspace must not drag the managed
+    // coding surface into a Turn that only exists to reach the desktop.
+    expect(names).toEqual(['computer_list_targets', 'computer_stop']);
+  });
+
+  it('publishes nothing on that same Turn when the boundary is absent', () => {
+    expect(
+      harness(false).startTurn(
+        { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 },
+        'codex',
+        {
+          computerTargets: true,
+          toolSurface: 'computer-targets-only',
+        },
+      ).entries,
+    ).toEqual([]);
+  });
+
+  it('ties the warning sentence to the catalog on every route', () => {
+    const withTargets = new ToolRegistry();
+    for (const tool of COMPUTER_TARGET_TOOLS) withTargets.register(tool);
+    const catalogs = {
+      // CLI route and provider-API route read the same catalog; the workspace-less API Turn is the
+      // same catalog again, and a flagged-off Turn simply has no such tool registered.
+      cli: withTargets.createSnapshot({ providerId: 'codex', workspaceId: null }),
+      api: withTargets.createSnapshot({ providerId: 'openai', workspaceId: null }),
+      apiWithoutWorkspace: harness(true).startTurn(
+        { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 },
+        'openai',
+        { computerTargets: true, toolSurface: 'computer-targets-only' },
+      ),
+      flagOff: harness(false).startTurn(
+        { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 },
+        'openai',
+        { computerTargets: true, toolSurface: 'computer-targets-only' },
+      ),
+    };
+    for (const [name, catalog] of Object.entries(catalogs)) {
+      const exposesTools = catalog.entries.some((entry) => entry.kind === 'computerTarget');
+      const carriesSentence =
+        computerTargetSystemPromptFor(catalog.entries) === COMPUTER_TARGET_SYSTEM_PROMPT;
+      expect({ name, exposesTools, carriesSentence }).toEqual({
+        name,
+        exposesTools: name !== 'flagOff',
+        carriesSentence: name !== 'flagOff',
+      });
+    }
   });
 
   it('carries the untrusted-label instruction only when the tools are exposed', () => {

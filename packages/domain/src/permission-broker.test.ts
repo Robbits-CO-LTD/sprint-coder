@@ -1563,3 +1563,119 @@ describe('Computer Use permission bindings', () => {
     ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
   });
 });
+
+describe('Computer Use target enumeration resource', () => {
+  const targetListCeiling = {
+    entries: [
+      {
+        capability: 'computer.observe' as const,
+        resourceSet: { kind: 'computer-target-list' as const },
+        operations: ['observe' as const],
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        providerEgress: ['none' as const],
+        sandboxProfiles: ['read-only' as const, 'workspace-write' as const],
+      },
+    ],
+    maxWorkerDepth: 0,
+    maxConcurrentWorkers: 0,
+  };
+  const enumerationRequest = {
+    taskId: 'task-1',
+    subjectId: 'computer-use:targets:computer.observe',
+    capability: 'computer.observe',
+    resource: { kind: 'computer-target-list', taskId: 'task-1' },
+    operation: 'observe',
+    providerEgress: 'none',
+    sandboxProfile: 'read-only',
+    executionSpecDigest: EXECUTION_DIGEST,
+    reviewerInputDigest: REVIEWER_INPUT_DIGEST,
+    risk: 'low',
+  } as PermissionRequest;
+  const enumerationPolicy = (preset: AccessPreset) => {
+    const expanded = expandAccessPreset(preset);
+    return {
+      ...basePolicy(),
+      parentCeiling: targetListCeiling,
+      modeCeiling: targetListCeiling,
+      sandbox: { feasible: true, profile: 'read-only' as const },
+      // The shape Main supplies: the Computer Use lane brings its own allow rule, exactly as the
+      // session lane does for `computer.observe`, and the Task preset is merged around it.
+      allowRules: [
+        {
+          capability: 'computer.observe' as const,
+          resourceSet: { kind: 'computer-target-list-exact' as const, taskId: 'task-1' },
+          operations: ['observe' as const],
+          auditReason: 'computer_target_discovery',
+        },
+        ...expanded.allowRules,
+      ],
+      immutableDeny: expanded.immutableDeny ?? [],
+      approvalPolicy: expanded.approvalPolicy,
+      ...(expanded.approvalReason === undefined ? {} : { approvalReason: expanded.approvalReason }),
+    };
+  };
+
+  it('allows enumeration under every access preset, the way session observe already is', () => {
+    for (const preset of ['ask', 'auto', 'full'] as const)
+      expect(
+        evaluatePermissionPolicy({
+          request: enumerationRequest,
+          policy: enumerationPolicy(preset),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'allow', reason: 'computer_target_discovery' });
+  });
+
+  it('still denies enumeration when the Task revokes computer.observe', () => {
+    expect(
+      evaluatePermissionPolicy({
+        request: enumerationRequest,
+        policy: {
+          ...enumerationPolicy('full'),
+          projectDeny: [
+            {
+              capability: 'computer.observe' as const,
+              resourceSet: { kind: 'all' as const },
+              operations: ['observe' as const],
+              auditReason: 'capability_revoked',
+            },
+          ],
+        },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
+  });
+
+  it.each([
+    { resource: { kind: 'computer-target-list', taskId: '' } },
+    // A list bound to a Task other than the one being evaluated.
+    { resource: { kind: 'computer-target-list', taskId: 'task-2' } },
+    // Enumeration is observe-only: nothing can be driven through a list.
+    { capability: 'computer.control', operation: 'control' },
+  ])('fails closed for malformed enumeration facts %#', (override) => {
+    expect(
+      evaluatePermissionPolicy({
+        request: { ...enumerationRequest, ...override } as PermissionRequest,
+        policy: enumerationPolicy('full'),
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
+  });
+
+  it('refuses a computer.control grant bound to a target list', () => {
+    expect(() =>
+      createSessionGrant({
+        id: 'grant-1',
+        subjectId: 'computer-use:targets:computer.control',
+        capability: 'computer.control',
+        resourceSet: { kind: 'computer-target-list-exact', taskId: 'task-1' },
+        operations: ['control'],
+        scope: 'once',
+        policyEpoch: 4,
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        providerEgress: ['none'],
+        sandboxProfiles: ['read-only'],
+      } as Parameters<typeof createSessionGrant>[0]),
+    ).toThrow('Computer control grants cannot bind a target list');
+  });
+});

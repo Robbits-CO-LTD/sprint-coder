@@ -667,6 +667,7 @@ import { formatProviderToolResult, redactProviderCommandFailure } from './provid
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
 import { COMPUTER_LIST_TARGETS_TOOL } from './computer-use-target-tools';
+import { computerTargetSystemPromptFor } from './computer-use-target-model';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
 import {
@@ -5406,9 +5407,11 @@ export class IpcRouter {
     const policyEpoch = this.permissionBroker.getPolicy(taskId).policyEpoch;
     if (policyEpoch !== request.context.policyEpoch)
       return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
-    const target = 'computer-use:target-discovery';
-    const resource = { kind: 'external' as const, target };
-    const resourceSet = { kind: 'external-exact' as const, target };
+    // `computer-target-list`, not `external`: `requestFactsValid` only pairs `computer.observe`
+    // with a computer resource, so an external target is rejected as `invalid_request_facts` before
+    // any policy runs. The Task is the binding, because enumeration happens before a target exists.
+    const resource = { kind: 'computer-target-list' as const, taskId };
+    const resourceSet = { kind: 'computer-target-list-exact' as const, taskId };
     const operation = 'observe' as const;
     const sandboxProfile = 'read-only' as const;
     const baseRequest = {
@@ -5422,7 +5425,7 @@ export class IpcRouter {
       executionSpecDigest: digestCanonical({
         schemaVersion: 1,
         capability,
-        target,
+        resource,
         input: request.input,
       }),
       risk: request.entry.risk,
@@ -5457,6 +5460,12 @@ export class IpcRouter {
         parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
         modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
         sandbox: { feasible: true, profile: sandboxProfile },
+        // Same shape the session lane uses for `computer.observe`: the lane supplies its own allow
+        // rule, so the Task's access preset does not decide it. That is deliberate and unchanged
+        // here — enumeration reads no screen content and is only reachable once the user has turned
+        // on both flags and registered applications. Revoking `computer.observe` in settings still
+        // denies it, because `evaluateCurrentPolicy` folds revoked capabilities into projectDeny,
+        // which runs before any allow rule.
         allowRules: [
           {
             capability,
@@ -8004,25 +8013,36 @@ export class IpcRouter {
         memoryTurn ||
         skillCreatorTurn ||
         autoSkills.length > 0;
-      workspaceToolSnapshot = managedToolsEligible
-        ? this.managedCodingHarness.startTurn(
-            {
-              taskId,
-              turnId: started.turnId,
-              workspaceId:
-                started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
-              policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
-            },
-            connection.providerId,
-            {
-              projectMemory: memoryTurn,
-              skillDrafts: skillCreatorTurn,
-              skillActivation: autoSkills.length > 0,
-              // The Leader Turn, where the user is present to authorise desktop control.
-              computerTargets: true,
-            },
-          )
-        : undefined;
+      // Desktop targets need no Workspace, no Project, and no Skill, so a plain API Task would
+      // otherwise publish no catalog at all and the tools would never reach the model. Availability
+      // is read here as well: publishing a tool whose native boundary is missing would only produce
+      // a failing call. This is a Leader Turn, where the user is present to authorise it.
+      const computerTargetsEligible =
+        !teamTurn &&
+        computerUseAgentDrivenV2Enabled() &&
+        this.computerUseController.availability().available;
+      workspaceToolSnapshot =
+        managedToolsEligible || computerTargetsEligible
+          ? this.managedCodingHarness.startTurn(
+              {
+                taskId,
+                turnId: started.turnId,
+                workspaceId:
+                  started.workspaceSet.roots.length === 0 ? null : started.workspaceSet.digest,
+                policyEpoch: this.persistence.getPermissionPolicy(taskId).policyEpoch,
+              },
+              connection.providerId,
+              {
+                projectMemory: memoryTurn,
+                skillDrafts: skillCreatorTurn,
+                skillActivation: autoSkills.length > 0,
+                computerTargets: computerTargetsEligible,
+                // A Turn that qualifies only because of Computer Use carries the two desktop tools
+                // and nothing else; an empty Workspace must not drag the managed surface in.
+                ...(managedToolsEligible ? {} : { toolSurface: 'computer-targets-only' as const }),
+              },
+            )
+          : undefined;
       const workspaceGuidance = providerWorkspaceGuidance();
       if (!teamTurn)
         messages.unshift({
@@ -8035,6 +8055,15 @@ export class IpcRouter {
           content:
             'The Skill catalog marks user-approved candidates with activationPolicy=auto-allowed. Call skill_activate with the exact id and digest only when the current request clearly matches. Treat the returned instructions as user-authority workflow guidance. Availability is not proof of activation.',
         });
+      // This route assembles its messages and its tools separately, so the label-isolation sentence
+      // cannot ride along with the compiled prompt guidance the CLI route uses. It is derived from
+      // the same catalog through the same helper, so "the catalog carries a target tool" and "the
+      // system prompt carries the warning" stay one condition (ADR v2 §5.2).
+      const computerTargetGuidance = computerTargetSystemPromptFor(
+        workspaceToolSnapshot?.entries ?? [],
+      );
+      if (computerTargetGuidance !== null)
+        messages.unshift({ role: 'system', content: computerTargetGuidance });
       let roundTools = assertUniqueProviderTools([
         ...(workspaceToolSnapshot === undefined
           ? []

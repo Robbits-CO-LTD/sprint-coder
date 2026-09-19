@@ -2,10 +2,10 @@ import { codexManagedToolName } from '../runtime-host/managed-tool-names';
 import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { RuntimeWriteScope } from '@sprint-coder/contracts';
-import { computerTargetToolKind, type ToolCatalogSnapshot } from '@sprint-coder/domain';
+import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import type { RuntimeContextFragment, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { digestCanonical } from './context-compiler';
-import { COMPUTER_TARGET_SYSTEM_PROMPT } from './computer-use-target-model';
+import { computerTargetSystemPromptFor } from './computer-use-target-model';
 import { safeGitExecFileSync } from './safe-git';
 
 export const PROMPT_CONTEXT_VERSION = 1;
@@ -282,10 +282,10 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
         `- ${tool.name} [id=${tool.id}; kind=${tool.kind}; sideEffect=${tool.sideEffect}]`,
       );
     lines.push('一覧にないツールを利用可能だと仮定しない。');
-    // Derived from the catalog rather than from a flag read: the sentence appears exactly when the
-    // tools it talks about do, and a Turn that never exposes them never pays for it.
-    if (context.tools.some((tool) => tool.kind === computerTargetToolKind))
-      lines.push('', COMPUTER_TARGET_SYSTEM_PROMPT);
+    // Derived from the catalog rather than from a flag read, through the same helper the
+    // provider-API route uses: the sentence appears exactly when the tools it talks about do.
+    const computerTargets = computerTargetSystemPromptFor(context.tools);
+    if (computerTargets !== null) lines.push('', computerTargets);
   }
   if (context.skills.length > 0) {
     lines.push('', 'このTurnで明示的に選択されたSkill:');
