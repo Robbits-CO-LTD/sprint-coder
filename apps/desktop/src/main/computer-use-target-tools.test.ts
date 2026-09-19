@@ -302,8 +302,8 @@ describe('computer_list_targets', () => {
     const first = selectable((await controller.listTargets({}, toolContext)).targets)[0]!;
     const second = selectable((await controller.listTargets({}, toolContext)).targets)[0]!;
     expect(second.targetToken).not.toBe(first.targetToken);
-    expect(controller.resolveTargetTokenForTest(first.targetToken)).toBeNull();
-    expect(controller.resolveTargetTokenForTest(second.targetToken)).not.toBeNull();
+    expect(controller.targetTokenBinding(first.targetToken)).toBeNull();
+    expect(controller.targetTokenBinding(second.targetToken)).not.toBeNull();
   });
 
   it('expires a token on the shared window-candidate TTL', async () => {
@@ -312,16 +312,16 @@ describe('computer_list_targets', () => {
     const token = selectable((await controller.listTargets({}, toolContext)).targets)[0]!
       .targetToken;
     clock += COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS - 1;
-    expect(controller.resolveTargetTokenForTest(token)).not.toBeNull();
+    expect(controller.targetTokenBinding(token)).not.toBeNull();
     clock += 1;
-    expect(controller.resolveTargetTokenForTest(token)).toBeNull();
+    expect(controller.targetTokenBinding(token)).toBeNull();
   });
 
   it('binds a token to the Task, Turn, policy epoch, profile revision, and window identity', async () => {
     const { controller } = createFixture();
     const token = selectable((await controller.listTargets({}, toolContext)).targets)[0]!
       .targetToken;
-    const binding = controller.resolveTargetTokenForTest(token)!.binding;
+    const binding = controller.targetTokenBinding(token)!;
     expect(binding).toMatchObject({
       taskId: 'task-1',
       turnId: 'turn-1',
@@ -342,24 +342,6 @@ describe('computer_list_targets', () => {
     await expect(controller.listTargets({}, { ...toolContext, policyEpoch: 1 })).rejects.toThrow(
       /policy epoch/iu,
     );
-  });
-});
-
-describe('computer_stop ownership', () => {
-  it('refuses a session id that belongs to another Task and stops one it owns', async () => {
-    const { controller } = createFixture();
-    const stop = vi.spyOn(controller, 'stop').mockResolvedValue(undefined);
-    controller.registerSessionOwnerForTest('session-1', 'task-1');
-    controller.registerSessionOwnerForTest('session-2', 'task-9');
-    await expect(controller.stopForAgent('session-2', toolContext)).rejects.toThrow(
-      /not owned by this task/iu,
-    );
-    await expect(controller.stopForAgent('session-missing', toolContext)).rejects.toThrow(
-      /not owned by this task/iu,
-    );
-    expect(stop).not.toHaveBeenCalled();
-    await controller.stopForAgent('session-1', toolContext);
-    expect(stop).toHaveBeenCalledWith('session-1', 'agent_stop');
   });
 });
 

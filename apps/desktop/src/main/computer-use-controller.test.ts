@@ -399,6 +399,7 @@ function createFixture(
     ...(options.runtimeCapture === undefined ? {} : { runtimeCapture: options.runtimeCapture }),
     ...(options.planner === undefined ? {} : { planner: options.planner }),
     featureEnabled: () => true,
+    agentDrivenEnabled: () => true,
     ...(options.now === undefined ? {} : { now: options.now }),
     currentPolicyEpoch: () => policyEpoch,
     publishStatus: (status) => statuses.push(status),
@@ -480,6 +481,27 @@ const click: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left'
 const plainType: ComputerUseAction = { type: 'type', text: 'hello' };
 
 describe('ComputerUseController', () => {
+  it('lets the Task agent stop only a session its own Task owns', async () => {
+    const fixture = createFixture();
+    const session = await start(fixture);
+    const context = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+    // Another Task's id and an id that names nothing fail the same way, so a tool call cannot be
+    // used to discover which sessions exist outside this Task.
+    await expect(
+      fixture.controller.stopForAgent(session.sessionId, { ...context, taskId: 'task-9' }),
+    ).rejects.toThrow(/not owned by this Task/iu);
+    await expect(fixture.controller.stopForAgent('session-missing', context)).rejects.toThrow(
+      /not owned by this Task/iu,
+    );
+    expect(fixture.nativeCloseCount()).toBe(0);
+    await fixture.controller.stopForAgent(session.sessionId, context);
+    expect(fixture.statuses.at(-1)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'agent_stop',
+    });
+    expect(fixture.nativeCloseCount()).toBe(1);
+  });
+
   it('records actual native calls without giving direct handwritten actions Provider evidence', async () => {
     const runtimeCapture = new ComputerUseRuntimeCapture();
     const fixture = createFixture({ runtimeCapture });

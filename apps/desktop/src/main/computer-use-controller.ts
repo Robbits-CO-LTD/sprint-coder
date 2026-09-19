@@ -47,6 +47,7 @@ import {
   resolveComputerTargetToken,
   COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
   type ComputerTargetAppTokenRecord,
+  type ComputerTargetTokenBinding,
   type ComputerTargetTokenRecord,
 } from './computer-use-target-model';
 import {
@@ -767,21 +768,19 @@ export class ComputerUseController {
   }
 
   /**
-   * Resolution seam for S3 and for the binding tests. Returns null for anything that has drifted.
+   * What a live `targetToken` currently names, or null when it is unknown or expired.
+   *
+   * S3's `computer_start` reads this to build the expected binding it then re-verifies against
+   * native. It answers null rather than a stale record, so a caller that forgets to re-check a
+   * single field still cannot spend a token issued under a different epoch.
    */
-  resolveTargetTokenForTest(token: string): ComputerTargetTokenRecord | null {
+  targetTokenBinding(token: string): ComputerTargetTokenBinding | null {
     const record = this.targetTokens.get(token);
     if (record === undefined) return null;
-    return resolveComputerTargetToken(this.targetTokens, token, record.binding, this.now());
-  }
-
-  /** Test seam: registers a session owner without standing up a native session. */
-  registerSessionOwnerForTest(sessionId: string, taskId: string): void {
-    this.startingSessions.set(sessionId, {
-      controller: new AbortController(),
-      reason: null,
-      taskId,
-    });
+    return (
+      resolveComputerTargetToken(this.targetTokens, token, record.binding, this.now())?.binding ??
+      null
+    );
   }
 
   private resolveTargetAppProfileId(
