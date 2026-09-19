@@ -266,6 +266,8 @@ if (sanitizerSelfCheckOnly) {
     ]);
     if (!existsSync(executable) || !statSync(executable).isFile())
       throw new Error('Computer Use Windows helper was not produced');
+    // Protocol-only tests cannot detect read/write deadlocks on a real Windows pipe.
+    run(process.execPath, ['--test', join(nativeDirectory, 'verify-windows-pipe.mjs')]);
     artifact = {
       kind: 'windows-helper',
       file: 'sprint-coder-computer-use-host.exe',

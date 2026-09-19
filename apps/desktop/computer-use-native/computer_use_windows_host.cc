@@ -2316,8 +2316,16 @@ bool ReadExact(HANDLE pipe, void *destination, std::size_t bytes) {
   while (offset < bytes) {
     const DWORD request =
         static_cast<DWORD>(std::min<std::size_t>(bytes - offset, 1u << 20));
+    ScopedKernelHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (event.value == nullptr)
+      return false;
+    OVERLAPPED operation{};
+    operation.hEvent = event.value;
     DWORD read = 0;
-    if (!ReadFile(pipe, output + offset, request, &read, nullptr) || read == 0)
+    const BOOL started =
+        ReadFile(pipe, output + offset, request, nullptr, &operation);
+    if ((!started && GetLastError() != ERROR_IO_PENDING) ||
+        !GetOverlappedResult(pipe, &operation, &read, TRUE) || read == 0)
       return false;
     offset += read;
   }
@@ -2330,9 +2338,16 @@ bool WriteExact(HANDLE pipe, const void *source, std::size_t bytes) {
   while (offset < bytes) {
     const DWORD request =
         static_cast<DWORD>(std::min<std::size_t>(bytes - offset, 1u << 20));
+    ScopedKernelHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (event.value == nullptr)
+      return false;
+    OVERLAPPED operation{};
+    operation.hEvent = event.value;
     DWORD written = 0;
-    if (!WriteFile(pipe, input + offset, request, &written, nullptr) ||
-        written == 0)
+    const BOOL started =
+        WriteFile(pipe, input + offset, request, nullptr, &operation);
+    if ((!started && GetLastError() != ERROR_IO_PENDING) ||
+        !GetOverlappedResult(pipe, &operation, &written, TRUE) || written == 0)
       return false;
     offset += written;
   }
@@ -4893,10 +4908,13 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     CloseHandle(parent);
     return 5;
   }
-  HANDLE pipe = CreateNamedPipeW(pipe_name.c_str(), PIPE_ACCESS_DUPLEX,
-                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE |
-                                     PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                                 1, 64 * 1024, 64 * 1024, 0, &security);
+  // ServePipe reads the next request on one thread while another writes the current response.
+  // A synchronous handle serializes those operations: the pending read can block the response
+  // until another request arrives. Each overlapped operation owns its own completion event.
+  HANDLE pipe = CreateNamedPipeW(
+      pipe_name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+      1, 64 * 1024, 64 * 1024, 0, &security);
   LocalFree(security_descriptor);
   if (pipe == INVALID_HANDLE_VALUE) {
     CloseHandle(parent);
@@ -4910,10 +4928,20 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     return 7;
   }
   const BackendProbe probe = ProbeBackend();
-  const BOOL connected =
-      ConnectNamedPipe(pipe, nullptr)
-          ? TRUE
-          : (GetLastError() == ERROR_PIPE_CONNECTED ? TRUE : FALSE);
+  ScopedKernelHandle connected_event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  OVERLAPPED connection{};
+  connection.hEvent = connected_event.value;
+  BOOL connected = FALSE;
+  if (connected_event.value != nullptr) {
+    connected = ConnectNamedPipe(pipe, &connection);
+    if (!connected) {
+      const DWORD error = GetLastError();
+      DWORD transferred = 0;
+      connected = error == ERROR_PIPE_CONNECTED ||
+                  (error == ERROR_IO_PENDING &&
+                   GetOverlappedResult(pipe, &connection, &transferred, TRUE));
+    }
+  }
   ULONG client_pid = 0;
   const bool authenticated_client =
       connected == TRUE &&
