@@ -6,6 +6,7 @@ import {
   computerUseModeAdjustmentNotice,
   computerUseTerminalNotice,
   computerUseWindowViews,
+  requestComputerUsePermissionSettings,
   profileView,
   subscribeComputerUseStatusWithReplay,
   useComputerUse,
@@ -54,6 +55,7 @@ describe('Computer Use renderer projection', () => {
       available: false,
       reasonCode: 'screen_recording_permission_required',
       manifestDigest: 'a'.repeat(64),
+      missingPermissions: ['screen_recording' as const],
     };
     expect(computerUseEntryVisible(permissionRequired)).toBe(true);
     expect(computerUseCapabilitiesReady(permissionRequired)).toBe(false);
@@ -184,5 +186,40 @@ describe('Computer Use renderer projection', () => {
         stopReason: 'user_stop',
       } as ComputerUseSessionStatus),
     ).toBeNull();
+  });
+
+  it('keeps a named-permission boundary visible so the user can open the right settings pane', () => {
+    const permissionRequired = {
+      platform: 'darwin' as const,
+      state: 'permission_required' as const,
+      acceptanceMode: null,
+      featureEnabled: true,
+      packageReady: true,
+      handshakeReady: true,
+      observe: false,
+      control: false,
+      available: false,
+      reasonCode: 'accessibility_permission_required',
+      manifestDigest: 'a'.repeat(64),
+      missingPermissions: ['accessibility' as const],
+    };
+    expect(computerUseEntryVisible(permissionRequired)).toBe(true);
+    expect(computerUseCapabilitiesReady(permissionRequired)).toBe(false);
+  });
+
+  it('asks Main for a settings pane with the permission enum and nothing else', async () => {
+    const openPermissionSettings = vi.fn(async () => ({ opened: true }));
+    await expect(
+      requestComputerUsePermissionSettings({ openPermissionSettings }, 'screen_recording'),
+    ).resolves.toBe(true);
+    expect(openPermissionSettings).toHaveBeenCalledWith({ permission: 'screen_recording' });
+    openPermissionSettings.mockResolvedValueOnce({ opened: false });
+    await expect(
+      requestComputerUsePermissionSettings({ openPermissionSettings }, 'accessibility'),
+    ).resolves.toBe(false);
+    await expect(
+      requestComputerUsePermissionSettings(undefined, 'accessibility'),
+    ).resolves.toBe(false);
+    expect(openPermissionSettings).toHaveBeenCalledTimes(2);
   });
 });

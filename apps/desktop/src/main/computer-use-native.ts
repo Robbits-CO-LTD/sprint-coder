@@ -6,6 +6,7 @@ import { join, resolve, sep } from 'node:path';
 import {
   computerUseNativeManifestSchema,
   type ComputerUseNativeManifest,
+  type ComputerUseOsPermission,
 } from '@sprint-coder/contracts';
 import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
@@ -39,6 +40,72 @@ const COMPUTER_USE_NATIVE_MAX_PROBE_BYTES = 64 * 1024;
 const ASAR_DIR_SEGMENT = `${sep}app.asar${sep}`;
 const MAC_TEAM_IDENTIFIER_PATTERN = /^[A-Z0-9]{10}$/u;
 
+/**
+ * The exact `reason` values the two native probes emit when they answer `available: false`
+ * (`computer_use_macos.mm` `Probe`, `computer_use_windows_host.cc` `ProbeJson`). Nothing else is
+ * accepted: native is a trusted second layer, but its strings are not forwarded verbatim to the
+ * renderer, so an unexpected or oversized reason degrades to `NATIVE_PROBE_UNAVAILABLE` exactly as
+ * before. Keep this list in sync with those two probes when either grows a reason.
+ */
+export const COMPUTER_USE_NATIVE_PROBE_REASONS = Object.freeze([
+  'ACCESSIBILITY_PERMISSION_REQUIRED',
+  'SCREEN_RECORDING_PERMISSION_REQUIRED',
+  'SCREEN_CAPTURE_KIT_UNAVAILABLE',
+  'WINDOWS_BUILD_UNSUPPORTED',
+  'UI_AUTOMATION_UNAVAILABLE',
+  'GRAPHICS_CAPTURE_UNAVAILABLE',
+] as const);
+export type ComputerUseNativeProbeReason = (typeof COMPUTER_USE_NATIVE_PROBE_REASONS)[number];
+
+function knownNativeProbeReason(value: unknown): ComputerUseNativeProbeReason | null {
+  return typeof value === 'string' &&
+    (COMPUTER_USE_NATIVE_PROBE_REASONS as readonly string[]).includes(value)
+    ? (value as ComputerUseNativeProbeReason)
+    : null;
+}
+
+/** A native capability fact is granted only when it is literally `true`. */
+function nativeCapabilityGranted(capabilities: unknown, key: string): boolean {
+  if (typeof capabilities !== 'object' || capabilities === null || Array.isArray(capabilities))
+    return false;
+  return (capabilities as Record<string, unknown>)[key] === true;
+}
+
+function nativeProbeCapabilities(value: unknown): ComputerUseNativeProbe['capabilities'] {
+  return {
+    observe: false,
+    control: false,
+    accessibility: nativeCapabilityGranted(value, 'accessibility'),
+    screenCapture: nativeCapabilityGranted(value, 'screenCapture'),
+    screenCaptureKit: nativeCapabilityGranted(value, 'screenCaptureKit'),
+  };
+}
+
+/**
+ * The reasons for which the per-capability facts are meaningful. Any other refusal — including an
+ * unknown reason that degraded to `NATIVE_PROBE_UNAVAILABLE` — measured nothing, so it must not
+ * claim that a specific OS permission is missing.
+ */
+const MACOS_PERMISSION_PROBE_REASONS: ReadonlySet<string> = new Set<ComputerUseNativeProbeReason>([
+  'ACCESSIBILITY_PERMISSION_REQUIRED',
+  'SCREEN_RECORDING_PERMISSION_REQUIRED',
+  'SCREEN_CAPTURE_KIT_UNAVAILABLE',
+]);
+
+/**
+ * Which OS permissions the user still has to grant. This only describes an already-closed gate; it
+ * never opens one. An empty list means "nothing nameable", not "everything is fine".
+ */
+export function computerUseMissingNativePermissions(
+  probe: ComputerUseNativeProbe,
+): readonly ComputerUseOsPermission[] {
+  if (probe.available || !MACOS_PERMISSION_PROBE_REASONS.has(probe.reason)) return [];
+  const missing: ComputerUseOsPermission[] = [];
+  if (probe.capabilities.accessibility !== true) missing.push('accessibility');
+  if (probe.capabilities.screenCapture !== true) missing.push('screen_recording');
+  return Object.freeze(missing);
+}
+
 export type ComputerUseNativeLoadOptions = Readonly<{
   /** Override the runtime environment in tests. Production callers must leave this undefined. */
   environment?: Readonly<Record<string, string | undefined>>;
@@ -62,6 +129,7 @@ const DENIED_PROBE = (
   reason: string,
   artifactPath: string | null = null,
   artifactDigest: string | null = null,
+  nativeCapabilities: ComputerUseNativeProbe['capabilities'] | null = null,
 ): ComputerUseNativeProbe =>
   Object.freeze({
     available: false,
@@ -71,7 +139,9 @@ const DENIED_PROBE = (
     reason,
     artifactPath,
     artifactDigest,
-    capabilities: Object.freeze({ observe: false, control: false }),
+    capabilities: Object.freeze(
+      nativeCapabilities ?? { observe: false, control: false },
+    ) as ComputerUseNativeProbe['capabilities'],
   });
 
 /**
@@ -170,7 +240,16 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   if (!isProbe(probe)) return DENIED_PROBE('HANDSHAKE_INVALID');
   if (parsed.platform === 'win32' && probe.sourceCommit !== parsed.sourceCommit)
     return DENIED_PROBE('SOURCE_COMMIT_MISMATCH');
-  if (probe.available !== true) return DENIED_PROBE('NATIVE_PROBE_UNAVAILABLE');
+  // The package is trusted at this point, so the native probe's own refusal is the most specific
+  // fact available. Only a reason this build knows about is forwarded, and it names a closed gate:
+  // observe/control stay false either way.
+  if (probe.available !== true)
+    return DENIED_PROBE(
+      knownNativeProbeReason(probe.reason) ?? 'NATIVE_PROBE_UNAVAILABLE',
+      null,
+      null,
+      nativeProbeCapabilities(probe.capabilities),
+    );
   const artifactDigest = parsed.platform === 'darwin' ? parsed.moduleDigest : parsed.binaryDigest;
   if (value['artifactDigest'] !== artifactDigest) return DENIED_PROBE('ARTIFACT_DIGEST_MISMATCH');
   return Object.freeze({
@@ -191,6 +270,8 @@ function isProbe(value: unknown): value is Readonly<{
   backend: string;
   available: boolean;
   sourceCommit?: string | null;
+  reason?: unknown;
+  capabilities?: unknown;
 }> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const probe = value as Record<string, unknown>;
@@ -307,7 +388,14 @@ export function loadComputerUseNative(
         manifest,
         probe: result,
         artifactPath,
-        addon: result.reason === 'NATIVE_PROBE_UNAVAILABLE' ? raw : null,
+        // A refusal that came from the native probe itself leaves the verified addon seam intact,
+        // so Main can re-probe after the user grants the permission. Every package-level refusal
+        // still drops it.
+        addon:
+          result.reason === 'NATIVE_PROBE_UNAVAILABLE' ||
+          knownNativeProbeReason(result.reason) !== null
+            ? raw
+            : null,
       });
     return Object.freeze({ manifest, probe: result, artifactPath, addon: raw });
   } catch (error) {
@@ -477,6 +565,8 @@ function parseNativeProbe(value: unknown): Readonly<{
   backend: string;
   available: boolean;
   sourceCommit: string | null;
+  reason: ComputerUseNativeProbeReason | null;
+  capabilities: ComputerUseNativeProbe['capabilities'];
 }> {
   if (typeof value !== 'object' || value === null || Array.isArray(value))
     throw new Error('HANDSHAKE_INVALID');
@@ -498,6 +588,10 @@ function parseNativeProbe(value: unknown): Readonly<{
     backend: probe['backend'],
     available: probe['available'],
     sourceCommit: typeof probe['sourceCommit'] === 'string' ? probe['sourceCommit'] : null,
+    // Kept as facts, not as text: only a known reason survives, and only `true` is a granted
+    // capability. The gate decides what, if anything, reaches the renderer.
+    reason: knownNativeProbeReason(probe['reason']),
+    capabilities: nativeProbeCapabilities(probe['capabilities']),
   });
 }
 

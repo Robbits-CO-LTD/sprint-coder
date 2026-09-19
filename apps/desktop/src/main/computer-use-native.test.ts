@@ -1929,3 +1929,224 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
     expect(() => parseWindowsComputerUseHelperAttestation(null)).toThrow('attestation is invalid');
   });
 });
+
+describe('Computer Use native OS permission reporting', () => {
+  const macManifest = (fixture: ReturnType<typeof packageFixture>): Record<string, unknown> =>
+    JSON.parse(
+      readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
+    ) as Record<string, unknown>;
+
+  const macGate = (probe: unknown, fixture = packageFixture()) =>
+    evaluateComputerUseNativeGate({
+      featureFlag: true,
+      packaged: true,
+      platform: 'darwin',
+      manifest: macManifest(fixture),
+      probe,
+      artifactDigest: macManifest(fixture)['moduleDigest'],
+    });
+
+  it('names the missing macOS accessibility permission instead of a generic probe failure', () => {
+    expect(
+      macGate({
+        protocolVersion: 1,
+        apiVersion: 2,
+        available: false,
+        backend: 'macos-ax-screen-capture-kit-cgevent',
+        reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+        capabilities: {
+          observe: false,
+          control: false,
+          accessibility: false,
+          screenCapture: true,
+          screenCaptureKit: true,
+        },
+      }),
+    ).toMatchObject({
+      available: false,
+      reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+      capabilities: {
+        observe: false,
+        control: false,
+        accessibility: false,
+        screenCapture: true,
+        screenCaptureKit: true,
+      },
+    });
+  });
+
+  it('names the missing macOS screen recording permission', () => {
+    expect(
+      macGate({
+        protocolVersion: 1,
+        apiVersion: 2,
+        available: false,
+        backend: 'macos-ax-screen-capture-kit-cgevent',
+        reason: 'SCREEN_RECORDING_PERMISSION_REQUIRED',
+        capabilities: {
+          observe: false,
+          control: false,
+          accessibility: true,
+          screenCapture: false,
+          screenCaptureKit: true,
+        },
+      }),
+    ).toMatchObject({
+      available: false,
+      reason: 'SCREEN_RECORDING_PERMISSION_REQUIRED',
+      capabilities: { accessibility: true, screenCapture: false },
+    });
+  });
+
+  it('passes through only the reasons the native probes actually emit', () => {
+    for (const reason of [
+      'ACCESSIBILITY_PERMISSION_REQUIRED',
+      'SCREEN_RECORDING_PERMISSION_REQUIRED',
+      'SCREEN_CAPTURE_KIT_UNAVAILABLE',
+      'WINDOWS_BUILD_UNSUPPORTED',
+      'UI_AUTOMATION_UNAVAILABLE',
+      'GRAPHICS_CAPTURE_UNAVAILABLE',
+    ])
+      expect(
+        macGate({
+          protocolVersion: 1,
+          apiVersion: 2,
+          available: false,
+          backend: 'fixture',
+          reason,
+        }).reason,
+      ).toBe(reason);
+  });
+
+  it('refuses an unknown, oversized, or non-string native reason', () => {
+    for (const reason of [
+      undefined,
+      null,
+      '',
+      'READY',
+      'PLEASE_OPEN_https://attacker.example',
+      'accessibility_permission_required',
+      'A'.repeat(200),
+      42,
+      { reason: 'ACCESSIBILITY_PERMISSION_REQUIRED' },
+      ['ACCESSIBILITY_PERMISSION_REQUIRED'],
+    ])
+      expect(
+        macGate({
+          protocolVersion: 1,
+          apiVersion: 2,
+          available: false,
+          backend: 'fixture',
+          reason,
+        }).reason,
+      ).toBe('NATIVE_PROBE_UNAVAILABLE');
+  });
+
+  it('treats any non-boolean native capability as false', () => {
+    expect(
+      macGate({
+        protocolVersion: 1,
+        apiVersion: 2,
+        available: false,
+        backend: 'fixture',
+        reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+        capabilities: {
+          accessibility: 'true',
+          screenCapture: 1,
+          screenCaptureKit: null,
+        },
+      }).capabilities,
+    ).toMatchObject({ accessibility: false, screenCapture: false, screenCaptureKit: false });
+    expect(
+      macGate({
+        protocolVersion: 1,
+        apiVersion: 2,
+        available: false,
+        backend: 'fixture',
+        reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+        capabilities: 'accessibility',
+      }).capabilities,
+    ).toMatchObject({ accessibility: false, screenCapture: false, screenCaptureKit: false });
+  });
+
+  it('keeps every package refusal ahead of a native permission reason', () => {
+    const permissionProbe = {
+      protocolVersion: 1,
+      apiVersion: 2,
+      available: false,
+      backend: 'fixture',
+      reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+      capabilities: { accessibility: false, screenCapture: false },
+    };
+    const unsigned = packageFixture({ trust: 'ad-hoc' });
+    expect(
+      evaluateComputerUseNativeGate({
+        featureFlag: true,
+        packaged: true,
+        platform: 'darwin',
+        manifest: macManifest(unsigned),
+        probe: permissionProbe,
+        artifactDigest: macManifest(unsigned)['moduleDigest'],
+      }).reason,
+    ).toBe('MACOS_SIGNATURE_REQUIRED');
+    expect(
+      evaluateComputerUseNativeGate({
+        featureFlag: false,
+        packaged: true,
+        platform: 'darwin',
+        manifest: macManifest(packageFixture()),
+        probe: permissionProbe,
+      }).reason,
+    ).toBe('FEATURE_FLAG_DISABLED');
+    expect(
+      evaluateComputerUseNativeGate({
+        featureFlag: true,
+        packaged: true,
+        platform: 'darwin',
+        manifest: { version: 1 },
+        probe: permissionProbe,
+      }).reason,
+    ).toBe('MANIFEST_INVALID');
+    const mismatched = packageFixture();
+    expect(
+      evaluateComputerUseNativeGate({
+        featureFlag: true,
+        packaged: true,
+        platform: 'darwin',
+        manifest: macManifest(mismatched),
+        probe: { ...permissionProbe, protocolVersion: 3 },
+        artifactDigest: macManifest(mismatched)['moduleDigest'],
+      }).reason,
+    ).toBe('HANDSHAKE_INVALID');
+  });
+
+  it('retains the verified addon seam when only an OS permission is missing', () => {
+    const fixture = packageFixture();
+    const addon = {
+      probe: () => ({
+        protocolVersion: 1,
+        apiVersion: 2,
+        available: false,
+        backend: 'fixture',
+        reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+        capabilities: { accessibility: false, screenCapture: true, screenCaptureKit: true },
+      }),
+      handshake: () => ({ protocolVersion: 1, apiVersion: 2, platform: 'darwin', napiVersion: 10 }),
+    };
+    const binding = loadComputerUseNative({
+      environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+      dirname: fixture.packagedDirname,
+      resourcesPath: fixture.resources,
+      platform: 'darwin',
+      architecture: 'arm64',
+      requireAddon: () => addon,
+      verifySignature: () => 'a'.repeat(64),
+    });
+
+    expect(binding.probe).toMatchObject({
+      available: false,
+      reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+    });
+    expect(binding.addon).toBe(addon);
+  });
+});

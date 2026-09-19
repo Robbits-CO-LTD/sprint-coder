@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import {
   ComputerUseOnboarding,
   ComputerUseSessionRail,
+  ComputerUseUnavailableNotice,
   type ComputerUseProfileView,
   type ComputerUseProviderView,
 } from './ComputerUsePanel';
@@ -525,5 +526,49 @@ describe('Computer Use responsive and theme CSS', () => {
     expect(computerUseCss).toMatch(
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.computer-use-dialog,[\s\S]*?transition: none;[\s\S]*?animation: none;/,
     );
+  });
+});
+
+describe('Computer Use OS permission guidance interaction', () => {
+  it('asks Main to open the pane for the exact missing permission, once per click', async () => {
+    const onOpenSettings = vi.fn(async () => {});
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <ComputerUseUnavailableNotice
+          availability={{
+            platform: 'darwin',
+            observe: false,
+            control: false,
+            reasonCode: 'accessibility_permission_required',
+            missingPermissions: ['accessibility'],
+          }}
+          busy={false}
+          onClose={() => {}}
+          onRetry={async () => {}}
+          onOpenSettings={onOpenSettings}
+        />,
+      ),
+    );
+    mounted.push({
+      container,
+      root,
+      dialog: required(container.querySelector<HTMLDialogElement>('dialog')),
+    });
+
+    const button = required(
+      container.querySelector<HTMLButtonElement>(
+        'button[data-computer-use-activation="permission-settings"]',
+      ),
+    );
+    expect(button.dataset['computerUsePermission']).toBe('accessibility');
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+    });
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenSettings).toHaveBeenCalledWith('accessibility');
   });
 });

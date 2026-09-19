@@ -13,6 +13,14 @@ export type ComputerUseNativeProbe = Readonly<{
   capabilities: Readonly<{
     observe: boolean;
     control: boolean;
+    /**
+     * Per-capability facts the native probe measured. They are present only when a probe actually
+     * reported them, so an absent field means "not measured", never "granted". Main treats
+     * anything other than `true` as not granted.
+     */
+    accessibility?: boolean;
+    screenCapture?: boolean;
+    screenCaptureKit?: boolean;
   }>;
 }>;
 
