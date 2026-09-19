@@ -45,6 +45,7 @@ describe('Computer Use renderer projection', () => {
     const permissionRequired = {
       platform: 'darwin' as const,
       state: 'native_unavailable' as const,
+      acceptanceMode: null,
       featureEnabled: true,
       packageReady: true,
       handshakeReady: true,

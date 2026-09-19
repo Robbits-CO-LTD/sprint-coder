@@ -5117,10 +5117,18 @@ export const computerUseAvailabilityStateSchema = z.enum([
 ]);
 export type ComputerUseAvailabilityState = z.infer<typeof computerUseAvailabilityStateSchema>;
 
+// An acceptance-only build waives one named verification so #387 can run on an unsigned Windows
+// package. It is fixed at build time and reported here purely so Main and Renderer can keep it
+// visible; nothing consumes this value as authority.
+export const computerUseAcceptanceModeSchema = z.enum(['windows-unsigned-acceptance']);
+export type ComputerUseAcceptanceMode = z.infer<typeof computerUseAcceptanceModeSchema>;
+
 export const computerUseAvailabilitySchema = z
   .object({
     platform: computerUseRuntimePlatformSchema,
     state: computerUseAvailabilityStateSchema,
+    // Absent for every ordinary build, so existing producers and stored payloads stay valid.
+    acceptanceMode: computerUseAcceptanceModeSchema.nullable().default(null),
     featureEnabled: z.boolean(),
     packageReady: z.boolean(),
     handshakeReady: z.boolean(),

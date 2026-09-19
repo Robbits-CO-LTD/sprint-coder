@@ -27,6 +27,12 @@ import {
   type ManagedLocalSidecarPin,
   type ManagedLocalTargetKey,
 } from './src/main/managed-local-sidecar-bundle';
+import {
+  COMPUTER_USE_ACCEPTANCE_BUILD_ENV,
+  COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
+  COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME,
+  computerUseAcceptanceBuildForEnv,
+} from './computer-use-acceptance-build';
 import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
 
 // @electron-forge/plugin-vite auto-sets packagerConfig.ignore to keep only the `.vite`
@@ -400,6 +406,61 @@ export function verifyPackagedComputerUseNativeBundle(
     !mainContainsCompiledPin
   )
     throw new Error(`Packaged Computer Use native artifact verification failed for ${platform}`);
+  assertPackagedComputerUseAcceptanceConsistency(
+    packagedMain,
+    existsSync(join(resources, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME)),
+    computerUseAcceptanceBuildForEnv(process.env, process.platform)?.mode ?? null,
+  );
+}
+
+/**
+ * The marker exists only inside the compiled acceptance payload, so the packaged Main bundle
+ * carries it exactly when the build was an acceptance build.  Verifying the produced bytes — not
+ * the build inputs — is what keeps an acceptance package out of a release.
+ */
+export function assertPackagedComputerUseAcceptanceConsistency(
+  packagedMain: string,
+  hasReceipt: boolean,
+  expectedMode: string | null,
+): void {
+  const markedMain = packagedMain.includes(COMPUTER_USE_ACCEPTANCE_BUILD_MARKER);
+  if (markedMain === (expectedMode !== null) && hasReceipt === (expectedMode !== null)) return;
+  throw new Error(
+    `Packaged Computer Use acceptance build state is inconsistent (main: ${markedMain}, receipt: ${hasReceipt}, expected: ${expectedMode ?? 'none'})`,
+  );
+}
+
+/** A release package must never be produced from an acceptance build. */
+export function assertComputerUseAcceptanceBuildAllowed(
+  environment: Readonly<Record<string, string | undefined>>,
+  platform: NodeJS.Platform,
+): void {
+  if (environment['SPRINT_CODER_RELEASE'] !== '1') return;
+  if (computerUseAcceptanceBuildForEnv(environment, platform) === null) return;
+  throw new Error(
+    `${COMPUTER_USE_ACCEPTANCE_BUILD_ENV} must not be set for a release package; acceptance builds are never published`,
+  );
+}
+
+/**
+ * Records the mode and the exact source commit next to the packaged helper so an acceptance run can
+ * be reported without trusting a screenshot.  Nothing at runtime reads this file.
+ */
+export function writeComputerUseAcceptanceBuildReceipt(
+  resourcesPath: string,
+  platform: ForgePlatform,
+  sourceCommit: string,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  if (platform !== 'win32') return false;
+  const acceptance = computerUseAcceptanceBuildForEnv(environment, 'win32');
+  if (acceptance === null) return false;
+  writeFileSync(
+    join(resourcesPath, COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME),
+    `${JSON.stringify({ mode: acceptance.mode, sourceCommit }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return true;
 }
 
 function countResourceBasename(directory: string, expectedName: string): number {
@@ -779,6 +840,9 @@ const config: ForgeConfig = {
     },
     prePackage: async (_forgeConfig, platform, architecture) => {
       assertNativePackagingHost(platform);
+      // Runs before the Vite plugin compiles Main, so a release build aborts before the acceptance
+      // constant can be baked in at all.
+      assertComputerUseAcceptanceBuildAllowed(process.env, process.platform);
       await prepareComputerUseNativeForViteBuild(platform, architecture);
       if (platform === 'win32') verifyBundledNodeResources();
     },
@@ -789,6 +853,12 @@ const config: ForgeConfig = {
             refreshPackagedComputerUseArtifactDigest(join(outputPath, 'resources'), 'win32');
           if (packageResult.platform === 'win32')
             refreshPackagedComputerUseWindowsSignerDigest(join(outputPath, 'resources'));
+          if (packageResult.platform === 'win32')
+            writeComputerUseAcceptanceBuildReceipt(
+              join(outputPath, 'resources'),
+              'win32',
+              computerUseRepositorySourceCommit(),
+            );
           verifyPackagedComputerUseNativeBundle(
             outputPath,
             packageResult.platform,

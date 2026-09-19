@@ -9,6 +9,7 @@ import type {
   ComputerUseWindowCandidate,
 } from '@sprint-coder/contracts';
 import {
+  ComputerUseAcceptanceBuildNotice,
   ComputerUseOnboarding,
   ComputerUseSessionRail,
   ComputerUseUnavailableNotice,
@@ -422,6 +423,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     stop,
     surface: (
       <>
+        <ComputerUseAcceptanceBuildNotice acceptanceMode={availability?.acceptanceMode ?? null} />
         {dialogOpen && taskId !== null && availability !== null ? (
           computerUseCapabilitiesReady(availability) ? (
             <ComputerUseOnboarding

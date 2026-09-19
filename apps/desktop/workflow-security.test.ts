@@ -8,6 +8,7 @@ const workflowFiles = [
   '.github/workflows/computer-use-evidence-harness.yml',
   '.github/workflows/ci.yml',
   '.github/workflows/release-beta.yml',
+  '.github/workflows/computer-use-acceptance-build.yml',
 ] as const;
 
 const workflows = Object.fromEntries(

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
+  ComputerUseAcceptanceBuildNotice,
   ComputerUseOnboarding,
   ComputerUseSessionRail,
   ComputerUseUnavailableNotice,
@@ -259,5 +260,24 @@ describe('ComputerUseSessionRail', () => {
     expect(render(true)).toContain('この計画で許可');
     expect(render(false)).not.toContain('この計画で許可');
     expect(render(true)).toContain('data-computer-use-activation="approval"');
+  });
+});
+
+describe('Computer Use acceptance build notice', () => {
+  it('stays hidden for an ordinary build', () => {
+    expect(renderToStaticMarkup(<ComputerUseAcceptanceBuildNotice acceptanceMode={null} />)).toBe(
+      '',
+    );
+  });
+
+  it('names the waived verification and the mode in an acceptance build', () => {
+    const markup = renderToStaticMarkup(
+      <ComputerUseAcceptanceBuildNotice acceptanceMode="windows-unsigned-acceptance" />,
+    );
+
+    expect(markup).toContain('受入れ専用ビルド');
+    expect(markup).toContain('署名者検証');
+    expect(markup).toContain('windows-unsigned-acceptance');
+    expect(markup).toContain('role="status"');
   });
 });

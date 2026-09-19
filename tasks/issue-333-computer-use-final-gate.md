@@ -37,6 +37,11 @@ both child Issues remain `OPEN / CLOSE_HOLD` until their mandatory evidence is v
 | AC-19/28, INV-19/20/21              | #387/#388 combined: both OS major journeys, five-action full-access sequence, restarts, third-party state change and bounded grant as detailed below                                                                 | Schema-v3 row PASS alone is insufficient; unrepresented original ACs remain mandatory and unmet                             |
 | AC-30, INV-13/18/21                 | #387 measures environment/control compatibility; #388 measures selected Provider path; Main checks UI/docs against results                                                                                           | Only supported claims require PASS; canonical reasoned unsupported SKIP cannot discharge Core/Safety                        |
 
+The `AC-17, INV-9` row has one recorded exception: a `windows-unsigned-acceptance` build waives
+Windows signer identity for the simplified #387 acceptance. See "Acceptance-only Windows build
+mode (#387)" below; the Windows side of that row stays unsatisfied until it is re-run on a signed
+package.
+
 ### Original ACs not established by schema v3 alone
 
 At the audit baseline, the [20 Core rows](https://github.com/Robbits-CO-LTD/sprint-coder/blob/5b20208eb7b4f7697105dca2bf9436da3aeec910/verify-computer-use-final-gate.mjs#L38)
@@ -247,6 +252,54 @@ The Windows Notepad rows require classic direct-process `notepad.exe` on a suppo
 environment. Store/UWP Notepad hosted through `ApplicationFrameHost.exe` is not a substitute. If
 the gate machine exposes only that unsupported proxy, the Core row is `FAIL`, not `SKIP`.
 
+## Acceptance-only Windows build mode (#387)
+
+This section records a build mode introduced for #387 under the owner decision of 2026-09-19. It
+adds no row, no evidence code, and no policy to the tables below, and it does not move any row out
+of `FAIL`. Parent #333 continues to own every requirement here.
+
+`windows-unsigned-acceptance` is a named build mode that lets the simplified on-device acceptance
+run on a Windows package that carries no Authenticode signature. It waives exactly one verification
+— **the identity of the Windows signer** — and only when the packaged manifest's `signerDigest` is
+`null`:
+
+| Waived in an acceptance build | Unchanged in an acceptance build |
+| --- | --- |
+| `WINDOWS_SIGNATURE_REQUIRED` for a manifest with no signer | `binaryDigest`/`moduleDigest` re-measurement of the packaged helper |
+| The packaged app/helper Authenticode verification and its `sha256(thumbprint) == signerDigest` equality | The spawned helper's measured image digest, image path, and `sourceCommit` handshake |
+| The spawned helper's Authenticode status and signer digest comparison | Manifest schema and target match, compiled provenance pin, protocol/API/N-API handshake, quarantine |
+| — | `MACOS_SIGNATURE_REQUIRED`, ad-hoc macOS refusal, and every macOS behaviour |
+| — | A *signed* Windows package: its signer verification still runs and still fails closed |
+
+The mode is fixed at build time. `apps/desktop/vite.main.config.ts` bakes it into the Main bundle
+from `SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD`, and Main reads only that compiled constant. No
+environment variable, CLI argument, settings value, or rewritten `computer-use-native.manifest.json`
+can enable it at runtime — the manifest schema is `.strict()`, so an added key makes the manifest
+fail to parse instead of granting anything. A release package cannot carry the mode: Forge refuses
+to package when `SPRINT_CODER_RELEASE=1` and the mode is set, the packaged Main bundle is scanned
+for a build-only marker after packaging, and `release-beta.yml` runs
+`apps/desktop/scripts/verify-computer-use-acceptance-build.mjs --expect absent` in every packaging
+job. The mode is produced only by the dispatch-only
+`.github/workflows/computer-use-acceptance-build.yml`, which uploads a short-lived artifact and
+never attests, tags, or publishes.
+
+Consequences for the tables below:
+
+- `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` is unchanged and still true. An *ordinary* unsigned Windows
+  package is built without the mode, so it still exposes neither observe nor control.
+- The Windows side of `AC-17, INV-9` stays **unsatisfied**. An acceptance build establishes which
+  bytes ran, not who signed them, so the row must be re-run on a signed Windows package at the
+  formal release.
+- `AC-28-WIN-FIXTURE-*` is **not attemptable** in this mode. The native authority class for the
+  deterministic Win32 fixture is derived from the running helper's own Authenticode signer
+  (`MaximumModeForWindowsExecutable`), so an unsigned helper can never promote the fixture to
+  `full_access_app`. Making it reachable would waive application authority as well, which is
+  outside the owner decision. Those rows stay `FAIL`; the Windows journeys of the simplified
+  acceptance use classic direct-process `notepad.exe`, whose authority comes from the Microsoft
+  signer and the exact system path and is therefore unaffected.
+
+The procedure itself is `docs/computer-use-simple-acceptance.md`.
+
 ## Canonical journey rules
 
 - Rows are ordered, closed, and versioned. Adding, removing, reordering, or renaming a row fails
@@ -365,7 +418,9 @@ only full-access classes and still require an English/Japanese target-language a
 Official Microsoft-signed macOS Visual Studio Code is supervised-only. Every other application is
 ineligible before attach; it cannot be promoted by display name, remembered profile, or model
 output. The unsigned fixture produced by `build.ps1` is compile evidence only and must be signed
-with the package release certificate before the Windows interactive journeys.
+with the package release certificate before the Windows interactive journeys. A
+`windows-unsigned-acceptance` build cannot satisfy that requirement at all, because the fixture's
+authority is derived from the running helper's own signer; its fixture rows stay `FAIL`.
 
 ## Manual workflow contract
 

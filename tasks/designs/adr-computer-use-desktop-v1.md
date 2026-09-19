@@ -149,6 +149,22 @@ installer from the same signer cannot replace the tested installer. On macOS the
 covered when Forge reseals the signed app, and the final gate compares that signed value with the
 package run before accepting evidence.
 
+### Acceptance-only Windows build mode
+
+`windows-unsigned-acceptance` is a build-time mode added for #387's simplified on-device
+acceptance. It waives one question the package cannot answer — the identity of the Windows signer —
+and only for a Windows manifest whose `signerDigest` is `null`. The artifact digest, the spawned
+helper's measured image, the image path, the source commit, the compiled provenance pin, the
+handshake, and every macOS rule keep their existing strength, and a signed Windows package keeps
+full signer verification even in such a build. The mode is fixed by a Vite `define` compiled into
+Main, so no environment variable, argument, setting, or rewritten manifest can enable it at
+runtime; Forge refuses to produce a release package from it, and the release workflow scans the
+packaged bundle to prove it is absent. The mode is visible in the Computer Use surface, in a
+startup log record, and in `resources/computer-use-acceptance-build.json`. Under this mode the
+deterministic Win32 acceptance fixture cannot be promoted to `full_access_app`, because that
+authority is derived from the running helper's own signer; Windows journeys use classic
+`notepad.exe`.
+
 ## No-Go conditions
 
 The capability remains unavailable when any gate is false:

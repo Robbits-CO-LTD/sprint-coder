@@ -1,0 +1,104 @@
+name: Computer Use acceptance build (Windows x64, unsigned)
+
+# Produces the acceptance-only Windows package described in
+# docs/computer-use-simple-acceptance.md. It waives Authenticode signer verification for the
+# Computer Use helper and nothing else, so its output is a short-lived Actions artifact: it is
+# never attested, never tagged, and never published as a release.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_unsigned_acceptance:
+        description: Type true to confirm this build waives Windows signer verification and must not be distributed
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: computer-use-acceptance-build-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  acceptance-build:
+    name: Make unsigned Windows x64 acceptance package
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Require explicit unsigned-acceptance confirmation
+        shell: pwsh
+        env:
+          CONFIRMED: ${{ inputs.confirm_unsigned_acceptance }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:CONFIRMED -ne 'true') {
+            throw 'This workflow produces an unsigned acceptance package; confirm_unsigned_acceptance must be true.'
+          }
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.2
+          cache: npm
+
+      - name: Initialize MSVC
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `npm ci` skips install scripts here, exactly as in the CI and release packaging jobs.
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Make unsigned Windows acceptance artifacts
+        working-directory: apps/desktop
+        shell: pwsh
+        env:
+          CI: 'true'
+          SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD: windows-unsigned-acceptance
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell -ExecutionPolicy Bypass -File scripts/ensure-inno-setup.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup verification failed.' }
+          npm run make:windows
+          if ($LASTEXITCODE -ne 0) { throw 'Windows acceptance build failed.' }
+
+      - name: Verify the package and its helper are unsigned
+        working-directory: apps/desktop
+        shell: pwsh
+        run: ./scripts/verify-unsigned-windows-release.ps1 -RequireUnsignedComputerUseHelper
+
+      - name: Verify the acceptance mode is compiled into Main
+        working-directory: apps/desktop
+        run: node scripts/verify-computer-use-acceptance-build.mjs --expect present
+
+      - name: Summarize the acceptance build
+        working-directory: apps/desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $receipt = Get-Content -Raw -LiteralPath 'out\Sprint Coder-win32-x64\resources\computer-use-acceptance-build.json'
+          "## Computer Use acceptance build" >> $env:GITHUB_STEP_SUMMARY
+          "Workflow commit: ``$env:GITHUB_SHA``" >> $env:GITHUB_STEP_SUMMARY
+          '```json' >> $env:GITHUB_STEP_SUMMARY
+          $receipt >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          'Windows signer verification is waived in this package. Do not distribute it.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload acceptance package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: computer-use-acceptance-windows-x64
+          path: |
+            apps/desktop/out/make/zip/win32/x64/*.zip
+            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe
+          if-no-files-found: error
+          retention-days: 3

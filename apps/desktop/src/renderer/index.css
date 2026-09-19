@@ -9103,6 +9103,20 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--accent-hover);
   background: var(--accent-wash);
 }
+.computer-use-acceptance-build {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 var(--gutter) 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning-line, var(--hairline-strong));
+  border-radius: var(--r-md);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--warning) 12%, var(--bg-panel));
+}
+.computer-use-acceptance-build p {
+  margin: 0;
+}
 .computer-use-terminal-notice {
   display: flex;
   flex-wrap: wrap;

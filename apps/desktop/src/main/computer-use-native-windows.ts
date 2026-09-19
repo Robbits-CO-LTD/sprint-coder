@@ -17,19 +17,26 @@ import {
   COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT,
   COMPUTER_USE_NATIVE_CLOSE_DRAIN_TIMEOUT_MS,
 } from './computer-use-native-host';
+import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import type { ComputerUseNativeAddon } from './computer-use-native-types';
 
 type NativeRecord = Record<string, unknown>;
 export type WindowsComputerUseHelperTrust = Readonly<{
   binaryDigest: string;
-  signerDigest: string;
+  /**
+   * `null` only in a `windows-unsigned-acceptance` build, where the compiled acceptance constant
+   * waived Authenticode signer identity for a package that carries no signer.  Every other trust
+   * field stays mandatory in both modes.
+   */
+  signerDigest: string | null;
   sourceCommit: string;
 }>;
 export type WindowsComputerUseHelperAttestation = Readonly<{
   imagePath: string;
   binaryDigest: string;
   signatureStatus: string;
-  signerThumbprint: string;
+  /** `null` is what Authenticode reports for an image that carries no signer certificate. */
+  signerThumbprint: string | null;
 }>;
 type PendingRequest = Readonly<{
   resolve: (value: unknown) => void;
@@ -442,9 +449,14 @@ export function assertWindowsComputerUseSpawnedHelperAttestation(
   expected: WindowsComputerUseHelperTrust,
   actual: WindowsComputerUseHelperAttestation,
 ): void {
+  // Each field is validated on its own so waiving the signer never relaxes the digest or commit
+  // binding that replaces it as the helper's identity.  A binding without a signer is itself only
+  // valid in a compiled acceptance build, so no caller can obtain the waiver by passing `null`.
   if (
     !/^[0-9a-f]{64}$/u.test(expected.binaryDigest) ||
-    !/^[0-9a-f]{64}$/u.test(expected.signerDigest) ||
+    (expected.signerDigest === null
+      ? !computerUseWindowsSignerWaived('win32', expected.signerDigest)
+      : !/^[0-9a-f]{64}$/u.test(expected.signerDigest)) ||
     !/^[0-9a-f]{40}$/u.test(expected.sourceCommit)
   )
     throw new Error('Computer Use Windows helper trust binding is invalid');
@@ -452,7 +464,18 @@ export function assertWindowsComputerUseSpawnedHelperAttestation(
     throw new Error('Computer Use Windows helper image path mismatch');
   if (actual.binaryDigest !== expected.binaryDigest)
     throw new Error('Computer Use Windows helper binary digest mismatch');
-  if (actual.signatureStatus !== 'Valid' || !/^[0-9A-F]{40}$/u.test(actual.signerThumbprint))
+  if (expected.signerDigest === null) {
+    // The waiver covers a helper that carries no signature at all.  One whose signature exists but
+    // does not verify was altered after signing, which is not what the acceptance build produces.
+    if (actual.signatureStatus !== 'NotSigned' || actual.signerThumbprint !== null)
+      throw new Error('Computer Use Windows helper signer is invalid');
+    return;
+  }
+  if (
+    actual.signatureStatus !== 'Valid' ||
+    actual.signerThumbprint === null ||
+    !/^[0-9A-F]{40}$/u.test(actual.signerThumbprint)
+  )
     throw new Error('Computer Use Windows helper signer is invalid');
   const signerDigest = createHash('sha256').update(actual.signerThumbprint, 'utf8').digest('hex');
   if (signerDigest !== expected.signerDigest)
@@ -509,22 +532,31 @@ function attestSpawnedWindowsComputerUseHelper(pid: number): WindowsComputerUseH
       },
     },
   );
-  const value = asRecord(
-    JSON.parse(output) as unknown,
-    'Computer Use Windows helper attestation is invalid',
-  );
+  return parseWindowsComputerUseHelperAttestation(JSON.parse(output) as unknown);
+}
+
+/**
+ * Authenticode reports no signer certificate for an unsigned image, so PowerShell serializes the
+ * thumbprint as `null`.  The shape is accepted here and judged by
+ * `assertWindowsComputerUseSpawnedHelperAttestation`, which refuses it for every signed binding.
+ */
+export function parseWindowsComputerUseHelperAttestation(
+  input: unknown,
+): WindowsComputerUseHelperAttestation {
+  const value = asRecord(input, 'Computer Use Windows helper attestation is invalid');
+  const signerThumbprint = value['signerThumbprint'];
   if (
     typeof value['imagePath'] !== 'string' ||
     typeof value['binaryDigest'] !== 'string' ||
     typeof value['signatureStatus'] !== 'string' ||
-    typeof value['signerThumbprint'] !== 'string'
+    (signerThumbprint !== null && typeof signerThumbprint !== 'string')
   )
     throw new Error('Computer Use Windows helper attestation is invalid');
   return Object.freeze({
     imagePath: value['imagePath'],
     binaryDigest: value['binaryDigest'],
     signatureStatus: value['signatureStatus'],
-    signerThumbprint: value['signerThumbprint'].toUpperCase(),
+    signerThumbprint: signerThumbprint === null ? null : signerThumbprint.toUpperCase(),
   });
 }
 

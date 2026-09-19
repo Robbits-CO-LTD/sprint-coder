@@ -2,6 +2,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import { defineConfig } from 'vite';
+import {
+  computerUseAcceptanceBuildForEnv,
+  type ComputerUseAcceptanceBuild,
+} from './computer-use-acceptance-build';
 import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
 
 export function macAutoUpdateEligibleForIdentity(identity: string | undefined): boolean {
@@ -36,6 +40,17 @@ export function computerUseNativePinForBuild(
   return computerUseNativeCompiledPin(manifest);
 }
 
+/**
+ * The acceptance mode is fixed here, at build time, and nowhere else.  Compiling it to `null` for
+ * every ordinary build is what makes the waiver unreachable in a release package.
+ */
+export function computerUseAcceptanceBuildForBuild(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+  platform: NodeJS.Platform = process.platform,
+): ComputerUseAcceptanceBuild | null {
+  return computerUseAcceptanceBuildForEnv(environment, platform);
+}
+
 export default defineConfig({
   define: {
     __SPRINT_CODER_MAC_AUTO_UPDATE_ELIGIBLE__: JSON.stringify(
@@ -43,6 +58,9 @@ export default defineConfig({
     ),
     __SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__: JSON.stringify(managedLocalSidecarPinsForBuild()),
     __SPRINT_CODER_COMPUTER_USE_NATIVE_PIN__: JSON.stringify(computerUseNativePinForBuild()),
+    __SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD__: JSON.stringify(
+      computerUseAcceptanceBuildForBuild(),
+    ),
   },
   build: { rollupOptions: { external: ['better-sqlite3', 'sharp'] } },
 });
