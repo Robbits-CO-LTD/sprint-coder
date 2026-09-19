@@ -28,6 +28,7 @@ import {
   decodeWindowsObservationPayload,
   isWindowsHelperResponseBound,
   operationTimeoutMilliseconds,
+  parseWindowsComputerUseHelperAttestation,
   windowsHelperEnvironment,
   windowsStopRequestKey,
 } from './computer-use-native-windows';
@@ -1761,6 +1762,7 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
   });
 
   it('keeps every non-signer helper trust field mandatory while the signer is waived', () => {
+    compileAcceptanceBuild();
     const waived = {
       binaryDigest: 'b'.repeat(64),
       signerDigest: null,
@@ -1770,7 +1772,7 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
       imagePath: 'C:\\App\\resources\\sprint-coder-computer-use-host.exe',
       binaryDigest: waived.binaryDigest,
       signatureStatus: 'NotSigned',
-      signerThumbprint: '',
+      signerThumbprint: null,
     } as const;
 
     expect(() =>
@@ -1824,8 +1826,106 @@ describe('Computer Use windows-unsigned-acceptance build mode', () => {
         imagePath,
         binaryDigest: signed.binaryDigest,
         signatureStatus: 'NotSigned',
-        signerThumbprint: '',
+        signerThumbprint: null,
       }),
     ).toThrow('signer is invalid');
+  });
+
+  it('honours a helper binding without a signer only in a compiled acceptance build', () => {
+    const imagePath = 'C:\\App\\resources\\sprint-coder-computer-use-host.exe';
+    const unsignedBinding = {
+      binaryDigest: 'b'.repeat(64),
+      signerDigest: null,
+      sourceCommit: 'f'.repeat(40),
+    } as const;
+    const unsignedAttestation = {
+      imagePath,
+      binaryDigest: unsignedBinding.binaryDigest,
+      signatureStatus: 'NotSigned',
+      signerThumbprint: null,
+    } as const;
+
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(
+        imagePath,
+        unsignedBinding,
+        unsignedAttestation,
+      ),
+    ).toThrow('trust binding is invalid');
+
+    compileAcceptanceBuild('windows-unsigned-acceptance-v2');
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(
+        imagePath,
+        unsignedBinding,
+        unsignedAttestation,
+      ),
+    ).toThrow('trust binding is invalid');
+  });
+
+  it('waives the signer only for a helper that carries no signature at all', () => {
+    compileAcceptanceBuild();
+    const imagePath = 'C:\\App\\resources\\sprint-coder-computer-use-host.exe';
+    const waived = {
+      binaryDigest: 'b'.repeat(64),
+      signerDigest: null,
+      sourceCommit: 'f'.repeat(40),
+    } as const;
+
+    for (const signatureStatus of ['Valid', 'HashMismatch', 'NotTrusted', 'UnknownError'])
+      expect(() =>
+        assertWindowsComputerUseSpawnedHelperAttestation(imagePath, waived, {
+          imagePath,
+          binaryDigest: waived.binaryDigest,
+          signatureStatus,
+          signerThumbprint: null,
+        }),
+      ).toThrow('signer is invalid');
+    expect(() =>
+      assertWindowsComputerUseSpawnedHelperAttestation(imagePath, waived, {
+        imagePath,
+        binaryDigest: waived.binaryDigest,
+        signatureStatus: 'NotSigned',
+        signerThumbprint: 'E'.repeat(40),
+      }),
+    ).toThrow('signer is invalid');
+  });
+
+  it('parses the attestation Authenticode reports for an unsigned helper', () => {
+    const imagePath = 'C:\\App\\resources\\sprint-coder-computer-use-host.exe';
+    // PowerShell serializes the missing signer certificate of an unsigned image as `null`.
+    const reported = JSON.parse(
+      JSON.stringify({
+        imagePath,
+        binaryDigest: 'b'.repeat(64),
+        signatureStatus: 'NotSigned',
+        signerThumbprint: null,
+      }),
+    ) as unknown;
+
+    expect(parseWindowsComputerUseHelperAttestation(reported)).toEqual({
+      imagePath,
+      binaryDigest: 'b'.repeat(64),
+      signatureStatus: 'NotSigned',
+      signerThumbprint: null,
+    });
+    expect(
+      parseWindowsComputerUseHelperAttestation({
+        imagePath,
+        binaryDigest: 'b'.repeat(64),
+        signatureStatus: 'Valid',
+        signerThumbprint: 'e'.repeat(40),
+      }).signerThumbprint,
+    ).toBe('E'.repeat(40));
+    for (const signerThumbprint of [undefined, 0, false, {}, []])
+      expect(() =>
+        parseWindowsComputerUseHelperAttestation({
+          imagePath,
+          binaryDigest: 'b'.repeat(64),
+          signatureStatus: 'NotSigned',
+          signerThumbprint,
+        }),
+      ).toThrow('attestation is invalid');
+    expect(() => parseWindowsComputerUseHelperAttestation(null)).toThrow('attestation is invalid');
   });
 });

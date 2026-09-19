@@ -54,6 +54,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # `npm ci` skips install scripts here, exactly as in the CI and release packaging jobs.
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
       - name: Make unsigned Windows acceptance artifacts
         working-directory: apps/desktop
         shell: pwsh
