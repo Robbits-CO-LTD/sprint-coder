@@ -2259,7 +2259,9 @@ export class IpcRouter {
       computerUseAvailabilitySchema,
       () => this.computerUseController.availability(),
     );
-    this.handleMutation(
+    // Not a mutation: nothing in the app changes, so it is not queued behind the Task mailbox or
+    // the update-install gate. The trusted click, the enum input, and the rate limit are the gates.
+    this.handle(
       IPC_CHANNELS.computerUseOpenPermissionSettings,
       computerUseOpenPermissionSettingsInputSchema,
       computerUseOpenPermissionSettingsResultSchema,
