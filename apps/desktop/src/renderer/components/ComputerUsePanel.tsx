@@ -5,6 +5,7 @@ import {
   type ComputerUseAcceptanceMode,
   type ComputerUseApprovalDecision,
   type ComputerUseMode,
+  type ComputerUseOsPermission,
   type ComputerUsePolicyLanguage,
 } from '@sprint-coder/contracts';
 import { Eye, ShieldAlert, Square, X } from './icons';
@@ -103,7 +104,16 @@ export type ComputerUseUnavailableView = Readonly<{
   observe: boolean;
   control: boolean;
   reasonCode: string | null;
+  /** Named by Main from a verified native probe; never a native string and never a URL. */
+  missingPermissions: readonly ComputerUseOsPermission[];
 }>;
+
+/** Every OS permission this product can name, in the order the user sees them. */
+const COMPUTER_USE_OS_PERMISSIONS = ['accessibility', 'screen_recording'] as const;
+const COMPUTER_USE_OS_PERMISSION_LABELS: Readonly<Record<ComputerUseOsPermission, string>> = {
+  accessibility: 'アクセシビリティ',
+  screen_recording: '画面収録',
+};
 
 /**
  * An acceptance-only build waives Windows signer verification, so it must never be mistaken for a
@@ -133,12 +143,14 @@ export function ComputerUseUnavailableNotice({
   error,
   onClose,
   onRetry,
+  onOpenSettings,
 }: {
   availability: ComputerUseUnavailableView;
   busy: boolean;
   error?: string | null;
   onClose: () => void;
   onRetry: () => Promise<void>;
+  onOpenSettings: (permission: ComputerUseOsPermission) => Promise<void>;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const descriptionId = 'computer-use-unavailable-description';
@@ -152,6 +164,15 @@ export function ComputerUseUnavailableNotice({
     };
   }, []);
 
+  // Main names a permission only from a verified native probe, so an itemised list is available
+  // exactly when the user can act on it. Everything else keeps the platform guidance below.
+  const permissionRows =
+    availability.missingPermissions.length === 0
+      ? []
+      : COMPUTER_USE_OS_PERMISSIONS.map((permission) => ({
+          permission,
+          granted: !availability.missingPermissions.includes(permission),
+        }));
   const missing = [
     availability.observe ? null : '画面の読み取り',
     availability.control ? null : 'アクセシビリティ操作',
@@ -190,10 +211,51 @@ export function ComputerUseUnavailableNotice({
           <div className="computer-use-full-warning" role="status">
             <ShieldAlert size={20} />
             <div>
-              <strong>{missing.join('と')}を利用できません</strong>
-              <p id={descriptionId}>{guidance}</p>
+              <strong>
+                {permissionRows.length === 0
+                  ? `${missing.join('と')}を利用できません`
+                  : '足りないOSの許可があります'}
+              </strong>
+              <p id={descriptionId}>
+                {permissionRows.length === 0
+                  ? guidance
+                  : 'macOSの「システム設定」→「プライバシーとセキュリティ」で、Sprint Coderに次の許可を与えてください。許可の反映にはSprint Coderの再起動が必要です。再起動後もこの案内が出る場合は「許可を再確認」してください。'}
+              </p>
             </div>
           </div>
+          {permissionRows.length === 0 ? null : (
+            <ul className="computer-use-permission-list" aria-live="polite">
+              {permissionRows.map((row) => (
+                <li key={row.permission} className="computer-use-permission-row">
+                  <span className="computer-use-permission-name">
+                    {COMPUTER_USE_OS_PERMISSION_LABELS[row.permission]}
+                  </span>
+                  <span
+                    className={
+                      row.granted
+                        ? 'computer-use-permission-state computer-use-permission-state--granted'
+                        : 'computer-use-permission-state computer-use-permission-state--missing'
+                    }
+                  >
+                    {row.granted ? '許可済み' : '未許可'}
+                  </span>
+                  {row.granted ? null : (
+                    <button
+                      type="button"
+                      className="computer-use-permission-open"
+                      data-computer-use-activation="permission-settings"
+                      data-computer-use-permission={row.permission}
+                      aria-label={`${COMPUTER_USE_OS_PERMISSION_LABELS[row.permission]}の設定を開く`}
+                      disabled={busy}
+                      onClick={() => void onOpenSettings(row.permission)}
+                    >
+                      設定を開く
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
           {availability.reasonCode === null ? null : (
             <p className="computer-use-reason-code">状態コード: {availability.reasonCode}</p>
           )}

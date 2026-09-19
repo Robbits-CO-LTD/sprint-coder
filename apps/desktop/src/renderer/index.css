@@ -8993,6 +8993,42 @@ button.composer-permission-chip[aria-expanded='true'] {
   display: block;
   margin-bottom: 4px;
 }
+.computer-use-permission-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.computer-use-permission-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+.computer-use-permission-name {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.computer-use-permission-state {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.computer-use-permission-state--granted {
+  color: var(--text-secondary);
+}
+.computer-use-permission-state--missing {
+  color: var(--warning);
+}
+.computer-use-permission-open {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+}
 .computer-use-reason-code {
   margin: 0;
   color: var(--text-secondary);

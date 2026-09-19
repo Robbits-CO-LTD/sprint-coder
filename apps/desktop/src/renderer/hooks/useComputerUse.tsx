@@ -4,6 +4,8 @@ import type {
   ComputerUseApprovalDecision,
   ComputerUseApi,
   ComputerUseAvailability,
+  ComputerUseOpenPermissionSettingsResult,
+  ComputerUseOsPermission,
   ComputerUseSessionStatus,
   ComputerUseStartInput,
   ComputerUseWindowCandidate,
@@ -250,6 +252,18 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     }
   }, [loadOnboarding]);
 
+  const openPermissionSettings = useCallback(
+    async (permission: ComputerUseOsPermission): Promise<void> => {
+      setDialogError(null);
+      const result = await requestComputerUsePermissionSettings(
+        window.sprintCoder?.computerUse,
+        permission,
+      ).catch(() => ({ opened: false, rateLimited: false }));
+      setDialogError(computerUsePermissionSettingsError(result));
+    },
+    [],
+  );
+
   const register = useCallback(async (): Promise<void> => {
     const api = window.sprintCoder?.computerUse;
     if (api === undefined || taskId === null) return;
@@ -447,6 +461,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
               error={dialogError}
               onClose={closeDialog}
               onRetry={retryAvailability}
+              onOpenSettings={openPermissionSettings}
             />
           )
         ) : null}
@@ -482,6 +497,29 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       </>
     ),
   };
+}
+
+/**
+ * Main owns the settings URL table and the rate limit; the renderer can only name a permission.
+ */
+export async function requestComputerUsePermissionSettings(
+  api: Pick<ComputerUseApi, 'openPermissionSettings'> | undefined,
+  permission: ComputerUseOsPermission,
+): Promise<ComputerUseOpenPermissionSettingsResult> {
+  if (api === undefined) return { opened: false, rateLimited: false };
+  return await api.openPermissionSettings({ permission });
+}
+
+/**
+ * A suppressed repeat is not a failure: when both permissions are missing, pressing the two
+ * buttons in quick succession must not claim that System Settings could not be opened.
+ */
+export function computerUsePermissionSettingsError(
+  result: ComputerUseOpenPermissionSettingsResult,
+): string | null {
+  return result.opened || result.rateLimited
+    ? null
+    : 'システム設定を開けませんでした。「システム設定」→「プライバシーとセキュリティ」から手動で許可してください。';
 }
 
 export function computerUseEntryVisible(availability: ComputerUseAvailability): boolean {

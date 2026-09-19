@@ -431,6 +431,8 @@ export class ComputerUseController {
     const observe = featureEnabled && native.observe;
     const control = observe && native.control;
     const available = observe;
+    // The feature gate is Main's, so a disabled feature names no OS permission to grant.
+    const missingPermissions = featureEnabled ? native.missingPermissions : [];
     const state = !featureEnabled
       ? 'feature_disabled'
       : !packageReady
@@ -438,10 +440,13 @@ export class ComputerUseController {
         : !handshakeReady
           ? 'handshake_failed'
           : !native.observe
-            ? 'native_unavailable'
+            ? missingPermissions.length > 0
+              ? 'permission_required'
+              : 'native_unavailable'
             : 'ready';
     return computerUseAvailabilitySchema.parse({
       ...native,
+      missingPermissions,
       featureEnabled,
       packageReady,
       handshakeReady,

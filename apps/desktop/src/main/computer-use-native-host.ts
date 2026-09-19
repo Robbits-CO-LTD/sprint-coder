@@ -29,7 +29,10 @@ import {
   computerUseCompiledAcceptanceMode,
   computerUseWindowsSignerWaived,
 } from './computer-use-acceptance-mode';
+// Type-only: a runtime import from the signed loader would close a cycle through the Windows
+// transport and leave the close budgets below uninitialised. See computer-use-native-probe-facts.
 import type { ComputerUseNativeBinding, ComputerUseNativeAddon } from './computer-use-native';
+import { computerUseMissingNativePermissions } from './computer-use-native-probe-facts';
 import {
   ComputerUseAccessibilityTreeError,
   projectComputerUseAccessibilityTree,
@@ -232,16 +235,25 @@ export function createComputerUseNativeHost(
         binding.probe.available && binding.probe.capabilities.observe && !inputQuarantined;
       const observe = packageReady && handshakeReady && nativeAvailable && controllerReady;
       const control = observe && binding.probe.capabilities.control && hasMethod(addon, 'dispatch');
+      // Named only once the package and the handshake are trusted: an OS permission is the one
+      // failure the user can act on, and it must never mask a package-level refusal.
+      const missingPermissions =
+        packageReady && handshakeReady && !observe
+          ? computerUseMissingNativePermissions(binding.probe)
+          : [];
       const state = !packageReady
         ? 'unsigned_package'
         : !handshakeReady
           ? 'handshake_failed'
           : !observe
-            ? 'native_unavailable'
+            ? missingPermissions.length > 0
+              ? 'permission_required'
+              : 'native_unavailable'
             : 'ready';
       return computerUseAvailabilitySchema.parse({
         platform: runtimePlatform,
         state,
+        missingPermissions,
         acceptanceMode,
         // The feature flag itself is evaluated by ComputerUseController. This native seam reports
         // only package/protocol/native facts and leaves the exact opt-in gate to Main.

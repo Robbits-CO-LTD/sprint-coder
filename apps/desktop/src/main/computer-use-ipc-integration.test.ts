@@ -120,6 +120,7 @@ function captureComputerUseHandlers(): {
   };
   controller: Record<string, ReturnType<typeof vi.fn>>;
   native: { pickApplication: ReturnType<typeof vi.fn> };
+  permissionSettings: { open: ReturnType<typeof vi.fn> };
   persistence: Record<string, ReturnType<typeof vi.fn>>;
 } {
   const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
@@ -199,6 +200,7 @@ function captureComputerUseHandlers(): {
     dispose: vi.fn(async () => undefined),
   };
   const native = { pickApplication: vi.fn(async () => identity) };
+  const permissionSettings = { open: vi.fn(async () => ({ opened: true })) };
   const persistence = {
     getTask: vi.fn(() => ({ id: 'task-1' })),
     getTaskModelSelection: vi.fn(() => null),
@@ -214,6 +216,7 @@ function captureComputerUseHandlers(): {
     computerUseActivationGate: activation,
     computerUseController: controller,
     computerUseNative: native,
+    computerUsePermissionSettings: permissionSettings,
     computerUseStatusBySession: new Map(),
     computerUseApprovalSessionById: new Map([['approval-1', 'session-1']]),
     computerUseQuickStartLatches: new Map(),
@@ -221,7 +224,7 @@ function captureComputerUseHandlers(): {
     persistence,
   });
   router.register();
-  return { router, handlers, activation, controller, native, persistence };
+  return { router, handlers, activation, controller, native, permissionSettings, persistence };
 }
 
 describe('Computer Use Main IPC integration', () => {
@@ -559,5 +562,30 @@ describe('Computer Use Main IPC integration', () => {
     await handler(input, {}, {});
     expect(fixture.activation.consume).toHaveBeenLastCalledWith(expect.anything(), 'approval');
     expect(fixture.controller.resolveApproval).toHaveBeenCalledWith(input);
+  });
+
+  it('opens an OS permission pane only from a trusted Computer Use click, by enum', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseOpenPermissionSettings);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+
+    fixture.activation.consume.mockReturnValueOnce(null);
+    await expect(handler({ permission: 'accessibility' }, {}, {})).rejects.toBeTruthy();
+    expect(fixture.permissionSettings.open).not.toHaveBeenCalled();
+
+    fixture.activation.consume.mockReturnValueOnce({
+      token: 'permission-activation',
+      intent: null,
+    });
+    await expect(handler({ permission: 'accessibility' }, {}, {})).resolves.toEqual({
+      opened: true,
+    });
+    expect(fixture.activation.consume).toHaveBeenLastCalledWith(
+      expect.anything(),
+      'permission-settings',
+    );
+    // Main hands the opener the enum only; no URL or path ever crosses the boundary.
+    expect(fixture.permissionSettings.open).toHaveBeenCalledWith('accessibility');
   });
 });

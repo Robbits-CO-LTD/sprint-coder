@@ -9,6 +9,11 @@ import {
 } from '@sprint-coder/contracts';
 import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
+  knownNativeProbeReason,
+  nativeProbeCapabilities,
+  type ComputerUseNativeProbeReason,
+} from './computer-use-native-probe-facts';
+import {
   createWindowsComputerUseNativeAddon,
   windowsHelperEnvironment,
 } from './computer-use-native-windows';
@@ -22,6 +27,15 @@ import {
   parseComputerUseNativeCompiledPin,
   type ComputerUseNativeCompiledPin,
 } from './computer-use-native-provenance';
+
+// Re-exported so existing callers and tests keep one import site for the native seam. The
+// definitions live in a leaf module so the Main adapter can use them without a runtime cycle.
+export {
+  COMPUTER_USE_NATIVE_PROBE_REASONS,
+  computerUseMissingNativePermissions,
+  knownNativeProbeReason,
+} from './computer-use-native-probe-facts';
+export type { ComputerUseNativeProbeReason } from './computer-use-native-probe-facts';
 
 export type {
   ComputerUseNativeAddon,
@@ -62,6 +76,7 @@ const DENIED_PROBE = (
   reason: string,
   artifactPath: string | null = null,
   artifactDigest: string | null = null,
+  nativeCapabilities: ComputerUseNativeProbe['capabilities'] | null = null,
 ): ComputerUseNativeProbe =>
   Object.freeze({
     available: false,
@@ -71,7 +86,7 @@ const DENIED_PROBE = (
     reason,
     artifactPath,
     artifactDigest,
-    capabilities: Object.freeze({ observe: false, control: false }),
+    capabilities: Object.freeze(nativeCapabilities ?? { observe: false, control: false }),
   });
 
 /**
@@ -170,9 +185,20 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   if (!isProbe(probe)) return DENIED_PROBE('HANDSHAKE_INVALID');
   if (parsed.platform === 'win32' && probe.sourceCommit !== parsed.sourceCommit)
     return DENIED_PROBE('SOURCE_COMMIT_MISMATCH');
-  if (probe.available !== true) return DENIED_PROBE('NATIVE_PROBE_UNAVAILABLE');
+  // The measured artifact has to match the manifest *before* anything the probe said is believed.
+  // Otherwise an unverified module's own reason would be the first thing shown to the user.
   const artifactDigest = parsed.platform === 'darwin' ? parsed.moduleDigest : parsed.binaryDigest;
   if (value['artifactDigest'] !== artifactDigest) return DENIED_PROBE('ARTIFACT_DIGEST_MISMATCH');
+  // Only now is the package fully verified, so the native probe's own refusal is the most specific
+  // fact available. Only a reason this build knows about is forwarded, and it names a closed gate:
+  // observe/control stay false either way.
+  if (probe.available !== true)
+    return DENIED_PROBE(
+      knownNativeProbeReason(probe.reason) ?? 'NATIVE_PROBE_UNAVAILABLE',
+      null,
+      null,
+      nativeProbeCapabilities(probe.capabilities),
+    );
   return Object.freeze({
     available: true,
     protocolVersion: 1,
@@ -191,6 +217,8 @@ function isProbe(value: unknown): value is Readonly<{
   backend: string;
   available: boolean;
   sourceCommit?: string | null;
+  reason?: unknown;
+  capabilities?: unknown;
 }> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const probe = value as Record<string, unknown>;
@@ -307,7 +335,14 @@ export function loadComputerUseNative(
         manifest,
         probe: result,
         artifactPath,
-        addon: result.reason === 'NATIVE_PROBE_UNAVAILABLE' ? raw : null,
+        // A refusal that came from the native probe itself leaves the verified addon seam intact,
+        // so Main can re-probe after the user grants the permission. Every package-level refusal
+        // still drops it.
+        addon:
+          result.reason === 'NATIVE_PROBE_UNAVAILABLE' ||
+          knownNativeProbeReason(result.reason) !== null
+            ? raw
+            : null,
       });
     return Object.freeze({ manifest, probe: result, artifactPath, addon: raw });
   } catch (error) {
@@ -477,6 +512,8 @@ function parseNativeProbe(value: unknown): Readonly<{
   backend: string;
   available: boolean;
   sourceCommit: string | null;
+  reason: ComputerUseNativeProbeReason | null;
+  capabilities: ComputerUseNativeProbe['capabilities'];
 }> {
   if (typeof value !== 'object' || value === null || Array.isArray(value))
     throw new Error('HANDSHAKE_INVALID');
@@ -498,6 +535,10 @@ function parseNativeProbe(value: unknown): Readonly<{
     backend: probe['backend'],
     available: probe['available'],
     sourceCommit: typeof probe['sourceCommit'] === 'string' ? probe['sourceCommit'] : null,
+    // Kept as facts, not as text: only a known reason survives, and only `true` is a granted
+    // capability. The gate decides what, if anything, reaches the renderer.
+    reason: knownNativeProbeReason(probe['reason']),
+    capabilities: nativeProbeCapabilities(probe['capabilities']),
   });
 }
 

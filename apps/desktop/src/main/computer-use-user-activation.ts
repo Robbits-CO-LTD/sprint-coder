@@ -17,6 +17,7 @@ export type ComputerUseActivationPermit = Readonly<{
     | 'window'
     | 'start'
     | 'approval'
+    | 'permission-settings'
     | 'graph-start'
     | 'graph-resume'
     | 'graph-resume-step';

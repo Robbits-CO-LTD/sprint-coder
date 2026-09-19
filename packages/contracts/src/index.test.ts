@@ -2222,10 +2222,99 @@ describe('Computer Use contracts', () => {
       manifestDigest: digest,
     });
     expect(permissionRequired.state).toBe('native_unavailable');
+    expect(permissionRequired.missingPermissions).toEqual([]);
     expect(() =>
       contracts.computerUseAvailabilitySchema.parse({
         ...permissionRequired,
         state: 'ready',
+      }),
+    ).toThrow();
+  });
+
+  it('carries the exact missing OS permissions instead of one opaque failure', () => {
+    const permissionRequired = contracts.computerUseAvailabilitySchema.parse({
+      platform: 'darwin',
+      state: 'permission_required',
+      featureEnabled: true,
+      packageReady: true,
+      handshakeReady: true,
+      observe: false,
+      control: false,
+      available: false,
+      reasonCode: 'accessibility_permission_required',
+      manifestDigest: digest,
+      missingPermissions: ['accessibility'],
+    });
+    expect(permissionRequired.missingPermissions).toEqual(['accessibility']);
+    // A named permission state has to say which permission it means.
+    expect(() =>
+      contracts.computerUseAvailabilitySchema.parse({
+        ...permissionRequired,
+        missingPermissions: [],
+      }),
+    ).toThrow();
+    // A working native boundary can never carry permission guidance.
+    expect(() =>
+      contracts.computerUseAvailabilitySchema.parse({
+        ...permissionRequired,
+        state: 'ready',
+        observe: true,
+        control: true,
+        available: true,
+      }),
+    ).toThrow();
+    // Only the OS permissions this product knows about are representable.
+    for (const missingPermissions of [
+      ['camera'],
+      ['accessibility', 'accessibility'],
+      'accessibility',
+    ])
+      expect(() =>
+        contracts.computerUseAvailabilitySchema.parse({
+          ...permissionRequired,
+          missingPermissions,
+        }),
+      ).toThrow();
+  });
+
+  it('accepts only an OS permission name on the settings channel', () => {
+    for (const permission of ['accessibility', 'screen_recording'] as const)
+      expect(contracts.computerUseOpenPermissionSettingsInputSchema.parse({ permission })).toEqual({
+        permission,
+      });
+    for (const permission of [
+      'camera',
+      'Accessibility',
+      '',
+      1,
+      null,
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+    ])
+      expect(() =>
+        contracts.computerUseOpenPermissionSettingsInputSchema.parse({ permission }),
+      ).toThrow();
+    // No caller can smuggle a URL or a path alongside the enum.
+    expect(() =>
+      contracts.computerUseOpenPermissionSettingsInputSchema.parse({
+        permission: 'accessibility',
+        url: 'https://attacker.example',
+      }),
+    ).toThrow();
+    // A suppressed repeat stays distinguishable from a refusal, and the default keeps older
+    // payloads valid. "Opened" and "suppressed" can never both be true.
+    expect(
+      contracts.computerUseOpenPermissionSettingsResultSchema.parse({ opened: false }),
+    ).toEqual({ opened: false, rateLimited: false });
+    expect(
+      contracts.computerUseOpenPermissionSettingsResultSchema.parse({
+        opened: false,
+        rateLimited: true,
+      }),
+    ).toEqual({ opened: false, rateLimited: true });
+    expect(() =>
+      contracts.computerUseOpenPermissionSettingsResultSchema.parse({
+        opened: true,
+        rateLimited: true,
       }),
     ).toThrow();
   });

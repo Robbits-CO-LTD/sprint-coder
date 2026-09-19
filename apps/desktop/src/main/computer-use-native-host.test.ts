@@ -111,7 +111,8 @@ describe('Computer Use native Main adapter', () => {
     );
 
     expect(host.availability()).toMatchObject({
-      state: 'native_unavailable',
+      // A probe that names a TCC permission is reported as such; the gates below it are unchanged.
+      state: 'permission_required',
       packageReady: true,
       handshakeReady: true,
       observe: false,
@@ -1183,5 +1184,103 @@ describe('Computer Use native Main adapter', () => {
     expect(projection.metadata['terminal-input']).toMatchObject({ highImpact: true });
     expect(projection.serialized).not.toContain('Integrated Terminal');
     expect(projection.serialized).not.toContain('terminal-input');
+  });
+});
+
+describe('Computer Use native OS permission availability', () => {
+  const controllerAddon = {
+    probe: () => ({}),
+    pickApplication: () => ({}),
+    listWindows: () => [],
+    startSession: () => ({}),
+    observe: () => ({}),
+    dispatch: () => ({}),
+    cancel: () => undefined,
+    close: () => undefined,
+  };
+
+  it('reports each missing macOS permission by name and stays fail-closed', () => {
+    const host = createComputerUseNativeHost(
+      binding(controllerAddon, {
+        available: false,
+        reason: 'ACCESSIBILITY_PERMISSION_REQUIRED',
+        capabilities: {
+          observe: false,
+          control: false,
+          accessibility: false,
+          screenCapture: true,
+          screenCaptureKit: true,
+        },
+      }),
+      'darwin',
+    );
+
+    expect(host.availability()).toMatchObject({
+      state: 'permission_required',
+      packageReady: true,
+      handshakeReady: true,
+      observe: false,
+      control: false,
+      available: false,
+      reasonCode: 'accessibility_permission_required',
+      missingPermissions: ['accessibility'],
+    });
+  });
+
+  it('reports both missing macOS permissions when neither is granted', () => {
+    const host = createComputerUseNativeHost(
+      binding(controllerAddon, {
+        available: false,
+        reason: 'SCREEN_RECORDING_PERMISSION_REQUIRED',
+        capabilities: {
+          observe: false,
+          control: false,
+          accessibility: false,
+          screenCapture: false,
+          screenCaptureKit: true,
+        },
+      }),
+      'darwin',
+    );
+
+    expect(host.availability().missingPermissions).toEqual(['accessibility', 'screen_recording']);
+  });
+
+  it('never names a permission when the native probe did not measure one', () => {
+    const host = createComputerUseNativeHost(
+      binding(controllerAddon, {
+        available: false,
+        reason: 'UI_AUTOMATION_UNAVAILABLE',
+        capabilities: { observe: false, control: false },
+      }),
+      'win32',
+    );
+
+    expect(
+      createComputerUseNativeHost(
+        binding(controllerAddon, {
+          available: false,
+          reason: 'UI_AUTOMATION_UNAVAILABLE',
+          capabilities: { observe: false, control: false },
+        }),
+        'win32',
+        { windowsPhysicalBoundsToDip: (bounds) => bounds },
+      ).availability(),
+    ).toMatchObject({
+      state: 'native_unavailable',
+      reasonCode: 'ui_automation_unavailable',
+      missingPermissions: [],
+    });
+    expect(host.availability().missingPermissions).toEqual([]);
+  });
+
+  it('keeps a ready host free of any permission guidance', () => {
+    const host = createComputerUseNativeHost(binding(controllerAddon), 'darwin');
+
+    expect(host.availability()).toMatchObject({
+      state: 'ready',
+      available: true,
+      missingPermissions: [],
+    });
   });
 });

@@ -143,10 +143,12 @@ describe('ComputerUseUnavailableNotice', () => {
           observe: false,
           control: false,
           reasonCode: 'screen_recording_permission_required',
+          missingPermissions: [],
         }}
         busy={false}
         onClose={() => {}}
         onRetry={async () => {}}
+        onOpenSettings={async () => {}}
       />,
     );
 
@@ -155,6 +157,81 @@ describe('ComputerUseUnavailableNotice', () => {
     expect(html).toContain('アクセシビリティ');
     expect(html).toContain('autofocus=""');
     expect(html).toContain('許可を再確認');
+  });
+
+  it('names each OS permission separately and offers settings only for the missing ones', () => {
+    const html = renderToStaticMarkup(
+      <ComputerUseUnavailableNotice
+        availability={{
+          platform: 'darwin',
+          observe: false,
+          control: false,
+          reasonCode: 'accessibility_permission_required',
+          missingPermissions: ['accessibility'],
+        }}
+        busy={false}
+        onClose={() => {}}
+        onRetry={async () => {}}
+        onOpenSettings={async () => {}}
+      />,
+    );
+
+    expect(html).toContain('アクセシビリティ');
+    expect(html).toContain('未許可');
+    expect(html).toContain('許可済み');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain('data-computer-use-permission="accessibility"');
+    expect(html).not.toContain('data-computer-use-permission="screen_recording"');
+    expect(html).toContain('data-computer-use-activation="permission-settings"');
+    expect(html).toContain('設定を開く');
+    // The permission list never leaks a native reason string or a settings URL to the renderer.
+    expect(html).not.toContain('ACCESSIBILITY_PERMISSION_REQUIRED');
+    expect(html).not.toContain('x-apple.systempreferences');
+    // Recovery after granting still needs the existing re-check path, and macOS may need a restart.
+    expect(html).toContain('許可を再確認');
+    expect(html).toContain('再起動');
+  });
+
+  it('keeps one settings action per missing permission', () => {
+    const html = renderToStaticMarkup(
+      <ComputerUseUnavailableNotice
+        availability={{
+          platform: 'darwin',
+          observe: false,
+          control: false,
+          reasonCode: 'accessibility_permission_required',
+          missingPermissions: ['accessibility', 'screen_recording'],
+        }}
+        busy={false}
+        onClose={() => {}}
+        onRetry={async () => {}}
+        onOpenSettings={async () => {}}
+      />,
+    );
+
+    expect(html.match(/data-computer-use-activation="permission-settings"/gu)).toHaveLength(2);
+    expect(html).not.toContain('許可済み');
+  });
+
+  it('offers no settings action where the OS has no such permission to grant', () => {
+    const html = renderToStaticMarkup(
+      <ComputerUseUnavailableNotice
+        availability={{
+          platform: 'win32',
+          observe: false,
+          control: false,
+          reasonCode: 'ui_automation_unavailable',
+          missingPermissions: [],
+        }}
+        busy={false}
+        onClose={() => {}}
+        onRetry={async () => {}}
+        onOpenSettings={async () => {}}
+      />,
+    );
+
+    expect(html).not.toContain('data-computer-use-activation="permission-settings"');
+    expect(html).toContain('Windowsのプライバシー設定');
   });
 });
 

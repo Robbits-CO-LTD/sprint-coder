@@ -6,6 +6,8 @@ import {
   computerUseModeAdjustmentNotice,
   computerUseTerminalNotice,
   computerUseWindowViews,
+  computerUsePermissionSettingsError,
+  requestComputerUsePermissionSettings,
   profileView,
   subscribeComputerUseStatusWithReplay,
   useComputerUse,
@@ -54,6 +56,7 @@ describe('Computer Use renderer projection', () => {
       available: false,
       reasonCode: 'screen_recording_permission_required',
       manifestDigest: 'a'.repeat(64),
+      missingPermissions: ['screen_recording' as const],
     };
     expect(computerUseEntryVisible(permissionRequired)).toBe(true);
     expect(computerUseCapabilitiesReady(permissionRequired)).toBe(false);
@@ -184,5 +187,49 @@ describe('Computer Use renderer projection', () => {
         stopReason: 'user_stop',
       } as ComputerUseSessionStatus),
     ).toBeNull();
+  });
+
+  it('keeps a named-permission boundary visible so the user can open the right settings pane', () => {
+    const permissionRequired = {
+      platform: 'darwin' as const,
+      state: 'permission_required' as const,
+      acceptanceMode: null,
+      featureEnabled: true,
+      packageReady: true,
+      handshakeReady: true,
+      observe: false,
+      control: false,
+      available: false,
+      reasonCode: 'accessibility_permission_required',
+      manifestDigest: 'a'.repeat(64),
+      missingPermissions: ['accessibility' as const],
+    };
+    expect(computerUseEntryVisible(permissionRequired)).toBe(true);
+    expect(computerUseCapabilitiesReady(permissionRequired)).toBe(false);
+  });
+
+  it('asks Main for a settings pane with the permission enum and nothing else', async () => {
+    const openPermissionSettings = vi.fn(async () => ({ opened: true, rateLimited: false }));
+    await expect(
+      requestComputerUsePermissionSettings({ openPermissionSettings }, 'screen_recording'),
+    ).resolves.toEqual({ opened: true, rateLimited: false });
+    expect(openPermissionSettings).toHaveBeenCalledWith({ permission: 'screen_recording' });
+    await expect(requestComputerUsePermissionSettings(undefined, 'accessibility')).resolves.toEqual(
+      {
+        opened: false,
+        rateLimited: false,
+      },
+    );
+    expect(openPermissionSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('never calls a suppressed repeat a failure, so two missing grants stay clickable', () => {
+    // Both permissions missing: the user presses one button and then the other. Main suppresses a
+    // repeat only for the same permission, and a suppressed result must carry no error text.
+    expect(computerUsePermissionSettingsError({ opened: true, rateLimited: false })).toBeNull();
+    expect(computerUsePermissionSettingsError({ opened: false, rateLimited: true })).toBeNull();
+    expect(computerUsePermissionSettingsError({ opened: false, rateLimited: false })).toContain(
+      '手動で許可',
+    );
   });
 });

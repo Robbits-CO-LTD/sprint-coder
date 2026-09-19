@@ -5114,8 +5114,20 @@ export const computerUseAvailabilityStateSchema = z.enum([
   'unsigned_package',
   'native_unavailable',
   'handshake_failed',
+  // The signed native boundary is installed and answering, but the OS has not granted a
+  // capability it needs. This is the only failure the user can resolve themselves.
+  'permission_required',
 ]);
 export type ComputerUseAvailabilityState = z.infer<typeof computerUseAvailabilityStateSchema>;
+
+/**
+ * The OS permissions Computer Use can name to the user. This is a closed product vocabulary, not a
+ * native string: Main maps a verified native probe onto it, and it is also the entire input
+ * vocabulary of the "open the settings pane" channel, so no renderer or model output can ever
+ * choose a URL, a path, or a settings pane of its own.
+ */
+export const computerUseOsPermissionSchema = z.enum(['accessibility', 'screen_recording']);
+export type ComputerUseOsPermission = z.infer<typeof computerUseOsPermissionSchema>;
 
 // An acceptance-only build waives one named verification so #387 can run on an unsigned Windows
 // package. It is fixed at build time and reported here purely so Main and Renderer can keep it
@@ -5139,6 +5151,10 @@ export const computerUseAvailabilitySchema = z
       .string()
       .regex(/^[a-z][a-z0-9._-]{0,63}$/)
       .nullable(),
+    // Empty for every producer that has nothing to name, so existing producers and stored payloads
+    // stay valid. A non-empty list is the only thing the renderer uses to offer per-permission
+    // recovery; it never widens what observe/control are allowed to do.
+    missingPermissions: z.array(computerUseOsPermissionSchema).max(2).default([]),
     manifestDigest: computerUseDigestSchema.nullable(),
   })
   .strict()
@@ -5159,9 +5175,50 @@ export const computerUseAvailabilitySchema = z
       context.addIssue({ code: 'custom', message: 'Ready availability requires all gates' });
     if (availability.state !== 'ready' && nativeBoundaryReady && availability.observe)
       context.addIssue({ code: 'custom', message: 'A failed state cannot have all gates ready' });
+    if (new Set(availability.missingPermissions).size !== availability.missingPermissions.length)
+      context.addIssue({ code: 'custom', message: 'Missing permissions must be distinct' });
+    if (availability.observe && availability.missingPermissions.length > 0)
+      context.addIssue({
+        code: 'custom',
+        message: 'A working native boundary cannot report a missing OS permission',
+      });
+    if (
+      availability.state === 'permission_required' &&
+      availability.missingPermissions.length === 0
+    )
+      context.addIssue({
+        code: 'custom',
+        message: 'A permission_required state has to name the missing permission',
+      });
   });
 export type ComputerUseAvailability = z.infer<typeof computerUseAvailabilitySchema>;
 export const computerUseAvailabilityResultSchema = computerUseAvailabilitySchema;
+
+/**
+ * Opening an OS settings pane takes the permission name and nothing else. Main owns the fixed URL
+ * table, so this channel cannot be used to open an arbitrary URL, file, or application.
+ */
+export const computerUseOpenPermissionSettingsInputSchema = z
+  .object({ permission: computerUseOsPermissionSchema })
+  .strict();
+export type ComputerUseOpenPermissionSettingsInput = z.infer<
+  typeof computerUseOpenPermissionSettingsInputSchema
+>;
+export const computerUseOpenPermissionSettingsResultSchema = z
+  .object({
+    opened: z.boolean(),
+    // Distinguishes "the OS would not open this pane" from "Main suppressed a repeat request".
+    // Only the first is worth telling the user about; the second already has a pane on screen.
+    rateLimited: z.boolean().default(false),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (result.opened && result.rateLimited)
+      context.addIssue({ code: 'custom', message: 'A suppressed request cannot have opened' });
+  });
+export type ComputerUseOpenPermissionSettingsResult = z.infer<
+  typeof computerUseOpenPermissionSettingsResultSchema
+>;
 
 export const computerUseProfileRegisterInputSchema = z
   // Main consumes a recent trusted input and opens the OS picker. No identity fact is accepted
@@ -5837,6 +5894,9 @@ export const COMPUTER_USE_LIMITS = Object.freeze({
 
 export type ComputerUseApi = {
   availability(): Promise<ComputerUseAvailability>;
+  openPermissionSettings(
+    input: ComputerUseOpenPermissionSettingsInput,
+  ): Promise<ComputerUseOpenPermissionSettingsResult>;
   registerProfile(input: ComputerUseProfileRegisterInput): Promise<ComputerAppProfile | null>;
   listProfiles(input?: ComputerUseProfileListInput): Promise<ComputerUseProfileListResult>;
   listWindowCandidates(
@@ -6360,6 +6420,8 @@ export const IPC_CHANNELS = {
   approvalsListRecent: 'sprint-coder:approvals:list-recent',
   approvalsResolve: 'sprint-coder:approvals:resolve',
   computerUseAvailability: 'sprint-coder:computer-use:availability',
+  /** Open the OS settings pane for one named permission; Main owns the fixed URL table. */
+  computerUseOpenPermissionSettings: 'sprint-coder:computer-use:permissions:open-settings',
   computerUseProfilesList: 'sprint-coder:computer-use:profiles:list',
   computerUseProfileRegister: 'sprint-coder:computer-use:profiles:register',
   computerUseWindowCandidates: 'sprint-coder:computer-use:windows:list',
