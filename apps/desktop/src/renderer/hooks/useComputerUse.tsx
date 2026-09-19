@@ -4,6 +4,7 @@ import type {
   ComputerUseApprovalDecision,
   ComputerUseApi,
   ComputerUseAvailability,
+  ComputerUseOpenPermissionSettingsResult,
   ComputerUseOsPermission,
   ComputerUseSessionStatus,
   ComputerUseStartInput,
@@ -254,14 +255,11 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
   const openPermissionSettings = useCallback(
     async (permission: ComputerUseOsPermission): Promise<void> => {
       setDialogError(null);
-      const opened = await requestComputerUsePermissionSettings(
+      const result = await requestComputerUsePermissionSettings(
         window.sprintCoder?.computerUse,
         permission,
-      ).catch(() => false);
-      if (!opened)
-        setDialogError(
-          'システム設定を開けませんでした。「システム設定」→「プライバシーとセキュリティ」から手動で許可してください。',
-        );
+      ).catch(() => ({ opened: false, rateLimited: false }));
+      setDialogError(computerUsePermissionSettingsError(result));
     },
     [],
   );
@@ -507,9 +505,21 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
 export async function requestComputerUsePermissionSettings(
   api: Pick<ComputerUseApi, 'openPermissionSettings'> | undefined,
   permission: ComputerUseOsPermission,
-): Promise<boolean> {
-  if (api === undefined) return false;
-  return (await api.openPermissionSettings({ permission })).opened;
+): Promise<ComputerUseOpenPermissionSettingsResult> {
+  if (api === undefined) return { opened: false, rateLimited: false };
+  return await api.openPermissionSettings({ permission });
+}
+
+/**
+ * A suppressed repeat is not a failure: when both permissions are missing, pressing the two
+ * buttons in quick succession must not claim that System Settings could not be opened.
+ */
+export function computerUsePermissionSettingsError(
+  result: ComputerUseOpenPermissionSettingsResult,
+): string | null {
+  return result.opened || result.rateLimited
+    ? null
+    : 'システム設定を開けませんでした。「システム設定」→「プライバシーとセキュリティ」から手動で許可してください。';
 }
 
 export function computerUseEntryVisible(availability: ComputerUseAvailability): boolean {

@@ -29,11 +29,10 @@ import {
   computerUseCompiledAcceptanceMode,
   computerUseWindowsSignerWaived,
 } from './computer-use-acceptance-mode';
-import {
-  computerUseMissingNativePermissions,
-  type ComputerUseNativeBinding,
-  type ComputerUseNativeAddon,
-} from './computer-use-native';
+// Type-only: a runtime import from the signed loader would close a cycle through the Windows
+// transport and leave the close budgets below uninitialised. See computer-use-native-probe-facts.
+import type { ComputerUseNativeBinding, ComputerUseNativeAddon } from './computer-use-native';
+import { computerUseMissingNativePermissions } from './computer-use-native-probe-facts';
 import {
   ComputerUseAccessibilityTreeError,
   projectComputerUseAccessibilityTree,

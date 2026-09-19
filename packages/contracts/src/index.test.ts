@@ -2300,9 +2300,23 @@ describe('Computer Use contracts', () => {
         url: 'https://attacker.example',
       }),
     ).toThrow();
+    // A suppressed repeat stays distinguishable from a refusal, and the default keeps older
+    // payloads valid. "Opened" and "suppressed" can never both be true.
     expect(
       contracts.computerUseOpenPermissionSettingsResultSchema.parse({ opened: false }),
-    ).toEqual({ opened: false });
+    ).toEqual({ opened: false, rateLimited: false });
+    expect(
+      contracts.computerUseOpenPermissionSettingsResultSchema.parse({
+        opened: false,
+        rateLimited: true,
+      }),
+    ).toEqual({ opened: false, rateLimited: true });
+    expect(() =>
+      contracts.computerUseOpenPermissionSettingsResultSchema.parse({
+        opened: true,
+        rateLimited: true,
+      }),
+    ).toThrow();
   });
 
   it('rejects renderer identity spoofing and profile path or pid injection', () => {

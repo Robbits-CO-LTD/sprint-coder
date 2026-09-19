@@ -24,8 +24,10 @@ const MACOS_PERMISSION_SETTINGS_URLS: Readonly<Record<ComputerUseOsPermission, r
   });
 
 /**
- * Minimum spacing between two settings openings. A held or repeatedly clicked button must not be
- * able to keep re-launching System Settings.
+ * Minimum spacing between two settings openings **of the same permission**. A held or repeatedly
+ * clicked button must not be able to keep re-launching System Settings, but two different
+ * permissions are two different intents: when both are missing, the user has two buttons in front
+ * of them and pressing one must never swallow the other.
  */
 export const COMPUTER_USE_PERMISSION_SETTINGS_MIN_INTERVAL_MS = 1_500;
 
@@ -41,7 +43,9 @@ export function computerUsePermissionSettingsUrls(
 }
 
 export type ComputerUsePermissionSettingsOpener = Readonly<{
-  open(permission: ComputerUseOsPermission): Promise<Readonly<{ opened: boolean }>>;
+  open(
+    permission: ComputerUseOsPermission,
+  ): Promise<Readonly<{ opened: boolean; rateLimited: boolean }>>;
 }>;
 
 export function createComputerUsePermissionSettingsOpener(
@@ -53,31 +57,32 @@ export function createComputerUsePermissionSettingsOpener(
 ): ComputerUsePermissionSettingsOpener {
   const platform = options.platform ?? process.platform;
   const now = options.now ?? Date.now;
-  let lastOpenedAtMs: number | null = null;
+  const lastOpenedAtMs = new Map<ComputerUseOsPermission, number>();
 
   return Object.freeze({
     open: async (permission: ComputerUseOsPermission) => {
       const at = now();
+      const previousOpenedAtMs = lastOpenedAtMs.get(permission);
       if (
-        lastOpenedAtMs !== null &&
-        at - lastOpenedAtMs < COMPUTER_USE_PERMISSION_SETTINGS_MIN_INTERVAL_MS
+        previousOpenedAtMs !== undefined &&
+        at - previousOpenedAtMs < COMPUTER_USE_PERMISSION_SETTINGS_MIN_INTERVAL_MS
       )
-        return Object.freeze({ opened: false });
+        return Object.freeze({ opened: false, rateLimited: true });
       // Claim the window before awaiting the OS: two clicks that arrive while the first
       // `openExternal` is still in flight would otherwise both pass the check above.
-      const previousOpenedAtMs = lastOpenedAtMs;
-      lastOpenedAtMs = at;
+      lastOpenedAtMs.set(permission, at);
       for (const url of computerUsePermissionSettingsUrls(platform, permission)) {
         try {
           await options.openExternal(url);
-          return Object.freeze({ opened: true });
+          return Object.freeze({ opened: true, rateLimited: false });
         } catch {
           // This spelling is not registered on this OS version; try the next constant.
         }
       }
       // Nothing opened, so the user's next attempt must not be rate limited by this one.
-      lastOpenedAtMs = previousOpenedAtMs;
-      return Object.freeze({ opened: false });
+      if (previousOpenedAtMs === undefined) lastOpenedAtMs.delete(permission);
+      else lastOpenedAtMs.set(permission, previousOpenedAtMs);
+      return Object.freeze({ opened: false, rateLimited: false });
     },
   });
 }

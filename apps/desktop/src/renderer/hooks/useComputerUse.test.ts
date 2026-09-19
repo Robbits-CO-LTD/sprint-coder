@@ -6,6 +6,7 @@ import {
   computerUseModeAdjustmentNotice,
   computerUseTerminalNotice,
   computerUseWindowViews,
+  computerUsePermissionSettingsError,
   requestComputerUsePermissionSettings,
   profileView,
   subscribeComputerUseStatusWithReplay,
@@ -208,18 +209,27 @@ describe('Computer Use renderer projection', () => {
   });
 
   it('asks Main for a settings pane with the permission enum and nothing else', async () => {
-    const openPermissionSettings = vi.fn(async () => ({ opened: true }));
+    const openPermissionSettings = vi.fn(async () => ({ opened: true, rateLimited: false }));
     await expect(
       requestComputerUsePermissionSettings({ openPermissionSettings }, 'screen_recording'),
-    ).resolves.toBe(true);
+    ).resolves.toEqual({ opened: true, rateLimited: false });
     expect(openPermissionSettings).toHaveBeenCalledWith({ permission: 'screen_recording' });
-    openPermissionSettings.mockResolvedValueOnce({ opened: false });
-    await expect(
-      requestComputerUsePermissionSettings({ openPermissionSettings }, 'accessibility'),
-    ).resolves.toBe(false);
-    await expect(requestComputerUsePermissionSettings(undefined, 'accessibility')).resolves.toBe(
-      false,
+    await expect(requestComputerUsePermissionSettings(undefined, 'accessibility')).resolves.toEqual(
+      {
+        opened: false,
+        rateLimited: false,
+      },
     );
-    expect(openPermissionSettings).toHaveBeenCalledTimes(2);
+    expect(openPermissionSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('never calls a suppressed repeat a failure, so two missing grants stay clickable', () => {
+    // Both permissions missing: the user presses one button and then the other. Main suppresses a
+    // repeat only for the same permission, and a suppressed result must carry no error text.
+    expect(computerUsePermissionSettingsError({ opened: true, rateLimited: false })).toBeNull();
+    expect(computerUsePermissionSettingsError({ opened: false, rateLimited: true })).toBeNull();
+    expect(computerUsePermissionSettingsError({ opened: false, rateLimited: false })).toContain(
+      '手動で許可',
+    );
   });
 });

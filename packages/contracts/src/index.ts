@@ -5205,8 +5205,17 @@ export type ComputerUseOpenPermissionSettingsInput = z.infer<
   typeof computerUseOpenPermissionSettingsInputSchema
 >;
 export const computerUseOpenPermissionSettingsResultSchema = z
-  .object({ opened: z.boolean() })
-  .strict();
+  .object({
+    opened: z.boolean(),
+    // Distinguishes "the OS would not open this pane" from "Main suppressed a repeat request".
+    // Only the first is worth telling the user about; the second already has a pane on screen.
+    rateLimited: z.boolean().default(false),
+  })
+  .strict()
+  .superRefine((result, context) => {
+    if (result.opened && result.rateLimited)
+      context.addIssue({ code: 'custom', message: 'A suppressed request cannot have opened' });
+  });
 export type ComputerUseOpenPermissionSettingsResult = z.infer<
   typeof computerUseOpenPermissionSettingsResultSchema
 >;
