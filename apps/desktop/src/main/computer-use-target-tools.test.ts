@@ -436,6 +436,33 @@ describe('computer_list_targets', () => {
     await expect(controller.listTargets({}, toolContext)).rejects.toThrow(/unavailable/iu);
   });
 
+  it('discards the enumeration when the permission is revoked while native is still answering', async () => {
+    const other = profileRecord(
+      'profile-preview',
+      macIdentity({ identityDigest: 'e'.repeat(64), bundleId: 'com.example.preview' }),
+    );
+    const options: NonNullable<Parameters<typeof createFixture>[0]> = {
+      profiles: [profileRecord('profile-notes', macIdentity()), other],
+      // The revocation lands while the first native enumeration is in flight.
+      windowsFor: (profile) => {
+        options.policyEpoch = 1;
+        return [nativeWindow(profile, 1)];
+      },
+    };
+    const { controller, listWindowCalls } = createFixture(options);
+
+    await expect(controller.listTargets({}, toolContext)).rejects.toThrow(/policy epoch/iu);
+
+    // Nothing read under the revoked policy is kept, and the remaining applications are not asked.
+    expect(listWindowCalls).toEqual(['profile-notes']);
+    const internals = controller as unknown as {
+      targetTokens: ReadonlyMap<string, unknown>;
+      targetAppTokens: ReadonlyMap<string, unknown>;
+    };
+    expect(internals.targetTokens.size).toBe(0);
+    expect(internals.targetAppTokens.size).toBe(0);
+  });
+
   it('refuses a call bound to a stale policy epoch', async () => {
     const { controller } = createFixture({ policyEpoch: 2 });
     await expect(controller.listTargets({}, { ...toolContext, policyEpoch: 1 })).rejects.toThrow(

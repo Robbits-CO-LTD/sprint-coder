@@ -697,6 +697,13 @@ export class ComputerUseController {
       if (selectedProfileId !== null && profile.id !== selectedProfileId) continue;
       // One unreachable application must not blank the whole list; the agent still needs the rest.
       const windows = await this.listNativeWindows(profile).catch(() => []);
+      // Native took time to answer. A permission revoked meanwhile has already cleared this Task's
+      // tokens, so minting new ones — or returning titles that were read under the old policy —
+      // would let this call outlive the revocation. Nothing after this point awaits again.
+      if (this.disposed || this.currentPolicyEpoch(context.taskId) !== policyEpoch) {
+        this.revokeTargetTokens(context.taskId);
+        throw new Error('Computer Use policy epoch changed');
+      }
       const appToken = randomUUID();
       const appBinding = {
         taskId: context.taskId,
