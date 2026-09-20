@@ -852,6 +852,7 @@ export interface SprintCoderApi {
       commandSandbox?: CommandSandboxCapability;
       settingsWorkspaceV2?: boolean;
       projectMultiFolderUx?: boolean;
+      computerUseAgentDrivenV2?: boolean;
     }>;
   };
   windowControls: {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   bindComputerUseMaximumMode,
   bindComputerUsePolicyLanguage,
+  type ComputerAppGrantView,
   type ComputerUseAcceptanceMode,
   type ComputerUseApprovalDecision,
   type ComputerUseMode,
@@ -134,6 +135,137 @@ export function ComputerUseAcceptanceBuildNotice({
         ）。配布しないでください。
       </p>
     </aside>
+  );
+}
+
+const COMPUTER_USE_MODE_CEILING_LABELS: Readonly<Record<ComputerUseMode, string>> = {
+  observe_only: '観測のみ',
+  supervised: '操作ごとに確認',
+  full_access_app: 'フルアクセス',
+};
+
+function computerUseGrantDate(value: string | null): string {
+  if (value === null) return '未使用';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? '不明'
+    : parsed.toLocaleDateString('ja-JP', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/**
+ * The permanent application grants, and the only way to take one back (ADR v2 §6.1, §6.5).
+ *
+ * The row is built out of verified facts — publisher, application id, signing class, the mode
+ * ceiling — with the application's own name kept in its own element and labelled as such. They are
+ * never concatenated: an application that names itself "Notes — Apple, verified" must not be able to
+ * read as though the product said so.
+ *
+ * Revoking is a plain button rather than a confirmation flow. It only ever removes permission, the
+ * worst outcome is being asked again, and an extra dialog between a worried user and "stop this" is
+ * the wrong trade. The trusted click is what Main requires, so the activation attribute is on the
+ * button itself.
+ */
+export function ComputerUseGrantSection({
+  grants,
+  discardedRecords,
+  busy,
+  error,
+  onRevoke,
+}: {
+  grants: readonly ComputerAppGrantView[];
+  discardedRecords: number;
+  busy: boolean;
+  error: string | null;
+  onRevoke: (grant: ComputerAppGrantView) => Promise<void>;
+}) {
+  return (
+    <section className="computer-use-grants" aria-labelledby="computer-use-grants-title">
+      <h3 id="computer-use-grants-title" className="computer-use-grants__title">
+        許可済みアプリ
+      </h3>
+      <p className="computer-use-grants__lead">
+        AIが確認なしで操作できるアプリです。取り消すと、実行中の操作はその場で停止します。
+      </p>
+      {discardedRecords > 0 ? (
+        <p className="computer-use-grants__discarded" role="status">
+          <ShieldAlert size={14} />
+          無効な許可レコードを{discardedRecords}
+          件破棄しました。該当アプリは次回あらためて確認します。
+        </p>
+      ) : null}
+      {error === null ? null : (
+        <p className="computer-use-grants__error" role="alert">
+          {error}
+        </p>
+      )}
+      {grants.length === 0 ? (
+        <p className="computer-use-grants__empty">許可済みのアプリはありません。</p>
+      ) : (
+        <ul className="computer-use-grant-list">
+          {grants.map((grant) => (
+            <li className="computer-use-grant" key={grant.id}>
+              <div className="computer-use-grant__copy">
+                <strong className="computer-use-grant__name">
+                  {grant.untrustedDisplayName}
+                  <span className="computer-use-grant__name-note">（アプリ自称名）</span>
+                </strong>
+                <dl className="computer-use-grant__facts">
+                  <div>
+                    <dt>発行元</dt>
+                    <dd>{grant.publisher ?? '確認できません'}</dd>
+                  </div>
+                  <div>
+                    <dt>アプリID</dt>
+                    <dd>{grant.appId}</dd>
+                  </div>
+                  <div>
+                    <dt>署名</dt>
+                    <dd
+                      className={
+                        grant.identityKind === 'verified-signed'
+                          ? 'computer-use-grant__signed'
+                          : 'computer-use-grant__unsigned'
+                      }
+                    >
+                      {grant.identityKind === 'verified-signed' ? '本人確認済み' : '未署名'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>上限</dt>
+                    <dd>{COMPUTER_USE_MODE_CEILING_LABELS[grant.maxMode]}</dd>
+                  </div>
+                  <div>
+                    <dt>最終使用</dt>
+                    <dd>{computerUseGrantDate(grant.lastUsedAt)}</dd>
+                  </div>
+                  <div>
+                    <dt>AIの要求</dt>
+                    <dd>
+                      {grant.requestCount}回（拒否{grant.denialCount}回）
+                    </dd>
+                  </div>
+                </dl>
+                {grant.codeChangedAt === null ? null : (
+                  <small className="computer-use-grant__updated">
+                    {computerUseGrantDate(grant.codeChangedAt)}にアプリが更新されました。
+                  </small>
+                )}
+              </div>
+              <button
+                type="button"
+                className="computer-use-grant__revoke"
+                data-computer-use-activation="app-grant-revoke"
+                disabled={busy}
+                onClick={() => void onRevoke(grant)}
+              >
+                許可を取り消す
+                <span className="sr-only">（{grant.appId}）</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -292,9 +424,12 @@ export function ComputerUseOnboarding({
   controlAvailable,
   busy,
   error: externalError,
+  grants = null,
+  grantError = null,
   onClose,
   onRegister,
   onResolveWindows,
+  onRevokeGrant,
   onStart,
 }: {
   taskId?: string;
@@ -304,9 +439,18 @@ export function ComputerUseOnboarding({
   controlAvailable: boolean;
   busy: boolean;
   error?: string | null;
+  /**
+   * Null when the agent-driven gate is off, which is also the default.
+   *
+   * The section is absent rather than empty in that case: Main refuses the channel too, so an empty
+   * list would promise a surface that does not exist.
+   */
+  grants?: Readonly<{ grants: readonly ComputerAppGrantView[]; discardedRecords: number }> | null;
+  grantError?: string | null;
   onClose: () => void;
   onRegister: () => Promise<void>;
   onResolveWindows: (profileId: string) => Promise<readonly ComputerUseWindowView[]>;
+  onRevokeGrant?: (grant: ComputerAppGrantView) => Promise<void>;
   onStart: (input: ComputerUseStartView) => Promise<void>;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -665,6 +809,15 @@ export function ComputerUseOnboarding({
               V1の対応アプリは、WindowsはSystem32のクラシック版メモ帳と同じreleaseで署名した受入fixture、macOSはTextEditと公式Visual
               Studio Code（確認あり）です。上記以外のアプリは未対応です。
             </p>
+            {grants === null || onRevokeGrant === undefined ? null : (
+              <ComputerUseGrantSection
+                grants={grants.grants}
+                discardedRecords={grants.discardedRecords}
+                busy={busy}
+                error={grantError}
+                onRevoke={onRevokeGrant}
+              />
+            )}
           </section>
         ) : (
           <section className="computer-use-step">

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   bindComputerUsePolicyLanguage,
   bindComputerUseMaximumMode,
+  computerAppGrantViewSchema,
   computerAppProfileSchema,
   computerUseActionSchema,
   computerUseActionResultSchema,
@@ -17,8 +18,10 @@ import {
   selectableComputerTargetSchema,
   COMPUTER_TARGET_LIST_LIMIT,
   COMPUTER_USE_LIMITS,
+  type ComputerAppGrantView,
   type ComputerAppIdentity,
   type ComputerListTargetsOutput,
+  type ComputerUseGrantListResult,
   type ComputerTarget,
   type SelectableComputerTarget,
   type ComputerAppProfile,
@@ -44,6 +47,7 @@ import {
 } from '@sprint-coder/domain';
 import {
   computerTargetUntrustedLabel,
+  sanitizeUntrustedTargetLabel,
   resolveComputerTargetAppToken,
   resolveComputerTargetToken,
   COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
@@ -52,6 +56,15 @@ import {
   type ComputerTargetTokenRecord,
 } from './computer-use-target-model';
 import {
+  computerAppGrantIdentityFrom,
+  computerAppGrantMismatch,
+  type ComputerAppGrantIdentity,
+} from './computer-use-grant-identity';
+import {
+  computerAppGrantStoredIdentity,
+  type ComputerAppGrantRecord,
+} from './computer-use-grant-record';
+import {
   ToolBroker as MainToolBroker,
   type ToolAuthorizationRequest,
   type ToolAuthorizationDecision,
@@ -59,6 +72,7 @@ import {
 } from './tool-broker';
 import type {
   ComputerActionAuditRecord,
+  ComputerAppGrantListing,
   ComputerAppProfileInput,
   ComputerAppProfileRecord,
   ComputerActionAuditState,
@@ -221,6 +235,13 @@ export type ComputerUseControllerPersistence = Pick<
   | 'createComputerAppProfile'
   | 'updateComputerAppProfile'
   | 'removeComputerAppProfile'
+  | 'listComputerAppGrants'
+  | 'findComputerAppGrantByIdentity'
+  | 'getComputerAppGrant'
+  | 'createComputerAppGrant'
+  | 'touchComputerAppGrantUsed'
+  | 'countComputerAppGrantAccessRequest'
+  | 'removeComputerAppGrant'
   | 'recordComputerActionAudit'
   | 'completeComputerActionAudit'
   | 'listComputerActionAudits'
@@ -402,6 +423,18 @@ type PendingComputerApproval = {
   resolve: (decision: ToolAuthorizationDecision) => void;
   timer: ReturnType<typeof setTimeout>;
 };
+/**
+ * What one application contributed to an in-flight enumeration, and what that contribution assumed.
+ *
+ * Kept together so the re-read on the return path compares like with like: the row's `granted` flag
+ * came from the grant state captured here, and re-deriving it from the profile alone would compare
+ * the answer against itself.
+ */
+type TargetEnumerationSnapshot = Readonly<{
+  profile: ComputerAppProfileRecord;
+  grantState: Readonly<{ granted: boolean; grantId: string | null }>;
+}>;
+
 type WindowCandidatePermit = Readonly<{
   profileId: string;
   profileRevision: number;
@@ -427,6 +460,8 @@ export class ComputerUseController {
       controller: AbortController;
       reason: ComputerUseStopReason | null;
       taskId: string;
+      /** Which application this start is for, so a revoked grant can cancel it (ADR v2 §6.5). */
+      profileId: string;
     }
   >();
   private readonly now: () => number;
@@ -434,6 +469,13 @@ export class ComputerUseController {
   private startInProgress = false;
   private startingController: AbortController | null = null;
   private startingTaskId: string | null = null;
+  /**
+   * The application a start in flight is for, so revoking its grant can cancel it (ADR v2 §6.5).
+   *
+   * Without it, revoking would only reach `sessions`, and a start that is still awaiting native
+   * would go on to become a live session for an application whose permission was just withdrawn.
+   */
+  private startingProfileId: string | null = null;
 
   constructor(private readonly deps: ComputerUseControllerDeps) {
     this.now = deps.now ?? Date.now;
@@ -655,6 +697,222 @@ export class ComputerUseController {
   }
 
   /**
+   * The grant model (ADR v2 §6.2–§6.5).
+   *
+   * Everything below is the store plus the pure rules in `computer-use-grant-identity`; no route
+   * here creates a session, and none of it is reachable from model output. S3b's approval card is
+   * what will call `createAppGrant`, from a trusted click.
+   */
+
+  /**
+   * The grant identity for a stored application profile, or null when no grant is possible.
+   *
+   * The single place "may this application be granted at all?" is decided. Null covers an identity
+   * that cannot be pinned down (§6.2) and an application the current deny ruleset forbids (§3),
+   * because every caller does the same thing with both: treat the application as ungranted.
+   */
+  appGrantIdentityFor(identity: unknown): ComputerAppGrantIdentity | null {
+    return computerUseAppIdentityIsDenied(identity) ? null : computerAppGrantIdentityFrom(identity);
+  }
+
+  /**
+   * The live grant for an application, applying §6.3 on the way out.
+   *
+   * A stored row is not the answer on its own: a row whose signing class or normalised path has
+   * moved since it was written describes a different application, and a row whose class the ruleset
+   * now forbids is revoked here rather than being allowed to survive until something asks again.
+   */
+  appGrantFor(identity: unknown): ComputerAppGrantRecord | null {
+    const derived = computerAppGrantIdentityFrom(identity);
+    if (derived === null) return null;
+    const stored = this.deps.persistence.findComputerAppGrantByIdentity(
+      derived.platform,
+      derived.grantIdentityDigest,
+    );
+    if (stored === null) return null;
+    const mismatch = computerAppGrantMismatch(
+      computerAppGrantStoredIdentity(stored),
+      derived,
+      computerUseAppIdentityIsDenied(identity),
+    );
+    if (mismatch === null) return stored;
+    // A newly denied class is revoked outright — the user is not asked again (§6.3, T3). Every
+    // other mismatch leaves the row alone: it simply stops matching, and the next request raises a
+    // card whose approval writes the new identity.
+    //
+    // Fire-and-forget with its own catch: this runs on the synchronous path that builds an
+    // enumeration, and the answer — "not granted" — does not depend on the removal succeeding. A
+    // concurrent revoke of the same row makes it throw, and that is already the outcome we wanted.
+    if (mismatch === 'denied_class')
+      void this.revokeAppGrant(stored.id, stored.revision).catch(() => undefined);
+    return null;
+  }
+
+  /** Every grant, for the settings screen, with the count of rows that failed their MAC (T14). */
+  listAppGrants(): ComputerAppGrantListing {
+    return this.deps.persistence.listComputerAppGrants();
+  }
+
+  /**
+   * The settings screen's view of every grant (ADR v2 §6.1, §6.5).
+   *
+   * The single place a stored grant becomes something a person reads, so the sanitising of the
+   * application's own name happens once — the same function, and therefore the same character set,
+   * the agent-facing labels go through. A row that still fails the contract after sanitising is
+   * dropped and counted rather than thrown, so one strange name cannot blank the list the user
+   * revokes from.
+   */
+  listAppGrantViews(): ComputerUseGrantListResult {
+    const listing = this.deps.persistence.listComputerAppGrants();
+    const grants: ComputerAppGrantView[] = [];
+    let discardedRecords = listing.discarded;
+    for (const grant of listing.grants) {
+      const view = computerAppGrantViewSchema.safeParse({
+        id: grant.id,
+        revision: grant.revision,
+        platform: grant.platform,
+        identityKind: grant.identityKind,
+        publisher: grant.publisher,
+        appId: grant.appId,
+        untrustedDisplayName: sanitizeUntrustedTargetLabel(grant.displayName),
+        maxMode: grant.maxMode,
+        grantedAt: grant.createdAt,
+        lastUsedAt: grant.lastUsedAt,
+        codeChangedAt: grant.cdHashChangedAt,
+        requestCount: grant.requestCount,
+        denialCount: grant.denialCount,
+      });
+      if (view.success) grants.push(view.data);
+      else discardedRecords += 1;
+    }
+    return { grants, discardedRecords };
+  }
+
+  /**
+   * Records a permanent grant for one verified identity (ADR v2 §6.2, §6.5).
+   *
+   * Internal in this slice: the only intended caller is S3b's approval card, after a trusted click
+   * whose intent digest already matched a freshly re-taken identity. It refuses an identity it
+   * cannot derive or that the ruleset denies, so a mis-wired caller cannot widen the deny list.
+   */
+  createAppGrant(
+    identity: unknown,
+    input: Readonly<{
+      displayName?: string | undefined;
+      maxMode: ComputerUseMode;
+      providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
+    }>,
+  ): ComputerAppGrantRecord {
+    const derived = this.appGrantIdentityFor(identity);
+    if (derived === null) throw new Error('Computer Use application cannot be granted');
+    return this.deps.persistence.createComputerAppGrant({
+      identity: derived,
+      // Sanitised before it is stored as well as before it is shown. Storing the raw string would
+      // put app-authored control characters in the database, where the next reader is whichever
+      // surface forgets to sanitise; the verified app id is the fallback when nothing is left.
+      displayName: sanitizeUntrustedTargetLabel(
+        typeof input.displayName === 'string' && input.displayName.trim() !== ''
+          ? input.displayName
+          : derived.appId,
+      ),
+      maxMode: input.maxMode,
+      denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
+      providerEgress: input.providerEgress,
+    });
+  }
+
+  /**
+   * Revokes one grant and stops whatever was using it (ADR v2 §6.5).
+   *
+   * The store write happens first. If stopping a session threw, a grant that the user asked to
+   * remove would otherwise still be in the table — the stop is best-effort cleanup of something
+   * already forbidden, not a precondition for forbidding it.
+   */
+  async revokeAppGrant(grantId: string, expectedRevision: number): Promise<void> {
+    const grant = this.deps.persistence.getComputerAppGrant(grantId);
+    this.deps.persistence.removeComputerAppGrant(grantId, expectedRevision);
+    // Tokens naming this application are worthless now, and a live session must not keep driving an
+    // application whose permission was just withdrawn.
+    const revoked = (profileId: string): boolean =>
+      this.profileGrantIdentityDigest(profileId) === grant.grantIdentityDigest;
+    for (const [token, record] of this.targetTokens)
+      if (revoked(record.profileId)) this.targetTokens.delete(token);
+    for (const [token, record] of this.targetAppTokens)
+      if (revoked(record.profileId)) this.targetAppTokens.delete(token);
+    // Starts in flight, before anything reaches `sessions`. A start that is waiting on native or on
+    // the planner would otherwise finish and become a live session for an application the user has
+    // just revoked — the same hole `policyEpochChanged` closes for a permission change.
+    if (this.startingProfileId !== null && revoked(this.startingProfileId))
+      this.startingController?.abort(new Error('Computer Use application grant was revoked'));
+    for (const starting of this.startingSessions.values())
+      if (revoked(starting.profileId)) {
+        starting.reason = 'policy_changed';
+        starting.controller.abort(new Error('Computer Use application grant was revoked'));
+      }
+    await Promise.all(
+      [...this.sessions.values()]
+        .filter(
+          (session) =>
+            computerAppGrantIdentityFrom(session.profile.identity)?.grantIdentityDigest ===
+            grant.grantIdentityDigest,
+        )
+        .map((session) => this.stop(session.status.sessionId, 'policy_changed')),
+    );
+  }
+
+  /** Marks a grant used now, and records a signed application having been updated (§6.2.1). */
+  touchAppGrantUsed(identity: unknown): void {
+    const derived = computerAppGrantIdentityFrom(identity);
+    if (derived === null) return;
+    const stored = this.deps.persistence.findComputerAppGrantByIdentity(
+      derived.platform,
+      derived.grantIdentityDigest,
+    );
+    if (stored === null) return;
+    this.deps.persistence.touchComputerAppGrantUsed(
+      stored.id,
+      new Date(this.now()).toISOString(),
+      derived,
+    );
+  }
+
+  private profileGrantIdentityDigest(profileId: string): string | null {
+    try {
+      return (
+        computerAppGrantIdentityFrom(
+          this.deps.persistence.getComputerAppProfile(profileId).identity,
+        )?.grantIdentityDigest ?? null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether an application may be driven without a fresh card, and which grant says so.
+   *
+   * The single decision point behind the `granted` field. Two ways to be granted while both models
+   * coexist (ADR v2 §9 S3): a v2 grant, or a V1 profile the user registered *and* asked to be
+   * remembered — registration consumed a trusted click, so "remember" is V1's own "do not ask me
+   * again". Provider egress consent is deliberately not part of this: it is a separate agreement
+   * about where the screen is sent (§6.4), and it already governs the label on its own.
+   */
+  private appGrantState(
+    profile: ComputerAppProfileRecord,
+  ): Readonly<{ granted: boolean; grantId: string | null }> {
+    // A denied class is never granted, whatever a V1 registration says. `listTargets` already
+    // filters these out before asking, so this is the belt rather than the braces — but a future
+    // caller that forgets the filter should not be handed `granted: true` for a terminal.
+    if (computerUseAppIdentityIsDenied(profile.identity))
+      return Object.freeze({ granted: false, grantId: null });
+    const grant = this.appGrantFor(profile.identity);
+    return Object.freeze({
+      granted: grant !== null || profile.remember,
+      grantId: grant?.id ?? null,
+    });
+  }
+
+  /**
    * The agent-facing enumeration (ADR v2 §5.2).
    *
    * S2 does not change native, so the only windows that can be enumerated are those of applications
@@ -699,7 +957,7 @@ export class ComputerUseController {
       labelled: boolean;
       target: SelectableComputerTarget;
     }[] = [];
-    const snapshots = new Map<string, ComputerAppProfileRecord>();
+    const snapshots = new Map<string, TargetEnumerationSnapshot>();
     let truncated = false;
     let dropped = 0;
     for (const profile of profiles) {
@@ -722,7 +980,8 @@ export class ComputerUseController {
         appIdentityDigest: profile.identityDigest,
         profileRevision: profile.revision,
       } as const;
-      snapshots.set(profile.id, profile);
+      const grantState = this.appGrantState(profile);
+      snapshots.set(profile.id, { profile, grantState });
       let issued = false;
       let windowIndex = 0;
       for (const window of windows.filter(({ eligible }) => eligible !== false)) {
@@ -746,10 +1005,10 @@ export class ComputerUseController {
           appToken,
           verified: computerTargetVerifiedIdentity(profile),
           windowIndex,
-          // Only a registered profile can be listed in S2, and registration already consumed a
-          // trusted user activation, so every listed app is granted by construction. S3 replaces
-          // this with the grant table and can then answer false.
-          granted: true,
+          // A v2 grant, or a V1 profile the user registered and asked to remember (see
+          // `appGrantState`). Only this flag changes shape under the new gate; the V1 UI route
+          // reads neither this method nor the grant table.
+          granted: grantState.granted,
           mode: bindComputerUseMaximumMode(profile.mode, window.maximumMode),
           untrustedLabel: labelled
             ? computerTargetUntrustedLabel(profile.label, window.title)
@@ -796,6 +1055,10 @@ export class ComputerUseController {
     // carrying a window title the user has just withdrawn consent for. A stale row is dropped whole,
     // token included, rather than merely stripped of its label: the revision is part of the token
     // binding, so keeping the token would hand S3 a reference to a revision that no longer exists.
+    //
+    // Revoking a grant is the third route that changes a row without moving the policy epoch, so
+    // the grant a row was built against is re-read here too (ADR v2 §6.5: revoking stops what was
+    // using it, and must not hand back a token minted a moment earlier).
     //
     // Nothing below awaits, so this is the state the caller receives.
     const stale = new Set<string>();
@@ -864,19 +1127,29 @@ export class ComputerUseController {
    * whole enumeration over one application that simply went away.
    */
   private targetProfileUnchanged(
-    snapshot: ComputerAppProfileRecord,
+    snapshot: TargetEnumerationSnapshot,
     egressBinding: Readonly<{ connectionId: string; modelId: string }> | null,
   ): boolean {
     let current: ComputerAppProfileRecord;
     try {
-      current = this.deps.persistence.getComputerAppProfile(snapshot.id);
+      current = this.deps.persistence.getComputerAppProfile(snapshot.profile.id);
     } catch {
       return false;
     }
     if (
-      current.revision !== snapshot.revision ||
-      current.identityDigest !== snapshot.identityDigest ||
+      current.revision !== snapshot.profile.revision ||
+      current.identityDigest !== snapshot.profile.identityDigest ||
       computerUseAppIdentityIsDenied(current.identity)
+    )
+      return false;
+    // The grant as it reads now, compared against the one the row was built on. Only the two fields
+    // the row actually depends on: `revision` also moves when a counter is touched, and dropping a
+    // valid row because the agent's request count went up would be a denial of service dressed as
+    // caution. A revoke changes both of these.
+    const grantNow = this.appGrantState(current);
+    if (
+      grantNow.granted !== snapshot.grantState.granted ||
+      grantNow.grantId !== snapshot.grantState.grantId
     )
       return false;
     // Consent is re-derived the same way the row derived it, so the test is "does the agreement the
@@ -887,7 +1160,7 @@ export class ComputerUseController {
       record.providerEgressConsent &&
       record.connectionId === egressBinding.connectionId &&
       record.modelId === egressBinding.modelId;
-    return !consentFor(snapshot) || consentFor(current);
+    return !consentFor(snapshot.profile) || consentFor(current);
   }
 
   private resolveTargetAppProfileId(
@@ -955,6 +1228,7 @@ export class ComputerUseController {
     const controller = new AbortController();
     this.startingController = controller;
     this.startingTaskId = input.taskId;
+    this.startingProfileId = input.profileId;
     try {
       return await this.startInternal(input, controller);
     } catch (error) {
@@ -963,7 +1237,10 @@ export class ComputerUseController {
       throw error;
     } finally {
       if (this.startingController === controller) this.startingController = null;
-      if (this.startingTaskId === input.taskId) this.startingTaskId = null;
+      if (this.startingTaskId === input.taskId) {
+        this.startingTaskId = null;
+        this.startingProfileId = null;
+      }
       this.startInProgress = false;
     }
   }
@@ -1192,6 +1469,7 @@ export class ComputerUseController {
       controller,
       reason: null as ComputerUseStopReason | null,
       taskId: input.taskId,
+      profileId: input.profileId,
     };
     this.startingSessions.set(sessionId, starting);
     if (
@@ -2900,6 +3178,17 @@ function executableLeafName(executablePath: string | null): string {
     .at(-1);
   return leaf === undefined || leaf.trim() === '' ? COMPUTER_TARGET_UNKNOWN_APP_ID : leaf.trim();
 }
+
+/**
+ * The version of the deny ruleset this build applies (ADR v2 §3.0, T3).
+ *
+ * Stored on every grant so that raising it can be told from "this grant was written under the
+ * current rules". ADR v2 §9 makes the eligibility mode and its ruleset version compile-time
+ * constants rather than environment variables, and this is that constant for the V1 allow-list era:
+ * S4/S5 replace the list below and bump it, at which point grants written under version 1 are
+ * re-evaluated and any that now fall in a denied class are revoked rather than re-confirmed.
+ */
+export const COMPUTER_USE_DENY_RULESET_VERSION = 1;
 
 function computerUseAppIdentityIsDenied(identity: unknown): boolean {
   if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return true;

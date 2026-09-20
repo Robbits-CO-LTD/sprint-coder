@@ -1,0 +1,179 @@
+import { approvalContentMac } from './approval-digest-key';
+import type {
+  ComputerAppGrantIdentity,
+  ComputerAppGrantIdentityKind,
+  ComputerAppGrantPlatform,
+} from './computer-use-grant-identity';
+
+/**
+ * The stored shape of an application grant, and the MAC that makes it trustworthy (ADR v2 §6.2, T14).
+ *
+ * The attacker model for this feature includes writing to Sprint Coder's own data files, so a grant
+ * is not self-authenticating just because it is in our database: anyone who can write the SQLite
+ * file could otherwise insert a row granting full access to an application the user never saw. Every
+ * field below is therefore covered by an HMAC under the per-install key that never enters the
+ * database, and a row whose MAC does not verify is treated as absent rather than as damaged.
+ *
+ * A leaf module: it imports the key helper and nothing else from Main.
+ */
+
+export type ComputerAppGrantMode = 'observe_only' | 'supervised' | 'full_access_app';
+
+/**
+ * Grants are permanent and installation-wide (ADR v2 §6.5). "Once" is a decision about a single
+ * request and is never written down, so the column exists only to make that explicit in the schema.
+ */
+export type ComputerAppGrantScope = 'global';
+
+export type ComputerAppGrantRecord = Readonly<{
+  id: string;
+  platform: ComputerAppGrantPlatform;
+  identityKind: ComputerAppGrantIdentityKind;
+  grantIdentityDigest: string;
+  appId: string;
+  /**
+   * The application's own name for itself.
+   *
+   * Authenticated by the MAC, because an attacker relabelling a granted row would change what the
+   * user reads when deciding whether to revoke it — but never an input to any identity derivation
+   * (T2), and re-sanitised on every path that displays it.
+   */
+  displayName: string;
+  publisher: string | null;
+  signingIdentifier: string | null;
+  signerDigest: string | null;
+  packageFamilyName: string | null;
+  executablePath: string;
+  executableDigest: string | null;
+  cdHash: string | null;
+  /** The code identity seen the previous time, recorded rather than re-confirmed (§6.2.1). */
+  lastCdHash: string | null;
+  cdHashChangedAt: string | null;
+  /** The ceiling this grant was given at; the session binding may still bind lower. */
+  maxMode: ComputerAppGrantMode;
+  scope: ComputerAppGrantScope;
+  denyRulesetVersion: number;
+  grantVersion: number;
+  /** Provider egress consent for *this application* (§6.4, D10). Both null, or both set. */
+  providerEgressConnectionId: string | null;
+  providerEgressModelId: string | null;
+  requestCount: number;
+  denialCount: number;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+}>;
+
+/**
+ * Every field the MAC covers, in the order it covers them.
+ *
+ * Explicit rather than `Object.keys`: key order is an accident of construction, and a MAC whose
+ * input order can change is a MAC that starts rejecting valid rows. The exhaustiveness check below
+ * turns "added a column and forgot to authenticate it" — the failure that would let an attacker
+ * raise `max_mode` in place — into a compile error.
+ */
+export const COMPUTER_APP_GRANT_MAC_FIELDS = [
+  'id',
+  'platform',
+  'identityKind',
+  'grantIdentityDigest',
+  'appId',
+  'displayName',
+  'publisher',
+  'signingIdentifier',
+  'signerDigest',
+  'packageFamilyName',
+  'executablePath',
+  'executableDigest',
+  'cdHash',
+  'lastCdHash',
+  'cdHashChangedAt',
+  'maxMode',
+  'scope',
+  'denyRulesetVersion',
+  'grantVersion',
+  'providerEgressConnectionId',
+  'providerEgressModelId',
+  'requestCount',
+  'denialCount',
+  'lastUsedAt',
+  'createdAt',
+  'updatedAt',
+  'revision',
+] as const satisfies readonly (keyof ComputerAppGrantRecord)[];
+
+type MacCoveredField = (typeof COMPUTER_APP_GRANT_MAC_FIELDS)[number];
+type UnauthenticatedGrantField = Exclude<keyof ComputerAppGrantRecord, MacCoveredField>;
+// Adding a field to `ComputerAppGrantRecord` without adding it above fails to compile here.
+const GRANT_RECORD_IS_FULLY_AUTHENTICATED: UnauthenticatedGrantField extends never ? true : never =
+  true;
+void GRANT_RECORD_IS_FULLY_AUTHENTICATED;
+
+/**
+ * The identity a stored grant was written for, in the shape the pure comparison rules take.
+ *
+ * A projection, never a re-derivation: re-deriving the digest here from the record's own fields
+ * would make the comparison tautological, and the point of §6.3 is to compare what was stored
+ * against what is observed now.
+ */
+export function computerAppGrantStoredIdentity(
+  record: ComputerAppGrantRecord,
+): ComputerAppGrantIdentity {
+  return Object.freeze({
+    platform: record.platform,
+    identityKind: record.identityKind,
+    grantIdentityDigest: record.grantIdentityDigest,
+    appId: record.appId,
+    publisher: record.publisher,
+    signingIdentifier: record.signingIdentifier,
+    signerDigest: record.signerDigest,
+    packageFamilyName: record.packageFamilyName,
+    executablePath: record.executablePath,
+    executableDigest: record.executableDigest,
+    cdHash: record.cdHash,
+  });
+}
+
+/** Domain label for the per-install key, so a grant MAC can never be compared against another. */
+const COMPUTER_APP_GRANT_MAC_LABEL = 'computer-app-grant/v1';
+
+/**
+ * The keyed MAC over a grant's authenticated fields, hex encoded.
+ *
+ * Values are length-prefixed and typed, so no rearrangement of content between adjacent fields
+ * produces the same input: without that, moving one character from `appId` into `publisher` would
+ * authenticate a row nobody signed. Null is its own token for the same reason it is in the identity
+ * digest — "not observed" and "empty" are different facts.
+ */
+export function computerAppGrantRecordMac(record: ComputerAppGrantRecord): string {
+  const parts: string[] = [];
+  for (const field of COMPUTER_APP_GRANT_MAC_FIELDS) {
+    const value = record[field];
+    parts.push(
+      `${field}=${
+        value === null
+          ? 'null'
+          : typeof value === 'number'
+            ? `number:${value}`
+            : `text:${value.length}:${value}`
+      }`,
+    );
+  }
+  return approvalContentMac(COMPUTER_APP_GRANT_MAC_LABEL, parts.join('\u0000'));
+}
+
+/**
+ * Constant-time-enough comparison of two hex MACs.
+ *
+ * `timingSafeEqual` would need equal-length buffers and a try/catch around the length mismatch; the
+ * value being compared is a stored hex string rather than a secret the caller can probe adaptively,
+ * so a length check plus a full-width accumulate is the honest trade. It never short-circuits.
+ */
+export function computerAppGrantMacMatches(expected: string, actual: string): boolean {
+  if (expected.length !== actual.length) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1)
+    difference |= expected.charCodeAt(index) ^ actual.charCodeAt(index);
+  return difference === 0;
+}

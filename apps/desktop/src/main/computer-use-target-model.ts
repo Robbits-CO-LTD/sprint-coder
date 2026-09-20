@@ -1,4 +1,5 @@
 import {
+  COMPUTER_TARGET_LABEL_FORBIDDEN_PATTERN,
   COMPUTER_TARGET_LABEL_MAX_CHARACTERS,
   COMPUTER_TARGET_UNTRUSTED_LABEL_NOTE,
   type ComputerTargetUntrustedLabel,
@@ -20,6 +21,17 @@ import { computerTargetToolKind } from '@sprint-coder/domain';
  * value the ADR names.
  */
 export const COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS = 5 * 60_000;
+
+/**
+ * The single source for "which characters may never survive into a label".
+ *
+ * Its own instance rather than one shared with the schema: the `g` flag makes `lastIndex` stateful,
+ * and `replace` and `test` sharing an object would make each call depend on the previous one.
+ */
+const UNTRUSTED_LABEL_FORBIDDEN_CHARACTERS = new RegExp(
+  COMPUTER_TARGET_LABEL_FORBIDDEN_PATTERN,
+  'gu',
+);
 
 /**
  * Strips what a window title can carry into a model's context, rather than escaping it.
@@ -44,11 +56,15 @@ export function sanitizeUntrustedTargetLabel(
     // C0/C1 controls, newlines and tabs included: each one ends a line, so each becomes a space
     // rather than vanishing — dropping them outright would silently weld two words into one.
     .replace(/\p{Cc}/gu, ' ')
-    // The bidi marks, embeddings, overrides, and isolates reorder the text around them, and the
-    // zero-width characters hide text inside it; there is no separator to preserve, so they are
-    // removed. Written as escapes on purpose: a character class made of invisible characters cannot
-    // be reviewed.
-    .replace(/[\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/gu, '')
+    // Every remaining invisible: the whole `Cf` category (bidi controls, the zero-widths, U+00AD,
+    // and the Unicode Tag block, which encodes one ASCII character per codepoint and therefore
+    // carries a whole sentence inside the 64-character budget) plus the Hangul fillers, which render
+    // as blanks but are letters and so are outside `Cf`. None of them has a separator to preserve,
+    // so they are removed rather than turned into a space.
+    //
+    // The class is built from the contracts pattern that also validates the result. Enumerating it
+    // twice is exactly how the previous version came to strip less than the schema rejected.
+    .replace(UNTRUSTED_LABEL_FORBIDDEN_CHARACTERS, '')
     .replace(/\s+/gu, ' ')
     .trim();
   const capped = [...stripped].slice(0, maximum).join('').trim();

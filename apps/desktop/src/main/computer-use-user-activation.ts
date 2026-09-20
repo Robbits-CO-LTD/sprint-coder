@@ -18,6 +18,9 @@ export type ComputerUseActivationPermit = Readonly<{
     | 'start'
     | 'approval'
     | 'permission-settings'
+    // Revoking one application grant (ADR v2 §6.5). Its own kind, so a click on any other Computer
+    // Use control can never be spent as a revoke.
+    | 'app-grant-revoke'
     | 'graph-start'
     | 'graph-resume'
     | 'graph-resume-step';

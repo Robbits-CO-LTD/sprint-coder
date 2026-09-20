@@ -24,6 +24,7 @@ import {
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -242,6 +243,9 @@ function createFixture(
       ] satisfies readonly ComputerUseNativeWindow[];
     },
     startSession: async (input) => {
+      // Counted before the gate, so a test can observe "native startup has begun and is still
+      // running" — the window in which a session exists only in `startingSessions`.
+      startSessionEnteredCount += 1;
       await options.startSessionGate;
       startSessionCount += 1;
       if (startSessionCount > 1) await options.focusRestoreGate;
@@ -312,6 +316,8 @@ function createFixture(
       await options.closeGate;
     },
   };
+  const grantStore = createComputerAppGrantFixtureStore();
+  let startSessionEnteredCount = 0;
   const persistence = {
     listComputerAppProfiles: () => [currentProfile],
     getComputerAppProfile: () => currentProfile,
@@ -336,6 +342,7 @@ function createFixture(
       return currentProfile;
     },
     removeComputerAppProfile: () => undefined,
+    ...grantStore.api,
     recordComputerActionAudit: (input: ComputerActionAuditInput) => {
       const existing = [...audits.values()].find(
         (audit) =>
@@ -441,10 +448,12 @@ function createFixture(
     observationCount: () => revision,
     dispatchedActions: () => dispatchedActions,
     nativeStartWindowIds: () => nativeStartWindowIds,
+    startSessionEnteredCount: () => startSessionEnteredCount,
     nativeCancelCount: () => nativeCancelCount,
     nativeCloseCount: () => nativeCloseCount,
     profileUpdates: () => profileUpdates,
     currentProfile: () => currentProfile,
+    grants: grantStore.grants,
     managedLifecycle,
   };
 }
@@ -615,13 +624,25 @@ describe('ComputerUseController', () => {
   });
 
   it('does not report a successful limit stop for an expired final observation', async () => {
+    // One clock reading, shared by the controller and by both timestamps.
+    //
+    // The two `Date.now()` calls this replaces were evaluated microseconds apart, so the observation
+    // TTL was `30_000 + (however long the runner took between them)`. The contract caps that TTL at
+    // exactly 30 seconds, so on a slow runner the observation was rejected as malformed before it
+    // could be rejected as stale, and the session stopped with `error` instead of the
+    // `stale_observation` this test is about (seen once on Windows CI on main). Deriving `expiresAt`
+    // from `observedAt` under a frozen clock makes the gap exactly 30 seconds every time, and keeps
+    // the observation firmly in the past so the staleness check is still the one that fires.
+    const frozenNow = Date.now();
+    const staleObservedAt = frozenNow - 60_000;
     const fixture = createFixture({
+      now: () => frozenNow,
       planner: { plan: async () => click },
       observationOverridesForRevision: (revision) =>
         revision === 4
           ? {
-              observedAt: new Date(Date.now() - 60_000).toISOString(),
-              expiresAt: new Date(Date.now() - 30_000).toISOString(),
+              observedAt: new Date(staleObservedAt).toISOString(),
+              expiresAt: new Date(staleObservedAt + 30_000).toISOString(),
             }
           : {},
     });
@@ -826,6 +847,61 @@ describe('ComputerUseController', () => {
     const second = await start(fixture);
     expect(second.sessionId).not.toBe(first.sessionId);
     await fixture.controller.stop(second.sessionId);
+    await fixture.controller.dispose();
+  });
+
+  it('stops a running session when its application grant is revoked', async () => {
+    const fixture = createFixture();
+    const grant = fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const started = await start(fixture);
+    expect(fixture.controller.getStatus(started.sessionId)?.state).not.toBe('stopped');
+
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    // Revoking is a permission change, so it uses the same stop reason a policy change does: the
+    // audit trail and the Renderer's focus restore should not have to learn a new word for it.
+    expect(fixture.statuses.at(-1)?.state).toBe('stopped');
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('policy_changed');
+    expect(fixture.grants.size).toBe(0);
+    await fixture.controller.dispose();
+  });
+
+  it('cancels a start that is still in flight when its grant is revoked', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = createFixture({ startSessionGate: gate });
+    const grant = fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    // Revoking while native startup is still running is the window `sessions` alone does not cover:
+    // nothing is in `sessions` yet, so a revoke that only walked that map would let the start finish
+    // and hand back a live session for an application the user just took permission away from.
+    const starting = start(fixture);
+    await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    release();
+    // The revoke is what ends it, and it is reported as the permission change it is.
+    await expect(starting).rejects.toThrow('policy_changed');
+    // And no session ever went live: the only statuses published are the terminal ones.
+    expect(fixture.statuses.filter((status) => status.state !== 'stopped')).toEqual([]);
+    await fixture.controller.dispose();
+  });
+
+  it('leaves another application running when a different grant is revoked', async () => {
+    const fixture = createFixture();
+    const other = fixture.controller.createAppGrant(
+      { ...profile.identity, bundleId: 'com.example.unrelated' },
+      { maxMode: 'full_access_app', providerEgress: null },
+    );
+    const started = await start(fixture);
+    await fixture.controller.revokeAppGrant(other.id, other.revision);
+    expect(fixture.controller.getStatus(started.sessionId)?.state).not.toBe('stopped');
+    await fixture.controller.stop(started.sessionId);
     await fixture.controller.dispose();
   });
 

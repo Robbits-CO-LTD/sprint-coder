@@ -9029,6 +9029,120 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 0 10px;
   font-size: 11px;
 }
+/* Granted applications (ADR v2 §6.5). Matte and quiet: the only colour is a warning where a fact
+   is missing, and a restrained destructive tint on the control that takes permission away. */
+.computer-use-grants {
+  display: grid;
+  gap: 9px;
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+.computer-use-grants__title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.computer-use-grants__lead,
+.computer-use-grants__empty,
+.computer-use-grants__discarded {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.computer-use-grants__discarded {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  color: var(--warning);
+  background: var(--bg-panel);
+}
+.computer-use-grants__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 11.5px;
+}
+.computer-use-grant-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.computer-use-grant {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bg-panel);
+}
+.computer-use-grant__copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.computer-use-grant__name {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.computer-use-grant__name-note {
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+.computer-use-grant__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 4px 14px;
+  margin: 0;
+  font-size: 11px;
+}
+.computer-use-grant__facts > div {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.computer-use-grant__facts dt {
+  flex: none;
+  color: var(--text-secondary);
+}
+.computer-use-grant__facts dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.computer-use-grant__unsigned {
+  color: var(--warning);
+}
+.computer-use-grant__updated {
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.computer-use-grant__revoke {
+  min-height: 32px;
+  flex: none;
+  padding: 0 11px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-sm);
+  color: var(--danger);
+  background: var(--danger-wash);
+  font-size: 11.5px;
+}
+.computer-use-grant__revoke:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
 .computer-use-reason-code {
   margin: 0;
   color: var(--text-secondary);

@@ -2,6 +2,19 @@ import Database from 'better-sqlite3';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
 import { graphMissionRecordSchema } from './graph-mission-record';
 import {
+  computerAppGrantMismatch,
+  type ComputerAppGrantIdentity,
+  type ComputerAppGrantIdentityKind,
+  type ComputerAppGrantPlatform,
+} from './computer-use-grant-identity';
+import {
+  computerAppGrantMacMatches,
+  computerAppGrantRecordMac,
+  computerAppGrantStoredIdentity,
+  type ComputerAppGrantMode,
+  type ComputerAppGrantRecord,
+} from './computer-use-grant-record';
+import {
   graphUpdateRequestSchema,
   graphUpdateCommitSchema,
   graphPendingUpdateSchema,
@@ -1083,6 +1096,36 @@ type ApprovalRow = {
 export type ComputerAppProfileKind = 'win32-executable' | 'windows-package' | 'macos-bundle';
 export type ComputerAppProfilePlatform = 'win32' | 'darwin';
 export const COMPUTER_USE_MAX_PROFILES = 64;
+/** The same ceiling as profiles: a list a person is expected to read and prune by hand. */
+export const COMPUTER_USE_MAX_GRANTS = 64;
+/**
+ * The grant record format this build writes.
+ *
+ * Stored per row and covered by the MAC, so a future format change can be told apart from a row
+ * this build wrote — a grant that means something different than the reader assumes is exactly what
+ * §6.2's integrity protection is for.
+ */
+export const COMPUTER_APP_GRANT_VERSION = 1;
+export type ComputerAppGrantListing = Readonly<{
+  grants: readonly ComputerAppGrantRecord[];
+  /** Rows whose MAC did not verify; surfaced as a count in settings, never as content. */
+  discarded: number;
+}>;
+export type ComputerAppGrantInput = Readonly<{
+  id?: string;
+  /** Derived by the pure leaf, so the store can never be handed a digest its fields disagree with. */
+  identity: ComputerAppGrantIdentity;
+  /** App-authored, bounded, and never an identity input. Sanitised again before it is displayed. */
+  displayName: string;
+  maxMode: ComputerAppGrantMode;
+  denyRulesetVersion: number;
+  providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
+  requestCount?: number;
+  denialCount?: number;
+  lastUsedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}>;
 export type ComputerAppProfileRecord = Readonly<{
   id: string;
   platform: ComputerAppProfilePlatform;
@@ -4078,6 +4121,87 @@ const migrations = [
         BEGIN SELECT RAISE(ABORT, 'Graph owner consent is immutable'); END;
     `,
   },
+  {
+    version: 92,
+    checksum: 'computer-use-v92-app-grants',
+    // Per-application grants (ADR v2 §6.2). Separate from `computer_app_profiles`, which stays the
+    // V1 allow-list: a profile records "a person registered this application through the OS picker",
+    // a grant records "a person approved this identity for agent-driven control", and S8 removes the
+    // former without touching the latter.
+    //
+    // `record_mac` authenticates every other column under the per-install key (T14). The CHECKs
+    // below are the cheap structural half — they stop a malformed row from ever being written — and
+    // the MAC is the half that survives someone editing the file directly.
+    sql: `
+      CREATE TABLE computer_app_grants (
+        id TEXT PRIMARY KEY,
+        platform TEXT NOT NULL CHECK (platform IN ('win32', 'darwin')),
+        identity_kind TEXT NOT NULL CHECK (identity_kind IN ('verified-signed', 'unverified')),
+        grant_identity_digest TEXT NOT NULL CHECK (
+          length(grant_identity_digest) = 64 AND grant_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND 256),
+        -- The application's own name for itself. Stored so the settings list is readable, kept out
+        -- of every identity derivation (T2), and sanitised again on the way to the Renderer.
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 256),
+        publisher TEXT CHECK (publisher IS NULL OR length(publisher) BETWEEN 1 AND 128),
+        signing_identifier TEXT CHECK (
+          signing_identifier IS NULL OR length(signing_identifier) BETWEEN 1 AND 256
+        ),
+        signer_digest TEXT CHECK (
+          signer_digest IS NULL OR (
+            length(signer_digest) = 64 AND signer_digest NOT GLOB '*[^0-9a-f]*'
+          )
+        ),
+        package_family_name TEXT CHECK (
+          package_family_name IS NULL OR length(package_family_name) BETWEEN 1 AND 256
+        ),
+        executable_path TEXT NOT NULL CHECK (
+          length(executable_path) BETWEEN 1 AND 4096 AND instr(executable_path, char(0)) = 0
+        ),
+        executable_digest TEXT CHECK (
+          executable_digest IS NULL OR (
+            length(executable_digest) = 64 AND executable_digest NOT GLOB '*[^0-9a-f]*'
+          )
+        ),
+        cd_hash TEXT CHECK (
+          cd_hash IS NULL OR (length(cd_hash) = 64 AND cd_hash NOT GLOB '*[^0-9a-f]*')
+        ),
+        last_cd_hash TEXT CHECK (
+          last_cd_hash IS NULL OR (length(last_cd_hash) = 64 AND last_cd_hash NOT GLOB '*[^0-9a-f]*')
+        ),
+        cd_hash_changed_at TEXT,
+        max_mode TEXT NOT NULL CHECK (max_mode IN ('observe_only', 'supervised', 'full_access_app')),
+        -- Only permanent grants are written down; "allow once" is a decision about one request.
+        scope TEXT NOT NULL DEFAULT 'global' CHECK (scope = 'global'),
+        deny_ruleset_version INTEGER NOT NULL CHECK (deny_ruleset_version >= 1),
+        grant_version INTEGER NOT NULL CHECK (grant_version >= 1),
+        -- Provider egress consent is per application (§6.4 / D10), so it lives here rather than
+        -- beside the model selection. Either the pair is known or there is no consent at all.
+        provider_egress_connection_id TEXT CHECK (
+          provider_egress_connection_id IS NULL OR length(provider_egress_connection_id) <= 128
+        ),
+        provider_egress_model_id TEXT CHECK (
+          provider_egress_model_id IS NULL OR length(provider_egress_model_id) <= 256
+        ),
+        request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+        denial_count INTEGER NOT NULL DEFAULT 0 CHECK (denial_count >= 0),
+        last_used_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        record_mac TEXT NOT NULL CHECK (
+          length(record_mac) = 64 AND record_mac NOT GLOB '*[^0-9a-f]*'
+        ),
+        CHECK (
+          (provider_egress_connection_id IS NULL) = (provider_egress_model_id IS NULL)
+        ),
+        UNIQUE(platform, grant_identity_digest)
+      );
+      CREATE INDEX computer_app_grants_lookup_idx
+        ON computer_app_grants(platform, grant_identity_digest);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -5221,6 +5345,23 @@ export interface PersistenceClient {
     input: ComputerAppProfileInput,
   ): ComputerAppProfileRecord;
   removeComputerAppProfile(profileId: string, expectedRevision: number): void;
+  listComputerAppGrants(): ComputerAppGrantListing;
+  findComputerAppGrantByIdentity(
+    platform: ComputerAppGrantPlatform,
+    grantIdentityDigest: string,
+  ): ComputerAppGrantRecord | null;
+  getComputerAppGrant(grantId: string): ComputerAppGrantRecord;
+  createComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord;
+  touchComputerAppGrantUsed(
+    grantId: string,
+    usedAt: string,
+    observed?: ComputerAppGrantIdentity | null,
+  ): ComputerAppGrantRecord;
+  countComputerAppGrantAccessRequest(
+    grantId: string,
+    outcome: 'requested' | 'denied',
+  ): ComputerAppGrantRecord;
+  removeComputerAppGrant(grantId: string, expectedRevision: number): void;
   recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord;
   completeComputerActionAudit(input: {
     auditId: string;
@@ -14330,6 +14471,228 @@ export class SqlitePersistenceClient implements PersistenceClient {
     }
   }
 
+  /**
+   * Every grant this installation holds, plus how many rows were discarded (ADR v2 §6.2, T14).
+   *
+   * Verification is per row. One forged or corrupted row must not blank the settings screen — that
+   * would be a way to hide the other grants from the person deciding whether to keep them — so a row
+   * that fails its MAC is dropped and counted. The count is shown, never the row.
+   */
+  listComputerAppGrants(): ComputerAppGrantListing {
+    const rows = this.db
+      .prepare('SELECT * FROM computer_app_grants ORDER BY app_id, id')
+      .all() as ComputerAppGrantRow[];
+    const grants: ComputerAppGrantRecord[] = [];
+    let discarded = 0;
+    for (const row of rows) {
+      const grant = verifiedComputerAppGrant(row);
+      if (grant === null) discarded += 1;
+      else grants.push(grant);
+    }
+    return Object.freeze({ grants, discarded });
+  }
+
+  /**
+   * The grant for one verified identity, or null.
+   *
+   * Null covers "no grant", "a grant whose MAC does not verify", and "a row that no longer parses".
+   * The caller cannot tell them apart, and must not: all three mean the application is not granted,
+   * and a caller that could distinguish a tampered row would be tempted to treat it as recoverable.
+   */
+  findComputerAppGrantByIdentity(
+    platform: ComputerAppGrantPlatform,
+    grantIdentityDigest: string,
+  ): ComputerAppGrantRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM computer_app_grants WHERE platform = ? AND grant_identity_digest = ?')
+      .get(platform, grantIdentityDigest) as ComputerAppGrantRow | undefined;
+    return row === undefined ? null : verifiedComputerAppGrant(row);
+  }
+
+  getComputerAppGrant(grantId: string): ComputerAppGrantRecord {
+    const row = this.db.prepare('SELECT * FROM computer_app_grants WHERE id = ?').get(grantId) as
+      ComputerAppGrantRow | undefined;
+    const grant = row === undefined ? null : verifiedComputerAppGrant(row);
+    if (grant === null) throw new NotFoundError('Computer Use app grant not found');
+    return grant;
+  }
+
+  createComputerAppGrant(input: ComputerAppGrantInput): ComputerAppGrantRecord {
+    const now = new Date().toISOString();
+    const record = validateComputerAppGrant({
+      id: input.id ?? randomUUID(),
+      platform: input.identity.platform,
+      identityKind: input.identity.identityKind,
+      grantIdentityDigest: input.identity.grantIdentityDigest,
+      appId: input.identity.appId,
+      displayName: input.displayName,
+      publisher: input.identity.publisher,
+      signingIdentifier: input.identity.signingIdentifier,
+      signerDigest: input.identity.signerDigest,
+      packageFamilyName: input.identity.packageFamilyName,
+      executablePath: input.identity.executablePath,
+      executableDigest: input.identity.executableDigest,
+      cdHash: input.identity.cdHash,
+      lastCdHash: null,
+      cdHashChangedAt: null,
+      maxMode: input.maxMode,
+      scope: 'global',
+      denyRulesetVersion: input.denyRulesetVersion,
+      grantVersion: COMPUTER_APP_GRANT_VERSION,
+      providerEgressConnectionId: input.providerEgress?.connectionId ?? null,
+      providerEgressModelId: input.providerEgress?.modelId ?? null,
+      requestCount: input.requestCount ?? 0,
+      denialCount: input.denialCount ?? 0,
+      lastUsedAt: input.lastUsedAt ?? null,
+      createdAt: input.createdAt === undefined ? now : canonicalTimestamp(input.createdAt),
+      updatedAt: input.updatedAt === undefined ? now : canonicalTimestamp(input.updatedAt),
+      revision: 1,
+    });
+    // A row already holding this identity must not be able to block a fresh approval.
+    //
+    // Two ways that happens, and both are how a grant becomes *unusable* rather than valid: a row
+    // whose MAC does not verify (T14 — otherwise writing one forged row would permanently deny an
+    // application, since the unique index refuses the insert and `removeComputerAppGrant` refuses
+    // the delete), and a row that no longer describes this application at all — on macOS the digest
+    // excludes the path, so a copy in another directory collides with the original's row while
+    // failing §6.3. Only a row that authenticates *and* still matches is a real duplicate.
+    const conflicting = this.db
+      .prepare('SELECT * FROM computer_app_grants WHERE platform = ? AND grant_identity_digest = ?')
+      .get(record.platform, record.grantIdentityDigest) as ComputerAppGrantRow | undefined;
+    if (conflicting !== undefined) {
+      const verified = verifiedComputerAppGrant(conflicting);
+      if (
+        verified !== null &&
+        computerAppGrantMismatch(
+          computerAppGrantStoredIdentity(verified),
+          input.identity,
+          false,
+        ) === null
+      )
+        throw new Error('Computer Use app grant already exists');
+      this.db.prepare('DELETE FROM computer_app_grants WHERE id = ?').run(conflicting.id);
+    }
+    const grantCount = this.db
+      .prepare('SELECT COUNT(*) AS count FROM computer_app_grants')
+      .get() as {
+      count: number;
+    };
+    if (grantCount.count >= COMPUTER_USE_MAX_GRANTS)
+      throw new Error('Computer Use app grant limit reached');
+    this.db
+      .prepare(
+        `INSERT INTO computer_app_grants(
+           id, platform, identity_kind, grant_identity_digest, app_id, display_name, publisher,
+           signing_identifier, signer_digest, package_family_name, executable_path,
+           executable_digest, cd_hash, last_cd_hash, cd_hash_changed_at, max_mode, scope,
+           deny_ruleset_version, grant_version, provider_egress_connection_id,
+           provider_egress_model_id, request_count, denial_count, last_used_at,
+           created_at, updated_at, revision, record_mac
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(...computerAppGrantColumnValues(record), computerAppGrantRecordMac(record));
+    return this.getComputerAppGrant(record.id);
+  }
+
+  /**
+   * Marks a grant as used now, and records a signed application's code identity moving (§6.2.1).
+   *
+   * A moved `cdHash` is written down, not re-confirmed: the signer, Team ID, signing identifier and
+   * path are all still the same, which is exactly the ordinary-update case the ADR keeps quiet. The
+   * settings screen shows the date, so an application that changes implausibly often is visible.
+   */
+  touchComputerAppGrantUsed(
+    grantId: string,
+    usedAt: string,
+    observed: ComputerAppGrantIdentity | null = null,
+  ): ComputerAppGrantRecord {
+    const at = canonicalTimestamp(usedAt);
+    return this.rewriteComputerAppGrant(grantId, (current) => {
+      const movedTo =
+        observed !== null && observed.cdHash !== null && observed.cdHash !== current.cdHash
+          ? observed.cdHash
+          : null;
+      return {
+        ...current,
+        lastUsedAt: at,
+        ...(movedTo === null
+          ? {}
+          : { lastCdHash: current.cdHash, cdHash: movedTo, cdHashChangedAt: at }),
+      };
+    });
+  }
+
+  /**
+   * Counts one agent access request against an application (ADR v2 §6.1).
+   *
+   * Shown in settings so approval fatigue and an application the agent keeps asking about are both
+   * visible. Counting is not authorisation: nothing here widens what the grant permits.
+   */
+  countComputerAppGrantAccessRequest(
+    grantId: string,
+    outcome: 'requested' | 'denied',
+  ): ComputerAppGrantRecord {
+    return this.rewriteComputerAppGrant(grantId, (current) => ({
+      ...current,
+      requestCount: current.requestCount + 1,
+      denialCount: outcome === 'denied' ? current.denialCount + 1 : current.denialCount,
+    }));
+  }
+
+  /** Revokes one grant. The caller is responsible for stopping any session that was using it. */
+  removeComputerAppGrant(grantId: string, expectedRevision: number): void {
+    const current = this.getComputerAppGrant(grantId);
+    if (!Number.isSafeInteger(expectedRevision) || current.revision !== expectedRevision)
+      throw new OperationConflictError();
+    const result = this.db
+      .prepare('DELETE FROM computer_app_grants WHERE id = ? AND revision = ?')
+      .run(grantId, expectedRevision);
+    if (result.changes !== 1) throw new OperationConflictError();
+  }
+
+  /**
+   * Read, verify, mutate, re-MAC, write — the only way a grant column ever changes.
+   *
+   * Going through `getComputerAppGrant` means a row whose MAC does not verify cannot be updated into
+   * a row whose MAC does: an attacker who writes a forged grant cannot have the app launder it by
+   * touching a counter. The revision guard makes the read-modify-write safe against a concurrent
+   * revoke, which would otherwise resurrect the row.
+   */
+  private rewriteComputerAppGrant(
+    grantId: string,
+    mutate: (current: ComputerAppGrantRecord) => ComputerAppGrantRecord,
+  ): ComputerAppGrantRecord {
+    const current = this.getComputerAppGrant(grantId);
+    const next = validateComputerAppGrant({
+      ...mutate(current),
+      id: current.id,
+      createdAt: current.createdAt,
+      updatedAt: new Date().toISOString(),
+      revision: current.revision + 1,
+    });
+    const result = this.db
+      .prepare(
+        `UPDATE computer_app_grants
+         SET platform = ?, identity_kind = ?, grant_identity_digest = ?, app_id = ?,
+             display_name = ?, publisher = ?,
+             signing_identifier = ?, signer_digest = ?, package_family_name = ?,
+             executable_path = ?, executable_digest = ?, cd_hash = ?, last_cd_hash = ?,
+             cd_hash_changed_at = ?, max_mode = ?, scope = ?, deny_ruleset_version = ?,
+             grant_version = ?, provider_egress_connection_id = ?, provider_egress_model_id = ?,
+             request_count = ?, denial_count = ?, last_used_at = ?, created_at = ?, updated_at = ?,
+             revision = ?, record_mac = ?
+         WHERE id = ? AND revision = ?`,
+      )
+      .run(
+        ...computerAppGrantColumnValues(next).slice(1),
+        computerAppGrantRecordMac(next),
+        current.id,
+        current.revision,
+      );
+    if (result.changes !== 1) throw new OperationConflictError();
+    return this.getComputerAppGrant(current.id);
+  }
+
   recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord {
     const validated = validateComputerActionAuditInput(input);
     const createdAt = canonicalTimestamp(input.createdAt ?? new Date().toISOString());
@@ -22072,6 +22435,222 @@ function isPlainComputerRecord(value: object): value is Record<string, unknown> 
     );
   };
   return visit(value, 0);
+}
+
+type ComputerAppGrantRow = {
+  id: string;
+  platform: string;
+  identity_kind: string;
+  grant_identity_digest: string;
+  app_id: string;
+  display_name: string;
+  publisher: string | null;
+  signing_identifier: string | null;
+  signer_digest: string | null;
+  package_family_name: string | null;
+  executable_path: string;
+  executable_digest: string | null;
+  cd_hash: string | null;
+  last_cd_hash: string | null;
+  cd_hash_changed_at: string | null;
+  max_mode: string;
+  scope: string;
+  deny_ruleset_version: number;
+  grant_version: number;
+  provider_egress_connection_id: string | null;
+  provider_egress_model_id: string | null;
+  request_count: number;
+  denial_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+  record_mac: string;
+};
+
+/**
+ * A row, only if it both parses and authenticates (ADR v2 §6.2 / T14).
+ *
+ * Structure first, MAC second: `validateComputerAppGrant` throws on a row whose columns are not the
+ * shape the MAC was computed over, and computing a MAC over a malformed record would compare two
+ * things that were never comparable. Both failures answer null, because both mean the same thing to
+ * every caller — this application is not granted.
+ */
+function verifiedComputerAppGrant(row: ComputerAppGrantRow): ComputerAppGrantRecord | null {
+  let record: ComputerAppGrantRecord;
+  try {
+    record = validateComputerAppGrant({
+      id: row.id,
+      platform: row.platform,
+      identityKind: row.identity_kind,
+      grantIdentityDigest: row.grant_identity_digest,
+      appId: row.app_id,
+      displayName: row.display_name,
+      publisher: row.publisher,
+      signingIdentifier: row.signing_identifier,
+      signerDigest: row.signer_digest,
+      packageFamilyName: row.package_family_name,
+      executablePath: row.executable_path,
+      executableDigest: row.executable_digest,
+      cdHash: row.cd_hash,
+      lastCdHash: row.last_cd_hash,
+      cdHashChangedAt: row.cd_hash_changed_at,
+      maxMode: row.max_mode,
+      scope: row.scope,
+      denyRulesetVersion: row.deny_ruleset_version,
+      grantVersion: row.grant_version,
+      providerEgressConnectionId: row.provider_egress_connection_id,
+      providerEgressModelId: row.provider_egress_model_id,
+      requestCount: row.request_count,
+      denialCount: row.denial_count,
+      lastUsedAt: row.last_used_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      revision: row.revision,
+    });
+  } catch {
+    return null;
+  }
+  return computerAppGrantMacMatches(computerAppGrantRecordMac(record), row.record_mac)
+    ? record
+    : null;
+}
+
+/**
+ * The column values, in the order both statements above write them.
+ *
+ * One list rather than two literal argument lists: an insert and an update that enumerate the same
+ * 26 columns separately drift, and a grant written with two columns transposed authenticates fine
+ * and then means something else.
+ */
+function computerAppGrantColumnValues(
+  record: ComputerAppGrantRecord,
+): readonly (string | number | null)[] {
+  return [
+    record.id,
+    record.platform,
+    record.identityKind,
+    record.grantIdentityDigest,
+    record.appId,
+    record.displayName,
+    record.publisher,
+    record.signingIdentifier,
+    record.signerDigest,
+    record.packageFamilyName,
+    record.executablePath,
+    record.executableDigest,
+    record.cdHash,
+    record.lastCdHash,
+    record.cdHashChangedAt,
+    record.maxMode,
+    record.scope,
+    record.denyRulesetVersion,
+    record.grantVersion,
+    record.providerEgressConnectionId,
+    record.providerEgressModelId,
+    record.requestCount,
+    record.denialCount,
+    record.lastUsedAt,
+    record.createdAt,
+    record.updatedAt,
+    record.revision,
+  ];
+}
+
+/**
+ * Structural validation of a grant, applied on the way in *and* on the way out.
+ *
+ * Applied on read as well as on write because the file is writable by the attacker this feature
+ * models: a row inserted by something other than this code has never been through the writer's
+ * checks, and the MAC only proves that whatever is there is what we wrote — a row from an older,
+ * looser build would still authenticate.
+ */
+function validateComputerAppGrant(
+  input: Readonly<Record<string, unknown>>,
+): ComputerAppGrantRecord {
+  const invalid = (): never => {
+    throw new Error('Invalid Computer Use app grant');
+  };
+  const text = (key: string, maximum: number): string => {
+    const value = input[key];
+    if (typeof value !== 'string' || value.length < 1 || value.length > maximum) invalid();
+    return value as string;
+  };
+  const optionalText = (key: string, maximum: number): string | null => {
+    const value = input[key];
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'string' || value.length < 1 || value.length > maximum) invalid();
+    return value as string;
+  };
+  const digest = (key: string): string => {
+    const value = text(key, 64);
+    if (!/^[a-f0-9]{64}$/u.test(value)) invalid();
+    return value;
+  };
+  const optionalDigest = (key: string): string | null => {
+    const value = optionalText(key, 64);
+    if (value !== null && !/^[a-f0-9]{64}$/u.test(value)) invalid();
+    return value;
+  };
+  const count = (key: string, minimum: number): number => {
+    const value = input[key];
+    if (!Number.isSafeInteger(value) || (value as number) < minimum) invalid();
+    return value as number;
+  };
+  const timestamp = (key: string): string => {
+    const value = text(key, 64);
+    if (!Number.isFinite(Date.parse(value))) invalid();
+    return canonicalTimestamp(value);
+  };
+  const optionalTimestamp = (key: string): string | null => {
+    const value = optionalText(key, 64);
+    if (value === null) return null;
+    if (!Number.isFinite(Date.parse(value))) invalid();
+    return canonicalTimestamp(value);
+  };
+  const platform = input['platform'];
+  if (platform !== 'darwin' && platform !== 'win32') invalid();
+  const identityKind = input['identityKind'];
+  if (identityKind !== 'verified-signed' && identityKind !== 'unverified') invalid();
+  const maxMode = input['maxMode'];
+  if (maxMode !== 'observe_only' && maxMode !== 'supervised' && maxMode !== 'full_access_app')
+    invalid();
+  if (input['scope'] !== 'global') invalid();
+  const executablePath = text('executablePath', 4_096);
+  if (executablePath.includes('\u0000')) invalid();
+  const providerEgressConnectionId = optionalText('providerEgressConnectionId', 128);
+  const providerEgressModelId = optionalText('providerEgressModelId', 256);
+  // Consent is a pair; half of one would be a consent whose destination is unknown.
+  if ((providerEgressConnectionId === null) !== (providerEgressModelId === null)) invalid();
+  return Object.freeze({
+    id: text('id', 128),
+    platform: platform as ComputerAppGrantPlatform,
+    identityKind: identityKind as ComputerAppGrantIdentityKind,
+    grantIdentityDigest: digest('grantIdentityDigest'),
+    appId: text('appId', 256),
+    displayName: text('displayName', 256),
+    publisher: optionalText('publisher', 128),
+    signingIdentifier: optionalText('signingIdentifier', 256),
+    signerDigest: optionalDigest('signerDigest'),
+    packageFamilyName: optionalText('packageFamilyName', 256),
+    executablePath,
+    executableDigest: optionalDigest('executableDigest'),
+    cdHash: optionalDigest('cdHash'),
+    lastCdHash: optionalDigest('lastCdHash'),
+    cdHashChangedAt: optionalTimestamp('cdHashChangedAt'),
+    maxMode: maxMode as ComputerAppGrantMode,
+    scope: 'global',
+    denyRulesetVersion: count('denyRulesetVersion', 1),
+    grantVersion: count('grantVersion', 1),
+    providerEgressConnectionId,
+    providerEgressModelId,
+    requestCount: count('requestCount', 0),
+    denialCount: count('denialCount', 0),
+    lastUsedAt: optionalTimestamp('lastUsedAt'),
+    createdAt: timestamp('createdAt'),
+    updatedAt: timestamp('updatedAt'),
+    revision: count('revision', 1),
+  });
 }
 
 function toComputerAppProfile(row: ComputerAppProfileRow): ComputerAppProfileRecord {

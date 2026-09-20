@@ -3,6 +3,7 @@ import {
   IPC_CHANNELS,
   computerAppProfileSchema,
   computerUseAvailabilitySchema,
+  computerUseGrantRevokeInputSchema,
   computerUseProfileRegisterInputSchema,
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
@@ -15,10 +16,15 @@ import {
   computerTargetSystemPromptFor,
 } from './computer-use-target-model';
 import { ComputerUseController } from './computer-use-controller';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { PermissionBroker } from './permission-broker';
 import { expandAccessPreset } from '@sprint-coder/domain';
 import type { PermissionPolicyRecord } from './persistence';
+import {
+  COMPUTER_USE_UI_ACTIVATION_KINDS,
+  isComputerUseUiActivationKind,
+} from '../computer-use-activation';
 import {
   approvalActivationIntent,
   quickStartActivationIntent,
@@ -78,6 +84,29 @@ const quickStartCandidate = {
   policyLanguage: 'en' as const,
   maximumMode: 'full_access_app' as const,
 };
+
+/**
+ * Runs `body` with the agent-driven gate forced on or off.
+ *
+ * Both flags, because the v2 gate is the master switch AND its own opt-in: setting only the second
+ * would leave the gate off and the test would pass for the wrong reason.
+ */
+async function withAgentDrivenGate(enabled: boolean, body: () => Promise<void>): Promise<void> {
+  const previous = process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'];
+  const previousMaster = process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'];
+  if (enabled) {
+    process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'] = '1';
+    process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] = '1';
+  } else delete process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'];
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'];
+    else process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'] = previous;
+    if (previousMaster === undefined) delete process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'];
+    else process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] = previousMaster;
+  }
+}
 
 function quickStartInput(
   overrides: Partial<{
@@ -205,6 +234,8 @@ function captureComputerUseHandlers(): {
     ),
     stop: vi.fn(async () => undefined),
     stopOutsideTask: vi.fn(async () => undefined),
+    listAppGrantViews: vi.fn(() => ({ grants: [], discardedRecords: 0 })),
+    revokeAppGrant: vi.fn(async () => undefined),
     resolveApproval: vi.fn(async () => undefined),
     getStatus: vi.fn(() => null),
     policyEpochChanged: vi.fn(),
@@ -600,6 +631,77 @@ describe('Computer Use Main IPC integration', () => {
     expect(fixture.permissionSettings.open).toHaveBeenCalledWith('accessibility');
   });
 
+  it('serves the grant list only under the agent-driven gate', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseGrantsList);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+
+    // The Renderer hides the section from `appInfo`, but hiding is not refusing: with the gate off
+    // the channel itself must fail, or a compromised Renderer would still read the grants.
+    await withAgentDrivenGate(false, async () => {
+      // The handler refuses synchronously, so the call itself throws rather than returning a
+      // rejected promise. Asserting on the call keeps that distinction honest.
+      expect(() => handler({}, {}, {})).toThrow();
+      expect(fixture.controller['listAppGrantViews']).not.toHaveBeenCalled();
+    });
+    await withAgentDrivenGate(true, async () => {
+      expect(await handler({}, {}, {})).toEqual({ grants: [], discardedRecords: 0 });
+    });
+  });
+
+  it('revokes one grant only from a trusted click, by id and revision', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseGrantRevoke);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+    const input = { grantId: 'grant-1', expectedRevision: 3 };
+
+    await withAgentDrivenGate(true, async () => {
+      // No click: a model that reaches the Renderer cannot revoke, and — more to the point — cannot
+      // use this channel at all.
+      fixture.activation.consume.mockReturnValueOnce(null);
+      await expect(handler(input, {}, {})).rejects.toBeTruthy();
+      expect(fixture.controller['revokeAppGrant']).not.toHaveBeenCalled();
+
+      fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
+      await expect(handler(input, {}, {})).resolves.toEqual({ grants: [], discardedRecords: 0 });
+      // Its own activation kind, so a click on Start or on an approval cannot be spent here.
+      expect(fixture.activation.consume).toHaveBeenLastCalledWith(
+        expect.anything(),
+        'app-grant-revoke',
+      );
+      expect(fixture.controller['revokeAppGrant']).toHaveBeenCalledWith('grant-1', 3);
+    });
+
+    // And with the gate off, the trusted click is not enough either.
+    await withAgentDrivenGate(false, async () => {
+      fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
+      await expect(handler(input, {}, {})).rejects.toBeTruthy();
+    });
+  });
+
+  it('keeps the revoke click kind in the one list every activation seam reads', () => {
+    // Three seams have to agree: the Renderer gate that records the click, Main's intent channel
+    // that binds the recorded kind, and the handler that consumes it. A kind one of them omits does
+    // not fail loudly — `consume` compares against a kind that was never bound, so the control is
+    // silently dead. They now read this list, so membership is the whole check.
+    expect(isComputerUseUiActivationKind('app-grant-revoke')).toBe(true);
+    expect(COMPUTER_USE_UI_ACTIVATION_KINDS).toContain('app-grant-revoke');
+    for (const rejected of ['app-grant-revoke-but-not-really', '', undefined, null, 0])
+      expect(isComputerUseUiActivationKind(rejected)).toBe(false);
+  });
+
+  it('rejects a revoke that names anything other than a row Main already showed', () => {
+    for (const rejected of [
+      { grantId: 'grant-1' },
+      { grantId: 'grant-1', expectedRevision: 0 },
+      { grantId: 'grant-1', expectedRevision: 1, maxMode: 'full_access_app' },
+      { grantId: '', expectedRevision: 1 },
+    ])
+      expect(computerUseGrantRevokeInputSchema.safeParse(rejected).success).toBe(false);
+  });
+
   it('measures Computer Use egress consent against the Turn destination, not the Task setting', () => {
     const fixture = captureComputerUseHandlers();
     const router = fixture.router as unknown as {
@@ -763,6 +865,7 @@ describe('Computer Use target tools end to end', () => {
         getActiveTurnId: () => null,
         getPermissionPolicy: () => ({ policyEpoch: 0 }),
         listComputerActionAudits: () => [],
+        ...createComputerAppGrantFixtureStore().api,
       } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
       native: {
         availability: () => available,
