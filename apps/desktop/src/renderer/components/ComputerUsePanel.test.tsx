@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import type { ComputerAppGrantView } from '@sprint-coder/contracts';
 import {
   ComputerUseAcceptanceBuildNotice,
+  ComputerUseGrantSection,
   ComputerUseOnboarding,
   ComputerUseSessionRail,
   ComputerUseUnavailableNotice,
@@ -356,5 +358,140 @@ describe('Computer Use acceptance build notice', () => {
     expect(markup).toContain('署名者検証');
     expect(markup).toContain('windows-unsigned-acceptance');
     expect(markup).toContain('role="status"');
+  });
+});
+
+const grant: ComputerAppGrantView = {
+  id: 'grant-1',
+  revision: 3,
+  platform: 'darwin',
+  identityKind: 'verified-signed',
+  publisher: 'TEAMID1234',
+  appId: 'com.apple.TextEdit',
+  untrustedDisplayName: 'TextEdit',
+  maxMode: 'full_access_app',
+  grantedAt: '2026-09-01T00:00:00.000Z',
+  lastUsedAt: '2026-09-18T00:00:00.000Z',
+  codeChangedAt: null,
+  requestCount: 4,
+  denialCount: 1,
+};
+
+describe('Computer Use granted applications', () => {
+  it('shows the verified facts, the usage counts, and a revoke control per application', () => {
+    const markup = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[grant]}
+        discardedRecords={0}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain('許可済みアプリ');
+    expect(markup).toContain('TEAMID1234');
+    expect(markup).toContain('com.apple.TextEdit');
+    expect(markup).toContain('本人確認済み');
+    expect(markup).toContain('フルアクセス');
+    expect(markup).toContain('4回');
+    expect(markup).toContain('拒否1回');
+    // Revoking is privileged, so the control carries its own activation kind. Without it Main
+    // refuses the call, which is what makes "a model cannot revoke" structural rather than a habit.
+    expect(markup).toContain('data-computer-use-activation="app-grant-revoke"');
+    expect(markup).toContain('許可を取り消す');
+    // The application's own name is labelled as such and kept out of the verified list.
+    expect(markup).toContain('アプリ自称名');
+    expect(markup).toContain('aria-labelledby="computer-use-grants-title"');
+  });
+
+  it('never renders a path, a digest, or a process id', () => {
+    const markup = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[grant]}
+        discardedRecords={0}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+      />,
+    );
+    for (const leak of ['executablePath', '/Applications', 'Digest', 'pid'])
+      expect(markup).not.toContain(leak);
+  });
+
+  it('names an unsigned application and a missing publisher rather than inventing either', () => {
+    const markup = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[
+          {
+            ...grant,
+            identityKind: 'unverified',
+            publisher: null,
+            maxMode: 'supervised',
+            lastUsedAt: null,
+            codeChangedAt: '2026-09-19T00:00:00.000Z',
+          },
+        ]}
+        discardedRecords={0}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain('未署名');
+    expect(markup).toContain('確認できません');
+    expect(markup).toContain('操作ごとに確認');
+    expect(markup).toContain('未使用');
+    expect(markup).toContain('アプリが更新されました');
+  });
+
+  it('reports discarded records as a count, and an empty list as empty', () => {
+    const markup = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[]}
+        discardedRecords={2}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain('許可済みのアプリはありません');
+    expect(markup).toContain('無効な許可レコードを2件破棄しました');
+    expect(markup).toContain('role="status"');
+  });
+
+  it('stays out of the onboarding dialog entirely while the agent-driven gate is off', () => {
+    const off = renderToStaticMarkup(
+      <ComputerUseOnboarding
+        profiles={profiles}
+        providers={providers}
+        controlAvailable
+        busy={false}
+        onClose={() => {}}
+        onRegister={async () => {}}
+        onResolveWindows={async () => []}
+        onStart={async () => {}}
+      />,
+    );
+    expect(off).not.toContain('computer-use-grants');
+
+    const on = renderToStaticMarkup(
+      <ComputerUseOnboarding
+        profiles={profiles}
+        providers={providers}
+        controlAvailable
+        busy={false}
+        grants={{ grants: [grant], discardedRecords: 0 }}
+        onClose={() => {}}
+        onRegister={async () => {}}
+        onResolveWindows={async () => []}
+        onRevokeGrant={async () => {}}
+        onStart={async () => {}}
+      />,
+    );
+    expect(on).toContain('computer-use-grants');
+    expect(on).toContain('許可を取り消す');
   });
 });

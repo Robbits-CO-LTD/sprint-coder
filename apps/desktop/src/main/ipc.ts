@@ -89,6 +89,8 @@ import {
   commandEnvelopeSchema,
   computerUseApprovalResolveInputSchema,
   computerUseAvailabilitySchema,
+  computerUseGrantListResultSchema,
+  computerUseGrantRevokeInputSchema,
   computerUseOpenPermissionSettingsInputSchema,
   computerUseOpenPermissionSettingsResultSchema,
   computerUseProfileListInputSchema,
@@ -2282,6 +2284,9 @@ export class IpcRouter {
       platform: process.platform,
       settingsWorkspaceV2: settingsWorkspaceV2Enabled(),
       projectMultiFolderUx: projectMultiFolderUxEnabled(),
+      // Main is the only judge of the agent-driven gate; the Renderer shows or hides the grant
+      // management section from this answer rather than reading an environment of its own.
+      computerUseAgentDrivenV2: computerUseAgentDrivenV2Enabled(),
       // Startup recovery outcome (issue #9). Already computed before the window existed — this is
       // just the first path that ever carried it to the renderer.
       recovery: this.persistence.getStartupRecovery(),
@@ -2319,6 +2324,33 @@ export class IpcRouter {
             availability.reasonCode ?? availability.state,
           );
         return { profiles: this.computerUseController.listProfiles() };
+      },
+    );
+    // The settings screen's view of the permanent grants (ADR v2 §6.5). Reading is not a mutation
+    // and needs no click; both channels refuse outright when the agent-driven gate is off, so the
+    // section is not merely hidden in the Renderer — Main does not serve it either.
+    this.handle(
+      IPC_CHANNELS.computerUseGrantsList,
+      emptyPayloadSchema,
+      computerUseGrantListResultSchema,
+      () => {
+        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
+        return this.computerUseController.listAppGrantViews();
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.computerUseGrantRevoke,
+      computerUseGrantRevokeInputSchema,
+      computerUseGrantListResultSchema,
+      async (input, event) => {
+        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
+        // A trusted click inside the Computer Use panel, and a row id plus the revision the user was
+        // looking at. Nothing here can name an application, a path, or a mode — revoking can only
+        // ever remove, so the worst a confused caller achieves is asking the user again.
+        const activation = this.computerUseActivationGate.consume(event, 'app-grant-revoke');
+        if (activation === null) throw new SecurityError();
+        await this.computerUseController.revokeAppGrant(input.grantId, input.expectedRevision);
+        return this.computerUseController.listAppGrantViews();
       },
     );
     this.handleMutation(

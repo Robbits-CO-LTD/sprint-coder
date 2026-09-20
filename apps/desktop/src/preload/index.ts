@@ -49,6 +49,8 @@ import {
   computerAppProfileSchema,
   computerUseApprovalResolveInputSchema,
   computerUseAvailabilitySchema,
+  computerUseGrantListResultSchema,
+  computerUseGrantRevokeInputSchema,
   computerUseOpenPermissionSettingsInputSchema,
   computerUseOpenPermissionSettingsResultSchema,
   computerUseProfileListInputSchema,
@@ -485,6 +487,24 @@ const api: SprintCoderApi = {
             input,
           )
         : Promise.reject(new Error('Computer Use app registration requires a trusted click')),
+    listGrants: () =>
+      invoke(
+        IPC_CHANNELS.computerUseGrantsList,
+        emptyPayloadSchema,
+        computerUseGrantListResultSchema,
+        {},
+      ),
+    // Revoking is destructive from the user's point of view, so it carries the same trusted-click
+    // proof the other privileged Computer Use seams do. Main verifies the click again.
+    revokeGrant: (input) =>
+      trustedComputerUseActivation.consume('app-grant-revoke')
+        ? invoke(
+            IPC_CHANNELS.computerUseGrantRevoke,
+            computerUseGrantRevokeInputSchema,
+            computerUseGrantListResultSchema,
+            input,
+          )
+        : Promise.reject(new Error('Computer Use grant revocation requires a trusted click')),
     listProfiles: (input = {}) =>
       invoke(
         IPC_CHANNELS.computerUseProfilesList,

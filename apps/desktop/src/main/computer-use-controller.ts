@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   bindComputerUsePolicyLanguage,
   bindComputerUseMaximumMode,
+  computerAppGrantViewSchema,
   computerAppProfileSchema,
   computerUseActionSchema,
   computerUseActionResultSchema,
@@ -17,8 +18,10 @@ import {
   selectableComputerTargetSchema,
   COMPUTER_TARGET_LIST_LIMIT,
   COMPUTER_USE_LIMITS,
+  type ComputerAppGrantView,
   type ComputerAppIdentity,
   type ComputerListTargetsOutput,
+  type ComputerUseGrantListResult,
   type ComputerTarget,
   type SelectableComputerTarget,
   type ComputerAppProfile,
@@ -44,6 +47,7 @@ import {
 } from '@sprint-coder/domain';
 import {
   computerTargetUntrustedLabel,
+  sanitizeUntrustedTargetLabel,
   resolveComputerTargetAppToken,
   resolveComputerTargetToken,
   COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
@@ -741,6 +745,41 @@ export class ComputerUseController {
   }
 
   /**
+   * The settings screen's view of every grant (ADR v2 §6.1, §6.5).
+   *
+   * The single place a stored grant becomes something a person reads, so the sanitising of the
+   * application's own name happens once — the same function, and therefore the same character set,
+   * the agent-facing labels go through. A row that still fails the contract after sanitising is
+   * dropped and counted rather than thrown, so one strange name cannot blank the list the user
+   * revokes from.
+   */
+  listAppGrantViews(): ComputerUseGrantListResult {
+    const listing = this.deps.persistence.listComputerAppGrants();
+    const grants: ComputerAppGrantView[] = [];
+    let discardedRecords = listing.discarded;
+    for (const grant of listing.grants) {
+      const view = computerAppGrantViewSchema.safeParse({
+        id: grant.id,
+        revision: grant.revision,
+        platform: grant.platform,
+        identityKind: grant.identityKind,
+        publisher: grant.publisher,
+        appId: grant.appId,
+        untrustedDisplayName: sanitizeUntrustedTargetLabel(grant.displayName),
+        maxMode: grant.maxMode,
+        grantedAt: grant.createdAt,
+        lastUsedAt: grant.lastUsedAt,
+        codeChangedAt: grant.cdHashChangedAt,
+        requestCount: grant.requestCount,
+        denialCount: grant.denialCount,
+      });
+      if (view.success) grants.push(view.data);
+      else discardedRecords += 1;
+    }
+    return { grants, discardedRecords };
+  }
+
+  /**
    * Records a permanent grant for one verified identity (ADR v2 §6.2, §6.5).
    *
    * Internal in this slice: the only intended caller is S3b's approval card, after a trusted click
@@ -750,6 +789,7 @@ export class ComputerUseController {
   createAppGrant(
     identity: unknown,
     input: Readonly<{
+      displayName?: string | undefined;
       maxMode: ComputerUseMode;
       providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
     }>,
@@ -758,6 +798,14 @@ export class ComputerUseController {
     if (derived === null) throw new Error('Computer Use application cannot be granted');
     return this.deps.persistence.createComputerAppGrant({
       identity: derived,
+      // Sanitised before it is stored as well as before it is shown. Storing the raw string would
+      // put app-authored control characters in the database, where the next reader is whichever
+      // surface forgets to sanitise; the verified app id is the fallback when nothing is left.
+      displayName: sanitizeUntrustedTargetLabel(
+        typeof input.displayName === 'string' && input.displayName.trim() !== ''
+          ? input.displayName
+          : derived.appId,
+      ),
       maxMode: input.maxMode,
       denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
       providerEgress: input.providerEgress,

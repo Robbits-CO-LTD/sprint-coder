@@ -3,6 +3,7 @@ export type ComputerUseUiActivationKind =
   | 'start'
   | 'approval'
   | 'permission-settings'
+  | 'app-grant-revoke'
   | 'graph-start'
   | 'graph-resume'
   | 'graph-resume-step';
@@ -23,6 +24,7 @@ export function createTrustedComputerUseUiActivationGate(now: () => number = Dat
         kind !== 'start' &&
         kind !== 'approval' &&
         kind !== 'permission-settings' &&
+        kind !== 'app-grant-revoke' &&
         kind !== 'graph-start' &&
         kind !== 'graph-resume' &&
         kind !== 'graph-resume-step'

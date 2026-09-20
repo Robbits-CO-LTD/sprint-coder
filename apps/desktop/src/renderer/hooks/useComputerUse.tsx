@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  ComputerAppGrantView,
   ComputerAppProfile,
   ComputerUseApprovalDecision,
   ComputerUseApi,
   ComputerUseAvailability,
+  ComputerUseGrantListResult,
   ComputerUseOpenPermissionSettingsResult,
   ComputerUseOsPermission,
   ComputerUseSessionStatus,
@@ -59,6 +61,11 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [profiles, setProfiles] = useState<readonly ComputerAppProfile[]>([]);
+  // Null until Main says the agent-driven gate is on. The settings section is absent in that state
+  // rather than empty: Main refuses the channel too, so an empty list would promise a surface that
+  // does not exist.
+  const [grants, setGrants] = useState<ComputerUseGrantListResult | null>(null);
+  const [grantError, setGrantError] = useState<string | null>(null);
   const [providerOptions, setProviderOptions] = useState<readonly ComputerUseProviderView[]>([]);
   const [session, setSession] = useState<ComputerUseSessionStatus | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -145,6 +152,42 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     return result.profiles;
   }, [taskId]);
 
+  /**
+   * Loads the grant list, but only when Main has said the gate is on.
+   *
+   * Main decides; the Renderer asks. Reading the environment here would be a second judge of the
+   * same question, and the two could disagree after a restart.
+   */
+  const refreshGrants = useCallback(async (): Promise<void> => {
+    const api = window.sprintCoder?.computerUse;
+    const info = await window.sprintCoder?.app?.getInfo().catch(() => null);
+    if (api === undefined || info?.computerUseAgentDrivenV2 !== true) {
+      setGrants(null);
+      return;
+    }
+    setGrants(await api.listGrants());
+  }, []);
+
+  const revokeGrant = useCallback(
+    async (grant: ComputerAppGrantView): Promise<void> => {
+      const api = window.sprintCoder?.computerUse;
+      if (api === undefined) return;
+      setGrantError(null);
+      setBusy(true);
+      try {
+        setGrants(await api.revokeGrant({ grantId: grant.id, expectedRevision: grant.revision }));
+      } catch (cause) {
+        // A stale revision is the expected failure: the row moved while the screen was open. Re-read
+        // rather than leaving the user looking at a list that no longer matches.
+        setGrantError(messageOf(cause, '許可を取り消せませんでした。'));
+        await refreshGrants().catch(() => undefined);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refreshGrants],
+  );
+
   const loadOnboarding = useCallback(async (): Promise<void> => {
     if (taskId === null) return;
     const permissions = window.sprintCoder?.permissions;
@@ -152,6 +195,11 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     const modelsApi = window.sprintCoder?.models;
     if (permissions === undefined || providersApi === undefined || modelsApi === undefined)
       throw new Error('Computer Useの設定APIを利用できません。');
+    // Failing to read the grants must not stop the rest of the screen from loading: the list is
+    // management, not a precondition for anything else on this dialog.
+    void refreshGrants().catch((cause: unknown) => {
+      setGrantError(messageOf(cause, '許可済みアプリを読み込めませんでした。'));
+    });
     const [currentProfiles, policy, connections, catalog] = await Promise.all([
       refreshProfiles(),
       permissions.get(taskId),
@@ -197,7 +245,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     // still satisfies the Computer Use provider gates.
     setProviderOptions(catalogOptions);
     setProfiles(currentProfiles);
-  }, [refreshProfiles, taskId]);
+  }, [refreshGrants, refreshProfiles, taskId]);
 
   const enabled = availability !== null && computerUseEntryVisible(availability);
 
@@ -449,9 +497,12 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
               controlAvailable={availability.control}
               busy={busy}
               error={dialogError}
+              grants={grants}
+              grantError={grantError}
               onClose={closeDialog}
               onRegister={register}
               onResolveWindows={resolveWindows}
+              onRevokeGrant={revokeGrant}
               onStart={start}
             />
           ) : (

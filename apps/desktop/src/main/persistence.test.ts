@@ -10378,6 +10378,7 @@ if (runsWithElectronAbi)
     function createGrant(persistence: SqlitePersistenceClient, overrides = {}) {
       return persistence.createComputerAppGrant({
         identity,
+        displayName: 'Notes',
         maxMode: 'full_access_app',
         denyRulesetVersion: 1,
         providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
@@ -10512,6 +10513,7 @@ if (runsWithElectronAbi)
       expect(() =>
         fixture.persistence.createComputerAppGrant({
           identity,
+          displayName: 'Notes',
           maxMode: 'supervised',
           denyRulesetVersion: 1,
           providerEgress: { connectionId: 'connection-1', modelId: '' },

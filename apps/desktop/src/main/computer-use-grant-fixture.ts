@@ -76,6 +76,7 @@ export function createComputerAppGrantFixtureStore(
         const record: ComputerAppGrantRecord = Object.freeze({
           ...input.identity,
           id: input.id ?? `grant-${sequence}`,
+          displayName: input.displayName,
           lastCdHash: null,
           cdHashChangedAt: null,
           maxMode: input.maxMode,

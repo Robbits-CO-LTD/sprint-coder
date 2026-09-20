@@ -51,29 +51,28 @@ export const COMPUTER_APP_GRANT_IDENTITY_VERSION = 1;
 /**
  * Which fields decide whether a stored grant still describes the application in front of us.
  *
- * Split into two lists whose union is checked against the record type below, so a field added to
- * `ComputerAppGrantIdentity` is a compile error until someone has decided which list it belongs in.
- * That decision is the security-relevant one: silently landing in neither list would mean a new
- * identity attribute could change without invalidating any grant.
+ * Split into three unions whose combination is checked against the record type below, so a field
+ * added to `ComputerAppGrantIdentity` is a compile error until someone has decided which group it
+ * belongs in. That decision is the security-relevant one: silently landing in none of them would
+ * mean a new identity attribute could change without invalidating any grant.
  */
-const GRANT_IDENTITY_COMPARED = [
-  'platform',
-  'identityKind',
+type GrantIdentityComparedField =
+  | 'platform'
+  | 'identityKind'
   // Covers, per platform: bundle id + Team ID + signing identifier (macOS), signer digest + image
   // leaf + parent directory (Windows Win32), package family + signer digest (Windows package), and
   // executable path + executable digest (unverified).
-  'grantIdentityDigest',
+  | 'grantIdentityDigest'
   // Compared on top of the digest because the macOS derivation deliberately excludes the path, so
   // that an ordinary in-place update keeps the grant. "Same signer, different location" is a
   // different application (ADR v2 §6.3) and has to stop matching.
-  'executablePath',
-] as const;
+  | 'executablePath';
 
 /**
  * Compared only for `unverified` applications, where the executable digest *is* the identity, and
  * ignored for signed ones, where it moves on every ordinary update (ADR v2 §6.2.1).
  */
-const GRANT_IDENTITY_COMPARED_WHEN_UNVERIFIED = ['executableDigest'] as const;
+type GrantIdentityComparedWhenUnverifiedField = 'executableDigest';
 
 /**
  * Recorded and shown, never compared.
@@ -82,19 +81,13 @@ const GRANT_IDENTITY_COMPARED_WHEN_UNVERIFIED = ['executableDigest'] as const;
  * change instead of re-asking. The rest are display facts derived from the digest inputs, so they
  * cannot move without the digest moving.
  */
-const GRANT_IDENTITY_RECORDED_ONLY = [
-  'appId',
-  'publisher',
-  'signingIdentifier',
-  'signerDigest',
-  'packageFamilyName',
-  'cdHash',
-] as const;
+type GrantIdentityRecordedOnlyField =
+  'appId' | 'publisher' | 'signingIdentifier' | 'signerDigest' | 'packageFamilyName' | 'cdHash';
 
 type GrantIdentityClassifiedField =
-  | (typeof GRANT_IDENTITY_COMPARED)[number]
-  | (typeof GRANT_IDENTITY_COMPARED_WHEN_UNVERIFIED)[number]
-  | (typeof GRANT_IDENTITY_RECORDED_ONLY)[number];
+  | GrantIdentityComparedField
+  | GrantIdentityComparedWhenUnverifiedField
+  | GrantIdentityRecordedOnlyField;
 type UnclassifiedGrantIdentityField = Exclude<
   keyof ComputerAppGrantIdentity,
   GrantIdentityClassifiedField
@@ -268,7 +261,7 @@ function grantDigest(variant: string, fields: readonly (string | null)[]): strin
   const hash = createHash('sha256');
   hash.update(`computer-app-grant-identity/v${COMPUTER_APP_GRANT_IDENTITY_VERSION}/${variant}`);
   for (const field of fields) {
-    hash.update(' ');
+    hash.update('\u0000');
     hash.update(field === null ? 'null' : `text:${field.length}:${field}`);
   }
   return hash.digest('hex');

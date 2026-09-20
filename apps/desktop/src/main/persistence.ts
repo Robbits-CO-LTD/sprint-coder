@@ -1113,6 +1113,8 @@ export type ComputerAppGrantInput = Readonly<{
   id?: string;
   /** Derived by the pure leaf, so the store can never be handed a digest its fields disagree with. */
   identity: ComputerAppGrantIdentity;
+  /** App-authored, bounded, and never an identity input. Sanitised again before it is displayed. */
+  displayName: string;
   maxMode: ComputerAppGrantMode;
   denyRulesetVersion: number;
   providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
@@ -4137,6 +4139,9 @@ const migrations = [
           length(grant_identity_digest) = 64 AND grant_identity_digest NOT GLOB '*[^0-9a-f]*'
         ),
         app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND 256),
+        -- The application's own name for itself. Stored so the settings list is readable, kept out
+        -- of every identity derivation (T2), and sanitised again on the way to the Renderer.
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 256),
         publisher TEXT CHECK (publisher IS NULL OR length(publisher) BETWEEN 1 AND 128),
         signing_identifier TEXT CHECK (
           signing_identifier IS NULL OR length(signing_identifier) BETWEEN 1 AND 256
@@ -14518,6 +14523,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       identityKind: input.identity.identityKind,
       grantIdentityDigest: input.identity.grantIdentityDigest,
       appId: input.identity.appId,
+      displayName: input.displayName,
       publisher: input.identity.publisher,
       signingIdentifier: input.identity.signingIdentifier,
       signerDigest: input.identity.signerDigest,
@@ -14550,13 +14556,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO computer_app_grants(
-           id, platform, identity_kind, grant_identity_digest, app_id, publisher,
+           id, platform, identity_kind, grant_identity_digest, app_id, display_name, publisher,
            signing_identifier, signer_digest, package_family_name, executable_path,
            executable_digest, cd_hash, last_cd_hash, cd_hash_changed_at, max_mode, scope,
            deny_ruleset_version, grant_version, provider_egress_connection_id,
            provider_egress_model_id, request_count, denial_count, last_used_at,
            created_at, updated_at, revision, record_mac
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(...computerAppGrantColumnValues(record), computerAppGrantRecordMac(record));
     return this.getComputerAppGrant(record.id);
@@ -14641,7 +14647,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const result = this.db
       .prepare(
         `UPDATE computer_app_grants
-         SET platform = ?, identity_kind = ?, grant_identity_digest = ?, app_id = ?, publisher = ?,
+         SET platform = ?, identity_kind = ?, grant_identity_digest = ?, app_id = ?,
+             display_name = ?, publisher = ?,
              signing_identifier = ?, signer_digest = ?, package_family_name = ?,
              executable_path = ?, executable_digest = ?, cd_hash = ?, last_cd_hash = ?,
              cd_hash_changed_at = ?, max_mode = ?, scope = ?, deny_ruleset_version = ?,
@@ -22410,6 +22417,7 @@ type ComputerAppGrantRow = {
   identity_kind: string;
   grant_identity_digest: string;
   app_id: string;
+  display_name: string;
   publisher: string | null;
   signing_identifier: string | null;
   signer_digest: string | null;
@@ -22451,6 +22459,7 @@ function verifiedComputerAppGrant(row: ComputerAppGrantRow): ComputerAppGrantRec
       identityKind: row.identity_kind,
       grantIdentityDigest: row.grant_identity_digest,
       appId: row.app_id,
+      displayName: row.display_name,
       publisher: row.publisher,
       signingIdentifier: row.signing_identifier,
       signerDigest: row.signer_digest,
@@ -22497,6 +22506,7 @@ function computerAppGrantColumnValues(
     record.identityKind,
     record.grantIdentityDigest,
     record.appId,
+    record.displayName,
     record.publisher,
     record.signingIdentifier,
     record.signerDigest,
@@ -22581,7 +22591,7 @@ function validateComputerAppGrant(
     invalid();
   if (input['scope'] !== 'global') invalid();
   const executablePath = text('executablePath', 4_096);
-  if (executablePath.includes(' ')) invalid();
+  if (executablePath.includes('\u0000')) invalid();
   const providerEgressConnectionId = optionalText('providerEgressConnectionId', 128);
   const providerEgressModelId = optionalText('providerEgressModelId', 256);
   // Consent is a pair; half of one would be a consent whose destination is unknown.
@@ -22592,6 +22602,7 @@ function validateComputerAppGrant(
     identityKind: identityKind as ComputerAppGrantIdentityKind,
     grantIdentityDigest: digest('grantIdentityDigest'),
     appId: text('appId', 256),
+    displayName: text('displayName', 256),
     publisher: optionalText('publisher', 128),
     signingIdentifier: optionalText('signingIdentifier', 256),
     signerDigest: optionalDigest('signerDigest'),
