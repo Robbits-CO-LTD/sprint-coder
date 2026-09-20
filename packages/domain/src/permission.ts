@@ -110,7 +110,17 @@ export type PermissionResource =
       windowIdentityDigest: string;
       sessionId: string;
       revision: number;
-    };
+    }
+  /**
+   * The set of drivable targets one Task may be told about, before any of them is chosen.
+   *
+   * Every other computer resource names an app, a window, a session, or an observation — things that
+   * only exist once a target has been picked. Enumeration is what happens before that, so it has no
+   * app identity to bind to; what it does have is a Task, which is the boundary that matters (one
+   * Task must not learn what another Task's desktop contains). It is observe-only by construction:
+   * nothing can be driven through it.
+   */
+  | { kind: 'computer-target-list'; taskId: string };
 
 export type ResourceSet =
   | { kind: 'workspace'; workspaceId?: string }
@@ -176,6 +186,7 @@ export type ResourceSet =
       sessionId: string;
       revision: number;
     }
+  | { kind: 'computer-target-list' | 'computer-target-list-exact'; taskId?: string }
   | { kind: 'all' };
 
 export type PermissionRule = {
@@ -501,6 +512,13 @@ export function createSessionGrant(grant: SessionGrant): SessionGrant {
   // foreground window, user takeover, or the policy epoch that established the app binding.
   if (grant.capability === 'computer.control' && grant.scope !== 'once')
     throw new Error('Computer control grants must be ephemeral');
+  // Enumeration is observe-only, so a control grant must never be able to name a target list.
+  if (
+    grant.capability === 'computer.control' &&
+    (grant.resourceSet.kind === 'computer-target-list' ||
+      grant.resourceSet.kind === 'computer-target-list-exact')
+  )
+    throw new Error('Computer control grants cannot bind a target list');
   if (
     (grant.capability === 'computer.observe' || grant.capability === 'computer.control') &&
     !isComputerResourceSet(grant.resourceSet)
@@ -817,6 +835,12 @@ function requestFactsValid(request: PermissionRequest): boolean {
     )
       return false;
   }
+  if (request.resource.kind === 'computer-target-list') {
+    // The Task is the whole binding: there is no app identity yet, and the request must not be able
+    // to enumerate on behalf of a Task other than the one being evaluated.
+    if (request.resource.taskId.length === 0 || request.resource.taskId !== request.taskId)
+      return false;
+  }
   const resourceMatchesCapability =
     request.capability === 'workspace.read' || request.capability === 'workspace.write'
       ? request.resource.kind === 'workspace-path' ||
@@ -841,7 +865,11 @@ function requestFactsValid(request: PermissionRequest): boolean {
                     ? request.resource.kind === 'computer-app' ||
                       request.resource.kind === 'computer-window' ||
                       request.resource.kind === 'computer-session' ||
-                      request.resource.kind === 'computer-revision'
+                      request.resource.kind === 'computer-revision' ||
+                      // Enumeration is observe-only: there is nothing to drive through a list, so
+                      // `computer.control` must never accept it.
+                      (request.capability === 'computer.observe' &&
+                        request.resource.kind === 'computer-target-list')
                     : request.resource.kind === 'workspace-path' ||
                       request.resource.kind === 'external-path';
   return resourceMatchesCapability;
@@ -975,6 +1003,8 @@ export function permissionResourceIdentity(resource: PermissionResource): string
       resource.sessionId,
       resource.revision,
     ]);
+  if (resource.kind === 'computer-target-list')
+    return JSON.stringify([resource.kind, resource.taskId]);
   if (resource.kind === 'provider-disclosure')
     return JSON.stringify([
       resource.kind,
@@ -1017,7 +1047,8 @@ export function permissionRequestFingerprint(request: PermissionRequest): string
         : request.resource.kind === 'computer-app' ||
             request.resource.kind === 'computer-window' ||
             request.resource.kind === 'computer-session' ||
-            request.resource.kind === 'computer-revision'
+            request.resource.kind === 'computer-revision' ||
+            request.resource.kind === 'computer-target-list'
           ? permissionResourceIdentity(request.resource)
           : request.resource;
   return createHash('sha256')
@@ -1187,6 +1218,11 @@ export function resourceContains(set: ResourceSet, resource: PermissionResource)
         resource.windowIdentityDigest === set.windowIdentityDigest) &&
       (set.platform === undefined || resource.platform === set.platform)
     );
+  if (set.kind === 'computer-target-list' || set.kind === 'computer-target-list-exact')
+    return (
+      resource.kind === 'computer-target-list' &&
+      (set.taskId === undefined || resource.taskId === set.taskId)
+    );
   if (set.kind === 'external-exact')
     return resource.kind === 'external' && resource.target === set.target;
   return false;
@@ -1217,7 +1253,9 @@ function isComputerResourceSet(resourceSet: ResourceSet): boolean {
     resourceSet.kind === 'computer-session' ||
     resourceSet.kind === 'computer-session-exact' ||
     resourceSet.kind === 'computer-revision' ||
-    resourceSet.kind === 'computer-revision-exact'
+    resourceSet.kind === 'computer-revision-exact' ||
+    resourceSet.kind === 'computer-target-list' ||
+    resourceSet.kind === 'computer-target-list-exact'
   );
 }
 

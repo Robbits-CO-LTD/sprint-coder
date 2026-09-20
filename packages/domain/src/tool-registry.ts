@@ -10,8 +10,19 @@ export const toolKinds = [
   'backgroundTask',
   'agentControl',
   'computer',
+  'computerTarget',
 ] as const;
 export const computerUseToolKind = 'computer' as const;
+/**
+ * Target discovery and session teardown, as seen by the outer Task agent.
+ *
+ * `computer` is the in-session vocabulary and is hidden from everyone except the Computer Use
+ * controller. These tools are the opposite case: they are the only place a target may be chosen, so
+ * they must reach the agent that talks to the user — and nowhere else. A subagent, a Team Worker, or
+ * a background Turn has no user in front of it to authorise desktop control, so the audience filter
+ * below narrows this kind to `chat` instead of widening `computer`.
+ */
+export const computerTargetToolKind = 'computerTarget' as const;
 const toolSideEffects = ['none', 'read', 'write', 'process', 'network', 'control'] as const;
 const toolRisks = ['low', 'medium', 'high'] as const;
 const toolExecutionTargets = ['main', 'utility', 'command-runner', 'mcp-gateway'] as const;
@@ -163,6 +174,10 @@ const DIGEST = /^[a-f0-9]{64}$/;
 
 export function isComputerUseToolKind(kind: ToolKind): boolean {
   return kind === computerUseToolKind;
+}
+
+export function isComputerTargetToolKind(kind: ToolKind): boolean {
+  return kind === computerTargetToolKind;
 }
 
 export function createToolId(parts: ToolIdParts): ToolId {
@@ -369,7 +384,8 @@ export class ToolRegistry {
         .filter(
           (definition) =>
             definition.kind === kind &&
-            (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)),
+            (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)) &&
+            (audience === 'chat' || !isComputerTargetToolKind(definition.kind)),
         )
         .sort((left, right) => left.toolId.localeCompare(right.toolId)),
     );
@@ -397,6 +413,7 @@ export class ToolRegistry {
     const eligible = [...this.definitions.values()].filter(
       (definition) =>
         (audience === 'computer-controller' || !isComputerUseToolKind(definition.kind)) &&
+        (audience === 'chat' || !isComputerTargetToolKind(definition.kind)) &&
         (available === null || available.has(definition.toolId)) &&
         (definition.providerCompatibility.includes('*') ||
           definition.providerCompatibility.includes(input.providerId)) &&
@@ -589,7 +606,7 @@ function validateAuthorityMetadata(
                   (required.has('workspace.read') || required.has('filesystem.external.read')))
               : input.kind === 'backgroundTask' || input.kind === 'agentControl'
                 ? input.sideEffect === 'control' && input.requiredCapabilities.length > 0
-                : input.kind === 'computer'
+                : input.kind === 'computer' || input.kind === 'computerTarget'
                   ? input.sideEffect === 'control' &&
                     (required.has('computer.observe') || required.has('computer.control'))
                   : false;
