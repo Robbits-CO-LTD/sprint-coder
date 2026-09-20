@@ -690,7 +690,16 @@ export class ComputerUseController {
     const egressBinding =
       this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
     const expiresAt = this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS;
-    const targets: ComputerTarget[] = [];
+    // Held with the profile that produced each row, because the last thing this method does is ask
+    // the store whether those profiles still say what they said when the row was built.
+    const pending: {
+      profileId: string;
+      appToken: string;
+      targetToken: string;
+      labelled: boolean;
+      target: SelectableComputerTarget;
+    }[] = [];
+    const snapshots = new Map<string, ComputerAppProfileRecord>();
     let truncated = false;
     let dropped = 0;
     for (const profile of profiles) {
@@ -713,15 +722,21 @@ export class ComputerUseController {
         appIdentityDigest: profile.identityDigest,
         profileRevision: profile.revision,
       } as const;
+      snapshots.set(profile.id, profile);
       let issued = false;
       let windowIndex = 0;
       for (const window of windows.filter(({ eligible }) => eligible !== false)) {
         windowIndex += 1;
-        if (targets.length >= COMPUTER_TARGET_LIST_LIMIT) {
+        if (pending.length >= COMPUTER_TARGET_LIST_LIMIT) {
           truncated = true;
           break;
         }
         const targetToken = randomUUID();
+        const labelled =
+          egressBinding !== null &&
+          profile.providerEgressConsent &&
+          profile.connectionId === egressBinding.connectionId &&
+          profile.modelId === egressBinding.modelId;
         // Validated per row rather than only in the final envelope. A single malformed profile —
         // one with no app id, or a path the leaf name cannot be taken from — would otherwise throw
         // from the envelope parse and take every other application's windows down with it.
@@ -736,13 +751,9 @@ export class ComputerUseController {
           // this with the grant table and can then answer false.
           granted: true,
           mode: bindComputerUseMaximumMode(profile.mode, window.maximumMode),
-          untrustedLabel:
-            egressBinding !== null &&
-            profile.providerEgressConsent &&
-            profile.connectionId === egressBinding.connectionId &&
-            profile.modelId === egressBinding.modelId
-              ? computerTargetUntrustedLabel(profile.label, window.title)
-              : null,
+          untrustedLabel: labelled
+            ? computerTargetUntrustedLabel(profile.label, window.title)
+            : null,
         });
         if (!row.success) {
           dropped += 1;
@@ -761,7 +772,13 @@ export class ComputerUseController {
           }),
         );
         issued = true;
-        targets.push(row.data);
+        pending.push({
+          profileId: profile.id,
+          appToken,
+          targetToken,
+          labelled,
+          target: row.data,
+        });
       }
       if (issued)
         this.targetAppTokens.set(
@@ -769,6 +786,30 @@ export class ComputerUseController {
           Object.freeze({ binding: appBinding, profileId: profile.id, expiresAt }),
         );
       if (truncated) break;
+    }
+    // Re-read every contributing application as the store has it now.
+    //
+    // The epoch check above only catches a *permission* change. Re-registering an application takes
+    // a different route: it updates the row in place, moves its revision, and puts its provider
+    // egress consent back to false — all without touching the Task's policy epoch. A long
+    // enumeration can straddle that, so a row built from the first application can be handed back
+    // carrying a window title the user has just withdrawn consent for. A stale row is dropped whole,
+    // token included, rather than merely stripped of its label: the revision is part of the token
+    // binding, so keeping the token would hand S3 a reference to a revision that no longer exists.
+    //
+    // Nothing below awaits, so this is the state the caller receives.
+    const stale = new Set<string>();
+    for (const [profileId, snapshot] of snapshots)
+      if (!this.targetProfileUnchanged(snapshot, egressBinding)) stale.add(profileId);
+    const targets: ComputerTarget[] = [];
+    for (const row of pending) {
+      if (!stale.has(row.profileId)) {
+        targets.push(row.target);
+        continue;
+      }
+      dropped += 1;
+      this.targetTokens.delete(row.targetToken);
+      this.targetAppTokens.delete(row.appToken);
     }
     if (dropped > 0)
       // Counted, never quoted: the reason a row failed is derived from app-authored text, and the
@@ -812,6 +853,41 @@ export class ComputerUseController {
       resolveComputerTargetToken(this.targetTokens, token, record.binding, this.now())?.binding ??
       null
     );
+  }
+
+  /**
+   * Whether an application still says what it said when its rows were built.
+   *
+   * Synchronous and total: a removed row, a moved revision, a changed identity, an application that
+   * has since become a denied class, or consent that no longer covers this Turn's destination all
+   * answer false. It never throws, because it runs on the return path where a throw would discard a
+   * whole enumeration over one application that simply went away.
+   */
+  private targetProfileUnchanged(
+    snapshot: ComputerAppProfileRecord,
+    egressBinding: Readonly<{ connectionId: string; modelId: string }> | null,
+  ): boolean {
+    let current: ComputerAppProfileRecord;
+    try {
+      current = this.deps.persistence.getComputerAppProfile(snapshot.id);
+    } catch {
+      return false;
+    }
+    if (
+      current.revision !== snapshot.revision ||
+      current.identityDigest !== snapshot.identityDigest ||
+      computerUseAppIdentityIsDenied(current.identity)
+    )
+      return false;
+    // Consent is re-derived the same way the row derived it, so the test is "does the agreement the
+    // label was returned under still hold", not "did any consent field move". A row that never
+    // carried a label has nothing to withdraw.
+    const consentFor = (record: ComputerAppProfileRecord): boolean =>
+      egressBinding !== null &&
+      record.providerEgressConsent &&
+      record.connectionId === egressBinding.connectionId &&
+      record.modelId === egressBinding.modelId;
+    return !consentFor(snapshot) || consentFor(current);
   }
 
   private resolveTargetAppProfileId(

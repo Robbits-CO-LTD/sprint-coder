@@ -896,3 +896,58 @@ describe('Computer Use target tools end to end', () => {
     ).rejects.toThrow(/computer_session_missing/u);
   });
 });
+
+describe('Computer Use target tool exposure decision', () => {
+  function decide(
+    input: Readonly<{ teamTurn: boolean; toolCalling: boolean | null | undefined }>,
+    options: { flag?: boolean; available?: boolean } = {},
+  ): boolean {
+    const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
+    Object.assign(router, {
+      computerUseController: {
+        availability: () => ({ ...available, available: options.available !== false }),
+      },
+    });
+    const previous = process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'];
+    const previousMaster = process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'];
+    if (options.flag === false) delete process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'];
+    else {
+      process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'] = '1';
+      process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] = '1';
+    }
+    try {
+      return (
+        router as unknown as {
+          computerTargetsExposedForTurn(value: typeof input): boolean;
+        }
+      ).computerTargetsExposedForTurn(input);
+    } finally {
+      if (previous === undefined) delete process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'];
+      else process.env['SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2'] = previous;
+      if (previousMaster === undefined) delete process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'];
+      else process.env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] = previousMaster;
+    }
+  }
+
+  it('withholds the tools from a model that does not accept tools at all', () => {
+    // Attaching tools to such a model breaks the request itself, so an ordinary chat Turn would
+    // start failing the moment both flags were on.
+    expect(decide({ teamTurn: false, toolCalling: false })).toBe(false);
+    // Unknown capability keeps the previous behaviour rather than guessing the model cannot.
+    expect(decide({ teamTurn: false, toolCalling: null })).toBe(true);
+    expect(decide({ teamTurn: false, toolCalling: undefined })).toBe(true);
+    expect(decide({ teamTurn: false, toolCalling: true })).toBe(true);
+  });
+
+  it('withholds the tools when the native boundary cannot serve them, on every route', () => {
+    // The CLI route passes `toolCalling: true`; without this check it exposed two tools that could
+    // only answer "Computer Use native boundary is unavailable".
+    expect(decide({ teamTurn: false, toolCalling: true }, { available: false })).toBe(false);
+    expect(decide({ teamTurn: false, toolCalling: undefined }, { available: false })).toBe(false);
+  });
+
+  it('withholds the tools from a Team Turn and with the flag off', () => {
+    expect(decide({ teamTurn: true, toolCalling: true })).toBe(false);
+    expect(decide({ teamTurn: false, toolCalling: true }, { flag: false })).toBe(false);
+  });
+});

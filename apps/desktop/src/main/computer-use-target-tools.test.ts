@@ -122,7 +122,7 @@ function createFixture(
     policyEpoch?: number;
   } = {},
 ) {
-  const profiles = options.profiles ?? [profileRecord('profile-notes', macIdentity())];
+  const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
   const listWindowCalls: string[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
@@ -172,7 +172,16 @@ function createFixture(
     repositionEmergencyStop: () => true,
     ...(options.now === undefined ? {} : { now: options.now }),
   });
-  return { controller, listWindowCalls, profiles };
+  return {
+    controller,
+    listWindowCalls,
+    profiles,
+    /** Stands in for a re-registration: `registerProfile` updates the row in place and bumps it. */
+    replaceProfile: (id: string, changes: Partial<ComputerAppProfileRecord>) => {
+      const index = profiles.findIndex((profile) => profile.id === id);
+      profiles[index] = { ...profiles[index]!, ...changes };
+    },
+  };
 }
 
 const toolContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
@@ -461,6 +470,87 @@ describe('computer_list_targets', () => {
     };
     expect(internals.targetTokens.size).toBe(0);
     expect(internals.targetAppTokens.size).toBe(0);
+  });
+
+  it('drops rows whose application was re-registered while a later one was still enumerating', async () => {
+    const notes = profileRecord('profile-a-notes', macIdentity());
+    const preview = profileRecord(
+      'profile-b-preview',
+      macIdentity({ identityDigest: 'e'.repeat(64), bundleId: 'com.example.preview' }),
+    );
+    const options: NonNullable<Parameters<typeof createFixture>[0]> = {
+      profiles: [notes, preview],
+    };
+    const fixture = createFixture({
+      ...options,
+      windowsFor: (profile) => {
+        // While the second application is being enumerated, the first is re-registered: the row is
+        // updated in place, its revision moves, and `computerUseRegistrationPreferences` puts its
+        // provider egress consent back to false. The Task policy epoch does not change, so the
+        // epoch re-check cannot see this.
+        if (profile.id === 'profile-b-preview')
+          fixture.replaceProfile('profile-a-notes', {
+            revision: notes.revision + 1,
+            providerEgressConsent: false,
+          });
+        return [nativeWindow(profile, 1)];
+      },
+    });
+
+    const result = await fixture.controller.listTargets({}, toolContext);
+    const rows = selectable(result.targets);
+    // The stale application is gone entirely — not merely stripped of its label — because its
+    // revision is part of the token binding and the consent it was read under no longer holds.
+    expect(rows.map((row) => row.verified.appId)).toEqual(['com.example.preview']);
+    expect(JSON.stringify(result)).not.toContain('Window 1__notes_marker');
+    // No token survives for the dropped application.
+    const internals = fixture.controller as unknown as {
+      targetTokens: ReadonlyMap<string, { profileId: string }>;
+      targetAppTokens: ReadonlyMap<string, { profileId: string }>;
+    };
+    expect([...internals.targetTokens.values()].map(({ profileId }) => profileId)).toEqual([
+      'profile-b-preview',
+    ]);
+    expect([...internals.targetAppTokens.values()].map(({ profileId }) => profileId)).toEqual([
+      'profile-b-preview',
+    ]);
+    // The surviving application's own token is still usable.
+    expect(fixture.controller.targetTokenBinding(rows[0]!.targetToken)).not.toBeNull();
+  });
+
+  it('drops rows whose application was removed or became a denied class while enumerating', async () => {
+    for (const change of [
+      { removed: true },
+      {
+        identity: {
+          platform: 'darwin',
+          identityDigest: 'a'.repeat(64),
+          bundleId: 'com.apple.terminal',
+          displayName: 'Terminal',
+        },
+      },
+    ] as const) {
+      const notes = profileRecord('profile-a-notes', macIdentity());
+      const preview = profileRecord(
+        'profile-b-preview',
+        macIdentity({ identityDigest: 'e'.repeat(64), bundleId: 'com.example.preview' }),
+      );
+      const fixture = createFixture({
+        profiles: [notes, preview],
+        windowsFor: (profile) => {
+          if (profile.id === 'profile-b-preview')
+            fixture.replaceProfile(
+              'profile-a-notes',
+              'removed' in change
+                ? { id: 'profile-a-gone' }
+                : (change as { identity: Record<string, unknown> }),
+            );
+          return [nativeWindow(profile, 1)];
+        },
+      });
+      const rows = selectable((await fixture.controller.listTargets({}, toolContext)).targets);
+      expect(rows.map((row) => row.verified.appId)).toEqual(['com.example.preview']);
+    }
   });
 
   it('refuses a call bound to a stale policy epoch', async () => {

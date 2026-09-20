@@ -6225,8 +6225,13 @@ export class IpcRouter {
         projectMemory: memoryTurn,
         skillDrafts: skillCreatorTurn,
         skillActivation: autoSkills.length > 0,
-        // The Leader Turn, where the user is present to authorise desktop control.
-        computerTargets: true,
+        // Same decision point the provider-API route uses. A CLI runtime always accepts tools, so
+        // the only questions left are the flags, the native boundary, and whether this is a Leader
+        // Turn with a user present to authorise desktop control.
+        computerTargets: this.computerTargetsExposedForTurn({
+          teamTurn: started.teamTurn,
+          toolCalling: true,
+        }),
       },
     );
     if (kind === 'claude' && toolCatalogSnapshot.entries.length > 0) {
@@ -7546,6 +7551,27 @@ export class IpcRouter {
   }
 
   /**
+   * The one place that decides whether a Turn may see the Computer Use target tools.
+   *
+   * Both runtime routes ask this, because deciding it twice is how the routes drifted apart: the CLI
+   * route exposed the tools wherever the flags were on, while the provider-API route also required a
+   * usable native boundary, so a machine without the native helper offered the model two tools that
+   * could only ever fail. `toolCalling` is the same fact `providerWorkspaceToolsEligible` reads —
+   * attaching tools to a model that does not accept them breaks the request itself, not just the
+   * tool call. A CLI runtime always accepts tools, so it passes `true`.
+   */
+  private computerTargetsExposedForTurn(
+    input: Readonly<{ teamTurn: boolean; toolCalling: boolean | null | undefined }>,
+  ): boolean {
+    return (
+      !input.teamTurn &&
+      input.toolCalling !== false &&
+      computerUseAgentDrivenV2Enabled() &&
+      this.computerUseController.availability().available
+    );
+  }
+
+  /**
    * The `{connectionId, modelId}` a Computer Use consent check must be measured against.
    *
    * Null whenever this Main cannot say where the Turn sends — an unrecorded Turn, a Turn that has
@@ -8014,13 +8040,11 @@ export class IpcRouter {
         skillCreatorTurn ||
         autoSkills.length > 0;
       // Desktop targets need no Workspace, no Project, and no Skill, so a plain API Task would
-      // otherwise publish no catalog at all and the tools would never reach the model. Availability
-      // is read here as well: publishing a tool whose native boundary is missing would only produce
-      // a failing call. This is a Leader Turn, where the user is present to authorise it.
-      const computerTargetsEligible =
-        !teamTurn &&
-        computerUseAgentDrivenV2Enabled() &&
-        this.computerUseController.availability().available;
+      // otherwise publish no catalog at all and the tools would never reach the model.
+      const computerTargetsEligible = this.computerTargetsExposedForTurn({
+        teamTurn,
+        toolCalling: selectedModel?.toolCalling.value,
+      });
       workspaceToolSnapshot =
         managedToolsEligible || computerTargetsEligible
           ? this.managedCodingHarness.startTurn(
