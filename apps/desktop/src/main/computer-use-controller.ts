@@ -900,6 +900,11 @@ export class ComputerUseController {
   private appGrantState(
     profile: ComputerAppProfileRecord,
   ): Readonly<{ granted: boolean; grantId: string | null }> {
+    // A denied class is never granted, whatever a V1 registration says. `listTargets` already
+    // filters these out before asking, so this is the belt rather than the braces — but a future
+    // caller that forgets the filter should not be handed `granted: true` for a terminal.
+    if (computerUseAppIdentityIsDenied(profile.identity))
+      return Object.freeze({ granted: false, grantId: null });
     const grant = this.appGrantFor(profile.identity);
     return Object.freeze({
       granted: grant !== null || profile.remember,
