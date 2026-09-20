@@ -5152,9 +5152,35 @@ const computerTargetUntrustedTextSchema = z
   .refine(
     // Control characters, newlines, and the Unicode bidi overrides are what let a title close the
     // surrounding JSON framing or reorder itself into something that reads as a separate line.
-    (value) => !/[\p{Cc}\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/u.test(value),
-    'Untrusted target label retains control or direction characters',
+    //
+    // `\p{Cf}` rather than a hand-picked list of bidi and zero-width codepoints: the Unicode Tag
+    // block (U+E0000\u2013U+E007F) maps one ASCII character to one invisible codepoint, so an enumerated
+    // list that omits it lets a whole sentence through inside the 64-character budget, visible to
+    // neither the user nor the log yet legible to a model. `U+00AD` is the same problem with one
+    // character. The Hangul fillers render as blanks but are letters, not format characters, so they
+    // are named; NFKC already folds U+3164 and U+FFA0 onto U+1160, and both forms are listed anyway
+    // so the set does not depend on the caller having normalised first.
+    //
+    // This must stay the exact set `sanitizeUntrustedTargetLabel` removes. Losing ZWJ breaks
+    // multi-codepoint emoji, which is accepted: the label is a hint the agent is told not to act on.
+    (value) => !COMPUTER_TARGET_LABEL_FORBIDDEN_CHARACTERS.test(value),
+    'Untrusted target label retains control, format, or filler characters',
   );
+
+/**
+ * The characters a target label may never retain.
+ *
+ * Exported as source text, not as a compiled regex, so the Main-side sanitiser can build its own
+ * `gu` instance from the same characters: the two sets drifting apart would mean either a dropped
+ * row (stripped less than rejected) or a silent gap (rejected less than stripped). A shared `g`
+ * instance would carry `lastIndex` between callers, so neither side reuses the other's object.
+ */
+export const COMPUTER_TARGET_LABEL_FORBIDDEN_PATTERN =
+  '[\\p{Cc}\\p{Cf}\\u115F\\u1160\\u3164\\uFFA0]';
+const COMPUTER_TARGET_LABEL_FORBIDDEN_CHARACTERS = new RegExp(
+  COMPUTER_TARGET_LABEL_FORBIDDEN_PATTERN,
+  'u',
+);
 
 export const computerTargetUntrustedLabelSchema = z
   .object({

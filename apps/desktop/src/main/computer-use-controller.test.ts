@@ -615,13 +615,25 @@ describe('ComputerUseController', () => {
   });
 
   it('does not report a successful limit stop for an expired final observation', async () => {
+    // One clock reading, shared by the controller and by both timestamps.
+    //
+    // The two `Date.now()` calls this replaces were evaluated microseconds apart, so the observation
+    // TTL was `30_000 + (however long the runner took between them)`. The contract caps that TTL at
+    // exactly 30 seconds, so on a slow runner the observation was rejected as malformed before it
+    // could be rejected as stale, and the session stopped with `error` instead of the
+    // `stale_observation` this test is about (seen once on Windows CI on main). Deriving `expiresAt`
+    // from `observedAt` under a frozen clock makes the gap exactly 30 seconds every time, and keeps
+    // the observation firmly in the past so the staleness check is still the one that fires.
+    const frozenNow = Date.now();
+    const staleObservedAt = frozenNow - 60_000;
     const fixture = createFixture({
+      now: () => frozenNow,
       planner: { plan: async () => click },
       observationOverridesForRevision: (revision) =>
         revision === 4
           ? {
-              observedAt: new Date(Date.now() - 60_000).toISOString(),
-              expiresAt: new Date(Date.now() - 30_000).toISOString(),
+              observedAt: new Date(staleObservedAt).toISOString(),
+              expiresAt: new Date(staleObservedAt + 30_000).toISOString(),
             }
           : {},
     });
