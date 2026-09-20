@@ -460,6 +460,8 @@ export class ComputerUseController {
       controller: AbortController;
       reason: ComputerUseStopReason | null;
       taskId: string;
+      /** Which application this start is for, so a revoked grant can cancel it (ADR v2 §6.5). */
+      profileId: string;
     }
   >();
   private readonly now: () => number;
@@ -467,6 +469,13 @@ export class ComputerUseController {
   private startInProgress = false;
   private startingController: AbortController | null = null;
   private startingTaskId: string | null = null;
+  /**
+   * The application a start in flight is for, so revoking its grant can cancel it (ADR v2 §6.5).
+   *
+   * Without it, revoking would only reach `sessions`, and a start that is still awaiting native
+   * would go on to become a live session for an application whose permission was just withdrawn.
+   */
+  private startingProfileId: string | null = null;
 
   constructor(private readonly deps: ComputerUseControllerDeps) {
     this.now = deps.now ?? Date.now;
@@ -824,12 +833,22 @@ export class ComputerUseController {
     this.deps.persistence.removeComputerAppGrant(grantId, expectedRevision);
     // Tokens naming this application are worthless now, and a live session must not keep driving an
     // application whose permission was just withdrawn.
+    const revoked = (profileId: string): boolean =>
+      this.profileGrantIdentityDigest(profileId) === grant.grantIdentityDigest;
     for (const [token, record] of this.targetTokens)
-      if (this.profileGrantIdentityDigest(record.profileId) === grant.grantIdentityDigest)
-        this.targetTokens.delete(token);
+      if (revoked(record.profileId)) this.targetTokens.delete(token);
     for (const [token, record] of this.targetAppTokens)
-      if (this.profileGrantIdentityDigest(record.profileId) === grant.grantIdentityDigest)
-        this.targetAppTokens.delete(token);
+      if (revoked(record.profileId)) this.targetAppTokens.delete(token);
+    // Starts in flight, before anything reaches `sessions`. A start that is waiting on native or on
+    // the planner would otherwise finish and become a live session for an application the user has
+    // just revoked — the same hole `policyEpochChanged` closes for a permission change.
+    if (this.startingProfileId !== null && revoked(this.startingProfileId))
+      this.startingController?.abort(new Error('Computer Use application grant was revoked'));
+    for (const starting of this.startingSessions.values())
+      if (revoked(starting.profileId)) {
+        starting.reason = 'policy_changed';
+        starting.controller.abort(new Error('Computer Use application grant was revoked'));
+      }
     await Promise.all(
       [...this.sessions.values()]
         .filter(
@@ -1204,6 +1223,7 @@ export class ComputerUseController {
     const controller = new AbortController();
     this.startingController = controller;
     this.startingTaskId = input.taskId;
+    this.startingProfileId = input.profileId;
     try {
       return await this.startInternal(input, controller);
     } catch (error) {
@@ -1212,7 +1232,10 @@ export class ComputerUseController {
       throw error;
     } finally {
       if (this.startingController === controller) this.startingController = null;
-      if (this.startingTaskId === input.taskId) this.startingTaskId = null;
+      if (this.startingTaskId === input.taskId) {
+        this.startingTaskId = null;
+        this.startingProfileId = null;
+      }
       this.startInProgress = false;
     }
   }
@@ -1441,6 +1464,7 @@ export class ComputerUseController {
       controller,
       reason: null as ComputerUseStopReason | null,
       taskId: input.taskId,
+      profileId: input.profileId,
     };
     this.startingSessions.set(sessionId, starting);
     if (

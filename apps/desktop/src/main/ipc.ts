@@ -61,6 +61,7 @@ import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from '
 import { CommandRunnerError } from './command-runner';
 import { ManagedStdinRejection } from './managed-command-stdin';
 import { configureApprovalDigestKey } from './approval-digest-key';
+import { isComputerUseUiActivationKind } from '../computer-use-activation';
 import { pathComparisonKey } from '../path-comparison';
 import {
   approvalActivationIntent,
@@ -4681,16 +4682,9 @@ export class IpcRouter {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return;
     const rawKind = (raw as Record<string, unknown>)['kind'];
     const rawIntent = (raw as Record<string, unknown>)['intent'];
-    if (
-      rawKind !== 'application' &&
-      rawKind !== 'start' &&
-      rawKind !== 'approval' &&
-      rawKind !== 'permission-settings' &&
-      rawKind !== 'graph-start' &&
-      rawKind !== 'graph-resume' &&
-      rawKind !== 'graph-resume-step'
-    )
-      return;
+    // The shared list, not a copy: a kind Main consumes but never binds makes that control silently
+    // dead, and a hand-maintained duplicate is how that happens.
+    if (!isComputerUseUiActivationKind(rawKind)) return;
     if (rawIntent !== null && typeof rawIntent !== 'string') return;
     this.computerUseActivationGate.bindIntent(event, rawKind, rawIntent);
   };

@@ -22,6 +22,10 @@ import { PermissionBroker } from './permission-broker';
 import { expandAccessPreset } from '@sprint-coder/domain';
 import type { PermissionPolicyRecord } from './persistence';
 import {
+  COMPUTER_USE_UI_ACTIVATION_KINDS,
+  isComputerUseUiActivationKind,
+} from '../computer-use-activation';
+import {
   approvalActivationIntent,
   quickStartActivationIntent,
   startActivationIntent,
@@ -675,6 +679,17 @@ describe('Computer Use Main IPC integration', () => {
       fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
       await expect(handler(input, {}, {})).rejects.toBeTruthy();
     });
+  });
+
+  it('keeps the revoke click kind in the one list every activation seam reads', () => {
+    // Three seams have to agree: the Renderer gate that records the click, Main's intent channel
+    // that binds the recorded kind, and the handler that consumes it. A kind one of them omits does
+    // not fail loudly — `consume` compares against a kind that was never bound, so the control is
+    // silently dead. They now read this list, so membership is the whole check.
+    expect(isComputerUseUiActivationKind('app-grant-revoke')).toBe(true);
+    expect(COMPUTER_USE_UI_ACTIVATION_KINDS).toContain('app-grant-revoke');
+    for (const rejected of ['app-grant-revoke-but-not-really', '', undefined, null, 0])
+      expect(isComputerUseUiActivationKind(rejected)).toBe(false);
   });
 
   it('rejects a revoke that names anything other than a row Main already showed', () => {

@@ -10473,6 +10473,47 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('lets the user grant an application again after a forged row blocks it', () => {
+      const fixture = createPersistence();
+      const original = createGrant(fixture.persistence, { maxMode: 'supervised' });
+      fixture.persistence.close();
+
+      const db = new Database(fixture.path);
+      db.prepare('UPDATE computer_app_grants SET max_mode = ? WHERE id = ?').run(
+        'full_access_app',
+        original.id,
+      );
+      db.close();
+
+      // Without this, one file write denies an application permanently: the unique index refuses a
+      // new grant for the same identity, and the delete path refuses to touch a row whose MAC does
+      // not verify. "次回あらためて確認します" has to actually be recoverable.
+      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      expect(reopened.listComputerAppGrants().discarded).toBe(1);
+      const regranted = createGrant(reopened);
+      expect(regranted.id).not.toBe(original.id);
+      expect(reopened.listComputerAppGrants()).toEqual({ grants: [regranted], discarded: 0 });
+      reopened.close();
+    });
+
+    it('replaces a grant whose application moved, rather than colliding with it', () => {
+      const fixture = createPersistence();
+      createGrant(fixture.persistence);
+      // On macOS the digest excludes the path, so the copy in Downloads has the same digest and a
+      // different path: §6.3 says it does not match, and re-approving it must not hit the unique
+      // index on the row it no longer describes.
+      const moved = {
+        ...identity,
+        executablePath: '/Users/x/Downloads/Notes.app/Contents/MacOS/Notes',
+      };
+      const replacement = createGrant(fixture.persistence, { identity: moved });
+      expect(replacement.executablePath).toBe(moved.executablePath);
+      expect(fixture.persistence.listComputerAppGrants().grants).toEqual([replacement]);
+      // The still-matching case remains a duplicate, and is still refused.
+      expect(() => createGrant(fixture.persistence, { identity: moved })).toThrow('already exists');
+      fixture.persistence.close();
+    });
+
     it('refuses a second grant for the same identity, and caps how many it will hold', () => {
       const fixture = createPersistence();
       createGrant(fixture.persistence);

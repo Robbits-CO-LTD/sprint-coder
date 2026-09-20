@@ -243,6 +243,9 @@ function createFixture(
       ] satisfies readonly ComputerUseNativeWindow[];
     },
     startSession: async (input) => {
+      // Counted before the gate, so a test can observe "native startup has begun and is still
+      // running" — the window in which a session exists only in `startingSessions`.
+      startSessionEnteredCount += 1;
       await options.startSessionGate;
       startSessionCount += 1;
       if (startSessionCount > 1) await options.focusRestoreGate;
@@ -314,6 +317,7 @@ function createFixture(
     },
   };
   const grantStore = createComputerAppGrantFixtureStore();
+  let startSessionEnteredCount = 0;
   const persistence = {
     listComputerAppProfiles: () => [currentProfile],
     getComputerAppProfile: () => currentProfile,
@@ -444,6 +448,7 @@ function createFixture(
     observationCount: () => revision,
     dispatchedActions: () => dispatchedActions,
     nativeStartWindowIds: () => nativeStartWindowIds,
+    startSessionEnteredCount: () => startSessionEnteredCount,
     nativeCancelCount: () => nativeCancelCount,
     nativeCloseCount: () => nativeCloseCount,
     profileUpdates: () => profileUpdates,
@@ -860,6 +865,30 @@ describe('ComputerUseController', () => {
     expect(fixture.statuses.at(-1)?.state).toBe('stopped');
     expect(fixture.statuses.at(-1)?.stopReason).toBe('policy_changed');
     expect(fixture.grants.size).toBe(0);
+    await fixture.controller.dispose();
+  });
+
+  it('cancels a start that is still in flight when its grant is revoked', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fixture = createFixture({ startSessionGate: gate });
+    const grant = fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    // Revoking while native startup is still running is the window `sessions` alone does not cover:
+    // nothing is in `sessions` yet, so a revoke that only walked that map would let the start finish
+    // and hand back a live session for an application the user just took permission away from.
+    const starting = start(fixture);
+    await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    release();
+    // The revoke is what ends it, and it is reported as the permission change it is.
+    await expect(starting).rejects.toThrow('policy_changed');
+    // And no session ever went live: the only statuses published are the terminal ones.
+    expect(fixture.statuses.filter((status) => status.state !== 'stopped')).toEqual([]);
     await fixture.controller.dispose();
   });
 

@@ -1,5 +1,11 @@
-import type { ComputerAppGrantRecord } from './computer-use-grant-record';
-import type { ComputerAppGrantIdentity } from './computer-use-grant-identity';
+import {
+  computerAppGrantStoredIdentity,
+  type ComputerAppGrantRecord,
+} from './computer-use-grant-record';
+import {
+  computerAppGrantMismatch,
+  type ComputerAppGrantIdentity,
+} from './computer-use-grant-identity';
 import type { ComputerAppGrantInput, ComputerAppGrantListing } from './persistence';
 
 /**
@@ -92,14 +98,24 @@ export function createComputerAppGrantFixtureStore(
           updatedAt: input.updatedAt ?? now,
           revision: 1,
         });
-        if (
-          [...grants.values()].some(
-            (grant) =>
-              grant.platform === record.platform &&
-              grant.grantIdentityDigest === record.grantIdentityDigest,
+        // Same rule as the SQLite store: a row for this identity that no longer describes the
+        // application gives way to the fresh approval, and only a still-matching one is a duplicate.
+        const conflicting = [...grants.values()].find(
+          (grant) =>
+            grant.platform === record.platform &&
+            grant.grantIdentityDigest === record.grantIdentityDigest,
+        );
+        if (conflicting !== undefined) {
+          if (
+            computerAppGrantMismatch(
+              computerAppGrantStoredIdentity(conflicting),
+              input.identity,
+              false,
+            ) === null
           )
-        )
-          throw new Error('Computer Use app grant already exists');
+            throw new Error('Computer Use app grant already exists');
+          grants.delete(conflicting.id);
+        }
         grants.set(record.id, record);
         return record;
       },

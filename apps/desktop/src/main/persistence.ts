@@ -1,14 +1,16 @@
 import Database from 'better-sqlite3';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
 import { graphMissionRecordSchema } from './graph-mission-record';
-import type {
-  ComputerAppGrantIdentity,
-  ComputerAppGrantIdentityKind,
-  ComputerAppGrantPlatform,
+import {
+  computerAppGrantMismatch,
+  type ComputerAppGrantIdentity,
+  type ComputerAppGrantIdentityKind,
+  type ComputerAppGrantPlatform,
 } from './computer-use-grant-identity';
 import {
   computerAppGrantMacMatches,
   computerAppGrantRecordMac,
+  computerAppGrantStoredIdentity,
   type ComputerAppGrantMode,
   type ComputerAppGrantRecord,
 } from './computer-use-grant-record';
@@ -14546,6 +14548,30 @@ export class SqlitePersistenceClient implements PersistenceClient {
       updatedAt: input.updatedAt === undefined ? now : canonicalTimestamp(input.updatedAt),
       revision: 1,
     });
+    // A row already holding this identity must not be able to block a fresh approval.
+    //
+    // Two ways that happens, and both are how a grant becomes *unusable* rather than valid: a row
+    // whose MAC does not verify (T14 — otherwise writing one forged row would permanently deny an
+    // application, since the unique index refuses the insert and `removeComputerAppGrant` refuses
+    // the delete), and a row that no longer describes this application at all — on macOS the digest
+    // excludes the path, so a copy in another directory collides with the original's row while
+    // failing §6.3. Only a row that authenticates *and* still matches is a real duplicate.
+    const conflicting = this.db
+      .prepare('SELECT * FROM computer_app_grants WHERE platform = ? AND grant_identity_digest = ?')
+      .get(record.platform, record.grantIdentityDigest) as ComputerAppGrantRow | undefined;
+    if (conflicting !== undefined) {
+      const verified = verifiedComputerAppGrant(conflicting);
+      if (
+        verified !== null &&
+        computerAppGrantMismatch(
+          computerAppGrantStoredIdentity(verified),
+          input.identity,
+          false,
+        ) === null
+      )
+        throw new Error('Computer Use app grant already exists');
+      this.db.prepare('DELETE FROM computer_app_grants WHERE id = ?').run(conflicting.id);
+    }
     const grantCount = this.db
       .prepare('SELECT COUNT(*) AS count FROM computer_app_grants')
       .get() as {
