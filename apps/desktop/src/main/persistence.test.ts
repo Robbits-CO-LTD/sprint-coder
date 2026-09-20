@@ -48,6 +48,7 @@ import {
   SealedPostImageUnsupportedError,
   CANVAS_NODE_POSITIONS_MAX_ENTRIES,
   CanvasViewConflictError,
+  COMPUTER_USE_MAX_GRANTS,
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
   ImageAttachmentAcceptanceError,
@@ -60,6 +61,7 @@ import {
   validateCanvasCamera,
   validateCanvasNodePositions,
 } from './persistence';
+import { computerAppGrantIdentityFrom } from './computer-use-grant-identity';
 import { loadNativeSafeFs, nativeSafeFsAddonPath, NativeSafeFsError } from './native-safe-fs';
 import { currentWorkspaceRootIdentityDigest } from './path-guard';
 import { structuredPatchDigest, type PreparedStructuredPatch } from './structured-patch';
@@ -9180,6 +9182,7 @@ if (runsWithElectronAbi)
         { version: 89 },
         { version: 90 },
         { version: 91 },
+        { version: 92 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -10354,6 +10357,167 @@ if (runsWithElectronAbi)
           identityDigest: 'f'.repeat(64),
         }),
       ).toThrow('profile limit');
+      fixture.persistence.close();
+    });
+  });
+
+if (runsWithElectronAbi)
+  describe('Computer Use application grants (ADR v2 §6.2)', () => {
+    const identity = computerAppGrantIdentityFrom({
+      platform: 'darwin',
+      identityDigest: 'a'.repeat(64),
+      bundleId: 'com.example.notes',
+      executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
+      executableDigest: 'b'.repeat(64),
+      teamId: 'TEAMID1234',
+      signingIdentifier: 'com.example.notes',
+      cdHash: 'c'.repeat(64),
+      displayName: 'Notes',
+    })!;
+
+    function createGrant(persistence: SqlitePersistenceClient, overrides = {}) {
+      return persistence.createComputerAppGrant({
+        identity,
+        maxMode: 'full_access_app',
+        denyRulesetVersion: 1,
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+        ...overrides,
+      });
+    }
+
+    it('stores a grant against its verified identity and counts how it is used', () => {
+      const fixture = createPersistence();
+      const grant = createGrant(fixture.persistence);
+      expect(grant.revision).toBe(1);
+      expect(grant.scope).toBe('global');
+      expect(grant.grantIdentityDigest).toBe(identity.grantIdentityDigest);
+      expect(grant.providerEgressConnectionId).toBe('connection-1');
+      expect(fixture.persistence.listComputerAppGrants()).toEqual({
+        grants: [grant],
+        discarded: 0,
+      });
+      expect(
+        fixture.persistence.findComputerAppGrantByIdentity('darwin', identity.grantIdentityDigest),
+      ).toEqual(grant);
+      // A digest from another installation, or another application, is simply not granted.
+      expect(
+        fixture.persistence.findComputerAppGrantByIdentity('darwin', 'f'.repeat(64)),
+      ).toBeNull();
+      expect(
+        fixture.persistence.findComputerAppGrantByIdentity('win32', identity.grantIdentityDigest),
+      ).toBeNull();
+
+      const requested = fixture.persistence.countComputerAppGrantAccessRequest(
+        grant.id,
+        'requested',
+      );
+      const denied = fixture.persistence.countComputerAppGrantAccessRequest(grant.id, 'denied');
+      expect([denied.requestCount, denied.denialCount]).toEqual([2, 1]);
+      expect(requested.revision).toBe(2);
+      const used = fixture.persistence.touchComputerAppGrantUsed(
+        grant.id,
+        '2026-09-20T01:02:03.000Z',
+      );
+      expect(used.lastUsedAt).toBe('2026-09-20T01:02:03.000Z');
+      fixture.persistence.close();
+    });
+
+    it('records a signed application updating, without asking for the grant again', () => {
+      const fixture = createPersistence();
+      const grant = createGrant(fixture.persistence);
+      const updated = fixture.persistence.touchComputerAppGrantUsed(
+        grant.id,
+        '2026-09-20T02:00:00.000Z',
+        { ...identity, cdHash: 'd'.repeat(64) },
+      );
+      // Same signer, same path, new code: §6.2.1 keeps the grant and writes down the change so the
+      // settings screen can show it.
+      expect(updated.cdHash).toBe('d'.repeat(64));
+      expect(updated.lastCdHash).toBe('c'.repeat(64));
+      expect(updated.cdHashChangedAt).toBe('2026-09-20T02:00:00.000Z');
+      expect(updated.grantIdentityDigest).toBe(grant.grantIdentityDigest);
+      fixture.persistence.close();
+    });
+
+    it('treats a row whose MAC does not verify as absent, without losing the rest', () => {
+      const fixture = createPersistence();
+      const kept = createGrant(fixture.persistence);
+      const tampered = createGrant(fixture.persistence, {
+        identity: { ...identity, grantIdentityDigest: 'e'.repeat(64) },
+        maxMode: 'observe_only',
+      });
+      fixture.persistence.close();
+
+      // The attacker model includes writing this file (ADR v2 §2): raise the stored ceiling to full
+      // access without the per-install key, which is exactly what T14 is about.
+      const db = new Database(fixture.path);
+      db.prepare('UPDATE computer_app_grants SET max_mode = ? WHERE id = ?').run(
+        'full_access_app',
+        tampered.id,
+      );
+      db.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      const listing = reopened.listComputerAppGrants();
+      // One bad row is dropped and counted; the other grant is untouched, because a forged row must
+      // not be able to blank the screen the user revokes from.
+      expect(listing.grants.map((grant) => grant.id)).toEqual([kept.id]);
+      expect(listing.discarded).toBe(1);
+      expect(reopened.findComputerAppGrantByIdentity('darwin', 'e'.repeat(64))).toBeNull();
+      expect(() => reopened.getComputerAppGrant(tampered.id)).toThrow('not found');
+      // Nor can a tampered row be laundered into a valid one by touching a counter.
+      expect(() => reopened.countComputerAppGrantAccessRequest(tampered.id, 'requested')).toThrow(
+        'not found',
+      );
+      reopened.close();
+    });
+
+    it('refuses a second grant for the same identity, and caps how many it will hold', () => {
+      const fixture = createPersistence();
+      createGrant(fixture.persistence);
+      expect(() => createGrant(fixture.persistence)).toThrow();
+      for (let index = 1; index < COMPUTER_USE_MAX_GRANTS; index += 1)
+        createGrant(fixture.persistence, {
+          identity: { ...identity, grantIdentityDigest: index.toString(16).padStart(64, '0') },
+        });
+      expect(() =>
+        createGrant(fixture.persistence, {
+          identity: { ...identity, grantIdentityDigest: 'f'.repeat(64) },
+        }),
+      ).toThrow('grant limit');
+      fixture.persistence.close();
+    });
+
+    it('revokes a grant only against the revision the caller saw', () => {
+      const fixture = createPersistence();
+      const grant = createGrant(fixture.persistence);
+      expect(() =>
+        fixture.persistence.removeComputerAppGrant(grant.id, grant.revision + 1),
+      ).toThrow();
+      fixture.persistence.countComputerAppGrantAccessRequest(grant.id, 'requested');
+      // The revision the settings screen rendered is stale now, so the revoke has to be retried
+      // against what the row actually says rather than removing a grant the user never read.
+      expect(() => fixture.persistence.removeComputerAppGrant(grant.id, grant.revision)).toThrow();
+      const current = fixture.persistence.getComputerAppGrant(grant.id);
+      fixture.persistence.removeComputerAppGrant(current.id, current.revision);
+      expect(fixture.persistence.listComputerAppGrants().grants).toEqual([]);
+      expect(
+        fixture.persistence.findComputerAppGrantByIdentity('darwin', identity.grantIdentityDigest),
+      ).toBeNull();
+      fixture.persistence.close();
+    });
+
+    it('refuses to store half a provider egress consent', () => {
+      const fixture = createPersistence();
+      expect(() =>
+        fixture.persistence.createComputerAppGrant({
+          identity,
+          maxMode: 'supervised',
+          denyRulesetVersion: 1,
+          providerEgress: { connectionId: 'connection-1', modelId: '' },
+        }),
+      ).toThrow('Invalid Computer Use app grant');
+      expect(fixture.persistence.listComputerAppGrants().grants).toEqual([]);
       fixture.persistence.close();
     });
   });
