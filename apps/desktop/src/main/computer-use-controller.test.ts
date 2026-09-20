@@ -24,6 +24,7 @@ import {
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -312,6 +313,7 @@ function createFixture(
       await options.closeGate;
     },
   };
+  const grantStore = createComputerAppGrantFixtureStore();
   const persistence = {
     listComputerAppProfiles: () => [currentProfile],
     getComputerAppProfile: () => currentProfile,
@@ -336,6 +338,7 @@ function createFixture(
       return currentProfile;
     },
     removeComputerAppProfile: () => undefined,
+    ...grantStore.api,
     recordComputerActionAudit: (input: ComputerActionAuditInput) => {
       const existing = [...audits.values()].find(
         (audit) =>
@@ -445,6 +448,7 @@ function createFixture(
     nativeCloseCount: () => nativeCloseCount,
     profileUpdates: () => profileUpdates,
     currentProfile: () => currentProfile,
+    grants: grantStore.grants,
     managedLifecycle,
   };
 }
@@ -838,6 +842,37 @@ describe('ComputerUseController', () => {
     const second = await start(fixture);
     expect(second.sessionId).not.toBe(first.sessionId);
     await fixture.controller.stop(second.sessionId);
+    await fixture.controller.dispose();
+  });
+
+  it('stops a running session when its application grant is revoked', async () => {
+    const fixture = createFixture();
+    const grant = fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const started = await start(fixture);
+    expect(fixture.controller.getStatus(started.sessionId)?.state).not.toBe('stopped');
+
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    // Revoking is a permission change, so it uses the same stop reason a policy change does: the
+    // audit trail and the Renderer's focus restore should not have to learn a new word for it.
+    expect(fixture.statuses.at(-1)?.state).toBe('stopped');
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('policy_changed');
+    expect(fixture.grants.size).toBe(0);
+    await fixture.controller.dispose();
+  });
+
+  it('leaves another application running when a different grant is revoked', async () => {
+    const fixture = createFixture();
+    const other = fixture.controller.createAppGrant(
+      { ...profile.identity, bundleId: 'com.example.unrelated' },
+      { maxMode: 'full_access_app', providerEgress: null },
+    );
+    const started = await start(fixture);
+    await fixture.controller.revokeAppGrant(other.id, other.revision);
+    expect(fixture.controller.getStatus(started.sessionId)?.state).not.toBe('stopped');
+    await fixture.controller.stop(started.sessionId);
     await fixture.controller.dispose();
   });
 

@@ -27,6 +27,7 @@ import {
   type ComputerTargetTokenBinding,
   type ComputerTargetTokenRecord,
 } from './computer-use-target-model';
+import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { COMPUTER_TARGET_TOOLS } from './computer-use-target-tools';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { compilePromptGuidance } from './prompt-context';
@@ -124,6 +125,7 @@ function createFixture(
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
+  const grantStore = createComputerAppGrantFixtureStore();
   const listWindowCalls: string[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
@@ -150,6 +152,7 @@ function createFixture(
     createComputerAppProfile: vi.fn(),
     updateComputerAppProfile: vi.fn(),
     removeComputerAppProfile: vi.fn(),
+    ...grantStore.api,
     recordComputerActionAudit: vi.fn(),
     completeComputerActionAudit: vi.fn(),
     listComputerActionAudits: () => [],
@@ -177,6 +180,7 @@ function createFixture(
     controller,
     listWindowCalls,
     profiles,
+    grants: grantStore.grants,
     /** Stands in for a re-registration: `registerProfile` updates the row in place and bumps it. */
     replaceProfile: (id: string, changes: Partial<ComputerAppProfileRecord>) => {
       const index = profiles.findIndex((profile) => profile.id === id);
@@ -229,6 +233,133 @@ describe('computer_list_targets', () => {
     // Each row must be usable as a target reference on its own; two rows never share a token.
     expect(new Set(rows.map((row) => row.targetToken)).size).toBe(4);
     expect(new Set(rows.map((row) => row.appToken)).size).toBe(2);
+  });
+
+  it('answers granted from the grant table, not from being enumerable', async () => {
+    // S2 answered `true` unconditionally. A profile registered without "remember" is exactly the
+    // case that has to answer false now, or the flag would have changed nothing.
+    const profile = profileRecord('profile-notes', macIdentity(), { remember: false });
+    const fixture = createFixture({ profiles: [profile] });
+    expect(
+      selectable((await fixture.controller.listTargets({}, toolContext)).targets)[0]?.granted,
+    ).toBe(false);
+
+    const grant = fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: null,
+    });
+    expect(
+      selectable((await fixture.controller.listTargets({}, toolContext)).targets)[0]?.granted,
+    ).toBe(true);
+
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    expect(
+      selectable((await fixture.controller.listTargets({}, toolContext)).targets)[0]?.granted,
+    ).toBe(false);
+  });
+
+  it('does not change what the V1 allow-list route already promised', async () => {
+    // A registered, remembered profile is V1's own "do not ask me again", so it stays granted with
+    // no grant row at all. Provider egress consent is a separate agreement and must not gate this.
+    const fixture = createFixture({
+      profiles: [profileRecord('profile-notes', macIdentity(), { providerEgressConsent: false })],
+    });
+    expect(fixture.grants.size).toBe(0);
+    expect(
+      selectable((await fixture.controller.listTargets({}, toolContext)).targets)[0]?.granted,
+    ).toBe(true);
+  });
+
+  it('drops a row whose grant was revoked while native was still enumerating', async () => {
+    const first = profileRecord('profile-a-notes', macIdentity(), { remember: false });
+    const second = profileRecord(
+      'profile-b-preview',
+      macIdentity({ identityDigest: 'e'.repeat(64), bundleId: 'com.example.preview' }),
+      { remember: false },
+    );
+    let revoke: (() => void) | null = null;
+    const fixture = createFixture({
+      profiles: [first, second],
+      // Revoking while the *second* application is being enumerated is the race the return-path
+      // re-read exists for: the first application's rows and tokens already exist, and nothing has
+      // touched the Task's policy epoch, so only re-reading the grant can catch it.
+      windowsFor: (profile) => {
+        if (profile.id === second.id) {
+          revoke?.();
+          revoke = null;
+        }
+        return [nativeWindow(profile, 1)];
+      },
+    });
+    const grant = fixture.controller.createAppGrant(first.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: null,
+    });
+    fixture.controller.createAppGrant(second.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: null,
+    });
+    const before = selectable((await fixture.controller.listTargets({}, toolContext)).targets);
+    expect(before.map((row) => row.granted)).toEqual([true, true]);
+
+    revoke = () => void fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    const after = selectable((await fixture.controller.listTargets({}, toolContext)).targets);
+    // The revoked application's row is gone entirely, token included — keeping the token would let
+    // S3b spend a reference to a grant the user has just withdrawn.
+    expect(after.map((row) => row.verified.appId)).toEqual(['com.example.preview']);
+    expect(fixture.controller.targetTokenBinding(before[0]!.targetToken)).toBeNull();
+  });
+
+  it('stops matching a grant when the same signer appears at a different path', async () => {
+    const profile = profileRecord('profile-notes', macIdentity(), { remember: false });
+    const fixture = createFixture({ profiles: [profile] });
+    fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: null,
+    });
+    // Same bundle id, Team ID and signing identifier — a copy in Downloads (§6.3).
+    fixture.replaceProfile('profile-notes', {
+      identity: macIdentity({
+        executablePath: '/Users/x/Downloads/Notes.app/Contents/MacOS/Notes',
+      }) as unknown as Record<string, unknown>,
+    });
+    expect(
+      selectable((await fixture.controller.listTargets({}, toolContext)).targets)[0]?.granted,
+    ).toBe(false);
+    // The row is still there, so the next request raises a card rather than silently failing.
+    expect(fixture.grants.size).toBe(1);
+  });
+
+  it('revokes rather than re-confirms a grant whose class the ruleset now denies', async () => {
+    const profile = profileRecord('profile-notes', macIdentity(), { remember: false });
+    const fixture = createFixture({ profiles: [profile] });
+    fixture.controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: null,
+    });
+    // The same signed identity — so the grant still resolves — now classified as a terminal. This
+    // stands in for a ruleset that widened: the digest is untouched, the verdict is not.
+    fixture.replaceProfile('profile-notes', {
+      identity: macIdentity({ displayName: 'Terminal' }) as unknown as Record<string, unknown>,
+    });
+    expect(fixture.controller.appGrantFor(fixture.profiles[0]!.identity)).toBeNull();
+    // Gone, not merely unmatched: T3 says a newly denied class is not offered for approval again.
+    expect(fixture.grants.size).toBe(0);
+    // And the deny list keeps it out of the enumeration entirely.
+    expect((await fixture.controller.listTargets({}, toolContext)).targets).toEqual([]);
+  });
+
+  it('refuses to grant an application the deny ruleset forbids', () => {
+    const fixture = createFixture({
+      profiles: [profileRecord('profile-term', macIdentity({ bundleId: 'com.apple.terminal' }))],
+    });
+    expect(() =>
+      fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+        maxMode: 'full_access_app',
+        providerEgress: null,
+      }),
+    ).toThrow('cannot be granted');
+    expect(fixture.grants.size).toBe(0);
   });
 
   it('truncates an untrusted label to 64 characters and removes control and direction characters', async () => {
