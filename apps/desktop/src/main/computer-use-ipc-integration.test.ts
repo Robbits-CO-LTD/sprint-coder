@@ -3,6 +3,7 @@ import {
   IPC_CHANNELS,
   computerAppProfileSchema,
   computerUseAvailabilitySchema,
+  computerAppGrantResolveInputSchema,
   computerUseGrantRevokeInputSchema,
   computerUseProfileRegisterInputSchema,
   computerListTargetsOutputSchema,
@@ -26,6 +27,7 @@ import {
   isComputerUseUiActivationKind,
 } from '../computer-use-activation';
 import {
+  appGrantActivationIntent,
   approvalActivationIntent,
   quickStartActivationIntent,
   startActivationIntent,
@@ -234,8 +236,15 @@ function captureComputerUseHandlers(): {
     ),
     stop: vi.fn(async () => undefined),
     stopOutsideTask: vi.fn(async () => undefined),
-    listAppGrantViews: vi.fn(() => ({ grants: [], discardedRecords: 0 })),
+    listAppGrantViews: vi.fn(() => ({ grants: [], discardedRecords: 0, requestedApps: [] })),
     revokeAppGrant: vi.fn(async () => undefined),
+    purgeInvalidAppGrants: vi.fn(() => ({
+      grants: [],
+      discardedRecords: 0,
+      requestedApps: [],
+      removedRecords: 2,
+    })),
+    resolveAppGrantRequest: vi.fn(async () => undefined),
     resolveApproval: vi.fn(async () => undefined),
     getStatus: vi.fn(() => null),
     policyEpochChanged: vi.fn(),
@@ -646,7 +655,11 @@ describe('Computer Use Main IPC integration', () => {
       expect(fixture.controller['listAppGrantViews']).not.toHaveBeenCalled();
     });
     await withAgentDrivenGate(true, async () => {
-      expect(await handler({}, {}, {})).toEqual({ grants: [], discardedRecords: 0 });
+      expect(await handler({}, {}, {})).toEqual({
+        grants: [],
+        discardedRecords: 0,
+        requestedApps: [],
+      });
     });
   });
 
@@ -665,7 +678,11 @@ describe('Computer Use Main IPC integration', () => {
       expect(fixture.controller['revokeAppGrant']).not.toHaveBeenCalled();
 
       fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
-      await expect(handler(input, {}, {})).resolves.toEqual({ grants: [], discardedRecords: 0 });
+      await expect(handler(input, {}, {})).resolves.toEqual({
+        grants: [],
+        discardedRecords: 0,
+        requestedApps: [],
+      });
       // Its own activation kind, so a click on Start or on an approval cannot be spent here.
       expect(fixture.activation.consume).toHaveBeenLastCalledWith(
         expect.anything(),
@@ -679,6 +696,89 @@ describe('Computer Use Main IPC integration', () => {
       fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
       await expect(handler(input, {}, {})).rejects.toBeTruthy();
     });
+  });
+
+  it('removes unauthenticated grant rows only from its own trusted click', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseGrantPurge);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+
+    await withAgentDrivenGate(true, async () => {
+      fixture.activation.consume.mockReturnValueOnce(null);
+      await expect(handler({}, {}, {})).rejects.toBeTruthy();
+      expect(fixture.controller['purgeInvalidAppGrants']).not.toHaveBeenCalled();
+
+      fixture.activation.consume.mockReturnValueOnce({ token: 'purge-activation', intent: null });
+      await expect(handler({}, {}, {})).resolves.toEqual({
+        grants: [],
+        discardedRecords: 0,
+        requestedApps: [],
+        removedRecords: 2,
+      });
+      // Its own kind: a click on a row's revoke button cannot be spent as "remove those rows".
+      expect(fixture.activation.consume).toHaveBeenLastCalledWith(
+        expect.anything(),
+        'app-grant-purge',
+      );
+    });
+
+    await withAgentDrivenGate(false, async () => {
+      fixture.activation.consume.mockReturnValueOnce({ token: 'purge-activation', intent: null });
+      await expect(handler({}, {}, {})).rejects.toBeTruthy();
+    });
+  });
+
+  it('answers an approval card only from a trusted click, and hands Main the intent', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseGrantRequestResolve);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+    const input = { requestId: 'request-1', expectedRevision: 1, decision: 'allow_always' };
+
+    await withAgentDrivenGate(true, async () => {
+      // No click at all: this is the shape model output would arrive in, and it cannot approve.
+      fixture.activation.consume.mockReturnValueOnce(null);
+      await expect(handler(input, {}, {})).rejects.toBeTruthy();
+      expect(fixture.controller['resolveAppGrantRequest']).not.toHaveBeenCalled();
+
+      const intent = appGrantActivationIntent({
+        requestId: 'request-1',
+        expectedRevision: 1,
+        decision: 'allow_always',
+        identityDigest: 'a'.repeat(64),
+      });
+      fixture.activation.consume.mockReturnValueOnce({ token: 'grant-activation', intent });
+      await expect(handler(input, {}, {})).resolves.toBeUndefined();
+      expect(fixture.activation.consume).toHaveBeenLastCalledWith(expect.anything(), 'app-grant');
+      // Main forwards the intent rather than judging it: the card it belongs to lives in the
+      // controller, which is also where deny is exempted from the comparison.
+      expect(fixture.controller['resolveAppGrantRequest']).toHaveBeenCalledWith(input, intent);
+    });
+
+    await withAgentDrivenGate(false, async () => {
+      fixture.activation.consume.mockReturnValueOnce({ token: 'grant-activation', intent: null });
+      await expect(handler(input, {}, {})).rejects.toBeTruthy();
+    });
+  });
+
+  it('rejects a card answer that names anything other than a card Main published', () => {
+    for (const rejected of [
+      { requestId: 'request-1', expectedRevision: 1 },
+      { requestId: 'request-1', expectedRevision: 1, decision: 'allow' },
+      { requestId: 'request-1', expectedRevision: 0, decision: 'deny' },
+      { requestId: '', expectedRevision: 1, decision: 'deny' },
+      // No identity, mode, or app token: the Renderer can only name a row Main already showed it.
+      { requestId: 'request-1', expectedRevision: 1, decision: 'deny', maxMode: 'full_access_app' },
+    ])
+      expect(computerAppGrantResolveInputSchema.safeParse(rejected).success).toBe(false);
+  });
+
+  it('keeps the card click kinds in the one list every activation seam reads', () => {
+    for (const kind of ['app-grant', 'app-grant-purge'] as const) {
+      expect(isComputerUseUiActivationKind(kind)).toBe(true);
+      expect(COMPUTER_USE_UI_ACTIVATION_KINDS).toContain(kind);
+    }
   });
 
   it('keeps the revoke click kind in the one list every activation seam reads', () => {
@@ -914,6 +1014,8 @@ describe('Computer Use target tools end to end', () => {
         ).evaluateToolPermission(request, request.entry.requiredCapabilities[0]!) as never,
       computerTargets: {
         listTargets: (input, context) => controller.listTargets(input, context),
+        requestAccess: (input, context) => controller.requestAccess(input, context),
+        start: (input, context) => controller.startForAgent(input, context),
         stop: (sessionId, context) => controller.stopForAgent(sessionId, context),
       },
     });
@@ -931,6 +1033,8 @@ describe('Computer Use target tools end to end', () => {
     });
     expect(snapshot.entries.map((entry) => entry.providerName).sort()).toEqual([
       'computer_list_targets',
+      'computer_request_access',
+      'computer_start',
       'computer_stop',
     ]);
     // The catalog carries a target tool, so the warning sentence must accompany it.

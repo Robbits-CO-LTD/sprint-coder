@@ -49,7 +49,10 @@ import {
   computerAppProfileSchema,
   computerUseApprovalResolveInputSchema,
   computerUseAvailabilitySchema,
+  computerAppGrantRequestSchema,
+  computerAppGrantResolveInputSchema,
   computerUseGrantListResultSchema,
+  computerUseGrantPurgeResultSchema,
   computerUseGrantRevokeInputSchema,
   computerUseOpenPermissionSettingsInputSchema,
   computerUseOpenPermissionSettingsResultSchema,
@@ -505,6 +508,37 @@ const api: SprintCoderApi = {
             input,
           )
         : Promise.reject(new Error('Computer Use grant revocation requires a trusted click')),
+    purgeGrants: () =>
+      trustedComputerUseActivation.consume('app-grant-purge')
+        ? invoke(
+            IPC_CHANNELS.computerUseGrantPurge,
+            emptyPayloadSchema,
+            computerUseGrantPurgeResultSchema,
+            {},
+          )
+        : Promise.reject(new Error('Computer Use grant cleanup requires a trusted click')),
+    // The card's own click. The intent is compared in Main against the card it was built for, so
+    // this seam only proves that a real activation happened and forwards the row the user answered.
+    // Deny carries no intent on purpose: refusing must never fail because the card went stale.
+    resolveGrantRequest: (input) => {
+      const parsed = computerAppGrantResolveInputSchema.parse(input);
+      return trustedComputerUseActivation.consume('app-grant')
+        ? invoke(
+            IPC_CHANNELS.computerUseGrantRequestResolve,
+            computerAppGrantResolveInputSchema,
+            z.undefined(),
+            parsed,
+          )
+        : Promise.reject(new Error('Computer Use application approval requires a trusted click'));
+    },
+    subscribeGrantRequests: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+        const parsed = computerAppGrantRequestSchema.safeParse(value);
+        if (parsed.success) listener(parsed.data);
+      };
+      ipcRenderer.on(IPC_CHANNELS.computerUseGrantRequestEvent, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.computerUseGrantRequestEvent, handler);
+    },
     listProfiles: (input = {}) =>
       invoke(
         IPC_CHANNELS.computerUseProfilesList,

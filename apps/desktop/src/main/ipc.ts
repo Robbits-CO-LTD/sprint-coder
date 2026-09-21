@@ -81,6 +81,8 @@ import {
   canvasViewSaveInputSchema,
   canvasViewSaveResultSchema,
   chatMessageSchema,
+  computerAppGrantRequestSchema,
+  computerAppGrantResolveInputSchema,
   computerAppProfileSchema,
   computerUseApprovalSchema,
   commandSummarySchema,
@@ -91,6 +93,7 @@ import {
   computerUseApprovalResolveInputSchema,
   computerUseAvailabilitySchema,
   computerUseGrantListResultSchema,
+  computerUseGrantPurgeResultSchema,
   computerUseGrantRevokeInputSchema,
   computerUseOpenPermissionSettingsInputSchema,
   computerUseOpenPermissionSettingsResultSchema,
@@ -1697,6 +1700,9 @@ export class IpcRouter {
             computerTargets: {
               listTargets: (input, context) =>
                 this.computerUseController.listTargets(input, context),
+              requestAccess: (input, context) =>
+                this.computerUseController.requestAccess(input, context),
+              start: (input, context) => this.computerUseController.startForAgent(input, context),
               stop: (sessionId, context) =>
                 this.computerUseController.stopForAgent(sessionId, context),
             },
@@ -1843,8 +1849,11 @@ export class IpcRouter {
       providerEgressBindingFor: (taskId, turnId) =>
         this.computerUseProviderEgressBindingFor(taskId, turnId),
       currentPolicyEpoch: (taskId) => this.permissionBroker.getPolicy(taskId).policyEpoch,
-      canStartSession: (taskId) =>
-        this.persistence.getActiveTurnId(taskId) === null &&
+      // A panel start needs an idle Task. `computer_start` runs inside a Turn, so what it needs is
+      // that its own Turn is still the active one — the same requirement, expressed against the
+      // Turn that owns the session rather than against "none".
+      canStartSession: (taskId, ownerTurnId) =>
+        this.persistence.getActiveTurnId(taskId) === ownerTurnId &&
         !this.teamCoordinator.hasBusyWorkers(taskId),
       plannerFactory: async ({
         taskId,
@@ -1854,6 +1863,7 @@ export class IpcRouter {
         modelId,
         mode,
         policyEpoch,
+        sessionGoal,
         signal,
       }) => {
         const selected = this.persistence.getProviderConnection(connectionId);
@@ -1891,6 +1901,9 @@ export class IpcRouter {
           permissionBroker: this.permissionBroker,
           endpointTrust,
           structuredOutputSupported: selectedModel?.structuredOutput.value === true,
+          // What `computer_start` said this session is for, or nothing when a person started it
+          // from the panel and the Task's own objective is the whole story.
+          ...(sessionGoal === null ? {} : { sessionGoal }),
         } as const;
         const permit = await preflightComputerUseProvider(
           { ...plannerBaseDeps, sessionId, catalogRevision, policyEpoch },
@@ -1937,6 +1950,7 @@ export class IpcRouter {
           request.capability,
         ),
       publishApproval: (approval) => this.publishComputerUseApproval(approval),
+      publishGrantRequest: (request) => this.publishComputerUseGrantRequest(request),
       publishStatus: (status) => this.publishComputerUseStatus(status),
       armEmergencyStop: (sessionId, targetBounds) => {
         this.computerUseEmergencySessionId = sessionId;
@@ -2352,6 +2366,38 @@ export class IpcRouter {
         if (activation === null) throw new SecurityError();
         await this.computerUseController.revokeAppGrant(input.grantId, input.expectedRevision);
         return this.computerUseController.listAppGrantViews();
+      },
+    );
+    // Removing grant rows that no longer authenticate (T14). Its own activation kind although it
+    // only ever deletes: the revoke button names a row the user was looking at and this one names
+    // none, and a click that says "remove this app" must not be spendable as "remove those rows".
+    this.handleMutation(
+      IPC_CHANNELS.computerUseGrantPurge,
+      emptyPayloadSchema,
+      computerUseGrantPurgeResultSchema,
+      // Async although nothing awaits: every privileged Computer Use channel answers with a
+      // promise, and a handler that throws synchronously reaches its caller differently.
+      async (_input, event) => {
+        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
+        const activation = this.computerUseActivationGate.consume(event, 'app-grant-purge');
+        if (activation === null) throw new SecurityError();
+        return this.computerUseController.purgeInvalidAppGrants();
+      },
+    );
+    // Answering the in-conversation approval card (ADR v2 §6.1.1). The trusted click is proved
+    // here; the intent it carried is handed to the controller, which is where it is compared
+    // against the card — and where deny is exempted, so refusing is never blocked by a stale
+    // intent. Model output and screen text reach neither.
+    this.handleMutation(
+      IPC_CHANNELS.computerUseGrantRequestResolve,
+      computerAppGrantResolveInputSchema,
+      z.undefined(),
+      async (input, event) => {
+        if (!computerUseAgentDrivenV2Enabled()) throw new SecurityError();
+        const activation = this.computerUseActivationGate.consume(event, 'app-grant');
+        if (activation === null) throw new SecurityError();
+        await this.computerUseController.resolveAppGrantRequest(input, activation.intent);
+        return undefined;
       },
     );
     this.handleMutation(
@@ -4673,6 +4719,27 @@ export class IpcRouter {
       this.computerUseStatusBySession.get(approval.sessionId) ??
       this.computerUseController.getStatus(approval.sessionId);
     if (status !== null && status !== undefined) this.publishComputerUseStatus(status);
+  }
+
+  /**
+   * Pushes one application approval card to the window (ADR v2 §6.1).
+   *
+   * Validated on the way out as well as in the controller: this is the only place a card crosses
+   * into the Renderer, and a payload that does not satisfy the contract must not be rendered at all
+   * rather than rendered partially. Nothing is stored — the card is live state, and a Renderer that
+   * reloads is a Renderer whose card the controller has already withdrawn.
+   */
+  private publishComputerUseGrantRequest(request: unknown): void {
+    const parsed = computerAppGrantRequestSchema.safeParse(request);
+    if (!parsed.success) return;
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
+    // The card asks the user to act inside Sprint Coder, so it is worth surfacing the window — the
+    // same treatment an in-session approval gets.
+    if (parsed.data.state === 'pending') {
+      this.window.show();
+      this.window.focus();
+    }
+    this.window.webContents.send(IPC_CHANNELS.computerUseGrantRequestEvent, parsed.data);
   }
 
   private readonly handleComputerUseActivationIntent = (
