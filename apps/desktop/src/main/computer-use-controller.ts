@@ -1578,6 +1578,12 @@ export class ComputerUseController {
     const observed = await this.refetchAppGrantFacts(profile.id);
     if (observed === null || observed.identity.grantIdentityDigest !== identity.grantIdentityDigest)
       return this.accessRefused('access_request_invalid_token');
+    // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
+    // card to withdraw, and a policy change does not abort this dispatch either. Raising now would
+    // put a card bound to the old epoch on screen, so the epoch is read again on this side of the
+    // await — the same answer a token from before the change gets.
+    if (this.currentPolicyEpoch(context.taskId) !== policyEpoch)
+      return this.accessRefused('access_request_invalid_token');
     // A Turn that is already gone has nobody left to click, and the card holds the single global
     // slot for two minutes. Checked before raising, and again through the listener below.
     if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
@@ -1874,6 +1880,13 @@ export class ComputerUseController {
     const observed = await this.refetchAppGrantFacts(pending.profileId);
     // The card may have been withdrawn while native was answering; nothing below may resurrect it.
     if (this.pendingAppGrantRequest !== pending) return;
+    // Checked against the present rather than trusted to the withdrawal above: the intent digest
+    // only proves the click matches the card, and a grant must never be written under permissions
+    // other than the ones the card was raised under (§6.5).
+    if (this.currentPolicyEpoch(pending.taskId) !== pending.policyEpoch) {
+      this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
+      return;
+    }
     if (observed === null || !computerAppGrantCardFactsMatch(pending.facts, observed.facts)) {
       this.closeAppGrantCard(pending.request.id, 'app_grant_identity_changed', 'identity_changed');
       return;

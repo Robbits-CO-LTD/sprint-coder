@@ -520,6 +520,58 @@ describe('computer_request_access', () => {
     expect(stored.providerEgressModelId).toBe('model-2');
   });
 
+  it('raises no card when the policy changed while native was answering', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Call 1 builds the target list; call 2 is the re-fetch inside `requestAccess`. There is no
+    // card yet for `policyEpochChanged` to withdraw, and the dispatch is not aborted by it.
+    const fixture = createFixture({
+      listWindowsGate: (call) => (call === 1 ? undefined : held),
+    });
+    const target = await listOne(fixture);
+    const asked = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'ask' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.setPolicyEpoch(1);
+    fixture.controller.policyEpochChanged('task-1');
+    release();
+    expect(await asked).toEqual({ granted: false, reasonCode: 'access_request_invalid_token' });
+    expect(fixture.published).toHaveLength(0);
+  });
+
+  it('writes no grant when the policy changed between the click and the identity re-fetch', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Calls 1 and 2 list and raise; call 3 is the re-fetch the click performs. The epoch moves
+    // without the controller being told, so only the check against the present can refuse.
+    const fixture = createFixture({
+      listWindowsGate: (call) => (call < 3 ? undefined : held),
+    });
+    const target = await listOne(fixture);
+    const asked = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'ask' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    const clicked = fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+      intentFor(card, 'allow_always'),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.setPolicyEpoch(1);
+    release();
+    await clicked;
+    expect(await asked).toEqual({ granted: false, reasonCode: 'access_request_withdrawn' });
+    expect(fixture.controller.listAppGrantViews().grants).toHaveLength(0);
+  });
+
   it('allows one unresolved card at a time', async () => {
     const fixture = createFixture();
     const target = await listOne(fixture);
