@@ -24,6 +24,10 @@ import {
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
+import {
+  computerAppGrantIdentityFrom,
+  computerAppNativeIdentityDigest,
+} from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 
 const imageBytes = Buffer.from(
@@ -31,9 +35,9 @@ const imageBytes = Buffer.from(
   'base64',
 );
 const imageDigest = createHash('sha256').update(imageBytes).digest('hex');
-const appIdentity: ComputerAppIdentity = {
+const appIdentityFacts = {
   platform: 'darwin',
-  identityDigest: 'a'.repeat(64),
+  identityDigest: '',
   bundleId: 'com.example.sprint-coder-computer-use-fixture',
   executablePath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
   executableDigest: 'b'.repeat(64),
@@ -43,7 +47,22 @@ const appIdentity: ComputerAppIdentity = {
   displayName: 'Fixture',
   policyLanguage: 'en',
   maximumMode: 'full_access_app',
+} as ComputerAppIdentity;
+/**
+ * The digest native would have produced, rather than a chosen one.
+ *
+ * The grant machinery this file exercises now requires a profile's `identity_json` to recompute to
+ * the top-level digest native verified (T14), so a fixture with an invented digest would be a row
+ * that could not exist.
+ */
+const appIdentity: ComputerAppIdentity = {
+  ...appIdentityFacts,
+  identityDigest: computerAppNativeIdentityDigest(
+    appIdentityFacts,
+    computerAppGrantIdentityFrom(appIdentityFacts)!,
+  )!,
 };
+const appGrantIdentity = computerAppGrantIdentityFrom(appIdentity)!;
 const profile: ComputerAppProfileRecord = {
   id: 'profile-1',
   platform: 'darwin',
@@ -852,7 +871,7 @@ describe('ComputerUseController', () => {
 
   it('stops a running session when its application grant is revoked', async () => {
     const fixture = createFixture();
-    const grant = fixture.controller.createAppGrant(profile.identity, {
+    const grant = fixture.controller.createAppGrant(appGrantIdentity, {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -874,7 +893,7 @@ describe('ComputerUseController', () => {
       release = resolve;
     });
     const fixture = createFixture({ startSessionGate: gate });
-    const grant = fixture.controller.createAppGrant(profile.identity, {
+    const grant = fixture.controller.createAppGrant(appGrantIdentity, {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -894,10 +913,11 @@ describe('ComputerUseController', () => {
 
   it('leaves another application running when a different grant is revoked', async () => {
     const fixture = createFixture();
-    const other = fixture.controller.createAppGrant(
-      { ...profile.identity, bundleId: 'com.example.unrelated' },
-      { maxMode: 'full_access_app', providerEgress: null },
-    );
+    const unrelatedFacts = { ...appIdentityFacts, bundleId: 'com.example.unrelated' };
+    const other = fixture.controller.createAppGrant(computerAppGrantIdentityFrom(unrelatedFacts)!, {
+      maxMode: 'full_access_app',
+      providerEgress: null,
+    });
     const started = await start(fixture);
     await fixture.controller.revokeAppGrant(other.id, other.revision);
     expect(fixture.controller.getStatus(started.sessionId)?.state).not.toBe('stopped');

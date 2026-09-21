@@ -27,7 +27,11 @@ import {
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
 import { computerAppGrantIntentDigest } from './computer-use-access-request';
-import { computerAppGrantIdentityFrom } from './computer-use-grant-identity';
+import {
+  computerAppGrantIdentityFrom,
+  computerAppNativeIdentityDigest,
+  type ComputerAppGrantIdentity,
+} from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 
 /**
@@ -51,10 +55,18 @@ const availability: ComputerUseAvailability = computerUseAvailabilitySchema.pars
   manifestDigest: 'c'.repeat(64),
 });
 
+/**
+ * A macOS identity whose `identityDigest` is the digest native would have produced for it.
+ *
+ * Derived rather than invented, because the controller now requires the two halves of a profile to
+ * describe one application: a fixture with a hand-picked digest describes a row that could not
+ * exist. Applications are told apart here by bundle id and path — the things that actually
+ * distinguish them — and a test that wants a broken row overrides `identityDigest` on purpose.
+ */
 function macIdentity(overrides: Partial<ComputerAppIdentity> = {}): ComputerAppIdentity {
-  return {
+  const draft = {
     platform: 'darwin',
-    identityDigest: 'a'.repeat(64),
+    identityDigest: '',
     bundleId: 'com.example.notes',
     executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
     executableDigest: 'b'.repeat(64),
@@ -66,6 +78,27 @@ function macIdentity(overrides: Partial<ComputerAppIdentity> = {}): ComputerAppI
     maximumMode: 'full_access_app',
     ...overrides,
   } as ComputerAppIdentity;
+  return (
+    'identityDigest' in overrides
+      ? draft
+      : { ...draft, identityDigest: nativeIdentityDigestFor(draft) }
+  ) as ComputerAppIdentity;
+}
+
+/** The native formula, through the leaf, so a fixture and the gate agree by construction. */
+function nativeIdentityDigestFor(identity: ComputerAppIdentity): string {
+  const derived = computerAppGrantIdentityFrom(identity);
+  if (derived === null) throw new Error('fixture identity cannot be derived');
+  const digest = computerAppNativeIdentityDigest(identity, derived);
+  if (digest === null) throw new Error('fixture identity has no native digest');
+  return digest;
+}
+
+/** The gate's identity for a fixture profile, which is what `createAppGrant` now takes. */
+function grantIdentityOf(profile: ComputerAppProfileRecord): ComputerAppGrantIdentity {
+  const derived = computerAppGrantIdentityFrom(profile.identity);
+  if (derived === null) throw new Error('fixture profile identity cannot be derived');
+  return derived;
 }
 
 function profileRecord(
@@ -130,10 +163,11 @@ function observation(
   sessionId: string,
   revision: number,
   now: number,
+  appIdentityDigest: string,
 ): ComputerUseNativeObservation {
   return {
     sessionId,
-    appIdentityDigest: 'a'.repeat(64),
+    appIdentityDigest,
     windowIdentityDigest: 'd'.repeat(64),
     profileRevision: 3,
     maximumMode: 'full_access_app',
@@ -245,7 +279,12 @@ function createFixture(
     },
     observe: async (session) => {
       observationRevision += 1;
-      return observation(session.sessionId, observationRevision, Date.now());
+      return observation(
+        session.sessionId,
+        observationRevision,
+        Date.now(),
+        session.appIdentityDigest,
+      );
     },
     dispatch: async () => ({ result: 'completed', reasonCode: null }),
     cancel: async () => undefined,
@@ -491,7 +530,7 @@ describe('computer_request_access', () => {
 
   it('short-circuits an already granted application without a card', async () => {
     const fixture = createFixture();
-    fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -506,7 +545,7 @@ describe('computer_request_access', () => {
     const fixture = createFixture({
       providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
     });
-    const grant = fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -590,8 +629,9 @@ describe('computer_request_access', () => {
     const original = profileRecord('profile-a', macIdentity());
     const copy = profileRecord(
       'profile-b',
+      // No invented digest: a signed macOS identity hashes the same at both paths, which is
+      // exactly the condition this test is about.
       macIdentity({
-        identityDigest: 'c'.repeat(64),
         executablePath: '/Users/someone/Downloads/Notes.app/Contents/MacOS/Notes',
       }),
     );
@@ -646,7 +686,6 @@ describe('computer_request_access', () => {
       profileRecord(
         `profile-${index}`,
         macIdentity({
-          identityDigest: `${index}`.repeat(64).slice(0, 64),
           bundleId: `com.example.app${index}`,
           executablePath: `/Applications/App${index}.app/Contents/MacOS/App${index}`,
         }),
@@ -706,7 +745,6 @@ describe('computer_request_access', () => {
       profileRecord(
         `profile-${index}`,
         macIdentity({
-          identityDigest: `${index}`.repeat(64).slice(0, 64),
           bundleId: `com.example.app${index}`,
           executablePath: `/Applications/App${index}.app/Contents/MacOS/App${index}`,
         }),
@@ -1049,8 +1087,8 @@ describe('computer_request_access', () => {
   });
 
   it('creates no grant when the application changed between the card and the click', async () => {
-    let identityDigest = 'a'.repeat(64);
     const profile = profileRecord('profile-notes', macIdentity());
+    let identityDigest = profile.identityDigest;
     const fixture = createFixture({
       profiles: [profile],
       windowsFor: () => [
@@ -1208,9 +1246,137 @@ describe('computer_request_access', () => {
   });
 });
 
+/**
+ * The two halves of a profile row, and what happens when they stop describing one application.
+ *
+ * Native verifies the top-level `identityDigest` and `canonicalPath`; the grant is matched on
+ * `identity_json`, which native never reads and no MAC covers. The attacker in scope here can write
+ * the SQLite file (ADR v2 §2.1), so the only thing keeping those two halves together is the check
+ * the controller now makes.
+ */
+describe('profile identity binding (T14)', () => {
+  /** TextEdit's identity, and a VS Code profile wearing it. */
+  function swapped(): {
+    textEdit: ComputerAppIdentity;
+    profile: ComputerAppProfileRecord;
+  } {
+    const textEdit = macIdentity({
+      bundleId: 'com.apple.TextEdit',
+      executablePath: '/System/Applications/TextEdit.app/Contents/MacOS/TextEdit',
+      teamId: 'APPLETEAM1',
+      signingIdentifier: 'com.apple.TextEdit',
+      displayName: 'TextEdit',
+    });
+    const vsCode = macIdentity({
+      bundleId: 'com.microsoft.VSCode',
+      executablePath: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+      teamId: 'MSFTTEAM01',
+      signingIdentifier: 'com.microsoft.VSCode',
+      displayName: 'Code',
+    });
+    // The rewrite: the row keeps the digest and path native verifies for VS Code, and the JSON
+    // inside it becomes TextEdit's.
+    const profile = profileRecord('profile-vscode', vsCode);
+    return {
+      textEdit,
+      profile: {
+        ...profile,
+        identity: textEdit as unknown as Record<string, unknown>,
+      },
+    };
+  }
+
+  it('refuses a row whose identity JSON was swapped for another application', async () => {
+    const { textEdit, profile } = swapped();
+    const fixture = createFixture({ profiles: [profile] });
+    // TextEdit has been granted, with consent to send its screen to this model.
+    fixture.controller.createAppGrant(computerAppGrantIdentityFrom(textEdit)!, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+
+    // The row must not pick up that grant, and must not send a window title under its consent.
+    const row = selectable((await fixture.controller.listTargets({}, context)).targets)[0];
+    expect(row?.granted).toBe(false);
+    expect(row?.untrustedLabel).toBeNull();
+
+    // Asking refuses without raising a card: there is no application here to put on one.
+    expect(
+      await fixture.controller.requestAccess({ appToken: row!.appToken, reason: 'x' }, context),
+    ).toEqual({ granted: false, reasonCode: 'access_request_invalid_token' });
+    expect(fixture.published).toHaveLength(0);
+
+    // And starting refuses before native is asked to focus anything.
+    await expect(
+      fixture.controller.startForAgent({ targetToken: row!.targetToken, goal: 'x' }, context),
+    ).rejects.toThrow(/not granted|token/u);
+    expect(fixture.startedSessions()).toBe(0);
+  });
+
+  it('refuses a row whose JSON path is not the path native verified', async () => {
+    const identity = macIdentity();
+    const profile = {
+      ...profileRecord('profile-notes', identity),
+      // The digest still recomputes — a signed macOS digest leaves the path out on purpose — so the
+      // path is the only thing left saying which copy native actually checked.
+      canonicalPath: '/Users/someone/Downloads/Notes.app/Contents/MacOS/Notes',
+    };
+    const fixture = createFixture({ profiles: [profile] });
+    fixture.controller.createAppGrant(computerAppGrantIdentityFrom(identity)!, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const row = selectable((await fixture.controller.listTargets({}, context)).targets)[0];
+    expect(row?.granted).toBe(false);
+    await expect(
+      fixture.controller.startForAgent({ targetToken: row!.targetToken, goal: 'x' }, context),
+    ).rejects.toThrow(/not granted|token/u);
+    expect(fixture.startedSessions()).toBe(0);
+  });
+
+  it('refuses a row whose JSON disowns the digest native verified', async () => {
+    const identity = macIdentity();
+    const fixture = createFixture({
+      profiles: [
+        {
+          ...profileRecord('profile-notes', identity),
+          // The JSON no longer claims to be this row at all.
+          identity: { ...identity, identityDigest: 'f'.repeat(64) } as unknown as Record<
+            string,
+            unknown
+          >,
+        },
+      ],
+    });
+    fixture.controller.createAppGrant(computerAppGrantIdentityFrom(identity)!, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    expect(
+      selectable((await fixture.controller.listTargets({}, context)).targets)[0]?.granted,
+    ).toBe(false);
+  });
+
+  it('still lets an honest row be granted, started, and revoked', async () => {
+    // The gate must not be a wall: the ordinary row native verified goes through it untouched.
+    const fixture = createFixture();
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const row = selectable((await fixture.controller.listTargets({}, context)).targets)[0];
+    expect(row?.granted).toBe(true);
+    expect(row?.untrustedLabel?.appName).toBe('Notes');
+    await fixture.controller.revokeAppGrant(grant.id, grant.revision);
+    expect(
+      selectable((await fixture.controller.listTargets({}, context)).targets)[0]?.granted,
+    ).toBe(false);
+  });
+});
+
 describe('computer_start', () => {
   function grantFor(fixture: ReturnType<typeof createFixture>): void {
-    fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -1394,7 +1560,7 @@ describe('computer_start', () => {
     const fixture = createFixture({
       plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
     });
-    fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
       maxMode: 'observe_only',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -1686,7 +1852,7 @@ describe('computer_start', () => {
       profiles: [profileRecord('profile-notes', macIdentity(), { providerEgressConsent: true })],
       providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
     });
-    const grant = fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+    const grant = fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -1718,7 +1884,7 @@ describe('computer_start', () => {
       profiles: [profile],
       windowsFor: () => [nativeWindow(profile, { maximumMode: 'supervised' })],
     });
-    fixture.controller.createAppGrant(profile.identity, {
+    fixture.controller.createAppGrant(grantIdentityOf(profile), {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });

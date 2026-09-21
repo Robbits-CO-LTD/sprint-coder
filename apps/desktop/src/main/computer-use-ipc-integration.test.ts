@@ -28,6 +28,10 @@ import {
   computerTargetSystemPromptFor,
 } from './computer-use-target-model';
 import { ComputerUseController } from './computer-use-controller';
+import {
+  computerAppGrantIdentityFrom,
+  computerAppNativeIdentityDigest,
+} from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { PermissionBroker } from './permission-broker';
@@ -1000,6 +1004,27 @@ describe('Computer Use Main IPC integration', () => {
   });
 });
 
+const endToEndIdentityFacts = {
+  platform: 'darwin',
+  identityDigest: '',
+  bundleId: 'com.example.notes',
+  executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
+  executableDigest: 'b'.repeat(64),
+  teamId: 'TEAMID1234',
+  signingIdentifier: 'com.example.notes',
+  cdHash: null,
+  displayName: 'Notes',
+  policyLanguage: 'en',
+  maximumMode: 'full_access_app',
+};
+const endToEndIdentity = {
+  ...endToEndIdentityFacts,
+  identityDigest: computerAppNativeIdentityDigest(
+    endToEndIdentityFacts,
+    computerAppGrantIdentityFrom(endToEndIdentityFacts)!,
+  )!,
+};
+
 const endToEndImageBytes = Buffer.from('89504e470d0a1a0a', 'hex');
 const endToEndImageDigest = createHash('sha256').update(endToEndImageBytes).digest('hex');
 
@@ -1091,20 +1116,10 @@ describe('Computer Use target tools end to end', () => {
       label: 'Notes',
       canonicalPath: '/Applications/Notes.app/Contents/MacOS/Notes',
       appUrl: null,
-      identity: {
-        platform: 'darwin',
-        identityDigest: 'a'.repeat(64),
-        bundleId: 'com.example.notes',
-        executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
-        executableDigest: 'b'.repeat(64),
-        teamId: 'TEAMID1234',
-        signingIdentifier: 'com.example.notes',
-        cdHash: null,
-        displayName: 'Notes',
-        policyLanguage: 'en',
-        maximumMode: 'full_access_app',
-      },
-      identityDigest: 'a'.repeat(64),
+      identity: endToEndIdentity,
+      // The digest native would have produced, not an invented one: the controller binds the two
+      // halves of a profile together (T14), so a chosen digest describes a row that cannot exist.
+      identityDigest: endToEndIdentity.identityDigest,
       version: null,
       executableDigest: 'b'.repeat(64),
       mode: 'full_access_app' as const,
@@ -1239,7 +1254,7 @@ describe('Computer Use target tools end to end', () => {
     // The catalog carries a target tool, so the warning sentence must accompany it.
     expect(computerTargetSystemPromptFor(snapshot.entries)).toBe(COMPUTER_TARGET_SYSTEM_PROMPT);
     // The window title travels only under a grant whose egress consent names this destination.
-    controller.createAppGrant(profile.identity, {
+    controller.createAppGrant(computerAppGrantIdentityFrom(profile.identity)!, {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
@@ -1366,7 +1381,7 @@ describe('Computer Use target tools end to end', () => {
       computerTargets: true,
       toolSurface: 'computer-targets-only',
     });
-    fixture.controller.createAppGrant(fixture.profile.identity, {
+    fixture.controller.createAppGrant(computerAppGrantIdentityFrom(fixture.profile.identity)!, {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });

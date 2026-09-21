@@ -74,6 +74,8 @@ import {
 import {
   computerAppGrantIdentityFrom,
   computerAppGrantMismatch,
+  computerAppNativeIdentityDigest,
+  normalizeExecutablePath,
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
 import {
@@ -872,14 +874,43 @@ export class ComputerUseController {
    */
 
   /**
-   * The grant identity for a stored application profile, or null when no grant is possible.
+   * The one gate every agent-route grant decision goes through (T14).
    *
-   * The single place "may this application be granted at all?" is decided. Null covers an identity
-   * that cannot be pinned down (§6.2) and an application the current deny ruleset forbids (§3),
-   * because every caller does the same thing with both: treat the application as ungranted.
+   * A profile row has two halves that nothing used to tie together. Native verifies the top-level
+   * `identityDigest` and `canonicalPath` — those are the facts it re-derives from the running
+   * process and refuses to proceed on when they move. The grant is matched on `identity_json`,
+   * which native never reads and no MAC covers. Rewriting the JSON alone therefore let native
+   * vouch for VS Code while `appGrantState` answered with TextEdit's grant, and its provider-egress
+   * consent, and `computer_start` sent VS Code's screen with no card.
+   *
+   * So the gate: the JSON may only speak for this profile when it *is* this profile. Four checks,
+   * and the deny ruleset on top.
+   *
+   * The panel route deliberately does not come through here. It takes a trusted click every time
+   * and reads no grant, so its authority is the click rather than anything in this row.
    */
-  appGrantIdentityFor(identity: unknown): ComputerAppGrantIdentity | null {
-    return computerUseAppIdentityIsDenied(identity) ? null : computerAppGrantIdentityFrom(identity);
+  private boundGrantIdentity(profile: ComputerAppProfileRecord): ComputerAppGrantIdentity | null {
+    const identity = profile.identity;
+    // The JSON's own claim about which row it belongs to.
+    if (identity['identityDigest'] !== profile.identityDigest) return null;
+    // The deny ruleset is deliberately *not* applied here, and it has to be that way: `appGrantFor`
+    // needs an identity for a newly forbidden class in order to *revoke* its row (§6.3, T3), and
+    // returning null would leave that row standing. Every caller applies it — `appGrantState` and
+    // `startForAgent` up front, `appGrantFor` through the mismatch, the card through its recorded
+    // `denied` fact, and `createAppGrant` as a belt.
+    const derived = computerAppGrantIdentityFrom(identity);
+    if (derived === null) return null;
+    if (derived.platform !== profile.platform) return null;
+    // The digest native actually verified, recomputed from the JSON under the JSON's own signing
+    // class. This is the check that makes the two halves one application.
+    if (computerAppNativeIdentityDigest(identity, derived) !== profile.identityDigest) return null;
+    // And the other fact native re-derives. The macOS signed formula leaves the path out on purpose
+    // (so an update keeps the grant), so the digest alone would let a copy elsewhere answer for the
+    // row whose path native checked.
+    return normalizeExecutablePath(derived.platform, profile.canonicalPath) ===
+      derived.executablePath
+      ? derived
+      : null;
   }
 
   /**
@@ -889,8 +920,9 @@ export class ComputerUseController {
    * moved since it was written describes a different application, and a row whose class the ruleset
    * now forbids is revoked here rather than being allowed to survive until something asks again.
    */
-  appGrantFor(identity: unknown): ComputerAppGrantRecord | null {
-    const derived = computerAppGrantIdentityFrom(identity);
+  appGrantFor(profile: ComputerAppProfileRecord): ComputerAppGrantRecord | null {
+    // Through the gate, so the JSON these fields come from is the one native verified (T14).
+    const derived = this.boundGrantIdentity(profile);
     if (derived === null) return null;
     const stored = this.deps.persistence.findComputerAppGrantByIdentity(
       derived.platform,
@@ -900,7 +932,7 @@ export class ComputerUseController {
     const mismatch = computerAppGrantMismatch(
       computerAppGrantStoredIdentity(stored),
       derived,
-      computerUseAppIdentityIsDenied(identity),
+      computerUseAppIdentityIsDenied(profile.identity),
     );
     if (mismatch === null) return stored;
     // A newly denied class is revoked outright — the user is not asked again (§6.3, T3). Every
@@ -1005,15 +1037,28 @@ export class ComputerUseController {
    * cannot derive or that the ruleset denies, so a mis-wired caller cannot widen the deny list.
    */
   createAppGrant(
-    identity: unknown,
+    identity: ComputerAppGrantIdentity,
     input: Readonly<{
       displayName?: string | undefined;
       maxMode: ComputerUseMode;
       providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
     }>,
   ): ComputerAppGrantRecord {
-    const derived = this.appGrantIdentityFor(identity);
-    if (derived === null) throw new Error('Computer Use application cannot be granted');
+    // An identity that already came out of `boundGrantIdentity`, never raw JSON: the caller holds
+    // the one the card was re-verified against, and re-deriving here would be a second derivation
+    // that nothing had bound to the profile native verified (T14).
+    const derived = identity;
+    // The gate already applied the deny ruleset to the whole record; this is the belt, over the
+    // attributes a grant identity still carries, so a mis-wired caller cannot widen the deny list.
+    if (
+      computerUseAppIdentityIsDenied({
+        platform: derived.platform,
+        bundleId: derived.platform === 'darwin' ? derived.appId : null,
+        packageFamilyName: derived.packageFamilyName,
+        executablePath: derived.executablePath,
+      })
+    )
+      throw new Error('Computer Use application cannot be granted');
     return this.deps.persistence.createComputerAppGrant({
       identity: derived,
       // Sanitised before it is stored as well as before it is shown. Storing the raw string would
@@ -1076,17 +1121,20 @@ export class ComputerUseController {
       [...this.sessions.values()]
         .filter(
           (session) =>
-            computerAppGrantIdentityFrom(session.profile.identity)?.grantIdentityDigest ===
+            this.boundGrantIdentity(session.profile)?.grantIdentityDigest ===
             grant.grantIdentityDigest,
         )
         .map((session) => this.stop(session.status.sessionId, 'policy_changed')),
     );
   }
 
-  /** Marks a grant used now, and records a signed application having been updated (§6.2.1). */
-  touchAppGrantUsed(identity: unknown): void {
-    const derived = computerAppGrantIdentityFrom(identity);
-    if (derived === null) return;
+  /**
+   * Marks a grant used now, and records a signed application having been updated (§6.2.1).
+   *
+   * Takes the identity the gate produced rather than a profile: every caller already holds one,
+   * and re-deriving from raw JSON here would be a way back around the binding.
+   */
+  touchAppGrantUsed(derived: ComputerAppGrantIdentity): void {
     const stored = this.deps.persistence.findComputerAppGrantByIdentity(
       derived.platform,
       derived.grantIdentityDigest,
@@ -1102,9 +1150,8 @@ export class ComputerUseController {
   private profileGrantIdentityDigest(profileId: string): string | null {
     try {
       return (
-        computerAppGrantIdentityFrom(
-          this.deps.persistence.getComputerAppProfile(profileId).identity,
-        )?.grantIdentityDigest ?? null
+        this.boundGrantIdentity(this.deps.persistence.getComputerAppProfile(profileId))
+          ?.grantIdentityDigest ?? null
       );
     } catch {
       return null;
@@ -1131,7 +1178,7 @@ export class ComputerUseController {
     // `listTargets` already filters these out before asking, so this is the belt rather than the
     // braces — but a future caller that forgets the filter must not be handed a granted terminal.
     if (computerUseAppIdentityIsDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
-    const grant = this.appGrantFor(profile.identity);
+    const grant = this.appGrantFor(profile);
     if (grant !== null)
       return Object.freeze({
         granted: true,
@@ -1181,7 +1228,7 @@ export class ComputerUseController {
   ): TaskScopedAppGrant | null {
     const scoped = this.taskScopedGrants.get(taskId);
     if (scoped === undefined) return null;
-    const identity = computerAppGrantIdentityFrom(profile.identity);
+    const identity = this.boundGrantIdentity(profile);
     if (identity === null) return null;
     const key = this.taskScopedGrantKey(identity);
     const entry = scoped.get(key);
@@ -1555,7 +1602,7 @@ export class ComputerUseController {
     }
     const profile = profiles.find((candidate) => candidate.id === profileId);
     if (profile === undefined) return this.accessRefused('access_request_invalid_token');
-    const identity = this.appGrantIdentityFor(profile.identity);
+    const identity = this.boundGrantIdentity(profile);
     if (identity === null) return this.accessRefused('access_request_invalid_token');
     const egressBinding =
       this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
@@ -1680,7 +1727,7 @@ export class ComputerUseController {
     } catch {
       return null;
     }
-    const identity = computerAppGrantIdentityFrom(profile.identity);
+    const identity = this.boundGrantIdentity(profile);
     if (identity === null) return null;
     // From this enumeration, not from the store: the attested ceiling is one of the facts, and a
     // native boundary that has lowered it since the card was raised has to stop the grant.
@@ -1910,7 +1957,7 @@ export class ComputerUseController {
         return;
       }
     } else if (input.decision === 'allow_always')
-      this.createAppGrant(observed.profile.identity, {
+      this.createAppGrant(observed.identity, {
         displayName: pending.displayName,
         maxMode: observed.facts.maximumMode,
         providerEgress: pending.providerEgress,
@@ -2102,7 +2149,7 @@ export class ComputerUseController {
       state.providerEgress.modelId !== egressBinding.modelId
     )
       throw new Error('Computer Use provider egress consent is missing for this model');
-    const identity = computerAppGrantIdentityFrom(profile.identity);
+    const identity = this.boundGrantIdentity(profile);
     if (identity === null) throw new Error('Computer Use target token is not valid');
     // Checked around every await from here on, not only once the session exists. Native enumeration
     // is the slow part of this path, and a Turn cancelled during it must not go on to focus a
@@ -2181,7 +2228,7 @@ export class ComputerUseController {
         signal,
       );
       // Only a session that actually started counts as use (§6.2.1).
-      if (state.scope === 'grant') this.touchAppGrantUsed(observed.profile.identity);
+      if (state.scope === 'grant') this.touchAppGrantUsed(observed.identity);
       // Nothing runs between `start` resolving and this line, so anything the session has already
       // published is in `seen`, and anything later arrives through `onSettled`.
       const already = seen.get(status.sessionId) ?? status;
