@@ -5607,14 +5607,29 @@ export const computerAppAccessRequestViewSchema = z
   .strict();
 export type ComputerAppAccessRequestView = z.infer<typeof computerAppAccessRequestViewSchema>;
 
+/**
+ * How long the settings lists may be, shared by the schema and by whoever builds them.
+ *
+ * Exported because a producer that does not know the bound will eventually exceed it, and this
+ * envelope is not decoration: it carries the grant list, and it is what `revoke` and the cleanup
+ * answer with. A 65th row in an auxiliary history must not be able to make the list that the user
+ * revokes permissions from fail to parse. The producer orders by recency and truncates; the schema
+ * is the check that it did.
+ */
+export const COMPUTER_USE_GRANT_LIST_LIMIT = 64;
+export const COMPUTER_USE_REQUESTED_APP_LIST_LIMIT = 64;
+
 export const computerUseGrantListResultSchema = z
   .object({
-    grants: z.array(computerAppGrantViewSchema).max(64),
+    grants: z.array(computerAppGrantViewSchema).max(COMPUTER_USE_GRANT_LIST_LIMIT),
     /** Rows whose MAC did not verify and were discarded (T14). A count, never their content. */
     discardedRecords: z.number().int().nonnegative(),
     /** Applications the agent asked about but never received a grant for. Empty by default so
      * every existing producer and stored payload stays valid. */
-    requestedApps: z.array(computerAppAccessRequestViewSchema).max(64).default([]),
+    requestedApps: z
+      .array(computerAppAccessRequestViewSchema)
+      .max(COMPUTER_USE_REQUESTED_APP_LIST_LIMIT)
+      .default([]),
   })
   .strict();
 export type ComputerUseGrantListResult = z.infer<typeof computerUseGrantListResultSchema>;

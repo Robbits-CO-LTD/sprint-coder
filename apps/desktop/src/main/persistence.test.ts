@@ -10642,14 +10642,15 @@ if (runsWithElectronAbi)
         denialCount: 0,
         denied: false,
       });
+      // The refusal answers the card that was already counted; it is not a second ask.
       expect(record(fixture.persistence, task.id, 'denied')).toMatchObject({
-        requestCount: 2,
+        requestCount: 1,
         denialCount: 1,
         denied: true,
       });
       // A later request must not clear the refusal: §6.1 makes "no" final inside the Task.
       expect(record(fixture.persistence, task.id)).toMatchObject({
-        requestCount: 3,
+        requestCount: 2,
         denialCount: 1,
         denied: true,
       });
@@ -10661,7 +10662,7 @@ if (runsWithElectronAbi)
       expect(
         fixture.persistence.getComputerAppAccessRequest('darwin', digest, other.id),
       ).toBeNull();
-      expect(fixture.persistence.countComputerAppAccessRequestsForTask(task.id)).toBe(3);
+      expect(fixture.persistence.countComputerAppAccessRequestsForTask(task.id)).toBe(2);
       expect(fixture.persistence.countComputerAppAccessRequestsForTask(other.id)).toBe(0);
       record(fixture.persistence, other.id);
       expect(fixture.persistence.countComputerAppAccessRequestsForTask(other.id)).toBe(1);
@@ -10687,12 +10688,59 @@ if (runsWithElectronAbi)
           appId: 'com.example.notes',
           // The most recent name the application gave for itself.
           displayName: 'Notes (renamed)',
-          requestCount: 3,
+          // One card was shown, in the second Task, and refused. The first Task's row is a
+          // refusal with no card behind it, which is counted as a refusal and not as an ask.
+          requestCount: 1,
           denialCount: 2,
           lastRequestedAt: expect.any(String),
         },
       ]);
       expect(() => record(fixture.persistence, 'task-that-does-not-exist')).toThrow();
+      fixture.persistence.close();
+    });
+
+    it('counts a shown card once, and a refusal only as a refusal', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('Counting');
+      record(fixture.persistence, task.id);
+      record(fixture.persistence, task.id, 'denied');
+      // One card was shown and refused. Counting the refusal as a second request would spend two of
+      // the Task's five on one card and tell the settings screen the agent asked twice.
+      expect(
+        fixture.persistence.getComputerAppAccessRequest('darwin', digest, task.id),
+      ).toMatchObject({ requestCount: 1, denialCount: 1, denied: true });
+      expect(fixture.persistence.countComputerAppAccessRequestsForTask(task.id)).toBe(1);
+      // A refusal with no prior row means the card's own write never landed; it does not invent one.
+      const orphan = fixture.persistence.recordComputerAppAccessRequest({
+        platform: 'darwin',
+        grantIdentityDigest: 'b'.repeat(64),
+        taskId: task.id,
+        appId: 'com.example.other',
+        displayName: 'Other',
+        outcome: 'denied',
+      });
+      expect(orphan).toMatchObject({ requestCount: 0, denialCount: 1, denied: true });
+      expect(fixture.persistence.countComputerAppAccessRequestsForTask(task.id)).toBe(1);
+      fixture.persistence.close();
+    });
+
+    it('bounds the totals it returns, most recent first', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('Many applications');
+      for (let index = 0; index < 70; index += 1)
+        record(fixture.persistence, task.id, 'requested', {
+          grantIdentityDigest: index.toString(16).padStart(64, '0'),
+          appId: `com.example.app${index}`,
+          displayName: `App ${index}`,
+          // Ordered in time so "most recent first" is a fact rather than a tie-break.
+          now: new Date(Date.parse('2026-09-20T00:00:00.000Z') + index * 1_000).toISOString(),
+        });
+      const totals = fixture.persistence.listComputerAppAccessRequestTotals(10);
+      expect(totals).toHaveLength(10);
+      expect(totals[0]?.appId).toBe('com.example.app69');
+      expect(totals.at(-1)?.appId).toBe('com.example.app60');
+      // The default bound leaves room for a full grant table on top of the list the caller shows.
+      expect(fixture.persistence.listComputerAppAccessRequestTotals()).toHaveLength(70);
       fixture.persistence.close();
     });
 

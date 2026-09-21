@@ -47,6 +47,7 @@ import {
   type GraphStepInterruption,
 } from './graph-resource';
 import {
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
   graphGenerationSchema,
   graphMissionPlanSchema,
   teamMissionCheckpointSchema,
@@ -1098,6 +1099,15 @@ export type ComputerAppProfilePlatform = 'win32' | 'darwin';
 export const COMPUTER_USE_MAX_PROFILES = 64;
 /** The same ceiling as profiles: a list a person is expected to read and prune by hand. */
 export const COMPUTER_USE_MAX_GRANTS = 64;
+/**
+ * How many application histories one read of the totals may return.
+ *
+ * The settings screen shows the ungranted ones, so the caller asks for enough that a full grant
+ * table cannot crowd them out: every granted application may also have a history, and they are
+ * filtered out after the query.
+ */
+export const COMPUTER_USE_MAX_ACCESS_REQUEST_TOTALS =
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT + COMPUTER_USE_MAX_GRANTS;
 /**
  * The grant record format this build writes.
  *
@@ -5459,7 +5469,7 @@ export interface PersistenceClient {
     taskId: string,
   ): ComputerAppAccessRequestRecord | null;
   countComputerAppAccessRequestsForTask(taskId: string): number;
-  listComputerAppAccessRequestTotals(): readonly ComputerAppAccessRequestTotals[];
+  listComputerAppAccessRequestTotals(limit?: number): readonly ComputerAppAccessRequestTotals[];
   recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord;
   completeComputerActionAudit(input: {
     auditId: string;
@@ -14808,16 +14818,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.assertTask(input.taskId);
     const now = canonicalTimestamp(input.now ?? new Date().toISOString());
     const denied = input.outcome === 'denied' ? 1 : 0;
+    // The two outcomes count different things. `requested` means a card was shown, and that is what
+    // the per-Turn and per-Task ceilings are about; `denied` is the answer to a card that was
+    // already counted when it went up, so it moves only the refusal columns. Counting a refusal as
+    // a second request would spend two of the Task's five on one card and would tell the settings
+    // screen the agent asked twice.
+    //
+    // A refusal with no prior row inserts `request_count` 0 rather than 1: it means the card's own
+    // `requested` write did not land (the Task went away and came back, an older build), and
+    // inventing a request nobody can point at is worse than a counter that is one low.
+    const requested = denied === 1 ? 0 : 1;
     this.db
       .prepare(
         `INSERT INTO computer_app_access_requests(
            platform, grant_identity_digest, task_id, app_id, display_name,
            request_count, denial_count, denied, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(platform, grant_identity_digest, task_id) DO UPDATE SET
            app_id = excluded.app_id,
            display_name = excluded.display_name,
-           request_count = computer_app_access_requests.request_count + 1,
+           request_count = computer_app_access_requests.request_count + excluded.request_count,
            denial_count = computer_app_access_requests.denial_count + excluded.denial_count,
            denied = MAX(computer_app_access_requests.denied, excluded.denied),
            updated_at = excluded.updated_at`,
@@ -14828,6 +14848,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         input.taskId,
         input.appId.slice(0, 256),
         input.displayName.slice(0, 256),
+        requested,
         denied,
         denied,
         now,
@@ -14872,7 +14893,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * Grouped here rather than in Main so the sum is one statement over the index: the caller pairs
    * these with the grant rows and shows only the applications that never became one.
    */
-  listComputerAppAccessRequestTotals(): readonly ComputerAppAccessRequestTotals[] {
+  listComputerAppAccessRequestTotals(
+    limit = COMPUTER_USE_MAX_ACCESS_REQUEST_TOTALS,
+  ): readonly ComputerAppAccessRequestTotals[] {
+    // Most recent first and bounded in SQL. This table grows with every application the agent has
+    // ever asked about, across every Task, and nothing prunes it; the caller's envelope has a
+    // length the contract enforces, so the bound belongs here as well as there.
     const rows = this.db
       .prepare(
         `SELECT platform, grant_identity_digest,
@@ -14881,9 +14907,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
                 MAX(updated_at) AS last_requested_at
          FROM computer_app_access_requests
          GROUP BY platform, grant_identity_digest
-         ORDER BY platform, grant_identity_digest`,
+         ORDER BY last_requested_at DESC, platform, grant_identity_digest
+         LIMIT ?`,
       )
-      .all() as {
+      .all(Math.max(0, Math.trunc(limit))) as {
       platform: string;
       grant_identity_digest: string;
       request_count: number;

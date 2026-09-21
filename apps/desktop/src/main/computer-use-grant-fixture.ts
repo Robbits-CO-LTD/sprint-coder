@@ -62,7 +62,7 @@ export function createComputerAppGrantFixtureStore(
       taskId: string,
     ): ComputerAppAccessRequestRecord | null;
     countComputerAppAccessRequestsForTask(taskId: string): number;
-    listComputerAppAccessRequestTotals(): readonly ComputerAppAccessRequestTotals[];
+    listComputerAppAccessRequestTotals(limit?: number): readonly ComputerAppAccessRequestTotals[];
   }>;
 }> {
   const grants = new Map<string, ComputerAppGrantRecord>();
@@ -191,7 +191,9 @@ export function createComputerAppGrantFixtureStore(
           taskId: input.taskId,
           appId: input.appId,
           displayName: input.displayName,
-          requestCount: (current?.requestCount ?? 0) + 1,
+          // Only a card that was shown counts as a request; the refusal that answers it moves the
+          // refusal columns alone. Same rule as the SQLite store — see `recordComputerAppAccessRequest`.
+          requestCount: (current?.requestCount ?? 0) + (input.outcome === 'denied' ? 0 : 1),
           denialCount: (current?.denialCount ?? 0) + (input.outcome === 'denied' ? 1 : 0),
           // A refusal inside a Task is final for that Task; a later request cannot clear it.
           denied: (current?.denied ?? false) || input.outcome === 'denied',
@@ -207,7 +209,9 @@ export function createComputerAppGrantFixtureStore(
         [...accessRequests.values()]
           .filter((row) => row.taskId === taskId)
           .reduce((total, row) => total + row.requestCount, 0),
-      listComputerAppAccessRequestTotals: () => {
+      // Same contract as the store: most recent first, and bounded. A fixture that returns them in
+      // insertion order would let a caller's truncation look correct while dropping the wrong ones.
+      listComputerAppAccessRequestTotals: (limit = Number.MAX_SAFE_INTEGER) => {
         const totals = new Map<string, ComputerAppAccessRequestTotals>();
         for (const row of accessRequests.values()) {
           const key = `${row.platform}:${row.grantIdentityDigest}`;
@@ -228,7 +232,13 @@ export function createComputerAppGrantFixtureStore(
             }),
           );
         }
-        return [...totals.values()];
+        return [...totals.values()]
+          .sort((left, right) =>
+            left.lastRequestedAt === right.lastRequestedAt
+              ? left.grantIdentityDigest.localeCompare(right.grantIdentityDigest)
+              : right.lastRequestedAt.localeCompare(left.lastRequestedAt),
+          )
+          .slice(0, Math.max(0, Math.trunc(limit)));
       },
     },
   };
