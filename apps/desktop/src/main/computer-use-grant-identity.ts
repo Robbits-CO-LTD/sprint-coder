@@ -190,6 +190,78 @@ export function computerAppGrantIdentityFrom(identity: unknown): ComputerAppGran
 }
 
 /**
+ * Recomputes the digest the native boundary would have produced for this identity record (T14).
+ *
+ * The grant is matched on fields read out of `computer_app_profiles.identity_json`, which carries
+ * no MAC; native verifies the row's top-level `identity_digest` and `canonical_path` and never
+ * looks inside that JSON. Nothing tied the two together, so rewriting the JSON alone — keeping one
+ * application's verified top-level digest and putting another's signing facts inside — made native
+ * vouch for application A while the grant lookup answered with application B's permission and its
+ * provider-egress consent. Recomputing the digest from the JSON and comparing it against the field
+ * native actually verified is what closes that: the JSON now has to describe the same application.
+ *
+ * Mirrors the native formulas exactly, on the raw strings, with no trimming:
+ * - macOS `computer_use_macos.mm` `BuildIdentityFacts` (~:664). Signed:
+ *   `sha256("computer-app-identity-v2\n" + bundleId + "\n" + teamId + "\n" + signingIdentifier)`.
+ *   Unsigned: `sha256("computer-app-identity-v2-unsigned\n" + bundleId + "\n" + executableDigest)`.
+ *   `IdentityObjectFromFacts` (~:690) emits `teamId`/`signingIdentifier` as strings — possibly
+ *   empty — when the target is signed and as `null` when it is not, so "is a string" is how the
+ *   record carries native's own signed/unsigned answer.
+ * - Windows `computer_use_windows_host.cc` (~:883). Unsigned:
+ *   `sha256("computer-win-identity-v1-unsigned\n" + executableDigest)`. Signed:
+ *   `sha256("computer-win-identity-v1-signed\n" + asciiLowercase(path_utf8) + "\n" + signerDigest)`.
+ *   `WindowsIdentityJson` (~:1038) writes that same `path_utf8` as `executablePath`, unchanged, and
+ *   `signerDigest` as `null` when there is no signature. Only ASCII `A`–`Z` fold, which is what the
+ *   native loop does — not a Unicode lowercase.
+ *
+ * **The formula is chosen by the grant's own signing class, never by trying both.** "Either one
+ * matches" would let an unsigned application that calls itself `com.apple.TextEdit` satisfy the
+ * unsigned formula while its JSON also claims TextEdit's Team ID, and so pick up TextEdit's
+ * `verified-signed` grant. Where the two answers can legitimately differ — native signed the target
+ * but both signing strings came back empty, so the derivation below reads it as unverified — there
+ * is no formula that is safely applicable and the answer is null: no grant is possible.
+ */
+export function computerAppNativeIdentityDigest(
+  identity: unknown,
+  derived: ComputerAppGrantIdentity,
+): string | null {
+  if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return null;
+  const record = identity as Record<string, unknown>;
+  // Raw, because native hashed raw: the derivation trims and folds empty to null for its own
+  // fields, and reusing those values here would hash something native never saw.
+  const raw = (key: string): string => (typeof record[key] === 'string' ? record[key] : '');
+  const present = (key: string): boolean => typeof record[key] === 'string';
+  const signed = derived.identityKind === 'verified-signed';
+  if (derived.platform === 'darwin') {
+    // Native's answer, as the record carries it. Disagreement in either direction is fatal.
+    if (signed !== (present('teamId') || present('signingIdentifier'))) return null;
+    return signed
+      ? nativeDigest(
+          `computer-app-identity-v2\n${raw('bundleId')}\n${raw('teamId')}\n${raw('signingIdentifier')}`,
+        )
+      : nativeDigest(
+          `computer-app-identity-v2-unsigned\n${raw('bundleId')}\n${raw('executableDigest')}`,
+        );
+  }
+  if (signed !== present('signerDigest')) return null;
+  return signed
+    ? nativeDigest(
+        `computer-win-identity-v1-signed\n${asciiLowercase(raw('executablePath'))}\n${raw('signerDigest')}`,
+      )
+    : nativeDigest(`computer-win-identity-v1-unsigned\n${raw('executableDigest')}`);
+}
+
+/** Plain SHA-256 hex of the UTF-8 bytes, matching `StringDigest` / `Sha256String`. */
+function nativeDigest(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/** `A`–`Z` only, exactly the byte loop the Windows host runs — never a Unicode lowercase. */
+function asciiLowercase(value: string): string {
+  return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+}
+
+/**
  * Whether a stored grant still describes the application observed now.
  *
  * Whole-identity equality over an explicit field list, not a deep compare: see the lists above for

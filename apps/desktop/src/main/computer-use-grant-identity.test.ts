@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   computerAppGrantCodeChanged,
   computerAppGrantIdentityFrom,
   computerAppGrantIdentityMatches,
   computerAppGrantMismatch,
+  computerAppNativeIdentityDigest,
   normalizeExecutablePath,
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
@@ -230,5 +232,98 @@ describe('grant identity derivation', () => {
     expect(normalizeExecutablePath('darwin', '/Applications/Notes')).not.toBe(
       normalizeExecutablePath('darwin', '/applications/notes'),
     );
+  });
+});
+
+/**
+ * The digest native itself would have produced, recomputed from the identity record (T14).
+ *
+ * Every expected value below is built in the test from `node:crypto`, not taken from the
+ * implementation: a test that called the same helper would only prove it is consistent with itself,
+ * and what matters is that it agrees with two C++ files it cannot import.
+ */
+describe('native identity digest recomputation', () => {
+  const sha256 = (value: string): string =>
+    createHash('sha256').update(value, 'utf8').digest('hex');
+  const digestOf = (identity: Record<string, unknown>): string | null =>
+    computerAppNativeIdentityDigest(identity, derive(identity));
+
+  it('mirrors the macOS signed formula', () => {
+    // computer_use_macos.mm BuildIdentityFacts: bundle id, Team ID, signing identifier.
+    expect(digestOf(macIdentity())).toBe(
+      sha256('computer-app-identity-v2\ncom.example.notes\nTEAMID1234\ncom.example.notes'),
+    );
+    // Raw strings, not the trimmed ones the grant identity keeps: native hashed what it read.
+    expect(digestOf(macIdentity({ teamId: ' TEAMID1234 ' }))).toBe(
+      sha256('computer-app-identity-v2\ncom.example.notes\n TEAMID1234 \ncom.example.notes'),
+    );
+    // A signed target with one empty string is still signed, and the empty string is hashed.
+    expect(digestOf(macIdentity({ signingIdentifier: '' }))).toBe(
+      sha256('computer-app-identity-v2\ncom.example.notes\nTEAMID1234\n'),
+    );
+  });
+
+  it('mirrors the macOS unsigned formula', () => {
+    const unsigned = macIdentity({ teamId: null, signingIdentifier: null });
+    expect(digestOf(unsigned)).toBe(
+      sha256(`computer-app-identity-v2-unsigned\ncom.example.notes\n${'b'.repeat(64)}`),
+    );
+  });
+
+  it('mirrors both Windows formulas, folding only ASCII in the path', () => {
+    expect(digestOf(winIdentity({ signerDigest: null }))).toBe(
+      sha256(`computer-win-identity-v1-unsigned\n${'b'.repeat(64)}`),
+    );
+    // computer_use_windows_host.cc lowercases bytes 'A'-'Z' only — not a Unicode lowercase — and
+    // `WindowsIdentityJson` writes that same `path_utf8` as `executablePath`.
+    expect(digestOf(winIdentity())).toBe(
+      sha256(
+        `computer-win-identity-v1-signed\nc:\\program files\\example\\notes.exe\n${'d'.repeat(64)}`,
+      ),
+    );
+    const turkish = winIdentity({ executablePath: 'C:\\İstanbul\\Notes.exe' });
+    expect(digestOf(turkish)).toBe(
+      sha256(`computer-win-identity-v1-signed\nc:\\İstanbul\\notes.exe\n${'d'.repeat(64)}`),
+    );
+    // A Unicode lowercase would have folded the dotted capital I; native does not.
+    expect(digestOf(turkish)).not.toBe(
+      sha256(
+        `computer-win-identity-v1-signed\n${'C:\\İstanbul\\Notes.exe'.toLowerCase()}\n${'d'.repeat(64)}`,
+      ),
+    );
+  });
+
+  it('picks the formula from the signing class, never by trying both', () => {
+    // The attack the strictness is for: an unsigned application that calls itself TextEdit and
+    // also claims TextEdit's Team ID. Native saw no signature, so it used the unsigned formula;
+    // the grant derivation reads the Team ID and calls it `verified-signed`. Answering with
+    // whichever formula happens to match would hand it TextEdit's signed grant.
+    const forged = macIdentity({ teamId: 'APPLETEAMID', signingIdentifier: 'com.apple.TextEdit' });
+    const asUnsigned = sha256(
+      `computer-app-identity-v2-unsigned\ncom.example.notes\n${'b'.repeat(64)}`,
+    );
+    expect(digestOf(forged)).not.toBe(asUnsigned);
+
+    // And the case where the two answers legitimately differ: native signed the target but both
+    // signing strings came back empty, so the derivation reads it as unverified. There is no
+    // formula that is safe to apply, and the answer is null — no grant is possible.
+    const emptySigned = macIdentity({ teamId: '', signingIdentifier: '' });
+    expect(derive(emptySigned).identityKind).toBe('unverified');
+    expect(digestOf(emptySigned)).toBeNull();
+    // The mirror on Windows: a signer digest the derivation cannot read as one.
+    const unreadableSigner = winIdentity({ signerDigest: 'not-a-digest' });
+    expect(derive(unreadableSigner).identityKind).toBe('unverified');
+    expect(digestOf(unreadableSigner)).toBeNull();
+  });
+
+  it('refuses a record whose signing class the JSON contradicts', () => {
+    // `IdentityObjectFromFacts` emits these as strings when signed and null when not, so "is a
+    // string" is how the record carries native's own answer. An unsigned record that still names a
+    // Team ID is not something native produces.
+    const derived = derive(macIdentity({ teamId: null, signingIdentifier: null }));
+    expect(
+      computerAppNativeIdentityDigest(macIdentity({ signingIdentifier: null }), derived),
+    ).toBeNull();
+    expect(computerAppNativeIdentityDigest('not an object', derived)).toBeNull();
   });
 });
