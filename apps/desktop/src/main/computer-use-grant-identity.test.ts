@@ -117,6 +117,61 @@ describe('grant identity derivation', () => {
     ).toBe(packaged.grantIdentityDigest);
   });
 
+  it('keeps a Windows package grant across a servicing update, and only for packages', () => {
+    // `WindowsApps\<PackageFullName>_<version>_<arch>__<publisherId>\` puts the version in the
+    // directory name, so comparing the path would re-ask for permission on every Store update.
+    const packaged = derive(
+      winIdentity({
+        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+        executablePath:
+          'C:\\Program Files\\WindowsApps\\Example.Notes_1.0.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
+      }),
+    );
+    const updated = derive(
+      winIdentity({
+        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+        executablePath:
+          'C:\\Program Files\\WindowsApps\\Example.Notes_1.1.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
+        // A signed application's executable bytes move on every update and are not compared.
+        executableDigest: 'f'.repeat(64),
+      }),
+    );
+    expect(computerAppGrantMismatch(packaged, updated, false)).toBeNull();
+    expect(computerAppGrantIdentityMatches(packaged, updated)).toBe(true);
+    // A different signer is still a different application, path or no path.
+    expect(
+      computerAppGrantMismatch(
+        packaged,
+        derive(
+          winIdentity({
+            packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+            signerDigest: 'e'.repeat(64),
+          }),
+        ),
+        false,
+      ),
+    ).toBe('identity_changed');
+    // The other direction: a plain Win32 image keeps the path comparison, because "the same signer
+    // in a different directory" really is a different application there.
+    const image = derive(winIdentity());
+    expect(
+      computerAppGrantMismatch(
+        { ...image, executablePath: 'c:\\program files\\example\\moved\\notes.exe' },
+        image,
+        false,
+      ),
+    ).toBe('identity_changed');
+    // And an unsigned Windows application, whose identity is the path and the bytes.
+    const unsigned = derive(winIdentity({ signerDigest: null }));
+    expect(
+      computerAppGrantMismatch(
+        { ...unsigned, executablePath: 'c:\\other\\notes.exe' },
+        unsigned,
+        false,
+      ),
+    ).toBe('identity_changed');
+  });
+
   it('binds an unsigned application to its executable bytes', () => {
     const base = derive(macIdentity({ teamId: null, signingIdentifier: null }));
     const rebuilt = derive(

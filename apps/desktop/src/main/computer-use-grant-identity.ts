@@ -63,9 +63,10 @@ type GrantIdentityComparedField =
   // leaf + parent directory (Windows Win32), package family + signer digest (Windows package), and
   // executable path + executable digest (unverified).
   | 'grantIdentityDigest'
-  // Compared on top of the digest because the macOS derivation deliberately excludes the path, so
-  // that an ordinary in-place update keeps the grant. "Same signer, different location" is a
-  // different application (ADR v2 §6.3) and has to stop matching.
+  // Compared on top of the digest for every identity *except* a Windows package — see
+  // `grantIdentityComparesExecutablePath`. The macOS derivation deliberately excludes the path so
+  // that an ordinary in-place update keeps the grant, and "same signer, different location" is a
+  // different application (ADR v2 §6.3) which has to stop matching.
   | 'executablePath';
 
 /**
@@ -218,7 +219,8 @@ export function computerAppGrantMismatch(
     return 'signing_class_changed';
   if (
     stored.grantIdentityDigest !== observed.grantIdentityDigest ||
-    stored.executablePath !== observed.executablePath
+    (grantIdentityComparesExecutablePath(stored) &&
+      stored.executablePath !== observed.executablePath)
   )
     return 'identity_changed';
   if (
@@ -227,6 +229,28 @@ export function computerAppGrantMismatch(
   )
     return 'executable_changed';
   return null;
+}
+
+/**
+ * Whether the normalised executable path is part of this identity's equality.
+ *
+ * It is, for everything except a Windows packaged application. A package installs under
+ * `WindowsApps\<PackageFullName>_<version>_<arch>__<publisherId>\`, so the *version is in the
+ * directory name*: comparing the path would turn every ordinary Store update into
+ * `identity_changed` and re-ask for permission the user already gave. The package's own identity is
+ * stronger than a path anyway — package family name plus Authenticode signer are exactly what the
+ * digest is derived from, and neither can be forged by installing somewhere else.
+ *
+ * A non-package Win32 executable keeps the comparison: there, "the same signer, in a different
+ * directory" is a genuinely different application, and the parent directory is part of the digest
+ * precisely so that it is.
+ */
+function grantIdentityComparesExecutablePath(identity: ComputerAppGrantIdentity): boolean {
+  return !(
+    identity.platform === 'win32' &&
+    identity.identityKind === 'verified-signed' &&
+    identity.packageFamilyName !== null
+  );
 }
 
 /**
