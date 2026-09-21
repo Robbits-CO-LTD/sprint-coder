@@ -9183,6 +9183,7 @@ if (runsWithElectronAbi)
         { version: 90 },
         { version: 91 },
         { version: 92 },
+        { version: 93 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -10562,5 +10563,193 @@ if (runsWithElectronAbi)
       ).toThrow('Invalid Computer Use app grant');
       expect(fixture.persistence.listComputerAppGrants().grants).toEqual([]);
       fixture.persistence.close();
+    });
+
+    it('records a new destination without touching the application permission (§6.4)', () => {
+      const fixture = createPersistence();
+      const grant = createGrant(fixture.persistence, { maxMode: 'supervised' });
+      const moved = fixture.persistence.setComputerAppGrantProviderEgress(grant.id, {
+        connectionId: 'connection-2',
+        modelId: 'model-2',
+      });
+      expect(moved.providerEgressConnectionId).toBe('connection-2');
+      expect(moved.providerEgressModelId).toBe('model-2');
+      // A is untouched: the ceiling, the identity, and the counters are the user's earlier answer.
+      expect(moved.maxMode).toBe('supervised');
+      expect(moved.grantIdentityDigest).toBe(grant.grantIdentityDigest);
+      expect(moved.requestCount).toBe(grant.requestCount);
+      // Still authenticated after the rewrite, so it is still readable.
+      expect(fixture.persistence.getComputerAppGrant(grant.id)).toEqual(moved);
+      fixture.persistence.close();
+    });
+
+    it('removes rows that no longer authenticate only when asked to (T14)', () => {
+      const fixture = createPersistence();
+      const kept = createGrant(fixture.persistence);
+      const doomed = createGrant(fixture.persistence, {
+        identity: { ...identity, grantIdentityDigest: 'e'.repeat(64) },
+        maxMode: 'observe_only',
+      });
+      fixture.persistence.close();
+
+      const db = new Database(fixture.path);
+      db.prepare('UPDATE computer_app_grants SET max_mode = ? WHERE id = ?').run(
+        'full_access_app',
+        doomed.id,
+      );
+      db.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      // Reading never deletes: the discarded count is the only evidence the file was rewritten.
+      expect(reopened.listComputerAppGrants().discarded).toBe(1);
+      expect(reopened.listComputerAppGrants().discarded).toBe(1);
+
+      expect(reopened.purgeUnauthenticatedComputerAppGrants()).toBe(1);
+      expect(reopened.listComputerAppGrants()).toEqual({ grants: [kept], discarded: 0 });
+      // Idempotent, and a row that verifies is never this action's business.
+      expect(reopened.purgeUnauthenticatedComputerAppGrants()).toBe(0);
+      expect(reopened.getComputerAppGrant(kept.id)).toEqual(kept);
+      reopened.close();
+    });
+  });
+
+if (runsWithElectronAbi)
+  describe('Computer Use access requests (ADR v2 §6.1, T8)', () => {
+    const digest = 'a'.repeat(64);
+
+    function record(
+      persistence: SqlitePersistenceClient,
+      taskId: string,
+      outcome: 'requested' | 'denied' = 'requested',
+      overrides: Record<string, unknown> = {},
+    ) {
+      return persistence.recordComputerAppAccessRequest({
+        platform: 'darwin',
+        grantIdentityDigest: digest,
+        taskId,
+        appId: 'com.example.notes',
+        displayName: 'Notes',
+        outcome,
+        ...overrides,
+      });
+    }
+
+    it('counts per application per Task, and keeps a refusal final for that Task', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('Access requests');
+      expect(record(fixture.persistence, task.id)).toMatchObject({
+        requestCount: 1,
+        denialCount: 0,
+        denied: false,
+      });
+      expect(record(fixture.persistence, task.id, 'denied')).toMatchObject({
+        requestCount: 2,
+        denialCount: 1,
+        denied: true,
+      });
+      // A later request must not clear the refusal: §6.1 makes "no" final inside the Task.
+      expect(record(fixture.persistence, task.id)).toMatchObject({
+        requestCount: 3,
+        denialCount: 1,
+        denied: true,
+      });
+      expect(
+        fixture.persistence.getComputerAppAccessRequest('darwin', digest, task.id),
+      ).toMatchObject({ denied: true });
+      // Another Task starts clean, and the per-Task ceiling counts only its own.
+      const other = fixture.persistence.createTask('Another Task');
+      expect(
+        fixture.persistence.getComputerAppAccessRequest('darwin', digest, other.id),
+      ).toBeNull();
+      expect(fixture.persistence.countComputerAppAccessRequestsForTask(task.id)).toBe(3);
+      expect(fixture.persistence.countComputerAppAccessRequestsForTask(other.id)).toBe(0);
+      record(fixture.persistence, other.id);
+      expect(fixture.persistence.countComputerAppAccessRequestsForTask(other.id)).toBe(1);
+      fixture.persistence.close();
+    });
+
+    it('totals across Tasks for the settings screen, and refuses an unknown Task', () => {
+      const fixture = createPersistence();
+      const first = fixture.persistence.createTask('First');
+      const second = fixture.persistence.createTask('Second');
+      // Explicit timestamps: the name shown is the most recent one, and two rows written in the
+      // same millisecond would otherwise decide that by row order rather than by time.
+      record(fixture.persistence, first.id, 'denied', { now: '2026-09-20T00:00:00.000Z' });
+      record(fixture.persistence, second.id, 'requested', { now: '2026-09-20T00:00:01.000Z' });
+      record(fixture.persistence, second.id, 'denied', {
+        displayName: 'Notes (renamed)',
+        now: '2026-09-20T00:00:02.000Z',
+      });
+      expect(fixture.persistence.listComputerAppAccessRequestTotals()).toEqual([
+        {
+          platform: 'darwin',
+          grantIdentityDigest: digest,
+          appId: 'com.example.notes',
+          // The most recent name the application gave for itself.
+          displayName: 'Notes (renamed)',
+          requestCount: 3,
+          denialCount: 2,
+          lastRequestedAt: expect.any(String),
+        },
+      ]);
+      expect(() => record(fixture.persistence, 'task-that-does-not-exist')).toThrow();
+      fixture.persistence.close();
+    });
+
+    it('takes a Task-scoped refusal away with the Task', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('Doomed');
+      record(fixture.persistence, task.id, 'denied');
+      fixture.persistence.close();
+
+      // Tasks are archived rather than deleted today, so the cascade is exercised directly: it is
+      // the schema's promise that a refusal does not outlive the conversation it was made in.
+      const db = new Database(fixture.path);
+      db.pragma('foreign_keys = ON');
+      db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+      db.close();
+
+      const reopened = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      expect(reopened.getComputerAppAccessRequest('darwin', digest, task.id)).toBeNull();
+      expect(reopened.listComputerAppAccessRequestTotals()).toEqual([]);
+      reopened.close();
+    });
+
+    it('upgrades a database written before the table existed', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('Upgrade');
+      // An S3a database: grants exist, access requests do not.
+      const grant = fixture.persistence.createComputerAppGrant({
+        identity: computerAppGrantIdentityFrom({
+          platform: 'darwin',
+          identityDigest: 'a'.repeat(64),
+          bundleId: 'com.example.notes',
+          executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
+          executableDigest: 'b'.repeat(64),
+          teamId: 'TEAMID1234',
+          signingIdentifier: 'com.example.notes',
+          cdHash: null,
+          displayName: 'Notes',
+        })!,
+        displayName: 'Notes',
+        maxMode: 'full_access_app',
+        denyRulesetVersion: 1,
+        providerEgress: null,
+      });
+      fixture.persistence.close();
+
+      const old = new Database(fixture.path);
+      old.exec(
+        'DROP TABLE computer_app_access_requests; DELETE FROM schema_migrations WHERE version = 93;',
+      );
+      old.close();
+
+      const migrated = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+      // The grant survives the upgrade — its MAC does not depend on the new table — and the new
+      // table is usable straight away.
+      expect(migrated.getComputerAppGrant(grant.id)).toEqual(grant);
+      expect(migrated.listComputerAppAccessRequestTotals()).toEqual([]);
+      expect(record(migrated, task.id)).toMatchObject({ requestCount: 1 });
+      migrated.close();
     });
   });
