@@ -1,12 +1,17 @@
+import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   computerAppGrantRequestSchema,
   computerRequestAccessOutputSchema,
+  computerStartToolOutputSchema,
   computerUseAvailabilitySchema,
   type ComputerAppGrantDecision,
   type ComputerAppGrantRequest,
   type ComputerAppIdentity,
+  type ComputerUseAction,
   type ComputerUseAvailability,
+  type ComputerUseSessionStatus,
   type SelectableComputerTarget,
 } from '@sprint-coder/contracts';
 import { appGrantActivationIntent } from '../computer-use-activation-intent';
@@ -15,6 +20,7 @@ import {
   ComputerUseController,
   COMPUTER_USE_DENY_RULESET_VERSION,
   type ComputerUseNativeHost,
+  type ComputerUseNativeObservation,
   type ComputerUseNativeSession,
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
@@ -114,6 +120,74 @@ function nativeWindow(
 
 const context = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 } as const;
 
+const imageBytes = Buffer.from('89504e470d0a1a0a', 'hex');
+const imageDigest = createHash('sha256').update(imageBytes).digest('hex');
+
+/** The shape `acceptNativeObservation` accepts, so a fixture session can actually take rounds. */
+function observation(
+  sessionId: string,
+  revision: number,
+  now: number,
+): ComputerUseNativeObservation {
+  return {
+    sessionId,
+    appIdentityDigest: 'a'.repeat(64),
+    windowIdentityDigest: 'd'.repeat(64),
+    profileRevision: 3,
+    maximumMode: 'full_access_app',
+    policyLanguage: 'en',
+    screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+    revision,
+    observedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 20_000).toISOString(),
+    clientWidth: 800,
+    clientHeight: 600,
+    images: [
+      {
+        mimeType: 'image/png',
+        digest: imageDigest,
+        byteLength: imageBytes.byteLength,
+        width: 1,
+        height: 1,
+        base64: imageBytes.toString('base64'),
+      },
+    ],
+    treeDigest: null,
+    treeByteLength: 0,
+    treeDepth: 0,
+    treeNodeCount: 0,
+    focusedElementSignature: 'f'.repeat(64),
+    dialogSetRevision: 1,
+    dialogSetDigest: '1'.repeat(64),
+    activeWindowIdentityDigest: 'd'.repeat(64),
+    activeWindowKind: 'application',
+  } as ComputerUseNativeObservation;
+}
+
+/**
+ * Runs the clock until `pending` settles.
+ *
+ * A session takes rounds, and rounds sit on timers — the observation TTL, `wait`, the session's own
+ * expiry. Nothing here waits on wall-clock time; the loop simply keeps moving the injected clock
+ * until the call under test has an answer, and gives up rather than hanging if it never does.
+ */
+async function settle<T>(pending: Promise<T>, steps = 200, stepMs = 1_000): Promise<T> {
+  const sentinel = Symbol('pending');
+  const race = pending.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
+  for (let step = 0; step < steps; step += 1) {
+    const outcome = await Promise.race([race, Promise.resolve(sentinel)]);
+    if (outcome !== sentinel) {
+      if ('error' in outcome) throw outcome.error;
+      return outcome.value;
+    }
+    await vi.advanceTimersByTimeAsync(stepMs);
+  }
+  throw new Error('Computer Use fixture never settled');
+}
+
 function createFixture(
   options: {
     profiles?: readonly ComputerAppProfileRecord[];
@@ -122,6 +196,8 @@ function createFixture(
     agentDrivenEnabled?: boolean;
     publish?: boolean;
     startSessionGate?: Promise<void>;
+    /** What the inner planner answers each round. The default finishes the first round. */
+    plan?: (round: number) => Promise<ComputerUseAction>;
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
@@ -130,6 +206,11 @@ function createFixture(
   let policyEpoch = 0;
   let activeTurnId: string | null = context.turnId;
   let startedSessions = 0;
+  let observationRevision = 0;
+  let closedSessions = 0;
+  const audits = new Map<string, Record<string, unknown>>();
+  let plannedRounds = 0;
+  const statuses: ComputerUseSessionStatus[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
     pickApplication: async () => null,
@@ -151,12 +232,15 @@ function createFixture(
         screenBounds: { x: 0, y: 0, width: 800, height: 600 },
       } satisfies ComputerUseNativeSession;
     },
-    observe: async () => {
-      throw new Error('not used');
+    observe: async (session) => {
+      observationRevision += 1;
+      return observation(session.sessionId, observationRevision, Date.now());
     },
     dispatch: async () => ({ result: 'completed', reasonCode: null }),
     cancel: async () => undefined,
-    close: async () => undefined,
+    close: async () => {
+      closedSessions += 1;
+    },
   };
   const persistence = {
     listComputerAppProfiles: () => [...profiles],
@@ -169,9 +253,45 @@ function createFixture(
     updateComputerAppProfile: vi.fn(),
     removeComputerAppProfile: vi.fn(),
     ...grantStore.api,
-    recordComputerActionAudit: vi.fn(),
-    completeComputerActionAudit: vi.fn(),
-    listComputerActionAudits: () => [],
+    // A real enough audit store: `act` records before dispatch and completes afterwards, so a stub
+    // that answers undefined turns every round into an error and hides what the test is about.
+    recordComputerActionAudit: (input: Record<string, unknown>) => {
+      const existing = [...audits.values()].find(
+        (audit) =>
+          audit['sessionId'] === input['sessionId'] &&
+          audit['nativeRequestId'] === input['nativeRequestId'],
+      );
+      if (existing !== undefined) return existing;
+      const createdAt = (input['createdAt'] as string | undefined) ?? new Date().toISOString();
+      const record = {
+        ...input,
+        id: input['id'] ?? `audit-${audits.size + 1}`,
+        state: input['state'] ?? 'pending',
+        reasonCode: input['reasonCode'] ?? null,
+        createdAt,
+        updatedAt: createdAt,
+      } as Record<string, unknown>;
+      audits.set(record['id'] as string, record);
+      return record;
+    },
+    completeComputerActionAudit: (input: {
+      auditId: string;
+      state: string;
+      reasonCode?: string | null;
+      updatedAt: string;
+    }) => {
+      const current = audits.get(input.auditId);
+      if (current === undefined) throw new Error('audit missing');
+      const next = {
+        ...current,
+        state: input.state,
+        reasonCode: input.reasonCode ?? null,
+        updatedAt: input.updatedAt,
+      };
+      audits.set(input.auditId, next);
+      return next;
+    },
+    listComputerActionAudits: () => [...audits.values()],
     getActiveTurnId: () => activeTurnId,
     getPermissionPolicy: () => ({ policyEpoch }),
   } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'];
@@ -188,6 +308,16 @@ function createFixture(
         : options.providerBinding,
     currentPolicyEpoch: () => policyEpoch,
     repositionEmergencyStop: () => true,
+    publishStatus: (status) => statuses.push(status),
+    // A session with no planner never takes a round and never settles, so every fixture has one.
+    // The default answers `finish` immediately: the agent asked for a window, the session ran, and
+    // it ended — which is the shape `computer_start` returns.
+    planner: {
+      plan: async (): Promise<ComputerUseAction> => {
+        plannedRounds += 1;
+        return (await options.plan?.(plannedRounds)) ?? { type: 'finish' };
+      },
+    },
     ...(options.publish === false
       ? {}
       : { publishGrantRequest: (request) => published.push(request) }),
@@ -199,6 +329,9 @@ function createFixture(
     grants: grantStore.grants,
     accessRequests: grantStore.accessRequests,
     startedSessions: () => startedSessions,
+    plannedRounds: () => plannedRounds,
+    closedSessions: () => closedSessions,
+    statuses,
     setPolicyEpoch: (next: number) => {
       policyEpoch = next;
     },
@@ -560,6 +693,76 @@ describe('computer_request_access', () => {
       expect(fixture.grants.size).toBe(0);
     });
 
+  it('withdraws the card at once when the Turn is canceled', async () => {
+    const fixture = createFixture();
+    const target = await listOne(fixture);
+    const canceled = new AbortController();
+    const pending = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'ask' },
+      context,
+      canceled.signal,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.pending().state).toBe('pending');
+    canceled.abort(new Error('Turn canceled'));
+    // Not after the two-minute timeout: the single global slot is free immediately, so another
+    // Task can raise a card the user can actually answer.
+    expect(await pending).toEqual({ granted: false, reasonCode: 'access_request_withdrawn' });
+    expect(fixture.published.at(-1)).toMatchObject({ state: 'canceled', noticeCode: 'withdrawn' });
+
+    const second = await listOne(fixture);
+    const next = fixture.controller.requestAccess(
+      { appToken: second.appToken, reason: 'again' },
+      { ...context, turnId: 'turn-2' },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.pending().state).toBe('pending');
+    await vi.advanceTimersByTimeAsync(120_000);
+    await next;
+  });
+
+  it('never raises a card for a Turn that is already gone', async () => {
+    const fixture = createFixture();
+    const target = await listOne(fixture);
+    const canceled = new AbortController();
+    canceled.abort(new Error('Turn canceled'));
+    expect(
+      await fixture.controller.requestAccess(
+        { appToken: target.appToken, reason: 'ask' },
+        context,
+        canceled.signal,
+      ),
+    ).toEqual({ granted: false, reasonCode: 'access_request_withdrawn' });
+    expect(fixture.published).toHaveLength(0);
+    // And it is not charged against the ceilings, because no card was shown.
+    expect(fixture.accessRequests.size).toBe(0);
+  });
+
+  it('settles a refusal even when the application is gone from the store', async () => {
+    const fixture = createFixture();
+    const target = await listOne(fixture);
+    const pending = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'ask' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    // The profile is removed while the card is on screen. Refusing must still work: a "no" that
+    // throws leaves the card pending and the one global slot taken for two minutes.
+    fixture.profiles.length = 0;
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+      null,
+    );
+    expect(await pending).toEqual({ granted: false, reasonCode: 'access_request_denied' });
+    expect(fixture.published.at(-1)).toMatchObject({ state: 'resolved', decision: 'deny' });
+    // The refusal is still recorded against the identity the card showed.
+    expect([...fixture.accessRequests.values()][0]).toMatchObject({
+      appId: 'com.example.notes',
+      denied: true,
+    });
+  });
+
   it('refuses a click whose intent does not match the card', async () => {
     const fixture = createFixture();
     const target = await listOne(fixture);
@@ -751,30 +954,201 @@ describe('computer_request_access', () => {
 });
 
 describe('computer_start', () => {
-  async function grantAndList(
-    fixture: ReturnType<typeof createFixture>,
-  ): Promise<SelectableComputerTarget> {
+  function grantFor(fixture: ReturnType<typeof createFixture>): void {
     fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
+  }
+
+  async function grantAndList(
+    fixture: ReturnType<typeof createFixture>,
+  ): Promise<SelectableComputerTarget> {
+    grantFor(fixture);
     return await listOne(fixture);
   }
 
-  it('starts one session on the window the token named', async () => {
+  /** A planner that parks the session on the given round until the test lets it go. */
+  function heldPlanner(round = 1): {
+    plan: (round: number) => Promise<ComputerUseAction>;
+    release: () => void;
+  } {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return {
+      plan: async (current) => {
+        if (current >= round) await held;
+        return { type: 'finish' };
+      },
+      release,
+    };
+  }
+
+  /** The session id of the running session, taken from what Main published. */
+  function runningSessionId(fixture: ReturnType<typeof createFixture>): string {
+    const id = fixture.statuses.at(-1)?.sessionId;
+    if (id === undefined) throw new Error('no session was published');
+    return id;
+  }
+
+  it('runs the session and returns only once it has ended', async () => {
     const fixture = createFixture();
     const target = await grantAndList(fixture);
-    const status = await fixture.controller.startForAgent(
-      { targetToken: target.targetToken, goal: 'Copy the table into Numbers' },
-      context,
+    const output = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: target.targetToken, goal: 'Copy the table into Numbers' },
+        context,
+      ),
     );
-    expect(status.taskId).toBe('task-1');
-    expect(status.mode).toBe('full_access_app');
+    expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
+    expect(output).toEqual({
+      sessionId: expect.any(String),
+      state: 'stopped',
+      stopReason: 'user_stop',
+      mode: 'full_access_app',
+      round: 1,
+      maxRounds: 25,
+    });
     expect(fixture.startedSessions()).toBe(1);
     // Using the grant is what marks it used, not asking about it.
     expect([...fixture.grants.values()][0]?.lastUsedAt).not.toBeNull();
-    // No handle, path, or process id crosses the boundary.
-    expect(JSON.stringify(status)).not.toContain('native-window-');
+  });
+
+  it('returns a projection narrow enough to write into the conversation', async () => {
+    const fixture = createFixture();
+    const target = await grantAndList(fixture);
+    const output = await settle(
+      fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+    );
+    // A tool result is durable. The pending approval carries a live-only excerpt of the target's
+    // screen, and the digests, ids and paths are either re-verification inputs or V1 privacy
+    // boundaries — none of them may be written into the conversation (§8).
+    expect(Object.keys(output).sort()).toEqual([
+      'maxRounds',
+      'mode',
+      'round',
+      'sessionId',
+      'state',
+      'stopReason',
+    ]);
+    const serialized = JSON.stringify(output);
+    for (const leak of [
+      'pendingApproval',
+      'appIdentityDigest',
+      'windowIdentityDigest',
+      'profileId',
+      'profileRevision',
+      'connectionId',
+      'modelId',
+      'taskId',
+      'native-window-',
+      '/Applications/',
+    ])
+      expect(serialized).not.toContain(leak);
+    // The full status still exists for the UI; it is simply not what the model is handed.
+    expect(fixture.statuses.at(-1)).toHaveProperty('appIdentityDigest');
+  });
+
+  it('does not return while the session is still taking rounds', async () => {
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
+    const target = await grantAndList(fixture);
+    let settled = false;
+    const running = fixture.controller
+      .startForAgent({ targetToken: target.targetToken, goal: 'x' }, context)
+      .then((output) => {
+        settled = true;
+        return output;
+      });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settled).toBe(false);
+    expect(fixture.controller.getStatus(runningSessionId(fixture))).not.toBeNull();
+    planner.release();
+    expect(await settle(running)).toMatchObject({ state: 'stopped', stopReason: 'user_stop' });
+  });
+
+  it('stops the session and rejects when the Turn is canceled', async () => {
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
+    const target = await grantAndList(fixture);
+    const canceled = new AbortController();
+    const running = fixture.controller
+      .startForAgent({ targetToken: target.targetToken, goal: 'x' }, context, canceled.signal)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await vi.advanceTimersByTimeAsync(1_000);
+    const sessionId = runningSessionId(fixture);
+    canceled.abort(new Error('Turn canceled'));
+    expect(await settle(running)).toBeInstanceOf(Error);
+    // Native is told, not just forgotten: the stop path cancels and closes the session.
+    expect(fixture.closedSessions()).toBe(1);
+    expect(fixture.controller.getStatus(sessionId)).toBeNull();
+    planner.release();
+  });
+
+  it('returns a stopped status when the emergency stop fires while it waits', async () => {
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
+    const target = await grantAndList(fixture);
+    const running = fixture.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'x' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    void fixture.controller.stop(runningSessionId(fixture), 'emergency_stop');
+    expect(await settle(running)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'emergency_stop',
+    });
+    planner.release();
+  });
+
+  it('returns when the session reaches its own expiry', async () => {
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
+    const target = await grantAndList(fixture);
+    const running = fixture.controller.startForAgent(
+      { targetToken: target.targetToken, goal: 'x' },
+      context,
+    );
+    // Eight hours, driven rather than waited for.
+    expect(await settle(running, 40, 30 * 60_000)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'limit_reached',
+    });
+    planner.release();
+  });
+
+  it('returns when the session runs out of rounds', async () => {
+    const fixture = createFixture({ plan: async () => ({ type: 'wait', milliseconds: 0 }) });
+    const target = await grantAndList(fixture);
+    const output = await settle(
+      fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+    );
+    expect(output).toMatchObject({ state: 'stopped', stopReason: 'limit_reached', round: 25 });
+    expect(fixture.plannedRounds()).toBe(25);
+  });
+
+  it('returns a paused session rather than waiting for a person who cannot resume', async () => {
+    // observe_only refuses the first input action and pauses. Nobody can resume while this Turn is
+    // running, so `paused` is as final as a stop from the caller's side.
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(fixture.profiles[0]!.identity, {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const target = await listOne(fixture);
+    expect(
+      await settle(
+        fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+      ),
+    ).toMatchObject({ state: 'paused', stopReason: null, mode: 'observe_only' });
   });
 
   it('refuses a token that is unknown, expired, or from another Task or Turn', async () => {
@@ -808,30 +1182,27 @@ describe('computer_start', () => {
     expect(expiring.startedSessions()).toBe(0);
   });
 
-  it('re-reads the grant before every observation, action, and approval', async () => {
-    const fixture = createFixture();
+  it('re-reads the grant before every round', async () => {
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
     const target = await grantAndList(fixture);
-    const status = await fixture.controller.startForAgent(
+    const running = fixture.controller.startForAgent(
       { targetToken: target.targetToken, goal: 'x' },
       context,
     );
-    // The application is still granted; only where its screen may go has moved. The per-round check
-    // runs before native is asked for anything, so the next observation never leaves the process.
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The application is still granted; only where its screen may go has moved. The next round
+    // checks before native is asked for anything, so nothing further leaves the process.
     const grant = [...fixture.grants.values()][0]!;
     fixture.controller['deps'].persistence.setComputerAppGrantProviderEgress(grant.id, {
       connectionId: 'connection-1',
       modelId: 'model-9',
     });
-    // The handler is attached in the same tick as the call: the clock is then driven forward, and
-    // a rejection that settles across a macrotask would otherwise surface as unhandled.
-    const observing = fixture.controller.observe(status.sessionId).then(
-      () => null,
-      (error: unknown) => error,
-    );
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(await observing).toBeInstanceOf(Error);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(fixture.controller.getStatus(status.sessionId)).toBeNull();
+    planner.release();
+    expect(await settle(running)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'policy_changed',
+    });
   });
 
   it('spends the token before its first await, so a concurrent twin loses', async () => {
@@ -851,8 +1222,7 @@ describe('computer_start', () => {
     );
     await expect(second).rejects.toThrow(/token/u);
     release();
-    await vi.advanceTimersByTimeAsync(0);
-    await expect(first).resolves.toMatchObject({ taskId: 'task-1' });
+    expect(await settle(first)).toMatchObject({ state: 'stopped' });
     expect(fixture.startedSessions()).toBe(1);
   });
 
@@ -890,9 +1260,11 @@ describe('computer_start', () => {
     ).rejects.toThrow(/access_not_granted/u);
 
     const own = await listOne(fixture);
-    await expect(
-      fixture.controller.startForAgent({ targetToken: own.targetToken, goal: 'x' }, context),
-    ).resolves.toMatchObject({ taskId: 'task-1' });
+    expect(
+      await settle(
+        fixture.controller.startForAgent({ targetToken: own.targetToken, goal: 'x' }, context),
+      ),
+    ).toMatchObject({ state: 'stopped' });
   });
 
   it('loses a Task-scoped grant when the policy epoch moves', async () => {
@@ -918,15 +1290,23 @@ describe('computer_start', () => {
   });
 
   it('stops a running session when its grant is revoked', async () => {
-    const fixture = createFixture();
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
     const target = await grantAndList(fixture);
-    const status = await fixture.controller.startForAgent(
+    const running = fixture.controller.startForAgent(
       { targetToken: target.targetToken, goal: 'x' },
       context,
     );
+    await vi.advanceTimersByTimeAsync(1_000);
+    const sessionId = runningSessionId(fixture);
     const grant = [...fixture.grants.values()][0]!;
     await fixture.controller.revokeAppGrant(grant.id, grant.revision);
-    expect(fixture.controller.getStatus(status.sessionId)).toBeNull();
+    expect(await settle(running)).toMatchObject({
+      state: 'stopped',
+      stopReason: 'policy_changed',
+    });
+    expect(fixture.controller.getStatus(sessionId)).toBeNull();
+    planner.release();
   });
 
   it('refuses when the window identity no longer matches the token', async () => {
@@ -945,12 +1325,14 @@ describe('computer_start', () => {
   });
 
   it('refuses a second session in the same Task (§5.4: stop, list, start)', async () => {
-    const fixture = createFixture();
+    const planner = heldPlanner();
+    const fixture = createFixture({ plan: planner.plan });
     const target = await grantAndList(fixture);
-    await fixture.controller.startForAgent(
+    const running = fixture.controller.startForAgent(
       { targetToken: target.targetToken, goal: 'first' },
       context,
     );
+    await vi.advanceTimersByTimeAsync(1_000);
     const second = await listOne(fixture);
     await expect(
       fixture.controller.startForAgent(
@@ -958,6 +1340,8 @@ describe('computer_start', () => {
         context,
       ),
     ).rejects.toThrow(/already running/u);
+    planner.release();
+    await settle(running);
     expect(fixture.startedSessions()).toBe(1);
   });
 
@@ -983,12 +1367,15 @@ describe('computer_start', () => {
       connectionId: 'connection-1',
       modelId: 'model-2',
     });
-    await expect(
-      fixture.controller.startForAgent(
-        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
-        context,
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
       ),
-    ).resolves.toMatchObject({ modelId: 'model-2' });
+    ).toMatchObject({ state: 'stopped' });
+    expect(fixture.statuses.at(-1)?.modelId).toBe('model-2');
   });
 
   it('binds the mode to the weaker of the grant ceiling and the native attestation', async () => {
@@ -1001,11 +1388,14 @@ describe('computer_start', () => {
       maxMode: 'full_access_app',
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
-    const status = await fixture.controller.startForAgent(
-      { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
-      context,
-    );
-    expect(status.mode).toBe('supervised');
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ mode: 'supervised' });
   });
 
   it('is unreachable with the agent-driven gate off', async () => {

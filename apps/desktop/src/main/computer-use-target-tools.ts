@@ -2,18 +2,19 @@ import {
   COMPUTER_LIST_TARGETS_TOOL_INPUT_JSON_SCHEMA,
   COMPUTER_REQUEST_ACCESS_TOOL_INPUT_JSON_SCHEMA,
   COMPUTER_START_TOOL_INPUT_JSON_SCHEMA,
+  COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA,
   COMPUTER_STOP_TOOL_INPUT_JSON_SCHEMA,
   computerListTargetsInputSchema,
   computerListTargetsOutputSchema,
   computerRequestAccessInputSchema,
   computerRequestAccessOutputSchema,
   computerStartToolInputSchema,
+  computerStartToolOutputSchema,
   computerStopToolInputSchema,
   computerStopToolOutputSchema,
-  computerUseSessionStatusSchema,
   type ComputerListTargetsOutput,
   type ComputerRequestAccessOutput,
-  type ComputerUseSessionStatus,
+  type ComputerStartToolOutput,
 } from '@sprint-coder/contracts';
 import {
   createToolDefinition,
@@ -116,7 +117,7 @@ export const COMPUTER_START_TOOL = createToolDefinition({
   kind: 'computerTarget',
   schemaVersion: 1,
   inputSchema: COMPUTER_START_TOOL_INPUT_JSON_SCHEMA,
-  outputSchema: { type: 'object' },
+  outputSchema: COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA,
   sideEffect: 'control',
   risk: 'high',
   requiredCapabilities: ['computer.control'],
@@ -126,9 +127,10 @@ export const COMPUTER_START_TOOL = createToolDefinition({
   workspaceBinding: { kind: 'none' },
   providerCompatibility: ['*'],
   parallelism: 'serial',
-  supportsCancellation: false,
+  // The call lasts as long as the session does, so cancelling the Turn has to reach it.
+  supportsCancellation: true,
   description:
-    'Begin one Computer Use session on the window a targetToken names. The token is single-use and the application must already be permitted — call computer_request_access first if it is not. One session drives one window: to change target, call computer_stop, list targets again, and start on the new token. goal states what this session is for.',
+    'Run one Computer Use session on the window a targetToken names, and return when that session has ended. The token is single-use and the application must already be permitted — call computer_request_access first if it is not. The result says how the session ended: stopped (with a reason), paused because a person took over or refused an action, or failed. Stopping, the emergency shortcut, and per-action approvals all work while it runs. To drive another window afterwards, call computer_list_targets again and start on a new token.',
 });
 
 export const COMPUTER_TARGET_TOOLS = [
@@ -143,14 +145,21 @@ export type ComputerTargetToolBoundary = Readonly<{
     input: Readonly<{ appToken?: string | undefined; refresh?: boolean | undefined }>,
     context: ToolExecutionContext,
   ): Promise<ComputerListTargetsOutput>;
+  /**
+   * Both of these wait on something outside the process — a person's click, and then the session
+   * itself — so both take the dispatch's abort signal. Without it a cancelled Turn would leave a
+   * card holding the single global slot, and a session running with nobody to answer to.
+   */
   requestAccess(
     input: Readonly<{ appToken: string; reason: string }>,
     context: ToolExecutionContext,
+    signal?: AbortSignal,
   ): Promise<ComputerRequestAccessOutput>;
   start(
     input: Readonly<{ targetToken: string; goal: string }>,
     context: ToolExecutionContext,
-  ): Promise<ComputerUseSessionStatus>;
+    signal?: AbortSignal,
+  ): Promise<ComputerStartToolOutput>;
   stop(sessionId: string, context: ToolExecutionContext): Promise<void>;
 }>;
 
@@ -175,18 +184,22 @@ export function registerComputerTargetTools(
     // The same claim the other three take. Only one card may be unresolved at a time, and two
     // requests interleaving would race for that slot rather than queue behind it.
     resourceClaims: (_input, context) => [{ key: `computer-use:${context.taskId}`, mode: 'write' }],
-    execute: async (input, context) =>
+    execute: async (input, context, control) =>
       computerRequestAccessOutputSchema.parse(
-        await boundary.requestAccess(computerRequestAccessInputSchema.parse(input), context),
+        await boundary.requestAccess(
+          computerRequestAccessInputSchema.parse(input),
+          context,
+          control.signal,
+        ),
       ),
   });
   broker.registerImplementation({
     toolId: COMPUTER_START_TOOL.toolId,
     implementationKind: 'built-in',
     resourceClaims: (_input, context) => [{ key: `computer-use:${context.taskId}`, mode: 'write' }],
-    execute: async (input, context) =>
-      computerUseSessionStatusSchema.parse(
-        await boundary.start(computerStartToolInputSchema.parse(input), context),
+    execute: async (input, context, control) =>
+      computerStartToolOutputSchema.parse(
+        await boundary.start(computerStartToolInputSchema.parse(input), context, control.signal),
       ),
   });
   broker.registerImplementation({

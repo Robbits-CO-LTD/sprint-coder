@@ -5805,6 +5805,77 @@ export const computerUseSessionStateSchema = z.enum([
 ]);
 export type ComputerUseSessionState = z.infer<typeof computerUseSessionStateSchema>;
 
+/**
+ * The states a session cannot leave on its own.
+ *
+ * `computer_start` waits for one of these, so the classification has to be exhaustive rather than a
+ * guess: the check below turns a state added to the enum without a decision into a compile error.
+ *
+ * - `stopped` and `failed` end the session; its record is gone.
+ * - `paused` is the user-takeover boundary. Only a person resumes it, and while an agent session's
+ *   Turn is still running nobody can: the resume route needs the Task to be idle. From the caller's
+ *   side it is therefore as final as a stop, and treating it as running would park the tool call
+ *   until the session's own expiry.
+ *
+ * Everything else is a step the session takes by itself — `starting`, `observing`, `planning`,
+ * `acting`, and `awaiting_approval`, which is waiting on a click that leads back into `acting` or
+ * into `paused`. `stopping` always becomes `stopped`.
+ */
+export const COMPUTER_USE_SETTLED_SESSION_STATES = ['paused', 'stopped', 'failed'] as const;
+type ComputerUseSettledSessionState = (typeof COMPUTER_USE_SETTLED_SESSION_STATES)[number];
+type ComputerUseRunningSessionState =
+  'starting' | 'observing' | 'planning' | 'acting' | 'awaiting_approval' | 'stopping';
+// A state added to the enum and to neither list fails to compile here.
+const COMPUTER_USE_SESSION_STATES_ARE_CLASSIFIED: Exclude<
+  ComputerUseSessionState,
+  ComputerUseSettledSessionState | ComputerUseRunningSessionState
+> extends never
+  ? true
+  : never = true;
+void COMPUTER_USE_SESSION_STATES_ARE_CLASSIFIED;
+
+export function computerUseSessionStateIsSettled(state: ComputerUseSessionState): boolean {
+  return (COMPUTER_USE_SETTLED_SESSION_STATES as readonly string[]).includes(state);
+}
+
+/**
+ * What `computer_start` hands back when the session has ended.
+ *
+ * A reduced projection of the session status, not the status itself. A tool result is written into
+ * the conversation and kept there, and the full status carries things that must not be: the pending
+ * approval — whose preview is a live-only excerpt of the target's screen (§8: observations are
+ * never persisted) — plus the application and window identity digests, the profile id, and the
+ * connection id. None of those tell the agent anything it can act on; all of them would be durable
+ * once written. What is left is what the caller actually needs: which session, how it ended, the
+ * mode it really ran in after Main bound it, and how far it got.
+ */
+export const computerStartToolOutputSchema = z
+  .object({
+    sessionId: computerUseIdSchema,
+    state: computerUseSessionStateSchema,
+    stopReason: computerUseStopReasonSchema.nullable(),
+    mode: computerUseModeSchema,
+    round: z.number().int().nonnegative(),
+    maxRounds: computerUseRoundLimitSchema,
+  })
+  .strict();
+export type ComputerStartToolOutput = z.infer<typeof computerStartToolOutputSchema>;
+export const COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    sessionId: { type: 'string', minLength: 1, maxLength: 128 },
+    state: { type: 'string', enum: [...computerUseSessionStateSchema.options] },
+    // Enum without a `type`: the tool schema dialect takes one type name, and this field is a
+    // reason or nothing. The enum alone says exactly that, and rejects anything else.
+    stopReason: { enum: [...computerUseStopReasonSchema.options, null] },
+    mode: { type: 'string', enum: [...computerUseModeSchema.options] },
+    round: { type: 'integer', minimum: 0 },
+    maxRounds: { type: 'integer', minimum: 1, maximum: 25 },
+  },
+  required: ['sessionId', 'state', 'stopReason', 'mode', 'round', 'maxRounds'],
+  additionalProperties: false,
+} as const;
+
 export const computerUseSessionStatusSchema = z
   .object({
     sessionId: computerUseIdSchema,

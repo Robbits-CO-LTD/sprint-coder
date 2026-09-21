@@ -18,6 +18,8 @@ import {
   computerAppGrantRequestSchema,
   computerAppAccessRequestViewSchema,
   computerRequestAccessOutputSchema,
+  computerStartToolOutputSchema,
+  computerUseSessionStateIsSettled,
   selectableComputerTargetSchema,
   COMPUTER_START_GOAL_MAX_CHARACTERS,
   COMPUTER_TARGET_LIST_LIMIT,
@@ -31,6 +33,7 @@ import {
   type ComputerAppIdentity,
   type ComputerListTargetsOutput,
   type ComputerRequestAccessOutput,
+  type ComputerStartToolOutput,
   type ComputerUseGrantListResult,
   type ComputerUseGrantPurgeResult,
   type ComputerTarget,
@@ -468,6 +471,8 @@ type PendingAppGrantRequest = {
   turnId: string;
   policyEpoch: number;
   profileId: string;
+  /** The identity as the card asserted it, so refusing never has to read the store again. */
+  identity: ComputerAppGrantIdentity;
   displayName: string;
   providerEgress: Readonly<{ connectionId: string; modelId: string }>;
   grantId: string | null;
@@ -1499,6 +1504,7 @@ export class ComputerUseController {
   async requestAccess(
     input: Readonly<{ appToken: string; reason: string }>,
     context: ToolExecutionContext,
+    signal?: AbortSignal,
   ): Promise<ComputerRequestAccessOutput> {
     if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
       return this.accessRefused('access_request_unavailable');
@@ -1551,6 +1557,9 @@ export class ComputerUseController {
       return this.accessRefused('access_request_rate_limited');
     const facts = this.appGrantCardFacts(profile, identity);
     if (facts === null) return this.accessRefused('access_request_invalid_token');
+    // A Turn that is already gone has nobody left to click, and the card holds the single global
+    // slot for two minutes. Checked before raising, and again through the listener below.
+    if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
     return await this.raiseAppGrantCard({
       context,
       kind,
@@ -1562,6 +1571,7 @@ export class ComputerUseController {
       reason: input.reason,
       providerEgress: egressBinding,
       grantId: state.grantId,
+      ...(signal === undefined ? {} : { signal }),
     });
   }
 
@@ -1635,6 +1645,7 @@ export class ComputerUseController {
       reason: string;
       providerEgress: Readonly<{ connectionId: string; modelId: string }>;
       grantId: string | null;
+      signal?: AbortSignal | undefined;
     }>,
   ): Promise<ComputerRequestAccessOutput> {
     const requestId = randomUUID();
@@ -1702,9 +1713,12 @@ export class ComputerUseController {
     );
     return await new Promise<ComputerRequestAccessOutput>((resolve) => {
       let settled = false;
+      const abandon = (): void =>
+        this.closeAppGrantCard(requestId, 'access_request_withdrawn', 'withdrawn');
       const settle = (outcome: ComputerRequestAccessOutput): void => {
         if (settled) return;
         settled = true;
+        input.signal?.removeEventListener('abort', abandon);
         resolve(computerRequestAccessOutputSchema.parse(outcome));
       };
       const timer = setTimeout(
@@ -1720,6 +1734,10 @@ export class ComputerUseController {
         turnId: input.context.turnId,
         policyEpoch: input.policyEpoch,
         profileId: input.profile.id,
+        // Held here rather than re-read from the store on the click: §6.1 requires the refusal to
+        // be recorded, and a profile that went away while the card was up must not turn "no" into
+        // a card that can never be answered.
+        identity: input.identity,
         displayName,
         providerEgress: input.providerEgress,
         grantId: input.grantId,
@@ -1727,6 +1745,9 @@ export class ComputerUseController {
         settle,
       };
       this.deps.publishGrantRequest?.(request);
+      // The Turn can be cancelled while the card is on screen. Withdrawing at once frees the single
+      // global slot instead of holding it for the rest of the two minutes.
+      input.signal?.addEventListener('abort', abandon, { once: true });
     });
   }
 
@@ -1842,19 +1863,32 @@ export class ComputerUseController {
     pending.settle(outcome);
   }
 
+  /**
+   * Writes down that the user said no (ADR v2 §6.1).
+   *
+   * Every write here is best-effort, and the identity comes from the card rather than from the
+   * store. Refusing is the fail-closed answer: it must settle the card whatever else has happened —
+   * a profile removed while the card was up, a grant revoked underneath it, a store that throws —
+   * because a refusal that fails leaves the card pending and the single global slot taken.
+   */
   private recordAppGrantDenial(pending: PendingAppGrantRequest): void {
-    const identity = computerAppGrantIdentityFrom(
-      this.deps.persistence.getComputerAppProfile(pending.profileId).identity,
-    );
-    if (identity !== null)
+    try {
       this.deps.persistence.recordComputerAppAccessRequest({
-        platform: identity.platform,
-        grantIdentityDigest: identity.grantIdentityDigest,
+        platform: pending.identity.platform,
+        grantIdentityDigest: pending.identity.grantIdentityDigest,
         taskId: pending.taskId,
-        appId: identity.appId,
+        appId: pending.identity.appId,
         displayName: pending.displayName,
         outcome: 'denied',
       });
+    } catch (error) {
+      // The Task itself may be gone, which is the one case the foreign key refuses. Nothing here
+      // grants anything, so the count is the only casualty.
+      secureLogger.warn('Computer Use could not record an application refusal', {
+        taskId: pending.taskId,
+        reason: error instanceof Error ? error.name : 'unknown',
+      });
+    }
     if (pending.grantId !== null)
       try {
         this.deps.persistence.countComputerAppGrantAccessRequest(pending.grantId, 'denied');
@@ -1941,11 +1975,20 @@ export class ComputerUseController {
    * where this Turn actually sends, and the window identity is re-taken from native. The session
    * itself is then created by the same path the panel uses — one session, one window, one Stop
    * overlay, one cancel epoch.
+   *
+   * **The call then waits for the session to end**, and this is structural rather than a
+   * convenience. The session is bound to the calling Turn: `assertSessionLive` requires that Turn
+   * to still be the active one, so returning early would let the Turn finish the moment the model
+   * answered and the next round would kill the session it had just started. The tool call in flight
+   * is what keeps the Turn open. Everything that could interrupt — an approval, a user takeover, the
+   * Stop overlay, the emergency shortcut, the round limit, the session's own expiry — still works;
+   * each simply leads to a state the session cannot leave, which is what this returns.
    */
   async startForAgent(
     input: Readonly<{ targetToken: string; goal: string }>,
     context: ToolExecutionContext,
-  ): Promise<ComputerUseSessionStatus> {
+    signal?: AbortSignal,
+  ): Promise<ComputerStartToolOutput> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     if (this.deps.agentDrivenEnabled?.() !== true)
       throw new Error('Computer Use agent-driven targets are unavailable');
@@ -2024,6 +2067,15 @@ export class ComputerUseController {
       }),
     );
     const maxMode = state.maxMode ?? 'observe_only';
+    // Installed before `start`, so no status published while the session is coming up can be
+    // missed — including a session that ends before `start` has even returned. Only one session
+    // exists at a time, and this call is holding that slot, so every status seen here is ours.
+    const seen = new Map<string, ComputerUseSessionStatus>();
+    let onSettled: ((status: ComputerUseSessionStatus) => void) | null = null;
+    const unsubscribe = this.subscribe((status) => {
+      seen.set(status.sessionId, status);
+      if (onSettled !== null && computerUseSessionStateIsSettled(status.state)) onSettled(status);
+    });
     try {
       const status = await this.start({
         taskId: context.taskId,
@@ -2052,8 +2104,35 @@ export class ComputerUseController {
       });
       // Only a session that actually started counts as use (§6.2.1).
       if (state.scope === 'grant') this.touchAppGrantUsed(observed.profile.identity);
-      return status;
+      // Nothing runs between `start` resolving and this line, so anything the session has already
+      // published is in `seen`, and anything later arrives through `onSettled`.
+      const already = seen.get(status.sessionId) ?? status;
+      if (computerUseSessionStateIsSettled(already.state)) return computerStartToolOutput(already);
+      return await new Promise<ComputerStartToolOutput>((resolve, reject) => {
+        const abandon = (): void => {
+          onSettled = null;
+          // The same reason `turnEnded` already uses for "the Turn that owned this session is
+          // gone". A cancelled Turn is that event, reaching the controller through the broker.
+          void this.stop(status.sessionId, 'turn_started').catch(() => undefined);
+          reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error('Computer Use session was canceled with its Turn'),
+          );
+        };
+        onSettled = (settled) => {
+          onSettled = null;
+          signal?.removeEventListener('abort', abandon);
+          resolve(computerStartToolOutput(settled));
+        };
+        if (signal?.aborted === true) {
+          abandon();
+          return;
+        }
+        signal?.addEventListener('abort', abandon, { once: true });
+      });
     } finally {
+      unsubscribe();
       this.windowCandidatePermits.delete(windowToken);
     }
   }
@@ -2967,11 +3046,19 @@ export class ComputerUseController {
   /**
    * Drops everything a Task was holding in memory (ADR v2 §6.1).
    *
-   * The Task-scoped grants go with the Task: "allow once" is scoped to the conversation the user
-   * said it in, and a deleted Task takes its answer with it. The store's own access-request rows
-   * cascade on the same event.
+   * Called when a Task is archived, which is the only way a conversation goes away in this product
+   * today — and the hook a delete path would use if one is ever added, which is why the store's
+   * access-request rows cascade on `tasks`.
+   *
+   * "Allow once" is scoped to the conversation the user said it in, so putting that conversation
+   * away ends it: un-archiving later must not silently carry a permission given in a context the
+   * user has since closed. A card raised in that Task cannot be answered any more either, so it is
+   * withdrawn rather than left holding the single global slot.
+   *
+   * The stored refusal is deliberately *not* dropped: "the user said no in this Task" is about the
+   * conversation, and archiving is not the user changing their mind.
    */
-  taskRemoved(taskId: string): void {
+  taskClosed(taskId: string): void {
     this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
     this.taskScopedGrants.delete(taskId);
     this.revokeTargetTokens(taskId);
@@ -4126,6 +4213,26 @@ function executableLeafName(executablePath: string | null): string {
  * re-evaluated and any that now fall in a denied class are revoked rather than re-confirmed.
  */
 export const COMPUTER_USE_DENY_RULESET_VERSION = 1;
+
+/**
+ * The session status, reduced to what may be written into the conversation.
+ *
+ * A tool result is durable; a session status is not. `pendingApproval` carries a live-only excerpt
+ * of the target's screen, and the identity digests, profile id, window token and connection id are
+ * either re-verification inputs or V1 privacy boundaries (§8). Named field by field rather than
+ * destructured with a rest, so a field added to the status is absent here until somebody decides it
+ * belongs — the opposite of a spread, which would publish it by default.
+ */
+export function computerStartToolOutput(status: ComputerUseSessionStatus): ComputerStartToolOutput {
+  return computerStartToolOutputSchema.parse({
+    sessionId: status.sessionId,
+    state: status.state,
+    stopReason: status.stopReason,
+    mode: status.mode,
+    round: status.round,
+    maxRounds: status.maxRounds,
+  });
+}
 
 /**
  * The agent's session goal, normalised the way a human-typed Task goal already is.
