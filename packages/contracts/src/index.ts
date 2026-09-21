@@ -5296,18 +5296,36 @@ export const computerStopToolOutputSchema = z.object({ stopped: z.literal(true) 
 export type ComputerStopToolOutput = z.infer<typeof computerStopToolOutputSchema>;
 
 /**
- * `computer_request_access` (ADR v2 §5.2, §6.1).
+ * A model-authored string bounded the way its published JSON schema says it is.
  *
- * The raw model-authored `reason` is validated only for length here. It is sanitised on the way to
- * the card, where it is shown in its own quarantined element: rejecting a reason outright for a
- * stray control character would let a target application suppress the card by choosing a name that
- * the model then quotes.
+ * `maxLength` in JSON Schema counts *code points*; Zod's `.max()` counts UTF-16 code units. With a
+ * plain `.max(N)` a model that obeys the schema it was given — 130 emoji against a 256 limit — has
+ * its tool call rejected by the validator behind it, which reads as the tool being broken. So the
+ * cheap unit bound is the outer guard (no code point exceeds two units) and the real limit is the
+ * code-point count, exactly as `computerUseUntrustedTextSchemaOf` does it.
+ *
+ * Unlike that one, this does not police which characters may appear: these strings are sanitised
+ * where they are used, and rejecting a tool call outright for a stray control character would let a
+ * target application suppress the approval card by choosing a name the model then quotes.
+ */
+export function computerUseModelTextSchemaOf(maximumCharacters: number): z.ZodType<string, string> {
+  return z
+    .string()
+    .max(maximumCharacters * 2)
+    .refine(
+      (value) => [...value].length <= maximumCharacters,
+      `Text exceeds ${maximumCharacters} characters`,
+    );
+}
+
+/**
+ * `computer_request_access` (ADR v2 §5.2, §6.1).
  */
 export const COMPUTER_ACCESS_REQUEST_REASON_MAX_INPUT = COMPUTER_ACCESS_REASON_MAX_CHARACTERS;
 export const computerRequestAccessInputSchema = z
   .object({
     appToken: computerUseIdSchema,
-    reason: z.string().max(COMPUTER_ACCESS_REASON_MAX_CHARACTERS),
+    reason: computerUseModelTextSchemaOf(COMPUTER_ACCESS_REASON_MAX_CHARACTERS),
   })
   .strict();
 export type ComputerRequestAccessInput = z.infer<typeof computerRequestAccessInputSchema>;
@@ -5355,7 +5373,10 @@ export const COMPUTER_START_GOAL_MAX_CHARACTERS = 1_024;
 export const computerStartToolInputSchema = z
   .object({
     targetToken: computerUseIdSchema,
-    goal: z.string().trim().min(1).max(COMPUTER_START_GOAL_MAX_CHARACTERS),
+    goal: computerUseModelTextSchemaOf(COMPUTER_START_GOAL_MAX_CHARACTERS).refine(
+      (value) => value.trim() !== '',
+      'Computer Use session goal is empty',
+    ),
   })
   .strict();
 export type ComputerStartToolInput = z.infer<typeof computerStartToolInputSchema>;
