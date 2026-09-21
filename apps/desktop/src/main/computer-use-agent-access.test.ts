@@ -363,11 +363,23 @@ function createFixture(
     setActiveTurnId: (next: string | null) => {
       activeTurnId = next;
     },
+    /**
+     * The card that is on screen *now*, or a throw.
+     *
+     * Not "the last pending snapshot in the history": a resolved or withdrawn card leaves its
+     * pending publish behind, so that reading would hand a test an id nobody is waiting on and
+     * every assertion about it would pass without a second card ever being raised.
+     */
     pending: (): ComputerAppGrantRequest => {
-      const card = published.filter((request) => request.state === 'pending').at(-1);
+      const latestById = new Map<string, ComputerAppGrantRequest>();
+      for (const request of published) latestById.set(request.id, request);
+      const card = [...latestById.values()].filter((request) => request.state === 'pending').at(-1);
       if (card === undefined) throw new Error('no pending card');
       return computerAppGrantRequestSchema.parse(card);
     },
+    /** How many cards have ever been put on screen, for "a new one appeared" assertions. */
+    cardsRaised: (): number =>
+      new Set(published.filter((request) => request.state === 'pending').map(({ id }) => id)).size,
   };
 }
 
@@ -865,15 +877,23 @@ describe('computer_request_access', () => {
     expect(await pending).toEqual({ granted: false, reasonCode: 'access_request_withdrawn' });
     expect(fixture.published.at(-1)).toMatchObject({ state: 'canceled', noticeCode: 'withdrawn' });
 
-    const second = await listOne(fixture);
+    // The slot is what the assertion is about, so the second request has to actually get a card:
+    // the token is taken under the Turn that spends it, the count of cards raised has to go up,
+    // and the new card must be a different one.
+    const secondTurn = { ...context, turnId: 'turn-2' };
+    const raisedBefore = fixture.cardsRaised();
+    const firstCardId = fixture.published[0]?.id;
+    const second = await listOne(fixture, secondTurn);
     const next = fixture.controller.requestAccess(
       { appToken: second.appToken, reason: 'again' },
-      { ...context, turnId: 'turn-2' },
+      secondTurn,
     );
-    await vi.advanceTimersByTimeAsync(0);
-    expect(fixture.pending().state).toBe('pending');
+    for (let tick = 0; tick < 10 && fixture.cardsRaised() === raisedBefore; tick += 1)
+      await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.cardsRaised()).toBe(raisedBefore + 1);
+    expect(fixture.pending().id).not.toBe(firstCardId);
     await vi.advanceTimersByTimeAsync(120_000);
-    await next;
+    expect(await next).toEqual({ granted: false, reasonCode: 'access_request_timed_out' });
   });
 
   it('never raises a card for a Turn that is already gone', async () => {
