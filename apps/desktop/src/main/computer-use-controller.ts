@@ -431,8 +431,13 @@ type ComputerAppGrantScopeKind = 'grant' | 'task';
  * Task deletion both end it.
  */
 type TaskScopedAppGrant = Readonly<{
-  platform: 'darwin' | 'win32';
-  grantIdentityDigest: string;
+  /**
+   * The identity the user said yes to, whole. The digest alone is not enough to match on: a signed
+   * macOS application's digest leaves the path out on purpose (so an update keeps the grant), which
+   * means a second copy of the same signed application somewhere else shares it. The persisted
+   * grant closes that with `computerAppGrantMismatch`, and "allow once" has to pass the same test.
+   */
+  identity: ComputerAppGrantIdentity;
   maxMode: ComputerUseMode;
   denyRulesetVersion: number;
   policyEpoch: number;
@@ -1042,9 +1047,15 @@ export class ComputerUseController {
     // A Task-scoped "allow once" for the same application goes too. The user asked for this
     // application to stop being permitted, and leaving the weaker agreement standing would mean the
     // revoke button removed a row while the application kept running.
-    const scopedKey = `${grant.platform}:${grant.grantIdentityDigest}`;
+    // By platform and digest rather than by key: the key also carries the path, and revoking is the
+    // one place where erring wide is right — every copy that shares the revoked identity goes.
     for (const [taskId, scoped] of this.taskScopedGrants) {
-      scoped.delete(scopedKey);
+      for (const [key, entry] of scoped)
+        if (
+          entry.identity.platform === grant.platform &&
+          entry.identity.grantIdentityDigest === grant.grantIdentityDigest
+        )
+          scoped.delete(key);
       if (scoped.size === 0) this.taskScopedGrants.delete(taskId);
     }
     for (const [token, record] of this.targetTokens)
@@ -1147,9 +1158,15 @@ export class ComputerUseController {
     return COMPUTER_APP_UNGRANTED;
   }
 
-  /** The key a Task-scoped grant is filed under. Platform included: a digest alone is not an app. */
+  /**
+   * The key a Task-scoped grant is filed under.
+   *
+   * Platform, digest and path. A digest alone is not an application — a signed macOS bundle's
+   * digest leaves the path out — so two copies of one signed application would otherwise share a
+   * slot, and saying yes to the second would silently take the answer away from the first.
+   */
   private taskScopedGrantKey(identity: ComputerAppGrantIdentity): string {
-    return `${identity.platform}:${identity.grantIdentityDigest}`;
+    return `${identity.platform}:${identity.grantIdentityDigest}:${identity.executablePath}`;
   }
 
   /**
@@ -1170,8 +1187,6 @@ export class ComputerUseController {
     const entry = scoped.get(key);
     if (entry === undefined) return null;
     if (
-      entry.platform !== identity.platform ||
-      entry.grantIdentityDigest !== identity.grantIdentityDigest ||
       entry.denyRulesetVersion !== COMPUTER_USE_DENY_RULESET_VERSION ||
       entry.policyEpoch !== this.currentPolicyEpoch(taskId)
     ) {
@@ -1179,6 +1194,10 @@ export class ComputerUseController {
       if (scoped.size === 0) this.taskScopedGrants.delete(taskId);
       return null;
     }
+    // The same comparison a persisted grant gets (§6.3). Not dropped on a mismatch: the entry still
+    // belongs to the application it was given to, and this is merely a different one that happens
+    // to share its digest — another copy of the same signed bundle at another path, say.
+    if (computerAppGrantMismatch(entry.identity, identity, false) !== null) return null;
     return entry;
   }
 
@@ -1969,8 +1988,7 @@ export class ComputerUseController {
     scoped.set(
       this.taskScopedGrantKey(observed.identity),
       Object.freeze({
-        platform: observed.identity.platform,
-        grantIdentityDigest: observed.identity.grantIdentityDigest,
+        identity: observed.identity,
         maxMode: observed.facts.maximumMode,
         denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
         policyEpoch: pending.policyEpoch,

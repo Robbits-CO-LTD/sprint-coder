@@ -175,6 +175,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       const api = window.sprintCoder?.computerUse;
       if (api === undefined) return;
       setGrantError(null);
+      setPurgedGrantRecords(null);
       setBusy(true);
       try {
         setGrants(await api.revokeGrant({ grantId: grant.id, expectedRevision: grant.revision }));
@@ -201,6 +202,8 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     const api = window.sprintCoder?.computerUse;
     if (api?.purgeGrants === undefined) return;
     setGrantError(null);
+    // The previous run's "removed N" must not sit beside this run's failure as if it described it.
+    setPurgedGrantRecords(null);
     setBusy(true);
     try {
       const { removedRecords, ...list } = await api.purgeGrants();
@@ -221,6 +224,9 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     const modelsApi = window.sprintCoder?.models;
     if (permissions === undefined || providersApi === undefined || modelsApi === undefined)
       throw new Error('Computer Useの設定APIを利用できません。');
+    // The result line describes one cleanup the user just ran; reopening the dialog, or opening it
+    // for another Task, is a new visit and starts without it.
+    setPurgedGrantRecords(null);
     // Failing to read the grants must not stop the rest of the screen from loading: the list is
     // management, not a precondition for anything else on this dialog.
     void refreshGrants().catch((cause: unknown) => {

@@ -584,6 +584,39 @@ describe('computer_request_access', () => {
     expect(fixture.controller.listAppGrantViews().grants).toHaveLength(0);
   });
 
+  it('keeps "just this once" to the copy of the application it was said to', async () => {
+    // Two installs of one signed application: same bundle id, Team ID and signing identifier, so the
+    // same grant identity digest — a signed macOS digest leaves the path out — at different paths.
+    const original = profileRecord('profile-a', macIdentity());
+    const copy = profileRecord(
+      'profile-b',
+      macIdentity({
+        identityDigest: 'c'.repeat(64),
+        executablePath: '/Users/someone/Downloads/Notes.app/Contents/MacOS/Notes',
+      }),
+    );
+    const fixture = createFixture({ profiles: [original, copy] });
+    const rows = selectable((await fixture.controller.listTargets({}, context)).targets);
+    const asked = fixture.controller.requestAccess(
+      { appToken: rows[0]!.appToken, reason: 'x' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_once' },
+      intentFor(card, 'allow_once'),
+    );
+    expect(await asked).toEqual({ granted: true, reasonCode: null });
+
+    const after = selectable((await fixture.controller.listTargets({}, context)).targets);
+    expect(after.map((row) => row.granted)).toEqual([true, false]);
+    await expect(
+      fixture.controller.startForAgent({ targetToken: after[1]!.targetToken, goal: 'x' }, context),
+    ).rejects.toThrow(/access_not_granted/u);
+    expect(fixture.startedSessions()).toBe(0);
+  });
+
   it('allows one unresolved card at a time', async () => {
     const fixture = createFixture();
     const target = await listOne(fixture);
