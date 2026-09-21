@@ -6,6 +6,8 @@ import {
   computerRequestAccessOutputSchema,
   computerStartToolOutputSchema,
   computerUseAvailabilitySchema,
+  computerUseGrantListResultSchema,
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
   type ComputerAppGrantDecision,
   type ComputerAppGrantRequest,
   type ComputerAppIdentity,
@@ -196,6 +198,10 @@ function createFixture(
     agentDrivenEnabled?: boolean;
     publish?: boolean;
     startSessionGate?: Promise<void>;
+    /** Consulted before every native enumeration, so a test can hold one of them in particular. */
+    listWindowsGate?: (call: number) => Promise<void> | undefined;
+    /** Stands in for the provider preflight: Main builds the planner here. */
+    plannerFactory?: (input: { signal: AbortSignal }) => Promise<void>;
     /** What the inner planner answers each round. The default finishes the first round. */
     plan?: (round: number) => Promise<ComputerUseAction>;
   } = {},
@@ -208,13 +214,18 @@ function createFixture(
   let startedSessions = 0;
   let observationRevision = 0;
   let closedSessions = 0;
+  let listWindowCalls = 0;
   const audits = new Map<string, Record<string, unknown>>();
   let plannedRounds = 0;
   const statuses: ComputerUseSessionStatus[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
     pickApplication: async () => null,
-    listWindows: async (profile) => options.windowsFor?.(profile) ?? [nativeWindow(profile)],
+    listWindows: async (profile) => {
+      listWindowCalls += 1;
+      await options.listWindowsGate?.(listWindowCalls);
+      return options.windowsFor?.(profile) ?? [nativeWindow(profile)];
+    },
     startSession: async (input) => {
       await options.startSessionGate;
       startedSessions += 1;
@@ -309,6 +320,19 @@ function createFixture(
     currentPolicyEpoch: () => policyEpoch,
     repositionEmergencyStop: () => true,
     publishStatus: (status) => statuses.push(status),
+    ...(options.plannerFactory === undefined
+      ? {}
+      : {
+          plannerFactory: async (input: { signal: AbortSignal }) => {
+            await options.plannerFactory!(input);
+            return {
+              plan: async (): Promise<ComputerUseAction> => {
+                plannedRounds += 1;
+                return (await options.plan?.(plannedRounds)) ?? { type: 'finish' };
+              },
+            };
+          },
+        }),
     // A session with no planner never takes a round and never settles, so every fixture has one.
     // The default answers `finish` immediately: the agent asked for a window, the session ran, and
     // it ended — which is the shape `computer_start` returns.
@@ -331,6 +355,7 @@ function createFixture(
     startedSessions: () => startedSessions,
     plannedRounds: () => plannedRounds,
     closedSessions: () => closedSessions,
+    listWindowCalls: () => listWindowCalls,
     statuses,
     setPolicyEpoch: (next: number) => {
       policyEpoch = next;
@@ -577,6 +602,60 @@ describe('computer_request_access', () => {
     });
   });
 
+  it('counts a shown card once, however it is answered', async () => {
+    // Five applications, each shown once and refused once. A refusal that also counted as a request
+    // would spend the Task's five on two and a half cards.
+    const profiles = Array.from({ length: 6 }, (_value, index) =>
+      profileRecord(
+        `profile-${index}`,
+        macIdentity({
+          identityDigest: `${index}`.repeat(64).slice(0, 64),
+          bundleId: `com.example.app${index}`,
+          executablePath: `/Applications/App${index}.app/Contents/MacOS/App${index}`,
+        }),
+      ),
+    );
+    const fixture = createFixture({ profiles });
+    let shown = 0;
+    const showAndDeny = async (index: number): Promise<unknown> => {
+      const turn = { ...context, turnId: `turn-${index}` };
+      const rows = selectable((await fixture.controller.listTargets({}, turn)).targets);
+      const outcome = fixture.controller.requestAccess(
+        { appToken: rows[index]!.appToken, reason: 'ask' },
+        turn,
+      );
+      // Raising a card now re-takes the identity from native first, so the publish is a few ticks
+      // out. Waited for by counting cards rather than by guessing a number of ticks.
+      const cards = (): readonly ComputerAppGrantRequest[] =>
+        fixture.published.filter((request) => request.state === 'pending');
+      for (let tick = 0; tick < 10 && cards().length === shown; tick += 1)
+        await vi.advanceTimersByTimeAsync(0);
+      const card = cards().at(-1);
+      if (cards().length > shown && card !== undefined) {
+        shown += 1;
+        await fixture.controller.resolveAppGrantRequest(
+          { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+          null,
+        );
+      }
+      return await outcome;
+    };
+    for (let index = 0; index < 5; index += 1)
+      expect(await showAndDeny(index)).toEqual({
+        granted: false,
+        reasonCode: 'access_request_denied',
+      });
+    // Exactly five cards were shown, so the sixth application is the one the ceiling stops.
+    expect(await showAndDeny(5)).toEqual({
+      granted: false,
+      reasonCode: 'access_request_rate_limited',
+    });
+    const listing = fixture.controller.listAppGrantViews();
+    expect(listing.requestedApps).toHaveLength(5);
+    for (const app of listing.requestedApps)
+      expect([app.requestCount, app.denialCount]).toEqual([1, 1]);
+  });
+
   it('refuses to ask again in a Task the user already refused in', async () => {
     const fixture = createFixture();
     const target = await listOne(fixture);
@@ -634,11 +713,35 @@ describe('computer_request_access', () => {
         platform: 'darwin',
         appId: 'com.example.notes',
         untrustedDisplayName: 'Notes',
-        requestCount: 2,
+        // One card was shown and refused: one request, one refusal. The refusal is the answer to
+        // the card that was already counted, never a second ask.
+        requestCount: 1,
         denialCount: 1,
         lastRequestedAt: expect.any(String),
       },
     ]);
+  });
+
+  it('keeps the settings envelope parseable when the history outgrows it', async () => {
+    const fixture = createFixture();
+    // Seventy applications the agent has asked about and that never became grants. The envelope
+    // that carries this list is the same one the settings screen revokes permissions from, and the
+    // one `revoke` and the cleanup answer with: an auxiliary history must not be able to break it.
+    for (let index = 0; index < 70; index += 1)
+      fixture.controller['deps'].persistence.recordComputerAppAccessRequest({
+        platform: 'darwin',
+        grantIdentityDigest: index.toString(16).padStart(64, '0'),
+        taskId: 'task-1',
+        appId: `com.example.app${index}`,
+        displayName: `App ${index}`,
+        outcome: 'requested',
+        now: new Date(Date.parse('2026-09-20T00:00:00.000Z') + index * 1_000).toISOString(),
+      });
+    const listing = fixture.controller.listAppGrantViews();
+    expect(computerUseGrantListResultSchema.parse(listing)).toBeTruthy();
+    expect(listing.requestedApps).toHaveLength(COMPUTER_USE_REQUESTED_APP_LIST_LIMIT);
+    // Most recent first, so what is dropped is the oldest history rather than an arbitrary slice.
+    expect(listing.requestedApps[0]?.appId).toBe('com.example.app69');
   });
 
   it('lapses after two minutes without an answer', async () => {
@@ -869,6 +972,53 @@ describe('computer_request_access', () => {
       state: 'canceled',
       noticeCode: 'identity_changed',
     });
+  });
+
+  it('creates no grant when the attested ceiling dropped between the card and the click', async () => {
+    let ceiling: 'full_access_app' | 'supervised' = 'full_access_app';
+    const profile = profileRecord('profile-notes', macIdentity());
+    const fixture = createFixture({
+      profiles: [profile],
+      windowsFor: () => [nativeWindow(profile, { maximumMode: ceiling })],
+    });
+    const target = await listOne(fixture);
+    const pending = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'ask' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    expect(card.verified.maxMode).toBe('full_access_app');
+    // Native now attests less for this application than it did when the card went up. Storing the
+    // grant anyway would write a permanent ceiling the user never read.
+    ceiling = 'supervised';
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+      intentFor(card, 'allow_always'),
+    );
+    expect(await pending).toEqual({ granted: false, reasonCode: 'app_grant_identity_changed' });
+    expect(fixture.grants.size).toBe(0);
+  });
+
+  it('shows the weakest ceiling across the windows it is offering', async () => {
+    // A session binds one window and which one is not known yet, so the card promises what every
+    // eligible window can honour.
+    const profile = profileRecord('profile-notes', macIdentity());
+    const fixture = createFixture({
+      profiles: [profile],
+      windowsFor: () => [
+        nativeWindow(profile, { maximumMode: 'full_access_app' }),
+        nativeWindow(profile, { windowIdentityDigest: 'e'.repeat(64), maximumMode: 'supervised' }),
+      ],
+    });
+    const pending = fixture.controller.requestAccess(
+      { appToken: (await listOne(fixture)).appToken, reason: 'ask' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.pending().verified.maxMode).toBe('supervised');
+    await vi.advanceTimersByTimeAsync(120_000);
+    await pending;
   });
 
   it('creates no grant when the deny verdict changed between the card and the click', async () => {
@@ -1203,6 +1353,85 @@ describe('computer_start', () => {
       state: 'stopped',
       stopReason: 'policy_changed',
     });
+  });
+
+  it('stops before native when the Turn is canceled during the identity re-fetch', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The first enumeration builds the target list; the one inside `startForAgent` is held, which
+    // is the window in which the Turn gets cancelled.
+    const fixture = createFixture({
+      listWindowsGate: (call) => (call === 1 ? undefined : held),
+    });
+    const target = await grantAndList(fixture);
+    const canceled = new AbortController();
+    const running = fixture.controller
+      .startForAgent({ targetToken: target.targetToken, goal: 'x' }, context, canceled.signal)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.listWindowCalls()).toBeGreaterThan(1);
+    canceled.abort(new Error('Turn canceled'));
+    release();
+    expect(await settle(running)).toBeInstanceOf(Error);
+    // No session was created at all: the abort was seen before native was asked to focus anything.
+    expect(fixture.startedSessions()).toBe(0);
+    expect(fixture.statuses).toEqual([]);
+  });
+
+  it('cancels native start-up and the provider preflight when the Turn is canceled', async () => {
+    let releaseNative: () => void = () => undefined;
+    const nativeHeld = new Promise<void>((resolve) => {
+      releaseNative = resolve;
+    });
+    const plannerSignals: AbortSignal[] = [];
+    const fixture = createFixture({
+      startSessionGate: nativeHeld,
+      plannerFactory: async ({ signal }) => {
+        plannerSignals.push(signal);
+      },
+    });
+    const target = await grantAndList(fixture);
+    const canceled = new AbortController();
+    const running = fixture.controller
+      .startForAgent({ targetToken: target.targetToken, goal: 'x' }, context, canceled.signal)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Native has been asked to start and has not answered yet.
+    expect(fixture.startedSessions()).toBe(0);
+    canceled.abort(new Error('Turn canceled'));
+    releaseNative();
+    expect(await settle(running)).toBeInstanceOf(Error);
+    // The session native did hand back is cancelled and closed rather than left running, and the
+    // provider preflight is never reached: an aborted start must not talk to a provider.
+    expect(fixture.closedSessions()).toBe(1);
+    expect(plannerSignals).toHaveLength(0);
+    expect(fixture.controller.getStatus(fixture.statuses.at(-1)?.sessionId ?? '')).toBeNull();
+  });
+
+  it('hands the provider preflight a signal that the Turn can cancel', async () => {
+    // The factory is where Main verifies the connection and runs the compatibility preflight. When
+    // the start is not cancelled it still has to receive a signal, or a later cancel reaches
+    // nothing.
+    const plannerSignals: AbortSignal[] = [];
+    const fixture = createFixture({
+      plannerFactory: async ({ signal }) => {
+        plannerSignals.push(signal);
+      },
+    });
+    const target = await grantAndList(fixture);
+    await settle(
+      fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+    );
+    expect(plannerSignals).toHaveLength(1);
+    expect(plannerSignals[0]?.aborted).toBe(true);
   });
 
   it('spends the token before its first await, so a concurrent twin loses', async () => {

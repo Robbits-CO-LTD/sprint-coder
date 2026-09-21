@@ -23,6 +23,8 @@ import {
   selectableComputerTargetSchema,
   COMPUTER_START_GOAL_MAX_CHARACTERS,
   COMPUTER_TARGET_LIST_LIMIT,
+  COMPUTER_USE_GRANT_LIST_LIMIT,
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
   COMPUTER_USE_LIMITS,
   type ComputerAccessRequestReasonCode,
   type ComputerAppAccessRequestView,
@@ -944,7 +946,13 @@ export class ComputerUseController {
     const requestedApps: ComputerAppAccessRequestView[] = [];
     // Only the applications that never became a grant: a granted one already has a row above with
     // its own counters, and listing it twice would read as two different applications.
+    //
+    // Truncated to what the envelope allows, most recent first. This envelope also carries the
+    // grant list and is what revoking and the cleanup answer with, so an auxiliary history that
+    // outgrew its bound must not be able to make the whole thing fail to parse — that would take
+    // away the screen the user revokes permissions from.
     for (const totals of this.deps.persistence.listComputerAppAccessRequestTotals()) {
+      if (requestedApps.length >= COMPUTER_USE_REQUESTED_APP_LIST_LIMIT) break;
       if (granted.has(`${totals.platform}:${totals.grantIdentityDigest}`)) continue;
       const view = computerAppAccessRequestViewSchema.safeParse({
         platform: totals.platform,
@@ -956,6 +964,10 @@ export class ComputerUseController {
       });
       if (view.success) requestedApps.push(view.data);
     }
+    // The store refuses to create more grants than this, so the slice is the belt: raising that
+    // ceiling without raising the contract's would otherwise break the list rather than shorten it.
+    if (grants.length > COMPUTER_USE_GRANT_LIST_LIMIT)
+      grants.length = COMPUTER_USE_GRANT_LIST_LIMIT;
     return { grants, discardedRecords, requestedApps };
   }
 
@@ -1555,17 +1567,21 @@ export class ComputerUseController {
         COMPUTER_ACCESS_REQUEST_TASK_LIMIT
     )
       return this.accessRefused('access_request_rate_limited');
-    const facts = this.appGrantCardFacts(profile, identity);
-    if (facts === null) return this.accessRefused('access_request_invalid_token');
+    // The same live enumeration the click will re-run, so both sides compute the ceiling from
+    // native rather than one from native and one from the store.
+    const observed = await this.refetchAppGrantFacts(profile.id);
+    if (observed === null || observed.identity.grantIdentityDigest !== identity.grantIdentityDigest)
+      return this.accessRefused('access_request_invalid_token');
     // A Turn that is already gone has nobody left to click, and the card holds the single global
     // slot for two minutes. Checked before raising, and again through the listener below.
     if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
+    if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
     return await this.raiseAppGrantCard({
       context,
       kind,
-      profile,
-      identity,
-      facts,
+      profile: observed.profile,
+      identity: observed.identity,
+      facts: observed.facts,
       policyEpoch,
       appToken: input.appToken,
       reason: input.reason,
@@ -1582,14 +1598,28 @@ export class ComputerUseController {
   /**
    * The verified facts the card asserts, and that the click must still find true (§6.1.1).
    *
-   * `maximumMode` is the native attestation bound by the profile's own ceiling — the mode the grant
-   * would actually carry — so a native boundary that later attests something weaker invalidates the
-   * card rather than quietly granting more than the user read.
+   * `maximumMode` is the ceiling the grant would actually carry: the profile's stored attestation
+   * bound by what native says *now* about the windows it is offering. It is taken from a live
+   * enumeration on both sides — when the card is raised and again when it is clicked — because a
+   * value read from the store on one side and from native on the other would compare two different
+   * questions and always agree.
+   *
+   * **The weakest eligible window wins.** A session binds one window, and which one is not known
+   * until `computer_start`; promising the strongest and then binding a window native attests lower
+   * would mean the user read a ceiling the grant does not have. The stored grant is a ceiling for
+   * every future session with this application, so it has to be one that all of them can honour.
    */
   private appGrantCardFacts(
     profile: ComputerAppProfileRecord,
     identity: ComputerAppGrantIdentity,
+    windows: readonly ComputerUseNativeWindow[],
   ): ComputerAppGrantCardFacts | null {
+    const eligible = windows.filter((window) => window.eligible !== false);
+    if (eligible.length === 0) return null;
+    const attested = eligible.reduce<ComputerUseMode>(
+      (weakest, window) => bindComputerUseMaximumMode(weakest, window.maximumMode),
+      maximumModeForProfile(profile),
+    );
     return Object.freeze({
       platform: identity.platform,
       identityKind: identity.identityKind,
@@ -1597,7 +1627,7 @@ export class ComputerUseController {
       appId: identity.appId,
       grantIdentityDigest: identity.grantIdentityDigest,
       denied: computerUseAppIdentityIsDenied(profile.identity),
-      maximumMode: maximumModeForProfile(profile),
+      maximumMode: attested,
     });
   }
 
@@ -1618,17 +1648,19 @@ export class ComputerUseController {
     facts: ComputerAppGrantCardFacts;
   }> | null> {
     let profile: ComputerAppProfileRecord;
+    let windows: readonly ComputerUseNativeWindow[];
     try {
       profile = this.deps.persistence.getComputerAppProfile(profileId);
-      const windows = await this.listNativeWindows(profile);
+      windows = await this.listNativeWindows(profile);
       profile = this.refreshSignedWindowsProfile(profile, windows);
-      if (!windows.some((window) => window.eligible !== false)) return null;
     } catch {
       return null;
     }
     const identity = computerAppGrantIdentityFrom(profile.identity);
     if (identity === null) return null;
-    const facts = this.appGrantCardFacts(profile, identity);
+    // From this enumeration, not from the store: the attested ceiling is one of the facts, and a
+    // native boundary that has lowered it since the card was raised has to stop the grant.
+    const facts = this.appGrantCardFacts(profile, identity, windows);
     return facts === null ? null : Object.freeze({ profile, identity, facts });
   }
 
@@ -2037,7 +2069,12 @@ export class ComputerUseController {
       throw new Error('Computer Use provider egress consent is missing for this model');
     const identity = computerAppGrantIdentityFrom(profile.identity);
     if (identity === null) throw new Error('Computer Use target token is not valid');
+    // Checked around every await from here on, not only once the session exists. Native enumeration
+    // is the slow part of this path, and a Turn cancelled during it must not go on to focus a
+    // window and start driving it.
+    signal?.throwIfAborted();
     const observed = await this.refetchAppGrantFacts(profile.id);
+    signal?.throwIfAborted();
     if (
       observed === null ||
       observed.identity.grantIdentityDigest !== identity.grantIdentityDigest ||
@@ -2045,6 +2082,7 @@ export class ComputerUseController {
     )
       throw new Error('Computer Use app identity changed');
     const windows = await this.listNativeWindows(observed.profile);
+    signal?.throwIfAborted();
     const candidate = windows.find(
       (window) =>
         window.windowId === binding.nativeWindowId &&
@@ -2077,31 +2115,36 @@ export class ComputerUseController {
       if (onSettled !== null && computerUseSessionStateIsSettled(status.state)) onSettled(status);
     });
     try {
-      const status = await this.start({
-        taskId: context.taskId,
-        turnId: context.turnId,
-        profileId: observed.profile.id,
-        windowId: windowToken,
-        // min(grant ceiling, native attestation). `startInternal` binds again against the window
-        // and the session, so this can only ever be the weaker of the two.
-        mode: bindComputerUseMaximumMode(maxMode, candidate.maximumMode),
-        connectionId: egressBinding.connectionId,
-        modelId: egressBinding.modelId,
-        providerEgressConsent: true,
-        providerEgressConsentBinding: egressBinding,
-        // Never writes the agreement back onto the V1 profile row: the grant is the record.
-        remember: false,
-        expectedPolicyEpoch: policyEpoch,
-        expectedWindowRevision: candidate.revision,
-        expectedProfileRevision: observed.profile.revision,
-        agent: {
-          goal: computerUseAgentGoal(input.goal),
-          grantScope: state.scope ?? 'grant',
-          grantId: state.grantId,
-          grantIdentityDigest: identity.grantIdentityDigest,
-          providerEgress: egressBinding,
+      const status = await this.start(
+        {
+          taskId: context.taskId,
+          turnId: context.turnId,
+          profileId: observed.profile.id,
+          windowId: windowToken,
+          // min(grant ceiling, native attestation). `startInternal` binds again against the window
+          // and the session, so this can only ever be the weaker of the two.
+          mode: bindComputerUseMaximumMode(maxMode, candidate.maximumMode),
+          connectionId: egressBinding.connectionId,
+          modelId: egressBinding.modelId,
+          providerEgressConsent: true,
+          providerEgressConsentBinding: egressBinding,
+          // Never writes the agreement back onto the V1 profile row: the grant is the record.
+          remember: false,
+          expectedPolicyEpoch: policyEpoch,
+          expectedWindowRevision: candidate.revision,
+          expectedProfileRevision: observed.profile.revision,
+          agent: {
+            goal: computerUseAgentGoal(input.goal),
+            grantScope: state.scope ?? 'grant',
+            grantId: state.grantId,
+            grantIdentityDigest: identity.grantIdentityDigest,
+            providerEgress: egressBinding,
+          },
         },
-      });
+        // Carried into the start path so an abort during start-up reaches native's cleanup, the
+        // provider preflight and the first planner call, rather than being noticed only afterwards.
+        signal,
+      );
       // Only a session that actually started counts as use (§6.2.1).
       if (state.scope === 'grant') this.touchAppGrantUsed(observed.profile.identity);
       // Nothing runs between `start` resolving and this line, so anything the session has already
@@ -2169,7 +2212,14 @@ export class ComputerUseController {
     }
   }
 
-  async start(input: ComputerUseStartRequest): Promise<ComputerUseSessionStatus> {
+  /**
+   * `externalSignal` is the calling Turn's, supplied only by `computer_start`. The panel's own
+   * start has no caller to be cancelled by; its session is cancelled through Stop and the overlay.
+   */
+  async start(
+    input: ComputerUseStartRequest,
+    externalSignal?: AbortSignal,
+  ): Promise<ComputerUseSessionStatus> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     input = {
       ...input,
@@ -2185,6 +2235,17 @@ export class ComputerUseController {
     this.startingController = controller;
     this.startingTaskId = input.taskId;
     this.startingProfileId = input.profileId;
+    // Linked to *this* start's own controller, never the other way round: an abort of the caller
+    // cancels this start-up — the native session handshake's cleanup, the provider preflight, the
+    // first planner call — and nothing here can abort anybody else's.
+    const forward = (): void =>
+      controller.abort(
+        externalSignal?.reason instanceof Error
+          ? externalSignal.reason
+          : new Error('Computer Use start was canceled'),
+      );
+    if (externalSignal?.aborted === true) forward();
+    else externalSignal?.addEventListener('abort', forward, { once: true });
     try {
       return await this.startInternal(input, controller);
     } catch (error) {
@@ -2192,6 +2253,7 @@ export class ComputerUseController {
         controller.abort(error instanceof Error ? error : new Error('Computer Use start failed'));
       throw error;
     } finally {
+      externalSignal?.removeEventListener('abort', forward);
       if (this.startingController === controller) this.startingController = null;
       if (this.startingTaskId === input.taskId) {
         this.startingTaskId = null;
@@ -2530,6 +2592,9 @@ export class ComputerUseController {
       }),
     );
     try {
+      // Before the factory, not only after it: the factory is where the provider preflight and the
+      // model-capability check happen, and a start that is already cancelled must not make them.
+      controller.signal.throwIfAborted();
       planner =
         this.deps.plannerFactory === undefined
           ? (this.deps.planner ?? null)
