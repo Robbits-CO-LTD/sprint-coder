@@ -13,6 +13,17 @@
   3. `computer_list_targets` の出力を **選択可能 / 不可の 2 union** に分離し、ラベルを 64 文字の untrusted 隔離枠に閉じ込め（§5.2）。
   4. app grant を **動的コード署名検証 + activation intent 束縛 + per-install MAC** で固め、egress consent をアプリごとに同一クリックで取得（§6）。
   5. スライスを再編（S2 縮小、D1 interlock を S4/S5 へ前倒し、各スライスに前提 D 番号）（§9）。
+- 2026-09-21 S3b（会話内の承認カード + `computer_request_access` + `computer_start`）の実装に合わせて更新。設計を変えたのは 4 点、記述を実装に合わせたのが 4 点。
+  1. **`computer_start` はセッションが終わるまで返らない**（§5.2 / §5.4）。セッションは呼び出した Turn に束縛されているので、早く返すと「モデルが答える → Turn が終わる → 次のラウンドで Turn 所有権エラーになってセッションが死ぬ」となり、機能として成立しない。飛んでいるツール呼び出しが Turn を生かしておく。
+  2. **`computer_start` の戻り値は session status ではなく縮小した射影**（§5.2）。ツール結果は会話に永続化されるので、`pendingApproval`（画面の一時的な抜粋）・identity digest・接続 ID は返さない。
+  3. **対象の切替は `computer_stop` → list → start ではなく list → start**（§5.4）。`computer_start` が終了時に返る以上、切替時点でセッションはもう無い。`computer_stop` は「まだ生きているセッションを止める」ために残す。
+  4. **承認カードのボタンは §6.1 の D14 が正**（§7.2 の図を修正）。「今回だけ許可」と「今後も許可」を同格で横並び、既定フォーカスは前者。ただし**入力中（input / textarea / contenteditable にキャレットがある）ならフォーカスを奪わない** — カードは予告なく現れるので、次の Space / Enter が承認になってはいけない。
+  5. 設定画面の要求回数 / 拒否回数は、**grant 行を持たないアプリの分も**新テーブル `computer_app_access_requests`（platform + grant_identity_digest + task_id）に記録し、別の一覧として表示する（§6.1）。Task への FK は cascade。この表は「許可を出さない」方向にしか効かないので MAC は付けない。
+  6. §6.4 の egress 専用カードには「今回だけ」が無い（許可 1 つ + 拒否）。A は既に合意済みで、聞いているのは宛先だけ。
+  7. S3b の identity 取り直し（§6.1.1 / §6.2.1）は、native を変えずに `listWindows` で行う。pid ベースの動的署名検証は S4 / S5 で置き換える。
+  8. `computer_start` は Turn の中から呼ばれるので、開始条件は「Task が idle」ではなく「呼び出した Turn が現役」。
+
+**未解決（S3b では解かない）**: 内側のセッションで得た**内容**を外側のエージェントへどう返すか。「あるアプリの表を別のアプリへ写す」のような依頼は、本来セッション内で完結させるか、観測した内容を外へ渡す必要がある。しかし内側の planner が読んだ画面テキストを外側の会話へ返すことは、T13（外側は履歴を持つ）のインジェクション経路そのものであり、現状の `computer_start` は「どう終わったか」しか返さない。これは別途設計が要る（候補: セッション内で完結させる操作語彙、Main が検証できる構造化された抽出結果、人が確認する経路）。
 
 本 ADR は「オーナー決定（2026-09-19）」を所与の前提として設計する。決定そのものは再検討しない。
 
@@ -291,10 +302,18 @@ mode の単調束縛（`bindComputerUseMaximumMode`、`computer-use-controller.t
 | --- | --- | --- | --- |
 | `computer_list_targets` v1 | `{ appToken?: string, refresh?: boolean }` | `{ targets: Target[], truncated: boolean }`（最大 50） | アプリ横断でウィンドウを列挙。`appToken` 指定時はそのアプリのウィンドウのみ |
 | `computer_request_access` v1 | `{ appToken: string, reason: string(<=256) }` | `{ granted: boolean, reasonCode: string \| null }` | Main が承認カードを出し、**人のクリック**を待つ。タイムアウト 120 秒。レート制限（T8） |
-| `computer_start` v1 | `{ targetToken: string, goal: string(<=1024) }` | `ComputerUseSessionStatus` | 既存 start 経路を再利用。grant 必須 |
+| `computer_start` v1 | `{ targetToken: string, goal: string(<=1024) }` | `{ sessionId, state, stopReason, mode, round, maxRounds }` | 既存 start 経路を再利用。grant 必須。**セッションが終了するまで返らない**（下記） |
 | `computer_stop` v1 | `{ sessionId: string }` | `{ stopped: true }` | 既存 stop 経路 |
 
 既存の `computer_observe` / `computer_act`（`computer-use-controller.ts:69-128`）は**そのまま**。
+
+**`computer_start` の戻り方（2026-09-21 追加）**
+
+- セッションは**呼び出した Turn に束縛される**（`assertSessionLive` はその Turn が現役であることを要求する）。開始直後に返すと、モデルが答えた瞬間に Turn が終わり、次のラウンドで自分が始めたセッションを殺す。したがって `computer_start` は**セッションが「自力では抜けられない状態」に達するまで待って返る**。飛んでいるツール呼び出しが Turn を生かしておく役割を持つ。
+- 「自力では抜けられない状態」= `stopped` / `failed` / `paused`。`paused` は user takeover の境界で、再開できるのは人だけであり、その Turn が走っている間は再開経路（Task が idle であることを要求する）が通らない。呼び出し側から見れば stop と同じく終端。
+- 待っている間も、操作ごとの承認・user takeover・Stop オーバーレイ・緊急停止・ラウンド上限・セッションの有効期限はすべてこれまでどおり効く。どれも終端状態に至るだけで、その状態がそのまま戻り値になる。
+- Turn がキャンセルされたら（ツール dispatch の abort signal）セッションを停止して呼び出しを失敗させる。
+- 戻り値は `ComputerUseSessionStatus` そのものではなく**縮小した射影**。ツール結果は会話に永続化されるため、`pendingApproval`（画面の一時的な抜粋を含む）・identity digest・profile / connection / model の ID は渡さない（§8「観測を永続化しない」）。
 
 `Target` は **2 つの union に分ける（D4 / D9）**。選択可能な行と、選択できない行では返す情報量をそもそも変える。
 
@@ -358,11 +377,12 @@ type UnavailableTarget = {
 
 ### 5.4 対象切替（1 セッション 1 ウィンドウを保ったまま）
 
-切替ツールは**追加しない**。手順は次のとおり:
+切替ツールは**追加しない**。手順は次のとおり（2026-09-21 更新: `computer_start` が終了時に返るので、切替時点でセッションはもう存在しない）:
 
-1. `computer_stop(sessionId)` → Main が native セッションを close、cancel epoch を進め、Stop オーバーレイを解除。
-2. `computer_list_targets()` → 新しい token 一式。
-3. `computer_start(newTargetToken, goal)` → 新しい sessionId、新しい cancel epoch、新しい観測 revision。
+1. `computer_list_targets()` → 新しい token 一式。
+2. `computer_start(newTargetToken, goal)` → 新しい sessionId、新しい cancel epoch、新しい観測 revision。
+
+`computer_stop(sessionId)` は残す。`computer_start` が返った時点でセッションは終わっているのが通常だが、何らかの理由でまだ生きているセッションを Task が畳むための経路として必要（Main が native セッションを close し、cancel epoch を進め、Stop オーバーレイを解除する）。
 
 これにより「1 セッションが同時に束縛するのは 1 ウィンドウ」が構造的に保たれる（切替 API を持たせると、途中の状態で 2 ウィンドウが有効な瞬間ができる）。切替は Turn 内で可能だが、`computer_start` は毎回 grant と policy epoch を再検証する。
 
@@ -382,6 +402,8 @@ type UnavailableTarget = {
 - ボタン（D14）: **「今回だけ許可」と「今後も許可（確認しない）」を同じ大きさで横に並べる**（どちらも primary でも secondary でもない同格）。恒久側の文言に結果を明示する（「今後このアプリでは確認しません」）。既定フォーカスは「今回だけ許可」。3 つ目に「拒否」。
 - **拒否されたアプリは、その Task の中では再要求できない**（`computer_request_access` は `access_request_denied_in_task` で即座に失敗）。Task をまたげば再要求できる。
 - 設定画面に、アプリごとの **AI の要求回数 / ユーザーの拒否回数 / 最終使用日**を表示する（承認疲労と、しつこく要求するアプリの可視化）。
+- **記録先（2026-09-21）**: grant 行を持つアプリは `computer_app_grants` のカウンタ、持たないアプリは新テーブル `computer_app_access_requests`（主キー = platform + grant_identity_digest + task_id、`tasks` への FK は `ON DELETE CASCADE`）。同じ表が「この Task では拒否済み」と「Task あたりの要求数」も答える。**MAC は付けない** — この表の値はどれも許可を与える方向には効かず、偽造しても「許可しない」が増えるだけだから。設定画面では grant にならなかったアプリを別の一覧として出す。
+- **カードのフォーカス（2026-09-21）**: 既定フォーカスは「今回だけ許可」だが、**ユーザーが入力中（input / textarea / contenteditable にキャレットがある）ならフォーカスを奪わない**。カードは予告なく現れ、Main はウィンドウを前面に出すので、書きかけのメッセージの次の Space / Enter が承認になってはいけない。その場合はカードの role / label による読み上げに任せ、ユーザーが Tab で到達する。
 - 承認は trusted user activation を消費する（`computer-use-activation.ts` に `kind: 'app-grant'` を追加）。モデル出力・画面の文章では絶対に承認できない。
 - **未解決の app-grant カードは同時に 1 枚まで**。2 枚目の要求は `access_request_pending` で拒否する。
 
@@ -423,6 +445,8 @@ scope('global'), created_at, updated_at, revision
 
 V1 の identity は、パスから実行ファイルを開いて静的に署名検証する形（`CopySigningFacts`）だった。grant がグローバル・無期限になる v2 では、静的検証の価値が相対的に下がる（検証したファイルと、いま動いているプロセスが同じとは限らない）。
 
+**S3b の実装状況（2026-09-21）**: 動的検証は native を変えずに行える範囲、すなわち `listWindows` の再列挙で代用している（走っているプロセスから identity digest と mode attestation を取り直し、Windows では実行中イメージの digest を照合する）。終了した／差し替えられた／適格なウィンドウを失ったアプリはここで落ちる。下記の pid ベースの検証は S4 / S5 で置き換える。
+
 - **主**: pid ベースの動的コード署名検証。macOS は `SecCodeCopyGuestWithAttributes`（`kSecGuestAttributePid`）で走っているプロセスのコードオブジェクトを取り、`SecCodeCheckValidity` を通す。Windows は実行中イメージ（`QueryFullProcessImageName` で得たイメージを、プロセスがロックしているファイルハンドル経由で）検証し、volume serial + file id で同一性を確認する（既存の `WindowsSessionExecutableMatches`、`computer_use_windows_host.cc:962-979` の枠組みを流用）。
 - **補助**: 従来の静的検証。動的検証が使えない環境では静的にフォールバックし、その旨を `identityKind` に反映する（`verified-signed-static`）。
 - **「更新では再確認しない」の条件を厳密化**: 署名者 / Team ID / signing identifier / 正規化パスが**すべて同一**で、かつ**動的検証が有効**な場合に限る。どれか 1 つでも欠ければ再確認。
@@ -461,7 +485,7 @@ V1 の identity は、パスから実行ファイルを開いて静的に署名�
 **B をアプリ非依存にしない理由（D10）**: 1 つ目のアプリ（例: テキストエディタ）で一度同意すると、以後は銀行のブラウザ画面でも社内管理画面でも、同意を取り直さずに画面が Provider へ送られる。「何を送るか」の性質がアプリごとに大きく違うので、同意の単位もアプリごとにする。
 
 - B は **A と同じクリックで、そのアプリについて 1 回取得**し、`computer_app_grants.provider_egress_consent` に `{connectionId, modelId}` 付きで記録する。承認カードには「このアプリの画面とアクセシビリティ情報を〈モデル名〉へ送ります」と明記する。
-- **モデル（または接続）を変えたときは B だけを取り直す**。A は生きたまま、「〈アプリ名〉の画面を新しいモデル〈…〉へ送ってよいか」を 1 回確認する。A の許可はやり直さない。
+- **モデル（または接続）を変えたときは B だけを取り直す**。A は生きたまま、「〈アプリ名〉の画面を新しいモデル〈…〉へ送ってよいか」を 1 回確認する。A の許可はやり直さない。この小さいカードのボタンは**「許可」と「拒否」の 2 つだけ**（2026-09-21）。アプリの許可は既にあり、聞いているのは宛先だけなので「今回だけ」に対応する対象が無い。
 - ラウンドごとの検証（`authorizeComputerUseProviderEgress`、`computer-use-planner.ts:207-208`）はそのまま維持し、入力を grant 由来の B に変える。
 - **一覧取得（`computer_list_targets`）の結果を Provider に渡すことも同意の範囲**として文言に含める（T7）。一覧は特定アプリに属さないため、**一覧用の egress は「起動中アプリの名前一覧を送る」という独立した 1 回の同意**とし、初回の Computer Use 利用時に取得する。
 
@@ -494,13 +518,17 @@ AI: computer_list_targets()        → Main が native 列挙 + deny 判定 + to
 AI: computer_request_access(appToken=Safari, reason="…")
   ↓
 [会話内カード] 発行元 Apple / com.apple.Safari / 署名確認済み / full_access_app
-               [許可（次回から確認しない）] [拒否]  (小)今回だけ
+               [今回だけ許可] [今後も許可（今後このアプリでは確認しません）] [拒否]
+               ※ 2 つの許可は同格・同じ大きさ。既定フォーカスは「今回だけ許可」、
+                 ただしユーザーが入力中ならフォーカスは奪わない（§6.1）
   ↓ 人がクリック（trusted activation）
-AI: computer_start(targetToken)    → Stop オーバーレイ表示、セッション開始
+AI: computer_start(targetToken, goal)  → Stop オーバーレイ表示、セッション開始
   ↓
 内側ループ: observe → computer_use_action_v1 → act …（ターゲットは変えられない）
   ↓
-AI: computer_stop(sessionId)
+セッション終了（停止 / 人が引き取った / 失敗）
+  ↓
+computer_start がここで返る → { sessionId, state, stopReason, mode, round, maxRounds }
 ```
 
 2 回目以降は `granted: true` なので `computer_request_access` を飛ばして `computer_start` に進む＝確認なしで始まる（受入れ条件）。
