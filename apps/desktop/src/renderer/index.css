@@ -9062,9 +9062,111 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--warning);
   background: var(--bg-panel);
 }
+.computer-use-grants__discarded {
+  flex-wrap: wrap;
+}
+.computer-use-grants__purge {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  font-size: 11px;
+}
+.computer-use-grants__purge:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.computer-use-grants__purged {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.computer-use-grants__requested {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+.computer-use-grants__subtitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 650;
+}
 .computer-use-grants__error {
   margin: 0;
   color: var(--danger);
+  font-size: 11.5px;
+}
+
+/* The in-conversation application approval card (ADR v2 §6.1). It inherits the approval card's
+   shell so the two read as the same kind of interruption; what it changes is the button row, where
+   D14 asks for the two approvals at equal weight rather than one primary and one secondary. */
+.computer-grant-card__facts div {
+  grid-template-columns: 92px 1fr;
+}
+.computer-grant-card__untrusted-note {
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.computer-grant-card__unsigned {
+  color: var(--warning);
+}
+.computer-grant-card__scope {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 10px;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.computer-grant-card__egress {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.computer-grant-card__egress code {
+  font: 11px/1.5 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.computer-grant-card__reason {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px dashed var(--hairline-strong);
+  border-radius: var(--r-sm);
+  background: var(--bg-panel);
+}
+.computer-grant-card__reason q {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.computer-grant-card__actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+/* Same padding, same border, same weight: neither approval may read as the recommended one. */
+.computer-grant-card__actions .computer-grant-card__allow {
+  flex: 1 1 200px;
+  min-height: 36px;
+  color: var(--text-primary);
+  border-color: var(--hairline-strong);
+  font-weight: 600;
+}
+.computer-grant-card__actions .computer-grant-card__allow:focus-visible {
+  border-color: var(--accent);
+}
+.computer-grant-card__notice {
+  width: min(680px, 100%);
+  margin: 8px 0 16px 44px;
+  color: var(--warning);
   font-size: 11.5px;
 }
 .computer-use-grant-list {

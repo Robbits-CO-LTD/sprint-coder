@@ -15,6 +15,8 @@ import { ArrowDown, ArrowUp } from '../icons';
 import { MessageBubble } from '../MessageBubble';
 import { RunCard } from '../RunCard';
 import { ApprovalCard } from '../ApprovalCard';
+import { ComputerUseAppGrantCard } from '../ComputerUseAppGrantCard';
+import { useComputerUseAppGrant } from '../../hooks/useComputerUseAppGrant';
 import { CommandCard } from '../CommandCard';
 import { ApprovalAuditRow } from '../ApprovalAuditRow';
 import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
@@ -68,6 +70,10 @@ export function Timeline({
   const installSkillDraft = useAppStore((s) => s.installSkillDraft);
   const discardSkillDraft = useAppStore((s) => s.discardSkillDraft);
   const resolving = useAppStore((s) => s.resolvingApprovalIds);
+  // The application approval card (ADR v2 §6.1). It lives beside the tool approvals because it is
+  // the same kind of interruption, but it is live Main state rather than a stored approval, so it
+  // comes from its own subscription instead of the store.
+  const appGrant = useComputerUseAppGrant(taskId);
   const resolveApproval = useAppStore((s) => s.resolveApproval);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [memoryDialog, setMemoryDialog] = useState<ProjectMemoryDialogSource | null>(null);
@@ -460,6 +466,14 @@ export function Timeline({
               }
             />
           ))}
+          {appGrant.request === null ? null : (
+            <ComputerUseAppGrantCard
+              key={appGrant.request.id}
+              request={appGrant.request}
+              busy={appGrant.busy}
+              onDecision={appGrant.resolve}
+            />
+          )}
           {memoryError !== null && (
             <p className="project-context-error" role="alert">
               {memoryError}
