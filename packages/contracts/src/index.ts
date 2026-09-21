@@ -5146,34 +5146,59 @@ export const computerTargetUnavailableClassSchema = z.enum([
 ]);
 export type ComputerTargetUnavailableClass = z.infer<typeof computerTargetUnavailableClassSchema>;
 
-export const computerUseUntrustedTextSchema = z
-  .string()
-  // Counted in codepoints, matching how the label is truncated. `.max()` alone counts UTF-16 code
-  // units, so a title of 33 emoji survives truncation at 33 codepoints and then fails validation at
-  // 66 units — which would throw away the whole list, not just the label. The cheap `.max()` below
-  // is the corresponding upper bound (no codepoint exceeds two units) and bounds the regex work.
-  .max(COMPUTER_TARGET_LABEL_MAX_CHARACTERS * 2)
-  .refine(
-    (value) => [...value].length <= COMPUTER_TARGET_LABEL_MAX_CHARACTERS,
-    `Untrusted target label exceeds ${COMPUTER_TARGET_LABEL_MAX_CHARACTERS} characters`,
-  )
-  .refine(
-    // Control characters, newlines, and the Unicode bidi overrides are what let a title close the
-    // surrounding JSON framing or reorder itself into something that reads as a separate line.
-    //
-    // `\p{Cf}` rather than a hand-picked list of bidi and zero-width codepoints: the Unicode Tag
-    // block (U+E0000\u2013U+E007F) maps one ASCII character to one invisible codepoint, so an enumerated
-    // list that omits it lets a whole sentence through inside the 64-character budget, visible to
-    // neither the user nor the log yet legible to a model. `U+00AD` is the same problem with one
-    // character. The Hangul fillers render as blanks but are letters, not format characters, so they
-    // are named; NFKC already folds U+3164 and U+FFA0 onto U+1160, and both forms are listed anyway
-    // so the set does not depend on the caller having normalised first.
-    //
-    // This must stay the exact set `sanitizeUntrustedTargetLabel` removes. Losing ZWJ breaks
-    // multi-codepoint emoji, which is accepted: the label is a hint the agent is told not to act on.
-    (value) => !COMPUTER_TARGET_LABEL_FORBIDDEN_CHARACTERS.test(value),
-    'Untrusted target label retains control, format, or filler characters',
+/**
+ * One untrusted-text rule, applied at whichever length the surface allows.
+ *
+ * A factory rather than a copy per length: the character class below is the security-relevant half,
+ * and two hand-written copies of it is exactly how the sanitiser and the schema came to disagree
+ * once already. Only the codepoint budget differs — 64 for a label the model reads, 256 for the
+ * reason a person reads on the approval card.
+ */
+export function computerUseUntrustedTextSchemaOf(
+  maximumCharacters: number,
+): z.ZodType<string, string> {
+  return (
+    z
+      .string()
+      // Counted in codepoints, matching how the label is truncated. `.max()` alone counts UTF-16 code
+      // units, so a title of 33 emoji survives truncation at 33 codepoints and then fails validation
+      // at 66 units — which would throw away the whole list, not just the label. The cheap `.max()`
+      // below is the corresponding upper bound (no codepoint exceeds two units) and bounds the regex
+      // work.
+      .max(maximumCharacters * 2)
+      .refine(
+        (value) => [...value].length <= maximumCharacters,
+        `Untrusted target label exceeds ${maximumCharacters} characters`,
+      )
+      .refine(
+        // Control characters, newlines, and the Unicode bidi overrides are what let a title close the
+        // surrounding JSON framing or reorder itself into something that reads as a separate line.
+        //
+        // `\p{Cf}` rather than a hand-picked list of bidi and zero-width codepoints: the Unicode Tag
+        // block (U+E0000\u2013U+E007F) maps one ASCII character to one invisible codepoint, so an
+        // enumerated list that omits it lets a whole sentence through inside the budget, visible to
+        // neither the user nor the log yet legible to a model. `U+00AD` is the same problem with one
+        // character. The Hangul fillers render as blanks but are letters, not format characters, so
+        // they are named; NFKC already folds U+3164 and U+FFA0 onto U+1160, and both forms are listed
+        // anyway so the set does not depend on the caller having normalised first.
+        //
+        // This must stay the exact set `sanitizeUntrustedTargetLabel` removes. Losing ZWJ breaks
+        // multi-codepoint emoji, which is accepted: the label is a hint the agent must not act on.
+        (value) => !COMPUTER_TARGET_LABEL_FORBIDDEN_CHARACTERS.test(value),
+        'Untrusted target label retains control, format, or filler characters',
+      )
   );
+}
+
+export const computerUseUntrustedTextSchema = computerUseUntrustedTextSchemaOf(
+  COMPUTER_TARGET_LABEL_MAX_CHARACTERS,
+);
+
+/** The reason the model writes on an access request (ADR v2 §5.2). Untrusted, and longer. */
+export const COMPUTER_ACCESS_REASON_MAX_CHARACTERS = 256;
+export const computerUseUntrustedReasonSchema = computerUseUntrustedTextSchemaOf(
+  COMPUTER_ACCESS_REASON_MAX_CHARACTERS,
+);
 
 /**
  * The characters a target label may never retain.
@@ -5269,6 +5294,80 @@ export const COMPUTER_STOP_TOOL_INPUT_JSON_SCHEMA = {
 } as const;
 export const computerStopToolOutputSchema = z.object({ stopped: z.literal(true) }).strict();
 export type ComputerStopToolOutput = z.infer<typeof computerStopToolOutputSchema>;
+
+/**
+ * `computer_request_access` (ADR v2 §5.2, §6.1).
+ *
+ * The raw model-authored `reason` is validated only for length here. It is sanitised on the way to
+ * the card, where it is shown in its own quarantined element: rejecting a reason outright for a
+ * stray control character would let a target application suppress the card by choosing a name that
+ * the model then quotes.
+ */
+export const COMPUTER_ACCESS_REQUEST_REASON_MAX_INPUT = COMPUTER_ACCESS_REASON_MAX_CHARACTERS;
+export const computerRequestAccessInputSchema = z
+  .object({
+    appToken: computerUseIdSchema,
+    reason: z.string().max(COMPUTER_ACCESS_REASON_MAX_CHARACTERS),
+  })
+  .strict();
+export type ComputerRequestAccessInput = z.infer<typeof computerRequestAccessInputSchema>;
+export const COMPUTER_REQUEST_ACCESS_TOOL_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    appToken: { type: 'string', minLength: 1, maxLength: 128 },
+    reason: { type: 'string', maxLength: COMPUTER_ACCESS_REASON_MAX_CHARACTERS },
+  },
+  required: ['appToken', 'reason'],
+  additionalProperties: false,
+} as const;
+
+/**
+ * Why an access request did not end in a grant.
+ *
+ * A closed vocabulary, and deliberately coarse: an unknown token, a token from another Task, an
+ * expired token and a token for a denied class all answer `access_request_invalid_token`, so the
+ * model cannot use the tool to probe which applications exist or which Task owns what.
+ */
+export const computerAccessRequestReasonCodeSchema = z.enum([
+  'access_request_invalid_token',
+  'access_request_pending',
+  'access_request_rate_limited',
+  'access_request_denied_in_task',
+  'access_request_timed_out',
+  'access_request_denied',
+  'access_request_withdrawn',
+  'app_grant_identity_changed',
+  'access_request_unavailable',
+]);
+export type ComputerAccessRequestReasonCode = z.infer<typeof computerAccessRequestReasonCodeSchema>;
+
+export const computerRequestAccessOutputSchema = z
+  .object({ granted: z.boolean(), reasonCode: computerAccessRequestReasonCodeSchema.nullable() })
+  .strict()
+  .superRefine((output, context) => {
+    if (output.granted !== (output.reasonCode === null))
+      context.addIssue({ code: 'custom', message: 'A granted request carries no reason code' });
+  });
+export type ComputerRequestAccessOutput = z.infer<typeof computerRequestAccessOutputSchema>;
+
+/** `computer_start` (ADR v2 §5.2). The goal is model-authored and bounded like a Task goal. */
+export const COMPUTER_START_GOAL_MAX_CHARACTERS = 1_024;
+export const computerStartToolInputSchema = z
+  .object({
+    targetToken: computerUseIdSchema,
+    goal: z.string().trim().min(1).max(COMPUTER_START_GOAL_MAX_CHARACTERS),
+  })
+  .strict();
+export type ComputerStartToolInput = z.infer<typeof computerStartToolInputSchema>;
+export const COMPUTER_START_TOOL_INPUT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    targetToken: { type: 'string', minLength: 1, maxLength: 128 },
+    goal: { type: 'string', minLength: 1, maxLength: COMPUTER_START_GOAL_MAX_CHARACTERS },
+  },
+  required: ['targetToken', 'goal'],
+  additionalProperties: false,
+} as const;
 
 export const computerUseAvailabilityStateSchema = z.enum([
   'ready',
@@ -5488,14 +5587,128 @@ export const computerAppGrantViewSchema = z
   .strict();
 export type ComputerAppGrantView = z.infer<typeof computerAppGrantViewSchema>;
 
+/**
+ * An application the agent has asked about that holds no grant (ADR v2 §6.1).
+ *
+ * Kept apart from `ComputerAppGrantView` because it grants nothing: it exists so the settings screen
+ * can show approval fatigue — which applications the agent keeps raising cards for, and how often
+ * the user said no — for the applications that never became grants. The same split between verified
+ * facts and the application's own name applies.
+ */
+export const computerAppAccessRequestViewSchema = z
+  .object({
+    platform: computerUsePlatformSchema,
+    appId: z.string().trim().min(1).max(256),
+    untrustedDisplayName: computerUseUntrustedTextSchema,
+    requestCount: z.number().int().nonnegative(),
+    denialCount: z.number().int().nonnegative(),
+    lastRequestedAt: timestampSchema,
+  })
+  .strict();
+export type ComputerAppAccessRequestView = z.infer<typeof computerAppAccessRequestViewSchema>;
+
 export const computerUseGrantListResultSchema = z
   .object({
     grants: z.array(computerAppGrantViewSchema).max(64),
     /** Rows whose MAC did not verify and were discarded (T14). A count, never their content. */
     discardedRecords: z.number().int().nonnegative(),
+    /** Applications the agent asked about but never received a grant for. Empty by default so
+     * every existing producer and stored payload stays valid. */
+    requestedApps: z.array(computerAppAccessRequestViewSchema).max(64).default([]),
   })
   .strict();
 export type ComputerUseGrantListResult = z.infer<typeof computerUseGrantListResultSchema>;
+
+/**
+ * The result of removing grant rows that no longer authenticate (T14).
+ *
+ * `removedRecords` is what the user is told; it is a count of rows whose MAC failed, never their
+ * content, because a row that fails its MAC is a row nobody can vouch for.
+ */
+export const computerUseGrantPurgeResultSchema = computerUseGrantListResultSchema.extend({
+  removedRecords: z.number().int().nonnegative(),
+});
+export type ComputerUseGrantPurgeResult = z.infer<typeof computerUseGrantPurgeResultSchema>;
+
+/**
+ * The in-conversation approval card for one application (ADR v2 §6.1).
+ *
+ * Verified facts and application-authored text are separate fields and are never concatenated: a
+ * publisher, an app id, a signing class and a mode are things Main derived from a signature, while
+ * `untrustedAppName` and `untrustedReason` are written by the target application and by the model.
+ * The card carries no path, no process id and no window handle (§8).
+ */
+export const computerAppGrantDecisionSchema = z.enum(['allow_once', 'allow_always', 'deny']);
+export type ComputerAppGrantDecision = z.infer<typeof computerAppGrantDecisionSchema>;
+
+export const computerAppGrantRequestSchema = z
+  .object({
+    id: computerUseIdSchema,
+    taskId: computerUseIdSchema,
+    /**
+     * Whether this card asks for the application itself, or only for sending its screen to a model
+     * the user has not consented to yet (§6.4: B is re-asked on its own, A stays).
+     */
+    kind: z.enum(['app-grant', 'provider-egress']),
+    state: z.enum(['pending', 'resolved', 'canceled']),
+    revision: z.number().int().positive(),
+    decision: computerAppGrantDecisionSchema.nullable(),
+    /**
+     * Why a card closed without a decision. A closed product vocabulary the Renderer turns into a
+     * sentence, so no Main string — and certainly no native or model string — becomes UI text.
+     */
+    noticeCode: z.enum(['timed_out', 'withdrawn', 'identity_changed']).nullable().default(null),
+    verified: z
+      .object({
+        platform: computerUsePlatformSchema,
+        identityKind: z.enum(['verified-signed', 'unverified']),
+        publisher: z.string().trim().min(1).max(128).nullable(),
+        appId: z.string().trim().min(1).max(256),
+        /** The ceiling this grant would carry — already bound by the native attestation. */
+        maxMode: computerUseModeSchema,
+      })
+      .strict(),
+    untrustedAppName: computerUseUntrustedTextSchema,
+    /** The model's stated reason, sanitised. Null when nothing survived sanitising. */
+    untrustedReason: computerUseUntrustedReasonSchema.nullable(),
+    /** The model the screen would be sent to, named only while that consent is missing (§6.4). */
+    providerEgressModelId: computerUseModelIdSchema.nullable(),
+    allowedDecisions: z.array(computerAppGrantDecisionSchema).min(1).max(3),
+    /**
+     * The activation intent each approve button carries (§6.1.1). Deny is absent on purpose: a user
+     * must always be able to say no, so refusing is never gated on an intent that may have gone
+     * stale while the card was on screen.
+     */
+    activationIntents: z
+      .object({
+        allow_once: z.string().min(1).max(2_048).optional(),
+        allow_always: z.string().min(1).max(2_048).optional(),
+      })
+      .strict(),
+    expiresAt: timestampSchema,
+  })
+  .strict()
+  .superRefine((request, context) => {
+    for (const decision of request.allowedDecisions)
+      if (decision !== 'deny' && request.activationIntents[decision] === undefined)
+        context.addIssue({ code: 'custom', message: 'Every approve button needs an intent' });
+    if (request.state === 'pending' && request.decision !== null)
+      context.addIssue({ code: 'custom', message: 'A pending card has no decision' });
+    if (request.state !== 'canceled' && request.noticeCode !== null)
+      context.addIssue({ code: 'custom', message: 'Only a withdrawn card carries a notice' });
+    if (request.state === 'resolved' && request.decision === null)
+      context.addIssue({ code: 'custom', message: 'A resolved card names its decision' });
+  });
+export type ComputerAppGrantRequest = z.infer<typeof computerAppGrantRequestSchema>;
+
+export const computerAppGrantResolveInputSchema = z
+  .object({
+    requestId: computerUseIdSchema,
+    expectedRevision: z.number().int().positive(),
+    decision: computerAppGrantDecisionSchema,
+  })
+  .strict();
+export type ComputerAppGrantResolveInput = z.infer<typeof computerAppGrantResolveInputSchema>;
 
 /**
  * Revoking takes an id and the revision the user was looking at, and nothing else.
@@ -6122,6 +6335,11 @@ export type ComputerUseApi = {
   listGrants(): Promise<ComputerUseGrantListResult>;
   /** Revokes one grant and returns the remaining list. Requires a trusted click. */
   revokeGrant(input: ComputerUseGrantRevokeInput): Promise<ComputerUseGrantListResult>;
+  /** Removes grant rows whose MAC no longer verifies (T14). Requires a trusted click. */
+  purgeGrants(): Promise<ComputerUseGrantPurgeResult>;
+  /** Answers one in-conversation approval card. Requires a trusted click. */
+  resolveGrantRequest(input: ComputerAppGrantResolveInput): Promise<void>;
+  subscribeGrantRequests(listener: (request: ComputerAppGrantRequest) => void): () => void;
   listProfiles(input?: ComputerUseProfileListInput): Promise<ComputerUseProfileListResult>;
   listWindowCandidates(
     input: ComputerUseWindowCandidatesInput,
@@ -6652,6 +6870,12 @@ export const IPC_CHANNELS = {
   computerUseGrantsList: 'sprint-coder:computer-use:grants:list',
   /** Revoke one grant. Requires a trusted click; Main stops whatever was using it. */
   computerUseGrantRevoke: 'sprint-coder:computer-use:grants:revoke',
+  /** Remove grant rows that no longer authenticate (T14). Requires its own trusted click. */
+  computerUseGrantPurge: 'sprint-coder:computer-use:grants:purge',
+  /** Push the in-conversation application approval card, and every later state it reaches. */
+  computerUseGrantRequestEvent: 'sprint-coder:computer-use:grants:request',
+  /** Answer one approval card. Requires a trusted click bound to the card's intent. */
+  computerUseGrantRequestResolve: 'sprint-coder:computer-use:grants:request-resolve',
   computerUseWindowCandidates: 'sprint-coder:computer-use:windows:list',
   computerUseStart: 'sprint-coder:computer-use:start',
   computerUseStatusGet: 'sprint-coder:computer-use:status:get',
