@@ -32,6 +32,28 @@ const COMPUTER_GRANT_NOTICES: Readonly<Record<string, string>> = {
   withdrawn: '確認を取り消しました。もう一度依頼してください。',
 };
 
+/**
+ * Whether the caret is somewhere a keystroke means text rather than a decision.
+ *
+ * Exported so the rule is testable on its own: it is the difference between a card that announces
+ * itself and a card that can be approved by the next character the user types.
+ */
+export function isEditingElsewhere(active: Element | null = document.activeElement): boolean {
+  if (active === null || !(active instanceof HTMLElement)) return false;
+  // The attribute as well as the property: `isContentEditable` is the live answer a browser gives,
+  // and the ancestor search is what catches a caret sitting in a child of an editable host.
+  if (
+    active.isContentEditable ||
+    active.closest('[contenteditable]:not([contenteditable="false"])') !== null
+  )
+    return true;
+  const tag = active.tagName;
+  // A button or a link is not editing, even inside a form; a disabled field takes no keystrokes.
+  return (
+    (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') && !active.matches(':disabled')
+  );
+}
+
 export function ComputerUseAppGrantCard({
   request,
   busy,
@@ -47,6 +69,13 @@ export function ComputerUseAppGrantCard({
   useEffect(() => {
     // The narrower of the two approvals, per D14. Focus is placed rather than left to the DOM order
     // so that adding a control above the buttons cannot silently move it to the permanent one.
+    //
+    // But never out from under someone who is writing. The card arrives unannounced, and Main
+    // raises the window with it: a user midway through the next message would otherwise have the
+    // caret pulled onto "今回だけ許可", and their next Space or Enter would grant an application
+    // they never read about. When the caret is in an editable control the card is left to its role
+    // and label to announce itself, and the user reaches it with Tab when they are ready.
+    if (isEditingElsewhere()) return;
     allowOnceRef.current?.focus({ preventScroll: true });
   }, [request.id]);
 
