@@ -1700,9 +1700,12 @@ export class IpcRouter {
             computerTargets: {
               listTargets: (input, context) =>
                 this.computerUseController.listTargets(input, context),
-              requestAccess: (input, context) =>
-                this.computerUseController.requestAccess(input, context),
-              start: (input, context) => this.computerUseController.startForAgent(input, context),
+              // Both wait on the world outside this process, so both take the dispatch's signal:
+              // cancelling the Turn withdraws the card and stops the session.
+              requestAccess: (input, context, signal) =>
+                this.computerUseController.requestAccess(input, context, signal),
+              start: (input, context, signal) =>
+                this.computerUseController.startForAgent(input, context, signal),
               stop: (sessionId, context) =>
                 this.computerUseController.stopForAgent(sessionId, context),
             },
@@ -3648,10 +3651,19 @@ export class IpcRouter {
       IPC_CHANNELS.tasksSetArchived,
       taskArchivedInputSchema,
       taskSummarySchema,
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, input.taskId, IPC_CHANNELS.tasksSetArchived, () =>
-          this.persistence.setArchived(input.taskId, input.archived),
-        ).value,
+      (input, event, envelope) => {
+        const result = this.runMutation(
+          event,
+          envelope,
+          input.taskId,
+          IPC_CHANNELS.tasksSetArchived,
+          () => this.persistence.setArchived(input.taskId, input.archived),
+        );
+        // Archiving is how a conversation goes away here; nothing deletes a Task. Computer Use's
+        // Task-scoped state has to end with it (ADR v2 §6.1) — see `taskClosed`.
+        if (result.executed && input.archived) this.computerUseController.taskClosed(input.taskId);
+        return result.value;
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.tasksSetGoal,
@@ -3764,7 +3776,7 @@ export class IpcRouter {
             return controlled.task;
           });
           if (result.executed && controlledTurnId !== null)
-            this.approvalCoordinator.turnEnded(input.taskId, controlledTurnId, 'canceled');
+            this.notifyTurnEnded(input.taskId, controlledTurnId, 'canceled');
           if (result.executed && canceledEvent !== null) this.publish(canceledEvent);
           if (result.executed && runtimeStopped) this.dispatchQueueTransition(next);
           if (controlledTurnId !== null) this.releaseCanceledRuntime(controlledTurnId);
@@ -4458,7 +4470,7 @@ export class IpcRouter {
                 goalTask = completion.task;
               },
             );
-            this.approvalCoordinator.turnEnded(input.taskId, activeTurnId, 'canceled');
+            this.notifyTurnEnded(input.taskId, activeTurnId, 'canceled');
             if (goalTask !== null) this.pushTaskUpdated(goalTask);
             if (canceledEvent !== null) this.publish(canceledEvent);
             // Keep the failed-stop quarantine while this Turn's process is unknown, but no longer
@@ -4505,7 +4517,7 @@ export class IpcRouter {
       turnCancelInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        this.approvalCoordinator.turnEnded(input.taskId, input.turnId, 'canceled');
+        this.notifyTurnEnded(input.taskId, input.turnId, 'canceled');
         const runtimeStopped = await this.cancelRuntime(input.taskId, input.turnId);
         let canceledEvent: TurnEvent | null = null;
         let goalTask: TaskSummary | null = null;
@@ -4740,6 +4752,24 @@ export class IpcRouter {
       this.window.focus();
     }
     this.window.webContents.send(IPC_CHANNELS.computerUseGrantRequestEvent, parsed.data);
+  }
+
+  /**
+   * The one place a Turn is declared over.
+   *
+   * Both coordinators hear it, because both hold state that outlives nothing: the approval
+   * coordinator's pending approvals, and Computer Use's application approval card, per-Turn request
+   * count, and any session bound to that Turn. They were two separate call lists once and the
+   * second one was simply never written — routing every site through here is what stops that
+   * happening again, and it is why there is no `computerUseController.turnEnded` call anywhere else.
+   */
+  private notifyTurnEnded(
+    taskId: string,
+    turnId: string,
+    outcome: Parameters<ApprovalCoordinator['turnEnded']>[2],
+  ): void {
+    this.approvalCoordinator.turnEnded(taskId, turnId, outcome);
+    this.computerUseController.turnEnded(taskId, turnId);
   }
 
   private readonly handleComputerUseActivationIntent = (
@@ -4980,7 +5010,7 @@ export class IpcRouter {
             throw new Error(
               'Runtime停止を確認できないため、更新を開始しません。Runtimeの停止を再試行してください。',
             );
-          this.approvalCoordinator.turnEnded(turn.taskId, turn.turnId, 'canceled');
+          this.notifyTurnEnded(turn.taskId, turn.turnId, 'canceled');
           const completion = this.persistence.cancelTurnAndFinishGoal(turn.taskId, turn.turnId);
           if (completion.task !== null) this.pushTaskUpdated(completion.task);
           if (completion.event !== null) this.publish(completion.event);
@@ -5298,7 +5328,7 @@ export class IpcRouter {
         this.managedWorkerTurn.values(),
       )
     ) {
-      this.approvalCoordinator.turnEnded(worker.taskId, worker.parentTurnId, 'finished');
+      this.notifyTurnEnded(worker.taskId, worker.parentTurnId, 'finished');
       // A Mission session Turn belongs to no chat Turn, so nothing else would ever close it. Drop
       // it once its last Worker is gone — completion, failure, cancel and restart recovery all
       // arrive here — and let the next step or manual resume start a fresh one.
@@ -5375,7 +5405,7 @@ export class IpcRouter {
         : event,
     );
     if (!authorizationTurnIsActive(null, taskId, turnId, this.managedWorkerTurn.values()))
-      this.approvalCoordinator.turnEnded(taskId, turnId, 'finished');
+      this.notifyTurnEnded(taskId, turnId, 'finished');
     // A Turn refused because a command can still write its Workspace must not hand the Workspace to
     // the next queued Turn: that Turn would edit underneath a process this one left running. The
     // queue stays as it is and the user restarts it — by stopping the command and retrying, or by
@@ -6113,7 +6143,7 @@ export class IpcRouter {
       );
       if (completion.task !== null) this.pushTaskUpdated(completion.task);
       this.publish(completion.event);
-      this.approvalCoordinator.turnEnded(taskId, started.turnId, 'finished');
+      this.notifyTurnEnded(taskId, started.turnId, 'finished');
       this.turnRuntimes.delete(started.turnId);
     });
   }
@@ -8044,7 +8074,7 @@ export class IpcRouter {
   ): Promise<void> {
     if (pending.canceledTurnId !== null) {
       if (!pending.logicalEndNotified) {
-        this.approvalCoordinator.turnEnded(pending.taskId, pending.canceledTurnId, 'canceled');
+        this.notifyTurnEnded(pending.taskId, pending.canceledTurnId, 'canceled');
         pending.logicalEndNotified = true;
       }
     }

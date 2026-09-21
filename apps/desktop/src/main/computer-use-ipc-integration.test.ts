@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
@@ -164,6 +166,7 @@ function captureComputerUseHandlers(): {
   native: { pickApplication: ReturnType<typeof vi.fn> };
   permissionSettings: { open: ReturnType<typeof vi.fn> };
   persistence: Record<string, ReturnType<typeof vi.fn>>;
+  approvalCoordinator: { turnEnded: ReturnType<typeof vi.fn> };
 } {
   const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
   const handlers = new Map<string, CapturedHandler>();
@@ -245,11 +248,14 @@ function captureComputerUseHandlers(): {
       removedRecords: 2,
     })),
     resolveAppGrantRequest: vi.fn(async () => undefined),
+    turnEnded: vi.fn(),
+    taskClosed: vi.fn(),
     resolveApproval: vi.fn(async () => undefined),
     getStatus: vi.fn(() => null),
     policyEpochChanged: vi.fn(),
     dispose: vi.fn(async () => undefined),
   };
+  const approvalCoordinator = { turnEnded: vi.fn() };
   const native = { pickApplication: vi.fn(async () => identity) };
   const permissionSettings = { open: vi.fn(async () => ({ opened: true })) };
   const persistence = {
@@ -259,12 +265,14 @@ function captureComputerUseHandlers(): {
     getModel: vi.fn(() => 'auto'),
     getActiveTurnId: vi.fn(() => null),
     getComputerAppProfile: vi.fn(() => ({ revision: 1 })),
+    setArchived: vi.fn((taskId: string) => ({ id: taskId })),
   };
   Object.assign(router, {
     handle: capture,
     handleMutation: capture,
     window: { id: 42, webContents: { once: vi.fn() } },
     computerUseActivationGate: activation,
+    approvalCoordinator,
     computerUseController: controller,
     computerUseNative: native,
     computerUsePermissionSettings: permissionSettings,
@@ -272,10 +280,28 @@ function captureComputerUseHandlers(): {
     computerUseApprovalSessionById: new Map([['approval-1', 'session-1']]),
     computerUseQuickStartLatches: new Map(),
     teamCoordinator: { hasBusyWorkers: vi.fn(() => false) },
+    // The mutation envelope machinery — the install gate, the principal, the idempotency hash — is
+    // covered where it lives. Stubbed here so a handler's own wiring is what the test observes.
+    runMutation: (
+      _event: unknown,
+      _envelope: unknown,
+      _taskId: string,
+      _channel: string,
+      action: () => unknown,
+    ) => ({ value: action(), executed: true }),
     persistence,
   });
   router.register();
-  return { router, handlers, activation, controller, native, permissionSettings, persistence };
+  return {
+    router,
+    handlers,
+    activation,
+    controller,
+    native,
+    permissionSettings,
+    persistence,
+    approvalCoordinator,
+  };
 }
 
 describe('Computer Use Main IPC integration', () => {
@@ -772,6 +798,52 @@ describe('Computer Use Main IPC integration', () => {
       { requestId: 'request-1', expectedRevision: 1, decision: 'deny', maxMode: 'full_access_app' },
     ])
       expect(computerAppGrantResolveInputSchema.safeParse(rejected).success).toBe(false);
+  });
+
+  it('tells Computer Use about every Turn that ends, through the one fan-out', () => {
+    const fixture = captureComputerUseHandlers();
+    const router = fixture.router as unknown as {
+      notifyTurnEnded(taskId: string, turnId: string, outcome: 'finished' | 'canceled'): void;
+    };
+    router.notifyTurnEnded('task-1', 'turn-1', 'finished');
+    expect(fixture.controller['turnEnded']).toHaveBeenCalledWith('task-1', 'turn-1');
+    router.notifyTurnEnded('task-1', 'turn-2', 'canceled');
+    expect(fixture.controller['turnEnded']).toHaveBeenCalledWith('task-1', 'turn-2');
+    // Both coordinators, always together: the approval coordinator's list of sites is the map, and
+    // the reason this is one method is that the second list was once simply never written.
+    expect(fixture.approvalCoordinator.turnEnded).toHaveBeenCalledTimes(2);
+    expect(fixture.controller['turnEnded']).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes every Turn ending through that fan-out and nowhere else', () => {
+    // A source check, because the wiring is only as good as the call sites: a future site that
+    // calls the approval coordinator directly would leave Computer Use's card, its per-Turn count,
+    // and any session bound to that Turn behind.
+    const source = readFileSync(resolve(process.cwd(), 'src/main/ipc.ts'), 'utf8');
+    // Exactly one of each, and both inside `notifyTurnEnded`: that is what makes the two lists one.
+    expect(source.match(/this\.approvalCoordinator\.turnEnded\(/gu)).toHaveLength(1);
+    expect(source.match(/this\.computerUseController\.turnEnded\(/gu)).toHaveLength(1);
+    const fanOut = source.slice(
+      source.indexOf('private notifyTurnEnded('),
+      source.indexOf('private readonly handleComputerUseActivationIntent'),
+    );
+    expect(fanOut).toContain('this.approvalCoordinator.turnEnded(taskId, turnId, outcome)');
+    expect(fanOut).toContain('this.computerUseController.turnEnded(taskId, turnId)');
+    // Eight call sites today; the number matters less than all of them going through one place.
+    expect((source.match(/this\.notifyTurnEnded\(/gu) ?? []).length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('ends a Task-scoped permission when the conversation is archived', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.tasksSetArchived);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+    await handler({ taskId: 'task-1', archived: true }, {}, {});
+    expect(fixture.controller['taskClosed']).toHaveBeenCalledWith('task-1');
+    // Un-archiving is the user opening the conversation again, not re-granting anything.
+    fixture.controller['taskClosed']?.mockClear();
+    await handler({ taskId: 'task-1', archived: false }, {}, {});
+    expect(fixture.controller['taskClosed']).not.toHaveBeenCalled();
   });
 
   it('keeps the card click kinds in the one list every activation seam reads', () => {

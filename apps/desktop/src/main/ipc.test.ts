@@ -2615,6 +2615,8 @@ describe('Main image attachment dispatch boundary', () => {
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         approvalCoordinator: { turnEnded },
+        // Every Turn ending fans out to both coordinators through `notifyTurnEnded`.
+        computerUseController: { turnEnded: vi.fn() },
         managedCodingHarness: {
           broker: {
             getTurnSnapshot: (taskId: string, turnId: string) => {
@@ -6137,6 +6139,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       pendingProjectMemoriesByTurn: new Map(),
       managedWorkerTurn: new Map(),
       approvalCoordinator: { turnEnded: vi.fn() },
+      computerUseController: { turnEnded: vi.fn() },
       pushRuntimeStatus,
       publish,
       persistence: {
