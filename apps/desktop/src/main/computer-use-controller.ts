@@ -478,6 +478,8 @@ type PendingAppGrantRequest = {
   displayName: string;
   providerEgress: Readonly<{ connectionId: string; modelId: string }>;
   grantId: string | null;
+  /** The ceiling of the agreement already in force, for a card that only asks about a destination. */
+  grantedMaxMode: ComputerUseMode | null;
   timer: ReturnType<typeof setTimeout>;
   settle: (outcome: ComputerRequestAccessOutput) => void;
 };
@@ -1143,7 +1145,11 @@ export class ComputerUseController {
       granted: true,
       scope: 'profile' as const,
       grantId: null,
-      maxMode: maximumModeForProfile(profile),
+      // What the user agreed to when they registered this application, not merely what native is
+      // able to do. A profile saved as `supervised` promised a confirmation before every action;
+      // inheriting only the native ceiling would let `computer_start` begin it at
+      // `full_access_app`, a stronger mode than V1's own quick start ever allowed for that row.
+      maxMode: bindComputerUseMaximumMode(profile.mode, maximumModeForProfile(profile)),
       providerEgress: profile.providerEgressConsent
         ? Object.freeze({ connectionId: profile.connectionId, modelId: profile.modelId })
         : null,
@@ -1587,6 +1593,7 @@ export class ComputerUseController {
       reason: input.reason,
       providerEgress: egressBinding,
       grantId: state.grantId,
+      grantedMaxMode: state.granted ? state.maxMode : null,
       ...(signal === undefined ? {} : { signal }),
     });
   }
@@ -1677,6 +1684,7 @@ export class ComputerUseController {
       reason: string;
       providerEgress: Readonly<{ connectionId: string; modelId: string }>;
       grantId: string | null;
+      grantedMaxMode: ComputerUseMode | null;
       signal?: AbortSignal | undefined;
     }>,
   ): Promise<ComputerRequestAccessOutput> {
@@ -1712,7 +1720,12 @@ export class ComputerUseController {
         identityKind: input.facts.identityKind,
         publisher: input.facts.publisher,
         appId: input.facts.appId,
-        maxMode: input.facts.maximumMode,
+        // A destination-only card describes the agreement that already exists, so it shows that
+        // agreement's ceiling rather than everything native could attest.
+        maxMode:
+          input.grantedMaxMode === null
+            ? input.facts.maximumMode
+            : bindComputerUseMaximumMode(input.grantedMaxMode, input.facts.maximumMode),
       },
       untrustedAppName: displayName,
       untrustedReason: sanitizeComputerAccessReason(input.reason),
@@ -1773,6 +1786,7 @@ export class ComputerUseController {
         displayName,
         providerEgress: input.providerEgress,
         grantId: input.grantId,
+        grantedMaxMode: input.grantedMaxMode,
         timer,
         settle,
       };
@@ -1983,13 +1997,19 @@ export class ComputerUseController {
     }
     // A V1 profile's "remember" is the grant here, and its consent lives on the profile row. The
     // Task-scoped map is where this consent goes, so the profile is not rewritten from a card.
+    // The entry takes over as the agreement `appGrantState` reports, so it has to carry the ceiling
+    // the profile carried: this card asked about a destination, and answering it must not also
+    // raise the mode above the one the user saved.
     const next = this.taskScopedGrants.get(pending.taskId) ?? new Map<string, TaskScopedAppGrant>();
     next.set(
       key,
       Object.freeze({
         platform: identity.platform,
         grantIdentityDigest: identity.grantIdentityDigest,
-        maxMode: pending.facts.maximumMode,
+        maxMode:
+          pending.grantedMaxMode === null
+            ? pending.facts.maximumMode
+            : bindComputerUseMaximumMode(pending.grantedMaxMode, pending.facts.maximumMode),
         denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
         policyEpoch: pending.policyEpoch,
         providerEgress: pending.providerEgress,

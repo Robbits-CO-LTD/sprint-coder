@@ -1627,6 +1627,66 @@ describe('computer_start', () => {
     ).toMatchObject({ mode: 'supervised' });
   });
 
+  it('keeps the mode a remembered V1 profile was saved with', async () => {
+    // Registered as `supervised` and remembered: V1's own quick start would confirm every action.
+    // Native could attest `full_access_app`, and inheriting only that would make `computer_start` a
+    // way around the confirmation the user asked for.
+    const profile = profileRecord('profile-notes', macIdentity(), {
+      mode: 'supervised',
+      remember: true,
+      providerEgressConsent: true,
+    });
+    const fixture = createFixture({ profiles: [profile] });
+    const target = await listOne(fixture);
+    expect(
+      await fixture.controller.requestAccess({ appToken: target.appToken, reason: 'x' }, context),
+    ).toEqual({ granted: true, reasonCode: null });
+    expect(fixture.published).toHaveLength(0);
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ mode: 'supervised' });
+  });
+
+  it('does not raise a remembered profile above its saved mode through the destination card', async () => {
+    const profile = profileRecord('profile-notes', macIdentity(), {
+      mode: 'supervised',
+      remember: true,
+      providerEgressConsent: true,
+    });
+    const fixture = createFixture({
+      profiles: [profile],
+      providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
+    });
+    const target = await listOne(fixture);
+    const asked = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'x' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    expect(card.kind).toBe('provider-egress');
+    // The card describes the agreement that exists, not everything native could attest.
+    expect(card.verified.maxMode).toBe('supervised');
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+      intentFor(card, 'allow_always'),
+    );
+    expect(await asked).toEqual({ granted: true, reasonCode: null });
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ mode: 'supervised' });
+  });
+
   it('is unreachable with the agent-driven gate off', async () => {
     const fixture = createFixture({ agentDrivenEnabled: false });
     await expect(
