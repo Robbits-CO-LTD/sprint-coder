@@ -6,7 +6,13 @@ import {
   computerAppGrantMismatch,
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
-import type { ComputerAppGrantInput, ComputerAppGrantListing } from './persistence';
+import type {
+  ComputerAppAccessRequestInput,
+  ComputerAppAccessRequestRecord,
+  ComputerAppAccessRequestTotals,
+  ComputerAppGrantInput,
+  ComputerAppGrantListing,
+} from './persistence';
 
 /**
  * An in-memory stand-in for the grant half of `PersistenceClient`, for tests that need a controller
@@ -22,6 +28,8 @@ export function createComputerAppGrantFixtureStore(
   options: Readonly<{ discarded?: number }> = {},
 ): Readonly<{
   grants: Map<string, ComputerAppGrantRecord>;
+  /** Access-request rows, keyed the way the table's primary key is. */
+  accessRequests: Map<string, ComputerAppAccessRequestRecord>;
   api: Readonly<{
     listComputerAppGrants(): ComputerAppGrantListing;
     findComputerAppGrantByIdentity(
@@ -39,10 +47,28 @@ export function createComputerAppGrantFixtureStore(
       grantId: string,
       outcome: 'requested' | 'denied',
     ): ComputerAppGrantRecord;
+    setComputerAppGrantProviderEgress(
+      grantId: string,
+      providerEgress: Readonly<{ connectionId: string; modelId: string }> | null,
+    ): ComputerAppGrantRecord;
     removeComputerAppGrant(grantId: string, expectedRevision: number): void;
+    purgeUnauthenticatedComputerAppGrants(): number;
+    recordComputerAppAccessRequest(
+      input: ComputerAppAccessRequestInput,
+    ): ComputerAppAccessRequestRecord;
+    getComputerAppAccessRequest(
+      platform: 'darwin' | 'win32',
+      grantIdentityDigest: string,
+      taskId: string,
+    ): ComputerAppAccessRequestRecord | null;
+    countComputerAppAccessRequestsForTask(taskId: string): number;
+    listComputerAppAccessRequestTotals(): readonly ComputerAppAccessRequestTotals[];
   }>;
 }> {
   const grants = new Map<string, ComputerAppGrantRecord>();
+  const accessRequests = new Map<string, ComputerAppAccessRequestRecord>();
+  const accessKey = (platform: string, digest: string, taskId: string): string =>
+    JSON.stringify([platform, digest, taskId]);
   let sequence = 0;
   const mustGet = (grantId: string): ComputerAppGrantRecord => {
     const grant = grants.get(grantId);
@@ -65,6 +91,7 @@ export function createComputerAppGrantFixtureStore(
   };
   return {
     grants,
+    accessRequests,
     api: {
       listComputerAppGrants: () => ({
         grants: [...grants.values()],
@@ -139,11 +166,69 @@ export function createComputerAppGrantFixtureStore(
           requestCount: current.requestCount + 1,
           denialCount: outcome === 'denied' ? current.denialCount + 1 : current.denialCount,
         })),
+      setComputerAppGrantProviderEgress: (grantId, providerEgress) =>
+        rewrite(grantId, (current) => ({
+          ...current,
+          providerEgressConnectionId: providerEgress?.connectionId ?? null,
+          providerEgressModelId: providerEgress?.modelId ?? null,
+        })),
       removeComputerAppGrant: (grantId, expectedRevision) => {
         const current = mustGet(grantId);
         if (current.revision !== expectedRevision)
           throw new Error('Computer Use app grant revision changed');
         grants.delete(grantId);
+      },
+      // Every row here authenticates by construction, so there is never anything to purge. The MAC
+      // itself is covered where the bytes live, in `persistence.test.ts`.
+      purgeUnauthenticatedComputerAppGrants: () => 0,
+      recordComputerAppAccessRequest: (input) => {
+        const key = accessKey(input.platform, input.grantIdentityDigest, input.taskId);
+        const now = input.now ?? new Date().toISOString();
+        const current = accessRequests.get(key);
+        const next: ComputerAppAccessRequestRecord = Object.freeze({
+          platform: input.platform,
+          grantIdentityDigest: input.grantIdentityDigest,
+          taskId: input.taskId,
+          appId: input.appId,
+          displayName: input.displayName,
+          requestCount: (current?.requestCount ?? 0) + 1,
+          denialCount: (current?.denialCount ?? 0) + (input.outcome === 'denied' ? 1 : 0),
+          // A refusal inside a Task is final for that Task; a later request cannot clear it.
+          denied: (current?.denied ?? false) || input.outcome === 'denied',
+          createdAt: current?.createdAt ?? now,
+          updatedAt: now,
+        });
+        accessRequests.set(key, next);
+        return next;
+      },
+      getComputerAppAccessRequest: (platform, grantIdentityDigest, taskId) =>
+        accessRequests.get(accessKey(platform, grantIdentityDigest, taskId)) ?? null,
+      countComputerAppAccessRequestsForTask: (taskId) =>
+        [...accessRequests.values()]
+          .filter((row) => row.taskId === taskId)
+          .reduce((total, row) => total + row.requestCount, 0),
+      listComputerAppAccessRequestTotals: () => {
+        const totals = new Map<string, ComputerAppAccessRequestTotals>();
+        for (const row of accessRequests.values()) {
+          const key = `${row.platform}:${row.grantIdentityDigest}`;
+          const current = totals.get(key);
+          totals.set(
+            key,
+            Object.freeze({
+              platform: row.platform,
+              grantIdentityDigest: row.grantIdentityDigest,
+              appId: row.appId,
+              displayName: row.displayName,
+              requestCount: (current?.requestCount ?? 0) + row.requestCount,
+              denialCount: (current?.denialCount ?? 0) + row.denialCount,
+              lastRequestedAt:
+                current === undefined || current.lastRequestedAt < row.updatedAt
+                  ? row.updatedAt
+                  : current.lastRequestedAt,
+            }),
+          );
+        }
+        return [...totals.values()];
       },
     },
   };

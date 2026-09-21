@@ -810,6 +810,10 @@ describe('agent-facing target tool exposure', () => {
         ? {
             computerTargets: {
               listTargets: async () => ({ targets: [], truncated: false }),
+              requestAccess: async () => ({ granted: false, reasonCode: 'access_request_denied' }),
+              start: async () => {
+                throw new Error('not started in this fixture');
+              },
               stop: async () => undefined,
             },
           }
@@ -833,10 +837,25 @@ describe('agent-facing target tool exposure', () => {
     expect(names).not.toContain('computer_stop');
   });
 
-  it('registers both tools on a Leader Turn when the boundary is present', () => {
+  it('registers every desktop tool on a Leader Turn when the boundary is present', () => {
     const names = providerNames(true);
-    expect(names).toContain('computer_list_targets');
-    expect(names).toContain('computer_stop');
+    for (const tool of COMPUTER_TARGET_TOOLS) expect(names).toContain(tool.providerName);
+  });
+
+  it('keeps every desktop tool, including the two that can start control, to audience chat', () => {
+    // The kind-level rule is proved in `packages/domain`; this pins the real definitions to it, so
+    // a tool added here with the wrong kind — the one that would reach a Worker or the in-session
+    // planner — fails at the definition rather than only in the registry's unit test.
+    for (const tool of COMPUTER_TARGET_TOOLS) {
+      expect(tool.kind).toBe('computerTarget');
+      expect(tool.executionTarget).toBe('main');
+      expect(tool.providerCompatibility).toEqual(['*']);
+    }
+    expect(
+      COMPUTER_TARGET_TOOLS.filter((tool) =>
+        tool.requiredCapabilities.includes('computer.control'),
+      ).map((tool) => tool.providerName),
+    ).toEqual(['computer_request_access', 'computer_start']);
   });
 
   it('withholds both tools from a Turn that is not the Leader answering the user', () => {
@@ -861,7 +880,12 @@ describe('agent-facing target tool exposure', () => {
       .sort();
     // Not `update_plan` or `request_user_input`: an empty Workspace must not drag the managed
     // coding surface into a Turn that only exists to reach the desktop.
-    expect(names).toEqual(['computer_list_targets', 'computer_stop']);
+    expect([...names].sort()).toEqual([
+      'computer_list_targets',
+      'computer_request_access',
+      'computer_start',
+      'computer_stop',
+    ]);
   });
 
   it('publishes nothing on that same Turn when the boundary is absent', () => {

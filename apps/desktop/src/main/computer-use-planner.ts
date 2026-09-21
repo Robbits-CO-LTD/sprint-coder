@@ -153,6 +153,14 @@ export type ComputerUseProviderPlannerDeps = Readonly<{
     signal: AbortSignal,
   ) => ComputerUseCompatibilityBinding | Promise<ComputerUseCompatibilityBinding>;
   endpointTrust?: 'trusted-local' | 'trusted-remote' | 'untrusted';
+  /**
+   * What `computer_start` said this session is for (ADR v2 §5.2).
+   *
+   * Normalised and bounded by Main before it arrives. It narrows the Task objective rather than
+   * replacing it, and it adds no vocabulary: the planner still answers only with
+   * `computer_use_action_v1`, and a tool call is still `planner_tool_call_not_allowed` (§5.1).
+   */
+  sessionGoal?: string;
   /** Main must set this only after the selected model's capability has been confirmed. */
   structuredOutputSupported?: boolean;
   streamDeadlines?: Readonly<{ firstEventTimeoutMs: number; idleTimeoutMs: number }>;
@@ -181,7 +189,11 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     validatePlannerInput({ ...input, observation });
     input.signal.throwIfAborted();
     const executionId = `computer:${observation.sessionId}:${observation.revision}:${input.round}`;
-    const trustedInstruction = plannerInstruction(this.deps.task, this.deps.mode);
+    const trustedInstruction = plannerInstruction(
+      this.deps.task,
+      this.deps.mode,
+      this.deps.sessionGoal ?? null,
+    );
     const prompt = plannerPrompt(observation);
     const egressPrompt = `${trustedInstruction}\n${prompt}`;
     const image = inlineScreenshot(observation);
@@ -806,11 +818,19 @@ function plannerPrompt(observation: ComputerUsePlannerObservation): string {
   ].join('\n');
 }
 
-function plannerInstruction(task: TaskSummary, mode: ComputerUseMode = 'full_access_app'): string {
+function plannerInstruction(
+  task: TaskSummary,
+  mode: ComputerUseMode = 'full_access_app',
+  sessionGoal: string | null = null,
+): string {
   const objective = (task.goal ?? task.title).normalize('NFKC').slice(0, 4_096);
   return [
     'Return exactly one JSON Computer Use action for the trusted Task objective below.',
     `Trusted Task objective: ${objective}`,
+    // Narrows the objective for this one session. It comes from the outer Task agent through
+    // `computer_start`, not from the screen, and it is normalised the same way the objective above
+    // is — but it is still only a statement of purpose: the grammar below is unchanged.
+    ...(sessionGoal === null ? [] : [`Session goal for this window: ${sessionGoal}`]),
     mode === 'observe_only'
       ? 'Mode is observe_only. Return only wait or finish; never propose input.'
       : `Mode is ${mode}. Main policy decides whether an input action is allowed.`,
