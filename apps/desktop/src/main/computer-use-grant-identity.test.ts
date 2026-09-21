@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   computerAppGrantCodeChanged,
   computerAppGrantIdentityFrom,
   computerAppGrantIdentityMatches,
   computerAppGrantMismatch,
+  computerAppNativeIdentityDigest,
   normalizeExecutablePath,
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
@@ -117,6 +119,72 @@ describe('grant identity derivation', () => {
     ).toBe(packaged.grantIdentityDigest);
   });
 
+  it('gives a Windows package claim no path exemption until native attests it', () => {
+    // `WindowsApps\<PackageFullName>_<version>_<arch>__<publisherId>\` puts the version in the
+    // directory name, so this re-asks on a Store update. That cost is accepted for now: the only
+    // thing that could switch the comparison off is `packageFamilyName`, which native does not
+    // verify yet and which sits in a record with no MAC (S5 / S6 bind it).
+    const packaged = derive(
+      winIdentity({
+        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+        executablePath:
+          'C:\\Program Files\\WindowsApps\\Example.Notes_1.0.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
+      }),
+    );
+    const updated = derive(
+      winIdentity({
+        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+        executablePath:
+          'C:\\Program Files\\WindowsApps\\Example.Notes_1.1.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
+        executableDigest: 'f'.repeat(64),
+      }),
+    );
+    expect(packaged.grantIdentityDigest).toBe(updated.grantIdentityDigest);
+    expect(computerAppGrantMismatch(packaged, updated, false)).toBe('identity_changed');
+    expect(computerAppGrantIdentityMatches(packaged, updated)).toBe(false);
+    // The forgery this closes: one signer, two applications, the same family name written on both.
+    const other = derive(
+      winIdentity({
+        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+        executablePath: 'C:\\Program Files\\Example\\Other\\Other.exe',
+      }),
+    );
+    expect(other.grantIdentityDigest).toBe(packaged.grantIdentityDigest);
+    expect(computerAppGrantMismatch(packaged, other, false)).toBe('identity_changed');
+    // A different signer is still a different application, path or no path.
+    expect(
+      computerAppGrantMismatch(
+        packaged,
+        derive(
+          winIdentity({
+            packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+            signerDigest: 'e'.repeat(64),
+          }),
+        ),
+        false,
+      ),
+    ).toBe('identity_changed');
+    // The other direction: a plain Win32 image keeps the path comparison, because "the same signer
+    // in a different directory" really is a different application there.
+    const image = derive(winIdentity());
+    expect(
+      computerAppGrantMismatch(
+        { ...image, executablePath: 'c:\\program files\\example\\moved\\notes.exe' },
+        image,
+        false,
+      ),
+    ).toBe('identity_changed');
+    // And an unsigned Windows application, whose identity is the path and the bytes.
+    const unsigned = derive(winIdentity({ signerDigest: null }));
+    expect(
+      computerAppGrantMismatch(
+        { ...unsigned, executablePath: 'c:\\other\\notes.exe' },
+        unsigned,
+        false,
+      ),
+    ).toBe('identity_changed');
+  });
+
   it('binds an unsigned application to its executable bytes', () => {
     const base = derive(macIdentity({ teamId: null, signingIdentifier: null }));
     const rebuilt = derive(
@@ -175,5 +243,105 @@ describe('grant identity derivation', () => {
     expect(normalizeExecutablePath('darwin', '/Applications/Notes')).not.toBe(
       normalizeExecutablePath('darwin', '/applications/notes'),
     );
+  });
+});
+
+/**
+ * The digest native itself would have produced, recomputed from the identity record (T14).
+ *
+ * Every expected value below is built in the test from `node:crypto`, not taken from the
+ * implementation: a test that called the same helper would only prove it is consistent with itself,
+ * and what matters is that it agrees with two C++ files it cannot import.
+ */
+describe('native identity digest recomputation', () => {
+  const sha256 = (value: string): string =>
+    createHash('sha256').update(value, 'utf8').digest('hex');
+  const digestOf = (identity: Record<string, unknown>): string | null =>
+    computerAppNativeIdentityDigest(identity, derive(identity));
+
+  it('mirrors the macOS signed formula', () => {
+    // computer_use_macos.mm BuildIdentityFacts: bundle id, Team ID, signing identifier.
+    expect(digestOf(macIdentity())).toBe(
+      sha256('computer-app-identity-v2\ncom.example.notes\nTEAMID1234\ncom.example.notes'),
+    );
+    // Raw strings, not the trimmed ones the grant identity keeps: native hashed what it read.
+    expect(digestOf(macIdentity({ teamId: ' TEAMID1234 ' }))).toBe(
+      sha256('computer-app-identity-v2\ncom.example.notes\n TEAMID1234 \ncom.example.notes'),
+    );
+    // A signed target with one empty string is still signed, and the empty string is hashed.
+    expect(digestOf(macIdentity({ signingIdentifier: '' }))).toBe(
+      sha256('computer-app-identity-v2\ncom.example.notes\nTEAMID1234\n'),
+    );
+  });
+
+  it('mirrors the macOS unsigned formula', () => {
+    const unsigned = macIdentity({ teamId: null, signingIdentifier: null });
+    expect(digestOf(unsigned)).toBe(
+      sha256(`computer-app-identity-v2-unsigned\ncom.example.notes\n${'b'.repeat(64)}`),
+    );
+  });
+
+  it('mirrors both Windows formulas, folding only ASCII in the path', () => {
+    expect(digestOf(winIdentity({ signerDigest: null }))).toBe(
+      sha256(`computer-win-identity-v1-unsigned\n${'b'.repeat(64)}`),
+    );
+    // computer_use_windows_host.cc lowercases bytes 'A'-'Z' only — not a Unicode lowercase — and
+    // `WindowsIdentityJson` writes that same `path_utf8` as `executablePath`.
+    expect(digestOf(winIdentity())).toBe(
+      sha256(
+        `computer-win-identity-v1-signed\nc:\\program files\\example\\notes.exe\n${'d'.repeat(64)}`,
+      ),
+    );
+    const turkish = winIdentity({ executablePath: 'C:\\İstanbul\\Notes.exe' });
+    expect(digestOf(turkish)).toBe(
+      sha256(`computer-win-identity-v1-signed\nc:\\İstanbul\\notes.exe\n${'d'.repeat(64)}`),
+    );
+    // A Unicode lowercase would have folded the dotted capital I; native does not.
+    expect(digestOf(turkish)).not.toBe(
+      sha256(
+        `computer-win-identity-v1-signed\n${'C:\\İstanbul\\Notes.exe'.toLowerCase()}\n${'d'.repeat(64)}`,
+      ),
+    );
+  });
+
+  it('picks the formula from the signing class, never by trying both', () => {
+    // The attack the strictness is for: an unsigned application that calls itself TextEdit and
+    // also claims TextEdit's Team ID. Native saw no signature, so it used the unsigned formula;
+    // the grant derivation reads the Team ID and calls it `verified-signed`. Answering with
+    // whichever formula happens to match would hand it TextEdit's signed grant.
+    const forged = macIdentity({ teamId: 'APPLETEAMID', signingIdentifier: 'com.apple.TextEdit' });
+    const asUnsigned = sha256(
+      `computer-app-identity-v2-unsigned\ncom.example.notes\n${'b'.repeat(64)}`,
+    );
+    expect(digestOf(forged)).not.toBe(asUnsigned);
+
+    // And the case where the two answers legitimately differ: native signed the target but both
+    // signing strings came back empty, so the derivation reads it as unverified. There is no
+    // formula that is safe to apply, and the answer is null — no grant is possible.
+    const emptySigned = macIdentity({ teamId: '', signingIdentifier: '' });
+    expect(derive(emptySigned).identityKind).toBe('unverified');
+    expect(digestOf(emptySigned)).toBeNull();
+    // The mirror on Windows: a signer digest the derivation cannot read as one.
+    const unreadableSigner = winIdentity({ signerDigest: 'not-a-digest' });
+    expect(derive(unreadableSigner).identityKind).toBe('unverified');
+    expect(digestOf(unreadableSigner)).toBeNull();
+  });
+
+  it('refuses a record whose signing class the JSON contradicts', () => {
+    // `IdentityObjectFromFacts` emits these as strings when signed and null when not, so "is a
+    // string" is how the record carries native's own answer. An unsigned record that still names a
+    // Team ID is not something native produces.
+    const derived = derive(macIdentity({ teamId: null, signingIdentifier: null }));
+    expect(
+      computerAppNativeIdentityDigest(macIdentity({ signingIdentifier: null }), derived),
+    ).toBeNull();
+    expect(computerAppNativeIdentityDigest('not an object', derived)).toBeNull();
+  });
+
+  it('refuses a Windows record that claims a package family native never attested', () => {
+    // Native writes `packageFamilyName: null` today. The claim changes the grant digest (family +
+    // signer, no path) while changing nothing native verifies, so the record cannot be bound.
+    expect(digestOf(winIdentity())).not.toBeNull();
+    expect(digestOf(winIdentity({ packageFamilyName: 'Example.Notes_8wekyb3d8bbwe' }))).toBeNull();
   });
 });

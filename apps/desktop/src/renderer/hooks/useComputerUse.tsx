@@ -66,6 +66,8 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
   // does not exist.
   const [grants, setGrants] = useState<ComputerUseGrantListResult | null>(null);
   const [grantError, setGrantError] = useState<string | null>(null);
+  /** Null until a cleanup has run in this dialog; then the count it removed (T14). */
+  const [purgedGrantRecords, setPurgedGrantRecords] = useState<number | null>(null);
   const [providerOptions, setProviderOptions] = useState<readonly ComputerUseProviderView[]>([]);
   const [session, setSession] = useState<ComputerUseSessionStatus | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -173,6 +175,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       const api = window.sprintCoder?.computerUse;
       if (api === undefined) return;
       setGrantError(null);
+      setPurgedGrantRecords(null);
       setBusy(true);
       try {
         setGrants(await api.revokeGrant({ grantId: grant.id, expectedRevision: grant.revision }));
@@ -188,6 +191,32 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     [refreshGrants],
   );
 
+  /**
+   * Removes grant rows that no longer authenticate (T14), at the user's request.
+   *
+   * Only ever offered when Main reports rows it had to discard, and the count it removed is shown
+   * afterwards: the user asked for a cleanup and is told what it did, rather than watching the
+   * discarded count silently fall to zero.
+   */
+  const purgeGrants = useCallback(async (): Promise<void> => {
+    const api = window.sprintCoder?.computerUse;
+    if (api?.purgeGrants === undefined) return;
+    setGrantError(null);
+    // The previous run's "removed N" must not sit beside this run's failure as if it described it.
+    setPurgedGrantRecords(null);
+    setBusy(true);
+    try {
+      const { removedRecords, ...list } = await api.purgeGrants();
+      setGrants(list);
+      setPurgedGrantRecords(removedRecords);
+    } catch (cause) {
+      setGrantError(messageOf(cause, '無効な許可レコードを削除できませんでした。'));
+      await refreshGrants().catch(() => undefined);
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshGrants]);
+
   const loadOnboarding = useCallback(async (): Promise<void> => {
     if (taskId === null) return;
     const permissions = window.sprintCoder?.permissions;
@@ -195,6 +224,9 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     const modelsApi = window.sprintCoder?.models;
     if (permissions === undefined || providersApi === undefined || modelsApi === undefined)
       throw new Error('Computer Useの設定APIを利用できません。');
+    // The result line describes one cleanup the user just ran; reopening the dialog, or opening it
+    // for another Task, is a new visit and starts without it.
+    setPurgedGrantRecords(null);
     // Failing to read the grants must not stop the rest of the screen from loading: the list is
     // management, not a precondition for anything else on this dialog.
     void refreshGrants().catch((cause: unknown) => {
@@ -499,10 +531,12 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
               error={dialogError}
               grants={grants}
               grantError={grantError}
+              purgedGrantRecords={purgedGrantRecords}
               onClose={closeDialog}
               onRegister={register}
               onResolveWindows={resolveWindows}
               onRevokeGrant={revokeGrant}
+              onPurgeGrants={purgeGrants}
               onStart={start}
             />
           ) : (

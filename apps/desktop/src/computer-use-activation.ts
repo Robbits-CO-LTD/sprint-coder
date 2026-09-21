@@ -2,8 +2,16 @@ export type ComputerUseUiActivationKind =
   | 'application'
   | 'start'
   | 'approval'
+  // Answering the in-conversation application approval card (ADR v2 §6.1). Its own kind, so a click
+  // on any other Computer Use control can never be spent as "grant this application".
+  | 'app-grant'
   | 'permission-settings'
   | 'app-grant-revoke'
+  // Removing grant rows that no longer authenticate (T14). Separate from `app-grant-revoke`
+  // although both only ever remove: the revoke button names one row the user was looking at, and
+  // this one names none, so keeping the intents distinct keeps the audit honest about which the
+  // user actually pressed.
+  | 'app-grant-purge'
   | 'graph-start'
   | 'graph-resume'
   | 'graph-resume-step';
@@ -21,8 +29,10 @@ export const COMPUTER_USE_UI_ACTIVATION_KINDS = [
   'application',
   'start',
   'approval',
+  'app-grant',
   'permission-settings',
   'app-grant-revoke',
+  'app-grant-purge',
   'graph-start',
   'graph-resume',
   'graph-resume-step',

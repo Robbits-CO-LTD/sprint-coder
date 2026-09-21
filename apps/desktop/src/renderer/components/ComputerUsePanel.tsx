@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   bindComputerUseMaximumMode,
   bindComputerUsePolicyLanguage,
+  type ComputerAppAccessRequestView,
   type ComputerAppGrantView,
   type ComputerUseAcceptanceMode,
   type ComputerUseApprovalDecision,
@@ -168,15 +169,21 @@ function computerUseGrantDate(value: string | null): string {
 export function ComputerUseGrantSection({
   grants,
   discardedRecords,
+  requestedApps,
+  purgedRecords,
   busy,
   error,
   onRevoke,
+  onPurge,
 }: {
   grants: readonly ComputerAppGrantView[];
   discardedRecords: number;
+  requestedApps: readonly ComputerAppAccessRequestView[];
+  purgedRecords: number | null;
   busy: boolean;
   error: string | null;
   onRevoke: (grant: ComputerAppGrantView) => Promise<void>;
+  onPurge: () => Promise<void>;
 }) {
   return (
     <section className="computer-use-grants" aria-labelledby="computer-use-grants-title">
@@ -191,8 +198,29 @@ export function ComputerUseGrantSection({
           <ShieldAlert size={14} />
           無効な許可レコードを{discardedRecords}
           件破棄しました。該当アプリは次回あらためて確認します。
+          {/* Deleting is the user's call, never automatic: the count above is the only sign that
+              something rewrote the database, and a silent cleanup would erase it. */}
+          <button
+            type="button"
+            className="computer-use-grants__purge"
+            data-testid="computer-use-grants-purge"
+            data-computer-use-activation="app-grant-purge"
+            disabled={busy}
+            onClick={() => void onPurge()}
+          >
+            無効なレコードを削除
+          </button>
         </p>
       ) : null}
+      {purgedRecords === null ? null : (
+        <p
+          className="computer-use-grants__purged"
+          role="status"
+          data-testid="computer-use-grants-purged"
+        >
+          無効な許可レコードを{purgedRecords}件削除しました。
+        </p>
+      )}
       {error === null ? null : (
         <p className="computer-use-grants__error" role="alert">
           {error}
@@ -264,6 +292,41 @@ export function ComputerUseGrantSection({
             </li>
           ))}
         </ul>
+      )}
+      {requestedApps.length === 0 ? null : (
+        <div className="computer-use-grants__requested">
+          {/* Approval fatigue, made visible (§6.1): applications the AI keeps raising cards for and
+              that were never granted. No row here permits anything. */}
+          <h4 className="computer-use-grants__subtitle">許可していないアプリへの要求</h4>
+          <ul className="computer-use-grant-list">
+            {requestedApps.map((app) => (
+              <li className="computer-use-grant" key={`${app.platform}:${app.appId}`}>
+                <div className="computer-use-grant__copy">
+                  <strong className="computer-use-grant__name">
+                    {app.untrustedDisplayName}
+                    <span className="computer-use-grant__name-note">（アプリ自称名）</span>
+                  </strong>
+                  <dl className="computer-use-grant__facts">
+                    <div>
+                      <dt>アプリID</dt>
+                      <dd>{app.appId}</dd>
+                    </div>
+                    <div>
+                      <dt>AIの要求</dt>
+                      <dd>
+                        {app.requestCount}回（拒否{app.denialCount}回）
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>最終要求</dt>
+                      <dd>{computerUseGrantDate(app.lastRequestedAt)}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </section>
   );
@@ -426,10 +489,12 @@ export function ComputerUseOnboarding({
   error: externalError,
   grants = null,
   grantError = null,
+  purgedGrantRecords = null,
   onClose,
   onRegister,
   onResolveWindows,
   onRevokeGrant,
+  onPurgeGrants,
   onStart,
 }: {
   taskId?: string;
@@ -445,12 +510,19 @@ export function ComputerUseOnboarding({
    * The section is absent rather than empty in that case: Main refuses the channel too, so an empty
    * list would promise a surface that does not exist.
    */
-  grants?: Readonly<{ grants: readonly ComputerAppGrantView[]; discardedRecords: number }> | null;
+  grants?: Readonly<{
+    grants: readonly ComputerAppGrantView[];
+    discardedRecords: number;
+    requestedApps: readonly ComputerAppAccessRequestView[];
+  }> | null;
   grantError?: string | null;
+  /** How many unauthenticated rows the last cleanup removed, or null if none has run. */
+  purgedGrantRecords?: number | null;
   onClose: () => void;
   onRegister: () => Promise<void>;
   onResolveWindows: (profileId: string) => Promise<readonly ComputerUseWindowView[]>;
   onRevokeGrant?: (grant: ComputerAppGrantView) => Promise<void>;
+  onPurgeGrants?: () => Promise<void>;
   onStart: (input: ComputerUseStartView) => Promise<void>;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -809,13 +881,18 @@ export function ComputerUseOnboarding({
               V1の対応アプリは、WindowsはSystem32のクラシック版メモ帳と同じreleaseで署名した受入fixture、macOSはTextEditと公式Visual
               Studio Code（確認あり）です。上記以外のアプリは未対応です。
             </p>
-            {grants === null || onRevokeGrant === undefined ? null : (
+            {grants === null ||
+            onRevokeGrant === undefined ||
+            onPurgeGrants === undefined ? null : (
               <ComputerUseGrantSection
                 grants={grants.grants}
                 discardedRecords={grants.discardedRecords}
+                requestedApps={grants.requestedApps}
+                purgedRecords={purgedGrantRecords ?? null}
                 busy={busy}
                 error={grantError}
                 onRevoke={onRevokeGrant}
+                onPurge={onPurgeGrants}
               />
             )}
           </section>

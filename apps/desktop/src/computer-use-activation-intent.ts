@@ -1,4 +1,5 @@
 import type {
+  ComputerAppGrantDecision,
   ComputerUseApprovalDecision,
   ComputerUseMode,
   ComputerUseStartInput,
@@ -29,8 +30,26 @@ export type ComputerUseApprovalActivationIntent = Readonly<{
   challenge: string;
 }>;
 
+/**
+ * What an approve button on the application approval card commits to (ADR v2 §6.1.1).
+ *
+ * `identityDigest` is `H(appToken, grant_identity_digest, denyRulesetVersion, policyEpoch, taskId)`,
+ * computed by Main when the card is built. Carrying it on the button means the click Main consumes
+ * names the exact application, ruleset and policy epoch the user was shown — and `decision` is part
+ * of the same string, so a renderer cannot turn a click on "today only" into a permanent grant.
+ */
+export type ComputerAppGrantActivationIntent = Readonly<{
+  operation: 'app-grant';
+  requestId: string;
+  expectedRevision: number;
+  decision: ComputerAppGrantDecision;
+  identityDigest: string;
+}>;
+
 export type ComputerUseActivationIntent =
-  ComputerUseStartActivationIntent | ComputerUseApprovalActivationIntent;
+  | ComputerUseStartActivationIntent
+  | ComputerUseApprovalActivationIntent
+  | ComputerAppGrantActivationIntent;
 
 /** Stable, bounded serialization recorded at the trusted input event and compared again in Main. */
 export function serializeComputerUseActivationIntent(intent: ComputerUseActivationIntent): string {
@@ -75,4 +94,10 @@ export function approvalActivationIntent(
   input: Omit<ComputerUseApprovalActivationIntent, 'operation'>,
 ): string {
   return serializeComputerUseActivationIntent({ operation: 'approval', ...input });
+}
+
+export function appGrantActivationIntent(
+  input: Omit<ComputerAppGrantActivationIntent, 'operation'>,
+): string {
+  return serializeComputerUseActivationIntent({ operation: 'app-grant', ...input });
 }

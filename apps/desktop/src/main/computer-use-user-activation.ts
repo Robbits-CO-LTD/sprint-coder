@@ -17,10 +17,14 @@ export type ComputerUseActivationPermit = Readonly<{
     | 'window'
     | 'start'
     | 'approval'
+    // Answering the in-conversation application approval card (ADR v2 §6.1).
+    | 'app-grant'
     | 'permission-settings'
     // Revoking one application grant (ADR v2 §6.5). Its own kind, so a click on any other Computer
     // Use control can never be spent as a revoke.
     | 'app-grant-revoke'
+    /** Removing grant rows whose MAC no longer verifies (T14). */
+    | 'app-grant-purge'
     | 'graph-start'
     | 'graph-resume'
     | 'graph-resume-step';

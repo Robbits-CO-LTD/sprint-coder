@@ -2661,3 +2661,63 @@ describe('graph inline anchor', () => {
     ).toEqual(reference);
   });
 });
+
+/**
+ * The bounds a model is told about have to be the bounds it is held to.
+ *
+ * `maxLength` in the published JSON schema counts code points; Zod's `.max()` counts UTF-16 code
+ * units. A model that obeys the schema it was given and writes 130 emoji would otherwise have its
+ * tool call rejected by the validator behind that schema, which looks like the tool being broken.
+ */
+describe('Computer Use model-authored tool input bounds', () => {
+  const astral = '\u{1F600}';
+
+  it('measures the access reason in code points, as its JSON schema promises', () => {
+    const limit = contracts.COMPUTER_ACCESS_REASON_MAX_CHARACTERS;
+    expect(
+      contracts.COMPUTER_REQUEST_ACCESS_TOOL_INPUT_JSON_SCHEMA.properties.reason.maxLength,
+    ).toBe(limit);
+    const at = { appToken: 'app-token', reason: astral.repeat(limit) };
+    expect(contracts.computerRequestAccessInputSchema.safeParse(at).success).toBe(true);
+    // Every one of those is two UTF-16 units, so a unit-counting bound would have refused it.
+    expect(at.reason.length).toBe(limit * 2);
+    const over = { appToken: 'app-token', reason: astral.repeat(limit + 1) };
+    expect(contracts.computerRequestAccessInputSchema.safeParse(over).success).toBe(false);
+    // And the plain-ASCII boundary still holds where it always did.
+    expect(
+      contracts.computerRequestAccessInputSchema.safeParse({
+        appToken: 'app-token',
+        reason: 'x'.repeat(limit),
+      }).success,
+    ).toBe(true);
+    expect(
+      contracts.computerRequestAccessInputSchema.safeParse({
+        appToken: 'app-token',
+        reason: 'x'.repeat(limit + 1),
+      }).success,
+    ).toBe(false);
+  });
+
+  it('measures the session goal the same way', () => {
+    const limit = contracts.COMPUTER_START_GOAL_MAX_CHARACTERS;
+    expect(contracts.COMPUTER_START_TOOL_INPUT_JSON_SCHEMA.properties.goal.maxLength).toBe(limit);
+    expect(
+      contracts.computerStartToolInputSchema.safeParse({
+        targetToken: 'target-token',
+        goal: astral.repeat(limit),
+      }).success,
+    ).toBe(true);
+    expect(
+      contracts.computerStartToolInputSchema.safeParse({
+        targetToken: 'target-token',
+        goal: astral.repeat(limit + 1),
+      }).success,
+    ).toBe(false);
+    // A goal still has to say something.
+    for (const goal of ['', '   '])
+      expect(
+        contracts.computerStartToolInputSchema.safeParse({ targetToken: 'target-token', goal })
+          .success,
+      ).toBe(false);
+  });
+});

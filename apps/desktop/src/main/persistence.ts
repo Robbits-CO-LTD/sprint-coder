@@ -47,6 +47,7 @@ import {
   type GraphStepInterruption,
 } from './graph-resource';
 import {
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
   graphGenerationSchema,
   graphMissionPlanSchema,
   teamMissionCheckpointSchema,
@@ -1099,6 +1100,15 @@ export const COMPUTER_USE_MAX_PROFILES = 64;
 /** The same ceiling as profiles: a list a person is expected to read and prune by hand. */
 export const COMPUTER_USE_MAX_GRANTS = 64;
 /**
+ * How many application histories one read of the totals may return.
+ *
+ * The settings screen shows the ungranted ones, so the caller asks for enough that a full grant
+ * table cannot crowd them out: every granted application may also have a history, and they are
+ * filtered out after the query.
+ */
+export const COMPUTER_USE_MAX_ACCESS_REQUEST_TOTALS =
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT + COMPUTER_USE_MAX_GRANTS;
+/**
  * The grant record format this build writes.
  *
  * Stored per row and covered by the MAC, so a future format change can be told apart from a row
@@ -1111,6 +1121,55 @@ export type ComputerAppGrantListing = Readonly<{
   /** Rows whose MAC did not verify; surfaced as a count in settings, never as content. */
   discarded: number;
 }>;
+/**
+ * One application's access-request history inside one Task (ADR v2 §6.1, T8).
+ *
+ * Keyed by platform + grant identity digest rather than by a profile id, so the row survives the
+ * application being re-registered and means the same thing once S4/S5 enumerate applications that
+ * were never registered at all. `denied` is the Task-scoped refusal: once the user says no, the
+ * agent may not raise another card for this application in this Task, and a different Task may ask.
+ *
+ * Deliberately not MAC-authenticated, unlike `computer_app_grants`. Every field here can only ever
+ * *withhold* — forging a row denies an application or inflates a counter, and clearing one puts the
+ * agent back to needing a human click it never had. There is no value an attacker can write that
+ * grants anything, so the per-install key buys nothing and the extra column would have to be kept
+ * consistent across two counters that move on every card.
+ */
+export type ComputerAppAccessRequestRecord = Readonly<{
+  platform: ComputerAppGrantPlatform;
+  grantIdentityDigest: string;
+  taskId: string;
+  appId: string;
+  /** App-authored. Sanitised on the way in and again on the way to the Renderer. */
+  displayName: string;
+  requestCount: number;
+  denialCount: number;
+  denied: boolean;
+  createdAt: string;
+  updatedAt: string;
+}>;
+
+export type ComputerAppAccessRequestInput = Readonly<{
+  platform: ComputerAppGrantPlatform;
+  grantIdentityDigest: string;
+  taskId: string;
+  appId: string;
+  displayName: string;
+  outcome: 'requested' | 'denied';
+  now?: string;
+}>;
+
+/** The aggregate a settings row shows for an application that holds no grant. */
+export type ComputerAppAccessRequestTotals = Readonly<{
+  platform: ComputerAppGrantPlatform;
+  grantIdentityDigest: string;
+  appId: string;
+  displayName: string;
+  requestCount: number;
+  denialCount: number;
+  lastRequestedAt: string;
+}>;
+
 export type ComputerAppGrantInput = Readonly<{
   id?: string;
   /** Derived by the pure leaf, so the store can never be handed a digest its fields disagree with. */
@@ -4202,6 +4261,39 @@ const migrations = [
         ON computer_app_grants(platform, grant_identity_digest);
     `,
   },
+  {
+    version: 93,
+    checksum: 'computer-use-v93-app-access-requests',
+    // What the agent asked about, per Task (ADR v2 §6.1, T8). One row per application identity per
+    // Task, which is the smallest shape that answers all three questions the card flow asks: "has
+    // the user already refused this application in this Task" (`denied`), "how many cards has this
+    // Task raised" (sum of `request_count` for the Task), and "how often has the agent asked about
+    // this application, and how often was it refused" for the settings screen — including for
+    // applications that never became a grant and therefore have no row in `computer_app_grants`.
+    //
+    // `ON DELETE CASCADE` is the Task-scoped lifetime: deleting the Task takes its refusals with
+    // it, so a later Task starts from a clean slate exactly as §6.1 says it should. No MAC here —
+    // see `ComputerAppAccessRequestRecord` for why a row that can only withhold does not need one.
+    sql: `
+      CREATE TABLE computer_app_access_requests (
+        platform TEXT NOT NULL CHECK (platform IN ('win32', 'darwin')),
+        grant_identity_digest TEXT NOT NULL CHECK (
+          length(grant_identity_digest) = 64 AND grant_identity_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        app_id TEXT NOT NULL CHECK (length(app_id) BETWEEN 1 AND 256),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 256),
+        request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+        denial_count INTEGER NOT NULL DEFAULT 0 CHECK (denial_count >= 0),
+        denied INTEGER NOT NULL DEFAULT 0 CHECK (denied IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (platform, grant_identity_digest, task_id)
+      );
+      CREATE INDEX computer_app_access_requests_task_idx
+        ON computer_app_access_requests(task_id);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -5361,7 +5453,23 @@ export interface PersistenceClient {
     grantId: string,
     outcome: 'requested' | 'denied',
   ): ComputerAppGrantRecord;
+  setComputerAppGrantProviderEgress(
+    grantId: string,
+    providerEgress: Readonly<{ connectionId: string; modelId: string }> | null,
+  ): ComputerAppGrantRecord;
   removeComputerAppGrant(grantId: string, expectedRevision: number): void;
+  /** Drops grant rows that no longer authenticate, and answers how many were dropped (T14). */
+  purgeUnauthenticatedComputerAppGrants(): number;
+  recordComputerAppAccessRequest(
+    input: ComputerAppAccessRequestInput,
+  ): ComputerAppAccessRequestRecord;
+  getComputerAppAccessRequest(
+    platform: ComputerAppGrantPlatform,
+    grantIdentityDigest: string,
+    taskId: string,
+  ): ComputerAppAccessRequestRecord | null;
+  countComputerAppAccessRequestsForTask(taskId: string): number;
+  listComputerAppAccessRequestTotals(limit?: number): readonly ComputerAppAccessRequestTotals[];
   recordComputerActionAudit(input: ComputerActionAuditInput): ComputerActionAuditRecord;
   completeComputerActionAudit(input: {
     auditId: string;
@@ -14639,6 +14747,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
     }));
   }
 
+  /**
+   * Records provider egress consent for one application (ADR v2 §6.4, D10).
+   *
+   * Separate from creating the grant because the two agreements are separate: changing the model
+   * re-asks only where the screen may go, and the application's own permission — and its mode
+   * ceiling, its identity, and its counters — is left exactly as the user gave it.
+   */
+  setComputerAppGrantProviderEgress(
+    grantId: string,
+    providerEgress: Readonly<{ connectionId: string; modelId: string }> | null,
+  ): ComputerAppGrantRecord {
+    return this.rewriteComputerAppGrant(grantId, (current) => ({
+      ...current,
+      providerEgressConnectionId: providerEgress?.connectionId ?? null,
+      providerEgressModelId: providerEgress?.modelId ?? null,
+    }));
+  }
+
   /** Revokes one grant. The caller is responsible for stopping any session that was using it. */
   removeComputerAppGrant(grantId: string, expectedRevision: number): void {
     const current = this.getComputerAppGrant(grantId);
@@ -14648,6 +14774,173 @@ export class SqlitePersistenceClient implements PersistenceClient {
       .prepare('DELETE FROM computer_app_grants WHERE id = ? AND revision = ?')
       .run(grantId, expectedRevision);
     if (result.changes !== 1) throw new OperationConflictError();
+  }
+
+  /**
+   * Removes every grant row that no longer authenticates, and answers how many (T14).
+   *
+   * Never called on read. A row that fails its MAC is already treated as absent everywhere, so
+   * deleting it silently while listing would destroy the one piece of evidence that something
+   * rewrote the file — and would do it on a path the user never asked to mutate anything. This runs
+   * only from the settings button, and only rows whose MAC fails are touched: a row that verifies is
+   * a grant the user gave and is not this action's business.
+   *
+   * Regenerating the per-install key is the ordinary reason to reach for it: every row then fails,
+   * every application is effectively ungranted, and without this the dead rows would sit in the
+   * table forever because `removeComputerAppGrant` refuses to delete what it cannot read.
+   */
+  purgeUnauthenticatedComputerAppGrants(): number {
+    const rows = this.db
+      .prepare('SELECT * FROM computer_app_grants')
+      .all() as ComputerAppGrantRow[];
+    const doomed = rows.filter((row) => verifiedComputerAppGrant(row) === null);
+    if (doomed.length === 0) return 0;
+    const statement = this.db.prepare('DELETE FROM computer_app_grants WHERE id = ?');
+    const remove = this.db.transaction((ids: readonly string[]) => {
+      for (const id of ids) statement.run(id);
+    });
+    remove(doomed.map((row) => row.id));
+    return doomed.length;
+  }
+
+  /**
+   * Counts one access request against an application inside one Task (ADR v2 §6.1, T8).
+   *
+   * Upsert rather than read-modify-write: two cards for the same application cannot be in flight at
+   * once (§6.1 allows one unresolved card globally), but the Task row is also read by the rate
+   * limit, and a lost update there would quietly raise the ceiling. `denied` only ever goes from 0
+   * to 1 — a refusal inside a Task is final for that Task, and the `MAX` keeps a later `requested`
+   * from clearing it.
+   */
+  recordComputerAppAccessRequest(
+    input: ComputerAppAccessRequestInput,
+  ): ComputerAppAccessRequestRecord {
+    this.assertTask(input.taskId);
+    const now = canonicalTimestamp(input.now ?? new Date().toISOString());
+    const denied = input.outcome === 'denied' ? 1 : 0;
+    // The two outcomes count different things. `requested` means a card was shown, and that is what
+    // the per-Turn and per-Task ceilings are about; `denied` is the answer to a card that was
+    // already counted when it went up, so it moves only the refusal columns. Counting a refusal as
+    // a second request would spend two of the Task's five on one card and would tell the settings
+    // screen the agent asked twice.
+    //
+    // A refusal with no prior row inserts `request_count` 0 rather than 1: it means the card's own
+    // `requested` write did not land (the Task went away and came back, an older build), and
+    // inventing a request nobody can point at is worse than a counter that is one low.
+    const requested = denied === 1 ? 0 : 1;
+    this.db
+      .prepare(
+        `INSERT INTO computer_app_access_requests(
+           platform, grant_identity_digest, task_id, app_id, display_name,
+           request_count, denial_count, denied, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(platform, grant_identity_digest, task_id) DO UPDATE SET
+           app_id = excluded.app_id,
+           display_name = excluded.display_name,
+           request_count = computer_app_access_requests.request_count + excluded.request_count,
+           denial_count = computer_app_access_requests.denial_count + excluded.denial_count,
+           denied = MAX(computer_app_access_requests.denied, excluded.denied),
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.platform,
+        input.grantIdentityDigest,
+        input.taskId,
+        input.appId.slice(0, 256),
+        input.displayName.slice(0, 256),
+        requested,
+        denied,
+        denied,
+        now,
+        now,
+      );
+    const record = this.getComputerAppAccessRequest(
+      input.platform,
+      input.grantIdentityDigest,
+      input.taskId,
+    );
+    if (record === null) throw new Error('Computer Use access request was not recorded');
+    return record;
+  }
+
+  getComputerAppAccessRequest(
+    platform: ComputerAppGrantPlatform,
+    grantIdentityDigest: string,
+    taskId: string,
+  ): ComputerAppAccessRequestRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM computer_app_access_requests
+         WHERE platform = ? AND grant_identity_digest = ? AND task_id = ?`,
+      )
+      .get(platform, grantIdentityDigest, taskId) as ComputerAppAccessRequestRow | undefined;
+    return row === undefined ? null : toComputerAppAccessRequest(row);
+  }
+
+  /** How many cards this Task has raised, for the per-Task ceiling (T8). */
+  countComputerAppAccessRequestsForTask(taskId: string): number {
+    const row = this.db
+      .prepare(
+        'SELECT COALESCE(SUM(request_count), 0) AS total FROM computer_app_access_requests WHERE task_id = ?',
+      )
+      .get(taskId) as { total: number };
+    return Number.isSafeInteger(row.total) ? row.total : 0;
+  }
+
+  /**
+   * Per-application totals across every Task, for the settings screen.
+   *
+   * Grouped here rather than in Main so the sum is one statement over the index: the caller pairs
+   * these with the grant rows and shows only the applications that never became one.
+   */
+  listComputerAppAccessRequestTotals(
+    limit = COMPUTER_USE_MAX_ACCESS_REQUEST_TOTALS,
+  ): readonly ComputerAppAccessRequestTotals[] {
+    // Most recent first and bounded in SQL. This table grows with every application the agent has
+    // ever asked about, across every Task, and nothing prunes it; the caller's envelope has a
+    // length the contract enforces, so the bound belongs here as well as there.
+    const rows = this.db
+      .prepare(
+        `SELECT platform, grant_identity_digest,
+                SUM(request_count) AS request_count,
+                SUM(denial_count) AS denial_count,
+                MAX(updated_at) AS last_requested_at
+         FROM computer_app_access_requests
+         GROUP BY platform, grant_identity_digest
+         ORDER BY last_requested_at DESC, platform, grant_identity_digest
+         LIMIT ?`,
+      )
+      .all(Math.max(0, Math.trunc(limit))) as {
+      platform: string;
+      grant_identity_digest: string;
+      request_count: number;
+      denial_count: number;
+      last_requested_at: string;
+    }[];
+    const naming = this.db.prepare(
+      `SELECT app_id, display_name FROM computer_app_access_requests
+       WHERE platform = ? AND grant_identity_digest = ?
+       ORDER BY updated_at DESC, task_id LIMIT 1`,
+    );
+    const totals: ComputerAppAccessRequestTotals[] = [];
+    for (const row of rows) {
+      if (row.platform !== 'win32' && row.platform !== 'darwin') continue;
+      const named = naming.get(row.platform, row.grant_identity_digest) as
+        { app_id: string; display_name: string } | undefined;
+      if (named === undefined) continue;
+      totals.push(
+        Object.freeze({
+          platform: row.platform,
+          grantIdentityDigest: row.grant_identity_digest,
+          appId: named.app_id,
+          displayName: named.display_name,
+          requestCount: row.request_count,
+          denialCount: row.denial_count,
+          lastRequestedAt: row.last_requested_at,
+        }),
+      );
+    }
+    return Object.freeze(totals);
   }
 
   /**
@@ -22467,6 +22760,46 @@ type ComputerAppGrantRow = {
   revision: number;
   record_mac: string;
 };
+
+type ComputerAppAccessRequestRow = {
+  platform: string;
+  grant_identity_digest: string;
+  task_id: string;
+  app_id: string;
+  display_name: string;
+  request_count: number;
+  denial_count: number;
+  denied: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * A stored access-request row, or a throw.
+ *
+ * Unlike a grant there is nothing to authenticate, so the only question is whether the row is the
+ * shape this code wrote. A malformed row here would be a bug rather than an attack — it can only
+ * withhold — and throwing is right: the caller is deciding whether to raise a card, and it must not
+ * proceed on a count it could not read.
+ */
+function toComputerAppAccessRequest(
+  row: ComputerAppAccessRequestRow,
+): ComputerAppAccessRequestRecord {
+  if (row.platform !== 'win32' && row.platform !== 'darwin')
+    throw new Error('Invalid Computer Use access request row');
+  return Object.freeze({
+    platform: row.platform,
+    grantIdentityDigest: row.grant_identity_digest,
+    taskId: row.task_id,
+    appId: row.app_id,
+    displayName: row.display_name,
+    requestCount: row.request_count,
+    denialCount: row.denial_count,
+    denied: row.denied === 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
 
 /**
  * A row, only if it both parses and authenticates (ADR v2 §6.2 / T14).

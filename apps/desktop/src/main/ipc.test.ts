@@ -25,6 +25,7 @@ import {
   computerUseApprovalResolveInputSchema,
   computerUseOpenPermissionSettingsInputSchema,
   computerUseProfileListInputSchema,
+  computerAppGrantResolveInputSchema,
   computerUseGrantRevokeInputSchema,
   computerUseProfileRegisterInputSchema,
   computerUseSessionStatusInputSchema,
@@ -2614,6 +2615,8 @@ describe('Main image attachment dispatch boundary', () => {
       Object.assign(router, {
         managedWorkerTurn: new Map(),
         approvalCoordinator: { turnEnded },
+        // Every Turn ending fans out to both coordinators through `notifyTurnEnded`.
+        computerUseController: { turnEnded: vi.fn() },
         managedCodingHarness: {
           broker: {
             getTurnSnapshot: (taskId: string, turnId: string) => {
@@ -5461,6 +5464,8 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.computerUseProfileRegister]: computerUseProfileRegisterInputSchema,
   [IPC_CHANNELS.computerUseGrantsList]: emptyPayloadSchema,
   [IPC_CHANNELS.computerUseGrantRevoke]: computerUseGrantRevokeInputSchema,
+  [IPC_CHANNELS.computerUseGrantPurge]: emptyPayloadSchema,
+  [IPC_CHANNELS.computerUseGrantRequestResolve]: computerAppGrantResolveInputSchema,
   [IPC_CHANNELS.computerUseWindowCandidates]: computerUseWindowCandidatesInputSchema,
   [IPC_CHANNELS.computerUseStart]: computerUseStartInputSchema,
   [IPC_CHANNELS.computerUseStatusGet]: computerUseSessionStatusInputSchema,
@@ -5551,6 +5556,8 @@ const NON_ROUTER_CHANNELS = new Set<string>([
   IPC_CHANNELS.updateHealthEvent,
   IPC_CHANNELS.computerUseActivationIntent,
   IPC_CHANNELS.computerUseStatusEvent,
+  // Main pushes the application approval card; the Renderer answers on its own router channel.
+  IPC_CHANNELS.computerUseGrantRequestEvent,
   IPC_CHANNELS.updateCheckNow,
   IPC_CHANNELS.updateOpenManual,
   IPC_CHANNELS.updateOpenLog,
@@ -6132,6 +6139,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       pendingProjectMemoriesByTurn: new Map(),
       managedWorkerTurn: new Map(),
       approvalCoordinator: { turnEnded: vi.fn() },
+      computerUseController: { turnEnded: vi.fn() },
       pushRuntimeStatus,
       publish,
       persistence: {

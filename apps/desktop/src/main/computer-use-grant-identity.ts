@@ -63,9 +63,9 @@ type GrantIdentityComparedField =
   // leaf + parent directory (Windows Win32), package family + signer digest (Windows package), and
   // executable path + executable digest (unverified).
   | 'grantIdentityDigest'
-  // Compared on top of the digest because the macOS derivation deliberately excludes the path, so
-  // that an ordinary in-place update keeps the grant. "Same signer, different location" is a
-  // different application (ADR v2 §6.3) and has to stop matching.
+  // Compared on top of the digest, for every identity. The macOS derivation deliberately excludes
+  // the path so that an ordinary in-place update keeps the grant, and "same signer, different
+  // location" is a different application (ADR v2 §6.3) which has to stop matching.
   | 'executablePath';
 
 /**
@@ -189,6 +189,83 @@ export function computerAppGrantIdentityFrom(identity: unknown): ComputerAppGran
 }
 
 /**
+ * Recomputes the digest the native boundary would have produced for this identity record (T14).
+ *
+ * The grant is matched on fields read out of `computer_app_profiles.identity_json`, which carries
+ * no MAC; native verifies the row's top-level `identity_digest` and `canonical_path` and never
+ * looks inside that JSON. Nothing tied the two together, so rewriting the JSON alone — keeping one
+ * application's verified top-level digest and putting another's signing facts inside — made native
+ * vouch for application A while the grant lookup answered with application B's permission and its
+ * provider-egress consent. Recomputing the digest from the JSON and comparing it against the field
+ * native actually verified is what closes that: the JSON now has to describe the same application.
+ *
+ * Mirrors the native formulas exactly, on the raw strings, with no trimming:
+ * - macOS `computer_use_macos.mm` `BuildIdentityFacts` (~:664). Signed:
+ *   `sha256("computer-app-identity-v2\n" + bundleId + "\n" + teamId + "\n" + signingIdentifier)`.
+ *   Unsigned: `sha256("computer-app-identity-v2-unsigned\n" + bundleId + "\n" + executableDigest)`.
+ *   `IdentityObjectFromFacts` (~:690) emits `teamId`/`signingIdentifier` as strings — possibly
+ *   empty — when the target is signed and as `null` when it is not, so "is a string" is how the
+ *   record carries native's own signed/unsigned answer.
+ * - Windows `computer_use_windows_host.cc` (~:883). Unsigned:
+ *   `sha256("computer-win-identity-v1-unsigned\n" + executableDigest)`. Signed:
+ *   `sha256("computer-win-identity-v1-signed\n" + asciiLowercase(path_utf8) + "\n" + signerDigest)`.
+ *   `WindowsIdentityJson` (~:1038) writes that same `path_utf8` as `executablePath`, unchanged, and
+ *   `signerDigest` as `null` when there is no signature. Only ASCII `A`–`Z` fold, which is what the
+ *   native loop does — not a Unicode lowercase.
+ *
+ * **The formula is chosen by the grant's own signing class, never by trying both.** "Either one
+ * matches" would let an unsigned application that calls itself `com.apple.TextEdit` satisfy the
+ * unsigned formula while its JSON also claims TextEdit's Team ID, and so pick up TextEdit's
+ * `verified-signed` grant. Where the two answers can legitimately differ — native signed the target
+ * but both signing strings came back empty, so the derivation below reads it as unverified — there
+ * is no formula that is safely applicable and the answer is null: no grant is possible.
+ */
+export function computerAppNativeIdentityDigest(
+  identity: unknown,
+  derived: ComputerAppGrantIdentity,
+): string | null {
+  if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return null;
+  const record = identity as Record<string, unknown>;
+  // Raw, because native hashed raw: the derivation trims and folds empty to null for its own
+  // fields, and reusing those values here would hash something native never saw.
+  const raw = (key: string): string => (typeof record[key] === 'string' ? record[key] : '');
+  const present = (key: string): boolean => typeof record[key] === 'string';
+  const signed = derived.identityKind === 'verified-signed';
+  if (derived.platform === 'darwin') {
+    // Native's answer, as the record carries it. Disagreement in either direction is fatal.
+    if (signed !== (present('teamId') || present('signingIdentifier'))) return null;
+    return signed
+      ? nativeDigest(
+          `computer-app-identity-v2\n${raw('bundleId')}\n${raw('teamId')}\n${raw('signingIdentifier')}`,
+        )
+      : nativeDigest(
+          `computer-app-identity-v2-unsigned\n${raw('bundleId')}\n${raw('executableDigest')}`,
+        );
+  }
+  if (signed !== present('signerDigest')) return null;
+  // Native writes `packageFamilyName: null` for every application today, so a record that claims a
+  // family did not come from native. The claim would change the grant digest (family + signer,
+  // no path) without changing anything native verifies, so there is no honest answer for it.
+  if (record['packageFamilyName'] !== null && record['packageFamilyName'] !== undefined)
+    return null;
+  return signed
+    ? nativeDigest(
+        `computer-win-identity-v1-signed\n${asciiLowercase(raw('executablePath'))}\n${raw('signerDigest')}`,
+      )
+    : nativeDigest(`computer-win-identity-v1-unsigned\n${raw('executableDigest')}`);
+}
+
+/** Plain SHA-256 hex of the UTF-8 bytes, matching `StringDigest` / `Sha256String`. */
+function nativeDigest(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/** `A`–`Z` only, exactly the byte loop the Windows host runs — never a Unicode lowercase. */
+function asciiLowercase(value: string): string {
+  return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+}
+
+/**
  * Whether a stored grant still describes the application observed now.
  *
  * Whole-identity equality over an explicit field list, not a deep compare: see the lists above for
@@ -218,6 +295,12 @@ export function computerAppGrantMismatch(
     return 'signing_class_changed';
   if (
     stored.grantIdentityDigest !== observed.grantIdentityDigest ||
+    // No exemption for a Windows package, although its directory carries the version and an
+    // ordinary Store update therefore re-asks. Skipping the comparison would have to be decided by
+    // `packageFamilyName`, and native does not attest that field yet: it is read from a record with
+    // no MAC, so writing the same family name onto two applications by one signer would make them
+    // one grant with no path check between them. The exemption belongs to the slice in which native
+    // returns the package identity and binds it into the digest it verifies (S5 / S6).
     stored.executablePath !== observed.executablePath
   )
     return 'identity_changed';

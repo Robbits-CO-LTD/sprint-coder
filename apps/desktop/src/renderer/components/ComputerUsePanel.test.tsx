@@ -383,9 +383,12 @@ describe('Computer Use granted applications', () => {
       <ComputerUseGrantSection
         grants={[grant]}
         discardedRecords={0}
+        requestedApps={[]}
+        purgedRecords={null}
         busy={false}
         error={null}
         onRevoke={async () => {}}
+        onPurge={async () => {}}
       />,
     );
 
@@ -410,9 +413,12 @@ describe('Computer Use granted applications', () => {
       <ComputerUseGrantSection
         grants={[grant]}
         discardedRecords={0}
+        requestedApps={[]}
+        purgedRecords={null}
         busy={false}
         error={null}
         onRevoke={async () => {}}
+        onPurge={async () => {}}
       />,
     );
     for (const leak of ['executablePath', '/Applications', 'Digest', 'pid'])
@@ -433,9 +439,12 @@ describe('Computer Use granted applications', () => {
           },
         ]}
         discardedRecords={0}
+        requestedApps={[]}
+        purgedRecords={null}
         busy={false}
         error={null}
         onRevoke={async () => {}}
+        onPurge={async () => {}}
       />,
     );
 
@@ -451,15 +460,85 @@ describe('Computer Use granted applications', () => {
       <ComputerUseGrantSection
         grants={[]}
         discardedRecords={2}
+        requestedApps={[]}
+        purgedRecords={null}
         busy={false}
         error={null}
         onRevoke={async () => {}}
+        onPurge={async () => {}}
       />,
     );
 
     expect(markup).toContain('許可済みのアプリはありません');
     expect(markup).toContain('無効な許可レコードを2件破棄しました');
     expect(markup).toContain('role="status"');
+    // The cleanup is offered only where there is something to clean up, and it carries its own
+    // activation kind: Main refuses the call without one, so a model cannot delete grant rows.
+    expect(markup).toContain('無効なレコードを削除');
+    expect(markup).toContain('data-computer-use-activation="app-grant-purge"');
+  });
+
+  it('offers no cleanup when every stored grant authenticates, and reports one that ran', () => {
+    const clean = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[grant]}
+        discardedRecords={0}
+        requestedApps={[]}
+        purgedRecords={null}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+        onPurge={async () => {}}
+      />,
+    );
+    expect(clean).not.toContain('無効なレコードを削除');
+    expect(clean).not.toContain('app-grant-purge');
+
+    const after = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[grant]}
+        discardedRecords={0}
+        requestedApps={[]}
+        purgedRecords={3}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+        onPurge={async () => {}}
+      />,
+    );
+    expect(after).toContain('無効な許可レコードを3件削除しました');
+  });
+
+  it('shows how often the AI asked about applications that were never granted', () => {
+    const markup = renderToStaticMarkup(
+      <ComputerUseGrantSection
+        grants={[]}
+        discardedRecords={0}
+        requestedApps={[
+          {
+            platform: 'darwin',
+            appId: 'com.example.other',
+            untrustedDisplayName: 'Other',
+            requestCount: 5,
+            denialCount: 2,
+            lastRequestedAt: '2026-09-20T00:00:00.000Z',
+          },
+        ]}
+        purgedRecords={null}
+        busy={false}
+        error={null}
+        onRevoke={async () => {}}
+        onPurge={async () => {}}
+      />,
+    );
+    expect(markup).toContain('許可していないアプリへの要求');
+    expect(markup).toContain('com.example.other');
+    expect(markup).toContain('5回');
+    expect(markup).toContain('拒否2回');
+    // Nothing here grants anything, so there is no control on these rows.
+    expect(markup.slice(markup.indexOf('許可していないアプリへの要求'))).not.toContain('<button');
+    // The application's own name stays labelled as the application's.
+    expect(markup).toContain('（アプリ自称名）');
   });
 
   it('stays out of the onboarding dialog entirely while the agent-driven gate is off', () => {
@@ -483,11 +562,12 @@ describe('Computer Use granted applications', () => {
         providers={providers}
         controlAvailable
         busy={false}
-        grants={{ grants: [grant], discardedRecords: 0 }}
+        grants={{ grants: [grant], discardedRecords: 0, requestedApps: [] }}
         onClose={() => {}}
         onRegister={async () => {}}
         onResolveWindows={async () => []}
         onRevokeGrant={async () => {}}
+        onPurgeGrants={async () => {}}
         onStart={async () => {}}
       />,
     );

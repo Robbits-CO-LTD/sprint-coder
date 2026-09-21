@@ -15,13 +15,29 @@ import {
   computerUseRoundLimitSchema,
   computerUseWindowCandidateSchema,
   computerListTargetsOutputSchema,
+  computerAppGrantRequestSchema,
+  computerAppAccessRequestViewSchema,
+  computerRequestAccessOutputSchema,
+  computerStartToolOutputSchema,
+  computerUseSessionStateIsSettled,
   selectableComputerTargetSchema,
+  COMPUTER_START_GOAL_MAX_CHARACTERS,
   COMPUTER_TARGET_LIST_LIMIT,
+  COMPUTER_USE_GRANT_LIST_LIMIT,
+  COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
   COMPUTER_USE_LIMITS,
+  type ComputerAccessRequestReasonCode,
+  type ComputerAppAccessRequestView,
+  type ComputerAppGrantDecision,
+  type ComputerAppGrantRequest,
+  type ComputerAppGrantResolveInput,
   type ComputerAppGrantView,
   type ComputerAppIdentity,
   type ComputerListTargetsOutput,
+  type ComputerRequestAccessOutput,
+  type ComputerStartToolOutput,
   type ComputerUseGrantListResult,
+  type ComputerUseGrantPurgeResult,
   type ComputerTarget,
   type SelectableComputerTarget,
   type ComputerAppProfile,
@@ -58,8 +74,21 @@ import {
 import {
   computerAppGrantIdentityFrom,
   computerAppGrantMismatch,
+  computerAppNativeIdentityDigest,
+  normalizeExecutablePath,
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
+import {
+  computerAppGrantAllowedDecisions,
+  computerAppGrantCardFactsMatch,
+  computerAppGrantIntentDigest,
+  sanitizeComputerAccessReason,
+  COMPUTER_ACCESS_REQUEST_TASK_LIMIT,
+  COMPUTER_ACCESS_REQUEST_TIMEOUT_MS,
+  COMPUTER_ACCESS_REQUEST_TURN_LIMIT,
+  type ComputerAppGrantCardFacts,
+} from './computer-use-access-request';
+import { appGrantActivationIntent } from '../computer-use-activation-intent';
 import {
   computerAppGrantStoredIdentity,
   type ComputerAppGrantRecord,
@@ -241,7 +270,13 @@ export type ComputerUseControllerPersistence = Pick<
   | 'createComputerAppGrant'
   | 'touchComputerAppGrantUsed'
   | 'countComputerAppGrantAccessRequest'
+  | 'setComputerAppGrantProviderEgress'
   | 'removeComputerAppGrant'
+  | 'purgeUnauthenticatedComputerAppGrants'
+  | 'recordComputerAppAccessRequest'
+  | 'getComputerAppAccessRequest'
+  | 'countComputerAppAccessRequestsForTask'
+  | 'listComputerAppAccessRequestTotals'
   | 'recordComputerActionAudit'
   | 'completeComputerActionAudit'
   | 'listComputerActionAudits'
@@ -267,6 +302,25 @@ export type ComputerUseStartRequest = Readonly<{
   expectedPolicyEpoch: number;
   expectedWindowRevision: number;
   expectedProfileRevision: number;
+  /**
+   * Set only by `computer_start` (ADR v2 §5.2), never by the panel.
+   *
+   * The IPC start schema is `.strict()`, so a Renderer cannot supply this field: it exists to tell
+   * the shared start path that this session's authority is a grant rather than a trusted click on
+   * the panel, which changes two things — where provider egress consent comes from (§6.4), and the
+   * fact that the grant is re-checked every round for as long as the session lives.
+   */
+  agent?: ComputerUseAgentStartBinding | undefined;
+}>;
+
+export type ComputerUseAgentStartBinding = Readonly<{
+  /** Model-authored, already normalised and bounded like a Task goal. */
+  goal: string;
+  /** Which kind of grant authorised this session, so each round can re-check the same one. */
+  grantScope: ComputerAppGrantScopeKind;
+  grantId: string | null;
+  grantIdentityDigest: string;
+  providerEgress: Readonly<{ connectionId: string; modelId: string }>;
 }>;
 
 export type ComputerUseAuthorizationRequest = Readonly<{
@@ -297,6 +351,8 @@ export type ComputerUseControllerDeps = Readonly<{
       modelId: string;
       mode: ComputerUseMode;
       policyEpoch: number;
+      /** The agent's stated goal for this session, or null for a session a person started. */
+      sessionGoal: string | null;
       signal: AbortSignal;
     }>,
   ) => Promise<ComputerUsePlannerPort> | ComputerUsePlannerPort;
@@ -321,9 +377,22 @@ export type ComputerUseControllerDeps = Readonly<{
   ) => Readonly<{ connectionId: string; modelId: string }> | null;
   now?: () => number;
   currentPolicyEpoch?: (taskId: string) => number;
-  canStartSession?: (taskId: string) => boolean;
+  /**
+   * Whether the Task is in a state a session may begin in.
+   *
+   * `ownerTurnId` is null for a start a person made from the panel, which needs an idle Task, and
+   * the calling Turn for `computer_start`, which by definition runs inside one.
+   */
+  canStartSession?: (taskId: string, ownerTurnId: string | null) => boolean;
   authorize?: (request: ComputerUseAuthorizationRequest) => ComputerUseAuthorization;
   publishApproval?: (approval: unknown) => void;
+  /**
+   * Pushes the in-conversation application approval card and every later state it reaches.
+   *
+   * Absent means the card cannot be shown, and `computer_request_access` then refuses rather than
+   * waiting: a card nobody can see is a tool call that would hang until its timeout.
+   */
+  publishGrantRequest?: (request: ComputerAppGrantRequest) => void;
   publishStatus?: (status: ComputerUseSessionStatus) => void;
   emergencyStopReady?: () => boolean;
   armEmergencyStop?: (
@@ -339,9 +408,99 @@ export type ComputerUseControllerDeps = Readonly<{
   lifecycle?: (event: ManagedToolLifecycleEvent) => void;
 }>;
 
+/**
+ * Which agreement says an application may be driven (ADR v2 §6.1, §6.5).
+ *
+ * `grant` is a row in `computer_app_grants` — permanent and installation-wide. `task` is the "just
+ * this once" answer: it lives in memory, inside one Task, and is gone on restart.
+ *
+ * A V1 profile's "remember" is deliberately *not* a third kind. The profile row carries no MAC, so
+ * `remember`, its consent flag and its connection/model pair are whatever the database file says
+ * (T14). The panel's start is safe to read them because it also needs a trusted click every time;
+ * `computer_start` has no click, so the only things it may stand on are a row that authenticates
+ * and an answer this process itself heard. A remembered V1 application therefore gets one card the
+ * first time an agent asks for it, like any other.
+ */
+type ComputerAppGrantScopeKind = 'grant' | 'task';
+
+/**
+ * What one Task agreed to for one application, without writing anything down (ADR v2 §6.1, D14).
+ *
+ * "Allow once" must not outlive the reason the user said it, so this record carries the two facts
+ * that would make it mean something different later: the policy epoch it was given under, and the
+ * deny ruleset that was in force. Either moving makes the entry stop matching, which is the same
+ * fail-closed answer as it never having existed. Nothing here is persisted, so a Main restart and a
+ * Task deletion both end it.
+ */
+type TaskScopedAppGrant = Readonly<{
+  /**
+   * The identity the user said yes to, whole. The digest alone is not enough to match on: a signed
+   * macOS application's digest leaves the path out on purpose (so an update keeps the grant), which
+   * means a second copy of the same signed application somewhere else shares it. The persisted
+   * grant closes that with `computerAppGrantMismatch`, and "allow once" has to pass the same test.
+   */
+  identity: ComputerAppGrantIdentity;
+  maxMode: ComputerUseMode;
+  denyRulesetVersion: number;
+  policyEpoch: number;
+  providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
+}>;
+
+/**
+ * The answer to "may this application be driven without a fresh card, and on what authority".
+ *
+ * One value rather than a bare boolean because every caller needs more than the boolean: the start
+ * path needs the mode ceiling and the egress pair, the enumeration needs something stable to
+ * compare a re-read against, and the card needs to know whether it is asking for the application or
+ * only for the destination.
+ */
+type ComputerAppGrantState = Readonly<{
+  granted: boolean;
+  scope: ComputerAppGrantScopeKind | null;
+  grantId: string | null;
+  maxMode: ComputerUseMode | null;
+  providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
+}>;
+
+const COMPUTER_APP_UNGRANTED: ComputerAppGrantState = Object.freeze({
+  granted: false,
+  scope: null,
+  grantId: null,
+  maxMode: null,
+  providerEgress: null,
+});
+
+/**
+ * One unresolved approval card, and everything the click has to be checked against (§6.1.1).
+ *
+ * The facts are held here rather than re-derived on the click because the comparison is between
+ * what the user *read* and what is true *now*; re-deriving both sides would compare the present
+ * against itself and pass every time.
+ */
+type PendingAppGrantRequest = {
+  request: ComputerAppGrantRequest;
+  facts: ComputerAppGrantCardFacts;
+  identityDigest: string;
+  taskId: string;
+  turnId: string;
+  policyEpoch: number;
+  profileId: string;
+  /** The identity as the card asserted it, so refusing never has to read the store again. */
+  identity: ComputerAppGrantIdentity;
+  displayName: string;
+  providerEgress: Readonly<{ connectionId: string; modelId: string }>;
+  grantId: string | null;
+  /** The ceiling of the agreement already in force, for a card that only asks about a destination. */
+  grantedMaxMode: ComputerUseMode | null;
+  timer: ReturnType<typeof setTimeout>;
+  settle: (outcome: ComputerRequestAccessOutput) => void;
+};
+
 type SessionRecord = {
   status: ComputerUseSessionStatus;
   profile: ComputerAppProfileRecord;
+  /** Present for a session `computer_start` created; null for one a person started. */
+  agent: ComputerUseAgentStartBinding | null;
   native: ComputerUseNativeSession;
   screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
   controller: AbortController;
@@ -432,7 +591,7 @@ type PendingComputerApproval = {
  */
 type TargetEnumerationSnapshot = Readonly<{
   profile: ComputerAppProfileRecord;
-  grantState: Readonly<{ granted: boolean; grantId: string | null }>;
+  grantState: ComputerAppGrantState;
 }>;
 
 type WindowCandidatePermit = Readonly<{
@@ -453,6 +612,16 @@ export class ComputerUseController {
   /** Agent-facing tokens (ADR v2 §5.3). Never persisted, and rotated on every list call. */
   private readonly targetTokens = new Map<string, ComputerTargetTokenRecord>();
   private readonly targetAppTokens = new Map<string, ComputerTargetAppTokenRecord>();
+  /**
+   * "Allow once" grants, by Task then by `${platform}:${grantIdentityDigest}` (ADR v2 §6.1).
+   *
+   * In memory on purpose: the whole meaning of the button is that nothing is written down.
+   */
+  private readonly taskScopedGrants = new Map<string, Map<string, TaskScopedAppGrant>>();
+  /** At most one unresolved card exists at a time, globally (§6.1). */
+  private pendingAppGrantRequest: PendingAppGrantRequest | null = null;
+  /** Cards raised per Turn, for the T8 ceiling. A Turn does not outlive the process. */
+  private readonly accessRequestsByTurn = new Map<string, number>();
   private readonly statusRevisionBySession = new Map<string, number>();
   private readonly startingSessions = new Map<
     string,
@@ -705,14 +874,43 @@ export class ComputerUseController {
    */
 
   /**
-   * The grant identity for a stored application profile, or null when no grant is possible.
+   * The one gate every agent-route grant decision goes through (T14).
    *
-   * The single place "may this application be granted at all?" is decided. Null covers an identity
-   * that cannot be pinned down (§6.2) and an application the current deny ruleset forbids (§3),
-   * because every caller does the same thing with both: treat the application as ungranted.
+   * A profile row has two halves that nothing used to tie together. Native verifies the top-level
+   * `identityDigest` and `canonicalPath` — those are the facts it re-derives from the running
+   * process and refuses to proceed on when they move. The grant is matched on `identity_json`,
+   * which native never reads and no MAC covers. Rewriting the JSON alone therefore let native
+   * vouch for VS Code while `appGrantState` answered with TextEdit's grant, and its provider-egress
+   * consent, and `computer_start` sent VS Code's screen with no card.
+   *
+   * So the gate: the JSON may only speak for this profile when it *is* this profile. Four checks,
+   * and the deny ruleset on top.
+   *
+   * The panel route deliberately does not come through here. It takes a trusted click every time
+   * and reads no grant, so its authority is the click rather than anything in this row.
    */
-  appGrantIdentityFor(identity: unknown): ComputerAppGrantIdentity | null {
-    return computerUseAppIdentityIsDenied(identity) ? null : computerAppGrantIdentityFrom(identity);
+  private boundGrantIdentity(profile: ComputerAppProfileRecord): ComputerAppGrantIdentity | null {
+    const identity = profile.identity;
+    // The JSON's own claim about which row it belongs to.
+    if (identity['identityDigest'] !== profile.identityDigest) return null;
+    // The deny ruleset is deliberately *not* applied here, and it has to be that way: `appGrantFor`
+    // needs an identity for a newly forbidden class in order to *revoke* its row (§6.3, T3), and
+    // returning null would leave that row standing. Every caller applies it — `appGrantState` and
+    // `startForAgent` up front, `appGrantFor` through the mismatch, the card through its recorded
+    // `denied` fact, and `createAppGrant` as a belt.
+    const derived = computerAppGrantIdentityFrom(identity);
+    if (derived === null) return null;
+    if (derived.platform !== profile.platform) return null;
+    // The digest native actually verified, recomputed from the JSON under the JSON's own signing
+    // class. This is the check that makes the two halves one application.
+    if (computerAppNativeIdentityDigest(identity, derived) !== profile.identityDigest) return null;
+    // And the other fact native re-derives. The macOS signed formula leaves the path out on purpose
+    // (so an update keeps the grant), so the digest alone would let a copy elsewhere answer for the
+    // row whose path native checked.
+    return normalizeExecutablePath(derived.platform, profile.canonicalPath) ===
+      derived.executablePath
+      ? derived
+      : null;
   }
 
   /**
@@ -722,8 +920,9 @@ export class ComputerUseController {
    * moved since it was written describes a different application, and a row whose class the ruleset
    * now forbids is revoked here rather than being allowed to survive until something asks again.
    */
-  appGrantFor(identity: unknown): ComputerAppGrantRecord | null {
-    const derived = computerAppGrantIdentityFrom(identity);
+  appGrantFor(profile: ComputerAppProfileRecord): ComputerAppGrantRecord | null {
+    // Through the gate, so the JSON these fields come from is the one native verified (T14).
+    const derived = this.boundGrantIdentity(profile);
     if (derived === null) return null;
     const stored = this.deps.persistence.findComputerAppGrantByIdentity(
       derived.platform,
@@ -733,7 +932,7 @@ export class ComputerUseController {
     const mismatch = computerAppGrantMismatch(
       computerAppGrantStoredIdentity(stored),
       derived,
-      computerUseAppIdentityIsDenied(identity),
+      computerUseAppIdentityIsDenied(profile.identity),
     );
     if (mismatch === null) return stored;
     // A newly denied class is revoked outright — the user is not asked again (§6.3, T3). Every
@@ -785,7 +984,49 @@ export class ComputerUseController {
       if (view.success) grants.push(view.data);
       else discardedRecords += 1;
     }
-    return { grants, discardedRecords };
+    const granted = new Set(
+      listing.grants.map((grant) => `${grant.platform}:${grant.grantIdentityDigest}`),
+    );
+    const requestedApps: ComputerAppAccessRequestView[] = [];
+    // Only the applications that never became a grant: a granted one already has a row above with
+    // its own counters, and listing it twice would read as two different applications.
+    //
+    // Truncated to what the envelope allows, most recent first. This envelope also carries the
+    // grant list and is what revoking and the cleanup answer with, so an auxiliary history that
+    // outgrew its bound must not be able to make the whole thing fail to parse — that would take
+    // away the screen the user revokes permissions from.
+    for (const totals of this.deps.persistence.listComputerAppAccessRequestTotals()) {
+      if (requestedApps.length >= COMPUTER_USE_REQUESTED_APP_LIST_LIMIT) break;
+      if (granted.has(`${totals.platform}:${totals.grantIdentityDigest}`)) continue;
+      const view = computerAppAccessRequestViewSchema.safeParse({
+        platform: totals.platform,
+        appId: totals.appId,
+        untrustedDisplayName: sanitizeUntrustedTargetLabel(totals.displayName),
+        requestCount: totals.requestCount,
+        denialCount: totals.denialCount,
+        lastRequestedAt: totals.lastRequestedAt,
+      });
+      if (view.success) requestedApps.push(view.data);
+    }
+    // The store refuses to create more grants than this, so the slice is the belt: raising that
+    // ceiling without raising the contract's would otherwise break the list rather than shorten it.
+    if (grants.length > COMPUTER_USE_GRANT_LIST_LIMIT)
+      grants.length = COMPUTER_USE_GRANT_LIST_LIMIT;
+    return { grants, discardedRecords, requestedApps };
+  }
+
+  /**
+   * Removes grant rows that no longer authenticate, at the user's request (T14).
+   *
+   * Never automatic. A row whose MAC fails is already treated as absent, so nothing is gained by
+   * deleting it behind the user's back — and the count of such rows is the only evidence that
+   * something rewrote the database, which a silent cleanup would erase. The usual cause is benign
+   * (the per-install key was regenerated, so every row fails at once), and without this those rows
+   * would stay forever: the ordinary revoke path refuses to delete a row it cannot read.
+   */
+  purgeInvalidAppGrants(): ComputerUseGrantPurgeResult {
+    const removedRecords = this.deps.persistence.purgeUnauthenticatedComputerAppGrants();
+    return { ...this.listAppGrantViews(), removedRecords };
   }
 
   /**
@@ -796,15 +1037,28 @@ export class ComputerUseController {
    * cannot derive or that the ruleset denies, so a mis-wired caller cannot widen the deny list.
    */
   createAppGrant(
-    identity: unknown,
+    identity: ComputerAppGrantIdentity,
     input: Readonly<{
       displayName?: string | undefined;
       maxMode: ComputerUseMode;
       providerEgress: Readonly<{ connectionId: string; modelId: string }> | null;
     }>,
   ): ComputerAppGrantRecord {
-    const derived = this.appGrantIdentityFor(identity);
-    if (derived === null) throw new Error('Computer Use application cannot be granted');
+    // An identity that already came out of `boundGrantIdentity`, never raw JSON: the caller holds
+    // the one the card was re-verified against, and re-deriving here would be a second derivation
+    // that nothing had bound to the profile native verified (T14).
+    const derived = identity;
+    // The gate already applied the deny ruleset to the whole record; this is the belt, over the
+    // attributes a grant identity still carries, so a mis-wired caller cannot widen the deny list.
+    if (
+      computerUseAppIdentityIsDenied({
+        platform: derived.platform,
+        bundleId: derived.platform === 'darwin' ? derived.appId : null,
+        packageFamilyName: derived.packageFamilyName,
+        executablePath: derived.executablePath,
+      })
+    )
+      throw new Error('Computer Use application cannot be granted');
     return this.deps.persistence.createComputerAppGrant({
       identity: derived,
       // Sanitised before it is stored as well as before it is shown. Storing the raw string would
@@ -835,6 +1089,20 @@ export class ComputerUseController {
     // application whose permission was just withdrawn.
     const revoked = (profileId: string): boolean =>
       this.profileGrantIdentityDigest(profileId) === grant.grantIdentityDigest;
+    // A Task-scoped "allow once" for the same application goes too. The user asked for this
+    // application to stop being permitted, and leaving the weaker agreement standing would mean the
+    // revoke button removed a row while the application kept running.
+    // By platform and digest rather than by key: the key also carries the path, and revoking is the
+    // one place where erring wide is right — every copy that shares the revoked identity goes.
+    for (const [taskId, scoped] of this.taskScopedGrants) {
+      for (const [key, entry] of scoped)
+        if (
+          entry.identity.platform === grant.platform &&
+          entry.identity.grantIdentityDigest === grant.grantIdentityDigest
+        )
+          scoped.delete(key);
+      if (scoped.size === 0) this.taskScopedGrants.delete(taskId);
+    }
     for (const [token, record] of this.targetTokens)
       if (revoked(record.profileId)) this.targetTokens.delete(token);
     for (const [token, record] of this.targetAppTokens)
@@ -853,17 +1121,20 @@ export class ComputerUseController {
       [...this.sessions.values()]
         .filter(
           (session) =>
-            computerAppGrantIdentityFrom(session.profile.identity)?.grantIdentityDigest ===
+            this.boundGrantIdentity(session.profile)?.grantIdentityDigest ===
             grant.grantIdentityDigest,
         )
         .map((session) => this.stop(session.status.sessionId, 'policy_changed')),
     );
   }
 
-  /** Marks a grant used now, and records a signed application having been updated (§6.2.1). */
-  touchAppGrantUsed(identity: unknown): void {
-    const derived = computerAppGrantIdentityFrom(identity);
-    if (derived === null) return;
+  /**
+   * Marks a grant used now, and records a signed application having been updated (§6.2.1).
+   *
+   * Takes the identity the gate produced rather than a profile: every caller already holds one,
+   * and re-deriving from raw JSON here would be a way back around the binding.
+   */
+  touchAppGrantUsed(derived: ComputerAppGrantIdentity): void {
     const stored = this.deps.persistence.findComputerAppGrantByIdentity(
       derived.platform,
       derived.grantIdentityDigest,
@@ -879,9 +1150,8 @@ export class ComputerUseController {
   private profileGrantIdentityDigest(profileId: string): string | null {
     try {
       return (
-        computerAppGrantIdentityFrom(
-          this.deps.persistence.getComputerAppProfile(profileId).identity,
-        )?.grantIdentityDigest ?? null
+        this.boundGrantIdentity(this.deps.persistence.getComputerAppProfile(profileId))
+          ?.grantIdentityDigest ?? null
       );
     } catch {
       return null;
@@ -889,27 +1159,108 @@ export class ComputerUseController {
   }
 
   /**
-   * Whether an application may be driven without a fresh card, and which grant says so.
+   * Whether an application may be driven without a fresh card, and on whose authority.
    *
-   * The single decision point behind the `granted` field. Two ways to be granted while both models
-   * coexist (ADR v2 §9 S3): a v2 grant, or a V1 profile the user registered *and* asked to be
-   * remembered — registration consumed a trusted click, so "remember" is V1's own "do not ask me
-   * again". Provider egress consent is deliberately not part of this: it is a separate agreement
-   * about where the screen is sent (§6.4), and it already governs the label on its own.
+   * **The single decision point.** `computer_start` asks this and nothing else; the enumeration's
+   * `granted` flag is this; the card asks it to decide whether it is needed at all. Two ways to be
+   * granted: a v2 grant row that authenticates, or a Task-scoped "allow once" from this Task's own
+   * card. A V1 profile's "remember" is not one — see `ComputerAppGrantScopeKind`.
+   *
+   * Provider egress consent is reported but never gates `granted`: §6.4 keeps the two agreements
+   * apart, so a granted application whose screen may not yet go to this model is granted, and it is
+   * the *destination* that gets re-asked.
    */
   private appGrantState(
     profile: ComputerAppProfileRecord,
-  ): Readonly<{ granted: boolean; grantId: string | null }> {
-    // A denied class is never granted, whatever a V1 registration says. `listTargets` already
-    // filters these out before asking, so this is the belt rather than the braces — but a future
-    // caller that forgets the filter should not be handed `granted: true` for a terminal.
-    if (computerUseAppIdentityIsDenied(profile.identity))
-      return Object.freeze({ granted: false, grantId: null });
-    const grant = this.appGrantFor(profile.identity);
-    return Object.freeze({
-      granted: grant !== null || profile.remember,
-      grantId: grant?.id ?? null,
-    });
+    taskId: string | null,
+  ): ComputerAppGrantState {
+    // A denied class is never granted, whatever a V1 registration or an earlier card says.
+    // `listTargets` already filters these out before asking, so this is the belt rather than the
+    // braces — but a future caller that forgets the filter must not be handed a granted terminal.
+    if (computerUseAppIdentityIsDenied(profile.identity)) return COMPUTER_APP_UNGRANTED;
+    const grant = this.appGrantFor(profile);
+    if (grant !== null)
+      return Object.freeze({
+        granted: true,
+        scope: 'grant' as const,
+        grantId: grant.id,
+        maxMode: grant.maxMode,
+        providerEgress:
+          grant.providerEgressConnectionId === null || grant.providerEgressModelId === null
+            ? null
+            : Object.freeze({
+                connectionId: grant.providerEgressConnectionId,
+                modelId: grant.providerEgressModelId,
+              }),
+      });
+    const scoped = taskId === null ? null : this.taskScopedGrantFor(taskId, profile);
+    if (scoped !== null)
+      return Object.freeze({
+        granted: true,
+        scope: 'task' as const,
+        grantId: null,
+        maxMode: scoped.maxMode,
+        providerEgress: scoped.providerEgress,
+      });
+    return COMPUTER_APP_UNGRANTED;
+  }
+
+  /**
+   * The key a Task-scoped grant is filed under.
+   *
+   * Platform, digest and path. A digest alone is not an application — a signed macOS bundle's
+   * digest leaves the path out — so two copies of one signed application would otherwise share a
+   * slot, and saying yes to the second would silently take the answer away from the first.
+   */
+  private taskScopedGrantKey(identity: ComputerAppGrantIdentity): string {
+    return `${identity.platform}:${identity.grantIdentityDigest}:${identity.executablePath}`;
+  }
+
+  /**
+   * This Task's "allow once" for an application, if it still means what it meant.
+   *
+   * A stale entry is dropped rather than ignored: leaving it in the map would let it come back if
+   * the epoch happened to return to its old value, and the map is the only record of it.
+   */
+  private taskScopedGrantFor(
+    taskId: string,
+    profile: ComputerAppProfileRecord,
+  ): TaskScopedAppGrant | null {
+    const scoped = this.taskScopedGrants.get(taskId);
+    if (scoped === undefined) return null;
+    const identity = this.boundGrantIdentity(profile);
+    if (identity === null) return null;
+    const key = this.taskScopedGrantKey(identity);
+    const entry = scoped.get(key);
+    if (entry === undefined) return null;
+    if (
+      entry.denyRulesetVersion !== COMPUTER_USE_DENY_RULESET_VERSION ||
+      entry.policyEpoch !== this.currentPolicyEpoch(taskId)
+    ) {
+      scoped.delete(key);
+      if (scoped.size === 0) this.taskScopedGrants.delete(taskId);
+      return null;
+    }
+    // The same comparison a persisted grant gets (§6.3). Not dropped on a mismatch: the entry still
+    // belongs to the application it was given to, and this is merely a different one that happens
+    // to share its digest — another copy of the same signed bundle at another path, say.
+    if (computerAppGrantMismatch(entry.identity, identity, false) !== null) return null;
+    return entry;
+  }
+
+  /** Whether two readings of the grant state describe the same agreement. */
+  private static grantStateMatches(
+    left: ComputerAppGrantState,
+    right: ComputerAppGrantState,
+  ): boolean {
+    return (
+      left.granted === right.granted &&
+      left.scope === right.scope &&
+      left.grantId === right.grantId &&
+      left.maxMode === right.maxMode &&
+      left.providerEgress?.connectionId === right.providerEgress?.connectionId &&
+      left.providerEgress?.modelId === right.providerEgress?.modelId
+    );
   }
 
   /**
@@ -980,7 +1331,7 @@ export class ComputerUseController {
         appIdentityDigest: profile.identityDigest,
         profileRevision: profile.revision,
       } as const;
-      const grantState = this.appGrantState(profile);
+      const grantState = this.appGrantState(profile, context.taskId);
       snapshots.set(profile.id, { profile, grantState });
       let issued = false;
       let windowIndex = 0;
@@ -991,11 +1342,9 @@ export class ComputerUseController {
           break;
         }
         const targetToken = randomUUID();
-        const labelled =
-          egressBinding !== null &&
-          profile.providerEgressConsent &&
-          profile.connectionId === egressBinding.connectionId &&
-          profile.modelId === egressBinding.modelId;
+        // From the grant, not from the profile row: the row is unauthenticated (T14), and a
+        // rewritten consent flag must not be what sends an application's window title out.
+        const labelled = ComputerUseController.egressAgreed(grantState, egressBinding);
         // Validated per row rather than only in the final envelope. A single malformed profile —
         // one with no app id, or a path the leaf name cannot be taken from — would otherwise throw
         // from the envelope parse and take every other application's windows down with it.
@@ -1063,7 +1412,7 @@ export class ComputerUseController {
     // Nothing below awaits, so this is the state the caller receives.
     const stale = new Set<string>();
     for (const [profileId, snapshot] of snapshots)
-      if (!this.targetProfileUnchanged(snapshot, egressBinding)) stale.add(profileId);
+      if (!this.targetProfileUnchanged(snapshot, context.taskId)) stale.add(profileId);
     const targets: ComputerTarget[] = [];
     for (const row of pending) {
       if (!stale.has(row.profileId)) {
@@ -1126,10 +1475,7 @@ export class ComputerUseController {
    * answer false. It never throws, because it runs on the return path where a throw would discard a
    * whole enumeration over one application that simply went away.
    */
-  private targetProfileUnchanged(
-    snapshot: TargetEnumerationSnapshot,
-    egressBinding: Readonly<{ connectionId: string; modelId: string }> | null,
-  ): boolean {
+  private targetProfileUnchanged(snapshot: TargetEnumerationSnapshot, taskId: string): boolean {
     let current: ComputerAppProfileRecord;
     try {
       current = this.deps.persistence.getComputerAppProfile(snapshot.profile.id);
@@ -1142,25 +1488,34 @@ export class ComputerUseController {
       computerUseAppIdentityIsDenied(current.identity)
     )
       return false;
-    // The grant as it reads now, compared against the one the row was built on. Only the two fields
-    // the row actually depends on: `revision` also moves when a counter is touched, and dropping a
-    // valid row because the agent's request count went up would be a denial of service dressed as
-    // caution. A revoke changes both of these.
-    const grantNow = this.appGrantState(current);
+    // The grant as it reads now, compared against the one the row was built on. Compared field by
+    // field rather than by the store row's `revision`, which also moves when a counter is touched:
+    // dropping a valid row because the agent's request count went up would be a denial of service
+    // dressed as caution. A revoke, an approval, and an egress consent change all move a field.
     if (
-      grantNow.granted !== snapshot.grantState.granted ||
-      grantNow.grantId !== snapshot.grantState.grantId
+      !ComputerUseController.grantStateMatches(
+        this.appGrantState(current, taskId),
+        snapshot.grantState,
+      )
     )
       return false;
-    // Consent is re-derived the same way the row derived it, so the test is "does the agreement the
-    // label was returned under still hold", not "did any consent field move". A row that never
-    // carried a label has nothing to withdraw.
-    const consentFor = (record: ComputerAppProfileRecord): boolean =>
+    // The label's consent is part of the grant state compared above, so an agreement that moved has
+    // already dropped the row.
+    return true;
+  }
+
+  /** Whether the agreement in force covers sending this application's screen to this destination. */
+  private static egressAgreed(
+    state: ComputerAppGrantState,
+    egressBinding: Readonly<{ connectionId: string; modelId: string }> | null,
+  ): boolean {
+    return (
       egressBinding !== null &&
-      record.providerEgressConsent &&
-      record.connectionId === egressBinding.connectionId &&
-      record.modelId === egressBinding.modelId;
-    return !consentFor(snapshot.profile) || consentFor(current);
+      state.granted &&
+      state.providerEgress !== null &&
+      state.providerEgress.connectionId === egressBinding.connectionId &&
+      state.providerEgress.modelId === egressBinding.modelId
+    );
   }
 
   private resolveTargetAppProfileId(
@@ -1213,7 +1568,749 @@ export class ComputerUseController {
         this.targetAppTokens.delete(token);
   }
 
-  async start(input: ComputerUseStartRequest): Promise<ComputerUseSessionStatus> {
+  /**
+   * `computer_request_access` (ADR v2 §5.2, §6.1).
+   *
+   * The only route from a tool call to a card, and the card is the only route to a grant. Nothing
+   * here can approve: every path either answers from an agreement that already exists, refuses with
+   * a fixed reason code, or parks until a person clicks. The reason codes are deliberately coarse —
+   * an unknown token, another Task's token, an expired token and a forbidden class all answer the
+   * same thing, so the tool cannot be used to enumerate what exists elsewhere.
+   */
+  async requestAccess(
+    input: Readonly<{ appToken: string; reason: string }>,
+    context: ToolExecutionContext,
+    signal?: AbortSignal,
+  ): Promise<ComputerRequestAccessOutput> {
+    if (this.disposed || this.deps.agentDrivenEnabled?.() !== true)
+      return this.accessRefused('access_request_unavailable');
+    if (!this.availability().available) return this.accessRefused('access_request_unavailable');
+    // Without a surface to show the card on, waiting would park the call until its timeout.
+    if (this.deps.publishGrantRequest === undefined)
+      return this.accessRefused('access_request_unavailable');
+    const policyEpoch = this.currentPolicyEpoch(context.taskId);
+    if (context.policyEpoch !== policyEpoch)
+      return this.accessRefused('access_request_invalid_token');
+    const profiles = this.deps.persistence
+      .listComputerAppProfiles()
+      .filter((profile) => !computerUseAppIdentityIsDenied(profile.identity));
+    let profileId: string;
+    try {
+      profileId = this.resolveTargetAppProfileId(input.appToken, context, policyEpoch, profiles);
+    } catch {
+      return this.accessRefused('access_request_invalid_token');
+    }
+    const profile = profiles.find((candidate) => candidate.id === profileId);
+    if (profile === undefined) return this.accessRefused('access_request_invalid_token');
+    const identity = this.boundGrantIdentity(profile);
+    if (identity === null) return this.accessRefused('access_request_invalid_token');
+    const egressBinding =
+      this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
+    // Without knowing where this Turn sends, there is no sentence to put on the card and no pair to
+    // record consent against, so there is nothing a click could agree to.
+    if (egressBinding === null) return this.accessRefused('access_request_unavailable');
+    const state = this.appGrantState(profile, context.taskId);
+    const egressAgreed =
+      state.providerEgress !== null &&
+      state.providerEgress.connectionId === egressBinding.connectionId &&
+      state.providerEgress.modelId === egressBinding.modelId;
+    // Already agreed, in full: the second and later requests cost the user nothing (§7.2).
+    if (state.granted && egressAgreed) return { granted: true, reasonCode: null };
+    const kind = state.granted ? ('provider-egress' as const) : ('app-grant' as const);
+    const denial = this.deps.persistence.getComputerAppAccessRequest(
+      identity.platform,
+      identity.grantIdentityDigest,
+      context.taskId,
+    );
+    // A refusal is final for this Task, and a different Task may ask again (§6.1).
+    if (denial?.denied === true) return this.accessRefused('access_request_denied_in_task');
+    if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
+    if (
+      (this.accessRequestsByTurn.get(context.turnId) ?? 0) >= COMPUTER_ACCESS_REQUEST_TURN_LIMIT ||
+      this.deps.persistence.countComputerAppAccessRequestsForTask(context.taskId) >=
+        COMPUTER_ACCESS_REQUEST_TASK_LIMIT
+    )
+      return this.accessRefused('access_request_rate_limited');
+    // The same live enumeration the click will re-run, so both sides compute the ceiling from
+    // native rather than one from native and one from the store.
+    const observed = await this.refetchAppGrantFacts(profile.id);
+    if (observed === null || computerAppGrantMismatch(identity, observed.identity, false) !== null)
+      return this.accessRefused('access_request_invalid_token');
+    // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
+    // card to withdraw, and a policy change does not abort this dispatch either. Raising now would
+    // put a card bound to the old epoch on screen, so the epoch is read again on this side of the
+    // await — the same answer a token from before the change gets.
+    if (this.currentPolicyEpoch(context.taskId) !== policyEpoch)
+      return this.accessRefused('access_request_invalid_token');
+    // A Turn that is already gone has nobody left to click, and the card holds the single global
+    // slot for two minutes. Checked before raising, and again through the listener below.
+    if (signal?.aborted === true) return this.accessRefused('access_request_withdrawn');
+    if (this.pendingAppGrantRequest !== null) return this.accessRefused('access_request_pending');
+    return await this.raiseAppGrantCard({
+      context,
+      kind,
+      profile: observed.profile,
+      identity: observed.identity,
+      facts: observed.facts,
+      policyEpoch,
+      appToken: input.appToken,
+      reason: input.reason,
+      providerEgress: egressBinding,
+      grantId: state.grantId,
+      grantedMaxMode: state.granted ? state.maxMode : null,
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  private accessRefused(reasonCode: ComputerAccessRequestReasonCode): ComputerRequestAccessOutput {
+    return computerRequestAccessOutputSchema.parse({ granted: false, reasonCode });
+  }
+
+  /**
+   * The verified facts the card asserts, and that the click must still find true (§6.1.1).
+   *
+   * `maximumMode` is the ceiling the grant would actually carry: the profile's stored attestation
+   * bound by what native says *now* about the windows it is offering. It is taken from a live
+   * enumeration on both sides — when the card is raised and again when it is clicked — because a
+   * value read from the store on one side and from native on the other would compare two different
+   * questions and always agree.
+   *
+   * **The weakest eligible window wins.** A session binds one window, and which one is not known
+   * until `computer_start`; promising the strongest and then binding a window native attests lower
+   * would mean the user read a ceiling the grant does not have. The stored grant is a ceiling for
+   * every future session with this application, so it has to be one that all of them can honour.
+   */
+  private appGrantCardFacts(
+    profile: ComputerAppProfileRecord,
+    identity: ComputerAppGrantIdentity,
+    windows: readonly ComputerUseNativeWindow[],
+  ): ComputerAppGrantCardFacts | null {
+    const eligible = windows.filter((window) => window.eligible !== false);
+    if (eligible.length === 0) return null;
+    const attested = eligible.reduce<ComputerUseMode>(
+      (weakest, window) => bindComputerUseMaximumMode(weakest, window.maximumMode),
+      maximumModeForProfile(profile),
+    );
+    return Object.freeze({
+      platform: identity.platform,
+      identityKind: identity.identityKind,
+      publisher: identity.publisher,
+      appId: identity.appId,
+      grantIdentityDigest: identity.grantIdentityDigest,
+      denied: computerUseAppIdentityIsDenied(profile.identity),
+      maximumMode: attested,
+    });
+  }
+
+  /**
+   * Re-takes the application's identity from the native boundary (ADR v2 §6.1.1, §6.2.1).
+   *
+   * S3b adds no native call: re-enumerating the application's windows is the dynamic check this
+   * slice can make, and it is a real one. `listWindows` answers from the running processes, filters
+   * on the identity digest the store holds, re-derives the mode ceiling per window, and — on
+   * Windows — refreshes the executable digest, which throws outright when the running image is not
+   * the one the profile was written for. An application that has exited, been replaced, or lost
+   * every eligible window therefore cannot pass. S4/S5 replace this with a pid-based signature
+   * check without changing what the caller compares.
+   */
+  private async refetchAppGrantFacts(profileId: string): Promise<Readonly<{
+    profile: ComputerAppProfileRecord;
+    identity: ComputerAppGrantIdentity;
+    facts: ComputerAppGrantCardFacts;
+  }> | null> {
+    let profile: ComputerAppProfileRecord;
+    let windows: readonly ComputerUseNativeWindow[];
+    try {
+      profile = this.deps.persistence.getComputerAppProfile(profileId);
+      windows = await this.listNativeWindows(profile);
+      profile = this.refreshSignedWindowsProfile(profile, windows);
+    } catch {
+      return null;
+    }
+    const identity = this.boundGrantIdentity(profile);
+    if (identity === null) return null;
+    // From this enumeration, not from the store: the attested ceiling is one of the facts, and a
+    // native boundary that has lowered it since the card was raised has to stop the grant.
+    const facts = this.appGrantCardFacts(profile, identity, windows);
+    return facts === null ? null : Object.freeze({ profile, identity, facts });
+  }
+
+  /** Builds one card, publishes it, and resolves when a person answers or the card lapses. */
+  private async raiseAppGrantCard(
+    input: Readonly<{
+      context: ToolExecutionContext;
+      kind: 'app-grant' | 'provider-egress';
+      profile: ComputerAppProfileRecord;
+      identity: ComputerAppGrantIdentity;
+      facts: ComputerAppGrantCardFacts;
+      policyEpoch: number;
+      appToken: string;
+      reason: string;
+      providerEgress: Readonly<{ connectionId: string; modelId: string }>;
+      grantId: string | null;
+      grantedMaxMode: ComputerUseMode | null;
+      signal?: AbortSignal | undefined;
+    }>,
+  ): Promise<ComputerRequestAccessOutput> {
+    const requestId = randomUUID();
+    const identityDigest = computerAppGrantIntentDigest({
+      appToken: input.appToken,
+      grantIdentityDigest: input.identity.grantIdentityDigest,
+      denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
+      policyEpoch: input.policyEpoch,
+      taskId: input.context.taskId,
+    });
+    const allowedDecisions = computerAppGrantAllowedDecisions(input.kind);
+    const activationIntents: Record<string, string> = {};
+    for (const decision of allowedDecisions)
+      if (decision !== 'deny')
+        activationIntents[decision] = appGrantActivationIntent({
+          requestId,
+          expectedRevision: 1,
+          decision,
+          identityDigest,
+        });
+    const displayName = sanitizeUntrustedTargetLabel(input.profile.label);
+    const request = computerAppGrantRequestSchema.parse({
+      id: requestId,
+      taskId: input.context.taskId,
+      kind: input.kind,
+      state: 'pending',
+      revision: 1,
+      decision: null,
+      noticeCode: null,
+      verified: {
+        platform: input.facts.platform,
+        identityKind: input.facts.identityKind,
+        publisher: input.facts.publisher,
+        appId: input.facts.appId,
+        // A destination-only card describes the agreement that already exists, so it shows that
+        // agreement's ceiling rather than everything native could attest.
+        maxMode:
+          input.grantedMaxMode === null
+            ? input.facts.maximumMode
+            : bindComputerUseMaximumMode(input.grantedMaxMode, input.facts.maximumMode),
+      },
+      untrustedAppName: displayName,
+      untrustedReason: sanitizeComputerAccessReason(input.reason),
+      providerEgressModelId: input.providerEgress.modelId,
+      allowedDecisions,
+      activationIntents,
+      expiresAt: new Date(this.now() + COMPUTER_ACCESS_REQUEST_TIMEOUT_MS).toISOString(),
+    });
+    // Counted before the card is shown, and only for a card that is actually shown (T8). Both
+    // stores are written: the grant row carries the counters for an application the user already
+    // granted, and the Task-scoped table carries them for one that has no row yet.
+    this.deps.persistence.recordComputerAppAccessRequest({
+      platform: input.identity.platform,
+      grantIdentityDigest: input.identity.grantIdentityDigest,
+      taskId: input.context.taskId,
+      appId: input.identity.appId,
+      displayName,
+      outcome: 'requested',
+    });
+    if (input.grantId !== null)
+      try {
+        this.deps.persistence.countComputerAppGrantAccessRequest(input.grantId, 'requested');
+      } catch {
+        // A grant revoked between the read above and here is not this call's problem: the card is
+        // still correct, and the counter is a display fact.
+      }
+    this.accessRequestsByTurn.set(
+      input.context.turnId,
+      (this.accessRequestsByTurn.get(input.context.turnId) ?? 0) + 1,
+    );
+    return await new Promise<ComputerRequestAccessOutput>((resolve) => {
+      let settled = false;
+      const abandon = (): void =>
+        this.closeAppGrantCard(requestId, 'access_request_withdrawn', 'withdrawn');
+      const settle = (outcome: ComputerRequestAccessOutput): void => {
+        if (settled) return;
+        settled = true;
+        input.signal?.removeEventListener('abort', abandon);
+        resolve(computerRequestAccessOutputSchema.parse(outcome));
+      };
+      const timer = setTimeout(
+        () => this.closeAppGrantCard(requestId, 'access_request_timed_out', 'timed_out'),
+        COMPUTER_ACCESS_REQUEST_TIMEOUT_MS,
+      );
+      timer.unref?.();
+      this.pendingAppGrantRequest = {
+        request,
+        facts: input.facts,
+        identityDigest,
+        taskId: input.context.taskId,
+        turnId: input.context.turnId,
+        policyEpoch: input.policyEpoch,
+        profileId: input.profile.id,
+        // Held here rather than re-read from the store on the click: §6.1 requires the refusal to
+        // be recorded, and a profile that went away while the card was up must not turn "no" into
+        // a card that can never be answered.
+        identity: input.identity,
+        displayName,
+        providerEgress: input.providerEgress,
+        grantId: input.grantId,
+        grantedMaxMode: input.grantedMaxMode,
+        timer,
+        settle,
+      };
+      this.deps.publishGrantRequest?.(request);
+      // The Turn can be cancelled while the card is on screen. Withdrawing at once frees the single
+      // global slot instead of holding it for the rest of the two minutes.
+      input.signal?.addEventListener('abort', abandon, { once: true });
+    });
+  }
+
+  /**
+   * Withdraws the card without a decision (ADR v2 §5.2).
+   *
+   * Every way a card can stop being answerable ends here: the timeout, the Turn being cancelled,
+   * the Task being switched away from, and a policy epoch change. All of them fail the tool call
+   * closed — the model is told the request did not succeed, never that it did.
+   */
+  private closeAppGrantCard(
+    requestId: string,
+    reasonCode: ComputerAccessRequestReasonCode,
+    noticeCode: 'timed_out' | 'withdrawn' | 'identity_changed',
+  ): void {
+    const pending = this.pendingAppGrantRequest;
+    if (pending === null || pending.request.id !== requestId) return;
+    this.pendingAppGrantRequest = null;
+    clearTimeout(pending.timer);
+    const canceled = computerAppGrantRequestSchema.parse({
+      ...pending.request,
+      state: 'canceled',
+      decision: null,
+      noticeCode,
+      revision: pending.request.revision + 1,
+    });
+    this.deps.publishGrantRequest?.(canceled);
+    pending.settle({ granted: false, reasonCode });
+  }
+
+  /** Withdraws a card that belongs to a Task or Turn that is no longer the one that raised it. */
+  private withdrawAppGrantCardFor(predicate: (pending: PendingAppGrantRequest) => boolean): void {
+    const pending = this.pendingAppGrantRequest;
+    if (pending !== null && predicate(pending))
+      this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
+  }
+
+  /**
+   * A person's answer to one card (ADR v2 §6.1.1).
+   *
+   * The activation is verified by the caller; what is verified here is that the click belongs to
+   * *this* card and *this* decision, and then that the application in front of us is still the one
+   * whose facts the user read. Deny is exempt from the intent check on purpose: refusing must never
+   * be blocked by an intent that went stale while the card was on screen.
+   */
+  async resolveAppGrantRequest(
+    input: ComputerAppGrantResolveInput,
+    activationIntent: string | null,
+  ): Promise<void> {
+    const pending = this.pendingAppGrantRequest;
+    if (pending === null || pending.request.id !== input.requestId)
+      throw new Error('Computer Use approval card not found');
+    if (
+      pending.request.revision !== input.expectedRevision ||
+      pending.request.state !== 'pending' ||
+      !pending.request.allowedDecisions.includes(input.decision)
+    )
+      throw new Error('Computer Use approval card is stale');
+    if (
+      input.decision !== 'deny' &&
+      activationIntent !==
+        appGrantActivationIntent({
+          requestId: input.requestId,
+          expectedRevision: input.expectedRevision,
+          decision: input.decision,
+          identityDigest: pending.identityDigest,
+        })
+    )
+      throw new Error('Computer Use approval card intent does not match');
+    if (input.decision === 'deny') {
+      this.recordAppGrantDenial(pending);
+      this.settleAppGrantCard(pending, input.decision, {
+        granted: false,
+        reasonCode: 'access_request_denied',
+      });
+      return;
+    }
+    const observed = await this.refetchAppGrantFacts(pending.profileId);
+    // The card may have been withdrawn while native was answering; nothing below may resurrect it.
+    if (this.pendingAppGrantRequest !== pending) return;
+    // Checked against the present rather than trusted to the withdrawal above: the intent digest
+    // only proves the click matches the card, and a grant must never be written under permissions
+    // other than the ones the card was raised under (§6.5).
+    if (this.currentPolicyEpoch(pending.taskId) !== pending.policyEpoch) {
+      this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
+      return;
+    }
+    // Two comparisons, because they cover different things. The facts are what the card *showed*;
+    // the identity is what the card was *about*, including the path — which a signed macOS
+    // application's digests all leave out, so a row re-pointed at another copy of the same signed
+    // application passes native and the facts alike. `computerAppGrantMismatch` is the comparison a
+    // stored grant gets (§6.3), and a grant about to be written must pass it first.
+    if (
+      observed === null ||
+      !computerAppGrantCardFactsMatch(pending.facts, observed.facts) ||
+      computerAppGrantMismatch(pending.identity, observed.identity, observed.facts.denied) !== null
+    ) {
+      this.closeAppGrantCard(pending.request.id, 'app_grant_identity_changed', 'identity_changed');
+      return;
+    }
+    if (pending.request.kind === 'provider-egress') {
+      // The application's own agreement went away while the card was up. The card only asked about
+      // a destination, so it is withdrawn rather than allowed to stand in for the missing grant.
+      if (!this.agreeProviderEgress(pending, observed.identity)) {
+        this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
+        return;
+      }
+    } else if (input.decision === 'allow_always')
+      this.createAppGrant(observed.identity, {
+        displayName: pending.displayName,
+        maxMode: observed.facts.maximumMode,
+        providerEgress: pending.providerEgress,
+      });
+    else this.createTaskScopedAppGrant(pending, observed);
+    this.settleAppGrantCard(pending, input.decision, { granted: true, reasonCode: null });
+  }
+
+  private settleAppGrantCard(
+    pending: PendingAppGrantRequest,
+    decision: ComputerAppGrantDecision,
+    outcome: ComputerRequestAccessOutput,
+  ): void {
+    if (this.pendingAppGrantRequest !== pending) return;
+    this.pendingAppGrantRequest = null;
+    clearTimeout(pending.timer);
+    this.deps.publishGrantRequest?.(
+      computerAppGrantRequestSchema.parse({
+        ...pending.request,
+        state: 'resolved',
+        decision,
+        revision: pending.request.revision + 1,
+      }),
+    );
+    pending.settle(outcome);
+  }
+
+  /**
+   * Writes down that the user said no (ADR v2 §6.1).
+   *
+   * Every write here is best-effort, and the identity comes from the card rather than from the
+   * store. Refusing is the fail-closed answer: it must settle the card whatever else has happened —
+   * a profile removed while the card was up, a grant revoked underneath it, a store that throws —
+   * because a refusal that fails leaves the card pending and the single global slot taken.
+   */
+  private recordAppGrantDenial(pending: PendingAppGrantRequest): void {
+    try {
+      this.deps.persistence.recordComputerAppAccessRequest({
+        platform: pending.identity.platform,
+        grantIdentityDigest: pending.identity.grantIdentityDigest,
+        taskId: pending.taskId,
+        appId: pending.identity.appId,
+        displayName: pending.displayName,
+        outcome: 'denied',
+      });
+    } catch (error) {
+      // The Task itself may be gone, which is the one case the foreign key refuses. Nothing here
+      // grants anything, so the count is the only casualty.
+      secureLogger.warn('Computer Use could not record an application refusal', {
+        taskId: pending.taskId,
+        reason: error instanceof Error ? error.name : 'unknown',
+      });
+    }
+    if (pending.grantId !== null)
+      try {
+        this.deps.persistence.countComputerAppGrantAccessRequest(pending.grantId, 'denied');
+      } catch {
+        // See `raiseAppGrantCard`: a counter on a row that has gone away is a display fact.
+      }
+  }
+
+  /**
+   * Records "just this once" (ADR v2 §6.1, D14).
+   *
+   * Nothing is written to the store. The entry carries the policy epoch and the deny ruleset it was
+   * given under, so `appGrantState` — still the single decision point — stops seeing it the moment
+   * either moves, without a second code path deciding when an in-memory grant expires.
+   */
+  private createTaskScopedAppGrant(
+    pending: PendingAppGrantRequest,
+    observed: Readonly<{ identity: ComputerAppGrantIdentity; facts: ComputerAppGrantCardFacts }>,
+  ): void {
+    const scoped =
+      this.taskScopedGrants.get(pending.taskId) ?? new Map<string, TaskScopedAppGrant>();
+    scoped.set(
+      this.taskScopedGrantKey(observed.identity),
+      Object.freeze({
+        identity: observed.identity,
+        maxMode: observed.facts.maximumMode,
+        denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
+        policyEpoch: pending.policyEpoch,
+        providerEgress: pending.providerEgress,
+      }),
+    );
+    this.taskScopedGrants.set(pending.taskId, scoped);
+  }
+
+  /**
+   * Records consent for a new destination, leaving the application's own grant alone (§6.4).
+   *
+   * The smaller half of the split: A — may this application be driven — is already agreed, and only
+   * B — may its screen go to this connection and model — is being asked. Writing A again here would
+   * re-ask a question the user already answered.
+   */
+  private agreeProviderEgress(
+    pending: PendingAppGrantRequest,
+    identity: ComputerAppGrantIdentity,
+  ): boolean {
+    if (pending.grantId !== null) {
+      try {
+        this.deps.persistence.setComputerAppGrantProviderEgress(
+          pending.grantId,
+          pending.providerEgress,
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    const scoped = this.taskScopedGrants.get(pending.taskId);
+    const key = this.taskScopedGrantKey(identity);
+    const entry = scoped?.get(key);
+    if (scoped !== undefined && entry !== undefined) {
+      scoped.set(key, Object.freeze({ ...entry, providerEgress: pending.providerEgress }));
+      return true;
+    }
+    // Neither agreement is there any more — revoked, or its epoch moved — so there is nothing for
+    // this consent to attach to. Recording it on its own would manufacture a grant out of a card
+    // that only asked about a destination.
+    return false;
+  }
+
+  /**
+   * `computer_start` (ADR v2 §5.2, §5.4).
+   *
+   * Everything a target token promised is re-verified against the present before native is asked to
+   * do anything: the token is spent, the binding is compared against the live Task, Turn and policy
+   * epoch, the grant is read through the one decision point, the destination is compared against
+   * where this Turn actually sends, and the window identity is re-taken from native. The session
+   * itself is then created by the same path the panel uses — one session, one window, one Stop
+   * overlay, one cancel epoch.
+   *
+   * **The call then waits for the session to end**, and this is structural rather than a
+   * convenience. The session is bound to the calling Turn: `assertSessionLive` requires that Turn
+   * to still be the active one, so returning early would let the Turn finish the moment the model
+   * answered and the next round would kill the session it had just started. The tool call in flight
+   * is what keeps the Turn open. Everything that could interrupt — an approval, a user takeover, the
+   * Stop overlay, the emergency shortcut, the round limit, the session's own expiry — still works;
+   * each simply leads to a state the session cannot leave, which is what this returns.
+   */
+  async startForAgent(
+    input: Readonly<{ targetToken: string; goal: string }>,
+    context: ToolExecutionContext,
+    signal?: AbortSignal,
+  ): Promise<ComputerStartToolOutput> {
+    if (this.disposed) throw new Error('Computer Use controller is disposed');
+    if (this.deps.agentDrivenEnabled?.() !== true)
+      throw new Error('Computer Use agent-driven targets are unavailable');
+    // Spent before the first await. Two calls racing with the same token must not both reach
+    // native: whichever deletes the entry owns it, and the other sees an unknown token.
+    const binding = this.targetTokenBinding(input.targetToken);
+    const record = this.targetTokens.get(input.targetToken);
+    this.targetTokens.delete(input.targetToken);
+    if (binding === null || record === undefined)
+      throw new Error('Computer Use target token is not valid');
+    const policyEpoch = this.currentPolicyEpoch(context.taskId);
+    if (
+      binding.taskId !== context.taskId ||
+      binding.turnId !== context.turnId ||
+      binding.policyEpoch !== policyEpoch ||
+      context.policyEpoch !== policyEpoch
+    )
+      throw new Error('Computer Use target token is not valid');
+    // §5.4: stop, list, start. A second session would put two windows under control at once.
+    for (const session of this.sessions.values())
+      if (session.status.taskId === context.taskId)
+        throw new Error('Computer Use session is already running for this Task');
+    const profile = this.deps.persistence.getComputerAppProfile(record.profileId);
+    if (
+      computerUseAppIdentityIsDenied(profile.identity) ||
+      profile.revision !== binding.profileRevision ||
+      profile.identityDigest !== binding.appIdentityDigest ||
+      profile.platform !== binding.platform
+    )
+      throw new Error('Computer Use target token is not valid');
+    const state = this.appGrantState(profile, context.taskId);
+    // The single decision point, and the only one. The model is expected to call
+    // `computer_request_access` and try again.
+    if (!state.granted)
+      throw new Error('Computer Use application is not granted: access_not_granted');
+    const egressBinding =
+      this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null;
+    // Grant-derived, not profile-derived (§6.4): the pair recorded on the agreement has to be the
+    // pair this Turn actually sends to, or the screen would travel somewhere nobody consented to.
+    if (
+      egressBinding === null ||
+      state.providerEgress === null ||
+      state.providerEgress.connectionId !== egressBinding.connectionId ||
+      state.providerEgress.modelId !== egressBinding.modelId
+    )
+      throw new Error('Computer Use provider egress consent is missing for this model');
+    const identity = this.boundGrantIdentity(profile);
+    if (identity === null) throw new Error('Computer Use target token is not valid');
+    // Checked around every await from here on, not only once the session exists. Native enumeration
+    // is the slow part of this path, and a Turn cancelled during it must not go on to focus a
+    // window and start driving it.
+    signal?.throwIfAborted();
+    const observed = await this.refetchAppGrantFacts(profile.id);
+    signal?.throwIfAborted();
+    if (
+      observed === null ||
+      computerAppGrantMismatch(identity, observed.identity, false) !== null ||
+      observed.profile.revision !== profile.revision
+    )
+      throw new Error('Computer Use app identity changed');
+    const windows = await this.listNativeWindows(observed.profile);
+    signal?.throwIfAborted();
+    const candidate = windows.find(
+      (window) =>
+        window.windowId === binding.nativeWindowId &&
+        window.windowIdentityDigest === binding.windowIdentityDigest &&
+        window.appIdentityDigest === binding.appIdentityDigest &&
+        window.eligible !== false,
+    );
+    if (candidate === undefined) throw new Error('Computer Use window identity changed');
+    // Minted here rather than threaded through as a second kind of permit: the shared start path
+    // consumes exactly one window candidate, and giving the agent route its own permit type would
+    // mean two code paths deciding which window a session binds.
+    const windowToken = randomUUID();
+    this.windowCandidatePermits.set(
+      windowToken,
+      Object.freeze({
+        profileId: observed.profile.id,
+        profileRevision: observed.profile.revision,
+        native: candidate,
+        expiresAt: this.now() + COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS,
+      }),
+    );
+    const maxMode = state.maxMode ?? 'observe_only';
+    // Installed before `start`, so no status published while the session is coming up can be
+    // missed — including a session that ends before `start` has even returned. Only one session
+    // exists at a time, and this call is holding that slot, so every status seen here is ours.
+    const seen = new Map<string, ComputerUseSessionStatus>();
+    let onSettled: ((status: ComputerUseSessionStatus) => void) | null = null;
+    const unsubscribe = this.subscribe((status) => {
+      seen.set(status.sessionId, status);
+      if (onSettled !== null && computerUseSessionStateIsSettled(status.state)) onSettled(status);
+    });
+    try {
+      const status = await this.start(
+        {
+          taskId: context.taskId,
+          turnId: context.turnId,
+          profileId: observed.profile.id,
+          windowId: windowToken,
+          // min(grant ceiling, native attestation). `startInternal` binds again against the window
+          // and the session, so this can only ever be the weaker of the two.
+          mode: bindComputerUseMaximumMode(maxMode, candidate.maximumMode),
+          connectionId: egressBinding.connectionId,
+          modelId: egressBinding.modelId,
+          providerEgressConsent: true,
+          providerEgressConsentBinding: egressBinding,
+          // Never writes the agreement back onto the V1 profile row: the grant is the record.
+          remember: false,
+          expectedPolicyEpoch: policyEpoch,
+          expectedWindowRevision: candidate.revision,
+          expectedProfileRevision: observed.profile.revision,
+          agent: {
+            goal: computerUseAgentGoal(input.goal),
+            grantScope: state.scope ?? 'grant',
+            grantId: state.grantId,
+            grantIdentityDigest: identity.grantIdentityDigest,
+            providerEgress: egressBinding,
+          },
+        },
+        // Carried into the start path so an abort during start-up reaches native's cleanup, the
+        // provider preflight and the first planner call, rather than being noticed only afterwards.
+        signal,
+      );
+      // Only a session that actually started counts as use (§6.2.1).
+      if (state.scope === 'grant') this.touchAppGrantUsed(observed.identity);
+      // Nothing runs between `start` resolving and this line, so anything the session has already
+      // published is in `seen`, and anything later arrives through `onSettled`.
+      const already = seen.get(status.sessionId) ?? status;
+      if (computerUseSessionStateIsSettled(already.state)) return computerStartToolOutput(already);
+      return await new Promise<ComputerStartToolOutput>((resolve, reject) => {
+        const abandon = (): void => {
+          onSettled = null;
+          // The same reason `turnEnded` already uses for "the Turn that owned this session is
+          // gone". A cancelled Turn is that event, reaching the controller through the broker.
+          void this.stop(status.sessionId, 'turn_started').catch(() => undefined);
+          reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error('Computer Use session was canceled with its Turn'),
+          );
+        };
+        onSettled = (settled) => {
+          // The single-session rule makes a foreign status here unexpected, not impossible: a late
+          // publish for the session that held the slot before this one must not answer this call.
+          if (settled.sessionId !== status.sessionId) return;
+          onSettled = null;
+          signal?.removeEventListener('abort', abandon);
+          resolve(computerStartToolOutput(settled));
+        };
+        if (signal?.aborted === true) {
+          abandon();
+          return;
+        }
+        signal?.addEventListener('abort', abandon, { once: true });
+      });
+    } finally {
+      unsubscribe();
+      this.windowCandidatePermits.delete(windowToken);
+    }
+  }
+
+  /**
+   * Re-reads the agreement a running agent session depends on (ADR v2 §6.4, §6.5).
+   *
+   * Called from `assertSessionLive`, so it runs before every round, every action, and every
+   * approval — the same cadence the per-round provider egress check runs at. A revoked grant, a
+   * ruleset change that forbids the class, or the Task being pointed at a different model all stop
+   * the session instead of letting the next round send a screenshot under an agreement that has
+   * gone away.
+   */
+  private assertAgentGrantStillHolds(record: SessionRecord): void {
+    const agent = record.agent;
+    if (agent === null) return;
+    const state = this.appGrantState(
+      this.deps.persistence.getComputerAppProfile(record.profile.id),
+      record.status.taskId,
+    );
+    if (
+      !state.granted ||
+      state.scope !== agent.grantScope ||
+      state.grantId !== agent.grantId ||
+      state.providerEgress === null ||
+      state.providerEgress.connectionId !== agent.providerEgress.connectionId ||
+      state.providerEgress.modelId !== agent.providerEgress.modelId
+    ) {
+      void this.stop(record.status.sessionId, 'policy_changed');
+      throw new Error('Computer Use application grant changed');
+    }
+  }
+
+  /**
+   * `externalSignal` is the calling Turn's, supplied only by `computer_start`. The panel's own
+   * start has no caller to be cancelled by; its session is cancelled through Stop and the overlay.
+   */
+  async start(
+    input: ComputerUseStartRequest,
+    externalSignal?: AbortSignal,
+  ): Promise<ComputerUseSessionStatus> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     input = {
       ...input,
@@ -1229,6 +2326,17 @@ export class ComputerUseController {
     this.startingController = controller;
     this.startingTaskId = input.taskId;
     this.startingProfileId = input.profileId;
+    // Linked to *this* start's own controller, never the other way round: an abort of the caller
+    // cancels this start-up — the native session handshake's cleanup, the provider preflight, the
+    // first planner call — and nothing here can abort anybody else's.
+    const forward = (): void =>
+      controller.abort(
+        externalSignal?.reason instanceof Error
+          ? externalSignal.reason
+          : new Error('Computer Use start was canceled'),
+      );
+    if (externalSignal?.aborted === true) forward();
+    else externalSignal?.addEventListener('abort', forward, { once: true });
     try {
       return await this.startInternal(input, controller);
     } catch (error) {
@@ -1236,6 +2344,7 @@ export class ComputerUseController {
         controller.abort(error instanceof Error ? error : new Error('Computer Use start failed'));
       throw error;
     } finally {
+      externalSignal?.removeEventListener('abort', forward);
       if (this.startingController === controller) this.startingController = null;
       if (this.startingTaskId === input.taskId) {
         this.startingTaskId = null;
@@ -1275,7 +2384,12 @@ export class ComputerUseController {
     const availability = this.availability();
     if (!availability.available || (record.status.mode !== 'observe_only' && !availability.control))
       throw new Error('Computer Use native boundary is unavailable');
-    if (this.deps.canStartSession?.(record.status.taskId) === false)
+    if (
+      this.deps.canStartSession?.(
+        record.status.taskId,
+        record.syntheticTurn ? null : record.turnId,
+      ) === false
+    )
       throw new Error('Computer Use requires an idle Task without active Team work');
     if (record.status.round >= record.status.maxRounds)
       throw new Error('Computer Use round limit was reached');
@@ -1372,7 +2486,11 @@ export class ComputerUseController {
     if (!availability.available) throw new Error('Computer Use native boundary is unavailable');
     if (this.deps.emergencyStopReady?.() === false)
       throw new Error('Computer Use emergency stop is unavailable');
-    if (this.deps.canStartSession?.(input.taskId) === false)
+    // Null for the panel's synthetic Turn, and the calling Turn for `computer_start`. The whole
+    // start path is checked against this one value, so a session started from inside a Turn is
+    // bound to that Turn rather than to "no Turn is running".
+    const ownerTurnId = input.turnId ?? null;
+    if (this.deps.canStartSession?.(input.taskId, ownerTurnId) === false)
       throw new Error('Computer Use requires an idle Task without active Team work');
     computerUseModeSchema.parse(input.mode);
     const profile = this.deps.persistence.getComputerAppProfile(input.profileId);
@@ -1380,9 +2498,11 @@ export class ComputerUseController {
       throw new Error('Computer Use cannot target this application class');
     if (profile.revision !== input.expectedProfileRevision)
       throw new Error('Computer Use app profile is stale');
-    const syntheticTurn = input.turnId === undefined;
+    const syntheticTurn = ownerTurnId === null;
     if (syntheticTurn && this.deps.persistence.getActiveTurnId(input.taskId) !== null)
       throw new Error('Computer Use synthetic session requires an idle Task');
+    if (!syntheticTurn && this.deps.persistence.getActiveTurnId(input.taskId) !== ownerTurnId)
+      throw new Error('Computer Use Turn ownership changed');
     const remember = input.remember === true;
     const profileMaximumMode = maximumModeForProfile(profile);
     const selectedMode = bindComputerUseMaximumMode(input.mode, profileMaximumMode);
@@ -1507,7 +2627,7 @@ export class ComputerUseController {
       throw new Error(`Computer Use start canceled: ${starting.reason ?? 'emergency_stop'}`);
     }
     try {
-      this.assertStartBinding(input.taskId, policyEpoch);
+      this.assertStartBinding(input.taskId, policyEpoch, ownerTurnId);
     } catch (error) {
       this.startingSessions.delete(sessionId);
       await this.deps.native.cancel(native, native.cancelEpoch + 1).catch(() => undefined);
@@ -1563,6 +2683,9 @@ export class ComputerUseController {
       }),
     );
     try {
+      // Before the factory, not only after it: the factory is where the provider preflight and the
+      // model-capability check happen, and a start that is already cancelled must not make them.
+      controller.signal.throwIfAborted();
       planner =
         this.deps.plannerFactory === undefined
           ? (this.deps.planner ?? null)
@@ -1574,11 +2697,12 @@ export class ComputerUseController {
               modelId: input.modelId,
               mode: effectiveMode,
               policyEpoch,
+              sessionGoal: input.agent?.goal ?? null,
               signal: controller.signal,
             });
       controller.signal.throwIfAborted();
       if (this.disposed) throw new Error('Computer Use controller is disposed');
-      this.assertStartBinding(input.taskId, policyEpoch);
+      this.assertStartBinding(input.taskId, policyEpoch, ownerTurnId);
     } catch (error) {
       this.startingSessions.delete(sessionId);
       await this.deps.native.cancel(native, native.cancelEpoch + 1).catch(() => undefined);
@@ -1617,6 +2741,7 @@ export class ComputerUseController {
     const record: SessionRecord = {
       status,
       profile: selectedProfile,
+      agent: input.agent ?? null,
       native,
       screenBounds: native.screenBounds,
       controller,
@@ -1888,6 +3013,9 @@ export class ComputerUseController {
   }
 
   async stopOutsideTask(selectedTaskId: string): Promise<void> {
+    // The card lives in one Task's conversation. Once the user is looking somewhere else it is no
+    // longer in front of them, and a card nobody can see must not keep a tool call waiting.
+    this.withdrawAppGrantCardFor((pending) => pending.taskId !== selectedTaskId);
     if (this.startingTaskId !== null && this.startingTaskId !== selectedTaskId)
       this.startingController?.abort(new Error('Computer Use Task selection changed'));
     for (const starting of this.startingSessions.values()) {
@@ -2063,15 +3191,48 @@ export class ComputerUseController {
   }
 
   turnEnded(taskId: string, turnId: string): void {
+    // The Turn that asked is gone, so there is nobody left to answer to. The card is withdrawn
+    // rather than left for the next Turn to inherit a decision it never asked for.
+    this.withdrawAppGrantCardFor(
+      (pending) => pending.taskId === taskId && pending.turnId === turnId,
+    );
+    this.accessRequestsByTurn.delete(turnId);
     for (const session of this.sessions.values())
       if (session.status.taskId === taskId && session.turnId === turnId)
         void this.stop(session.status.sessionId, 'turn_started');
+  }
+
+  /**
+   * Drops everything a Task was holding in memory (ADR v2 §6.1).
+   *
+   * Called when a Task is archived, which is the only way a conversation goes away in this product
+   * today — and the hook a delete path would use if one is ever added, which is why the store's
+   * access-request rows cascade on `tasks`.
+   *
+   * "Allow once" is scoped to the conversation the user said it in, so putting that conversation
+   * away ends it: un-archiving later must not silently carry a permission given in a context the
+   * user has since closed. A card raised in that Task cannot be answered any more either, so it is
+   * withdrawn rather than left holding the single global slot.
+   *
+   * The stored refusal is deliberately *not* dropped: "the user said no in this Task" is about the
+   * conversation, and archiving is not the user changing their mind.
+   */
+  taskClosed(taskId: string): void {
+    this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
+    this.taskScopedGrants.delete(taskId);
+    this.revokeTargetTokens(taskId);
   }
 
   policyEpochChanged(taskId: string): void {
     // Tokens are bound to the epoch they were issued under, so they are already unusable; dropping
     // them here keeps the map from holding references the agent can no longer spend.
     this.revokeTargetTokens(taskId);
+    // The card's intent digest covers the epoch, so a click would be refused anyway — withdrawing
+    // says so while the user is still looking at it instead of after they press a button.
+    this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
+    // "Allow once" was given under the permissions that were in force; a change to those is exactly
+    // the event §6.5 says must invalidate what is bound to the epoch.
+    this.taskScopedGrants.delete(taskId);
     if (this.startingTaskId === taskId)
       this.startingController?.abort(new Error('Computer Use policy changed while starting'));
     for (const starting of this.startingSessions.values())
@@ -2085,6 +3246,8 @@ export class ComputerUseController {
   }
 
   async rendererInvalidated(): Promise<void> {
+    // The window that was showing the card is gone, so the click it was waiting for can never come.
+    this.withdrawAppGrantCardFor(() => true);
     this.startingController?.abort(new Error('Computer Use renderer was reloaded'));
     for (const starting of this.startingSessions.values()) {
       starting.reason = 'renderer_reloaded';
@@ -2097,6 +3260,7 @@ export class ComputerUseController {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.withdrawAppGrantCardFor(() => true);
     this.startingController?.abort(new Error('Computer Use disposed while starting'));
     for (const [sessionId, starting] of this.startingSessions) {
       starting.reason = 'app_closed';
@@ -2112,6 +3276,8 @@ export class ComputerUseController {
     this.windowCandidatePermits.clear();
     this.targetTokens.clear();
     this.targetAppTokens.clear();
+    this.taskScopedGrants.clear();
+    this.accessRequestsByTurn.clear();
   }
 
   private async run(record: SessionRecord, firstRound = 1): Promise<void> {
@@ -3012,6 +4178,9 @@ export class ComputerUseController {
 
   private assertSessionLive(record: SessionRecord): void {
     if (record.controller.signal.aborted) throw new Error('Computer Use session is canceled');
+    // For an agent-started session the grant is part of being live: it authorised the session, so
+    // losing it must stop the session at the same cadence a policy change does.
+    this.assertAgentGrantStillHolds(record);
     if (this.now() >= Date.parse(record.status.expiresAt))
       throw new Error('Computer Use session expired');
     if (this.currentPolicyEpoch(record.status.taskId) !== record.status.policyEpoch)
@@ -3034,12 +4203,26 @@ export class ComputerUseController {
     );
   }
 
-  private assertStartBinding(taskId: string, policyEpoch: number): void {
-    if (this.deps.persistence.getActiveTurnId(taskId) !== null)
+  /**
+   * Re-checks, after each await in the start path, that the Task still belongs to this start.
+   *
+   * `ownerTurnId` is null for the session a person starts from the panel: that one owns a synthetic
+   * Turn, so any Turn appearing means something else took the Task. `computer_start` is the
+   * opposite case — it runs *inside* a Turn, and the requirement is that the Turn that called is
+   * still the active one. The two are the same check with a different expected value, which is also
+   * how `assertSessionLive` phrases it once the session exists.
+   */
+  private assertStartBinding(
+    taskId: string,
+    policyEpoch: number,
+    ownerTurnId: string | null = null,
+  ): void {
+    const activeTurnId = this.deps.persistence.getActiveTurnId(taskId);
+    if (ownerTurnId === null ? activeTurnId !== null : activeTurnId !== ownerTurnId)
       throw new Error('Computer Use synthetic session requires an idle Task');
     if (this.currentPolicyEpoch(taskId) !== policyEpoch)
       throw new Error('Computer Use policy epoch changed');
-    if (this.deps.canStartSession?.(taskId) === false)
+    if (this.deps.canStartSession?.(taskId, ownerTurnId) === false)
       throw new Error('Computer Use requires an idle Task without active Team work');
   }
 
@@ -3189,6 +4372,45 @@ function executableLeafName(executablePath: string | null): string {
  * re-evaluated and any that now fall in a denied class are revoked rather than re-confirmed.
  */
 export const COMPUTER_USE_DENY_RULESET_VERSION = 1;
+
+/**
+ * The session status, reduced to what may be written into the conversation.
+ *
+ * A tool result is durable; a session status is not. `pendingApproval` carries a live-only excerpt
+ * of the target's screen, and the identity digests, profile id, window token and connection id are
+ * either re-verification inputs or V1 privacy boundaries (§8). Named field by field rather than
+ * destructured with a rest, so a field added to the status is absent here until somebody decides it
+ * belongs — the opposite of a spread, which would publish it by default.
+ */
+export function computerStartToolOutput(status: ComputerUseSessionStatus): ComputerStartToolOutput {
+  return computerStartToolOutputSchema.parse({
+    sessionId: status.sessionId,
+    state: status.state,
+    stopReason: status.stopReason,
+    mode: status.mode,
+    round: status.round,
+    maxRounds: status.maxRounds,
+  });
+}
+
+/**
+ * The agent's session goal, normalised the way a human-typed Task goal already is.
+ *
+ * `plannerInstruction` NFKC-normalises and truncates the Task objective before it reaches a
+ * provider; a model-authored goal goes through the same treatment at its own smaller budget rather
+ * than through a second, looser rule. It is a purpose statement, never an instruction the inner
+ * planner can act on beyond the fixed `computer_use_action_v1` grammar (§5.1).
+ */
+function computerUseAgentGoal(goal: string): string {
+  const normalized = goal
+    .normalize('NFKC')
+    .replace(/\p{Cc}/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  const capped = [...normalized].slice(0, COMPUTER_START_GOAL_MAX_CHARACTERS).join('').trim();
+  if (capped === '') throw new Error('Computer Use session goal is empty');
+  return capped;
+}
 
 function computerUseAppIdentityIsDenied(identity: unknown): boolean {
   if (typeof identity !== 'object' || identity === null || Array.isArray(identity)) return true;

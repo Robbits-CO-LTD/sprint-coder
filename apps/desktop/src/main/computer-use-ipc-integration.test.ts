@@ -1,21 +1,37 @@
+import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
   computerAppProfileSchema,
   computerUseAvailabilitySchema,
+  computerAppGrantResolveInputSchema,
+  computerStartToolOutputSchema,
   computerUseGrantRevokeInputSchema,
+  type ComputerAppGrantRequest,
   computerUseProfileRegisterInputSchema,
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
-import { COMPUTER_LIST_TARGETS_TOOL, COMPUTER_STOP_TOOL } from './computer-use-target-tools';
+import {
+  COMPUTER_LIST_TARGETS_TOOL,
+  COMPUTER_REQUEST_ACCESS_TOOL,
+  COMPUTER_START_TOOL,
+  COMPUTER_STOP_TOOL,
+} from './computer-use-target-tools';
 import {
   COMPUTER_TARGET_SYSTEM_PROMPT,
   computerTargetSystemPromptFor,
 } from './computer-use-target-model';
 import { ComputerUseController } from './computer-use-controller';
+import {
+  computerAppGrantIdentityFrom,
+  computerAppNativeIdentityDigest,
+} from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { PermissionBroker } from './permission-broker';
@@ -26,6 +42,7 @@ import {
   isComputerUseUiActivationKind,
 } from '../computer-use-activation';
 import {
+  appGrantActivationIntent,
   approvalActivationIntent,
   quickStartActivationIntent,
   startActivationIntent,
@@ -162,6 +179,7 @@ function captureComputerUseHandlers(): {
   native: { pickApplication: ReturnType<typeof vi.fn> };
   permissionSettings: { open: ReturnType<typeof vi.fn> };
   persistence: Record<string, ReturnType<typeof vi.fn>>;
+  approvalCoordinator: { turnEnded: ReturnType<typeof vi.fn> };
 } {
   const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
   const handlers = new Map<string, CapturedHandler>();
@@ -234,13 +252,23 @@ function captureComputerUseHandlers(): {
     ),
     stop: vi.fn(async () => undefined),
     stopOutsideTask: vi.fn(async () => undefined),
-    listAppGrantViews: vi.fn(() => ({ grants: [], discardedRecords: 0 })),
+    listAppGrantViews: vi.fn(() => ({ grants: [], discardedRecords: 0, requestedApps: [] })),
     revokeAppGrant: vi.fn(async () => undefined),
+    purgeInvalidAppGrants: vi.fn(() => ({
+      grants: [],
+      discardedRecords: 0,
+      requestedApps: [],
+      removedRecords: 2,
+    })),
+    resolveAppGrantRequest: vi.fn(async () => undefined),
+    turnEnded: vi.fn(),
+    taskClosed: vi.fn(),
     resolveApproval: vi.fn(async () => undefined),
     getStatus: vi.fn(() => null),
     policyEpochChanged: vi.fn(),
     dispose: vi.fn(async () => undefined),
   };
+  const approvalCoordinator = { turnEnded: vi.fn() };
   const native = { pickApplication: vi.fn(async () => identity) };
   const permissionSettings = { open: vi.fn(async () => ({ opened: true })) };
   const persistence = {
@@ -250,12 +278,14 @@ function captureComputerUseHandlers(): {
     getModel: vi.fn(() => 'auto'),
     getActiveTurnId: vi.fn(() => null),
     getComputerAppProfile: vi.fn(() => ({ revision: 1 })),
+    setArchived: vi.fn((taskId: string) => ({ id: taskId })),
   };
   Object.assign(router, {
     handle: capture,
     handleMutation: capture,
     window: { id: 42, webContents: { once: vi.fn() } },
     computerUseActivationGate: activation,
+    approvalCoordinator,
     computerUseController: controller,
     computerUseNative: native,
     computerUsePermissionSettings: permissionSettings,
@@ -263,10 +293,28 @@ function captureComputerUseHandlers(): {
     computerUseApprovalSessionById: new Map([['approval-1', 'session-1']]),
     computerUseQuickStartLatches: new Map(),
     teamCoordinator: { hasBusyWorkers: vi.fn(() => false) },
+    // The mutation envelope machinery — the install gate, the principal, the idempotency hash — is
+    // covered where it lives. Stubbed here so a handler's own wiring is what the test observes.
+    runMutation: (
+      _event: unknown,
+      _envelope: unknown,
+      _taskId: string,
+      _channel: string,
+      action: () => unknown,
+    ) => ({ value: action(), executed: true }),
     persistence,
   });
   router.register();
-  return { router, handlers, activation, controller, native, permissionSettings, persistence };
+  return {
+    router,
+    handlers,
+    activation,
+    controller,
+    native,
+    permissionSettings,
+    persistence,
+    approvalCoordinator,
+  };
 }
 
 describe('Computer Use Main IPC integration', () => {
@@ -646,7 +694,11 @@ describe('Computer Use Main IPC integration', () => {
       expect(fixture.controller['listAppGrantViews']).not.toHaveBeenCalled();
     });
     await withAgentDrivenGate(true, async () => {
-      expect(await handler({}, {}, {})).toEqual({ grants: [], discardedRecords: 0 });
+      expect(await handler({}, {}, {})).toEqual({
+        grants: [],
+        discardedRecords: 0,
+        requestedApps: [],
+      });
     });
   });
 
@@ -665,7 +717,11 @@ describe('Computer Use Main IPC integration', () => {
       expect(fixture.controller['revokeAppGrant']).not.toHaveBeenCalled();
 
       fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
-      await expect(handler(input, {}, {})).resolves.toEqual({ grants: [], discardedRecords: 0 });
+      await expect(handler(input, {}, {})).resolves.toEqual({
+        grants: [],
+        discardedRecords: 0,
+        requestedApps: [],
+      });
       // Its own activation kind, so a click on Start or on an approval cannot be spent here.
       expect(fixture.activation.consume).toHaveBeenLastCalledWith(
         expect.anything(),
@@ -679,6 +735,135 @@ describe('Computer Use Main IPC integration', () => {
       fixture.activation.consume.mockReturnValueOnce({ token: 'revoke-activation', intent: null });
       await expect(handler(input, {}, {})).rejects.toBeTruthy();
     });
+  });
+
+  it('removes unauthenticated grant rows only from its own trusted click', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseGrantPurge);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+
+    await withAgentDrivenGate(true, async () => {
+      fixture.activation.consume.mockReturnValueOnce(null);
+      await expect(handler({}, {}, {})).rejects.toBeTruthy();
+      expect(fixture.controller['purgeInvalidAppGrants']).not.toHaveBeenCalled();
+
+      fixture.activation.consume.mockReturnValueOnce({ token: 'purge-activation', intent: null });
+      await expect(handler({}, {}, {})).resolves.toEqual({
+        grants: [],
+        discardedRecords: 0,
+        requestedApps: [],
+        removedRecords: 2,
+      });
+      // Its own kind: a click on a row's revoke button cannot be spent as "remove those rows".
+      expect(fixture.activation.consume).toHaveBeenLastCalledWith(
+        expect.anything(),
+        'app-grant-purge',
+      );
+    });
+
+    await withAgentDrivenGate(false, async () => {
+      fixture.activation.consume.mockReturnValueOnce({ token: 'purge-activation', intent: null });
+      await expect(handler({}, {}, {})).rejects.toBeTruthy();
+    });
+  });
+
+  it('answers an approval card only from a trusted click, and hands Main the intent', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseGrantRequestResolve);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+    const input = { requestId: 'request-1', expectedRevision: 1, decision: 'allow_always' };
+
+    await withAgentDrivenGate(true, async () => {
+      // No click at all: this is the shape model output would arrive in, and it cannot approve.
+      fixture.activation.consume.mockReturnValueOnce(null);
+      await expect(handler(input, {}, {})).rejects.toBeTruthy();
+      expect(fixture.controller['resolveAppGrantRequest']).not.toHaveBeenCalled();
+
+      const intent = appGrantActivationIntent({
+        requestId: 'request-1',
+        expectedRevision: 1,
+        decision: 'allow_always',
+        identityDigest: 'a'.repeat(64),
+      });
+      fixture.activation.consume.mockReturnValueOnce({ token: 'grant-activation', intent });
+      await expect(handler(input, {}, {})).resolves.toBeUndefined();
+      expect(fixture.activation.consume).toHaveBeenLastCalledWith(expect.anything(), 'app-grant');
+      // Main forwards the intent rather than judging it: the card it belongs to lives in the
+      // controller, which is also where deny is exempted from the comparison.
+      expect(fixture.controller['resolveAppGrantRequest']).toHaveBeenCalledWith(input, intent);
+    });
+
+    await withAgentDrivenGate(false, async () => {
+      fixture.activation.consume.mockReturnValueOnce({ token: 'grant-activation', intent: null });
+      await expect(handler(input, {}, {})).rejects.toBeTruthy();
+    });
+  });
+
+  it('rejects a card answer that names anything other than a card Main published', () => {
+    for (const rejected of [
+      { requestId: 'request-1', expectedRevision: 1 },
+      { requestId: 'request-1', expectedRevision: 1, decision: 'allow' },
+      { requestId: 'request-1', expectedRevision: 0, decision: 'deny' },
+      { requestId: '', expectedRevision: 1, decision: 'deny' },
+      // No identity, mode, or app token: the Renderer can only name a row Main already showed it.
+      { requestId: 'request-1', expectedRevision: 1, decision: 'deny', maxMode: 'full_access_app' },
+    ])
+      expect(computerAppGrantResolveInputSchema.safeParse(rejected).success).toBe(false);
+  });
+
+  it('tells Computer Use about every Turn that ends, through the one fan-out', () => {
+    const fixture = captureComputerUseHandlers();
+    const router = fixture.router as unknown as {
+      notifyTurnEnded(taskId: string, turnId: string, outcome: 'finished' | 'canceled'): void;
+    };
+    router.notifyTurnEnded('task-1', 'turn-1', 'finished');
+    expect(fixture.controller['turnEnded']).toHaveBeenCalledWith('task-1', 'turn-1');
+    router.notifyTurnEnded('task-1', 'turn-2', 'canceled');
+    expect(fixture.controller['turnEnded']).toHaveBeenCalledWith('task-1', 'turn-2');
+    // Both coordinators, always together: the approval coordinator's list of sites is the map, and
+    // the reason this is one method is that the second list was once simply never written.
+    expect(fixture.approvalCoordinator.turnEnded).toHaveBeenCalledTimes(2);
+    expect(fixture.controller['turnEnded']).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes every Turn ending through that fan-out and nowhere else', () => {
+    // A source check, because the wiring is only as good as the call sites: a future site that
+    // calls the approval coordinator directly would leave Computer Use's card, its per-Turn count,
+    // and any session bound to that Turn behind.
+    const source = readFileSync(resolve(process.cwd(), 'src/main/ipc.ts'), 'utf8');
+    // Exactly one of each, and both inside `notifyTurnEnded`: that is what makes the two lists one.
+    expect(source.match(/this\.approvalCoordinator\.turnEnded\(/gu)).toHaveLength(1);
+    expect(source.match(/this\.computerUseController\.turnEnded\(/gu)).toHaveLength(1);
+    const fanOut = source.slice(
+      source.indexOf('private notifyTurnEnded('),
+      source.indexOf('private readonly handleComputerUseActivationIntent'),
+    );
+    expect(fanOut).toContain('this.approvalCoordinator.turnEnded(taskId, turnId, outcome)');
+    expect(fanOut).toContain('this.computerUseController.turnEnded(taskId, turnId)');
+    // Eight call sites today; the number matters less than all of them going through one place.
+    expect((source.match(/this\.notifyTurnEnded\(/gu) ?? []).length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('ends a Task-scoped permission when the conversation is archived', async () => {
+    const fixture = captureComputerUseHandlers();
+    const handler = fixture.handlers.get(IPC_CHANNELS.tasksSetArchived);
+    expect(handler).toBeDefined();
+    if (handler === undefined) return;
+    await handler({ taskId: 'task-1', archived: true }, {}, {});
+    expect(fixture.controller['taskClosed']).toHaveBeenCalledWith('task-1');
+    // Un-archiving is the user opening the conversation again, not re-granting anything.
+    fixture.controller['taskClosed']?.mockClear();
+    await handler({ taskId: 'task-1', archived: false }, {}, {});
+    expect(fixture.controller['taskClosed']).not.toHaveBeenCalled();
+  });
+
+  it('keeps the card click kinds in the one list every activation seam reads', () => {
+    for (const kind of ['app-grant', 'app-grant-purge'] as const) {
+      expect(isComputerUseUiActivationKind(kind)).toBe(true);
+      expect(COMPUTER_USE_UI_ACTIVATION_KINDS).toContain(kind);
+    }
   });
 
   it('keeps the revoke click kind in the one list every activation seam reads', () => {
@@ -754,7 +939,7 @@ describe('Computer Use Main IPC integration', () => {
       },
     });
     const evaluate = (
-      entry: { toolId: string; providerName: string },
+      entry: { toolId: string; providerName: string; kind?: string },
       input: unknown,
     ): Promise<{ decision: string; reason: string }> =>
       (
@@ -766,7 +951,12 @@ describe('Computer Use Main IPC integration', () => {
         }
       ).evaluateToolPermission(
         {
-          entry: { ...entry, kind: 'computerTarget', sideEffect: 'control', risk: 'low' },
+          entry: {
+            kind: 'computerTarget',
+            sideEffect: 'control',
+            risk: 'low',
+            ...entry,
+          },
           input,
           callId: 'call-1',
           context: { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 3 },
@@ -794,11 +984,87 @@ describe('Computer Use Main IPC integration', () => {
       ),
     ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
     await expect(
-      evaluate({ toolId: 'builtin:computer:observe@1', providerName: 'computer_observe' }, {}),
+      evaluate(
+        {
+          toolId: 'builtin:computer:observe@1',
+          providerName: 'computer_observe',
+          // Its real kind: `computer_observe` belongs to the in-session surface, not the Task one.
+          kind: 'computer',
+        },
+        {},
+      ),
     ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
+
+    // A `computerTarget` tool nobody has assigned a lane to is denied at the door rather than
+    // falling into whichever evaluation happens to be last.
+    await expect(
+      evaluate({ toolId: 'builtin:computer:invented@1', providerName: 'computer_invented' }, {}),
+    ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_target_tool_unknown' });
     expect(previewed).toHaveLength(1);
   });
 });
+
+const endToEndIdentityFacts = {
+  platform: 'darwin',
+  identityDigest: '',
+  bundleId: 'com.example.notes',
+  executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
+  executableDigest: 'b'.repeat(64),
+  teamId: 'TEAMID1234',
+  signingIdentifier: 'com.example.notes',
+  cdHash: null,
+  displayName: 'Notes',
+  policyLanguage: 'en',
+  maximumMode: 'full_access_app',
+};
+const endToEndIdentity = {
+  ...endToEndIdentityFacts,
+  identityDigest: computerAppNativeIdentityDigest(
+    endToEndIdentityFacts,
+    computerAppGrantIdentityFrom(endToEndIdentityFacts)!,
+  )!,
+};
+
+const endToEndImageBytes = Buffer.from('89504e470d0a1a0a', 'hex');
+const endToEndImageDigest = createHash('sha256').update(endToEndImageBytes).digest('hex');
+
+/** The minimum an observation must be for a session to take a round through the real controller. */
+function endToEndObservation(sessionId: string, revision: number, appIdentityDigest: string) {
+  const now = Date.now();
+  return {
+    sessionId,
+    appIdentityDigest,
+    windowIdentityDigest: 'd'.repeat(64),
+    profileRevision: 3,
+    maximumMode: 'full_access_app',
+    policyLanguage: 'en',
+    screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+    revision,
+    observedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 20_000).toISOString(),
+    clientWidth: 800,
+    clientHeight: 600,
+    images: [
+      {
+        mimeType: 'image/png',
+        digest: endToEndImageDigest,
+        byteLength: endToEndImageBytes.byteLength,
+        width: 1,
+        height: 1,
+        base64: endToEndImageBytes.toString('base64'),
+      },
+    ],
+    treeDigest: null,
+    treeByteLength: 0,
+    treeDepth: 0,
+    treeNodeCount: 0,
+    focusedElementSignature: 'f'.repeat(64),
+    dialogSetRevision: 1,
+    dialogSetDigest: '1'.repeat(64),
+    activeWindowIdentityDigest: 'd'.repeat(64),
+    activeWindowKind: 'application',
+  };
+}
 
 describe('Computer Use target tools end to end', () => {
   /**
@@ -808,13 +1074,30 @@ describe('Computer Use target tools end to end', () => {
    * output schema. Each review round has found a break in a different one of these links, so they
    * are pinned together rather than one at a time.
    */
-  function endToEnd(options: { preset?: 'ask' | 'auto' | 'full'; revoked?: boolean } = {}) {
+  function endToEnd(
+    options: {
+      preset?: 'ask' | 'auto' | 'full';
+      revoked?: boolean;
+      revokedCapabilities?: ('computer.observe' | 'computer.control')[];
+      policyEpoch?: number;
+      /** V1's "remember" flag on the profile row. Never a grant: the row is unauthenticated. */
+      remembered?: boolean;
+    } = {},
+  ) {
     const preset = options.preset ?? 'full';
+    let policyEpoch = options.policyEpoch ?? 0;
+    const audits = new Map<string, unknown>();
+    const cards: ComputerAppGrantRequest[] = [];
+    const grantStore = createComputerAppGrantFixtureStore();
+    let observationRevision = 0;
     const policy: PermissionPolicyRecord = {
       preset,
-      policyEpoch: 0,
+      get policyEpoch() {
+        return policyEpoch;
+      },
       expandedPolicy: expandAccessPreset(preset),
-      revokedCapabilities: options.revoked === true ? ['computer.observe'] : [],
+      revokedCapabilities:
+        options.revokedCapabilities ?? (options.revoked === true ? ['computer.observe'] : []),
     };
     const permissionBroker = new PermissionBroker({
       getPermissionPolicy: () => policy,
@@ -833,27 +1116,17 @@ describe('Computer Use target tools end to end', () => {
       label: 'Notes',
       canonicalPath: '/Applications/Notes.app/Contents/MacOS/Notes',
       appUrl: null,
-      identity: {
-        platform: 'darwin',
-        identityDigest: 'a'.repeat(64),
-        bundleId: 'com.example.notes',
-        executablePath: '/Applications/Notes.app/Contents/MacOS/Notes',
-        executableDigest: 'b'.repeat(64),
-        teamId: 'TEAMID1234',
-        signingIdentifier: 'com.example.notes',
-        cdHash: null,
-        displayName: 'Notes',
-        policyLanguage: 'en',
-        maximumMode: 'full_access_app',
-      },
-      identityDigest: 'a'.repeat(64),
+      identity: endToEndIdentity,
+      // The digest native would have produced, not an invented one: the controller binds the two
+      // halves of a profile together (T14), so a chosen digest describes a row that cannot exist.
+      identityDigest: endToEndIdentity.identityDigest,
       version: null,
       executableDigest: 'b'.repeat(64),
       mode: 'full_access_app' as const,
       connectionId: 'connection-1',
       modelId: 'model-1',
       providerEgressConsent: true,
-      remember: true,
+      remember: options.remembered !== false,
       revision: 3,
       createdAt: '2026-09-19T00:00:00.000Z',
       updatedAt: '2026-09-19T00:00:00.000Z',
@@ -862,10 +1135,18 @@ describe('Computer Use target tools end to end', () => {
       persistence: {
         listComputerAppProfiles: () => [profile],
         getComputerAppProfile: () => profile,
-        getActiveTurnId: () => null,
-        getPermissionPolicy: () => ({ policyEpoch: 0 }),
+        // A real `computer_start` runs inside the calling Turn, so the Task has to look busy with
+        // exactly that Turn — the same thing production sees while a tool call is in flight.
+        getActiveTurnId: () => 'turn-1',
+        getPermissionPolicy: () => ({ policyEpoch }),
         listComputerActionAudits: () => [],
-        ...createComputerAppGrantFixtureStore().api,
+        recordComputerActionAudit: (input: Record<string, unknown>) => {
+          const record = { ...input, id: `audit-${audits.size + 1}`, state: 'pending' };
+          audits.set(record.id, record);
+          return record;
+        },
+        completeComputerActionAudit: ({ auditId }: { auditId: string }) => audits.get(auditId),
+        ...grantStore.api,
       } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
       native: {
         availability: () => available,
@@ -888,8 +1169,26 @@ describe('Computer Use target tools end to end', () => {
             maximumMode: 'full_access_app',
           },
         ],
-        startSession: async () => ({}) as never,
-        observe: async () => ({}) as never,
+        startSession: async (input: { sessionId: string; windowId: string }) => ({
+          sessionId: input.sessionId,
+          platform: 'darwin',
+          appIdentityDigest: profile.identityDigest,
+          windowIdentityDigest: 'd'.repeat(64),
+          windowId: input.windowId,
+          profileRevision: profile.revision,
+          cancelEpoch: 0,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+          screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+        }),
+        observe: async (session: { sessionId: string }) => {
+          observationRevision += 1;
+          return endToEndObservation(
+            session.sessionId,
+            observationRevision,
+            profile.identityDigest,
+          );
+        },
         dispatch: async () => ({ result: 'completed', reasonCode: null }),
         cancel: async () => undefined,
         close: async () => undefined,
@@ -897,15 +1196,18 @@ describe('Computer Use target tools end to end', () => {
       featureEnabled: () => true,
       agentDrivenEnabled: () => true,
       providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
-      currentPolicyEpoch: () => 0,
+      currentPolicyEpoch: () => policyEpoch,
       repositionEmergencyStop: () => true,
+      publishGrantRequest: (request) => cards.push(request),
+      // One round and done, so a real `computer_start` reaches a terminal state without a Provider.
+      planner: { plan: async () => ({ type: 'finish' }) },
     });
     const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
     Object.assign(router, { permissionBroker, computerUseController: controller });
     const harness = new ManagedCodingHarness({
       workspaceFor: () => null,
       rootIdentityFor: () => undefined,
-      policyEpochFor: () => 0,
+      policyEpochFor: () => policyEpoch,
       authorizer: (request) =>
         (
           router as unknown as {
@@ -914,16 +1216,30 @@ describe('Computer Use target tools end to end', () => {
         ).evaluateToolPermission(request, request.entry.requiredCapabilities[0]!) as never,
       computerTargets: {
         listTargets: (input, context) => controller.listTargets(input, context),
+        requestAccess: (input, context, signal) => controller.requestAccess(input, context, signal),
+        start: (input, context, signal) => controller.startForAgent(input, context, signal),
         stop: (sessionId, context) => controller.stopForAgent(sessionId, context),
       },
     });
-    return { harness, controller, permissionBroker };
+    return {
+      harness,
+      controller,
+      permissionBroker,
+      router,
+      cards,
+      profile,
+      grantStore,
+      /** Moves the policy under a Turn that was already dispatched, as a settings change does. */
+      movePolicyEpoch: (next: number) => {
+        policyEpoch = next;
+      },
+    };
   }
 
   const turnContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
 
   it('publishes, guards, authorizes, and executes computer_list_targets with no Workspace', async () => {
-    const { harness } = endToEnd();
+    const { harness, controller, profile } = endToEnd();
     // A Task with no Workspace at all: the surface carries the desktop tools and nothing else.
     const snapshot = harness.startTurn(turnContext, 'codex', {
       computerTargets: true,
@@ -931,10 +1247,17 @@ describe('Computer Use target tools end to end', () => {
     });
     expect(snapshot.entries.map((entry) => entry.providerName).sort()).toEqual([
       'computer_list_targets',
+      'computer_request_access',
+      'computer_start',
       'computer_stop',
     ]);
     // The catalog carries a target tool, so the warning sentence must accompany it.
     expect(computerTargetSystemPromptFor(snapshot.entries)).toBe(COMPUTER_TARGET_SYSTEM_PROMPT);
+    // The window title travels only under a grant whose egress consent names this destination.
+    controller.createAppGrant(computerAppGrantIdentityFrom(profile.identity)!, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
     const result = (await harness.broker.dispatch({
       taskId: 'task-1',
       turnId: 'turn-1',
@@ -997,6 +1320,185 @@ describe('Computer Use target tools end to end', () => {
         input: { sessionId: 'session-elsewhere' },
       }),
     ).rejects.toThrow(/computer_session_missing/u);
+  });
+
+  /**
+   * The two calls that carry `computer.control` before a session exists.
+   *
+   * These reached the controller in unit tests and were denied in production: both require
+   * `computer.control`, neither carries a `sessionId`, and the session-bound lane answers
+   * `computer_session_missing` without one. Dispatched here through the real authorizer, which is
+   * the only place that would have caught it.
+   */
+  async function raiseCard(fixture: ReturnType<typeof endToEnd>): Promise<{
+    outcome: Promise<unknown>;
+    card: ComputerAppGrantRequest;
+  }> {
+    const targets = (await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-list',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; appToken?: string }[] };
+    const appToken = targets.targets.find((target) => target.kind === 'selectable')?.appToken;
+    expect(appToken).toBeDefined();
+    const outcome = fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-access',
+      providerName: 'computer_request_access',
+      input: { appToken, reason: 'Copy the table' },
+    });
+    // The card is published from inside the dispatch, a few ticks in.
+    for (let tick = 0; tick < 50 && fixture.cards.length === 0; tick += 1)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    const card = fixture.cards.at(0);
+    expect(card).toBeDefined();
+    return { outcome, card: card as ComputerAppGrantRequest };
+  }
+
+  it('authorizes computer_request_access and reaches the card', async () => {
+    // No grant exists, so a card is actually needed — whatever the V1 row remembers.
+    const fixture = endToEnd({ preset: 'ask', remembered: false });
+    fixture.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    const { outcome, card } = await raiseCard(fixture);
+    expect(card.state).toBe('pending');
+    // A human click on that card, and the tool call answers.
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+      null,
+    );
+    expect(await outcome).toEqual({ granted: false, reasonCode: 'access_request_denied' });
+  });
+
+  it('authorizes computer_start and runs a session to its end', async () => {
+    const fixture = endToEnd({ preset: 'ask' });
+    fixture.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    fixture.controller.createAppGrant(computerAppGrantIdentityFrom(fixture.profile.identity)!, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const targets = (await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-list',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; targetToken?: string }[] };
+    const targetToken = targets.targets.find((target) => target.kind === 'selectable')?.targetToken;
+    const output = await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-start',
+      providerName: 'computer_start',
+      input: { targetToken, goal: 'Copy the table into Numbers' },
+    });
+    // Through the broker, which validates the reduced projection against the tool's own output
+    // schema — including `stopReason: null`, which an `enum` with no `type` has to accept.
+    expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
+    expect(output).toMatchObject({ state: 'stopped', stopReason: 'user_stop', round: 1 });
+  });
+
+  it('stops both control calls when computer.control is revoked, and leaves enumeration alone', async () => {
+    const fixture = endToEnd({ revokedCapabilities: ['computer.control'], remembered: false });
+    fixture.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    // Enumeration only needs `computer.observe`, so it still works.
+    const targets = (await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-list',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; appToken?: string; targetToken?: string }[] };
+    const selectable = targets.targets.find((target) => target.kind === 'selectable');
+    expect(selectable).toBeDefined();
+    // The lane supplies its own allow rule, but a revoked capability is folded into projectDeny,
+    // which runs first. Nothing reaches the controller, so no card is ever raised.
+    for (const call of [
+      {
+        providerName: 'computer_request_access',
+        input: { appToken: selectable?.appToken, reason: 'ask' },
+      },
+      {
+        providerName: 'computer_start',
+        input: { targetToken: selectable?.targetToken, goal: 'x' },
+      },
+    ])
+      await expect(
+        fixture.harness.broker.dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          callId: `call-${call.providerName}`,
+          ...call,
+        }),
+      ).rejects.toThrow(/capability_revoked/u);
+    expect(fixture.cards).toHaveLength(0);
+  });
+
+  it('denies both control calls when the policy epoch has moved', async () => {
+    const fixture = endToEnd({ policyEpoch: 7, remembered: false });
+    fixture.harness.startTurn({ ...turnContext, policyEpoch: 7 }, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    // The user changes a permission after the Turn was dispatched. The catalog is bound to the
+    // epoch it started with; the lane reads the current one.
+    fixture.movePolicyEpoch(8);
+    for (const call of [
+      { providerName: 'computer_request_access', input: { appToken: 'x', reason: 'ask' } },
+      { providerName: 'computer_start', input: { targetToken: 'x', goal: 'x' } },
+    ])
+      // The broker refuses first — a catalog bound to an epoch that has moved cannot dispatch at
+      // all — so this is the outer of the two guards.
+      await expect(
+        fixture.harness.broker.dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          callId: `call-${call.providerName}`,
+          ...call,
+        }),
+      ).rejects.toThrow(/policy epoch/iu);
+    expect(fixture.cards).toHaveLength(0);
+
+    // And the lane's own check, which is what answers if a call ever arrives past the broker.
+    const evaluate = (toolId: string): Promise<{ decision: string; reason: string }> =>
+      (
+        fixture.router as unknown as {
+          evaluateToolPermission(
+            request: unknown,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        }
+      ).evaluateToolPermission(
+        {
+          entry: {
+            toolId,
+            providerName: 'x',
+            kind: 'computerTarget',
+            sideEffect: 'control',
+            risk: 'high',
+          },
+          input: {},
+          callId: 'call-direct',
+          context: { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 7 },
+        },
+        'computer.control',
+      );
+    for (const toolId of [COMPUTER_REQUEST_ACCESS_TOOL.toolId, COMPUTER_START_TOOL.toolId])
+      await expect(evaluate(toolId)).resolves.toMatchObject({
+        decision: 'deny',
+        reason: 'policy_epoch_changed',
+      });
   });
 });
 

@@ -1679,3 +1679,159 @@ describe('Computer Use target enumeration resource', () => {
     ).toThrow('Computer control grants cannot bind a target list');
   });
 });
+
+/**
+ * The other half of the pre-session surface: asking the user for permission to drive an
+ * application, and starting one that is already permitted. Both carry `computer.control` and
+ * neither has a session yet, so neither fits the session resources or the enumeration one.
+ */
+describe('Computer Use pre-session access resource', () => {
+  const accessCeiling = {
+    entries: [
+      {
+        capability: 'computer.control' as const,
+        resourceSet: { kind: 'computer-target-access' as const },
+        operations: ['control' as const],
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        providerEgress: ['none' as const],
+        sandboxProfiles: ['read-only' as const, 'workspace-write' as const],
+      },
+    ],
+    maxWorkerDepth: 0,
+    maxConcurrentWorkers: 0,
+  };
+  const accessRequest = {
+    taskId: 'task-1',
+    subjectId: 'computer-use:access:computer.control',
+    capability: 'computer.control',
+    resource: { kind: 'computer-target-access', taskId: 'task-1' },
+    operation: 'control',
+    providerEgress: 'none',
+    sandboxProfile: 'read-only',
+    executionSpecDigest: EXECUTION_DIGEST,
+    reviewerInputDigest: REVIEWER_INPUT_DIGEST,
+    risk: 'high',
+  } as PermissionRequest;
+  const accessPolicy = (preset: AccessPreset) => {
+    const expanded = expandAccessPreset(preset);
+    return {
+      ...basePolicy(),
+      parentCeiling: accessCeiling,
+      modeCeiling: accessCeiling,
+      sandbox: { feasible: true, profile: 'read-only' as const },
+      allowRules: [
+        {
+          capability: 'computer.control' as const,
+          resourceSet: { kind: 'computer-target-access-exact' as const, taskId: 'task-1' },
+          operations: ['control' as const],
+          auditReason: 'computer_target_access',
+        },
+        ...expanded.allowRules,
+      ],
+      immutableDeny: expanded.immutableDeny ?? [],
+      approvalPolicy: expanded.approvalPolicy,
+      ...(expanded.approvalReason === undefined ? {} : { approvalReason: expanded.approvalReason }),
+    };
+  };
+
+  it('allows the pre-session lane under every access preset', () => {
+    // The lane brings its own allow rule because the approval is elsewhere: a human click on the
+    // card for `computer_request_access`, and the stored grant for `computer_start`. A second
+    // prompt from the Task preset would ask the same question twice.
+    for (const preset of ['ask', 'auto', 'full'] as const)
+      expect(
+        evaluatePermissionPolicy({
+          request: accessRequest,
+          policy: accessPolicy(preset),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'allow', reason: 'computer_target_access' });
+  });
+
+  it('still denies it when the Task revokes computer.control', () => {
+    expect(
+      evaluatePermissionPolicy({
+        request: accessRequest,
+        policy: {
+          ...accessPolicy('full'),
+          projectDeny: [
+            {
+              capability: 'computer.control' as const,
+              resourceSet: { kind: 'all' as const },
+              operations: ['control' as const],
+              auditReason: 'capability_revoked',
+            },
+          ],
+        },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
+  });
+
+  it.each([
+    { resource: { kind: 'computer-target-access', taskId: '' } },
+    // Bound to a Task other than the one being evaluated.
+    { resource: { kind: 'computer-target-access', taskId: 'task-2' } },
+    // Pre-session access is control-only: there is nothing to read through it, so pairing it with
+    // observe is exactly the confusion the two separate kinds exist to prevent.
+    { capability: 'computer.observe', operation: 'observe' },
+  ])('fails closed for malformed pre-session facts %#', (override) => {
+    expect(
+      evaluatePermissionPolicy({
+        request: { ...accessRequest, ...override } as PermissionRequest,
+        policy: accessPolicy('full'),
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
+  });
+
+  it('keeps the two pre-session resources from standing in for each other', () => {
+    // A control request against the enumeration resource, and an observe request against the
+    // access one. Both are the same mistake seen from either side.
+    expect(
+      evaluatePermissionPolicy({
+        request: {
+          ...accessRequest,
+          resource: { kind: 'computer-target-list', taskId: 'task-1' },
+        } as PermissionRequest,
+        policy: accessPolicy('full'),
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
+    // And an allow rule for one does not cover the other, even with matching facts.
+    expect(
+      evaluatePermissionPolicy({
+        request: accessRequest,
+        policy: {
+          ...accessPolicy('ask'),
+          allowRules: [
+            {
+              capability: 'computer.control' as const,
+              resourceSet: { kind: 'computer-target-list-exact' as const, taskId: 'task-1' },
+              operations: ['control' as const],
+              auditReason: 'computer_target_discovery',
+            },
+          ],
+        },
+        now: NOW,
+      }),
+    ).not.toMatchObject({ decision: 'allow', reason: 'computer_target_discovery' });
+  });
+
+  it('refuses a computer.observe grant bound to pre-session access', () => {
+    expect(() =>
+      createSessionGrant({
+        id: 'grant-1',
+        subjectId: 'computer-use:access:computer.observe',
+        capability: 'computer.observe',
+        resourceSet: { kind: 'computer-target-access-exact', taskId: 'task-1' },
+        operations: ['observe'],
+        scope: 'once',
+        policyEpoch: 4,
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        providerEgress: ['none'],
+        sandboxProfiles: ['read-only'],
+      } as Parameters<typeof createSessionGrant>[0]),
+    ).toThrow('Computer observe grants cannot bind pre-session access');
+  });
+});
