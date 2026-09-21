@@ -1055,7 +1055,7 @@ describe('Computer Use target tools end to end', () => {
       revoked?: boolean;
       revokedCapabilities?: ('computer.observe' | 'computer.control')[];
       policyEpoch?: number;
-      /** V1's "remember" counts as a grant, which would make a card unnecessary. */
+      /** V1's "remember" flag on the profile row. Never a grant: the row is unauthenticated. */
       remembered?: boolean;
     } = {},
   ) {
@@ -1224,7 +1224,7 @@ describe('Computer Use target tools end to end', () => {
   const turnContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
 
   it('publishes, guards, authorizes, and executes computer_list_targets with no Workspace', async () => {
-    const { harness } = endToEnd();
+    const { harness, controller, profile } = endToEnd();
     // A Task with no Workspace at all: the surface carries the desktop tools and nothing else.
     const snapshot = harness.startTurn(turnContext, 'codex', {
       computerTargets: true,
@@ -1238,6 +1238,11 @@ describe('Computer Use target tools end to end', () => {
     ]);
     // The catalog carries a target tool, so the warning sentence must accompany it.
     expect(computerTargetSystemPromptFor(snapshot.entries)).toBe(COMPUTER_TARGET_SYSTEM_PROMPT);
+    // The window title travels only under a grant whose egress consent names this destination.
+    controller.createAppGrant(profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
     const result = (await harness.broker.dispatch({
       taskId: 'task-1',
       turnId: 'turn-1',
@@ -1339,7 +1344,7 @@ describe('Computer Use target tools end to end', () => {
   }
 
   it('authorizes computer_request_access and reaches the card', async () => {
-    // Not remembered, so there is no V1 grant to short-circuit on and a card is actually needed.
+    // No grant exists, so a card is actually needed — whatever the V1 row remembers.
     const fixture = endToEnd({ preset: 'ask', remembered: false });
     fixture.harness.startTurn(turnContext, 'codex', {
       computerTargets: true,

@@ -410,11 +410,16 @@ export type ComputerUseControllerDeps = Readonly<{
  * Which agreement says an application may be driven (ADR v2 §6.1, §6.5).
  *
  * `grant` is a row in `computer_app_grants` — permanent and installation-wide. `task` is the "just
- * this once" answer: it lives in memory, inside one Task, and is gone on restart. `profile` is V1's
- * own "do not ask me again", which registration already took a trusted click for; it survives until
- * S8 removes the profile route.
+ * this once" answer: it lives in memory, inside one Task, and is gone on restart.
+ *
+ * A V1 profile's "remember" is deliberately *not* a third kind. The profile row carries no MAC, so
+ * `remember`, its consent flag and its connection/model pair are whatever the database file says
+ * (T14). The panel's start is safe to read them because it also needs a trusted click every time;
+ * `computer_start` has no click, so the only things it may stand on are a row that authenticates
+ * and an answer this process itself heard. A remembered V1 application therefore gets one card the
+ * first time an agent asks for it, like any other.
  */
-type ComputerAppGrantScopeKind = 'grant' | 'task' | 'profile';
+type ComputerAppGrantScopeKind = 'grant' | 'task';
 
 /**
  * What one Task agreed to for one application, without writing anything down (ADR v2 §6.1, D14).
@@ -1099,10 +1104,9 @@ export class ComputerUseController {
    * Whether an application may be driven without a fresh card, and on whose authority.
    *
    * **The single decision point.** `computer_start` asks this and nothing else; the enumeration's
-   * `granted` flag is this; the card asks it to decide whether it is needed at all. Three ways to
-   * be granted while both models coexist (ADR v2 §9 S3): a v2 grant row, a Task-scoped "allow once"
-   * from this Task's own card, or a V1 profile the user registered *and* asked to be remembered —
-   * registration consumed a trusted click, so "remember" is V1's own "do not ask me again".
+   * `granted` flag is this; the card asks it to decide whether it is needed at all. Two ways to be
+   * granted: a v2 grant row that authenticates, or a Task-scoped "allow once" from this Task's own
+   * card. A V1 profile's "remember" is not one — see `ComputerAppGrantScopeKind`.
    *
    * Provider egress consent is reported but never gates `granted`: §6.4 keeps the two agreements
    * apart, so a granted application whose screen may not yet go to this model is granted, and it is
@@ -1140,20 +1144,7 @@ export class ComputerUseController {
         maxMode: scoped.maxMode,
         providerEgress: scoped.providerEgress,
       });
-    if (!profile.remember) return COMPUTER_APP_UNGRANTED;
-    return Object.freeze({
-      granted: true,
-      scope: 'profile' as const,
-      grantId: null,
-      // What the user agreed to when they registered this application, not merely what native is
-      // able to do. A profile saved as `supervised` promised a confirmation before every action;
-      // inheriting only the native ceiling would let `computer_start` begin it at
-      // `full_access_app`, a stronger mode than V1's own quick start ever allowed for that row.
-      maxMode: bindComputerUseMaximumMode(profile.mode, maximumModeForProfile(profile)),
-      providerEgress: profile.providerEgressConsent
-        ? Object.freeze({ connectionId: profile.connectionId, modelId: profile.modelId })
-        : null,
-    });
+    return COMPUTER_APP_UNGRANTED;
   }
 
   /** The key a Task-scoped grant is filed under. Platform included: a digest alone is not an app. */
@@ -1285,11 +1276,9 @@ export class ComputerUseController {
           break;
         }
         const targetToken = randomUUID();
-        const labelled =
-          egressBinding !== null &&
-          profile.providerEgressConsent &&
-          profile.connectionId === egressBinding.connectionId &&
-          profile.modelId === egressBinding.modelId;
+        // From the grant, not from the profile row: the row is unauthenticated (T14), and a
+        // rewritten consent flag must not be what sends an application's window title out.
+        const labelled = ComputerUseController.egressAgreed(grantState, egressBinding);
         // Validated per row rather than only in the final envelope. A single malformed profile —
         // one with no app id, or a path the leaf name cannot be taken from — would otherwise throw
         // from the envelope parse and take every other application's windows down with it.
@@ -1357,8 +1346,7 @@ export class ComputerUseController {
     // Nothing below awaits, so this is the state the caller receives.
     const stale = new Set<string>();
     for (const [profileId, snapshot] of snapshots)
-      if (!this.targetProfileUnchanged(snapshot, egressBinding, context.taskId))
-        stale.add(profileId);
+      if (!this.targetProfileUnchanged(snapshot, context.taskId)) stale.add(profileId);
     const targets: ComputerTarget[] = [];
     for (const row of pending) {
       if (!stale.has(row.profileId)) {
@@ -1421,11 +1409,7 @@ export class ComputerUseController {
    * answer false. It never throws, because it runs on the return path where a throw would discard a
    * whole enumeration over one application that simply went away.
    */
-  private targetProfileUnchanged(
-    snapshot: TargetEnumerationSnapshot,
-    egressBinding: Readonly<{ connectionId: string; modelId: string }> | null,
-    taskId: string,
-  ): boolean {
+  private targetProfileUnchanged(snapshot: TargetEnumerationSnapshot, taskId: string): boolean {
     let current: ComputerAppProfileRecord;
     try {
       current = this.deps.persistence.getComputerAppProfile(snapshot.profile.id);
@@ -1449,15 +1433,23 @@ export class ComputerUseController {
       )
     )
       return false;
-    // Consent is re-derived the same way the row derived it, so the test is "does the agreement the
-    // label was returned under still hold", not "did any consent field move". A row that never
-    // carried a label has nothing to withdraw.
-    const consentFor = (record: ComputerAppProfileRecord): boolean =>
+    // The label's consent is part of the grant state compared above, so an agreement that moved has
+    // already dropped the row.
+    return true;
+  }
+
+  /** Whether the agreement in force covers sending this application's screen to this destination. */
+  private static egressAgreed(
+    state: ComputerAppGrantState,
+    egressBinding: Readonly<{ connectionId: string; modelId: string }> | null,
+  ): boolean {
+    return (
       egressBinding !== null &&
-      record.providerEgressConsent &&
-      record.connectionId === egressBinding.connectionId &&
-      record.modelId === egressBinding.modelId;
-    return !consentFor(snapshot.profile) || consentFor(current);
+      state.granted &&
+      state.providerEgress !== null &&
+      state.providerEgress.connectionId === egressBinding.connectionId &&
+      state.providerEgress.modelId === egressBinding.modelId
+    );
   }
 
   private resolveTargetAppProfileId(
@@ -1891,9 +1883,14 @@ export class ComputerUseController {
       this.closeAppGrantCard(pending.request.id, 'app_grant_identity_changed', 'identity_changed');
       return;
     }
-    if (pending.request.kind === 'provider-egress')
-      this.agreeProviderEgress(pending, observed.identity);
-    else if (input.decision === 'allow_always')
+    if (pending.request.kind === 'provider-egress') {
+      // The application's own agreement went away while the card was up. The card only asked about
+      // a destination, so it is withdrawn rather than allowed to stand in for the missing grant.
+      if (!this.agreeProviderEgress(pending, observed.identity)) {
+        this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
+        return;
+      }
+    } else if (input.decision === 'allow_always')
       this.createAppGrant(observed.profile.identity, {
         displayName: pending.displayName,
         maxMode: observed.facts.maximumMode,
@@ -1993,42 +1990,29 @@ export class ComputerUseController {
   private agreeProviderEgress(
     pending: PendingAppGrantRequest,
     identity: ComputerAppGrantIdentity,
-  ): void {
+  ): boolean {
     if (pending.grantId !== null) {
-      this.deps.persistence.setComputerAppGrantProviderEgress(
-        pending.grantId,
-        pending.providerEgress,
-      );
-      return;
+      try {
+        this.deps.persistence.setComputerAppGrantProviderEgress(
+          pending.grantId,
+          pending.providerEgress,
+        );
+        return true;
+      } catch {
+        return false;
+      }
     }
     const scoped = this.taskScopedGrants.get(pending.taskId);
     const key = this.taskScopedGrantKey(identity);
     const entry = scoped?.get(key);
     if (scoped !== undefined && entry !== undefined) {
       scoped.set(key, Object.freeze({ ...entry, providerEgress: pending.providerEgress }));
-      return;
+      return true;
     }
-    // A V1 profile's "remember" is the grant here, and its consent lives on the profile row. The
-    // Task-scoped map is where this consent goes, so the profile is not rewritten from a card.
-    // The entry takes over as the agreement `appGrantState` reports, so it has to carry the ceiling
-    // the profile carried: this card asked about a destination, and answering it must not also
-    // raise the mode above the one the user saved.
-    const next = this.taskScopedGrants.get(pending.taskId) ?? new Map<string, TaskScopedAppGrant>();
-    next.set(
-      key,
-      Object.freeze({
-        platform: identity.platform,
-        grantIdentityDigest: identity.grantIdentityDigest,
-        maxMode:
-          pending.grantedMaxMode === null
-            ? pending.facts.maximumMode
-            : bindComputerUseMaximumMode(pending.grantedMaxMode, pending.facts.maximumMode),
-        denyRulesetVersion: COMPUTER_USE_DENY_RULESET_VERSION,
-        policyEpoch: pending.policyEpoch,
-        providerEgress: pending.providerEgress,
-      }),
-    );
-    this.taskScopedGrants.set(pending.taskId, next);
+    // Neither agreement is there any more — revoked, or its epoch moved — so there is nothing for
+    // this consent to attach to. Recording it on its own would manufacture a grant out of a card
+    // that only asked about a destination.
+    return false;
   }
 
   /**

@@ -1699,41 +1699,29 @@ describe('computer_start', () => {
     ).toMatchObject({ mode: 'supervised' });
   });
 
-  it('keeps the mode a remembered V1 profile was saved with', async () => {
-    // Registered as `supervised` and remembered: V1's own quick start would confirm every action.
-    // Native could attest `full_access_app`, and inheriting only that would make `computer_start` a
-    // way around the confirmation the user asked for.
+  it('does not start on the word of a remembered V1 profile', async () => {
+    // Everything an attacker who can rewrite the database would set (T14): remembered, consented,
+    // and pointed at the destination this Turn uses. None of it authenticates, so none of it counts.
     const profile = profileRecord('profile-notes', macIdentity(), {
-      mode: 'supervised',
+      mode: 'full_access_app',
       remember: true,
       providerEgressConsent: true,
     });
     const fixture = createFixture({ profiles: [profile] });
     const target = await listOne(fixture);
-    expect(
-      await fixture.controller.requestAccess({ appToken: target.appToken, reason: 'x' }, context),
-    ).toEqual({ granted: true, reasonCode: null });
-    expect(fixture.published).toHaveLength(0);
-    expect(
-      await settle(
-        fixture.controller.startForAgent(
-          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
-          context,
-        ),
-      ),
-    ).toMatchObject({ mode: 'supervised' });
+    expect(target.granted).toBe(false);
+    await expect(
+      fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+    ).rejects.toThrow(/access_not_granted/u);
+    expect(fixture.startedSessions()).toBe(0);
   });
 
-  it('does not raise a remembered profile above its saved mode through the destination card', async () => {
+  it('asks with a full card for a remembered V1 profile, and the click is what grants', async () => {
     const profile = profileRecord('profile-notes', macIdentity(), {
-      mode: 'supervised',
       remember: true,
       providerEgressConsent: true,
     });
-    const fixture = createFixture({
-      profiles: [profile],
-      providerBinding: { connectionId: 'connection-1', modelId: 'model-2' },
-    });
+    const fixture = createFixture({ profiles: [profile] });
     const target = await listOne(fixture);
     const asked = fixture.controller.requestAccess(
       { appToken: target.appToken, reason: 'x' },
@@ -1741,12 +1729,11 @@ describe('computer_start', () => {
     );
     await vi.advanceTimersByTimeAsync(0);
     const card = fixture.pending();
-    expect(card.kind).toBe('provider-egress');
-    // The card describes the agreement that exists, not everything native could attest.
-    expect(card.verified.maxMode).toBe('supervised');
+    // The application itself is being asked about, not merely a destination.
+    expect(card.kind).toBe('app-grant');
     await fixture.controller.resolveAppGrantRequest(
-      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
-      intentFor(card, 'allow_always'),
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_once' },
+      intentFor(card, 'allow_once'),
     );
     expect(await asked).toEqual({ granted: true, reasonCode: null });
     expect(
@@ -1756,7 +1743,7 @@ describe('computer_start', () => {
           context,
         ),
       ),
-    ).toMatchObject({ mode: 'supervised' });
+    ).toMatchObject({ state: 'stopped' });
   });
 
   it('is unreachable with the agent-driven gate off', async () => {
