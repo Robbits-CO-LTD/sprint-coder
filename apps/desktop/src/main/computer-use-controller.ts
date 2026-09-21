@@ -2121,6 +2121,9 @@ export class ComputerUseController {
           );
         };
         onSettled = (settled) => {
+          // The single-session rule makes a foreign status here unexpected, not impossible: a late
+          // publish for the session that held the slot before this one must not answer this call.
+          if (settled.sessionId !== status.sessionId) return;
           onSettled = null;
           signal?.removeEventListener('abort', abandon);
           resolve(computerStartToolOutput(settled));
