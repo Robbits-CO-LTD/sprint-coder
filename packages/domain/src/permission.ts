@@ -120,7 +120,22 @@ export type PermissionResource =
    * Task must not learn what another Task's desktop contains). It is observe-only by construction:
    * nothing can be driven through it.
    */
-  | { kind: 'computer-target-list'; taskId: string };
+  | { kind: 'computer-target-list'; taskId: string }
+  /**
+   * The two control-bearing things a Task may do before a session exists: ask the user for
+   * permission to drive an application, and begin driving one it already has permission for.
+   *
+   * It carries `computer.control` and never `computer.observe`, which is the opposite of the list
+   * above and the reason it is a separate kind rather than a flag on it: neither of these reads a
+   * screen, and pairing control with an enumeration resource would let a control decision be made
+   * against the binding that exists purely to be read.
+   *
+   * Like the list, it binds only the Task, because there is no app identity yet — the token that
+   * names one is spent inside the tool, after this decision. What this resource governs is "may
+   * this Task reach for the desktop at all", and the specific application is decided by the human
+   * click on the approval card and by the stored grant, neither of which is a permission rule.
+   */
+  | { kind: 'computer-target-access'; taskId: string };
 
 export type ResourceSet =
   | { kind: 'workspace'; workspaceId?: string }
@@ -187,6 +202,7 @@ export type ResourceSet =
       revision: number;
     }
   | { kind: 'computer-target-list' | 'computer-target-list-exact'; taskId?: string }
+  | { kind: 'computer-target-access' | 'computer-target-access-exact'; taskId?: string }
   | { kind: 'all' };
 
 export type PermissionRule = {
@@ -519,6 +535,15 @@ export function createSessionGrant(grant: SessionGrant): SessionGrant {
       grant.resourceSet.kind === 'computer-target-list-exact')
   )
     throw new Error('Computer control grants cannot bind a target list');
+  // And the mirror: pre-session access is control-only, so an observe grant must never name it.
+  // Without this, "may read the desktop" could be written down as authority over the two calls
+  // that ask for permission and start driving.
+  if (
+    grant.capability === 'computer.observe' &&
+    (grant.resourceSet.kind === 'computer-target-access' ||
+      grant.resourceSet.kind === 'computer-target-access-exact')
+  )
+    throw new Error('Computer observe grants cannot bind pre-session access');
   if (
     (grant.capability === 'computer.observe' || grant.capability === 'computer.control') &&
     !isComputerResourceSet(grant.resourceSet)
@@ -835,9 +860,13 @@ function requestFactsValid(request: PermissionRequest): boolean {
     )
       return false;
   }
-  if (request.resource.kind === 'computer-target-list') {
+  if (
+    request.resource.kind === 'computer-target-list' ||
+    request.resource.kind === 'computer-target-access'
+  ) {
     // The Task is the whole binding: there is no app identity yet, and the request must not be able
-    // to enumerate on behalf of a Task other than the one being evaluated.
+    // to enumerate, or reach for the desktop, on behalf of a Task other than the one being
+    // evaluated.
     if (request.resource.taskId.length === 0 || request.resource.taskId !== request.taskId)
       return false;
   }
@@ -867,9 +896,13 @@ function requestFactsValid(request: PermissionRequest): boolean {
                       request.resource.kind === 'computer-session' ||
                       request.resource.kind === 'computer-revision' ||
                       // Enumeration is observe-only: there is nothing to drive through a list, so
-                      // `computer.control` must never accept it.
+                      // `computer.control` must never accept it. Pre-session access is the mirror
+                      // image — it is how a Task asks to drive something and how it begins, so
+                      // `computer.observe` must never accept that.
                       (request.capability === 'computer.observe' &&
-                        request.resource.kind === 'computer-target-list')
+                        request.resource.kind === 'computer-target-list') ||
+                      (request.capability === 'computer.control' &&
+                        request.resource.kind === 'computer-target-access')
                     : request.resource.kind === 'workspace-path' ||
                       request.resource.kind === 'external-path';
   return resourceMatchesCapability;
@@ -1003,7 +1036,7 @@ export function permissionResourceIdentity(resource: PermissionResource): string
       resource.sessionId,
       resource.revision,
     ]);
-  if (resource.kind === 'computer-target-list')
+  if (resource.kind === 'computer-target-list' || resource.kind === 'computer-target-access')
     return JSON.stringify([resource.kind, resource.taskId]);
   if (resource.kind === 'provider-disclosure')
     return JSON.stringify([
@@ -1048,7 +1081,8 @@ export function permissionRequestFingerprint(request: PermissionRequest): string
             request.resource.kind === 'computer-window' ||
             request.resource.kind === 'computer-session' ||
             request.resource.kind === 'computer-revision' ||
-            request.resource.kind === 'computer-target-list'
+            request.resource.kind === 'computer-target-list' ||
+            request.resource.kind === 'computer-target-access'
           ? permissionResourceIdentity(request.resource)
           : request.resource;
   return createHash('sha256')
@@ -1223,6 +1257,11 @@ export function resourceContains(set: ResourceSet, resource: PermissionResource)
       resource.kind === 'computer-target-list' &&
       (set.taskId === undefined || resource.taskId === set.taskId)
     );
+  if (set.kind === 'computer-target-access' || set.kind === 'computer-target-access-exact')
+    return (
+      resource.kind === 'computer-target-access' &&
+      (set.taskId === undefined || resource.taskId === set.taskId)
+    );
   if (set.kind === 'external-exact')
     return resource.kind === 'external' && resource.target === set.target;
   return false;
@@ -1255,7 +1294,9 @@ function isComputerResourceSet(resourceSet: ResourceSet): boolean {
     resourceSet.kind === 'computer-revision' ||
     resourceSet.kind === 'computer-revision-exact' ||
     resourceSet.kind === 'computer-target-list' ||
-    resourceSet.kind === 'computer-target-list-exact'
+    resourceSet.kind === 'computer-target-list-exact' ||
+    resourceSet.kind === 'computer-target-access' ||
+    resourceSet.kind === 'computer-target-access-exact'
   );
 }
 

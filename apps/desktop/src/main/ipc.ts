@@ -672,7 +672,12 @@ import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor'
 import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
-import { COMPUTER_LIST_TARGETS_TOOL } from './computer-use-target-tools';
+import {
+  COMPUTER_LIST_TARGETS_TOOL,
+  COMPUTER_REQUEST_ACCESS_TOOL,
+  COMPUTER_START_TOOL,
+  COMPUTER_STOP_TOOL,
+} from './computer-use-target-tools';
 import { computerTargetSystemPromptFor } from './computer-use-target-model';
 import { previewGraphSource } from './graph-source-preview';
 import { GraphSourceMonitor } from './graph-source-monitor';
@@ -978,6 +983,27 @@ export function authorizationTurnIsActive(
     if (worker.taskId === taskId && worker.parentTurnId === turnId) return true;
   return false;
 }
+
+/**
+ * Which authorization lane each agent-facing Computer Use tool belongs in.
+ *
+ * Three lanes, because the three questions are different. `discovery` asks "may this Task be told
+ * what is on the desktop" and is observe-only. `access` asks "may this Task reach for the desktop
+ * at all" — it covers the call that raises the approval card and the call that begins a session,
+ * neither of which has a session to bind to yet. `session` is the existing lane, bound to a live
+ * session id, and it is where `computer_stop` belongs.
+ *
+ * A table rather than a chain of comparisons so that adding a tool without choosing a lane is
+ * visible here and denied at the door, instead of falling into whichever branch happens to be last.
+ */
+const COMPUTER_TARGET_TOOL_LANES: ReadonlyMap<string, 'discovery' | 'access' | 'session'> = new Map(
+  [
+    [COMPUTER_LIST_TARGETS_TOOL.toolId, 'discovery' as const],
+    [COMPUTER_REQUEST_ACCESS_TOOL.toolId, 'access' as const],
+    [COMPUTER_START_TOOL.toolId, 'access' as const],
+    [COMPUTER_STOP_TOOL.toolId, 'session' as const],
+  ],
+);
 
 /**
  * The renderer's filtered model list is display-only. Main must independently require a current,
@@ -5624,6 +5650,125 @@ export class IpcRouter {
     };
   }
 
+  /**
+   * The pre-session control lane: `computer_request_access` and `computer_start`.
+   *
+   * Both carry `computer.control` and neither has a session, so the session lane — which requires a
+   * live session id and answers `computer_session_missing` without one — can never authorize them.
+   * They are not enumeration either: nothing here reads a screen. Hence a third lane, with its own
+   * resource kind that pairs with `computer.control` alone (`packages/domain`), bound to the Task,
+   * because the application is not decided by a permission rule at all.
+   *
+   * **Where the decision actually comes from**, and why this lane supplies its own allow rule:
+   * `computer_request_access` can only raise a card and wait for a human click — the click *is* the
+   * approval, and a second prompt from the Task's access preset would ask the same question twice,
+   * in the wrong order, about an application the user has not been shown yet. `computer_start`
+   * refuses unless `appGrantState` already says the application is granted, which is a decision the
+   * user made on that card. So the preset does not gate these; what still gates them is everything
+   * that is not an allow rule:
+   *
+   * - `computer.control` revoked in settings denies both, because `evaluateCurrentPolicy` folds a
+   *   revoked capability into `projectDeny`, which runs before any allow rule.
+   * - A policy epoch that moved since the tool call was authorized denies both.
+   * - The permit is revalidated immediately before execution, and nothing persistent is written:
+   *   the same non-persistent shape the other two Computer Use lanes use.
+   *
+   * Consistency with the session lane: there, `computer.control` supplies an allow rule only for
+   * `full_access_app`, and `supervised` deliberately leaves `allowRules` empty so the preset raises
+   * a per-action approval. That is the same principle — the lane brings an allow rule exactly where
+   * the human decision has already happened elsewhere — applied to a different question.
+   */
+  private async evaluateComputerTargetAccessPermission(
+    request: ToolAuthorizationRequest,
+    capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
+  ) {
+    if (capability !== 'computer.control')
+      return { decision: 'deny' as const, reason: 'computer_target_access_capability' };
+    const taskId = request.context.taskId;
+    const policyEpoch = this.permissionBroker.getPolicy(taskId).policyEpoch;
+    if (policyEpoch !== request.context.policyEpoch)
+      return { decision: 'deny' as const, reason: 'policy_epoch_changed' };
+    const resource = { kind: 'computer-target-access' as const, taskId };
+    const resourceSet = { kind: 'computer-target-access-exact' as const, taskId };
+    const operation = 'control' as const;
+    const sandboxProfile = 'read-only' as const;
+    const baseRequest = {
+      taskId,
+      subjectId: `computer-use:access:${capability}`,
+      capability,
+      resource,
+      operation,
+      providerEgress: 'none' as const,
+      sandboxProfile,
+      executionSpecDigest: digestCanonical({
+        schemaVersion: 1,
+        capability,
+        resource,
+        toolId: request.entry.toolId,
+        input: request.input,
+      }),
+      risk: request.entry.risk,
+    };
+    const permissionRequest = {
+      ...baseRequest,
+      reviewerInputDigest: autoReviewerInputDigest({
+        request: baseRequest,
+        tool: {
+          kind: request.entry.kind,
+          sideEffect: request.entry.sideEffect,
+          risk: request.entry.risk,
+        },
+        policyEpoch,
+      }),
+    } satisfies PermissionRequest;
+    const ceilingEntry = {
+      capability,
+      resourceSet,
+      operations: [operation],
+      expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+      providerEgress: ['none' as const],
+      sandboxProfiles: [sandboxProfile],
+    };
+    const evaluationInput = {
+      taskId,
+      turnId: request.context.turnId,
+      request: permissionRequest,
+      basePolicy: {
+        managedDeny: [],
+        projectDeny: [],
+        parentCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        modeCeiling: { entries: [ceilingEntry], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+        sandbox: { feasible: true, profile: sandboxProfile },
+        allowRules: [
+          {
+            capability,
+            resourceSet,
+            operations: [operation],
+            auditReason: 'computer_target_access',
+          },
+        ],
+      },
+      now: new Date().toISOString(),
+    } satisfies Parameters<PermissionBroker['preview']>[0];
+    const evaluation = this.permissionBroker.preview(evaluationInput);
+    if (evaluation.decision === 'deny' || evaluation.decision === 'approval_required')
+      return { decision: evaluation.decision, reason: evaluation.reason };
+    if (evaluation.permit === undefined)
+      return { decision: 'deny' as const, reason: 'computer_permission_permit_missing' };
+    const permit = evaluation.permit;
+    return {
+      decision: 'allow' as const,
+      reason: evaluation.reason,
+      ...(evaluation.decision === 'allow_once' ? { approvalDecision: 'allow_once' as const } : {}),
+      beforeExecute: () =>
+        this.permissionBroker.revalidateEphemeral({
+          ...evaluationInput,
+          permit,
+          now: new Date().toISOString(),
+        }).valid,
+    };
+  }
+
   private async evaluateComputerUsePermission(
     request: ToolAuthorizationRequest,
     capability: Extract<Capability, 'computer.observe' | 'computer.control'>,
@@ -5810,10 +5955,20 @@ export class IpcRouter {
   private async evaluateToolPermission(request: ToolAuthorizationRequest, capability: Capability) {
     if (request.entry.providerName === 'request_user_input')
       return { decision: 'approval_required' as const, reason: 'user_choice_required' };
-    if (capability === 'computer.observe' || capability === 'computer.control')
-      return request.entry.toolId === COMPUTER_LIST_TARGETS_TOOL.toolId
-        ? this.evaluateComputerTargetDiscoveryPermission(request, capability)
-        : this.evaluateComputerUsePermission(request, capability);
+    if (capability === 'computer.observe' || capability === 'computer.control') {
+      // Routed by exact tool id, never by the shape of the input. "Has no sessionId" would make a
+      // future tool that forgets the field fall into a pre-session lane by accident; a
+      // `computerTarget` tool that is not in the table is one nobody has decided about, and it is
+      // denied rather than defaulted into the session lane.
+      const lane = COMPUTER_TARGET_TOOL_LANES.get(request.entry.toolId);
+      if (request.entry.kind === 'computerTarget' && lane === undefined)
+        return { decision: 'deny' as const, reason: 'computer_target_tool_unknown' };
+      if (lane === 'discovery')
+        return this.evaluateComputerTargetDiscoveryPermission(request, capability);
+      if (lane === 'access')
+        return this.evaluateComputerTargetAccessPermission(request, capability);
+      return this.evaluateComputerUsePermission(request, capability);
+    }
     const managedWorkerWorkspace = this.managedWorkerCall.get(
       JSON.stringify([request.context.turnId, request.callId]),
     )?.workspace;

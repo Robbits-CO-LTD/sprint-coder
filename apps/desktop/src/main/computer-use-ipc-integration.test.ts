@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -6,14 +8,21 @@ import {
   computerAppProfileSchema,
   computerUseAvailabilitySchema,
   computerAppGrantResolveInputSchema,
+  computerStartToolOutputSchema,
   computerUseGrantRevokeInputSchema,
+  type ComputerAppGrantRequest,
   computerUseProfileRegisterInputSchema,
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
-import { COMPUTER_LIST_TARGETS_TOOL, COMPUTER_STOP_TOOL } from './computer-use-target-tools';
+import {
+  COMPUTER_LIST_TARGETS_TOOL,
+  COMPUTER_REQUEST_ACCESS_TOOL,
+  COMPUTER_START_TOOL,
+  COMPUTER_STOP_TOOL,
+} from './computer-use-target-tools';
 import {
   COMPUTER_TARGET_SYSTEM_PROMPT,
   computerTargetSystemPromptFor,
@@ -926,7 +935,7 @@ describe('Computer Use Main IPC integration', () => {
       },
     });
     const evaluate = (
-      entry: { toolId: string; providerName: string },
+      entry: { toolId: string; providerName: string; kind?: string },
       input: unknown,
     ): Promise<{ decision: string; reason: string }> =>
       (
@@ -938,7 +947,12 @@ describe('Computer Use Main IPC integration', () => {
         }
       ).evaluateToolPermission(
         {
-          entry: { ...entry, kind: 'computerTarget', sideEffect: 'control', risk: 'low' },
+          entry: {
+            kind: 'computerTarget',
+            sideEffect: 'control',
+            risk: 'low',
+            ...entry,
+          },
           input,
           callId: 'call-1',
           context: { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 3 },
@@ -966,11 +980,66 @@ describe('Computer Use Main IPC integration', () => {
       ),
     ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
     await expect(
-      evaluate({ toolId: 'builtin:computer:observe@1', providerName: 'computer_observe' }, {}),
+      evaluate(
+        {
+          toolId: 'builtin:computer:observe@1',
+          providerName: 'computer_observe',
+          // Its real kind: `computer_observe` belongs to the in-session surface, not the Task one.
+          kind: 'computer',
+        },
+        {},
+      ),
     ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_session_missing' });
+
+    // A `computerTarget` tool nobody has assigned a lane to is denied at the door rather than
+    // falling into whichever evaluation happens to be last.
+    await expect(
+      evaluate({ toolId: 'builtin:computer:invented@1', providerName: 'computer_invented' }, {}),
+    ).resolves.toMatchObject({ decision: 'deny', reason: 'computer_target_tool_unknown' });
     expect(previewed).toHaveLength(1);
   });
 });
+
+const endToEndImageBytes = Buffer.from('89504e470d0a1a0a', 'hex');
+const endToEndImageDigest = createHash('sha256').update(endToEndImageBytes).digest('hex');
+
+/** The minimum an observation must be for a session to take a round through the real controller. */
+function endToEndObservation(sessionId: string, revision: number, appIdentityDigest: string) {
+  const now = Date.now();
+  return {
+    sessionId,
+    appIdentityDigest,
+    windowIdentityDigest: 'd'.repeat(64),
+    profileRevision: 3,
+    maximumMode: 'full_access_app',
+    policyLanguage: 'en',
+    screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+    revision,
+    observedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 20_000).toISOString(),
+    clientWidth: 800,
+    clientHeight: 600,
+    images: [
+      {
+        mimeType: 'image/png',
+        digest: endToEndImageDigest,
+        byteLength: endToEndImageBytes.byteLength,
+        width: 1,
+        height: 1,
+        base64: endToEndImageBytes.toString('base64'),
+      },
+    ],
+    treeDigest: null,
+    treeByteLength: 0,
+    treeDepth: 0,
+    treeNodeCount: 0,
+    focusedElementSignature: 'f'.repeat(64),
+    dialogSetRevision: 1,
+    dialogSetDigest: '1'.repeat(64),
+    activeWindowIdentityDigest: 'd'.repeat(64),
+    activeWindowKind: 'application',
+  };
+}
 
 describe('Computer Use target tools end to end', () => {
   /**
@@ -980,13 +1049,30 @@ describe('Computer Use target tools end to end', () => {
    * output schema. Each review round has found a break in a different one of these links, so they
    * are pinned together rather than one at a time.
    */
-  function endToEnd(options: { preset?: 'ask' | 'auto' | 'full'; revoked?: boolean } = {}) {
+  function endToEnd(
+    options: {
+      preset?: 'ask' | 'auto' | 'full';
+      revoked?: boolean;
+      revokedCapabilities?: ('computer.observe' | 'computer.control')[];
+      policyEpoch?: number;
+      /** V1's "remember" counts as a grant, which would make a card unnecessary. */
+      remembered?: boolean;
+    } = {},
+  ) {
     const preset = options.preset ?? 'full';
+    let policyEpoch = options.policyEpoch ?? 0;
+    const audits = new Map<string, unknown>();
+    const cards: ComputerAppGrantRequest[] = [];
+    const grantStore = createComputerAppGrantFixtureStore();
+    let observationRevision = 0;
     const policy: PermissionPolicyRecord = {
       preset,
-      policyEpoch: 0,
+      get policyEpoch() {
+        return policyEpoch;
+      },
       expandedPolicy: expandAccessPreset(preset),
-      revokedCapabilities: options.revoked === true ? ['computer.observe'] : [],
+      revokedCapabilities:
+        options.revokedCapabilities ?? (options.revoked === true ? ['computer.observe'] : []),
     };
     const permissionBroker = new PermissionBroker({
       getPermissionPolicy: () => policy,
@@ -1025,7 +1111,7 @@ describe('Computer Use target tools end to end', () => {
       connectionId: 'connection-1',
       modelId: 'model-1',
       providerEgressConsent: true,
-      remember: true,
+      remember: options.remembered !== false,
       revision: 3,
       createdAt: '2026-09-19T00:00:00.000Z',
       updatedAt: '2026-09-19T00:00:00.000Z',
@@ -1034,10 +1120,18 @@ describe('Computer Use target tools end to end', () => {
       persistence: {
         listComputerAppProfiles: () => [profile],
         getComputerAppProfile: () => profile,
-        getActiveTurnId: () => null,
-        getPermissionPolicy: () => ({ policyEpoch: 0 }),
+        // A real `computer_start` runs inside the calling Turn, so the Task has to look busy with
+        // exactly that Turn — the same thing production sees while a tool call is in flight.
+        getActiveTurnId: () => 'turn-1',
+        getPermissionPolicy: () => ({ policyEpoch }),
         listComputerActionAudits: () => [],
-        ...createComputerAppGrantFixtureStore().api,
+        recordComputerActionAudit: (input: Record<string, unknown>) => {
+          const record = { ...input, id: `audit-${audits.size + 1}`, state: 'pending' };
+          audits.set(record.id, record);
+          return record;
+        },
+        completeComputerActionAudit: ({ auditId }: { auditId: string }) => audits.get(auditId),
+        ...grantStore.api,
       } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
       native: {
         availability: () => available,
@@ -1060,8 +1154,26 @@ describe('Computer Use target tools end to end', () => {
             maximumMode: 'full_access_app',
           },
         ],
-        startSession: async () => ({}) as never,
-        observe: async () => ({}) as never,
+        startSession: async (input: { sessionId: string; windowId: string }) => ({
+          sessionId: input.sessionId,
+          platform: 'darwin',
+          appIdentityDigest: profile.identityDigest,
+          windowIdentityDigest: 'd'.repeat(64),
+          windowId: input.windowId,
+          profileRevision: profile.revision,
+          cancelEpoch: 0,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+          screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+        }),
+        observe: async (session: { sessionId: string }) => {
+          observationRevision += 1;
+          return endToEndObservation(
+            session.sessionId,
+            observationRevision,
+            profile.identityDigest,
+          );
+        },
         dispatch: async () => ({ result: 'completed', reasonCode: null }),
         cancel: async () => undefined,
         close: async () => undefined,
@@ -1069,15 +1181,18 @@ describe('Computer Use target tools end to end', () => {
       featureEnabled: () => true,
       agentDrivenEnabled: () => true,
       providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
-      currentPolicyEpoch: () => 0,
+      currentPolicyEpoch: () => policyEpoch,
       repositionEmergencyStop: () => true,
+      publishGrantRequest: (request) => cards.push(request),
+      // One round and done, so a real `computer_start` reaches a terminal state without a Provider.
+      planner: { plan: async () => ({ type: 'finish' }) },
     });
     const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
     Object.assign(router, { permissionBroker, computerUseController: controller });
     const harness = new ManagedCodingHarness({
       workspaceFor: () => null,
       rootIdentityFor: () => undefined,
-      policyEpochFor: () => 0,
+      policyEpochFor: () => policyEpoch,
       authorizer: (request) =>
         (
           router as unknown as {
@@ -1086,12 +1201,24 @@ describe('Computer Use target tools end to end', () => {
         ).evaluateToolPermission(request, request.entry.requiredCapabilities[0]!) as never,
       computerTargets: {
         listTargets: (input, context) => controller.listTargets(input, context),
-        requestAccess: (input, context) => controller.requestAccess(input, context),
-        start: (input, context) => controller.startForAgent(input, context),
+        requestAccess: (input, context, signal) => controller.requestAccess(input, context, signal),
+        start: (input, context, signal) => controller.startForAgent(input, context, signal),
         stop: (sessionId, context) => controller.stopForAgent(sessionId, context),
       },
     });
-    return { harness, controller, permissionBroker };
+    return {
+      harness,
+      controller,
+      permissionBroker,
+      router,
+      cards,
+      profile,
+      grantStore,
+      /** Moves the policy under a Turn that was already dispatched, as a settings change does. */
+      movePolicyEpoch: (next: number) => {
+        policyEpoch = next;
+      },
+    };
   }
 
   const turnContext = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
@@ -1173,6 +1300,185 @@ describe('Computer Use target tools end to end', () => {
         input: { sessionId: 'session-elsewhere' },
       }),
     ).rejects.toThrow(/computer_session_missing/u);
+  });
+
+  /**
+   * The two calls that carry `computer.control` before a session exists.
+   *
+   * These reached the controller in unit tests and were denied in production: both require
+   * `computer.control`, neither carries a `sessionId`, and the session-bound lane answers
+   * `computer_session_missing` without one. Dispatched here through the real authorizer, which is
+   * the only place that would have caught it.
+   */
+  async function raiseCard(fixture: ReturnType<typeof endToEnd>): Promise<{
+    outcome: Promise<unknown>;
+    card: ComputerAppGrantRequest;
+  }> {
+    const targets = (await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-list',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; appToken?: string }[] };
+    const appToken = targets.targets.find((target) => target.kind === 'selectable')?.appToken;
+    expect(appToken).toBeDefined();
+    const outcome = fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-access',
+      providerName: 'computer_request_access',
+      input: { appToken, reason: 'Copy the table' },
+    });
+    // The card is published from inside the dispatch, a few ticks in.
+    for (let tick = 0; tick < 50 && fixture.cards.length === 0; tick += 1)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    const card = fixture.cards.at(0);
+    expect(card).toBeDefined();
+    return { outcome, card: card as ComputerAppGrantRequest };
+  }
+
+  it('authorizes computer_request_access and reaches the card', async () => {
+    // Not remembered, so there is no V1 grant to short-circuit on and a card is actually needed.
+    const fixture = endToEnd({ preset: 'ask', remembered: false });
+    fixture.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    const { outcome, card } = await raiseCard(fixture);
+    expect(card.state).toBe('pending');
+    // A human click on that card, and the tool call answers.
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'deny' },
+      null,
+    );
+    expect(await outcome).toEqual({ granted: false, reasonCode: 'access_request_denied' });
+  });
+
+  it('authorizes computer_start and runs a session to its end', async () => {
+    const fixture = endToEnd({ preset: 'ask' });
+    fixture.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    fixture.controller.createAppGrant(fixture.profile.identity, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const targets = (await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-list',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; targetToken?: string }[] };
+    const targetToken = targets.targets.find((target) => target.kind === 'selectable')?.targetToken;
+    const output = await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-start',
+      providerName: 'computer_start',
+      input: { targetToken, goal: 'Copy the table into Numbers' },
+    });
+    // Through the broker, which validates the reduced projection against the tool's own output
+    // schema — including `stopReason: null`, which an `enum` with no `type` has to accept.
+    expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
+    expect(output).toMatchObject({ state: 'stopped', stopReason: 'user_stop', round: 1 });
+  });
+
+  it('stops both control calls when computer.control is revoked, and leaves enumeration alone', async () => {
+    const fixture = endToEnd({ revokedCapabilities: ['computer.control'], remembered: false });
+    fixture.harness.startTurn(turnContext, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    // Enumeration only needs `computer.observe`, so it still works.
+    const targets = (await fixture.harness.broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId: 'call-list',
+      providerName: 'computer_list_targets',
+      input: {},
+    })) as { targets: readonly { kind: string; appToken?: string; targetToken?: string }[] };
+    const selectable = targets.targets.find((target) => target.kind === 'selectable');
+    expect(selectable).toBeDefined();
+    // The lane supplies its own allow rule, but a revoked capability is folded into projectDeny,
+    // which runs first. Nothing reaches the controller, so no card is ever raised.
+    for (const call of [
+      {
+        providerName: 'computer_request_access',
+        input: { appToken: selectable?.appToken, reason: 'ask' },
+      },
+      {
+        providerName: 'computer_start',
+        input: { targetToken: selectable?.targetToken, goal: 'x' },
+      },
+    ])
+      await expect(
+        fixture.harness.broker.dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          callId: `call-${call.providerName}`,
+          ...call,
+        }),
+      ).rejects.toThrow(/capability_revoked/u);
+    expect(fixture.cards).toHaveLength(0);
+  });
+
+  it('denies both control calls when the policy epoch has moved', async () => {
+    const fixture = endToEnd({ policyEpoch: 7, remembered: false });
+    fixture.harness.startTurn({ ...turnContext, policyEpoch: 7 }, 'codex', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    // The user changes a permission after the Turn was dispatched. The catalog is bound to the
+    // epoch it started with; the lane reads the current one.
+    fixture.movePolicyEpoch(8);
+    for (const call of [
+      { providerName: 'computer_request_access', input: { appToken: 'x', reason: 'ask' } },
+      { providerName: 'computer_start', input: { targetToken: 'x', goal: 'x' } },
+    ])
+      // The broker refuses first — a catalog bound to an epoch that has moved cannot dispatch at
+      // all — so this is the outer of the two guards.
+      await expect(
+        fixture.harness.broker.dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          callId: `call-${call.providerName}`,
+          ...call,
+        }),
+      ).rejects.toThrow(/policy epoch/iu);
+    expect(fixture.cards).toHaveLength(0);
+
+    // And the lane's own check, which is what answers if a call ever arrives past the broker.
+    const evaluate = (toolId: string): Promise<{ decision: string; reason: string }> =>
+      (
+        fixture.router as unknown as {
+          evaluateToolPermission(
+            request: unknown,
+            capability: string,
+          ): Promise<{ decision: string; reason: string }>;
+        }
+      ).evaluateToolPermission(
+        {
+          entry: {
+            toolId,
+            providerName: 'x',
+            kind: 'computerTarget',
+            sideEffect: 'control',
+            risk: 'high',
+          },
+          input: {},
+          callId: 'call-direct',
+          context: { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 7 },
+        },
+        'computer.control',
+      );
+    for (const toolId of [COMPUTER_REQUEST_ACCESS_TOOL.toolId, COMPUTER_START_TOOL.toolId])
+      await expect(evaluate(toolId)).resolves.toMatchObject({
+        decision: 'deny',
+        reason: 'policy_epoch_changed',
+      });
   });
 });
 
