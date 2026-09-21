@@ -1191,6 +1191,37 @@ describe('computer_request_access', () => {
     expect(fixture.grants.size).toBe(0);
   });
 
+  it('creates no grant when the row was re-pointed at another copy while the card was up', async () => {
+    // Another install of the same signed application: bundle id, Team ID and signing identifier are
+    // unchanged, so the native digest and the grant digest — neither includes the path on macOS —
+    // still match, native re-verifies happily, and every fact the card showed is still true. Only
+    // the comparison a stored grant gets (§6.3) notices that this is not the application asked about.
+    const profile = profileRecord('profile-notes', macIdentity());
+    const fixture = createFixture({ profiles: [profile] });
+    const target = await listOne(fixture);
+    const pending = fixture.controller.requestAccess(
+      { appToken: target.appToken, reason: 'ask' },
+      context,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const card = fixture.pending();
+    const elsewhere = '/Users/someone/Downloads/Notes.app/Contents/MacOS/Notes';
+    fixture.profiles[0] = {
+      ...profile,
+      canonicalPath: elsewhere,
+      identity: { ...(profile.identity as Record<string, unknown>), executablePath: elsewhere },
+    };
+    await fixture.controller.resolveAppGrantRequest(
+      { requestId: card.id, expectedRevision: card.revision, decision: 'allow_always' },
+      intentFor(card, 'allow_always'),
+    );
+    expect(await pending).toEqual({ granted: false, reasonCode: 'app_grant_identity_changed' });
+    expect(fixture.grants.size).toBe(0);
+    expect(
+      selectable((await fixture.controller.listTargets({}, context)).targets)[0]?.granted,
+    ).toBe(false);
+  });
+
   it('refuses a token it never issued, one from another Task, and an expired one', async () => {
     const fixture = createFixture();
     const target = await listOne(fixture);

@@ -1634,7 +1634,7 @@ export class ComputerUseController {
     // The same live enumeration the click will re-run, so both sides compute the ceiling from
     // native rather than one from native and one from the store.
     const observed = await this.refetchAppGrantFacts(profile.id);
-    if (observed === null || observed.identity.grantIdentityDigest !== identity.grantIdentityDigest)
+    if (observed === null || computerAppGrantMismatch(identity, observed.identity, false) !== null)
       return this.accessRefused('access_request_invalid_token');
     // `policyEpochChanged` withdraws the card that exists; while native was answering there was no
     // card to withdraw, and a policy change does not abort this dispatch either. Raising now would
@@ -1945,7 +1945,16 @@ export class ComputerUseController {
       this.closeAppGrantCard(pending.request.id, 'access_request_withdrawn', 'withdrawn');
       return;
     }
-    if (observed === null || !computerAppGrantCardFactsMatch(pending.facts, observed.facts)) {
+    // Two comparisons, because they cover different things. The facts are what the card *showed*;
+    // the identity is what the card was *about*, including the path — which a signed macOS
+    // application's digests all leave out, so a row re-pointed at another copy of the same signed
+    // application passes native and the facts alike. `computerAppGrantMismatch` is the comparison a
+    // stored grant gets (§6.3), and a grant about to be written must pass it first.
+    if (
+      observed === null ||
+      !computerAppGrantCardFactsMatch(pending.facts, observed.facts) ||
+      computerAppGrantMismatch(pending.identity, observed.identity, observed.facts.denied) !== null
+    ) {
       this.closeAppGrantCard(pending.request.id, 'app_grant_identity_changed', 'identity_changed');
       return;
     }
@@ -2159,7 +2168,7 @@ export class ComputerUseController {
     signal?.throwIfAborted();
     if (
       observed === null ||
-      observed.identity.grantIdentityDigest !== identity.grantIdentityDigest ||
+      computerAppGrantMismatch(identity, observed.identity, false) !== null ||
       observed.profile.revision !== profile.revision
     )
       throw new Error('Computer Use app identity changed');

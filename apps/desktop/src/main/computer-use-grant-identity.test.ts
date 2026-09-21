@@ -119,9 +119,11 @@ describe('grant identity derivation', () => {
     ).toBe(packaged.grantIdentityDigest);
   });
 
-  it('keeps a Windows package grant across a servicing update, and only for packages', () => {
+  it('gives a Windows package claim no path exemption until native attests it', () => {
     // `WindowsApps\<PackageFullName>_<version>_<arch>__<publisherId>\` puts the version in the
-    // directory name, so comparing the path would re-ask for permission on every Store update.
+    // directory name, so this re-asks on a Store update. That cost is accepted for now: the only
+    // thing that could switch the comparison off is `packageFamilyName`, which native does not
+    // verify yet and which sits in a record with no MAC (S5 / S6 bind it).
     const packaged = derive(
       winIdentity({
         packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
@@ -134,12 +136,21 @@ describe('grant identity derivation', () => {
         packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
         executablePath:
           'C:\\Program Files\\WindowsApps\\Example.Notes_1.1.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
-        // A signed application's executable bytes move on every update and are not compared.
         executableDigest: 'f'.repeat(64),
       }),
     );
-    expect(computerAppGrantMismatch(packaged, updated, false)).toBeNull();
-    expect(computerAppGrantIdentityMatches(packaged, updated)).toBe(true);
+    expect(packaged.grantIdentityDigest).toBe(updated.grantIdentityDigest);
+    expect(computerAppGrantMismatch(packaged, updated, false)).toBe('identity_changed');
+    expect(computerAppGrantIdentityMatches(packaged, updated)).toBe(false);
+    // The forgery this closes: one signer, two applications, the same family name written on both.
+    const other = derive(
+      winIdentity({
+        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
+        executablePath: 'C:\\Program Files\\Example\\Other\\Other.exe',
+      }),
+    );
+    expect(other.grantIdentityDigest).toBe(packaged.grantIdentityDigest);
+    expect(computerAppGrantMismatch(packaged, other, false)).toBe('identity_changed');
     // A different signer is still a different application, path or no path.
     expect(
       computerAppGrantMismatch(
@@ -325,5 +336,12 @@ describe('native identity digest recomputation', () => {
       computerAppNativeIdentityDigest(macIdentity({ signingIdentifier: null }), derived),
     ).toBeNull();
     expect(computerAppNativeIdentityDigest('not an object', derived)).toBeNull();
+  });
+
+  it('refuses a Windows record that claims a package family native never attested', () => {
+    // Native writes `packageFamilyName: null` today. The claim changes the grant digest (family +
+    // signer, no path) while changing nothing native verifies, so the record cannot be bound.
+    expect(digestOf(winIdentity())).not.toBeNull();
+    expect(digestOf(winIdentity({ packageFamilyName: 'Example.Notes_8wekyb3d8bbwe' }))).toBeNull();
   });
 });
