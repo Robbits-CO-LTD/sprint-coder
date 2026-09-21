@@ -4745,12 +4745,17 @@ export class IpcRouter {
     const parsed = computerAppGrantRequestSchema.safeParse(request);
     if (!parsed.success) return;
     if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-    // The card asks the user to act inside Sprint Coder, so it is worth surfacing the window — the
-    // same treatment an in-session approval gets.
+    // Surfaced without being given the keyboard.
+    //
+    // The card asks the user to act inside Sprint Coder, so a hidden window has to come back. But
+    // taking OS focus for something that arrives on the model's schedule is half of a real hazard:
+    // the keystroke a user was aiming at whatever they were doing lands on this window instead, and
+    // that keystroke is a genuine trusted activation. So the window is shown inactive and asks for
+    // attention — a flashing taskbar entry, a bouncing Dock icon — and the person comes to it.
     if (parsed.data.state === 'pending') {
-      this.window.show();
-      this.window.focus();
-    }
+      if (!this.window.isVisible()) this.window.showInactive();
+      this.window.flashFrame(true);
+    } else this.window.flashFrame(false);
     this.window.webContents.send(IPC_CHANNELS.computerUseGrantRequestEvent, parsed.data);
   }
 

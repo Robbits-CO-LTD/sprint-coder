@@ -80,7 +80,7 @@ describe('Computer Use application approval card', () => {
     expect(render(card({ untrustedReason: null }))).toContain('理由は示されていません');
   });
 
-  it('offers both approvals at equal weight, with focus on the narrower one', () => {
+  it('offers both approvals at equal weight, with the narrower one first', () => {
     const markup = render(card());
     // Neither approval carries the primary styling the rest of the product uses for "do this one".
     expect(markup).not.toContain('class="primary"');

@@ -1,4 +1,3 @@
-import { useEffect, useRef } from 'react';
 import type { ComputerAppGrantDecision, ComputerAppGrantRequest } from '@sprint-coder/contracts';
 import { ShieldAlert } from './icons';
 
@@ -8,7 +7,13 @@ import { ShieldAlert } from './icons';
  * It sits where the tool-approval cards sit and borrows their shell, because it is the same kind of
  * moment: the product has stopped and is asking a person to decide. What it does not borrow is the
  * primary/secondary button shape — D14 asks for the two approvals at equal weight, so neither is
- * styled as the obvious one and the keyboard lands on the narrower of them.
+ * styled as the obvious one.
+ *
+ * **Nothing here takes focus.** The card appears on the model's schedule, not the user's, and it
+ * grants a real permission. A guard against "is the caret in a text field" is not enough: the user
+ * may be typing in a different application entirely, and a keystroke that arrives as this window
+ * comes forward is a genuine trusted activation. So the card is announced and left alone, and a
+ * person reaches it with Tab or the pointer — an approval has to be an act, not a coincidence.
  *
  * Two kinds of text on this card and they are never joined: the facts Main derived from a signature
  * (publisher, application id, signing class, the mode that would be granted) and the strings the
@@ -32,28 +37,6 @@ const COMPUTER_GRANT_NOTICES: Readonly<Record<string, string>> = {
   withdrawn: '確認を取り消しました。もう一度依頼してください。',
 };
 
-/**
- * Whether the caret is somewhere a keystroke means text rather than a decision.
- *
- * Exported so the rule is testable on its own: it is the difference between a card that announces
- * itself and a card that can be approved by the next character the user types.
- */
-export function isEditingElsewhere(active: Element | null = document.activeElement): boolean {
-  if (active === null || !(active instanceof HTMLElement)) return false;
-  // The attribute as well as the property: `isContentEditable` is the live answer a browser gives,
-  // and the ancestor search is what catches a caret sitting in a child of an editable host.
-  if (
-    active.isContentEditable ||
-    active.closest('[contenteditable]:not([contenteditable="false"])') !== null
-  )
-    return true;
-  const tag = active.tagName;
-  // A button or a link is not editing, even inside a form; a disabled field takes no keystrokes.
-  return (
-    (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') && !active.matches(':disabled')
-  );
-}
-
 export function ComputerUseAppGrantCard({
   request,
   busy,
@@ -63,21 +46,7 @@ export function ComputerUseAppGrantCard({
   busy: boolean;
   onDecision: (decision: ComputerAppGrantDecision) => void;
 }) {
-  const allowOnceRef = useRef<HTMLButtonElement>(null);
   const egressOnly = request.kind === 'provider-egress';
-
-  useEffect(() => {
-    // The narrower of the two approvals, per D14. Focus is placed rather than left to the DOM order
-    // so that adding a control above the buttons cannot silently move it to the permanent one.
-    //
-    // But never out from under someone who is writing. The card arrives unannounced, and Main
-    // raises the window with it: a user midway through the next message would otherwise have the
-    // caret pulled onto "今回だけ許可", and their next Space or Enter would grant an application
-    // they never read about. When the caret is in an editable control the card is left to its role
-    // and label to announce itself, and the user reaches it with Tab when they are ready.
-    if (isEditingElsewhere()) return;
-    allowOnceRef.current?.focus({ preventScroll: true });
-  }, [request.id]);
 
   if (request.state !== 'pending')
     return request.noticeCode === null ? null : (
@@ -95,8 +64,15 @@ export function ComputerUseAppGrantCard({
       aria-label={egressOnly ? '画面の送信先の確認' : 'アプリ操作の許可'}
       aria-busy={busy}
       data-testid="computer-grant-card"
-      tabIndex={-1}
     >
+      {/* Polite, because the card is not an emergency and interrupting someone mid-sentence is the
+          same discourtesy as taking their keyboard. It tells a screen-reader user the card is here
+          and what it is about; reaching it stays their decision. */}
+      <p className="sr-only" role="status" aria-live="polite" data-testid="computer-grant-announce">
+        {egressOnly
+          ? 'AIが画面の送信先の確認を求めています。会話の末尾のカードで応答してください。'
+          : 'AIがアプリの操作許可を求めています。会話の末尾のカードで応答してください。'}
+      </p>
       <div className="approval-card__head">
         <span className="approval-card__icon">
           <ShieldAlert size={16} />
@@ -167,7 +143,6 @@ export function ComputerUseAppGrantCard({
       <div className="approval-card__actions computer-grant-card__actions">
         {request.allowedDecisions.includes('allow_once') ? (
           <button
-            ref={allowOnceRef}
             type="button"
             className="computer-grant-card__allow"
             data-testid="computer-grant-allow-once"
@@ -181,7 +156,6 @@ export function ComputerUseAppGrantCard({
         ) : null}
         {request.allowedDecisions.includes('allow_always') ? (
           <button
-            ref={request.allowedDecisions.includes('allow_once') ? undefined : allowOnceRef}
             type="button"
             className="computer-grant-card__allow"
             data-testid="computer-grant-allow-always"
