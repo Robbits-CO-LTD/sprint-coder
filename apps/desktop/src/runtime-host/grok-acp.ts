@@ -129,6 +129,13 @@ export class GrokAcpClient {
       return;
     }
     const id = message['id'];
+    // The CLI can interleave replies with its own string IDs during MCP turns. Our
+    // requests use numeric IDs; never coerce an unrelated reply into a pending request.
+    if (typeof id === 'string') {
+      if ('result' in message === 'error' in message) throw new Error('Invalid Grok response');
+      if ('error' in message) grokRecord(message['error']);
+      return;
+    }
     if (typeof id !== 'number') throw new Error('Invalid response identity');
     const pending = this.pending.get(id);
     if (pending === undefined) return;

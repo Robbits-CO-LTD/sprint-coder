@@ -7323,6 +7323,84 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each(['allow_once', 'deny'] as const)(
+      'keeps concurrent tool approvals independent after %s',
+      (decision) => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        const first = persistence.requestApproval(approvalRequest(task.id, turn.turnId));
+        const second = persistence.requestApproval(
+          approvalRequest(task.id, turn.turnId, {
+            id: 'approval-2',
+            itemId: 'item-2',
+            callId: 'call-2',
+            challenge: 'challenge-2',
+            specDigest: 'd'.repeat(64),
+          }),
+        );
+        expect(persistence.listPendingApprovals(task.id)).toHaveLength(2);
+        persistence.resolveApproval({
+          taskId: task.id,
+          approvalId: first.approval.id,
+          expectedTurnId: turn.turnId,
+          expectedRevision: 0,
+          challenge: first.approval.challenge,
+          decision,
+          operationId: randomUUID(),
+          decidedAt: '2026-07-22T12:01:00.000Z',
+        });
+        expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+        expect(persistence.listPendingApprovals(task.id).map(({ id }) => id)).toEqual([
+          second.approval.id,
+        ]);
+        expect(persistence.getApproval(task.id, second.approval.id)).toMatchObject({
+          state: 'pending',
+          decision: null,
+          revision: 0,
+        });
+        persistence.resolveApproval({
+          taskId: task.id,
+          approvalId: second.approval.id,
+          expectedTurnId: turn.turnId,
+          expectedRevision: 0,
+          challenge: second.approval.challenge,
+          decision: 'deny',
+          operationId: randomUUID(),
+          decidedAt: '2026-07-22T12:01:01.000Z',
+        });
+        expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('executing');
+        expect(persistence.listPendingApprovals(task.id)).toHaveLength(0);
+        persistence.close();
+      },
+    );
+
+    it('cancels every concurrent tool approval without accepting another request', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      for (const number of [1, 2])
+        persistence.requestApproval(
+          approvalRequest(task.id, turn.turnId, {
+            id: `approval-${number}`,
+            callId: `call-${number}`,
+          }),
+        );
+      persistence.cancelTurn(task.id, turn.turnId);
+      expect(persistence.listPendingApprovals(task.id)).toHaveLength(0);
+      for (const number of [1, 2])
+        expect(persistence.getApproval(task.id, `approval-${number}`)).toMatchObject({
+          state: 'canceled',
+          decision: null,
+        });
+      expect(() =>
+        persistence.requestApproval(
+          approvalRequest(task.id, turn.turnId, { id: 'approval-3', callId: 'call-3' }),
+        ),
+      ).toThrow('Turn is not eligible to request approval');
+      persistence.close();
+    });
+
     it('coordinates multiple capability approvals and shared retries against real SQLite', async () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask();

@@ -648,3 +648,21 @@ release PRを作成し、ReviewBOTと全CIを確認する。Windowsは現行仕�
 - [ ] DMGを含む全必須検証の成功後にGitHub Pre-releaseを公開する
 
 公開済み成果物はまだない。必須のmacOS配布検証が揃うまでDraftのまま維持する。
+# Issue #506 Grok Buildの応答失敗（2026-09-22）
+
+- 対象: 新規clone、base `7c02727`（#508取り込み済み）。実Grokの短い日本語質問の失敗原因を特定し修正する。
+- 非対象: nativeファイル/command許可、inventory検証撤去、他Provider代替、既存profile変更、release公開。
+- [x] Issue全コメント・現行コード・規約確認。添付0件。
+- [x] OpenRouter経由で `x-ai/grok-4.7` にACP仕様を相談。順序保証は未確認という回答を得た。公式資料・実測を優先する。
+- [x] Node 22.14.0 / 公式CLI 1.0.40 / 新規依存導入。実adapterの隔離環境・MCPなしでは短い質問が正常完了。
+- [x] Project/MCP付き実アプリ経路で失敗分岐を特定（本文を保存しない）。
+- [x] 未対応の文字列JSON-RPC応答IDでストリームを中断していた。型を変換せず無関係な応答だけ無視する回帰テストをRED→GREEN。
+- [x] desktop型検査、対象lint/format、直接関連79テストPASS。実アプリで会話・継続・逐次表示PASS。
+- [x] ファイル操作前のsearch_toolが裸のRead denyに一致して失敗。公式実装のRead(None)分類と実測を照合。
+- [x] Read(**)で全ファイルパスのdenyを維持し、pathless検索だけ通す。隔離模擬MCPの検索/呼出し成功、Windows絶対パスのuse_tool file引数は拒否。隔離設定テスト7 PASS / POSIX権限1 SKIP。
+- [x] 実アプリ(配布形式)でファイル作成、同時3件の承認の個別許可・残件待機・拒否・停止を確認。テスト実行のcommand承認はGrokがNode探索へ逸れたため中断(未完)。
+- [x] 実機で2つのcreate_file同時呼出しの片方が承認要求前に失敗することを確認。既存の複数承認の再開・取消処理は残件数を扱うが、追加要求だけwaiting_approvalを拒否していた。受付条件と重複状態遷移を最小修正し、個別許可/拒否・待機維持・取消をSQLite境界で検証する。
+- [ ] 同じ質問を実Grokで再確認し、実装・検証・未完の受入項目を区別して報告。
+- [ ] commit・push・PR作成、ReviewBOT指摘対応、必須CI、squash mergeを完了する(2026-09-23 Fableへ引き継ぎ。Codexは利用制限で停止)。
+
+計画改訂: 会話の成功だけで完了にせず、利用できない原因になっている同一経路の権限誤分類まで修正する。権限全許可やネイティブI/Oの追加は行わない。本文/result遅延の仮説は今回の原因と確認できず、変更しない。
