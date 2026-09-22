@@ -304,6 +304,189 @@ describe('RuntimeHostClient start acknowledgement', () => {
     client.dispose();
   });
 
+  it.each(['active', 'canceling', 'start-timeout', 'already-failed'] as const)(
+    'quarantines an unconfirmed Grok stop even when %s and blocks a distinct turn',
+    async (phase) => {
+      vi.useFakeTimers();
+      const failed = vi.fn();
+      const event = vi.fn();
+      const client = new RuntimeHostClient(event, failed, undefined, undefined, 'grok');
+      const child = children[0]!;
+      child.emit('spawn');
+      client.start('task-old', 'turn-old', 'inspect', null, 'auto', emptyCatalog());
+      await Promise.resolve();
+      const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+        string,
+        unknown
+      >;
+      const hello = {
+        ...start,
+        type: 'hello',
+        operationId: 'hello',
+        codexAvailable: false,
+        codexReadiness: 'unavailable',
+        codexModels: [],
+        claudeAvailable: false,
+        claudeReadiness: 'unavailable',
+        claudeModels: [],
+        grokAvailable: true,
+        grokReadiness: 'ready',
+        grokModels: [],
+      };
+      // Also cover an in-flight hello so quarantine cannot leave probe() pending.
+      if (phase !== 'active') {
+        child.emit('message', hello);
+        expect(await client.probe()).toMatchObject({ available: true });
+      }
+      const pendingProbe = client.probe();
+      let cancelCheck: Promise<unknown> | undefined;
+      if (phase === 'canceling')
+        cancelCheck = expect(client.cancel('task-old', 'turn-old')).rejects.toThrow();
+      if (phase === 'start-timeout') await vi.advanceTimersByTimeAsync(15_000);
+      if (phase === 'already-failed')
+        child.emit('message', {
+          ...start,
+          type: 'error',
+          seq: 1,
+          error: { code: 'RUNTIME_FAILED', userMessage: 'failed', retryable: true },
+        });
+      const failureCount = failed.mock.calls.length;
+      const previousCapability = client.currentImageAttachmentCapability();
+      const failure = {
+        ...start,
+        type: 'error',
+        seq: 2,
+        error: {
+          code: 'RUNTIME_STOP_UNCONFIRMED',
+          userMessage: 'Runtime stop could not be confirmed',
+          retryable: false,
+        },
+      };
+      child.emit('message', failure);
+      await cancelCheck;
+      if (phase === 'active') expect(await pendingProbe).toMatchObject({ available: false });
+      expect(failed).toHaveBeenCalledTimes(failureCount + 1);
+      expect(failed.mock.lastCall?.[2]).toEqual(failure.error);
+      child.emit('message', failure);
+      child.emit('message', hello);
+      child.emit('message', {
+        ...start,
+        type: 'event',
+        seq: 3,
+        event: { type: 'completed', finalText: 'late completion' },
+      });
+      child.emit('message', {
+        ...start,
+        type: 'event',
+        seq: 4,
+        event: { type: 'delta', messageId: 'message-old', delta: 'late text' },
+      });
+      expect(event).not.toHaveBeenCalled();
+      expect(failed).toHaveBeenCalledTimes(failureCount + 1);
+      if (phase !== 'already-failed')
+        expect(Reflect.get(client, 'active').has('turn-old')).toBe(true);
+      await expect(client.cancel('task-old', 'turn-old')).rejects.toThrow();
+      expect(await client.probe()).toMatchObject({ available: false, readiness: 'unavailable' });
+      expect(await client.captureImageAttachmentCapability()).toMatchObject({ available: false });
+      expect(client.currentImageAttachmentCapability().readinessRevision).toBeGreaterThan(
+        previousCapability.readinessRevision,
+      );
+      expect(client.start('task-new', 'turn-new', 'retry', null, 'auto', emptyCatalog())).toBe(
+        false,
+      );
+      await Promise.resolve();
+      expect(child.messages.filter((message) => messageType(message) === 'start')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(child.kill).not.toHaveBeenCalled();
+      child.emit('exit');
+      expect(await client.probe()).toMatchObject({ available: false });
+      expect(
+        client.start('task-new', 'turn-after-exit', 'retry', null, 'auto', emptyCatalog()),
+      ).toBe(false);
+      expect(children).toHaveLength(1);
+      client.dispose();
+    },
+  );
+
+  it('allows a distinct Grok turn after an ordinary runtime failure', async () => {
+    const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, 'grok');
+    const child = children[0]!;
+    child.emit('spawn');
+    client.start('task-old', 'turn-old', 'inspect', null, 'auto', emptyCatalog());
+    await Promise.resolve();
+    const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+      string,
+      unknown
+    >;
+    child.emit('message', {
+      ...start,
+      type: 'error',
+      seq: 1,
+      error: { code: 'RUNTIME_FAILED', userMessage: 'failed', retryable: true },
+    });
+    await expect(client.cancel('task-old', 'turn-old')).resolves.toMatchObject({ forced: false });
+    expect(client.start('task-new', 'turn-new', 'retry', null, 'auto', emptyCatalog())).toBe(true);
+    await Promise.resolve();
+    expect(child.messages.filter((message) => messageType(message) === 'start')).toHaveLength(2);
+    client.dispose();
+  });
+
+  it.each([false, true])(
+    'fails all concurrent Tasks once on host quarantine (trigger already failed: %s)',
+    async (triggerAlreadyFailed) => {
+      const failed = vi.fn();
+      const event = vi.fn();
+      const client = new RuntimeHostClient(event, failed, undefined, undefined, 'grok');
+      const child = children[0]!;
+      child.emit('spawn');
+      client.start('task-one', 'turn-one', 'first', null, 'auto', emptyCatalog());
+      client.start('task-two', 'turn-two', 'second', null, 'auto', emptyCatalog());
+      await Promise.resolve();
+      const starts = child.messages.filter((message) => messageType(message) === 'start') as Array<
+        Record<string, unknown>
+      >;
+      if (triggerAlreadyFailed) {
+        child.emit('message', {
+          ...starts[0],
+          type: 'error',
+          seq: 1,
+          error: { code: 'RUNTIME_FAILED', userMessage: 'failed', retryable: true },
+        });
+        failed.mockClear();
+      }
+      const failure = {
+        ...starts[0],
+        type: 'error',
+        seq: 2,
+        error: {
+          code: 'RUNTIME_STOP_UNCONFIRMED',
+          userMessage: 'Runtime stop could not be confirmed',
+          retryable: false,
+        },
+      };
+      child.emit('message', failure);
+      expect(
+        failed.mock.calls.map(([taskId, turnId, error]) => [taskId, turnId, error.code]).sort(),
+      ).toEqual([
+        ['task-one', 'turn-one', 'RUNTIME_STOP_UNCONFIRMED'],
+        ['task-two', 'turn-two', 'RUNTIME_STOP_UNCONFIRMED'],
+      ]);
+      for (const start of starts) {
+        child.emit('message', { ...failure, ...start, type: 'error', seq: 3 });
+        child.emit('message', {
+          ...start,
+          type: 'event',
+          seq: 4,
+          event: { type: 'completed', finalText: 'late completion' },
+        });
+      }
+      expect(failed).toHaveBeenCalledTimes(2);
+      expect(event).not.toHaveBeenCalled();
+      await expect(client.cancel('task-two', 'turn-two')).rejects.toThrow();
+      client.dispose();
+    },
+  );
+
   it('dispatches a catalog-bound Runtime tool request and returns its result', async () => {
     const handleTool = vi.fn(async (_taskId, _turnId, request) => ({
       path: request.arguments.path,

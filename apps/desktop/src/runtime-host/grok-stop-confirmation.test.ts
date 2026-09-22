@@ -159,6 +159,7 @@ describe('Grok process stop confirmation', () => {
     expect(f.exited).not.toHaveBeenCalled();
     resolveStop(false);
     await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+    expect(f.failed.mock.lastCall?.[0].code).toBe('RUNTIME_STOP_UNCONFIRMED');
     expect(f.events.some((event) => event.type === 'completed')).toBe(false);
     expect(f.exited).not.toHaveBeenCalled();
     expect(mocks.cleanup).not.toHaveBeenCalled();
@@ -167,6 +168,19 @@ describe('Grok process stop confirmation', () => {
     expect(f.failed.mock.lastCall?.[0]).toMatchObject({ retryable: false });
     expect(mocks.spawn).toHaveBeenCalledOnce();
     expect(mocks.stop).toHaveBeenCalledOnce();
+    f.adapter.start(
+      'distinct-turn',
+      'Synthetic retry',
+      [],
+      vi.fn(),
+      null,
+      'auto',
+      vi.fn(),
+      f.failed,
+      f.exited,
+    );
+    expect(mocks.spawn).toHaveBeenCalledOnce();
+    expect(f.failed.mock.lastCall?.[0].code).toBe('RUNTIME_STOP_UNCONFIRMED');
   });
 
   it('does not resolve cancellation or emit exit when the root closes but stop=false', async () => {

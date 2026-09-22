@@ -158,6 +158,7 @@ export class RuntimeHostClient {
     observedAtMs: 0,
   };
   private disposed = false;
+  private quarantined = false;
 
   constructor(
     private readonly onEvent: EventHandler,
@@ -177,6 +178,7 @@ export class RuntimeHostClient {
   }
 
   async probe(): Promise<RuntimeCapabilityReport> {
+    if (this.quarantined) return this.capabilityState.report;
     if (this.process === null && !this.disposed) this.launch();
     return this.probeResult;
   }
@@ -230,6 +232,10 @@ export class RuntimeHostClient {
     preparedImages?: RuntimePreparedImageAttachments,
     promptAgent?: PromptAgent,
   ): boolean {
+    if (this.quarantined) {
+      this.onFailure(taskId, turnId, this.unavailableError());
+      return false;
+    }
     const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
     const workspace =
       typeof workspaceInput === 'string' || workspaceInput === null
@@ -355,7 +361,7 @@ export class RuntimeHostClient {
     paths: readonly string[];
     manifestDigest: string;
   }): Promise<RuntimePreparedImageAttachments> {
-    if (this.disposed || this.kind !== 'codex')
+    if (this.disposed || this.quarantined || this.kind !== 'codex')
       return Promise.reject(new Error('Image attachment Runtime is unavailable'));
     if (this.process === null) this.launch();
     if (this.process === null)
@@ -407,6 +413,8 @@ export class RuntimeHostClient {
   }
 
   cancel(taskId: string, turnId: string): Promise<RuntimeStopReceipt> {
+    if (this.quarantined)
+      return Promise.reject(new Error('Runtime process tree stop could not be confirmed'));
     const existing = this.cancelWaiters.get(turnId);
     if (existing !== undefined) {
       if (existing.taskId !== taskId)
@@ -523,6 +531,7 @@ export class RuntimeHostClient {
   }
 
   private launch(): void {
+    if (this.quarantined) return;
     this.runtimeInstanceId = randomUUID();
     const instanceId = this.runtimeInstanceId;
     this.invalidateCapabilityState(instanceId);
@@ -587,11 +596,49 @@ export class RuntimeHostClient {
   private receive(instanceId: string, raw: unknown): void {
     if (
       this.disposed ||
+      this.quarantined ||
       instanceId !== this.runtimeInstanceId ||
       !isRuntimeToMainEnvelope(raw) ||
       raw.runtimeInstanceId !== this.runtimeInstanceId
     )
       return;
+    // Stop uncertainty belongs to the host, even if cancellation or an earlier failure has
+    // already terminalized the Turn. Publish the barrier before notifying Main's failure path.
+    if (raw.type === 'error' && raw.error.code === 'RUNTIME_STOP_UNCONFIRMED') {
+      const active = this.active.get(raw.turnId);
+      if (
+        active !== undefined &&
+        (active.taskId !== raw.taskId || active.operationId !== raw.operationId)
+      )
+        return;
+      const failures = [...this.active.entries()];
+      this.quarantined = true;
+      this.invalidateCapabilityState();
+      this.resolveProbe?.(this.capabilityState.report);
+      this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
+      this.probeResult = Promise.resolve(this.capabilityState.report);
+      for (const turn of this.active.values()) {
+        turn.startFailed = true;
+        turn.startAcceptanceDeadline.stop();
+        for (const controller of turn.toolControllers.values()) controller.abort();
+      }
+      const error = new Error('Runtime process tree stop could not be confirmed');
+      for (const waiter of this.cancelWaiters.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+      this.cancelWaiters.clear();
+      this.rejectExitWaiters(error);
+      this.rejectAllImagePrepareWaiters(error);
+      this.invalidateAllImagePreparationPhases();
+      for (const [turnId, turn] of failures) {
+        if (turnId === raw.turnId) continue;
+        this.onFailure(turn.taskId, turnId, raw.error);
+      }
+      this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
+      return;
+    }
     if (raw.type === 'hello') {
       if (this.resolveProbe === null || raw.operationId !== this.expectedProbeOperationId) return;
       const report =
@@ -934,7 +981,7 @@ export class RuntimeHostClient {
   }
 
   private refreshCapabilityProbe(): Promise<RuntimeCapabilityReport> {
-    if (this.disposed)
+    if (this.disposed || this.quarantined)
       return Promise.resolve({ available: false, readiness: 'unavailable', models: [] });
     if (this.process === null) return this.probe();
     if (this.resolveProbe !== null) return this.probeResult;
@@ -1022,6 +1069,7 @@ export class RuntimeHostClient {
   private post(message: MainToRuntimeEnvelope): void {
     const child = this.process;
     void this.spawnReady.then(() => {
+      if (this.quarantined) return;
       if (child !== null && child === this.process) child.postMessage(message);
     });
   }

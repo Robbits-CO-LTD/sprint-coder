@@ -9512,6 +9512,9 @@ export class IpcRouter {
     error: PublicError,
     diagnostic?: RuntimeFailureDiagnostic,
   ): void {
+    // A canceled/late failure still carries host-wide stop uncertainty. Set this before the
+    // mailbox and ownership guards so another Task or queued Turn cannot race the barrier.
+    if (error.code === 'RUNTIME_STOP_UNCONFIRMED') this.quarantinedRuntimeKinds.add(kind);
     void this.mailbox.run(taskId, async () => {
       if (this.canceledRuntimeTurns.has(turnId)) return;
       const activeRuntime = this.turnRuntimes.get(turnId);

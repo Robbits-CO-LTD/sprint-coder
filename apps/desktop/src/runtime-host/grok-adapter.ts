@@ -137,10 +137,12 @@ export async function probeGrok(
   });
   if (cli === null) return missing;
   const installed = { available: true, version: cli.version, cli, models: [AUTO] };
-  const isolation = prepareGrokIsolation(source);
+  let report: GrokProbe;
+  let isolation: ReturnType<typeof prepareGrokIsolation> | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
   let rpc: GrokAcpClient | undefined;
   try {
+    isolation = prepareGrokIsolation(source);
     child = spawn(cli.executable, buildGrokArgs(), {
       cwd: isolation.cwd,
       env: isolation.environment,
@@ -157,11 +159,13 @@ export async function probeGrok(
     const init = await rpc.request('initialize', INITIALIZE, 3_000);
     const models = grokModelsFromInitialize(init);
     const methodId = grokAuthenticationMethod(init);
-    if (methodId === null) return { ...installed, models, readiness: 'authentication_required' };
-    await rpc.request('authenticate', { methodId, _meta: { headless: true } }, 2_000);
-    return { ...installed, models, readiness: 'ready' };
+    if (methodId === null) report = { ...installed, models, readiness: 'authentication_required' };
+    else {
+      await rpc.request('authenticate', { methodId, _meta: { headless: true } }, 2_000);
+      report = { ...installed, models, readiness: 'ready' };
+    }
   } catch (error) {
-    return {
+    report = {
       ...installed,
       readiness:
         error instanceof GrokRpcError && error.category === 'authentication'
@@ -171,9 +175,17 @@ export async function probeGrok(
   } finally {
     rpc?.close();
     const stopped =
-      child === undefined || (await terminateRuntimeProcessTree(child, grokEnvironment(source)));
-    if (stopped) isolation.cleanup();
+      child === undefined ||
+      (await terminateRuntimeProcessTree(child, grokEnvironment(source)).catch(() => false));
+    if (stopped) {
+      try {
+        isolation?.cleanup();
+      } catch {
+        /* Cleanup cannot reject a capability response. */
+      }
+    } else report = { ...installed, readiness: 'unavailable' };
   }
+  return report;
 }
 
 export function assertGrokToolInventory(value: unknown): void {
@@ -210,6 +222,7 @@ export function grokMcpInventoryReady(raw: unknown, expected: readonly string[])
 
 export class GrokRuntimeAdapter {
   private readonly active = new Map<string, Control>();
+  private quarantined = false;
   private cli: ResolvedCliCommand | null = null;
   private cliVersion: string | null = null;
   constructor(
@@ -249,6 +262,10 @@ export class GrokRuntimeAdapter {
       catalogDigest: string;
     }) => Promise<{ success: boolean; output: unknown }>,
   ): void {
+    if (this.quarantined) {
+      fail(grokStopUnconfirmed());
+      return;
+    }
     if (this.active.has(turnId)) {
       fail({
         code: 'RUNTIME_FAILED',
@@ -337,14 +354,26 @@ export class GrokRuntimeAdapter {
       stop: () => (stopPromise ??= terminateRuntimeProcessTree(child, grokEnvironment())),
     };
     this.active.set(turnId, control);
+    const failAfterStop = (
+      error: PublicError,
+      stage: Parameters<RuntimeFailureDiagnosticCollector['snapshot']>[0],
+    ): void => {
+      if (failed || completed || control.canceled) return;
+      failed = true;
+      void control
+        .stop()
+        .catch(() => false)
+        .then((stopped) => {
+          if (!stopped) this.quarantined = true;
+          if (stopped && control.canceled) return;
+          fail(stopped ? error : grokStopUnconfirmed(), diagnostics.snapshot(stage));
+        });
+    };
     const abort = (
       stage: 'protocol_error' | 'startup_error' | 'spawn_error' | 'abnormal_exit',
       error?: unknown,
     ): void => {
-      if (failed || completed || control.canceled) return;
-      failed = true;
-      fail(grokPublicError(error), diagnostics.snapshot(stage));
-      void control.stop();
+      failAfterStop(grokPublicError(error), stage);
     };
     const deadline = new RuntimeProgressDeadline(
       {
@@ -353,17 +382,14 @@ export class GrokRuntimeAdapter {
         totalMs: teamMcp === undefined ? this.timeoutMs : 60 * 60_000,
       },
       (phase) => {
-        if (failed || completed || control.canceled) return;
-        failed = true;
-        fail(
+        failAfterStop(
           {
             code: 'RUNTIME_TIMEOUT',
             userMessage: 'Grok CLIの応答待ちがタイムアウトしました。',
             retryable: true,
           },
-          diagnostics.snapshot(`${phase}_timeout`),
+          `${phase}_timeout`,
         );
-        void control.stop();
       },
     );
     const update = (raw: unknown): void => {
@@ -434,15 +460,19 @@ export class GrokRuntimeAdapter {
       rpc.close();
       if (!terminalReceived && !completed && !failed && !control.canceled) abort('abnormal_exit');
       // Stop captures all descendants before cleanup so the bridge cannot outlive its owner.
-      void control.stop().then((stopped) => {
-        if (!stopped) {
-          abort('abnormal_exit');
-          return;
-        }
-        isolation.cleanup();
-        this.active.delete(turnId);
-        exited(code ?? (completed ? 0 : 1), control.canceled);
-      });
+      void control
+        .stop()
+        .catch(() => false)
+        .then((stopped) => {
+          if (!stopped) {
+            this.quarantined = true;
+            abort('abnormal_exit');
+            return;
+          }
+          isolation.cleanup();
+          this.active.delete(turnId);
+          exited(code ?? (completed ? 0 : 1), control.canceled);
+        });
     });
     deadline.start();
     void (async () => {
@@ -530,7 +560,10 @@ export class GrokRuntimeAdapter {
     const control = this.active.get(turnId);
     if (control === undefined) return false;
     control.canceled = true;
-    if (!(await control.stop())) throw new Error('Grok process exit was not confirmed');
+    if (!(await control.stop().catch(() => false))) {
+      this.quarantined = true;
+      throw new Error('Grok process exit was not confirmed');
+    }
     return false;
   }
   dispose(): void {
@@ -539,6 +572,15 @@ export class GrokRuntimeAdapter {
       void control.stop();
     }
   }
+}
+
+function grokStopUnconfirmed(): PublicError {
+  return {
+    code: 'RUNTIME_STOP_UNCONFIRMED',
+    userMessage:
+      'Grokプロセスの停止を確認できないため、Grokの新しい実行を停止しました。アプリを再起動してから再試行してください。',
+    retryable: false,
+  };
 }
 
 function grokPublicError(error: unknown): PublicError {

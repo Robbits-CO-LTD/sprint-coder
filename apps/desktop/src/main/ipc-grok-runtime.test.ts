@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { IPC_CHANNELS, type RuntimeKind } from '@sprint-coder/contracts';
+import { IPC_CHANNELS, type PublicError, type RuntimeKind } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import {
   IpcRouter,
@@ -50,6 +50,7 @@ type RouterProbe = {
   refreshModelCatalog(): Promise<void>;
   runtimeFor(kind: CliKind): RuntimeHostClient;
   startSelectedRuntime(started: StartedTurn): Promise<void>;
+  handleRuntimeFailure(kind: CliKind, taskId: string, turnId: string, error: PublicError): void;
   generateCliTaskTitle(request: TitleRequest, kind: CliKind, model: string): Promise<string | null>;
   routeCliTaskTitleEvent(
     kind: CliKind,
@@ -201,6 +202,62 @@ afterEach(() => {
 });
 
 describe('Grok CLI Main routing', () => {
+  it.each(['active', 'canceled', 'late'] as const)(
+    'quarantines Grok before %s failure guards and blocks queued and other Task turns',
+    async (phase) => {
+      const { router, grok, persistence } = createHarness();
+      const quarantinedRuntimeKinds = new Set<CliKind>();
+      const finishQuarantinedRuntimeStart = vi.fn();
+      const next = (taskId: string, turnId: string): StartedTurn => ({
+        ...started,
+        turnId,
+        event: { type: 'stage.changed', taskId, turnId, seq: 1, stage: 'understanding' },
+      });
+      const queued = next('task-grok', 'turn-queued');
+      const otherTask = next('task-other', 'turn-other');
+      const mailboxActions: Array<() => Promise<void>> = [];
+      const finishAndAdvance = vi.fn(() => {
+        expect(quarantinedRuntimeKinds.has('grok')).toBe(true);
+        return router.startSelectedRuntime(queued);
+      });
+      Object.assign(router, {
+        handleRuntimeFailure: Reflect.get(IpcRouter.prototype, 'handleRuntimeFailure'),
+        quarantinedRuntimeKinds,
+        canceledRuntimeTurns: new Set(phase === 'canceled' ? ['turn-grok'] : []),
+        turnRuntimes: new Map(phase === 'late' ? [] : [['turn-grok', 'grok']]),
+        mailbox: {
+          run: (_taskId: string, action: () => Promise<void>) => {
+            mailboxActions.push(action);
+            return Promise.resolve();
+          },
+        },
+        attachmentCustodyByTurn: new Map(),
+        turnLogCategoryByTurn: new Map(),
+        finishAndAdvance,
+        finishQuarantinedRuntimeStart,
+      });
+      persistence.getActiveTurnId = () => 'turn-other';
+      router.handleRuntimeFailure('grok', 'task-grok', 'turn-grok', {
+        code: 'RUNTIME_STOP_UNCONFIRMED',
+        userMessage: 'Runtime stop could not be confirmed',
+        retryable: false,
+      });
+      // Quarantine must take effect before the failure reaches the Task mailbox.
+      await router.startSelectedRuntime(otherTask);
+      expect(finishQuarantinedRuntimeStart).toHaveBeenCalledWith(otherTask);
+      persistence.getActiveTurnId = () => 'turn-queued';
+      await mailboxActions[0]!();
+      if (phase === 'active') expect(finishAndAdvance).toHaveBeenCalledOnce();
+      else {
+        expect(finishAndAdvance).not.toHaveBeenCalled();
+        await router.startSelectedRuntime(queued);
+      }
+      expect(finishQuarantinedRuntimeStart).toHaveBeenCalledWith(queued);
+      expect(grok.start).not.toHaveBeenCalled();
+      expect(quarantinedRuntimeKinds).toEqual(new Set(['grok']));
+    },
+  );
+
   it('probes Grok settings and validates its own model space', async () => {
     const { router, handlers, grok, persistence } = createHarness();
     router.register();

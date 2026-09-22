@@ -2113,6 +2113,7 @@ export const publicErrorCodeSchema = z.enum([
   'RUNTIME_RATE_LIMIT',
   'RUNTIME_FAILED',
   'RUNTIME_TIMEOUT',
+  'RUNTIME_STOP_UNCONFIRMED',
   'RUNTIME_PROTOCOL_ERROR',
   'INTERNAL_ERROR',
 ]);
