@@ -135,10 +135,22 @@ parentPort.on('message', ({ data }: Electron.MessageEvent) => {
       );
       return;
     }
-    void adapter.cancel(data.turnId).then((forced) => {
-      send(data.taskId, data.turnId, data.operationId, { type: 'stopped', forced });
-      activeTurns.delete(data.turnId);
-    });
+    void adapter.cancel(data.turnId).then(
+      (forced) => {
+        send(data.taskId, data.turnId, data.operationId, { type: 'stopped', forced });
+        activeTurns.delete(data.turnId);
+      },
+      () =>
+        send(data.taskId, data.turnId, data.operationId, {
+          type: 'error',
+          error: {
+            code: 'RUNTIME_STOP_UNCONFIRMED',
+            userMessage:
+              'Runtimeの停止を確認できないため、新しい実行を停止しました。アプリを再起動してから再試行してください。',
+            retryable: false,
+          },
+        }),
+    );
   }
 });
 

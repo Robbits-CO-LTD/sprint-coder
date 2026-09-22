@@ -30,6 +30,7 @@ const fixtures: Array<{ adapter: GrokRuntimeAdapter; child: ChildProcessWithoutN
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.cleanup.mockReset();
   mocks.stop.mockResolvedValue(false);
 });
 
@@ -238,5 +239,19 @@ describe('Grok process stop confirmation', () => {
     expect(f.events.some((event) => event.type === 'completed')).toBe(false);
     expect(f.failed).not.toHaveBeenCalled();
     expect(mocks.cleanup).toHaveBeenCalledOnce();
+  });
+  it('reports confirmed exit even when private scratch cleanup throws', async () => {
+    mocks.cleanup.mockImplementation(() => {
+      throw new Error('Synthetic EPERM');
+    });
+    const resolveStop = deferredStop();
+    const f = await startFixture();
+    f.finishPrompt();
+    await vi.waitFor(() => expect(mocks.stop).toHaveBeenCalledOnce());
+    f.child.emit('close', 0);
+    resolveStop(true);
+    await vi.waitFor(() => expect(f.exited).toHaveBeenCalledOnce());
+    expect(f.failed).not.toHaveBeenCalled();
+    expect(f.events.filter((e) => e.type === 'completed')).toHaveLength(1);
   });
 });

@@ -177,13 +177,8 @@ export async function probeGrok(
     const stopped =
       child === undefined ||
       (await terminateRuntimeProcessTree(child, grokEnvironment(source)).catch(() => false));
-    if (stopped) {
-      try {
-        isolation?.cleanup();
-      } catch {
-        /* Cleanup cannot reject a capability response. */
-      }
-    } else report = { ...installed, readiness: 'unavailable' };
+    if (stopped) cleanupGrokIsolation(isolation);
+    else report = { ...installed, readiness: 'unavailable' };
   }
   return report;
 }
@@ -310,7 +305,7 @@ export class GrokRuntimeAdapter {
         ];
       }
     } catch {
-      prepared?.cleanup();
+      cleanupGrokIsolation(prepared);
       fail(
         {
           code: 'RUNTIME_FAILED',
@@ -469,7 +464,7 @@ export class GrokRuntimeAdapter {
             abort('abnormal_exit');
             return;
           }
-          isolation.cleanup();
+          cleanupGrokIsolation(isolation);
           this.active.delete(turnId);
           exited(code ?? (completed ? 0 : 1), control.canceled);
         });
@@ -571,6 +566,17 @@ export class GrokRuntimeAdapter {
       control.canceled = true;
       void control.stop();
     }
+  }
+}
+
+function cleanupGrokIsolation(
+  isolation: ReturnType<typeof prepareGrokIsolation> | undefined,
+): void {
+  try {
+    isolation?.cleanup();
+  } catch {
+    // Windows can retain scratch-file handles after process exit. Lifecycle notifications
+    // must still settle; a locked private scratch directory is not an active CLI process.
   }
 }
 
