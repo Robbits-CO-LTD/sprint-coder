@@ -3,6 +3,8 @@ import {
   RUNTIME_AUTH_PROBE_TIMEOUT_MS,
   RUNTIME_HOST_HELLO_TIMEOUT_MS,
   RUNTIME_VERSION_PROBE_TIMEOUT_MS,
+  GROK_PROBE_BUDGET_MS,
+  GROK_HOST_HELLO_TIMEOUT_MS,
 } from './probe-budget';
 
 describe('Runtime Host probe budget', () => {
@@ -10,5 +12,6 @@ describe('Runtime Host probe budget', () => {
     expect(RUNTIME_HOST_HELLO_TIMEOUT_MS).toBeGreaterThan(
       RUNTIME_VERSION_PROBE_TIMEOUT_MS + RUNTIME_AUTH_PROBE_TIMEOUT_MS,
     );
+    expect(GROK_HOST_HELLO_TIMEOUT_MS).toBeGreaterThan(GROK_PROBE_BUDGET_MS);
   });
 });

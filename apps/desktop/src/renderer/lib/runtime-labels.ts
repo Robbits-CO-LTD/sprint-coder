@@ -8,30 +8,46 @@ export const RUNTIME_LABEL: Record<RuntimeKind, string> = {
   mock: 'Mock Runtime',
   codex: 'Codex',
   claude: 'Claude Code',
+  grok: 'Grok CLI',
 };
 
 export const RUNTIME_DESC: Record<RuntimeKind, string> = {
   mock: '決定論的ローカル応答',
   codex: 'ローカルのCodex CLIで実応答',
   claude: 'ローカルのClaude Code CLIで実応答',
+  grok: 'ローカルのGrok CLIで実応答',
 };
 
-export const RUNTIME_CLI_MISSING_HINT: Record<'codex' | 'claude', string> = {
+export const RUNTIME_CLI_MISSING_HINT: Record<Exclude<RuntimeKind, 'mock'>, string> = {
   codex: 'Codex CLIが見つかりません',
   claude: 'Claude CLIが見つかりません',
+  grok: 'Grok CLIが見つかりません',
 };
 
+type RuntimeReadiness = 'ready' | 'authentication_required' | 'unavailable';
+
+export function runtimeReadinessOf(
+  kind: RuntimeKind,
+  runtime: {
+    codexReadiness: RuntimeReadiness;
+    claudeReadiness: RuntimeReadiness;
+    grokReadiness: RuntimeReadiness;
+  },
+): RuntimeReadiness {
+  return kind === 'mock' ? 'ready' : runtime[`${kind}Readiness`];
+}
+
 export function runtimeReadinessHint(
-  kind: 'codex' | 'claude',
+  kind: Exclude<RuntimeKind, 'mock'>,
   readiness: 'ready' | 'authentication_required' | 'unavailable',
 ): string | null {
   if (readiness === 'ready') return null;
   if (readiness === 'authentication_required')
-    return `${RUNTIME_LABEL[kind]}はインストール済みですが、ログインが必要です`;
+    return `${RUNTIME_LABEL[kind]}はインストール済みですが、ログインが必要です${kind === 'grok' ? '（ターミナルで grok login を実行）' : ''}`;
   return RUNTIME_CLI_MISSING_HINT[kind];
 }
 
-export const RUNTIME_KINDS: readonly RuntimeKind[] = ['mock', 'codex', 'claude'];
+export const RUNTIME_KINDS: readonly RuntimeKind[] = ['mock', 'codex', 'claude', 'grok'];
 
 export const EFFORT_LEVELS: readonly ClaudeEffort[] = [
   'low',

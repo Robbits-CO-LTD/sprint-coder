@@ -514,7 +514,7 @@ export type TurnSnapshot = {
 export type SprintCoderErrorCode =
   'TURN_ACTIVE' | 'STEER_STALE' | 'RUNTIME_UNAVAILABLE' | 'STEER_UNSUPPORTED' | string;
 
-export type RuntimeKind = 'mock' | 'codex' | 'claude';
+export type RuntimeKind = 'mock' | 'codex' | 'claude' | 'grok';
 /** A batch of the model's reasoning text (issue #17). Pushed, never persisted — see contracts'
  * reasoningBatchSchema for why. Already secret-redacted and batched by Main. */
 export type ReasoningBatch = {
@@ -627,7 +627,7 @@ export type WorkerSummary = {
   objective: string | null;
   writeCapable: boolean;
   currentActivity: string | null;
-  engine: 'mock' | 'codex' | 'claude';
+  engine: RuntimeKind;
   /** Provider Connection the Worker was hired against, or null when the backend recorded none. */
   connectionId: string | null;
   /** Provider id exactly as the backend persisted it — never derived from `engine` or the model. */
@@ -1069,7 +1069,7 @@ export interface SprintCoderApi {
     list(taskId: string): Promise<GeneratedImage[]>;
     read(imageId: string): Promise<{ id: string; mimeType: 'image/png'; base64: string }>;
   };
-  /** Runtime switch (Mock/Codex). Backend may not have wired this yet; renderer must
+  /** Runtime switch. Backend may not have wired this yet; renderer must
    * runtime-check `typeof window.sprintCoder?.settings?.getRuntime === 'function'` before use. */
   settings: {
     getRuntime(taskId?: string): Promise<{
@@ -1078,8 +1078,11 @@ export interface SprintCoderApi {
       codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
       claudeAvailable: boolean;
       claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
+      grokAvailable: boolean;
+      grokReadiness: 'ready' | 'authentication_required' | 'unavailable';
       codexCli: import('@sprint-coder/contracts').ResolvedCliCommand | null;
       claudeCli: import('@sprint-coder/contracts').ResolvedCliCommand | null;
+      grokCli: import('@sprint-coder/contracts').ResolvedCliCommand | null;
       model: string;
       models: CodexModelOption[];
       effort: ClaudeEffort;
@@ -1088,7 +1091,7 @@ export interface SprintCoderApi {
       codexEffort: string;
       modelFallbackNotice: {
         changes: Array<{
-          runtimeKind: 'codex' | 'claude';
+          runtimeKind: Exclude<RuntimeKind, 'mock'>;
           migratedCount: number;
           resetCount: number;
         }>;

@@ -842,6 +842,13 @@ if (runsWithElectronAbi)
           displayName: 'Codex CLI',
           enabled: true,
         }),
+        expect.objectContaining({
+          id: 'builtin:grok-cli',
+          providerId: 'xai',
+          runtimeKind: 'builtin_cli',
+          displayName: 'Grok CLI',
+          enabled: true,
+        }),
       ]);
       expect(persistence.getProviderConnection('builtin:codex-cli')).toEqual(
         expect.objectContaining({
@@ -860,6 +867,7 @@ if (runsWithElectronAbi)
       expect(reopened.listProviderConnections().map(({ id }) => id)).toEqual([
         'builtin:claude-cli',
         'builtin:codex-cli',
+        'builtin:grok-cli',
       ]);
       expect(reopened.getProviderConnection('builtin:codex-cli').secretReference).toBe(
         secretReference,
@@ -1480,6 +1488,7 @@ if (runsWithElectronAbi)
           runtimeSupport: {
             codex: 'full' as const,
             claude: 'full' as const,
+            grok: 'full' as const,
             provider: 'full' as const,
           },
           features: ['standard:description', 'standard:name'],
@@ -1534,6 +1543,7 @@ if (runsWithElectronAbi)
           runtimeSupport: {
             codex: 'full' as const,
             claude: 'full' as const,
+            grok: 'full' as const,
             provider: 'full' as const,
           },
           features: ['standard:description', 'standard:name'],
@@ -9184,6 +9194,7 @@ if (runsWithElectronAbi)
         { version: 91 },
         { version: 92 },
         { version: 93 },
+        { version: 94 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],

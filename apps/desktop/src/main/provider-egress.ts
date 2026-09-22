@@ -209,6 +209,25 @@ export function authorizeClaudeProviderEgress(input: ProviderEgressInput): Provi
   );
 }
 
+export function dispatchAfterGrokProviderEgress(
+  input: ProviderEgressInput,
+  dispatch: () => void,
+): ProviderEgressDecision {
+  const decision = authorizeGrokProviderEgress(input);
+  if (decision.allowed) dispatch();
+  return decision;
+}
+
+export function authorizeGrokProviderEgress(input: ProviderEgressInput): ProviderEgressDecision {
+  return authorizeProviderEgress(
+    input,
+    'xai-grok-cli',
+    'grok',
+    'grok_provider_egress',
+    'trusted-remote',
+  );
+}
+
 export function authorizeOfficialApiProviderEgress(
   input: ProviderEgressInput,
   providerId: string,

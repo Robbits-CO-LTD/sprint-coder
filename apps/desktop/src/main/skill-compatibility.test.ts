@@ -5,6 +5,18 @@ const skill = (frontmatter: string, body = 'Follow the workflow.') =>
   Buffer.from(`---\n${frontmatter}\n---\n${body}\n`, 'utf8');
 
 describe('Skill compatibility analysis', () => {
+  it.each([
+    ['argument-hint: file', 'Review $ARGUMENTS.', 'portable'],
+    ['context: fork', 'Review files.', 'blocked'],
+    ['model: opus', 'Review files.', 'blocked'],
+    ['', 'Read @guide.md.', 'blocked'],
+    ['unknown-native-field: true', 'Review files.', 'blocked'],
+  ])('limits Grok support for native Skill features: %s', (fields, body, support) => {
+    expect(
+      analyzeSkillPackage(skill(`name: review\ndescription: Review files\n${fields}`, body))
+        .compatibility.runtimeSupport.grok,
+    ).toBe(support);
+  });
   it('accepts the portable Agent Skills metadata without granting requested tools', () => {
     const result = analyzeSkillPackage(
       skill(
@@ -24,7 +36,7 @@ describe('Skill compatibility analysis', () => {
 
     expect(result.compatibility).toMatchObject({
       profile: 'portable',
-      runtimeSupport: { codex: 'full', claude: 'full', provider: 'full' },
+      runtimeSupport: { codex: 'full', claude: 'full', grok: 'full', provider: 'full' },
       requestedTools: ['Bash(git diff *)', 'Read'],
       requiresConversion: false,
     });
@@ -40,7 +52,7 @@ describe('Skill compatibility analysis', () => {
     ]);
     expect(result.compatibility).toMatchObject({
       profile: 'codex-native',
-      runtimeSupport: { codex: 'full', claude: 'portable', provider: 'portable' },
+      runtimeSupport: { codex: 'full', claude: 'portable', grok: 'portable', provider: 'portable' },
     });
   });
 
@@ -51,7 +63,7 @@ describe('Skill compatibility analysis', () => {
     ]);
     expect(result.compatibility).toMatchObject({
       profile: 'portable',
-      runtimeSupport: { codex: 'full', claude: 'portable', provider: 'portable' },
+      runtimeSupport: { codex: 'full', claude: 'portable', grok: 'portable', provider: 'portable' },
       requiresConversion: false,
     });
     expect(result.compatibility.features).toContain('package:resources');
@@ -69,6 +81,7 @@ describe('Skill compatibility analysis', () => {
     expect(result.compatibility.runtimeSupport).toEqual({
       codex: 'blocked',
       claude: 'blocked',
+      grok: 'blocked',
       provider: 'blocked',
     });
     expect(result.compatibility.requiresConversion).toBe(true);

@@ -39,6 +39,7 @@ export const UNKNOWN_QUEUE_REASON_LABEL = '実行枠を待っています';
 export const BUILTIN_CONNECTION_LABELS: Readonly<Record<string, string>> = {
   'builtin:claude-cli': 'Claude CLI',
   'builtin:codex-cli': 'Codex CLI',
+  'builtin:grok-cli': 'Grok CLI',
 };
 
 export const UNKNOWN_CONNECTION_LABEL = 'Connection不明';

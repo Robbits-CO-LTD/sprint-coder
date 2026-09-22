@@ -352,6 +352,7 @@ export function connectionKindLabel(connection: ProviderConnection): string {
   if (connection.runtimeKind === 'builtin_cli') {
     if (connection.providerId === 'anthropic') return 'Claude CLI（組み込み）';
     if (connection.providerId === 'openai') return 'Codex CLI（組み込み）';
+    if (connection.providerId === 'xai') return 'Grok CLI（組み込み）';
     return '組み込みCLI';
   }
   if (connection.runtimeKind === 'mock') return 'モックProvider';

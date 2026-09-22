@@ -34,7 +34,7 @@ export type ParsedSkillMetadata = Readonly<{
 export function portableSkillCompatibility(): SkillCompatibilityReport {
   return {
     profile: 'portable',
-    runtimeSupport: { codex: 'full', claude: 'full', provider: 'full' },
+    runtimeSupport: { codex: 'full', claude: 'full', grok: 'full', provider: 'full' },
     features: ['standard:description', 'standard:name'],
     requestedTools: [],
     warnings: [],
@@ -158,6 +158,12 @@ function buildCompatibility(
     ['context', 'agent', 'model', 'shell'].some((key) => key in frontmatter);
 
   const runtimeSupport: SkillCompatibilityReport['runtimeSupport'] = {
+    grok:
+      crossRuntimeBlocked || hasFileReferences
+        ? 'blocked'
+        : profile === 'portable' && !hasPackageResources
+          ? 'full'
+          : 'portable',
     codex:
       profile === 'claude-native' && crossRuntimeBlocked
         ? 'blocked'

@@ -418,10 +418,11 @@ export function availabilityOf(
   runtime: {
     codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
     claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
+    grokReadiness: 'ready' | 'authentication_required' | 'unavailable';
   },
 ): { available: boolean; reason: string | null } {
   if (kind === 'mock') return { available: true, reason: null };
-  const readiness = kind === 'codex' ? runtime.codexReadiness : runtime.claudeReadiness;
+  const readiness = runtime[`${kind}Readiness`];
   return { available: readiness !== 'unavailable', reason: runtimeReadinessHint(kind, readiness) };
 }
 
@@ -462,7 +463,9 @@ function CliCompatibilityNotice() {
       ? runtime.codexCli
       : runtime.kind === 'claude'
         ? runtime.claudeCli
-        : null;
+        : runtime.kind === 'grok'
+          ? runtime.grokCli
+          : null;
   const text = cliCompatibilityText(cli);
   if (text === null) return null;
   return (
@@ -486,6 +489,9 @@ function EffortGroup() {
   const runtime = useAppStore((s) => s.runtime);
   const setEffort = useAppStore((s) => s.setEffort);
   const effortReason = effortUnavailableReason(runtime.kind, runtime.claudeAvailable);
+  if (runtime.kind === 'grok') {
+    return <p className="settings-hint">Grok CLIの既定の推論設定を使用します。</p>;
+  }
   return (
     <div className="settings-group">
       <label className="settings-field" htmlFor="settings-effort">
@@ -549,7 +555,7 @@ function CliDetectionGroup() {
     <div className="settings-group">
       <span className="settings-field-label">CLI検出状況</span>
       <ul className="settings-status">
-        {(['codex', 'claude'] as const).map((kind) => {
+        {(['codex', 'claude', 'grok'] as const).map((kind) => {
           const { available, reason } = availabilityOf(kind, runtime);
           return (
             <li key={kind} data-testid={`settings-cli-${kind}`}>

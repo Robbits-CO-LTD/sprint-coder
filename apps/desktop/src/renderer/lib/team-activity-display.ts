@@ -101,23 +101,24 @@ export function modelSelectionReasonLabel(reason: string | null | undefined): st
 // ---------------------------------------------------------------------------------------------
 // Which runtime a Worker is actually running on (Team v2 multi-provider).
 //
-// `engine` is a backend-compatibility field whose union is still `mock | codex | claude`, so an
-// external-API Worker necessarily carries one of those three values. Reading it as the runtime is
+// `engine` is a backend-compatibility field whose union contains only Mock and CLI runtimes, so an
+// external-API Worker necessarily carries one of those values. Reading it as the runtime is
 // therefore wrong for every Worker hired against a Provider Connection — it would announce a
 // GPT-5 Worker as "Claude". `connectionId` is the execution identity, so it decides.
 // ---------------------------------------------------------------------------------------------
 
-/** A Connection that is not one of the two built-in CLIs runs against an external Provider API.
+/** A Connection that is not one of the built-in CLIs runs against an external Provider API.
  * The contract carries no display name for it, and a Provider name must never be guessed from a
  * connection id or a model id, so the surface states the only fact it has: it is an API run. */
 export const EXTERNAL_API_RUNTIME_LABEL = 'API';
 
 /** Product names for the built-in runtimes. Deliberately NOT `BUILTIN_CONNECTION_LABELS`: that map
  * words the Connection row ("Claude CLI"), while this is the role/objective sub-line, which has
- * always read "Claude"/"Codex". Both are keyed by the same two connection ids. */
+ * always read "Claude"/"Codex". Both are keyed by the same built-in connection ids. */
 const BUILTIN_RUNTIME_LABELS: Readonly<Record<string, string>> = {
   'builtin:claude-cli': 'Claude',
   'builtin:codex-cli': 'Codex',
+  'builtin:grok-cli': 'Grok CLI',
 };
 
 /** The pre-multi-provider wording, kept only for rows the backend recorded no Connection on.
@@ -127,13 +128,14 @@ const BUILTIN_RUNTIME_LABELS: Readonly<Record<string, string>> = {
 const ENGINE_RUNTIME_LABELS: Readonly<Record<WorkerSummary['engine'], string>> = {
   claude: 'Claude',
   codex: 'Codex',
+  grok: 'Grok CLI',
   mock: 'Mock',
 };
 
 /**
  * The runtime name shown beside a Worker's objective, on the Canvas card and in the List row alike.
  *
- * A recorded `connectionId` is the Worker's real execution identity: the two built-in ids get their
+ * A recorded `connectionId` is the Worker's real execution identity: the built-in ids get their
  * product name, and every other id — a user-created Provider Connection — is announced as an API
  * run rather than as a Provider name inferred from the id. Only a legacy row that carries no
  * Connection at all falls back to `engine`, where it is still the best fact available.

@@ -58,7 +58,12 @@ import {
 } from '../runtime-host/protocol';
 import { RuntimeHostClient } from './runtime-host';
 
-function emitReadyHello(index: number, emitSpawn = true, operationId = 'hello'): void {
+function emitReadyHello(
+  index: number,
+  emitSpawn = true,
+  operationId = 'hello',
+  overrides: Record<string, unknown> = {},
+): void {
   const instanceId = electronMock.instances[index]!;
   if (emitSpawn) electronMock.children[index]!.emit('spawn');
   electronMock.children[index]!.emit('message', {
@@ -75,6 +80,7 @@ function emitReadyHello(index: number, emitSpawn = true, operationId = 'hello'):
     claudeAvailable: false,
     claudeReadiness: 'unavailable',
     claudeModels: [],
+    ...overrides,
   });
 }
 
@@ -84,6 +90,76 @@ afterEach(() => {
   electronMock.children.splice(0);
   electronMock.instances.splice(0);
   electronMock.fork.mockClear();
+});
+
+describe('RuntimeHostClient Grok capability', () => {
+  it('launches Grok and selects only its capability fields', async () => {
+    const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, 'grok');
+    const models = [{ id: 'grok-code-fast-1', displayName: 'Grok', description: 'test' }];
+    const cli = {
+      source: 'path',
+      executable: '/usr/local/bin/grok',
+      version: 'grok 1.0.0 (abcdef1)',
+      compatibility: 'verified',
+      capabilities: ['version_probe'],
+    };
+    expect(electronMock.fork).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining(['--runtime-kind', 'grok']),
+      expect.objectContaining({ serviceName: 'Sprint Coder Runtime Host (Grok)' }),
+    );
+    emitReadyHello(0, true, 'hello', {
+      grokAvailable: true,
+      grokReadiness: 'authentication_required',
+      grokModels: models,
+      grokCli: cli,
+    });
+    await expect(client.probe()).resolves.toEqual({
+      available: true,
+      readiness: 'authentication_required',
+      models,
+      cli,
+    });
+    expect(await client.captureImageAttachmentCapability()).toMatchObject({
+      runtimeKind: 'grok',
+      modelIds: ['grok-code-fast-1'],
+    });
+    expect(client.currentImageAttachmentCapability().runtimeKind).toBe('grok');
+    await expect(
+      client.prepareImageAttachments({
+        taskId: 'task-grok',
+        turnId: 'turn-grok',
+        selectionIdentity: 'a'.repeat(64),
+        manifest: [],
+        paths: [],
+        manifestDigest: runtimeImageManifestDigest([]),
+      }),
+    ).rejects.toThrow();
+    client.dispose();
+  });
+
+  it.each([false, true])(
+    'never falls back to Codex when Grok is unavailable (legacy=%s)',
+    async (legacy) => {
+      const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, 'grok');
+      emitReadyHello(0, true, 'hello', {
+        codexCli: {
+          source: 'path',
+          executable: '/usr/local/bin/codex',
+          version: 'codex 1.0.0',
+          compatibility: 'verified',
+          capabilities: ['app_server'],
+        },
+        ...(legacy ? {} : { grokAvailable: false, grokReadiness: 'unavailable', grokModels: [] }),
+      });
+      await expect(client.probe()).resolves.toEqual({
+        available: false,
+        readiness: 'unavailable',
+        models: [],
+      });
+      client.dispose();
+    },
+  );
 });
 
 describe('RuntimeHostClient image attachment capability state', () => {

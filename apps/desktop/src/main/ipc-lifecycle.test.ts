@@ -107,13 +107,14 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
     'teamWorkerRuntime',
     'compatibleRuntime',
     'claudeRuntime',
+    'grokRuntime',
     'attachmentCustodyStore',
     'teamMcpBridge',
   ])
     state[key] = { dispose };
   Object.assign(router, state);
   await expect(router.dispose()).resolves.toBeUndefined();
-  expect(dispose).toHaveBeenCalledTimes(13);
+  expect(dispose).toHaveBeenCalledTimes(14);
   expect(disposeGraphSources).toHaveBeenCalledTimes(1);
 });
 

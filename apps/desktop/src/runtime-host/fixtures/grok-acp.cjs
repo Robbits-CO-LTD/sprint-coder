@@ -1,0 +1,96 @@
+'use strict';
+// Synthetic ACP peer; never invokes a provider or touches a user Workspace.
+const readline = require('node:readline');
+const mode = process.argv[process.argv.indexOf('--model') + 1];
+const sessionId = 'grok-fixture-session';
+let tools = [];
+const send = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
+const update = (update, id = sessionId) =>
+  send({ method: 'session/update', params: { sessionId: id, update } });
+readline.createInterface({ input: process.stdin }).on('line', (line) => {
+  const request = JSON.parse(line);
+  const reply = (result) => send({ id: request.id, result });
+  if (request.method === 'initialize') {
+    reply({
+      protocolVersion: 1,
+      authMethods: mode === 'no-auth' ? [] : [{ id: 'cached_token' }],
+      _meta: {
+        grokShell: true,
+        modelState: { availableModels: [{ modelId: 'grok-fixture', name: 'Grok fixture' }] },
+      },
+    });
+  } else if (request.method === 'authenticate') reply({});
+  else if (request.method === 'session/new') {
+    if (request.params._meta.agentProfile.tools.join(',') !== 'search_tool,use_tool')
+      process.exit(5);
+    tools = request.params.mcpServers.length ? ['read_file'] : [];
+    update({
+      sessionUpdate: 'available_commands_update',
+      _meta: {
+        tools:
+          mode === 'rogue-tools'
+            ? ['read_file', 'search_tool', 'use_tool']
+            : ['search_tool', 'use_tool'],
+      },
+    });
+    reply({ sessionId, models: { currentModelId: 'grok-fixture' } });
+  } else if (request.method === '_x.ai/mcp/list') {
+    reply({
+      result: {
+        sessionMcpResolved: true,
+        servers:
+          mode === 'rogue-mcp'
+            ? [{ name: 'rogue' }]
+            : tools.length
+              ? [
+                  {
+                    name: 'team',
+                    session: {
+                      enabled: true,
+                      status: 'ready',
+                      tools: tools.map((name) => ({ name })),
+                    },
+                  },
+                ]
+              : [],
+      },
+    });
+  } else if (request.method === 'session/prompt') {
+    if (mode === 'empty') {
+      reply({ stopReason: 'end_turn' });
+      return;
+    }
+    if (mode === 'hang') return;
+    if (mode === 'malformed') {
+      process.stdout.write('not-json\n');
+      return;
+    }
+    if (mode === 'early-exit') {
+      process.exit(0);
+    }
+    if (mode === 'rpc-error') {
+      send({ id: request.id, error: { code: -32000, message: 'FAKE_SECRET_NOT_FOR_UI' } });
+      return;
+    }
+    if (mode === 'rate-limit') {
+      send({
+        id: request.id,
+        error: { code: -32603, message: '429 Rate limit exceeded FAKE_SECRET_NOT_FOR_UI' },
+      });
+      return;
+    }
+    update(
+      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'こんにちは' } },
+      mode === 'wrong-session' ? 'wrong' : sessionId,
+    );
+    if (mode === 'tool-wait') {
+      update({ sessionUpdate: 'tool_call', toolCallId: 't1', status: 'in_progress' });
+      setTimeout(() => {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' });
+        reply({ stopReason: 'end_turn' });
+      }, 100);
+      return;
+    }
+    reply({ stopReason: mode === 'max-tokens' ? 'max_tokens' : 'end_turn' });
+  } else send({ id: request.id, error: { code: -32601, message: 'unknown' } });
+});

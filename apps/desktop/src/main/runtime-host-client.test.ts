@@ -106,7 +106,7 @@ describe('RuntimeHostClient start acknowledgement', () => {
     client.dispose();
   });
 
-  it.each(['codex', 'claude'] as const)(
+  it.each(['codex', 'claude', 'grok'] as const)(
     'fails a rejected %s start once and ignores late or duplicate terminal responses',
     async (runtimeKind) => {
       vi.useFakeTimers();
@@ -171,7 +171,7 @@ describe('RuntimeHostClient start acknowledgement', () => {
     },
   );
 
-  it.each(['codex', 'claude'] as const)(
+  it.each(['codex', 'claude', 'grok'] as const)(
     'posts assistant and user Memory as valid %s starts without authority upgrades',
     async (runtimeKind) => {
       const failed = vi.fn();
@@ -260,6 +260,47 @@ describe('RuntimeHostClient start acknowledgement', () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(failed).not.toHaveBeenCalled();
     expect(child.messages.map(messageType)).toEqual(['hello', 'start']);
+    client.dispose();
+  });
+
+  it('reports Grok on start timeout and unavailable failures', async () => {
+    vi.useFakeTimers();
+    const failed = vi.fn();
+    const client = new RuntimeHostClient(vi.fn(), failed, undefined, undefined, 'grok');
+    children[0]!.emit('spawn');
+    client.start('task-grok', 'turn-grok', 'inspect', null, 'auto', emptyCatalog());
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledOnce();
+    expect(failed.mock.calls[0]?.[3]).toMatchObject({
+      runtimeKind: 'grok',
+      reasonCode: 'runtime_start_timeout',
+    });
+    client.dispose();
+    expect(client.start('task-grok', 'turn-next', 'inspect', null, 'auto', emptyCatalog())).toBe(
+      false,
+    );
+    expect(failed.mock.lastCall?.[2]).toMatchObject({
+      code: 'RUNTIME_UNAVAILABLE',
+      userMessage: 'Grok runtimeを利用できません。',
+    });
+  });
+
+  it('labels abnormal Grok exits without naming Codex', async () => {
+    const failed = vi.fn();
+    const client = new RuntimeHostClient(vi.fn(), failed, undefined, undefined, 'grok');
+    const child = children[0]!;
+    child.emit('spawn');
+    client.start('task-grok', 'turn-grok', 'inspect', null, 'auto', emptyCatalog());
+    await Promise.resolve();
+    const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+      string,
+      unknown
+    >;
+    child.emit('message', { ...start, type: 'exit', seq: 1, code: 1, canceled: false });
+    expect(failed.mock.lastCall?.[2]).toMatchObject({
+      code: 'RUNTIME_FAILED',
+      userMessage: 'Grok runtimeが異常終了しました。',
+    });
     client.dispose();
   });
 

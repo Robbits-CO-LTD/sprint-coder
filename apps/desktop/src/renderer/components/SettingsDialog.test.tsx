@@ -168,6 +168,7 @@ describe('CLI detection status', () => {
       availabilityOf('codex', {
         codexReadiness: 'authentication_required',
         claudeReadiness: 'unavailable',
+        grokReadiness: 'unavailable',
       }),
     ).toEqual({
       available: true,

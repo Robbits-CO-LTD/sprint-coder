@@ -3,30 +3,36 @@ import { TaskTitleAbortRegistry, TaskTitleRuntimePool } from './task-title-runti
 
 describe('TaskTitleRuntimePool', () => {
   it('creates isolated, reusable hosts for each CLI kind', () => {
-    const create = vi.fn((kind: 'codex' | 'claude') => ({ kind, dispose: vi.fn() }));
+    const create = vi.fn((kind: 'codex' | 'claude' | 'grok') => ({ kind, dispose: vi.fn() }));
     const pool = new TaskTitleRuntimePool(create);
 
     expect(pool.get('codex')).toBe(pool.get('codex'));
     expect(pool.get('claude')).toBe(pool.get('claude'));
     expect(pool.get('codex')).not.toBe(pool.get('claude'));
-    expect(create.mock.calls.map(([kind]) => kind)).toEqual(['codex', 'claude']);
+    expect(pool.get('grok')).toBe(pool.get('grok'));
+    expect(pool.get('grok')).not.toBe(pool.get('codex'));
+    expect(pool.get('grok')).not.toBe(pool.get('claude'));
+    expect(create.mock.calls.map(([kind]) => kind)).toEqual(['codex', 'claude', 'grok']);
   });
 
-  it('disposes only its background hosts and recreates them on later use', () => {
-    const runtimes: Array<{ dispose: ReturnType<typeof vi.fn> }> = [];
-    const pool = new TaskTitleRuntimePool(() => {
-      const runtime = { dispose: vi.fn() };
-      runtimes.push(runtime);
-      return runtime;
-    });
-    const first = pool.get('codex');
+  it.each(['codex', 'claude', 'grok'] as const)(
+    'disposes and recreates the %s background host',
+    (kind) => {
+      const runtimes: Array<{ dispose: ReturnType<typeof vi.fn> }> = [];
+      const pool = new TaskTitleRuntimePool(() => {
+        const runtime = { dispose: vi.fn() };
+        runtimes.push(runtime);
+        return runtime;
+      });
+      const first = pool.get(kind);
 
-    pool.dispose();
+      pool.dispose();
 
-    expect(first.dispose).toHaveBeenCalledOnce();
-    expect(pool.get('codex')).not.toBe(first);
-    expect(runtimes).toHaveLength(2);
-  });
+      expect(first.dispose).toHaveBeenCalledOnce();
+      expect(pool.get(kind)).not.toBe(first);
+      expect(runtimes).toHaveLength(2);
+    },
+  );
 });
 
 describe('TaskTitleAbortRegistry', () => {

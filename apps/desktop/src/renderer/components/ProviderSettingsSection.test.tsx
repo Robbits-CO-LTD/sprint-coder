@@ -229,6 +229,12 @@ describe('connectionKindLabel', () => {
     expect(
       connectionKindLabel(connection({ providerId: 'openai', runtimeKind: 'builtin_cli' })),
     ).toBe('Codex CLI（組み込み）');
+    expect(connectionKindLabel(connection({ providerId: 'xai', runtimeKind: 'builtin_cli' }))).toBe(
+      'Grok CLI（組み込み）',
+    );
+    expect(
+      connectionKindLabel(connection({ providerId: 'xai', runtimeKind: 'official_api' })),
+    ).toBe('xAI API');
     expect(
       connectionKindLabel(connection({ providerId: 'openai', runtimeKind: 'official_api' })),
     ).toBe('OpenAI API');

@@ -37,8 +37,8 @@ export class SkillSettingsService {
   private store: Promise<SkillStore> | null = null;
   private contextCatalogEntries: readonly SkillCatalogSnapshotEntry[] = [];
   private autoCandidatesByRuntime: Readonly<
-    Record<'codex' | 'claude' | 'provider', readonly ResolvedTurnSkill[]>
-  > = { codex: [], claude: [], provider: [] };
+    Record<'codex' | 'claude' | 'grok' | 'provider', readonly ResolvedTurnSkill[]>
+  > = { codex: [], claude: [], grok: [], provider: [] };
   private activationPolicyMutation: Promise<void> = Promise.resolve();
 
   constructor(
@@ -113,13 +113,14 @@ export class SkillSettingsService {
         })),
       ),
     );
-    const forRuntime = (runtime: 'codex' | 'claude' | 'provider') =>
+    const forRuntime = (runtime: 'codex' | 'claude' | 'grok' | 'provider') =>
       resolved
         .filter(({ compatibility }) => compatibility.runtimeSupport[runtime] !== 'blocked')
         .map((skill) => projectResolvedSkillForRuntime(skill, runtime));
     const byRuntime = {
       codex: forRuntime('codex'),
       claude: forRuntime('claude'),
+      grok: forRuntime('grok'),
       provider: forRuntime('provider'),
     };
     this.contextCatalogEntries = entries;
@@ -127,7 +128,7 @@ export class SkillSettingsService {
   }
 
   markContextCatalogUnavailable(): void {
-    this.autoCandidatesByRuntime = { codex: [], claude: [], provider: [] };
+    this.autoCandidatesByRuntime = { codex: [], claude: [], grok: [], provider: [] };
     this.contextCatalogEntries = [
       'sprint-coder-team',
       'sprint-coder-product',
@@ -147,6 +148,7 @@ export class SkillSettingsService {
         runtimeSupport: {
           codex: 'full' as const,
           claude: 'full' as const,
+          grok: 'full' as const,
           provider: 'full' as const,
         },
         features: [],
@@ -267,7 +269,7 @@ export class SkillSettingsService {
   async resolveSelections(
     selections: readonly TurnSkillSelection[],
     defaultArguments?: string,
-    runtime: 'codex' | 'claude' | 'provider' = 'provider',
+    runtime: 'codex' | 'claude' | 'grok' | 'provider' = 'provider',
   ): Promise<ResolvedTurnSkill[]> {
     const resolved = await Promise.all(
       selections.map(async (selection) => {
@@ -276,6 +278,11 @@ export class SkillSettingsService {
         ).resolveSelectable(selection.ref.source, selection.ref.skillId, selection.ref.digest);
         if (item.kind !== selection.kind)
           throw new SkillSettingsError('SOURCE_CHANGED', 'Skillの種類が変更されました');
+        if (runtime === 'grok' && item.compatibility.runtimeSupport.grok === 'blocked')
+          throw new SkillSettingsError(
+            'INVALID_SKILL',
+            '選択したRuntimeではこのSkillを使用できません',
+          );
         const selectionWithArguments = {
           ...selection,
           ...((selection.arguments ?? defaultArguments) === undefined
@@ -301,13 +308,13 @@ export class SkillSettingsService {
   }
 
   async resolveAutoCandidates(
-    runtime: 'codex' | 'claude' | 'provider',
+    runtime: 'codex' | 'claude' | 'grok' | 'provider',
   ): Promise<ResolvedTurnSkill[]> {
     await this.refreshContextCatalog();
     return [...this.autoCandidatesByRuntime[runtime]];
   }
 
-  pinnedAutoCandidates(runtime: 'codex' | 'claude' | 'provider'): ResolvedTurnSkill[] {
+  pinnedAutoCandidates(runtime: 'codex' | 'claude' | 'grok' | 'provider'): ResolvedTurnSkill[] {
     return [...this.autoCandidatesByRuntime[runtime]];
   }
 
@@ -379,7 +386,7 @@ export async function createSkillDraftWithPublicError(
 
 function projectResolvedSkillForRuntime(
   skill: ResolvedTurnSkill,
-  runtime: 'codex' | 'claude' | 'provider',
+  runtime: 'codex' | 'claude' | 'grok' | 'provider',
 ): ResolvedTurnSkill {
   if (skill.compatibility.runtimeSupport[runtime] !== 'portable') return skill;
   return {

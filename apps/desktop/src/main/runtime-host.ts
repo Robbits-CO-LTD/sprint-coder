@@ -16,6 +16,7 @@ import {
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
   type RuntimeFailureDiagnostic,
+  type RuntimeKind,
   type RuntimeProtocolFailureReasonCode,
   type RuntimeImageAttachmentManifestEntry,
   type RuntimePreparedImageAttachments,
@@ -28,7 +29,10 @@ import {
   type RuntimeWorkspaceSet,
   runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
-import { RUNTIME_HOST_HELLO_TIMEOUT_MS } from '../runtime-host/probe-budget';
+import {
+  GROK_HOST_HELLO_TIMEOUT_MS,
+  RUNTIME_HOST_HELLO_TIMEOUT_MS,
+} from '../runtime-host/probe-budget';
 import {
   IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS,
   runtimeCapabilityCatalogRevision,
@@ -160,7 +164,7 @@ export class RuntimeHostClient {
     private readonly onFailure: FailureHandler,
     private readonly prepareContext?: PrepareContext,
     private readonly onContextAccepted?: ContextAccepted,
-    private readonly kind: 'codex' | 'claude' = 'codex',
+    private readonly kind: RuntimeKind = 'codex',
     private readonly codexIsolationRoot = join(tmpdir(), 'sprint-coder-codex-isolated-tests'),
     private readonly bindTeamRuntimeProcess?: (
       taskId: string,
@@ -525,15 +529,18 @@ export class RuntimeHostClient {
     this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
       this.expectedProbeOperationId = 'hello';
-      setTimeout(() => {
-        if (this.resolveProbe === resolve) {
-          this.resolveProbe = null;
-          this.expectedProbeOperationId = null;
-          const report = { available: false, readiness: 'unavailable' as const, models: [] };
-          this.recordCapabilityState(instanceId, report);
-          resolve(report);
-        }
-      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
+      setTimeout(
+        () => {
+          if (this.resolveProbe === resolve) {
+            this.resolveProbe = null;
+            this.expectedProbeOperationId = null;
+            const report = { available: false, readiness: 'unavailable' as const, models: [] };
+            this.recordCapabilityState(instanceId, report);
+            resolve(report);
+          }
+        },
+        this.kind === 'grok' ? GROK_HOST_HELLO_TIMEOUT_MS : RUNTIME_HOST_HELLO_TIMEOUT_MS,
+      );
     });
     let child: UtilityProcess;
     try {
@@ -551,7 +558,9 @@ export class RuntimeHostClient {
           serviceName:
             this.kind === 'claude'
               ? 'Sprint Coder Runtime Host (Claude)'
-              : 'Sprint Coder Runtime Host',
+              : this.kind === 'grok'
+                ? 'Sprint Coder Runtime Host (Grok)'
+                : 'Sprint Coder Runtime Host',
           stdio: 'ignore',
         },
       );
@@ -593,12 +602,19 @@ export class RuntimeHostClient {
               models: raw.claudeModels,
               ...(raw.claudeCli === undefined ? {} : { cli: raw.claudeCli }),
             }
-          : {
-              available: raw.codexAvailable,
-              readiness: raw.codexReadiness,
-              models: raw.codexModels,
-              ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
-            };
+          : this.kind === 'grok'
+            ? {
+                available: raw.grokAvailable ?? false,
+                readiness: raw.grokReadiness ?? 'unavailable',
+                models: raw.grokModels ?? [],
+                ...(raw.grokCli === undefined ? {} : { cli: raw.grokCli }),
+              }
+            : {
+                available: raw.codexAvailable,
+                readiness: raw.codexReadiness,
+                models: raw.codexModels,
+                ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
+              };
       this.recordCapabilityState(instanceId, report);
       this.resolveProbe?.(report);
       this.resolveProbe = null;
@@ -822,7 +838,9 @@ export class RuntimeHostClient {
             userMessage:
               this.kind === 'claude'
                 ? 'Claude runtimeが異常終了しました。'
-                : 'Codex runtimeが異常終了しました。',
+                : this.kind === 'grok'
+                  ? 'Grok runtimeが異常終了しました。'
+                  : 'Codex runtimeが異常終了しました。',
             retryable: true,
           });
       }
@@ -925,14 +943,17 @@ export class RuntimeHostClient {
     this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
       this.expectedProbeOperationId = operationId;
-      setTimeout(() => {
-        if (this.resolveProbe !== resolve) return;
-        this.resolveProbe = null;
-        this.expectedProbeOperationId = null;
-        const report = { available: false, readiness: 'unavailable' as const, models: [] };
-        this.recordCapabilityState(instanceId, report);
-        resolve(report);
-      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
+      setTimeout(
+        () => {
+          if (this.resolveProbe !== resolve) return;
+          this.resolveProbe = null;
+          this.expectedProbeOperationId = null;
+          const report = { available: false, readiness: 'unavailable' as const, models: [] };
+          this.recordCapabilityState(instanceId, report);
+          resolve(report);
+        },
+        this.kind === 'grok' ? GROK_HOST_HELLO_TIMEOUT_MS : RUNTIME_HOST_HELLO_TIMEOUT_MS,
+      );
     });
     this.post({ ...this.base('', '', operationId, 1), type: 'hello' });
     return this.probeResult;
@@ -1027,7 +1048,9 @@ export class RuntimeHostClient {
       userMessage:
         this.kind === 'claude'
           ? 'Claude runtimeを利用できません。'
-          : 'Codex runtimeを利用できません。',
+          : this.kind === 'grok'
+            ? 'Grok runtimeを利用できません。'
+            : 'Codex runtimeを利用できません。',
       retryable: false,
     };
   }
@@ -1062,7 +1085,7 @@ export class RuntimeHostClient {
 }
 
 function runtimeStartFailureDiagnostic(
-  runtimeKind: 'codex' | 'claude',
+  runtimeKind: RuntimeKind,
   reasonCode: RuntimeProtocolFailureReasonCode,
   elapsedMs: number,
   teamMcpEnabled: boolean,

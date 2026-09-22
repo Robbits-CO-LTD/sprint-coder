@@ -6,13 +6,20 @@ import {
 
 export const BUILTIN_CLAUDE_CONNECTION_ID = 'builtin:claude-cli';
 export const BUILTIN_CODEX_CONNECTION_ID = 'builtin:codex-cli';
+export const BUILTIN_GROK_CONNECTION_ID = 'builtin:grok-cli';
 
 export type BuiltinRuntimeSelection = Readonly<{
-  runtimeKind: Extract<RuntimeKind, 'claude' | 'codex'>;
+  runtimeKind: Extract<RuntimeKind, 'claude' | 'codex' | 'grok'>;
   model: string;
 }>;
 
 export function modelSelectionForRuntime(runtimeKind: RuntimeKind, model: string): ModelSelection {
+  if (runtimeKind === 'grok')
+    return modelSelectionSchema.parse({
+      connectionId: BUILTIN_GROK_CONNECTION_ID,
+      requestedProvider: 'xai',
+      requestedModel: model,
+    });
   if (runtimeKind === 'claude')
     return modelSelectionSchema.parse({
       connectionId: BUILTIN_CLAUDE_CONNECTION_ID,
@@ -42,5 +49,7 @@ export function builtinRuntimeForModelSelection(
     return { runtimeKind: 'claude', model: parsed.requestedModel };
   if (parsed.connectionId === BUILTIN_CODEX_CONNECTION_ID && parsed.requestedProvider === 'openai')
     return { runtimeKind: 'codex', model: parsed.requestedModel };
+  if (parsed.connectionId === BUILTIN_GROK_CONNECTION_ID && parsed.requestedProvider === 'xai')
+    return { runtimeKind: 'grok', model: parsed.requestedModel };
   return null;
 }

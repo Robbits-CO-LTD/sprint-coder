@@ -1,10 +1,12 @@
 import { CodexRuntimeAdapter, probeCodex } from './codex-adapter';
 import { ClaudeRuntimeAdapter, probeClaude } from './claude-adapter';
+import { GrokRuntimeAdapter, probeGrok } from './grok-adapter';
 import {
   RUNTIME_PROTOCOL_VERSION,
   correlatedRuntimeStartRejection,
   isMainToRuntimeEnvelope,
   type MainToRuntimeEnvelope,
+  type RuntimeKind,
   type RuntimeToolRequest,
   type RuntimeToMainEnvelope,
 } from './protocol';
@@ -27,7 +29,9 @@ const runtimeInstanceId = readRuntimeInstanceId();
 const adapter =
   runtimeKind === 'claude'
     ? new ClaudeRuntimeAdapter()
-    : new CodexRuntimeAdapter(undefined, undefined, undefined, readCodexIsolationRoot());
+    : runtimeKind === 'grok'
+      ? new GrokRuntimeAdapter()
+      : new CodexRuntimeAdapter(undefined, undefined, undefined, readCodexIsolationRoot());
 const sequences = new Map<string, number>();
 const activeTurns = new Map<string, { taskId: string; operationId: string }>();
 const pendingToolCalls = new Map<
@@ -400,38 +404,47 @@ function terminateImagePreparationForTurn(turnId: string): void {
 }
 
 async function probeAndSendCapability(operationId: string): Promise<void> {
-  const probe = await (runtimeKind === 'claude' ? probeClaude() : probeCodex());
-  if (adapter instanceof CodexRuntimeAdapter) {
-    adapter.setCliVersion(probe.version ?? null);
-    adapter.setCliResolution(probe.cli ?? null);
-  }
-  if (adapter instanceof ClaudeRuntimeAdapter) {
-    adapter.setCliVersion(probe.version ?? null);
-    adapter.setCliResolution(probe.cli ?? null);
-  }
+  const probe = await (runtimeKind === 'claude'
+    ? probeClaude()
+    : runtimeKind === 'grok'
+      ? probeGrok()
+      : probeCodex());
+  adapter.setCliVersion(probe.version ?? null);
+  adapter.setCliResolution(probe.cli ?? null);
   send('', '', operationId, {
     type: 'hello',
+    codexAvailable: false,
+    codexReadiness: 'unavailable',
+    codexModels: [],
+    claudeAvailable: false,
+    claudeReadiness: 'unavailable',
+    claudeModels: [],
+    grokAvailable: false,
+    grokReadiness: 'unavailable',
+    grokModels: [],
     ...(runtimeKind === 'claude'
       ? {
-          codexAvailable: false,
-          codexReadiness: 'unavailable',
-          codexModels: [],
           claudeAvailable: probe.available,
           claudeReadiness: probe.readiness,
           claudeModels: probe.models,
           ...(probe.version === undefined ? {} : { claudeVersion: probe.version }),
           ...(probe.cli === undefined ? {} : { claudeCli: probe.cli }),
         }
-      : {
-          codexAvailable: probe.available,
-          codexReadiness: probe.readiness,
-          codexModels: probe.models,
-          ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
-          ...(probe.cli === undefined ? {} : { codexCli: probe.cli }),
-          claudeAvailable: false,
-          claudeReadiness: 'unavailable',
-          claudeModels: [],
-        }),
+      : runtimeKind === 'grok'
+        ? {
+            grokAvailable: probe.available,
+            grokReadiness: probe.readiness,
+            grokModels: probe.models,
+            ...(probe.version === undefined ? {} : { grokVersion: probe.version }),
+            ...(probe.cli === undefined ? {} : { grokCli: probe.cli }),
+          }
+        : {
+            codexAvailable: probe.available,
+            codexReadiness: probe.readiness,
+            codexModels: probe.models,
+            ...(probe.version === undefined ? {} : { codexVersion: probe.version }),
+            ...(probe.cli === undefined ? {} : { codexCli: probe.cli }),
+          }),
   });
 }
 
@@ -506,18 +519,28 @@ function send(
   turnId: string,
   operationId: string,
   payload:
-    | Pick<
+    | (Pick<
         Extract<RuntimeToMainEnvelope, { type: 'hello' }>,
         | 'type'
         | 'codexAvailable'
         | 'codexReadiness'
         | 'codexVersion'
+        | 'codexCli'
         | 'codexModels'
         | 'claudeAvailable'
         | 'claudeReadiness'
         | 'claudeVersion'
+        | 'claudeCli'
         | 'claudeModels'
-      >
+        | 'grokVersion'
+        | 'grokCli'
+      > &
+        Required<
+          Pick<
+            Extract<RuntimeToMainEnvelope, { type: 'hello' }>,
+            'grokAvailable' | 'grokReadiness' | 'grokModels'
+          >
+        >)
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'event' }>, 'type' | 'event'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'tool_request' }>, 'type' | 'request'>
     | Pick<Extract<RuntimeToMainEnvelope, { type: 'tool_cancel' }>, 'type' | 'callId'>
@@ -562,10 +585,10 @@ function readRuntimeInstanceId(): string {
   return value;
 }
 
-function readRuntimeKind(): 'codex' | 'claude' {
+function readRuntimeKind(): RuntimeKind {
   const index = process.argv.indexOf('--runtime-kind');
   const value = index < 0 ? undefined : process.argv[index + 1];
-  return value === 'claude' ? 'claude' : 'codex';
+  return value === 'claude' || value === 'grok' ? value : 'codex';
 }
 
 function readCodexIsolationRoot(): string {

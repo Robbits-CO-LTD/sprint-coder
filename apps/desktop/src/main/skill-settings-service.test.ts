@@ -34,6 +34,36 @@ describe('Skill activation source boundary', () => {
 });
 
 describe.skipIf(process.platform === 'win32')('SkillSettingsService', () => {
+  it('projects Claude metadata to portable Grok Skills for manual and automatic selection', async () => {
+    const service = new SkillSettingsService({ homePath: await home() });
+    const draft = await service.createDraft({
+      kind: 'chat',
+      skillId: 'portable-grok',
+      files: [
+        {
+          path: 'SKILL.md',
+          content:
+            '---\nname: Grok review\ndescription: Review safely\nargument-hint: file\n---\nReview $ARGUMENTS.',
+        },
+      ],
+    });
+    const installed = await service.installDraft(draft.id, draft.digest);
+    expect(installed.compatibility.runtimeSupport.grok).toBe('portable');
+    const selected = await service.resolveSelections(
+      [{ kind: 'chat', ref: installed.ref }],
+      'main.ts',
+      'grok',
+    );
+    expect(selected[0]?.content).toContain('Review main.ts.');
+    expect(selected[0]?.content).not.toContain('argument-hint');
+    await service.setActivationPolicy(installed.ref, 'auto-allowed');
+    expect((await service.resolveAutoCandidates('grok'))[0]?.content).not.toContain(
+      'argument-hint',
+    );
+    expect(service.pinnedAutoCandidates('grok')).toHaveLength(1);
+    service.markContextCatalogUnavailable();
+    expect(service.pinnedAutoCandidates('grok')).toEqual([]);
+  });
   it('retries opening the store after a transient filesystem failure', async () => {
     const root = await home();
     const blocked = join(root, '.sprintcoder');
