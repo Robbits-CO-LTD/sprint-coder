@@ -15755,7 +15755,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
         );
       }
       const turn = this.getTurn(input.taskId, input.turnId);
-      if (turn.state !== 'executing' && turn.state !== 'planning')
+      if (
+        turn.state !== 'executing' &&
+        turn.state !== 'planning' &&
+        turn.state !== 'waiting_approval'
+      )
         throw new Error('Turn is not eligible to request approval');
       if (this.getPermissionPolicy(input.taskId).policyEpoch !== input.policyEpoch)
         throw new Error('Approval policy epoch is stale');
@@ -15802,8 +15806,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
           new Date(input.requestedAt).toISOString(),
           input.callId,
         );
-      transitionTurn(turn.state, 'waiting_approval');
-      this.updateTurn(input.turnId, 'waiting_approval');
+      // Parallel tools each need their own approval. An existing pending card already
+      // put the Turn in this state; only the last resolved card may resume it.
+      if (turn.state !== 'waiting_approval') {
+        transitionTurn(turn.state, 'waiting_approval');
+        this.updateTurn(input.turnId, 'waiting_approval');
+      }
       const approval = this.getApprovalWithChallenge(input.taskId, input.id, input.challenge);
       const event = this.appendEvent({
         type: 'approval.requested',

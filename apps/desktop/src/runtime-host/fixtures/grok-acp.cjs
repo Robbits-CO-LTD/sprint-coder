@@ -72,6 +72,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       },
     });
   } else if (request.method === 'session/prompt') {
+    if (mode === 'string-response') {
+      update({
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'Synthetic thought' },
+      });
+      send({ id: 'internal-reply', result: {} });
+    }
     if (mode.startsWith('mcp-') && mode !== 'mcp-ready-update') mcpInventoryUpdate();
     if (mode === 'empty') {
       reply({ stopReason: 'end_turn' });

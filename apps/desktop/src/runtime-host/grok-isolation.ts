@@ -102,6 +102,8 @@ enabled = false
 [memory]
 enabled = false
 [permission]
-deny = ["Read", "Edit", "Bash", "Grep", "WebFetch", "WebSearch"]
+# search_tool is a pathless Read. Deny every file path (including use_tool file
+# arguments) without denying tool discovery; Read(*) also matches pathless Read.
+deny = ["Read(**)", "Edit", "Bash", "Grep", "WebFetch", "WebSearch"]
 allow = ["MCPTool(team__*)"]
 `;

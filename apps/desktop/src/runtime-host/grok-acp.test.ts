@@ -32,6 +32,44 @@ afterEach(() => {
 });
 
 describe('Grok ACP transport', () => {
+  it.each(['internal-reply', '1'])(
+    'ignores an unmatched string response ID without settling numeric work: %s',
+    async (id) => {
+      const f = fixture();
+      const settled = vi.fn();
+      const request = f.client.request('session/prompt', {}).then(settled, settled);
+      f.receive({ jsonrpc: '2.0', id, result: { ignored: true } });
+      f.receive({ jsonrpc: '2.0', id, error: { code: -32603, message: 'PRIVATE_CANARY' } });
+      await Promise.resolve();
+      expect(settled).not.toHaveBeenCalled();
+      expect(f.failed).not.toHaveBeenCalled();
+      f.receive({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's' } });
+      expect(f.notify).toHaveBeenCalledOnce();
+      f.receive({ jsonrpc: '2.0', id: 1, result: { stopReason: 'end_turn' } });
+      await request;
+      expect(settled).toHaveBeenCalledExactlyOnceWith({ stopReason: 'end_turn' });
+    },
+  );
+
+  it.each([null, true, {}, []])('still rejects an invalid response ID: %j', async (id) => {
+    const f = fixture();
+    const request = f.client.request('session/prompt', {}).catch((error: unknown) => error);
+    f.receive({ jsonrpc: '2.0', id, result: {} });
+    expect(await request).toBeInstanceOf(Error);
+    expect(f.failed).toHaveBeenCalledOnce();
+  });
+
+  it.each([{}, { result: {}, error: {} }, { error: null }])(
+    'rejects a malformed string-ID response: %j',
+    async (payload) => {
+      const f = fixture();
+      const request = f.client.request('session/prompt', {}).catch((error: unknown) => error);
+      f.receive({ jsonrpc: '2.0', id: 'internal-reply', ...payload });
+      expect(await request).toBeInstanceOf(Error);
+      expect(f.failed).toHaveBeenCalledOnce();
+    },
+  );
+
   it('correlates out-of-order replies and decodes UTF-8 split inside a character', async () => {
     const f = fixture();
     const first = f.client.request('initialize', { protocolVersion: 1 });

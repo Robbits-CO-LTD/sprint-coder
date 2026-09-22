@@ -107,7 +107,7 @@ describe('Grok isolation', () => {
     const deny = permission?.match(/^deny\s*=\s*(\[[^\n]*\])/mu)?.[1];
     const allow = permission?.match(/^allow\s*=\s*(\[[^\n]*\])/mu)?.[1];
     expect(JSON.parse(deny ?? 'null')).toEqual([
-      'Read',
+      'Read(**)',
       'Edit',
       'Bash',
       'Grep',

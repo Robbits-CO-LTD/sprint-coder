@@ -93,6 +93,16 @@ describe('Grok ACP adapter process lifecycle', () => {
       { type: 'completed', resolvedModel: 'grok-fixture' },
     ]);
   });
+  it('continues from thought to answer after an unmatched string response with MCP enabled', async () => {
+    const test = run('string-response', 5_000, teamMcp);
+    await test.exit;
+    expect(test.errors).toEqual([]);
+    expect(test.events.filter((e) => e.type === 'reasoning')).toHaveLength(1);
+    expect(test.events.filter((e) => e.type === 'delta')).toEqual([
+      { type: 'delta', messageId: expect.any(String), delta: 'こんにちは' },
+    ]);
+    expect(test.events.filter((e) => e.type === 'completed')).toHaveLength(1);
+  });
   it.each([
     'rogue-tools',
     'rogue-mcp',
