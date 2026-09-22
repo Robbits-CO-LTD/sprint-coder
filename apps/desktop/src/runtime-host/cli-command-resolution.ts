@@ -189,7 +189,8 @@ async function probeVersion(
 
 export function isSafeCliVersionText(kind: 'codex' | 'claude' | 'grok', version: string): boolean {
   if (version === '' || version.length > 128) return false;
-  if (kind === 'grok') return /^grok \d+\.\d+\.\d+(?: \([a-f0-9]{7,40}\))?$/u.test(version);
+  if (kind === 'grok')
+    return /^grok \d+\.\d+\.\d+(?: \([a-f0-9]{7,40}\))?(?: \[stable\])?$/u.test(version);
   const pattern =
     kind === 'codex'
       ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u

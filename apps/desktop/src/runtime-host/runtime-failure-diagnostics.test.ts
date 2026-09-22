@@ -159,6 +159,11 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     collector.setCliVersion('grok 1.0.0 (abcdef1)');
     expect(collector.snapshot('startup_error').cliVersion).toBe('grok 1.0.0 (abcdef1)');
     expect(isRuntimeFailureDiagnostic(collector.snapshot('startup_error'))).toBe(true);
+    collector.setCliVersion('grok 1.0.40 (eb1a2256660d) [stable]');
+    expect(collector.snapshot('startup_error').cliVersion).toBe(
+      'grok 1.0.40 (eb1a2256660d) [stable]',
+    );
+    expect(isRuntimeFailureDiagnostic(collector.snapshot('startup_error'))).toBe(true);
     collector.recordCodexIsolation({
       userConfigSnapshot: 'copied',
       selectedSkillCount: 1,

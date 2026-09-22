@@ -465,7 +465,7 @@ describe('Runtime Host protocol', () => {
       grokAvailable: true,
       grokReadiness: 'ready',
       grokModels: [{ id: 'grok-code-fast-1', displayName: 'Grok', description: '' }],
-      grokVersion: 'grok 1.0.0 (abcdef1)',
+      grokVersion: 'grok 1.0.40 (eb1a2256660d) [stable]',
       grokCli: {
         source: 'path',
         executable: '/usr/local/bin/grok',

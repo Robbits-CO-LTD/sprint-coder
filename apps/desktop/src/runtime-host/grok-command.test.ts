@@ -37,4 +37,20 @@ describe('official Grok command resolution', () => {
     expect(compatibilityFor('grok', 'grok 1.0.39')).toBe('unsupported');
     expect(compatibilityFor('grok', 'grok 2.0.0')).toBe('unsupported');
   });
+  it('accepts the Windows installer stable channel suffix without widening version compatibility', () => {
+    const version = 'grok 1.0.40 (eb1a2256660d) [stable]';
+    expect(isSafeCliVersionText('grok', version)).toBe(true);
+    expect(isSafeCliVersionText('grok', 'grok 1.0.40 [stable]')).toBe(true);
+    expect(compatibilityFor('grok', version)).toBe('compatible');
+    expect(compatibilityFor('grok', 'grok 1.0.39 (eb1a2256660d) [stable]')).toBe('unsupported');
+    expect(compatibilityFor('grok', 'grok 2.0.0 (eb1a2256660d) [stable]')).toBe('unsupported');
+  });
+  it.each([
+    'grok 1.0.40 (eb1a2256660d) [unknown]',
+    'grok 1.0.40 (eb1a2256660d) [stable] extra',
+    'grok 1.0.40 (eb1a2256660d)\n[stable]',
+    'grok 1.0.40 (eb1a2256660d) [stable]\nsecret',
+  ])('rejects noncanonical channel output: %s', (version) => {
+    expect(isSafeCliVersionText('grok', version)).toBe(false);
+  });
 });
