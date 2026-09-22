@@ -32,3 +32,18 @@ version/tag/commit、更新manifest、macOS署名・notarization・cleanupを検
 Windows実Grok受入は#506で継続。旧commitではG01のみPASS、G02検出不具合は修正済みだが
 実機再試験とG03〜G17は未完了。今回の公開は評価用ベータであり、全実機受入完了とは扱わない。
 Grokの画像添付・固有Effort選択は未対応。#506と既存Computer Useの実機gateはcloseしない。
+
+# 0.7.0-beta.6
+
+同日のユーザー依頼「pre-releaseしてください」に基づき、beta.5公開後にmainへ入った修正を
+評価用ベータとして公開する。base 0.7.0は維持し、未使用番号beta.6を一度だけ採用する。
+
+v0.7.0-beta.5以降の配布変更:
+
+- #508: Grokの`available_commands_update`でTeam MCP登録後に届く`team__`付き
+  inventory更新を、Mainが認可したtool名由来のものに限り受け入れる。旧実装は2件目の
+  通知を`RUNTIME_PROTOCOL_ERROR`として拒否し、Windows実機受入G04を止めていた。
+
+version更新はこのPRのみ（`apps/desktop/package.json`とlockfile）。配布・検証の方針と
+既知の未確認事項（#506のG04以降の実機再試験、Grokの画像添付・固有Effort未対応、
+Computer Useの実機gate）はbeta.5の記載を引き継ぎ、このpre-releaseでcloseしない。
