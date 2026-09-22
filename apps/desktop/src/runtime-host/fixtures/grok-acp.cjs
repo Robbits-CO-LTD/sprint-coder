@@ -7,6 +7,21 @@ let tools = [];
 const send = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
 const update = (update, id = sessionId) =>
   send({ method: 'session/update', params: { sessionId: id, update } });
+const mcpInventoryUpdate = () =>
+  update({
+    sessionUpdate: 'available_commands_update',
+    _meta: {
+      tools: [
+        'search_tool',
+        'use_tool',
+        'team__search_tool',
+        'team__use_tool',
+        ...(mode === 'mcp-rogue-native' ? ['bash'] : []),
+        ...(mode === 'mcp-rogue-alias' ? ['team__unregistered'] : []),
+        ...(mode === 'mcp-rogue-server' ? ['rogue__use_tool'] : []),
+      ],
+    },
+  });
 readline.createInterface({ input: process.stdin }).on('line', (line) => {
   const request = JSON.parse(line);
   const reply = (result) => send({ id: request.id, result });
@@ -23,7 +38,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
   else if (request.method === 'session/new') {
     if (request.params._meta.agentProfile.tools.join(',') !== 'search_tool,use_tool')
       process.exit(5);
-    tools = request.params.mcpServers.length ? ['read_file'] : [];
+    tools = request.params.mcpServers.length ? ['search_tool', 'use_tool'] : [];
     update({
       sessionUpdate: 'available_commands_update',
       _meta: {
@@ -35,6 +50,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     });
     reply({ sessionId, models: { currentModelId: 'grok-fixture' } });
   } else if (request.method === '_x.ai/mcp/list') {
+    if (mode === 'mcp-ready-update') mcpInventoryUpdate();
     reply({
       result: {
         sessionMcpResolved: true,
@@ -56,6 +72,7 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       },
     });
   } else if (request.method === 'session/prompt') {
+    if (mode.startsWith('mcp-') && mode !== 'mcp-ready-update') mcpInventoryUpdate();
     if (mode === 'empty') {
       reply({ stopReason: 'end_turn' });
       return;
