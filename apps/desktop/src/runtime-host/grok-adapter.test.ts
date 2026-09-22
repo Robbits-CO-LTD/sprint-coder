@@ -8,11 +8,11 @@ import {
   grokMcpInventoryReady,
   grokModelsFromInitialize,
 } from './grok-adapter';
-import type { RuntimeCanonicalEvent } from './protocol';
+import type { RuntimeCanonicalEvent, RuntimeTeamMcpOption } from './protocol';
 import type { PublicError } from '@sprint-coder/contracts';
 
 const fixture = fileURLToPath(new URL('./fixtures/grok-acp.cjs', import.meta.url));
-function run(model: string, timeout = 5_000) {
+function run(model: string, timeout = 5_000, teamMcp?: RuntimeTeamMcpOption) {
   const adapter = new GrokRuntimeAdapter(timeout, [fixture]);
   adapter.setCliResolution({
     executable: process.execPath,
@@ -38,11 +38,49 @@ function run(model: string, timeout = 5_000) {
     (event) => events.push(event),
     (error) => errors.push(error),
     (code, canceled) => finish({ code, canceled }),
+    teamMcp,
   );
   return { adapter, events, errors, accepted, exit };
 }
 
 describe('Grok ACP adapter process lifecycle', () => {
+  const teamMcp: RuntimeTeamMcpOption = {
+    socketPath: 'synthetic-unused-socket',
+    token: 'synthetic-unused-token',
+    guidance: '',
+    toolNames: [],
+    managedTools: ['search_tool', 'use_tool'].map((name) => ({
+      name,
+      description: 'Synthetic host tool',
+      inputSchema: { type: 'object', properties: {} },
+    })),
+  };
+  it.each(['mcp-ready-update', 'mcp-prompt-update'])(
+    'accepts authorized MCP aliases in a later inventory notification: %s',
+    async (mode) => {
+      const test = run(mode, 5_000, teamMcp);
+      await test.exit;
+      expect(test.errors).toEqual([]);
+      expect(test.events.filter((e) => e.type === 'delta')).toHaveLength(1);
+      expect(test.events.filter((e) => e.type === 'completed')).toHaveLength(1);
+    },
+  );
+  it.each(['mcp-rogue-native', 'mcp-rogue-alias', 'mcp-rogue-server'])(
+    'still rejects an unauthorized tool in a later MCP inventory: %s',
+    async (mode) => {
+      const test = run(mode, 5_000, teamMcp);
+      await test.exit;
+      expect(test.errors).toHaveLength(1);
+      expect(test.errors[0]?.code).toBe('RUNTIME_PROTOCOL_ERROR');
+      expect(test.events.some((e) => e.type === 'completed')).toBe(false);
+    },
+  );
+  it('rejects Team aliases when no Team MCP is configured', async () => {
+    const test = run('mcp-prompt-update');
+    await test.exit;
+    expect(test.errors[0]?.code).toBe('RUNTIME_PROTOCOL_ERROR');
+    expect(test.events.some((e) => e.type === 'completed')).toBe(false);
+  });
   it('streams a real subprocess response and completes exactly once after a checked profile', async () => {
     const test = run('normal');
     await test.exit;
@@ -173,5 +211,29 @@ describe('Grok catalog and capability gates', () => {
         ['read_file'],
       ),
     ).toBe(true);
+  });
+  it.each([
+    ['search_tool', 'use_tool'],
+    ['search_tool', 'use_tool', 'team__search_tool'],
+    ['team__use_tool', 'use_tool', 'team__search_tool', 'search_tool'],
+  ])('allows only registered aliases while MCP discovery progresses: %j', (...tools) => {
+    expect(() => assertGrokToolInventory(tools, ['search_tool', 'use_tool'])).not.toThrow();
+  });
+  it.each(
+    [
+      null,
+      {},
+      [],
+      ['search_tool'],
+      ['team__search_tool', 'team__use_tool'],
+      ['search_tool', 'use_tool', 'use_tool'],
+      ['search_tool', 'use_tool', 'team__search_tool', 'team__search_tool'],
+      ['search_tool', 'use_tool', 'bash'],
+      ['search_tool', 'use_tool', 'team__unregistered'],
+      ['search_tool', 'use_tool', 'rogue__use_tool'],
+      ['search_tool', 'use_tool', 1],
+    ].map((tools) => ({ tools })),
+  )('rejects malformed, missing, duplicate or unregistered inventory: $tools', ({ tools }) => {
+    expect(() => assertGrokToolInventory(tools, ['search_tool', 'use_tool'])).toThrow();
   });
 });

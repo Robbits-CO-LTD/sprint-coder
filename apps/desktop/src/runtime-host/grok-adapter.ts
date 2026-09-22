@@ -183,11 +183,19 @@ export async function probeGrok(
   return report;
 }
 
-export function assertGrokToolInventory(value: unknown): void {
+export function assertGrokToolInventory(
+  value: unknown,
+  expectedMcpTools: readonly string[] = [],
+): void {
+  const nativeTools = ['search_tool', 'use_tool'];
+  // Grok re-announces this combined inventory as MCP tools become available.
+  // Only aliases of this Turn's Main-authorized bridge tools may join the native pair.
+  const allowed = new Set([...nativeTools, ...expectedMcpTools.map((name) => `team__${name}`)]);
   if (
     !Array.isArray(value) ||
-    value.length !== 2 ||
-    !['search_tool', 'use_tool'].every((name) => value.includes(name))
+    new Set(value).size !== value.length ||
+    !nativeTools.every((name) => value.includes(name)) ||
+    value.some((name) => typeof name !== 'string' || !allowed.has(name))
   )
     throw new Error('Grok native tool isolation failed');
 }
@@ -393,7 +401,7 @@ export class GrokRuntimeAdapter {
       const event = grokRecord(params['update']);
       const type = event['sessionUpdate'];
       if (type === 'available_commands_update') {
-        assertGrokToolInventory(grokRecord(event['_meta'])['tools']);
+        assertGrokToolInventory(grokRecord(event['_meta'])['tools'], expectedTools);
         inventorySeen = true;
       } else if (type === 'agent_message_chunk' || type === 'agent_thought_chunk') {
         if (!inventorySeen) throw new Error('Grok emitted content before inventory');
