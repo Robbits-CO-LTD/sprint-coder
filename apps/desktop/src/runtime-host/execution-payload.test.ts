@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { buildClaudePrompt } from './claude-adapter';
 import { buildCodexPrompt } from './codex-adapter';
-import { removeSealedGuidancePrefix, serializeCliExecutionPayload } from './execution-payload';
+import {
+  removeSealedGuidancePrefix,
+  serializeCliExecutionPayload,
+  verifySerializedPayload,
+} from './execution-payload';
 
 const reference = {
   id: 'reference-1',
@@ -23,6 +27,40 @@ const assistantMemory = {
 };
 
 describe('shared CLI execution payload serializer', () => {
+  it('seals Grok UTF-8 payloads with authority labels and detects changed bytes', () => {
+    const payload = serializeCliExecutionPayload({
+      kind: 'grok',
+      request: '実装して 🚀',
+      contextFragments: [
+        {
+          id: 'system',
+          source: 'system',
+          trust: 'system',
+          authority: 'system',
+          content: 'Follow the authorized scope.',
+        },
+      ],
+      projectItems: [reference, assistantMemory],
+      teamGuidance: 'Follow the authorized scope.\nReport completion.',
+    });
+    expect(payload.bytes.equals(Buffer.from(payload.text, 'utf8'))).toBe(true);
+    expect(payload.digest).toBe(createHash('sha256').update(payload.bytes).digest('hex'));
+    expect(verifySerializedPayload(payload.text, payload.digest)).toBe(true);
+    expect(verifySerializedPayload(payload.text + '\n', payload.digest)).toBe(false);
+    expect(payload.text.match(/Follow the authorized scope\./g)).toHaveLength(1);
+    expect(payload.text).toContain('Current user request:\n\nReport completion.\n\n実装して 🚀');
+    const items = JSON.parse(payload.text.split('\n\n')[3]!) as Array<{
+      authority: string;
+      content: string;
+    }>;
+    expect(
+      items.map(({ authority, content }) => ({ authority, data: JSON.parse(content) })),
+    ).toEqual([
+      { authority: 'none', data: { data: reference.content } },
+      { authority: 'none', data: { data: assistantMemory.content } },
+    ]);
+  });
+
   it('produces the exact bytes consumed by both adapter prompt builders', () => {
     const codex = serializeCliExecutionPayload({
       kind: 'codex',

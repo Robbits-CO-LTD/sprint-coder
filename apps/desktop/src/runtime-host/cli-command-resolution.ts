@@ -43,7 +43,7 @@ const COMPATIBILITY_PRIORITY: Readonly<Record<ResolvedCliCommand['compatibility'
 };
 
 export async function probeCliCommandCandidates(input: {
-  kind: 'codex' | 'claude';
+  kind: 'codex' | 'claude' | 'grok';
   candidates: readonly CliCommandCandidate[];
   environment: Readonly<NodeJS.ProcessEnv>;
   timeoutMs: number;
@@ -73,7 +73,7 @@ export async function probeCliCommandCandidates(input: {
 }
 
 export async function probeFirstCapableCliCommand(
-  kind: 'codex' | 'claude',
+  kind: 'codex' | 'claude' | 'grok',
   candidates: readonly CliCommandCandidate[],
   probe: (candidate: CliCommandCandidate) => Promise<ResolvedCliCommand | null>,
 ): Promise<ResolvedCliCommand | null> {
@@ -136,11 +136,19 @@ export function selectResolvedCliCommand(
 }
 
 export function compatibilityFor(
-  kind: 'codex' | 'claude',
+  kind: 'codex' | 'claude' | 'grok',
   versionText: string,
 ): ResolvedCliCommand['compatibility'] {
   const version = parseVersion(versionText);
   if (version === null || version.prerelease) return 'untested';
+  if (kind === 'grok') {
+    if (
+      version.major !== 1 ||
+      compareVersion(version, { major: 1, minor: 0, patch: 40, prerelease: false }) < 0
+    )
+      return 'unsupported';
+    return 'compatible';
+  }
   const verified = kind === 'codex' ? [0, 144, 4] : [2, 1, 218];
   if (
     version.major === verified[0] &&
@@ -169,7 +177,7 @@ function deduplicateCandidates(candidates: readonly CliCommandCandidate[]): CliC
 }
 
 async function probeVersion(
-  kind: 'codex' | 'claude',
+  kind: 'codex' | 'claude' | 'grok',
   executable: string,
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
@@ -179,8 +187,10 @@ async function probeVersion(
   return result?.code === 0 && isSafeCliVersionText(kind, version) ? version : null;
 }
 
-export function isSafeCliVersionText(kind: 'codex' | 'claude', version: string): boolean {
+export function isSafeCliVersionText(kind: 'codex' | 'claude' | 'grok', version: string): boolean {
   if (version === '' || version.length > 128) return false;
+  if (kind === 'grok')
+    return /^grok \d+\.\d+\.\d+(?: \([a-f0-9]{7,40}\))?(?: \[stable\])?$/u.test(version);
   const pattern =
     kind === 'codex'
       ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u
@@ -189,11 +199,28 @@ export function isSafeCliVersionText(kind: 'codex' | 'claude', version: string):
 }
 
 async function probeRequiredCapabilities(
-  kind: 'codex' | 'claude',
+  kind: 'codex' | 'claude' | 'grok',
   executable: string,
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
 ): Promise<string[] | null> {
+  if (kind === 'grok') {
+    const result = await probeCommand(
+      executable,
+      ['agent', '--help'],
+      environment,
+      timeoutMs,
+      16 * 1024,
+    );
+    if (
+      result?.code !== 0 ||
+      !/\bstdio\b/u.test(result.output) ||
+      !result.output.includes('--no-leader') ||
+      !result.output.includes('--agent-profile')
+    )
+      return null;
+    return ['version_probe', 'acp', 'agent_profile', 'no_leader'];
+  }
   if (kind === 'codex') {
     const result = await probeCommand(
       executable,

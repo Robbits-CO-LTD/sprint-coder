@@ -16,7 +16,7 @@ function fixture(index: number): SkillCatalogItem {
     activationPolicy: 'manual',
     compatibility: {
       profile: 'portable',
-      runtimeSupport: { codex: 'full', claude: 'full', provider: 'full' },
+      runtimeSupport: { codex: 'full', claude: 'full', grok: 'full', provider: 'full' },
       features: [],
       requestedTools: [],
       warnings: [],

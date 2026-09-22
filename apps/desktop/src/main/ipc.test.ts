@@ -316,8 +316,11 @@ describe('Codex selected Skill delivery', () => {
       'skill-catalog',
     ]);
     expect(contextFragmentsForRuntime('claude', fragments)).toEqual(fragments);
+    expect(
+      contextFragmentsForRuntime('grok', fragments, new Set(['UNIQUE_SELECTED_SKILL_BODY'])),
+    ).toEqual(fragments);
     expect(contextFragmentsForRuntime('provider', fragments)).toEqual(fragments);
-    for (const runtime of ['codex', 'claude', 'provider'] as const)
+    for (const runtime of ['codex', 'claude', 'grok', 'provider'] as const)
       expect(contextFragmentsForRuntime(runtime, fragments)[0]?.content).toBe(
         SPRINT_CODER_IDENTITY_PROMPT,
       );
@@ -325,15 +328,15 @@ describe('Codex selected Skill delivery', () => {
 });
 
 describe('Main runtime failure diagnostics', () => {
-  function createRuntimeFailureHarness(diagnosticId = 'diagnostic-main-protocol') {
+  function createRuntimeFailureHarness(
+    diagnosticId = 'diagnostic-main-protocol',
+    kind: 'codex' | 'grok' = 'codex',
+  ) {
     const recordRuntimeFailureDiagnostic = vi.fn().mockReturnValue({ diagnosticId });
     const pushRuntimeStatus = vi.fn();
-    const turnRuntimes = new Map([['turn-protocol', 'codex']]);
+    const turnRuntimes = new Map([['turn-protocol', kind]]);
     const runtimeDiagnosticContextByTurn = new Map([
-      [
-        'turn-protocol',
-        { startedAtMs: Date.now() - 10, runtimeKind: 'codex', teamMcpEnabled: true },
-      ],
+      ['turn-protocol', { startedAtMs: Date.now() - 10, runtimeKind: kind, teamMcpEnabled: true }],
     ]);
     let activeTurnId: string | null = 'turn-protocol';
     const finishAndAdvance = vi.fn((_taskId: string, turnId: string) => {
@@ -351,7 +354,7 @@ describe('Main runtime failure diagnostics', () => {
       turnLogCategoryByTurn: new Map([['turn-protocol', 'chat']]),
       turnLogStartedAtByTurn: new Map([['turn-protocol', Date.now() - 10]]),
       turnLogRuntimeByTurn: new Map([
-        ['turn-protocol', { runtime: 'codex' as const, provider: 'openai' }],
+        ['turn-protocol', { runtime: kind, provider: kind === 'grok' ? 'xai' : 'openai' }],
       ]),
       runtimeDiagnosticContextByTurn,
       attachmentCustodyByTurn: new Map(),
@@ -365,7 +368,7 @@ describe('Main runtime failure diagnostics', () => {
     return {
       probe: router as unknown as {
         handleRuntimeFailure(
-          kind: 'codex',
+          kind: 'codex' | 'grok',
           taskId: string,
           turnId: string,
           error: { code: string; userMessage: string; retryable: boolean },
@@ -379,48 +382,51 @@ describe('Main runtime failure diagnostics', () => {
     };
   }
 
-  it('persists one fallback for a missing protocol diagnostic and relays its id', async () => {
-    const harness = createRuntimeFailureHarness();
-    const log = vi.spyOn(secureLogger, 'error');
+  it.each(['codex', 'grok'] as const)(
+    'persists the %s fallback protocol diagnostic and relays its id',
+    async (kind) => {
+      const harness = createRuntimeFailureHarness('diagnostic-main-protocol', kind);
+      const log = vi.spyOn(secureLogger, 'error');
 
-    harness.probe.handleRuntimeFailure('codex', 'task-protocol', 'turn-protocol', {
-      code: 'RUNTIME_PROTOCOL_ERROR',
-      userMessage: 'safe public message',
-      retryable: true,
-    });
+      harness.probe.handleRuntimeFailure(kind, 'task-protocol', 'turn-protocol', {
+        code: 'RUNTIME_PROTOCOL_ERROR',
+        userMessage: 'safe public message',
+        retryable: true,
+      });
 
-    await vi.waitFor(() => expect(harness.finishAndAdvance).toHaveBeenCalledOnce());
-    expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledOnce();
-    expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledWith(
-      'task-protocol',
-      'turn-protocol',
-      expect.objectContaining({
-        runtimeKind: 'codex',
-        failureStage: 'protocol_error',
-        teamMcp: { enabled: true, status: 'configured' },
-      }),
-    );
-    expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
-    );
-    expect(log).toHaveBeenCalledWith(
-      'Runtime failed',
-      expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
-      expect.objectContaining({
-        category: 'chat',
-        event: 'turn.runtime.failed',
-        taskId: 'task-protocol',
-        turnId: 'turn-protocol',
-        status: 'failed',
-      }),
-    );
-    expect(harness.finishAndAdvance).toHaveBeenCalledWith(
-      'task-protocol',
-      'turn-protocol',
-      'failed',
-    );
-    log.mockRestore();
-  });
+      await vi.waitFor(() => expect(harness.finishAndAdvance).toHaveBeenCalledOnce());
+      expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledOnce();
+      expect(harness.recordRuntimeFailureDiagnostic).toHaveBeenCalledWith(
+        'task-protocol',
+        'turn-protocol',
+        expect.objectContaining({
+          runtimeKind: kind,
+          failureStage: 'protocol_error',
+          teamMcp: { enabled: true, status: 'configured' },
+        }),
+      );
+      expect(harness.pushRuntimeStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
+      );
+      expect(log).toHaveBeenCalledWith(
+        'Runtime failed',
+        expect.objectContaining({ diagnosticId: 'diagnostic-main-protocol' }),
+        expect.objectContaining({
+          category: 'chat',
+          event: 'turn.runtime.failed',
+          taskId: 'task-protocol',
+          turnId: 'turn-protocol',
+          status: 'failed',
+        }),
+      );
+      expect(harness.finishAndAdvance).toHaveBeenCalledWith(
+        'task-protocol',
+        'turn-protocol',
+        'failed',
+      );
+      log.mockRestore();
+    },
+  );
 
   it('keeps adapter diagnostics and does not invent diagnostics for non-protocol failures', async () => {
     const existing = new RuntimeFailureDiagnosticCollector(
@@ -620,7 +626,7 @@ describe('Turn cancellation boundary', () => {
   });
 
   it.each(
-    ['codex', 'claude'].flatMap((kind) => [
+    ['codex', 'claude', 'grok'].flatMap((kind) => [
       { kind, runtimeFails: false, commandFails: true },
       { kind, runtimeFails: true, commandFails: false },
       { kind, runtimeFails: true, commandFails: true },
@@ -1973,7 +1979,7 @@ describe('Main image attachment dispatch boundary', () => {
     }
   });
 
-  it('denies view_image through all five wired generic callbacks before broker execution', async () => {
+  it('denies view_image through all six wired generic callbacks before broker execution', async () => {
     const brokerDispatch = vi.fn();
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
     const catalogDigest = 'a'.repeat(64);
@@ -2036,6 +2042,12 @@ describe('Main image attachment dispatch boundary', () => {
           request: unknown,
           signal: AbortSignal,
         ): Promise<unknown>;
+        grokRuntime(
+          taskId: string,
+          turnId: string,
+          request: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
       };
     };
     const callbacks = probe.createGenericManagedRuntimeToolHandlers();
@@ -2077,6 +2089,7 @@ describe('Main image attachment dispatch boundary', () => {
         directRequest('claude-runtime'),
         signal,
       ),
+      await callbacks.grokRuntime('task-grok', 'turn-grok', directRequest('grok-runtime'), signal),
     ];
     expect(dispatch.mock.calls.map(([owner]) => owner)).toEqual([
       'cli-team',
@@ -2084,6 +2097,7 @@ describe('Main image attachment dispatch boundary', () => {
       'team-mcp',
       'codex-runtime',
       'claude-runtime',
+      'grok-runtime',
     ]);
     for (const result of results) {
       expect(result).toMatchObject({

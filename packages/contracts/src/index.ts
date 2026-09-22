@@ -479,7 +479,7 @@ export const workerSummarySchema = z
     objective: z.string().nullable(),
     writeCapable: z.boolean(),
     currentActivity: z.string().nullable(),
-    engine: z.enum(['mock', 'codex', 'claude']),
+    engine: z.enum(['mock', 'codex', 'claude', 'grok']),
     connectionId: teamConnectionIdSchema.nullable(),
     requestedProvider: teamProviderIdSchema.nullable(),
     requestedModel: z.string().min(1).max(256).nullable(),
@@ -1305,6 +1305,7 @@ export const skillCompatibilityReportSchema = z
       .object({
         codex: skillRuntimeSupportSchema,
         claude: skillRuntimeSupportSchema,
+        grok: skillRuntimeSupportSchema.default('blocked'),
         provider: skillRuntimeSupportSchema,
       })
       .strict(),
@@ -2112,6 +2113,7 @@ export const publicErrorCodeSchema = z.enum([
   'RUNTIME_RATE_LIMIT',
   'RUNTIME_FAILED',
   'RUNTIME_TIMEOUT',
+  'RUNTIME_STOP_UNCONFIRMED',
   'RUNTIME_PROTOCOL_ERROR',
   'INTERNAL_ERROR',
 ]);
@@ -2127,7 +2129,7 @@ export const publicErrorSchema = z
   .strict();
 export type PublicError = z.infer<typeof publicErrorSchema>;
 
-export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude']);
+export const runtimeKindSchema = z.enum(['mock', 'codex', 'claude', 'grok']);
 export type RuntimeKind = z.infer<typeof runtimeKindSchema>;
 export const providerRuntimeKindSchema = z.enum([
   'builtin_cli',
@@ -3662,14 +3664,14 @@ export const modelFallbackNoticeSchema = z
       .array(
         z
           .object({
-            runtimeKind: z.enum(['codex', 'claude']),
+            runtimeKind: z.enum(['codex', 'claude', 'grok']),
             migratedCount: z.number().int().min(0).max(1_000_000),
             resetCount: z.number().int().min(0).max(1_000_000),
           })
           .strict(),
       )
       .min(1)
-      .max(2),
+      .max(3),
   })
   .strict();
 export type ModelFallbackNotice = z.infer<typeof modelFallbackNoticeSchema>;
@@ -3739,8 +3741,11 @@ export const runtimeSettingsSchema = z
     // Runtime kind's own capability list (Codex's or Claude's), per the Main-side probe.
     claudeAvailable: z.boolean(),
     claudeReadiness: runtimeReadinessSchema,
+    grokAvailable: z.boolean().default(false),
+    grokReadiness: runtimeReadinessSchema.default('unavailable'),
     codexCli: resolvedCliCommandSchema.nullable().default(null),
     claudeCli: resolvedCliCommandSchema.nullable().default(null),
+    grokCli: resolvedCliCommandSchema.nullable().default(null),
     model: codexModelIdSchema,
     models: z.array(codexModelOptionSchema).max(32),
     // Additive field for the Claude effort control. Persisted under the single

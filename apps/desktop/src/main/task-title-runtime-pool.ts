@@ -1,29 +1,25 @@
-export type TaskTitleRuntimeKind = 'codex' | 'claude';
+export type TaskTitleRuntimeKind = 'codex' | 'claude' | 'grok';
 
 /**
  * Owns Runtime Hosts used only by background title generation. A host is created lazily per CLI
  * kind, so cancelling or restarting it can never terminate a foreground conversation Turn.
  */
 export class TaskTitleRuntimePool<T extends { dispose(): void }> {
-  private codex: T | null = null;
-  private claude: T | null = null;
+  private readonly runtimes = new Map<TaskTitleRuntimeKind, T>();
 
   constructor(private readonly create: (kind: TaskTitleRuntimeKind) => T) {}
 
   get(kind: TaskTitleRuntimeKind): T {
-    const existing = kind === 'claude' ? this.claude : this.codex;
-    if (existing !== null) return existing;
+    const existing = this.runtimes.get(kind);
+    if (existing !== undefined) return existing;
     const runtime = this.create(kind);
-    if (kind === 'claude') this.claude = runtime;
-    else this.codex = runtime;
+    this.runtimes.set(kind, runtime);
     return runtime;
   }
 
   dispose(): void {
-    this.codex?.dispose();
-    this.claude?.dispose();
-    this.codex = null;
-    this.claude = null;
+    for (const runtime of this.runtimes.values()) runtime.dispose();
+    this.runtimes.clear();
   }
 }
 

@@ -5,11 +5,11 @@ import { assessProviderEgressDisclosure } from './provider-disclosure-classifier
 import type * as PromptContextModule from './prompt-context';
 
 const runtimeHostMock = vi.hoisted(() => ({
-  starts: [] as Array<{ kind: 'claude' | 'codex'; args: unknown[] }>,
+  starts: [] as Array<{ kind: 'claude' | 'codex' | 'grok'; args: unknown[] }>,
   waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
   startSucceeds: true,
   failures: new Map<
-    'claude' | 'codex',
+    'claude' | 'codex' | 'grok',
     {
       code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE';
       userMessage: string;
@@ -52,7 +52,7 @@ vi.mock('./runtime-host', () => ({
       ) => void,
       _prepareContext?: unknown,
       _onContextAccepted?: unknown,
-      private readonly kind: 'claude' | 'codex' = 'codex',
+      private readonly kind: 'claude' | 'codex' | 'grok' = 'codex',
     ) {}
 
     async probe(): Promise<{ available: boolean; readiness: 'ready'; models: never[] }> {
@@ -111,6 +111,7 @@ import {
   applyWorkerContextInheritance,
   buildInheritedWorkerContext,
   TeamRuntimeAvailabilityTracker,
+  chooseWorkerRuntime,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
@@ -200,6 +201,44 @@ function runtime(
 }
 
 describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
+  it('selects Grok, uses Team MCP, resolves xai and passes no effort override', async () => {
+    runtimeHostMock.starts.length = 0;
+    expect(chooseWorkerRuntime('grok', 'grok-test-model', false)).toEqual({
+      kind: 'grok',
+      model: 'grok-test-model',
+    });
+    const teamMcp = {
+      socketPath: '/tmp/grok-team.sock',
+      token: 'fixture-token',
+      guidance: 'Use the managed tools.',
+      toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+    };
+    const subject = runtime({
+      selectRuntimes: () => [{ kind: 'grok', model: 'grok-test-model' }],
+      teamMcpFor: () => teamMcp,
+    });
+    const result = await subject.execute({ worker: worker(true), envelope, content: 'test' });
+    expect(result.resolution).toEqual({
+      resolvedProvider: 'xai',
+      resolvedModel: 'grok-test-model',
+    });
+    const start = runtimeHostMock.starts.at(-1)!;
+    expect(start.kind).toBe('grok');
+    expect(start.args[7]).toBe(teamMcp);
+    expect(start.args[8]).toBeUndefined();
+    expect(start.args[12]).toBeUndefined();
+    subject.dispose();
+    runtimeHostMock.starts.length = 0;
+  });
+
+  it('tracks Grok cooldown independently and allows retry after expiry', () => {
+    const tracker = new TeamRuntimeAvailabilityTracker();
+    tracker.markUnavailable('grok', undefined, 1000);
+    expect(tracker.isAvailable('grok', 60999)).toBe(false);
+    expect(tracker.isAvailable('claude', 1000)).toBe(true);
+    expect(tracker.isAvailable('codex', 1000)).toBe(true);
+    expect(tracker.isAvailable('grok', 61000)).toBe(true);
+  });
   it('does not start a Worker stopped while its tool catalog is preparing', async () => {
     let releaseCatalog!: (value: { tools: never[] }) => void;
     const catalog = new Promise<{ tools: never[] }>((resolve) => {

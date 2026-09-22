@@ -2,11 +2,28 @@ import { describe, expect, it } from 'vitest';
 import {
   BUILTIN_CLAUDE_CONNECTION_ID,
   BUILTIN_CODEX_CONNECTION_ID,
+  BUILTIN_GROK_CONNECTION_ID,
   builtinRuntimeForModelSelection,
   modelSelectionForRuntime,
 } from './connection-identity';
 
 describe('connection identity', () => {
+  it('round-trips Grok CLI with xai and rejects mismatched builtin providers', () => {
+    const selection = modelSelectionForRuntime('grok', 'grok-test-model');
+    expect(selection).toEqual({
+      connectionId: BUILTIN_GROK_CONNECTION_ID,
+      requestedProvider: 'xai',
+      requestedModel: 'grok-test-model',
+    });
+    expect(builtinRuntimeForModelSelection(selection)).toEqual({
+      runtimeKind: 'grok',
+      model: 'grok-test-model',
+    });
+    for (const requestedProvider of ['openai', 'anthropic'])
+      expect(builtinRuntimeForModelSelection({ ...selection, requestedProvider })).toBeNull();
+    expect(builtinRuntimeForModelSelection({ ...selection, connectionId: 'xai:api' })).toBeNull();
+    expect(() => builtinRuntimeForModelSelection({ ...selection, requestedModel: null })).toThrow();
+  });
   it('maps built-in Claude and Codex CLI runtimes to stable Connection identities', () => {
     expect(modelSelectionForRuntime('claude', 'claude-opus-5')).toEqual({
       connectionId: BUILTIN_CLAUDE_CONNECTION_ID,

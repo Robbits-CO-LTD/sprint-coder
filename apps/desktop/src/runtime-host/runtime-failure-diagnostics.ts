@@ -6,7 +6,9 @@ import {
   type ResolvedCliCommand,
   type RuntimeFailureDiagnostic,
   type RuntimeFailureStage,
+  type RuntimeKind,
 } from './protocol';
+import { isSafeCliVersionText } from './cli-command-resolution';
 
 export const RUNTIME_DIAGNOSTIC_MAX_BYTES = 16 * 1024;
 const STDERR_TAIL_MAX_BYTES = 8 * 1024;
@@ -29,7 +31,7 @@ export class RuntimeFailureDiagnosticCollector {
   private cliResolution: ResolvedCliCommand | null = null;
 
   constructor(
-    private readonly runtimeKind: 'codex' | 'claude',
+    private readonly runtimeKind: RuntimeKind,
     private readonly appVersion: string,
     private cliVersion: string | null,
     private readonly teamMcpEnabled: boolean,
@@ -142,7 +144,7 @@ function safeCliResolution(cli: ResolvedCliCommand): ResolvedCliCommand {
 type ResolveRuntimeFailureDiagnosticInput = Readonly<{
   errorCode: string;
   diagnostic: RuntimeFailureDiagnostic | undefined;
-  runtimeKind: 'codex' | 'claude';
+  runtimeKind: RuntimeKind;
   appVersion: string;
   /** Unix epoch milliseconds captured when Main dispatched the Turn. */
   startedAtMs: number | undefined;
@@ -199,11 +201,6 @@ function boundedText(value: string | null, maxLength: number): string | null {
   return value.length <= maxLength ? value : value.slice(0, maxLength);
 }
 
-function safeCliVersion(runtimeKind: 'codex' | 'claude', value: string | null): string | null {
-  const bounded = boundedText(value, 128);
-  const pattern =
-    runtimeKind === 'codex'
-      ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
-      : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/;
-  return bounded !== null && pattern.test(bounded) ? bounded : null;
+function safeCliVersion(runtimeKind: RuntimeKind, value: string | null): string | null {
+  return value !== null && isSafeCliVersionText(runtimeKind, value) ? value : null;
 }

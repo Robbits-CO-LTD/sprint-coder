@@ -445,6 +445,54 @@ describe('Runtime Host protocol', () => {
     expect(isMainToRuntimeEnvelope({ ...valid, effort: 5 })).toBe(false);
   });
 
+  it('accepts legacy hello but requires a complete, bounded Grok capability when present', () => {
+    const legacy = {
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-grok',
+      taskId: '',
+      turnId: '',
+      seq: 1,
+      operationId: 'hello',
+      type: 'hello',
+      codexAvailable: false,
+      codexReadiness: 'unavailable',
+      codexModels: [],
+      claudeAvailable: false,
+      claudeReadiness: 'unavailable',
+      claudeModels: [],
+    };
+    const grok = {
+      grokAvailable: true,
+      grokReadiness: 'ready',
+      grokModels: [{ id: 'grok-code-fast-1', displayName: 'Grok', description: '' }],
+      grokVersion: 'grok 1.0.40 (eb1a2256660d) [stable]',
+      grokCli: {
+        source: 'path',
+        executable: '/usr/local/bin/grok',
+        version: 'grok 1.0.0 (abcdef1)',
+        compatibility: 'verified',
+        capabilities: ['version_probe'],
+      },
+    };
+    expect(isRuntimeToMainEnvelope(legacy)).toBe(true);
+    expect(isRuntimeToMainEnvelope({ ...legacy, ...grok })).toBe(true);
+    for (const field of Object.keys(grok)) {
+      expect(isRuntimeToMainEnvelope({ ...legacy, [field]: Reflect.get(grok, field) })).toBe(false);
+    }
+    for (const invalid of [
+      { grokAvailable: 'yes' },
+      { grokReadiness: 'unknown' },
+      { grokModels: undefined },
+      { grokModels: Array.from({ length: 33 }, () => grok.grokModels[0]) },
+      { grokModels: [{ id: 'invalid model id' }] },
+      { grokVersion: 'grok 1.0.0\n/private/request' },
+      { grokVersion: 'grok 1.0.0 (' + 'a'.repeat(128) + ')' },
+      { grokCli: { ...grok.grokCli, capabilities: ['invalid-capability'] } },
+    ]) {
+      expect(isRuntimeToMainEnvelope({ ...legacy, ...grok, ...invalid })).toBe(false);
+    }
+  });
+
   it('accepts catalog-defined Codex effort levels including ultra', () => {
     for (const effort of ['none', 'ultra', 'future_level-2']) {
       expect(isMainToRuntimeEnvelope({ ...startEnvelope(), effort })).toBe(true);
@@ -491,6 +539,27 @@ describe('Runtime Host protocol', () => {
     };
 
     expect(isRuntimeToMainEnvelope(error)).toBe(true);
+    for (const cliVersion of [null, 'grok 1.0.0', 'grok 1.0.0 (abcdef1)']) {
+      expect(
+        isRuntimeToMainEnvelope({
+          ...error,
+          diagnostic: { ...error.diagnostic, runtimeKind: 'grok', cliVersion },
+        }),
+      ).toBe(true);
+    }
+    for (const cliVersion of [
+      'codex 1.0.0',
+      'grok 1.0.0\n/private/request',
+      'grok 1.0.0 (secret-token)',
+      'a'.repeat(129),
+    ]) {
+      expect(
+        isRuntimeToMainEnvelope({
+          ...error,
+          diagnostic: { ...error.diagnostic, runtimeKind: 'grok', cliVersion },
+        }),
+      ).toBe(false);
+    }
     expect(
       isRuntimeToMainEnvelope({
         ...error,

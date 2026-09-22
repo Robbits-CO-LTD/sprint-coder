@@ -453,7 +453,7 @@ type ProviderImageBridgeDispatchResult = Readonly<{
 }>;
 
 type GenericManagedRuntimeToolOwner =
-  'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime';
+  'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime' | 'grok-runtime';
 
 type GenericManagedRuntimeToolRequest = Readonly<{
   callId: string;
@@ -491,6 +491,7 @@ type GenericManagedRuntimeToolHandlers = Readonly<{
   ) => Promise<unknown>;
   codexRuntime: DirectGenericManagedRuntimeToolHandler;
   claudeRuntime: DirectGenericManagedRuntimeToolHandler;
+  grokRuntime: DirectGenericManagedRuntimeToolHandler;
 }>;
 
 function isProviderImageBridgeDispatchResult(
@@ -524,7 +525,7 @@ class ProviderTurnFailureError extends Error {
 }
 
 export function contextFragmentsForRuntime(
-  kind: 'codex' | 'claude' | 'provider',
+  kind: 'codex' | 'claude' | 'grok' | 'provider',
   fragments: readonly RuntimeContextFragment[],
   nativeSkillContents: ReadonlySet<string> = new Set(),
 ): RuntimeContextFragment[] {
@@ -661,9 +662,11 @@ import { MutationLeaseBusyError, MutationQuarantinedError } from './mutation-lea
 import {
   authorizeClaudeProviderEgress,
   authorizeCodexProviderEgress,
+  authorizeGrokProviderEgress,
   authorizeOfficialApiProviderEgress,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
+  dispatchAfterGrokProviderEgress,
 } from './provider-egress';
 import { ReasoningBatcher } from './reasoning-batcher';
 import { projectContextProviderMessages } from './project-context-delivery';
@@ -886,7 +889,7 @@ type PortBinding = { taskId: string; port: MessagePortMain };
 type ActiveRuntimeKind = RuntimeKind | 'provider';
 type RuntimeDiagnosticContext = Readonly<{
   startedAtMs: number;
-  runtimeKind: 'codex' | 'claude';
+  runtimeKind: 'codex' | 'claude' | 'grok';
   teamMcpEnabled: boolean;
 }>;
 type TaskTitleRequest = Pick<StartedTurn, 'text' | 'runtimeKind' | 'model' | 'modelSelection'> & {
@@ -894,7 +897,7 @@ type TaskTitleRequest = Pick<StartedTurn, 'text' | 'runtimeKind' | 'model' | 'mo
 };
 type CliTaskTitleJob = {
   taskId: string;
-  kind: 'codex' | 'claude';
+  kind: 'codex' | 'claude' | 'grok';
   output: string;
   timer: NodeJS.Timeout;
   resolve: (title: string | null) => void;
@@ -1036,6 +1039,7 @@ export class IpcRouter {
   private readonly cliTeamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
   private readonly teamWorkerRuntime: ProviderAwareTeamWorkerRuntime;
   private readonly claudeRuntime: RuntimeHostClient;
+  private readonly grokRuntime: RuntimeHostClient;
   private readonly taskTitleRuntimes: TaskTitleRuntimePool<RuntimeHostClient>;
   private readonly taskTitleProviderAborts = new TaskTitleAbortRegistry();
   private disposed = false;
@@ -1117,7 +1121,7 @@ export class IpcRouter {
   /** Ignore late events after persistence has terminalized a Turn while its runtime is quarantined. */
   private readonly canceledRuntimeTurns = new Set<string>();
   /** A failed stop confirmation blocks new work until the app is relaunched. */
-  private readonly quarantinedRuntimeKinds = new Set<'codex' | 'claude'>();
+  private readonly quarantinedRuntimeKinds = new Set<'codex' | 'claude' | 'grok'>();
   private readonly quarantinedRuntimeTasks = new Set<string>();
   /** First-Turn requests awaiting successful completion before title generation begins. */
   private readonly pendingTaskTitles = new Map<string, TaskTitleRequest>();
@@ -1438,7 +1442,11 @@ export class IpcRouter {
         ),
       authorizeEgress: (kind, taskId, turnId, prompt, context, knownWorkspaceRoots) => {
         const authorize =
-          kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
+          kind === 'grok'
+            ? authorizeGrokProviderEgress
+            : kind === 'claude'
+              ? authorizeClaudeProviderEgress
+              : authorizeCodexProviderEgress;
         return authorize({
           broker: this.permissionBroker,
           task: this.persistence.getTask(taskId),
@@ -1846,6 +1854,19 @@ export class IpcRouter {
       join(app.getPath('userData'), 'codex-isolated'),
       (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
       genericManagedRuntimeTools.claudeRuntime,
+    );
+    this.grokRuntime = new RuntimeHostClient(
+      (taskId, turnId, runtimeEvent) =>
+        this.handleRuntimeEvent('grok', taskId, turnId, runtimeEvent),
+      (taskId, turnId, error, diagnostic) =>
+        this.handleRuntimeFailure('grok', taskId, turnId, error, diagnostic),
+      (taskId, turnId) => this.prepareContext(taskId, turnId),
+      (taskId, turnId, fragmentIds, projectItemIds, snapshotDigest) =>
+        this.acknowledgeRuntimeContext(taskId, turnId, fragmentIds, projectItemIds, snapshotDigest),
+      'grok',
+      join(app.getPath('userData'), 'codex-isolated'),
+      (_taskId, turnId, identity) => this.teamMcpBridge.bindRuntimeProcess(turnId, identity),
+      genericManagedRuntimeTools.grokRuntime,
     );
     // Computer Use is constructed only after the Main-owned Provider and Permission services
     // above exist. Its native host is injected by index.ts after the signed package gate runs;
@@ -2582,10 +2603,10 @@ export class IpcRouter {
               selectionIdentity: null,
             };
           }
-        if (builtin?.runtimeKind === 'claude')
+        if (builtin?.runtimeKind === 'claude' || builtin?.runtimeKind === 'grok')
           return {
             status: 'unsupported' as const,
-            reason: '選択中のClaude Codeモデルでは画像添付を利用できません',
+            reason: `選択中の${builtin.runtimeKind === 'grok' ? 'Grok CLI' : 'Claude Code'}モデルでは画像添付を利用できません`,
             selectionIdentity: null,
           };
         if (!this.attachmentCustodyReady)
@@ -2664,18 +2685,21 @@ export class IpcRouter {
       runtimeSettingsGetInputSchema,
       runtimeSettingsSchema,
       async (input) => {
-        const [codexCapability, claudeCapability] = await Promise.all([
+        const [codexCapability, claudeCapability, grokCapability] = await Promise.all([
           this.codexRuntime.probe(),
           this.claudeRuntime.probe(),
+          this.grokRuntime.probe(),
         ]);
         this.reconcileBuiltinCapability('codex', codexCapability);
         this.reconcileBuiltinCapability('claude', claudeCapability);
+        this.reconcileBuiltinCapability('grok', grokCapability);
         const taskSelection =
           input.taskId === undefined ? null : this.persistence.getTaskModelSelection(input.taskId);
         const taskRuntime =
           taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
         const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
-        const activeCapability = kind === 'claude' ? claudeCapability : codexCapability;
+        const activeCapability =
+          kind === 'grok' ? grokCapability : kind === 'claude' ? claudeCapability : codexCapability;
         const storedModel = taskRuntime?.model ?? this.persistence.getModel();
         const model = activeCapability.models.some(({ id }) => id === storedModel)
           ? storedModel
@@ -2688,6 +2712,9 @@ export class IpcRouter {
           claudeAvailable: claudeCapability.available,
           claudeReadiness: claudeCapability.readiness,
           claudeCli: claudeCapability.cli ?? null,
+          grokAvailable: grokCapability.available,
+          grokReadiness: grokCapability.readiness,
+          grokCli: grokCapability.cli ?? null,
           model,
           models: activeCapability.models,
           effort: this.persistence.getEffort(),
@@ -2698,7 +2725,7 @@ export class IpcRouter {
           codexEffort: clampCodexEffort(
             this.persistence.getCodexEffort(),
             codexCapability.models,
-            kind === 'claude' ? 'auto' : storedModel,
+            kind === 'codex' ? storedModel : 'auto',
           ),
           modelFallbackNotice: this.persistence.takeModelFallbackNotice(),
         };
@@ -3282,7 +3309,7 @@ export class IpcRouter {
       runtimeSetInputSchema,
       z.undefined(),
       async (input, event, envelope) => {
-        if (input.kind === 'codex' || input.kind === 'claude') {
+        if (input.kind === 'codex' || input.kind === 'claude' || input.kind === 'grok') {
           const capability = await this.runtimeFor(input.kind).probe();
           if (capability.readiness !== 'ready') throw new RuntimeUnavailableError(input.kind);
         }
@@ -3315,7 +3342,7 @@ export class IpcRouter {
         const taskRuntime =
           taskSelection === null ? null : builtinRuntimeForModelSelection(taskSelection);
         const kind = taskRuntime?.runtimeKind ?? this.persistence.getRuntime();
-        const runtimeKind = kind === 'claude' ? 'claude' : 'codex';
+        const runtimeKind = kind === 'claude' || kind === 'grok' ? kind : 'codex';
         const capability = await this.runtimeFor(runtimeKind).probe();
         if (capability.readiness !== 'ready') throw new RuntimeUnavailableError(runtimeKind);
         if (!capability.models.some(({ id }) => id === input.model))
@@ -4433,6 +4460,7 @@ export class IpcRouter {
         if (
           activeRuntimeKind === 'codex' ||
           activeRuntimeKind === 'claude' ||
+          activeRuntimeKind === 'grok' ||
           activeRuntimeKind === 'provider'
         )
           throw new SteerUnsupportedError();
@@ -4692,14 +4720,20 @@ export class IpcRouter {
       // would run the whole suite against a real model, slowly and at real cost.
       if (process.env['SPRINT_CODER_RUNTIME_ADOPT'] === '0') return;
       if (this.persistence.getStoredRuntime() !== null) return;
-      const [codex, claude] = await Promise.all([
+      const [codex, claude, grok] = await Promise.all([
         this.codexRuntime.probe(),
         this.claudeRuntime.probe(),
+        this.grokRuntime.probe(),
       ]);
-      // Codex first only because it is the historical default of this app's settings key; neither is
-      // "better", and the user changes it in one click either way.
+      // Keep the historical preference order for existing installs, then consider Grok.
       const installed: RuntimeKind | null =
-        codex.readiness === 'ready' ? 'codex' : claude.readiness === 'ready' ? 'claude' : null;
+        codex.readiness === 'ready'
+          ? 'codex'
+          : claude.readiness === 'ready'
+            ? 'claude'
+            : grok.readiness === 'ready'
+              ? 'grok'
+              : null;
       if (installed === null) return;
       this.persistence.setRuntime(installed);
     } catch {
@@ -5001,6 +5035,7 @@ export class IpcRouter {
     await this.compatibleRuntime.dispose();
     await this.managedLocalProviderRuntime?.dispose();
     this.claudeRuntime.dispose();
+    this.grokRuntime.dispose();
     this.graphGenerationUnsubscribe?.();
     this.graphGenerationUnsubscribe = null;
     this.graphSourceMonitor.dispose();
@@ -5203,6 +5238,7 @@ export class IpcRouter {
       },
       codexRuntime: direct('codex-runtime'),
       claudeRuntime: direct('claude-runtime'),
+      grokRuntime: direct('grok-runtime'),
     });
   }
 
@@ -6283,7 +6319,9 @@ export class IpcRouter {
   private finishQuarantinedRuntimeStart(started: StartedTurn): void {
     const taskId = started.event.taskId;
     const runtimeKind: ActiveRuntimeKind =
-      started.runtimeKind === 'codex' || started.runtimeKind === 'claude'
+      started.runtimeKind === 'codex' ||
+      started.runtimeKind === 'claude' ||
+      started.runtimeKind === 'grok'
         ? started.runtimeKind
         : started.runtimeKind === 'mock'
           ? 'mock'
@@ -6320,7 +6358,9 @@ export class IpcRouter {
       return;
     if (
       this.quarantinedRuntimeTasks.has(taskId) ||
-      ((started.runtimeKind === 'codex' || started.runtimeKind === 'claude') &&
+      ((started.runtimeKind === 'codex' ||
+        started.runtimeKind === 'claude' ||
+        started.runtimeKind === 'grok') &&
         this.quarantinedRuntimeKinds.has(started.runtimeKind))
     ) {
       this.finishQuarantinedRuntimeStart(started);
@@ -6330,7 +6370,10 @@ export class IpcRouter {
       try {
         await this.assertTurnWorkspaceHealthy(started);
       } catch {
-        const kind = started.runtimeKind === 'claude' ? 'claude' : 'codex';
+        const kind =
+          started.runtimeKind === 'claude' || started.runtimeKind === 'grok'
+            ? started.runtimeKind
+            : 'codex';
         this.turnRuntimes.set(started.turnId, kind);
         this.handleRuntimeFailure(kind, taskId, started.turnId, {
           code: 'RUNTIME_FAILED',
@@ -6386,11 +6429,16 @@ export class IpcRouter {
       kind !== 'mock' &&
       (teamTurn || skillCreatorTurn || memoryTurn);
     if (teamTurn && wantsLeaderMcp && !this.teamSkillReady) {
-      this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
-        code: 'RUNTIME_FAILED',
-        userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
-        retryable: true,
-      });
+      this.handleRuntimeFailure(
+        kind === 'claude' || kind === 'grok' ? kind : 'codex',
+        taskId,
+        started.turnId,
+        {
+          code: 'RUNTIME_FAILED',
+          userMessage: '組み込みTeam Skillを検証できないためTeamを開始できません。',
+          retryable: true,
+        },
+      );
       return;
     }
     let teamMcp: RuntimeTeamMcpOption | undefined;
@@ -6401,11 +6449,16 @@ export class IpcRouter {
         memoryTurn,
       });
       if (teamMcp === undefined && (teamTurn || skillCreatorTurn)) {
-        this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
-          code: 'RUNTIME_FAILED',
-          userMessage: 'Team MCPへ接続できないためTeamを開始できません。',
-          retryable: true,
-        });
+        this.handleRuntimeFailure(
+          kind === 'claude' || kind === 'grok' ? kind : 'codex',
+          taskId,
+          started.turnId,
+          {
+            code: 'RUNTIME_FAILED',
+            userMessage: 'Team MCPへ接続できないためTeamを開始できません。',
+            retryable: true,
+          },
+        );
         return;
       }
       if (teamTurn && requiresTeamWorkersInput(started.text))
@@ -6416,17 +6469,22 @@ export class IpcRouter {
       // real-runtime leader cannot drive a team — the deterministic leader orchestrates while
       // Workers execute on the real runtime.
       if (this.attachmentCapabilityByTurn.has(started.turnId)) {
-        this.handleRuntimeFailure(kind === 'claude' ? 'claude' : 'codex', taskId, started.turnId, {
-          code: 'RUNTIME_FAILED',
-          userMessage: '画像添付を含むTurnではTeam Runtimeを無効化できません。',
-          retryable: true,
-        });
+        this.handleRuntimeFailure(
+          kind === 'claude' || kind === 'grok' ? kind : 'codex',
+          taskId,
+          started.turnId,
+          {
+            code: 'RUNTIME_FAILED',
+            userMessage: '画像添付を含むTurnではTeam Runtimeを無効化できません。',
+            retryable: true,
+          },
+        );
         return;
       }
       kind = 'mock';
     }
     this.turnRuntimes.set(started.turnId, kind);
-    if (kind === 'codex' || kind === 'claude')
+    if (kind === 'codex' || kind === 'claude' || kind === 'grok')
       this.runtimeDiagnosticContextByTurn.set(started.turnId, {
         startedAtMs: Date.now(),
         runtimeKind: kind,
@@ -6474,7 +6532,11 @@ export class IpcRouter {
       workspacePath,
     );
     const dispatchEgress =
-      kind === 'claude' ? dispatchAfterClaudeProviderEgress : dispatchAfterCodexProviderEgress;
+      kind === 'grok'
+        ? dispatchAfterGrokProviderEgress
+        : kind === 'claude'
+          ? dispatchAfterClaudeProviderEgress
+          : dispatchAfterCodexProviderEgress;
     const runtimeSkills = [...started.skills, ...autoSkills].map((skill) => {
       const compatibility = skill.compatibility ?? portableSkillCompatibility();
       return {
@@ -6517,7 +6579,7 @@ export class IpcRouter {
         }),
       },
     );
-    if (kind === 'claude' && toolCatalogSnapshot.entries.length > 0) {
+    if ((kind === 'claude' || kind === 'grok') && toolCatalogSnapshot.entries.length > 0) {
       const managedTools = providerToolsFromSnapshot(toolCatalogSnapshot);
       if (teamMcp === undefined)
         teamMcp = this.registerManagedMcp(
@@ -6542,7 +6604,7 @@ export class IpcRouter {
         };
       }
       if (teamMcp === undefined) {
-        this.handleRuntimeFailure('claude', taskId, started.turnId, {
+        this.handleRuntimeFailure(kind, taskId, started.turnId, {
           code: 'RUNTIME_FAILED',
           userMessage: 'Managed Coding Harnessへ接続できません。',
           retryable: true,
@@ -6550,6 +6612,12 @@ export class IpcRouter {
         return;
       }
     }
+    const diagnosticContext = this.runtimeDiagnosticContextByTurn.get(started.turnId);
+    if (diagnosticContext !== undefined && teamMcp !== undefined)
+      this.runtimeDiagnosticContextByTurn.set(started.turnId, {
+        ...diagnosticContext,
+        teamMcpEnabled: true,
+      });
     const runtimeContextFragments = contextFragmentsForRuntime(
       kind,
       injectPromptGuidance(
@@ -6622,7 +6690,7 @@ export class IpcRouter {
           now: new Date().toISOString(),
           payloadDigest: serializedPayload.digest,
           adapterVersion: 'runtime-protocol-v8',
-          connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
+          connectionId: `builtin:${kind}-cli`,
           modelId: started.model,
           endpointTrust: 'trusted-remote',
           round: 1,
@@ -6653,7 +6721,9 @@ export class IpcRouter {
             // the selected model's advertised set; '' means "no override".
             kind === 'claude'
               ? this.persistence.getEffort()
-              : this.persistence.getCodexEffort() || undefined,
+              : kind === 'codex'
+                ? this.persistence.getCodexEffort() || undefined
+                : undefined,
             writeScope,
             runtimeSkills,
             dispatchPayload,
@@ -6701,7 +6771,9 @@ export class IpcRouter {
           ? 'provider'
           : runtimeKind;
     return this.skillSettings.resolveSelections(
-      bindBuiltinImagegenSkillForTurn(text, runtimeKind, selections),
+      runtimeKind === 'codex'
+        ? bindBuiltinImagegenSkillForTurn(text, runtimeKind, selections)
+        : [...selections],
       text,
       skillRuntime,
     );
@@ -6709,7 +6781,7 @@ export class IpcRouter {
 
   private async prepareTurnImageAttachments(
     started: StartedTurn,
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
   ): Promise<
     | Readonly<{
         receipt: RuntimePreparedImageAttachments;
@@ -7215,7 +7287,7 @@ export class IpcRouter {
    * with an errorCode so a Mission that parks on `waiting_resume` can be explained after the fact.
    */
   private async prepareWorkerManagedCatalog(
-    kind: 'claude' | 'codex' | 'provider',
+    kind: 'claude' | 'codex' | 'grok' | 'provider',
     taskId: string,
     runtimeTurnId: string,
     runtimeWorkspace: RuntimeWorkspaceSet,
@@ -7250,7 +7322,7 @@ export class IpcRouter {
   }
 
   private async buildWorkerManagedCatalog(
-    kind: 'claude' | 'codex' | 'provider',
+    kind: 'claude' | 'codex' | 'grok' | 'provider',
     taskId: string,
     runtimeTurnId: string,
     runtimeWorkspace: RuntimeWorkspaceSet,
@@ -7496,13 +7568,15 @@ export class IpcRouter {
   }
 
   private async refreshModelCatalog(): Promise<void> {
-    const [codexCapability, claudeCapability] = await Promise.all([
+    const [codexCapability, claudeCapability, grokCapability] = await Promise.all([
       this.codexRuntime.probe(),
       this.claudeRuntime.probe(),
+      this.grokRuntime.probe(),
     ]);
     const checkedAt = new Date().toISOString();
     this.reconcileBuiltinCapability('codex', codexCapability);
     this.reconcileBuiltinCapability('claude', claudeCapability);
+    this.reconcileBuiltinCapability('grok', grokCapability);
     const connections = this.providerConnections
       .list()
       .filter(({ id }) => id !== MANAGED_LOCAL_CONNECTION_ID);
@@ -7568,12 +7642,21 @@ export class IpcRouter {
             this.teamRuntimeAvailability.isAvailable('claude'),
           checkedAt,
         ),
+        ...providerModelsForBuiltin(
+          'builtin:grok-cli',
+          'Grok CLI',
+          'xai',
+          grokCapability.models,
+          grokCapability.readiness === 'ready' && this.teamRuntimeAvailability.isAvailable('grok'),
+          checkedAt,
+        ),
         ...externalModels,
         ...managedModels,
       ],
       new Map([
         ['builtin:codex-cli', 'subscription'],
         ['builtin:claude-cli', 'subscription'],
+        ['builtin:grok-cli', 'subscription'],
         ...(managedConnection === null ? [] : ([[MANAGED_LOCAL_CONNECTION_ID, 'local']] as const)),
         ...connections.map(
           (connection) =>
@@ -7638,7 +7721,7 @@ export class IpcRouter {
   }
 
   private reconcileBuiltinCapability(
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     capability: Awaited<ReturnType<RuntimeHostClient['probe']>>,
   ): void {
     if (capability.readiness !== 'ready' || capability.models.length < 2) return;
@@ -7653,7 +7736,7 @@ export class IpcRouter {
     const runtime = selection === null ? null : builtinRuntimeForModelSelection(selection);
     if (selection !== null && runtime === null) return;
     const selectedKind = runtime?.runtimeKind ?? this.persistence.getRuntime();
-    if (selectedKind !== 'codex' && selectedKind !== 'claude') return;
+    if (selectedKind !== 'codex' && selectedKind !== 'claude' && selectedKind !== 'grok') return;
     try {
       const capability = await this.runtimeFor(selectedKind).probe();
       this.reconcileBuiltinCapability(selectedKind, capability);
@@ -7788,11 +7871,16 @@ export class IpcRouter {
     if (!verifyBuiltinTeamSkillAcceptance(expectedTeamSkill, acceptedFragmentIds)) {
       this.teamSkillResolutionByTurn.delete(turnId);
       const runtime = this.turnRuntimes.get(turnId);
-      this.handleRuntimeFailure(runtime === 'claude' ? 'claude' : 'codex', taskId, turnId, {
-        code: 'RUNTIME_PROTOCOL_ERROR',
-        userMessage: 'Runtimeが組み込みTeam Skillを受理しませんでした。',
-        retryable: false,
-      });
+      this.handleRuntimeFailure(
+        runtime === 'claude' || runtime === 'grok' ? runtime : 'codex',
+        taskId,
+        turnId,
+        {
+          code: 'RUNTIME_PROTOCOL_ERROR',
+          userMessage: 'Runtimeが組み込みTeam Skillを受理しませんでした。',
+          retryable: false,
+        },
+      );
       return;
     }
     if (expectedTeamSkill && !acceptedFragmentIds.includes(BUILTIN_TEAM_SKILL_FRAGMENT_ID)) return;
@@ -7814,11 +7902,15 @@ export class IpcRouter {
       this.publish(event);
   }
 
-  private runtimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
-    return kind === 'claude' ? this.claudeRuntime : this.codexRuntime;
+  private runtimeFor(kind: 'codex' | 'claude' | 'grok'): RuntimeHostClient {
+    return kind === 'grok'
+      ? this.grokRuntime
+      : kind === 'claude'
+        ? this.claudeRuntime
+        : this.codexRuntime;
   }
 
-  private taskTitleRuntimeFor(kind: 'codex' | 'claude'): RuntimeHostClient {
+  private taskTitleRuntimeFor(kind: 'codex' | 'claude' | 'grok'): RuntimeHostClient {
     return this.taskTitleRuntimes.get(kind);
   }
 
@@ -7897,7 +7989,11 @@ export class IpcRouter {
           request,
           request.modelSelection.connectionId,
         );
-      else if (request.runtimeKind === 'codex' || request.runtimeKind === 'claude')
+      else if (
+        request.runtimeKind === 'codex' ||
+        request.runtimeKind === 'claude' ||
+        request.runtimeKind === 'grok'
+      )
         generated = await this.generateCliTaskTitle(request, request.runtimeKind, request.model);
       else generated = null;
       if (generated === null || this.disposed) return;
@@ -7912,7 +8008,7 @@ export class IpcRouter {
 
   private async generateCliTaskTitle(
     request: TaskTitleRequest,
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     model: string,
   ): Promise<string | null> {
     if (this.disposed) return null;
@@ -7927,7 +8023,11 @@ export class IpcRouter {
       skills: [],
     });
     const authorize =
-      kind === 'claude' ? authorizeClaudeProviderEgress : authorizeCodexProviderEgress;
+      kind === 'grok'
+        ? authorizeGrokProviderEgress
+        : kind === 'claude'
+          ? authorizeClaudeProviderEgress
+          : authorizeCodexProviderEgress;
     const egress = authorize({
       broker: this.permissionBroker,
       task: this.persistence.getTask(request.taskId),
@@ -7937,7 +8037,7 @@ export class IpcRouter {
       now: new Date().toISOString(),
       payloadDigest: serializedPayload.digest,
       adapterVersion: 'runtime-protocol-v7:title-v1',
-      connectionId: kind === 'claude' ? 'builtin:claude-cli' : 'builtin:codex-cli',
+      connectionId: `builtin:${kind}-cli`,
       modelId: model,
       endpointTrust: 'trusted-remote',
       round: 1,
@@ -7947,7 +8047,7 @@ export class IpcRouter {
 
     let effort: string | undefined;
     if (kind === 'claude') effort = this.persistence.getEffort();
-    else {
+    else if (kind === 'codex') {
       const capability = await this.codexRuntime.probe();
       if (this.disposed) return null;
       effort =
@@ -8069,7 +8169,7 @@ export class IpcRouter {
   }
 
   private routeCliTaskTitleEvent(
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     _taskId: string,
     turnId: string,
     event: RuntimeCanonicalEvent,
@@ -8087,7 +8187,7 @@ export class IpcRouter {
   }
 
   private routeCliTaskTitleFailure(
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     _taskId: string,
     turnId: string,
     _error: PublicError,
@@ -8122,7 +8222,7 @@ export class IpcRouter {
         this.runtimeCancelActions.run(turnId, () => {
           this.pendingTaskTitles.delete(turnId);
           let cancelAction: () => Promise<void>;
-          if (kind === 'codex' || kind === 'claude')
+          if (kind === 'codex' || kind === 'claude' || kind === 'grok')
             cancelAction = async () => {
               await this.runtimeFor(kind).cancel(taskId, turnId);
             };
@@ -8156,7 +8256,7 @@ export class IpcRouter {
         }),
       (error) => {
         if (
-          (kind === 'codex' || kind === 'claude') &&
+          (kind === 'codex' || kind === 'claude' || kind === 'grok') &&
           !(error instanceof ManagedCommandCancellationError)
         )
           this.quarantinedRuntimeKinds.add(kind);
@@ -9097,7 +9197,7 @@ export class IpcRouter {
   }
 
   private handleRuntimeEvent(
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     taskId: string,
     turnId: string,
     runtimeEvent: RuntimeCanonicalEvent,
@@ -9122,9 +9222,9 @@ export class IpcRouter {
               runtimeEvent.delta,
             ),
           );
-        else if (runtimeEvent.type === 'thread')
-          this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
-        else if (runtimeEvent.type === 'operation') return;
+        else if (runtimeEvent.type === 'thread') {
+          if (kind === 'codex') this.codexThreadByTurn.set(turnId, runtimeEvent.threadId);
+        } else if (runtimeEvent.type === 'operation') return;
         else {
           await this.completeCanonicalTeamTurn(
             kind,
@@ -9148,7 +9248,7 @@ export class IpcRouter {
   }
 
   private completeCanonicalTeamTurn(
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     taskId: string,
     turnId: string,
     resolvedModel: string | undefined,
@@ -9406,12 +9506,15 @@ export class IpcRouter {
   }
 
   private handleRuntimeFailure(
-    kind: 'codex' | 'claude',
+    kind: 'codex' | 'claude' | 'grok',
     taskId: string,
     turnId: string,
     error: PublicError,
     diagnostic?: RuntimeFailureDiagnostic,
   ): void {
+    // A canceled/late failure still carries host-wide stop uncertainty. Set this before the
+    // mailbox and ownership guards so another Task or queued Turn cannot race the barrier.
+    if (error.code === 'RUNTIME_STOP_UNCONFIRMED') this.quarantinedRuntimeKinds.add(kind);
     void this.mailbox.run(taskId, async () => {
       if (this.canceledRuntimeTurns.has(turnId)) return;
       const activeRuntime = this.turnRuntimes.get(turnId);
@@ -9730,7 +9833,7 @@ export function isTrustedIpcSender(
 
 class SecurityError extends Error {}
 class RuntimeUnavailableError extends Error {
-  constructor(readonly kind: 'codex' | 'claude' = 'codex') {
+  constructor(readonly kind: 'codex' | 'claude' | 'grok' = 'codex') {
     super();
   }
 }
@@ -9756,12 +9859,13 @@ export function clampCodexEffort(
 }
 
 class InvalidModelError extends Error {
-  constructor(readonly kind: 'codex' | 'claude' | 'provider' = 'codex') {
+  constructor(readonly kind: 'codex' | 'claude' | 'grok' | 'provider' = 'codex') {
     super();
   }
 }
 
-export function invalidModelUserMessage(kind: 'codex' | 'claude' | 'provider'): string {
+export function invalidModelUserMessage(kind: 'codex' | 'claude' | 'grok' | 'provider'): string {
+  if (kind === 'grok') return '選択したモデルは現在のGrok CLIで利用できません。';
   if (kind === 'claude') return '選択したモデルは現在のClaude CLIで利用できません。';
   if (kind === 'provider') return '選択したモデルは現在のProvider Connectionで利用できません。';
   return '選択したモデルは現在のCodex CLIで利用できません。';
@@ -9871,7 +9975,7 @@ export function listAvailableTeamRuntimeModels(
       {
         taskId,
         text: '',
-        connectionIds: ['builtin:codex-cli', 'builtin:claude-cli'],
+        connectionIds: ['builtin:codex-cli', 'builtin:claude-cli', 'builtin:grok-cli'],
         providerIds: [],
         accessTypes: [],
         capabilities: [],
@@ -10458,9 +10562,11 @@ export function toPublicError(error: unknown): PublicError {
     return {
       code: 'RUNTIME_UNAVAILABLE',
       userMessage:
-        error.kind === 'claude'
-          ? 'Claude CLIが利用できないため、このruntimeを選択できません。'
-          : 'Codex CLIが利用できないため、このruntimeを選択できません。',
+        error.kind === 'grok'
+          ? 'Grok CLIが利用できないため、このruntimeを選択できません。'
+          : error.kind === 'claude'
+            ? 'Claude CLIが利用できないため、このruntimeを選択できません。'
+            : 'Codex CLIが利用できないため、このruntimeを選択できません。',
       retryable: false,
     };
   if (error instanceof ProviderSecretStorageUnavailableError)

@@ -6,6 +6,7 @@ import {
   RuntimeFailureDiagnosticCollector,
   resolveRuntimeFailureDiagnostic,
 } from './runtime-failure-diagnostics';
+import { isRuntimeFailureDiagnostic } from './protocol';
 
 describe('resolveRuntimeFailureDiagnostic', () => {
   it('creates a safe protocol-error fallback without retaining untrusted failure details', () => {
@@ -150,6 +151,59 @@ describe('RuntimeFailureDiagnosticCollector CLI resolution', () => {
 });
 
 describe('RuntimeFailureDiagnosticCollector', () => {
+  it('round-trips Grok diagnostics and drops foreign or unbounded version text', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('grok', '0.7.0', 'grok 1.0.0', false);
+    const diagnostic = collector.snapshot('startup_error');
+    expect(diagnostic).toMatchObject({ runtimeKind: 'grok', cliVersion: 'grok 1.0.0' });
+    expect(isRuntimeFailureDiagnostic(diagnostic)).toBe(true);
+    collector.setCliVersion('grok 1.0.0 (abcdef1)');
+    expect(collector.snapshot('startup_error').cliVersion).toBe('grok 1.0.0 (abcdef1)');
+    expect(isRuntimeFailureDiagnostic(collector.snapshot('startup_error'))).toBe(true);
+    collector.setCliVersion('grok 1.0.40 (eb1a2256660d) [stable]');
+    expect(collector.snapshot('startup_error').cliVersion).toBe(
+      'grok 1.0.40 (eb1a2256660d) [stable]',
+    );
+    expect(isRuntimeFailureDiagnostic(collector.snapshot('startup_error'))).toBe(true);
+    collector.recordCodexIsolation({
+      userConfigSnapshot: 'copied',
+      selectedSkillCount: 1,
+      disabledUnexpectedSkillCount: 0,
+      verified: true,
+    });
+    expect(collector.snapshot('startup_error').codexIsolation).toBeUndefined();
+    for (const version of [
+      'codex 1.0.0',
+      '2.1.218 (Claude Code)',
+      'grok 1.0.0\n/private/request',
+      'grok 1.0.0 (secret-token)',
+      'grok 1.0.0 (' + 'a'.repeat(128) + ')',
+    ]) {
+      collector.setCliVersion(version);
+      expect(collector.snapshot('startup_error').cliVersion).toBeNull();
+      expect(
+        new RuntimeFailureDiagnosticCollector('grok', '0.7.0', version, false).snapshot(
+          'startup_error',
+        ).cliVersion,
+      ).toBeNull();
+    }
+  });
+
+  it('replaces a foreign diagnostic with a Grok protocol fallback', () => {
+    const diagnostic = resolveRuntimeFailureDiagnostic({
+      errorCode: 'RUNTIME_PROTOCOL_ERROR',
+      diagnostic: new RuntimeFailureDiagnosticCollector('codex', '0.7.0', null, false).snapshot(
+        'protocol_error',
+      ),
+      runtimeKind: 'grok',
+      appVersion: '0.7.0',
+      startedAtMs: 1_000,
+      teamMcpEnabled: false,
+      nowMs: 1_025,
+    });
+    expect(diagnostic).toMatchObject({ runtimeKind: 'grok', elapsedMs: 25, cliVersion: null });
+    expect(isRuntimeFailureDiagnostic(diagnostic)).toBe(true);
+  });
+
   it('records bounded protocol method names while counting unsupported notifications', () => {
     const collector = new RuntimeFailureDiagnosticCollector('codex', '0.2.1', 'codex 1.2.3', true);
     collector.recordNotification('turn/started');

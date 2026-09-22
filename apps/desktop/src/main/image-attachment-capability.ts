@@ -9,11 +9,12 @@ import {
   builtinRuntimeForModelSelection,
 } from './connection-identity';
 import type { ImageAttachmentAcceptanceSelection } from './persistence';
+import type { RuntimeKind } from '../runtime-host/protocol';
 
 export const IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS = 5_000;
 
 export type ImageAttachmentRuntimeSnapshot = Readonly<{
-  runtimeKind: 'codex' | 'claude';
+  runtimeKind: RuntimeKind;
   available: boolean;
   readiness: 'ready' | 'authentication_required' | 'unavailable';
   runtimeInstanceId: string;
@@ -24,7 +25,7 @@ export type ImageAttachmentRuntimeSnapshot = Readonly<{
 }>;
 
 export type ImageAttachmentRuntimeCurrent = Readonly<{
-  runtimeKind: 'codex' | 'claude';
+  runtimeKind: RuntimeKind;
   runtimeInstanceId: string;
   readinessRevision: number;
   catalogRevision: string;

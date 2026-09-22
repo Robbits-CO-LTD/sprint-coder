@@ -15,8 +15,10 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { canonicalizeExistingPath, pathComparisonKey } from '../path-comparison';
 import { TEAM_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
+import { isSafeCliVersionText } from './cli-command-resolution';
 
 export const RUNTIME_PROTOCOL_VERSION = 11;
+export type RuntimeKind = 'codex' | 'claude' | 'grok';
 
 export type RuntimeImageAttachmentManifestEntry = Readonly<{
   id: string;
@@ -200,7 +202,7 @@ export type ResolvedCliCommand = Readonly<{
 export type RuntimeFailureDiagnostic = Readonly<{
   version: 1;
   diagnosticId: string;
-  runtimeKind: 'codex' | 'claude';
+  runtimeKind: RuntimeKind;
   failureStage: RuntimeFailureStage;
   elapsedMs: number;
   appVersion: string;
@@ -336,6 +338,12 @@ export type RuntimeToMainEnvelope =
       claudeVersion?: string;
       claudeCli?: ResolvedCliCommand;
       claudeModels: CodexModelOption[];
+      // Legacy hosts may omit all Grok fields. New hosts always send the capability trio.
+      grokAvailable?: boolean;
+      grokReadiness?: 'ready' | 'authentication_required' | 'unavailable';
+      grokVersion?: string;
+      grokCli?: ResolvedCliCommand;
+      grokModels?: CodexModelOption[];
     })
   | (EnvelopeBase & {
       type: 'images_prepared';
@@ -816,7 +824,24 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
       'claudeModels' in value &&
       Array.isArray(value.claudeModels) &&
       value.claudeModels.length <= 32 &&
-      value.claudeModels.every((model) => codexModelOptionSchema.safeParse(model).success)
+      value.claudeModels.every((model) => codexModelOptionSchema.safeParse(model).success) &&
+      (!['grokAvailable', 'grokReadiness', 'grokModels', 'grokVersion', 'grokCli'].some(
+        (field) => field in value,
+      ) ||
+        ('grokAvailable' in value &&
+          typeof value.grokAvailable === 'boolean' &&
+          'grokReadiness' in value &&
+          ['ready', 'authentication_required', 'unavailable'].includes(
+            value.grokReadiness as string,
+          ) &&
+          (!('grokVersion' in value) ||
+            (typeof value.grokVersion === 'string' &&
+              isSafeCliVersionText('grok', value.grokVersion))) &&
+          (!('grokCli' in value) || isResolvedCliCommand(value.grokCli)) &&
+          'grokModels' in value &&
+          Array.isArray(value.grokModels) &&
+          value.grokModels.length <= 32 &&
+          value.grokModels.every((model) => codexModelOptionSchema.safeParse(model).success)))
     );
   if (value.type === 'images_prepared')
     return (
@@ -994,7 +1019,9 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       record['diagnosticId'],
     ) &&
-    (record['runtimeKind'] === 'codex' || record['runtimeKind'] === 'claude') &&
+    (record['runtimeKind'] === 'codex' ||
+      record['runtimeKind'] === 'claude' ||
+      record['runtimeKind'] === 'grok') &&
     [
       'first_event_timeout',
       'idle_timeout',
@@ -1012,13 +1039,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     (record['cliVersion'] === null ||
       (typeof record['cliVersion'] === 'string' &&
         record['cliVersion'].length <= 128 &&
-        (record['runtimeKind'] === 'codex'
-          ? /^(?:codex|codex-cli) v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(
-              record['cliVersion'],
-            )
-          : /^(?:claude-code )?v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?: \(Claude Code\))?$/.test(
-              record['cliVersion'],
-            )))) &&
+        isSafeCliVersionText(record['runtimeKind'], record['cliVersion']))) &&
     (!('capabilityMismatch' in record) ||
       record['capabilityMismatch'] === undefined ||
       isCapabilityMismatch(record['capabilityMismatch'])) &&

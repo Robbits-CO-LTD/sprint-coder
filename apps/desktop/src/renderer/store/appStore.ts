@@ -90,8 +90,11 @@ export type RuntimeState = {
   codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
   claudeAvailable: boolean;
   claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
+  grokAvailable: boolean;
+  grokReadiness: 'ready' | 'authentication_required' | 'unavailable';
   codexCli: ResolvedCliCommand | null;
   claudeCli: ResolvedCliCommand | null;
+  grokCli: ResolvedCliCommand | null;
   model: string;
   models: CodexModelOption[];
   effort: ClaudeEffort;
@@ -983,8 +986,11 @@ export const useAppStore = create<AppState>((set, get) => {
       codexReadiness: 'unavailable',
       claudeAvailable: false,
       claudeReadiness: 'unavailable',
+      grokAvailable: false,
+      grokReadiness: 'unavailable',
       codexCli: null,
       claudeCli: null,
+      grokCli: null,
       model: 'auto',
       models: [{ id: 'auto', displayName: 'Auto', description: 'Codexの既定モデルを使用' }],
       effort: 'medium',
@@ -1274,7 +1280,9 @@ export const useAppStore = create<AppState>((set, get) => {
           get().showToast(
             kind === 'claude'
               ? 'Claude CLIが見つからないため切り替えできません'
-              : 'Codex CLIが見つからないため切り替えできません',
+              : kind === 'grok'
+                ? 'Grok CLIが見つからないため切り替えできません'
+                : 'Codex CLIが見つからないため切り替えできません',
           );
         } else {
           set({ error: describeError(err) });

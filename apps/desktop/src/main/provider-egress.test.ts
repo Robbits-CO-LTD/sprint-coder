@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { PermissionBroker } from './permission-broker';
 import { SqlitePersistenceClient } from './persistence';
@@ -14,6 +14,7 @@ import {
   authorizeOfficialApiProviderEgress,
   dispatchAfterCodexProviderEgress,
   dispatchAfterClaudeProviderEgress,
+  dispatchAfterGrokProviderEgress,
 } from './provider-egress';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
@@ -92,7 +93,7 @@ if (runsWithElectronAbi)
       expect(dispatches).toBe(0);
       fixture.persistence.close();
     });
-    it.each(['codex', 'claude'] as const)(
+    it.each(['codex', 'claude', 'grok'] as const)(
       'dispatches %s generated guidance containing the selected Workspace root',
       (kind) => {
         const fixture = createFixture(false);
@@ -131,7 +132,11 @@ if (runsWithElectronAbi)
           knownWorkspaceRoots: [root],
         };
         const dispatch =
-          kind === 'codex' ? dispatchAfterCodexProviderEgress : dispatchAfterClaudeProviderEgress;
+          kind === 'grok'
+            ? dispatchAfterGrokProviderEgress
+            : kind === 'codex'
+              ? dispatchAfterCodexProviderEgress
+              : dispatchAfterClaudeProviderEgress;
         const decision = dispatch(input, () => {
           dispatches += 1;
         });
@@ -145,6 +150,42 @@ if (runsWithElectronAbi)
         fixture.persistence.close();
       },
     );
+    it.each([
+      { localOnly: false, prompt: 'clean prompt', allowed: true },
+      { localOnly: true, prompt: 'clean prompt', allowed: false },
+      { localOnly: false, prompt: 'password=hunter2', allowed: false },
+    ])(
+      'enforces Grok egress policy and distinct audit identity (%#)',
+      ({ localOnly, prompt, allowed }) => {
+        const fixture = createFixture(localOnly);
+        const broker = new PermissionBroker(fixture.persistence);
+        const evaluate = vi.spyOn(broker, 'evaluate');
+        const dispatch = vi.fn();
+        const decision = dispatchAfterGrokProviderEgress(
+          {
+            broker,
+            task: fixture.task,
+            turnId: 'turn-grok-egress',
+            prompt,
+            context,
+            now: '2026-07-23T00:00:00.000Z',
+          },
+          dispatch,
+        );
+        expect(decision.allowed).toBe(allowed);
+        expect(dispatch).toHaveBeenCalledTimes(allowed ? 1 : 0);
+        expect(evaluate.mock.calls[0]?.[0]).toMatchObject({
+          request: {
+            subjectId: 'runtime:grok:turn-grok-egress',
+            resource: { providerId: 'xai-grok-cli' },
+          },
+        });
+        if (allowed) expect(decision.evaluation.reason).toBe('grok_provider_egress');
+        expect(readAudit(fixture.path)[0]).toMatchObject({ decision: allowed ? 'allow' : 'deny' });
+        fixture.persistence.close();
+      },
+    );
+
     it('allows public package integrity metadata through the complete egress gate', () => {
       const fixture = createFixture(false);
       let dispatches = 0;

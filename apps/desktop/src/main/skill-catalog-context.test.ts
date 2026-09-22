@@ -13,7 +13,7 @@ const entry = (
   activationPolicy: 'manual',
   compatibility: {
     profile: 'portable',
-    runtimeSupport: { codex: 'full', claude: 'full', provider: 'full' },
+    runtimeSupport: { codex: 'full', claude: 'full', grok: 'full', provider: 'full' },
     features: [],
     requestedTools: [],
     warnings: [],

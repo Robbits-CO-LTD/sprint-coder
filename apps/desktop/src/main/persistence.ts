@@ -4294,6 +4294,98 @@ const migrations = [
         ON computer_app_access_requests(task_id);
     `,
   },
+  {
+    version: 94,
+    checksum: 'runtime-v94-grok-cli',
+    // Create/copy/drop/rename preserves incoming REFERENCES (including the Task/Thread/Turn
+    // cycle). FK enforcement must be disabled outside the transaction, as in v30.
+    requiresForeignKeysOff: true,
+    sql: `
+      CREATE TABLE turns_v94 (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        user_message_id TEXT NOT NULL REFERENCES messages(id), assistant_message_id TEXT REFERENCES messages(id),
+        state TEXT NOT NULL, seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL DEFAULT 'mock' CHECK (runtime_kind IN ('mock', 'codex', 'claude', 'grok')),
+        model TEXT NOT NULL DEFAULT 'auto',
+        connection_id TEXT, requested_provider TEXT, requested_model TEXT,
+        resolved_provider TEXT, resolved_model TEXT, provider_usage_json TEXT, resolution_json TEXT,
+        auto_skill_candidates_pinned INTEGER NOT NULL DEFAULT 0 CHECK (auto_skill_candidates_pinned IN (0, 1))
+      );
+      INSERT INTO turns_v94 (
+        id, task_id, user_message_id, assistant_message_id, state, seq, created_at, updated_at,
+        runtime_kind, model, connection_id, requested_provider, requested_model,
+        resolved_provider, resolved_model, provider_usage_json, resolution_json, auto_skill_candidates_pinned
+      ) SELECT
+        id, task_id, user_message_id, assistant_message_id, state, seq, created_at, updated_at,
+        runtime_kind, model, connection_id, requested_provider, requested_model,
+        resolved_provider, resolved_model, provider_usage_json, resolution_json, auto_skill_candidates_pinned
+      FROM turns;
+      DROP TABLE turns;
+      ALTER TABLE turns_v94 RENAME TO turns;
+      CREATE INDEX turns_task_state_idx ON turns(task_id, state);
+
+      CREATE TABLE agent_threads_v94 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('mock', 'codex', 'claude', 'grok')),
+        state TEXT NOT NULL CHECK (state IN ('idle', 'active', 'paused', 'interrupted', 'completed')),
+        active_turn_id TEXT REFERENCES turns(id) ON DELETE SET NULL,
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        connection_id TEXT, requested_provider TEXT, requested_model TEXT
+      );
+      INSERT INTO agent_threads_v94 (
+        id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at,
+        connection_id, requested_provider, requested_model
+      ) SELECT
+        id, task_id, runtime_kind, state, active_turn_id, revision, created_at, updated_at,
+        connection_id, requested_provider, requested_model
+      FROM agent_threads;
+      DROP TABLE agent_threads;
+      ALTER TABLE agent_threads_v94 RENAME TO agent_threads;
+      CREATE INDEX agent_threads_task_idx ON agent_threads(task_id, created_at, id);
+
+      CREATE TABLE runtime_failure_diagnostics_v94 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude', 'grok', 'provider')),
+        failure_stage TEXT NOT NULL CHECK (
+          (runtime_kind IN ('codex', 'claude', 'grok') AND failure_stage IN (
+            'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+            'startup_error', 'spawn_error', 'abnormal_exit'
+          )) OR
+          (runtime_kind = 'provider' AND failure_stage IN (
+            'model_preparation', 'first_event_timeout', 'idle_timeout', 'provider_error',
+            'network', 'stream_error'
+          ))
+        ),
+        diagnostic_json TEXT NOT NULL CHECK (length(CAST(diagnostic_json AS BLOB)) <= 16384),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO runtime_failure_diagnostics_v94 (
+        id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+      ) SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+      FROM runtime_failure_diagnostics;
+      DROP TABLE runtime_failure_diagnostics;
+      ALTER TABLE runtime_failure_diagnostics_v94 RENAME TO runtime_failure_diagnostics;
+      CREATE INDEX runtime_failure_diagnostics_task_created_idx
+        ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+
+      INSERT INTO provider_connections (
+        id, provider_id, runtime_kind, display_name, enabled, created_at, updated_at,
+        verification_status, rate_limit_mode, max_concurrent_requests
+      ) VALUES (
+        'builtin:grok-cli', 'xai', 'builtin_cli', 'Grok CLI', 1,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        'not_required', 'bypass', NULL
+      );
+      CREATE TEMP TABLE grok_v94_fk_guard(valid INTEGER NOT NULL CHECK (valid = 1));
+      INSERT INTO grok_v94_fk_guard(valid)
+        SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pragma_foreign_key_check) THEN 1 ELSE 0 END;
+      DROP TABLE grok_v94_fk_guard;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4901,7 +4993,7 @@ export interface PersistenceClient {
     ) => string,
   ): void;
   setAutoSkillProvider?(
-    provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
+    provider: (runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[],
   ): void;
   setSealedPostImageObserver?(observer: SealedPostImageObserver): void;
   openGraphWorkspaceObservation?(
@@ -5409,7 +5501,7 @@ export interface PersistenceClient {
   getModel(): string;
   setModel(model: string): void;
   reconcileBuiltinModelCatalog(
-    kind: Extract<RuntimeKind, 'codex' | 'claude'>,
+    kind: Extract<RuntimeKind, 'codex' | 'claude' | 'grok'>,
     availableModelIds: readonly string[],
   ): void;
   takeModelFallbackNotice(): ModelFallbackNotice | null;
@@ -5851,7 +5943,7 @@ export interface PersistenceClient {
 // 'mock' has no model concept and is bucketed with Codex's key so pre-Claude installs keep
 // reading/writing the exact same 'runtime.codex.model' row they always have.
 function modelSettingsKey(kind: RuntimeKind): string {
-  return kind === 'claude' ? 'runtime.claude.model' : 'runtime.codex.model';
+  return kind === 'mock' ? 'runtime.codex.model' : `runtime.${kind}.model`;
 }
 
 /**
@@ -5875,7 +5967,7 @@ const RETIRED_MODEL_IDS: Readonly<Partial<Record<RuntimeKind, Readonly<Record<st
     claude: { opus: 'claude-opus-5' },
   };
 
-function modelFallbackNoticeKey(kind: Extract<RuntimeKind, 'codex' | 'claude'>): string {
+function modelFallbackNoticeKey(kind: Extract<RuntimeKind, 'codex' | 'claude' | 'grok'>): string {
   return `runtime.${kind}.model-fallback-notice`;
 }
 
@@ -6404,7 +6496,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
     | ((selections: readonly TurnSkillSelection[], includeBuiltinTeamSkill: boolean) => string)
     | null = null;
   private autoSkillProvider:
-    ((runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[]) | null = null;
+    ((runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[]) | null =
+    null;
   private sealedPostImageObserver: SealedPostImageObserver | null = null;
   readonly recoveryReport: DatabaseRecoveryReport;
   private startupInterruptedTurns = 0;
@@ -6464,7 +6557,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   setAutoSkillProvider(
-    provider: (runtime: 'codex' | 'claude' | 'provider') => readonly PersistedTurnSkill[],
+    provider: (runtime: 'codex' | 'claude' | 'grok' | 'provider') => readonly PersistedTurnSkill[],
   ): void {
     this.autoSkillProvider = provider;
   }
@@ -13999,6 +14092,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       { value: string } | undefined;
     if (row?.value === 'codex') return 'codex';
     if (row?.value === 'claude') return 'claude';
+    if (row?.value === 'grok') return 'grok';
     return 'mock';
   }
 
@@ -14188,16 +14282,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   reconcileBuiltinModelCatalog(
-    kind: Extract<RuntimeKind, 'codex' | 'claude'>,
+    kind: Extract<RuntimeKind, 'codex' | 'claude' | 'grok'>,
     availableModelIds: readonly string[],
   ): void {
     const available = new Set(availableModelIds);
     // A successful catalog always contains Auto plus at least one executable model. Treat a
     // smaller result as a retrieval failure and preserve every saved preference unchanged.
     if (!available.has('auto') || available.size < 2) return;
-    const connectionId =
-      kind === 'claude' ? BUILTIN_CLAUDE_CONNECTION_ID : BUILTIN_CODEX_CONNECTION_ID;
-    const provider = kind === 'claude' ? 'anthropic' : 'openai';
+    const { connectionId, requestedProvider: provider } = modelSelectionForRuntime(kind, 'auto');
     const normalize = (stored: string): { model: string; migrated: boolean } => {
       if (available.has(stored)) return { model: stored, migrated: false };
       const replacement = RETIRED_MODEL_IDS[kind]?.[stored];
@@ -14276,7 +14368,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   takeModelFallbackNotice(): ModelFallbackNotice | null {
     return this.db.transaction(() => {
       const changes: ModelFallbackNotice['changes'] = [];
-      for (const runtimeKind of ['codex', 'claude'] as const) {
+      for (const runtimeKind of ['codex', 'claude', 'grok'] as const) {
         const key = modelFallbackNoticeKey(runtimeKind);
         const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
           { value: string } | undefined;
@@ -20075,11 +20167,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const selection = this.getImageAttachmentAcceptanceSelection(taskId);
     const { runtimeKind, model, modelSelection } = selection;
     const autoRuntime =
-      modelSelection.connectionId !== null && modelSelection.requestedProvider !== null
-        ? 'provider'
-        : runtimeKind === 'mock'
+      builtinRuntimeForModelSelection(modelSelection)?.runtimeKind === 'grok'
+        ? 'grok'
+        : modelSelection.connectionId !== null && modelSelection.requestedProvider !== null
           ? 'provider'
-          : runtimeKind;
+          : runtimeKind === 'mock'
+            ? 'provider'
+            : runtimeKind;
     const selectedSkillKeys = new Set(
       parsedSkills.map(
         ({ selection: selected }) =>

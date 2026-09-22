@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import type {
   RuntimeContextFragment,
+  RuntimeKind,
   RuntimeProjectContextItem,
   RuntimeSkillInput,
 } from './protocol';
@@ -35,7 +36,7 @@ export function removeSealedGuidancePrefix(
  * Runtime Host verifies the digest and adapters dispatch `text` verbatim.
  */
 export function serializeCliExecutionPayload(input: {
-  kind: 'codex' | 'claude';
+  kind: RuntimeKind;
   request: string;
   contextFragments: readonly RuntimeContextFragment[];
   projectItems: readonly RuntimeProjectContextItem[];

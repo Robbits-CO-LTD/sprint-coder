@@ -155,6 +155,15 @@ export function SetupWizard({ onOpenSettings }: { onOpenSettings: () => void }) 
                   <strong>Claude Code</strong>
                   <small>{readinessLabel(runtime.claudeReadiness)}</small>
                 </div>
+                <div>
+                  <span className={`setup-status setup-status--${runtime.grokReadiness}`} />
+                  <strong>Grok CLI</strong>
+                  <small>
+                    {runtime.grokReadiness === 'authentication_required'
+                      ? 'ログインが必要です（grok login）'
+                      : readinessLabel(runtime.grokReadiness)}
+                  </small>
+                </div>
               </div>
               <button type="button" className="setup-secondary" onClick={onOpenSettings}>
                 <Settings size={15} /> 接続を設定

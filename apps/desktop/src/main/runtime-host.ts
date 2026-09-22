@@ -16,6 +16,7 @@ import {
   type RuntimeCanonicalEvent,
   type RuntimeContextFragment,
   type RuntimeFailureDiagnostic,
+  type RuntimeKind,
   type RuntimeProtocolFailureReasonCode,
   type RuntimeImageAttachmentManifestEntry,
   type RuntimePreparedImageAttachments,
@@ -28,7 +29,10 @@ import {
   type RuntimeWorkspaceSet,
   runtimeWorkspaceSetFromLegacyPath,
 } from '../runtime-host/protocol';
-import { RUNTIME_HOST_HELLO_TIMEOUT_MS } from '../runtime-host/probe-budget';
+import {
+  GROK_HOST_HELLO_TIMEOUT_MS,
+  RUNTIME_HOST_HELLO_TIMEOUT_MS,
+} from '../runtime-host/probe-budget';
 import {
   IMAGE_ATTACHMENT_CAPABILITY_MAX_AGE_MS,
   runtimeCapabilityCatalogRevision,
@@ -154,13 +158,14 @@ export class RuntimeHostClient {
     observedAtMs: 0,
   };
   private disposed = false;
+  private quarantined = false;
 
   constructor(
     private readonly onEvent: EventHandler,
     private readonly onFailure: FailureHandler,
     private readonly prepareContext?: PrepareContext,
     private readonly onContextAccepted?: ContextAccepted,
-    private readonly kind: 'codex' | 'claude' = 'codex',
+    private readonly kind: RuntimeKind = 'codex',
     private readonly codexIsolationRoot = join(tmpdir(), 'sprint-coder-codex-isolated-tests'),
     private readonly bindTeamRuntimeProcess?: (
       taskId: string,
@@ -173,6 +178,7 @@ export class RuntimeHostClient {
   }
 
   async probe(): Promise<RuntimeCapabilityReport> {
+    if (this.quarantined) return this.capabilityState.report;
     if (this.process === null && !this.disposed) this.launch();
     return this.probeResult;
   }
@@ -226,6 +232,10 @@ export class RuntimeHostClient {
     preparedImages?: RuntimePreparedImageAttachments,
     promptAgent?: PromptAgent,
   ): boolean {
+    if (this.quarantined) {
+      this.onFailure(taskId, turnId, this.unavailableError());
+      return false;
+    }
     const prepared = preparedContext ?? this.prepareContext?.(taskId, turnId);
     const workspace =
       typeof workspaceInput === 'string' || workspaceInput === null
@@ -351,7 +361,7 @@ export class RuntimeHostClient {
     paths: readonly string[];
     manifestDigest: string;
   }): Promise<RuntimePreparedImageAttachments> {
-    if (this.disposed || this.kind !== 'codex')
+    if (this.disposed || this.quarantined || this.kind !== 'codex')
       return Promise.reject(new Error('Image attachment Runtime is unavailable'));
     if (this.process === null) this.launch();
     if (this.process === null)
@@ -403,6 +413,8 @@ export class RuntimeHostClient {
   }
 
   cancel(taskId: string, turnId: string): Promise<RuntimeStopReceipt> {
+    if (this.quarantined)
+      return Promise.reject(new Error('Runtime process tree stop could not be confirmed'));
     const existing = this.cancelWaiters.get(turnId);
     if (existing !== undefined) {
       if (existing.taskId !== taskId)
@@ -519,21 +531,25 @@ export class RuntimeHostClient {
   }
 
   private launch(): void {
+    if (this.quarantined) return;
     this.runtimeInstanceId = randomUUID();
     const instanceId = this.runtimeInstanceId;
     this.invalidateCapabilityState(instanceId);
     this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
       this.expectedProbeOperationId = 'hello';
-      setTimeout(() => {
-        if (this.resolveProbe === resolve) {
-          this.resolveProbe = null;
-          this.expectedProbeOperationId = null;
-          const report = { available: false, readiness: 'unavailable' as const, models: [] };
-          this.recordCapabilityState(instanceId, report);
-          resolve(report);
-        }
-      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
+      setTimeout(
+        () => {
+          if (this.resolveProbe === resolve) {
+            this.resolveProbe = null;
+            this.expectedProbeOperationId = null;
+            const report = { available: false, readiness: 'unavailable' as const, models: [] };
+            this.recordCapabilityState(instanceId, report);
+            resolve(report);
+          }
+        },
+        this.kind === 'grok' ? GROK_HOST_HELLO_TIMEOUT_MS : RUNTIME_HOST_HELLO_TIMEOUT_MS,
+      );
     });
     let child: UtilityProcess;
     try {
@@ -551,7 +567,9 @@ export class RuntimeHostClient {
           serviceName:
             this.kind === 'claude'
               ? 'Sprint Coder Runtime Host (Claude)'
-              : 'Sprint Coder Runtime Host',
+              : this.kind === 'grok'
+                ? 'Sprint Coder Runtime Host (Grok)'
+                : 'Sprint Coder Runtime Host',
           stdio: 'ignore',
         },
       );
@@ -578,11 +596,49 @@ export class RuntimeHostClient {
   private receive(instanceId: string, raw: unknown): void {
     if (
       this.disposed ||
+      this.quarantined ||
       instanceId !== this.runtimeInstanceId ||
       !isRuntimeToMainEnvelope(raw) ||
       raw.runtimeInstanceId !== this.runtimeInstanceId
     )
       return;
+    // Stop uncertainty belongs to the host, even if cancellation or an earlier failure has
+    // already terminalized the Turn. Publish the barrier before notifying Main's failure path.
+    if (raw.type === 'error' && raw.error.code === 'RUNTIME_STOP_UNCONFIRMED') {
+      const active = this.active.get(raw.turnId);
+      if (
+        active !== undefined &&
+        (active.taskId !== raw.taskId || active.operationId !== raw.operationId)
+      )
+        return;
+      const failures = [...this.active.entries()];
+      this.quarantined = true;
+      this.invalidateCapabilityState();
+      this.resolveProbe?.(this.capabilityState.report);
+      this.resolveProbe = null;
+      this.expectedProbeOperationId = null;
+      this.probeResult = Promise.resolve(this.capabilityState.report);
+      for (const turn of this.active.values()) {
+        turn.startFailed = true;
+        turn.startAcceptanceDeadline.stop();
+        for (const controller of turn.toolControllers.values()) controller.abort();
+      }
+      const error = new Error('Runtime process tree stop could not be confirmed');
+      for (const waiter of this.cancelWaiters.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+      this.cancelWaiters.clear();
+      this.rejectExitWaiters(error);
+      this.rejectAllImagePrepareWaiters(error);
+      this.invalidateAllImagePreparationPhases();
+      for (const [turnId, turn] of failures) {
+        if (turnId === raw.turnId) continue;
+        this.onFailure(turn.taskId, turnId, raw.error);
+      }
+      this.onFailure(raw.taskId, raw.turnId, raw.error, raw.diagnostic);
+      return;
+    }
     if (raw.type === 'hello') {
       if (this.resolveProbe === null || raw.operationId !== this.expectedProbeOperationId) return;
       const report =
@@ -593,12 +649,19 @@ export class RuntimeHostClient {
               models: raw.claudeModels,
               ...(raw.claudeCli === undefined ? {} : { cli: raw.claudeCli }),
             }
-          : {
-              available: raw.codexAvailable,
-              readiness: raw.codexReadiness,
-              models: raw.codexModels,
-              ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
-            };
+          : this.kind === 'grok'
+            ? {
+                available: raw.grokAvailable ?? false,
+                readiness: raw.grokReadiness ?? 'unavailable',
+                models: raw.grokModels ?? [],
+                ...(raw.grokCli === undefined ? {} : { cli: raw.grokCli }),
+              }
+            : {
+                available: raw.codexAvailable,
+                readiness: raw.codexReadiness,
+                models: raw.codexModels,
+                ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
+              };
       this.recordCapabilityState(instanceId, report);
       this.resolveProbe?.(report);
       this.resolveProbe = null;
@@ -822,7 +885,9 @@ export class RuntimeHostClient {
             userMessage:
               this.kind === 'claude'
                 ? 'Claude runtimeが異常終了しました。'
-                : 'Codex runtimeが異常終了しました。',
+                : this.kind === 'grok'
+                  ? 'Grok runtimeが異常終了しました。'
+                  : 'Codex runtimeが異常終了しました。',
             retryable: true,
           });
       }
@@ -916,7 +981,7 @@ export class RuntimeHostClient {
   }
 
   private refreshCapabilityProbe(): Promise<RuntimeCapabilityReport> {
-    if (this.disposed)
+    if (this.disposed || this.quarantined)
       return Promise.resolve({ available: false, readiness: 'unavailable', models: [] });
     if (this.process === null) return this.probe();
     if (this.resolveProbe !== null) return this.probeResult;
@@ -925,14 +990,17 @@ export class RuntimeHostClient {
     this.probeResult = new Promise<RuntimeCapabilityReport>((resolve) => {
       this.resolveProbe = resolve;
       this.expectedProbeOperationId = operationId;
-      setTimeout(() => {
-        if (this.resolveProbe !== resolve) return;
-        this.resolveProbe = null;
-        this.expectedProbeOperationId = null;
-        const report = { available: false, readiness: 'unavailable' as const, models: [] };
-        this.recordCapabilityState(instanceId, report);
-        resolve(report);
-      }, RUNTIME_HOST_HELLO_TIMEOUT_MS);
+      setTimeout(
+        () => {
+          if (this.resolveProbe !== resolve) return;
+          this.resolveProbe = null;
+          this.expectedProbeOperationId = null;
+          const report = { available: false, readiness: 'unavailable' as const, models: [] };
+          this.recordCapabilityState(instanceId, report);
+          resolve(report);
+        },
+        this.kind === 'grok' ? GROK_HOST_HELLO_TIMEOUT_MS : RUNTIME_HOST_HELLO_TIMEOUT_MS,
+      );
     });
     this.post({ ...this.base('', '', operationId, 1), type: 'hello' });
     return this.probeResult;
@@ -1001,6 +1069,7 @@ export class RuntimeHostClient {
   private post(message: MainToRuntimeEnvelope): void {
     const child = this.process;
     void this.spawnReady.then(() => {
+      if (this.quarantined) return;
       if (child !== null && child === this.process) child.postMessage(message);
     });
   }
@@ -1027,7 +1096,9 @@ export class RuntimeHostClient {
       userMessage:
         this.kind === 'claude'
           ? 'Claude runtimeを利用できません。'
-          : 'Codex runtimeを利用できません。',
+          : this.kind === 'grok'
+            ? 'Grok runtimeを利用できません。'
+            : 'Codex runtimeを利用できません。',
       retryable: false,
     };
   }
@@ -1062,7 +1133,7 @@ export class RuntimeHostClient {
 }
 
 function runtimeStartFailureDiagnostic(
-  runtimeKind: 'codex' | 'claude',
+  runtimeKind: RuntimeKind,
   reasonCode: RuntimeProtocolFailureReasonCode,
   elapsedMs: number,
   teamMcpEnabled: boolean,

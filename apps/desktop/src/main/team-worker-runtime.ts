@@ -1,3 +1,4 @@
+import { modelSelectionForRuntime } from './connection-identity';
 import { randomUUID } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import type {
@@ -34,14 +35,14 @@ import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 // the app runs on the mock runtime without any real CLI available) execution fails explicitly.
 // Production must never present simulated Worker output as a real Team report.
 
-export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex'; model: string }>;
+export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex' | 'grok'; model: string }>;
 
 const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
 
 export class TeamRuntimeAvailabilityTracker {
-  private readonly unavailableUntil = new Map<'claude' | 'codex', number>();
+  private readonly unavailableUntil = new Map<'claude' | 'codex' | 'grok', number>();
 
-  isAvailable(kind: 'claude' | 'codex', now = Date.now()): boolean {
+  isAvailable(kind: 'claude' | 'codex' | 'grok', now = Date.now()): boolean {
     const until = this.unavailableUntil.get(kind);
     if (until === undefined) return true;
     if (until > now) return false;
@@ -49,7 +50,7 @@ export class TeamRuntimeAvailabilityTracker {
     return true;
   }
 
-  markUnavailable(kind: 'claude' | 'codex', retryAt?: string, now = Date.now()): void {
+  markUnavailable(kind: 'claude' | 'codex' | 'grok', retryAt?: string, now = Date.now()): void {
     const parsed = retryAt === undefined ? Number.NaN : Date.parse(retryAt);
     this.unavailableUntil.set(
       kind,
@@ -64,7 +65,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   availability: TeamRuntimeAvailabilityTracker;
   workspaceFor: (taskId: string) => string | null;
   catalogFor: (
-    kind: 'claude' | 'codex',
+    kind: 'claude' | 'codex' | 'grok',
     taskId: string,
     runtimeTurnId: string,
     workspace: RuntimeWorkspaceSet,
@@ -75,7 +76,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   ) => unknown | Promise<unknown>;
   /** Provider egress gate; returns false when policy denies the dispatch. */
   authorizeEgress: (
-    kind: 'claude' | 'codex',
+    kind: 'claude' | 'codex' | 'grok',
     taskId: string,
     turnId: string,
     prompt: string,
@@ -133,16 +134,16 @@ type TeamWorkerExecutionInput = Parameters<TeamWorkerRuntime['execute']>[0];
 export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly executionAborts = new Map<string, AbortController>();
   private readonly simulator = new DeterministicTeamWorkerRuntime();
-  private readonly clients = new Map<'claude' | 'codex', RuntimeHostClient>();
+  private readonly clients = new Map<'claude' | 'codex' | 'grok', RuntimeHostClient>();
   private readonly pending = new Map<string, PendingRun>();
   private readonly activeByAgent = new Map<
     string,
-    { kind: 'claude' | 'codex'; taskId: string; turnId: string }
+    { kind: 'claude' | 'codex' | 'grok'; taskId: string; turnId: string }
   >();
 
   constructor(private readonly deps: TeamWorkerRuntimeDeps) {}
 
-  private client(kind: 'claude' | 'codex'): RuntimeHostClient {
+  private client(kind: 'claude' | 'codex' | 'grok'): RuntimeHostClient {
     const existing = this.clients.get(kind);
     if (existing !== undefined) return existing;
     const created = new RuntimeHostClient(
@@ -334,7 +335,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             toolCalls: 0,
           },
           resolution: {
-            resolvedProvider: choice.kind === 'codex' ? 'openai' : 'anthropic',
+            resolvedProvider: modelSelectionForRuntime(choice.kind, choice.model).requestedProvider,
             resolvedModel: choice.model,
           },
         };
@@ -605,7 +606,7 @@ function isRuntimeAvailabilityError(error: unknown): error is TeamRuntimeExecuti
 }
 
 function runtimeLabel(kind: RealRuntimeChoice['kind']): string {
-  return kind === 'codex' ? 'Codex' : 'Claude Code';
+  return kind === 'grok' ? 'Grok CLI' : kind === 'codex' ? 'Codex' : 'Claude Code';
 }
 
 function emptyPreparedContext(): PreparedContext {
@@ -801,7 +802,7 @@ export function chooseWorkerRuntime(
   selectedModel: string,
   claudeProbablyAvailable: boolean,
 ): RealRuntimeChoice | null {
-  if (selectedKind === 'claude' || selectedKind === 'codex')
+  if (selectedKind === 'claude' || selectedKind === 'codex' || selectedKind === 'grok')
     return { kind: selectedKind, model: selectedModel };
   return claudeProbablyAvailable ? { kind: 'claude', model: 'auto' } : null;
 }

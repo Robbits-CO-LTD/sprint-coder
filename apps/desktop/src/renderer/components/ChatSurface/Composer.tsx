@@ -35,6 +35,7 @@ import {
   RUNTIME_KINDS,
   RUNTIME_LABEL,
   runtimeReadinessHint,
+  runtimeReadinessOf,
 } from '../../lib/runtime-labels';
 import type {
   ClaudeEffort,
@@ -335,8 +336,7 @@ export function Composer({ taskId }: { taskId: string }) {
     }),
     [selectedSkills],
   );
-  const skillRuntime =
-    runtime.kind === 'codex' ? 'codex' : runtime.kind === 'claude' ? 'claude' : 'provider';
+  const skillRuntime = runtime.kind === 'mock' ? 'provider' : runtime.kind;
   const autoSkillCount = skillCatalog.filter(
     (item) =>
       item.enabled &&
@@ -1106,8 +1106,7 @@ function RuntimeChip() {
   }
 
   function choose(kind: RuntimeKind) {
-    if (kind === 'codex' && runtime.codexReadiness !== 'ready') return;
-    if (kind === 'claude' && runtime.claudeReadiness !== 'ready') return;
+    if (runtimeReadinessOf(kind, runtime) !== 'ready') return;
     setOpen(false);
     if (kind !== runtime.kind) void setRuntime(kind);
   }
@@ -1137,9 +1136,7 @@ function RuntimeChip() {
       {open && (
         <div className="runtime-menu" role="menu" aria-label="Runtime選択">
           {RUNTIME_KINDS.map((kind) => {
-            const disabled =
-              (kind === 'codex' && runtime.codexReadiness !== 'ready') ||
-              (kind === 'claude' && runtime.claudeReadiness !== 'ready');
+            const disabled = runtimeReadinessOf(kind, runtime) !== 'ready';
             return (
               <button
                 data-testid={`runtime-option-${kind}`}
@@ -1150,11 +1147,8 @@ function RuntimeChip() {
                 className={`runtime-menu-item${runtime.kind === kind ? ' active' : ''}`}
                 disabled={disabled}
                 title={
-                  disabled && (kind === 'codex' || kind === 'claude')
-                    ? (runtimeReadinessHint(
-                        kind,
-                        kind === 'codex' ? runtime.codexReadiness : runtime.claudeReadiness,
-                      ) ?? undefined)
+                  disabled && kind !== 'mock'
+                    ? (runtimeReadinessHint(kind, runtimeReadinessOf(kind, runtime)) ?? undefined)
                     : undefined
                 }
                 onClick={() => choose(kind)}
@@ -1178,9 +1172,7 @@ function ModelChip() {
   const supported =
     typeof window !== 'undefined' && typeof window.sprintCoder?.settings?.setModel === 'function';
   const enabled =
-    supported &&
-    ((runtime.kind === 'codex' && runtime.codexReadiness === 'ready') ||
-      (runtime.kind === 'claude' && runtime.claudeReadiness === 'ready'));
+    supported && runtime.kind !== 'mock' && runtimeReadinessOf(runtime.kind, runtime) === 'ready';
   const selected = runtime.models.find(({ id }) => id === runtime.model) ?? {
     id: runtime.model,
     displayName: runtime.model,
@@ -1225,7 +1217,10 @@ function ModelChip() {
             ? runtime.kind === 'claude' && runtime.resolvedModel
               ? `Modelを選択（直近のTurnで実際に使用: ${runtime.resolvedModel}）`
               : 'Modelを選択'
-            : 'Codex/Claude Runtime選択時にモデルを変更できます'
+            : runtime.kind === 'mock'
+              ? 'CLI Runtime選択時にモデルを変更できます'
+              : (runtimeReadinessHint(runtime.kind, runtimeReadinessOf(runtime.kind, runtime)) ??
+                undefined)
         }
       >
         {selected.displayName}
@@ -1372,8 +1367,10 @@ function EffortChip() {
     setOpen(false);
     if (effort === selected) return;
     if (runtime.kind === 'claude') void setEffort(effort as ClaudeEffort);
-    else void setCodexEffort(effort);
+    else if (runtime.kind === 'codex') void setCodexEffort(effort);
   }
+
+  if (runtime.kind === 'grok') return null;
 
   return (
     <div
