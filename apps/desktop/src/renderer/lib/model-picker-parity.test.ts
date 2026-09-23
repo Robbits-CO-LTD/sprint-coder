@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { ModelSelection } from '@sprint-coder/contracts';
+import type { ModelSelection, ProviderModel } from '@sprint-coder/contracts';
 import {
   MODEL_PICKER_AUTO_LABEL,
   canApplyOptimisticSelection,
+  chosenFromCatalog,
   isModelPickerV2Active,
+  namesSelection,
   resolveTriggerLabel,
   rollbackModelPicker,
   sameSelection,
@@ -23,6 +25,25 @@ function selection(overrides: Partial<ModelSelection> = {}): ModelSelection {
 
 function snapshot(overrides: Partial<ModelPickerSnapshot> = {}): ModelPickerSnapshot {
   return { taskId: 'task-a', enabled: true, selection: selection(), ...overrides };
+}
+
+const unknown = { value: null, source: 'unknown' as const };
+
+function catalogRow(connectionId: string, modelId: string, displayName: string): ProviderModel {
+  return {
+    connectionId,
+    providerId: 'openai',
+    modelId,
+    displayName,
+    available: true,
+    availabilityCheckedAt: '2026-07-29T00:00:00.000Z',
+    contextWindow: unknown,
+    maxOutputTokens: unknown,
+    toolCalling: unknown,
+    structuredOutput: unknown,
+    multimodalInput: unknown,
+    reasoning: unknown,
+  };
 }
 
 describe('isModelPickerV2Active', () => {
@@ -74,6 +95,67 @@ describe('resolveTriggerLabel', () => {
         null,
       ),
     ).toBe(MODEL_PICKER_AUTO_LABEL);
+  });
+});
+
+describe('namesSelection', () => {
+  const chosen = { connectionId: 'conn-1', requestedModel: 'gpt-5.6', displayName: 'GPT-5.6' };
+
+  it('is true only when both sides name the same connection and model', () => {
+    expect(namesSelection(selection(), chosen)).toBe(true);
+    expect(namesSelection(selection({ connectionId: 'conn-2' }), chosen)).toBe(false);
+    expect(namesSelection(selection({ requestedModel: 'gpt-5.6-mini' }), chosen)).toBe(false);
+    expect(namesSelection(null, chosen)).toBe(false);
+    expect(namesSelection(selection(), null)).toBe(false);
+    expect(namesSelection(null, null)).toBe(false);
+  });
+});
+
+describe('chosenFromCatalog', () => {
+  const match = catalogRow('conn-1', 'gpt-5.6', 'GPT-5.6');
+
+  it('returns the display name of the first exact connection and model', () => {
+    expect(
+      chosenFromCatalog({ connectionId: 'conn-1', requestedModel: 'gpt-5.6' }, [
+        catalogRow('conn-2', 'gpt-5.6', 'Other GPT'),
+        match,
+      ]),
+    ).toEqual({
+      connectionId: 'conn-1',
+      requestedModel: 'gpt-5.6',
+      displayName: 'GPT-5.6',
+    });
+  });
+
+  it('does not reuse the same model id from another connection', () => {
+    expect(
+      chosenFromCatalog({ connectionId: 'conn-1', requestedModel: 'gpt-5.6' }, [
+        catalogRow('conn-2', 'gpt-5.6', 'Other GPT'),
+      ]),
+    ).toBeNull();
+  });
+
+  it('does not treat a longer model id as the selection', () => {
+    // `gpt-5.6` is a prefix of `gpt-5.6-mini`, and Main's text filter would return both. The name
+    // is still a different model.
+    expect(
+      chosenFromCatalog({ connectionId: 'conn-1', requestedModel: 'gpt-5.6' }, [
+        catalogRow('conn-1', 'gpt-5.6-mini', 'GPT-5.6 mini'),
+      ]),
+    ).toBeNull();
+  });
+
+  it('returns null when the selection is missing or has no identity', () => {
+    expect(chosenFromCatalog(null, [match])).toBeNull();
+    expect(chosenFromCatalog({ connectionId: null, requestedModel: null }, [match])).toBeNull();
+    expect(chosenFromCatalog({ connectionId: 'conn-1', requestedModel: null }, [match])).toBeNull();
+    expect(
+      chosenFromCatalog({ connectionId: null, requestedModel: 'gpt-5.6' }, [match]),
+    ).toBeNull();
+  });
+
+  it('returns null when the page has no rows', () => {
+    expect(chosenFromCatalog({ connectionId: 'conn-1', requestedModel: 'gpt-5.6' }, [])).toBeNull();
   });
 });
 
