@@ -12,6 +12,7 @@ import { ToolBroker, type ToolAuthorizer } from './tool-broker';
 import {
   CommandRunner,
   prepareExecutionSpec,
+  rejectWindowsSandboxedNodeTestIsolation,
   type CommandOutputChunk,
   type CommandResult,
 } from './command-runner';
@@ -88,7 +89,7 @@ export const MANAGED_EXEC_COMMAND_TOOL = createToolDefinition({
   }),
   providerName: 'exec_command',
   description:
-    'Execute one sealed executable and argv in the managed OS sandbox. argv must contain arguments only and must not repeat executable. Command success is process evidence only and never creates Edit Saga assurance evidence; use trusted workspace reads for that. Long-running work may continue as an owned background session. On Windows, launch developer executables directly with an absolute .exe path: cmd.exe or PowerShell cannot start PATH child programs inside the AppContainer. When native write tools are unavailable, use an installed runtime with direct file I/O (for example Node fs) and absolute Workspace file paths. Windows PowerShell filesystem cmdlets may fall back to the drive root even when process cwd is correct; do not infer Workspace paths from those errors. Run Node tests with node.exe --test --test-isolation=none because the default test isolation launches a blocked child process.',
+    "Execute one sealed executable and argv in the managed OS sandbox. argv must contain arguments only and must not repeat executable. Command success is process evidence only and never creates Edit Saga assurance evidence; use trusted workspace reads for that. Long-running work may continue as an owned background session. On Windows, launch developer executables directly with an absolute .exe path: cmd.exe or PowerShell cannot start PATH child programs inside the AppContainer. When native write tools are unavailable, use an installed runtime with direct file I/O (for example Node fs) and absolute Workspace file paths. Windows PowerShell filesystem cmdlets may fall back to the drive root even when process cwd is correct; do not infer Workspace paths from those errors. Inside the Windows AppContainer a child process cannot be given piped stdin/stdout/stderr: Node retries the pipe creation forever, so a program that captures a child's output never finishes, while children with inherited or ignored stdio work. Run Node tests in-process with node.exe --test --experimental-test-isolation=none on Node 22.8 to 23.5 or --test-isolation=none on Node 23.6 and later; the default process isolation is rejected before approval.",
   parallelism: 'serial',
   maxOutputBytes: 2 * 1024 * 1024,
   supportsCancellation: true,
@@ -446,6 +447,9 @@ export function registerCommandRunnerTool(
         executable: request.executable,
         argv: request.argv,
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+      });
+      rejectWindowsSandboxedNodeTestIsolation(spec.absoluteExecutable, spec.argv, {
+        sandboxed: commandRunner.isSandboxed,
       });
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),

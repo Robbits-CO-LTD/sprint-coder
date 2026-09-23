@@ -50,8 +50,8 @@ G06の依頼例（ファイル名を毎回変え、証拠の使い回しを防�
 > 既存README.mdに使い方を追記し、作成・変更したファイルを読み返してください。
 > Nodeのテストを実行し、失敗したら修正してください。
 
-検証時は実際の `node.exe` の絶対パスを使う。Node の major を確認して、その版でテスト分離を切るフラグを選ぶ。Node 22 では `--test --experimental-test-isolation=none` を使う。
-既定の `node --test` はサンドボックス内で子プロセスを起動すると戻らず終わらない。この件は Issue #522 を参照する。
+検証時は実際の `node.exe` の絶対パスを使う。Node の major を確認して、その版でテスト分離を切るフラグを選ぶ。Node 22.8 から 23.5 までは `--test --experimental-test-isolation=none`、Node 23.6 以降は `--test --test-isolation=none` を使う（Node 22 系は前者。22.8 より前には、テストを同じプロセスで実行するモードがない）。
+既定の `node --test` は承認前に `NODE_TEST_ISOLATION_REQUIRED` で拒否される。AppContainer 内では、標準入出力をパイプした子プロセスは起動できず、Node がパイプ作成を永遠に再試行する。標準入出力を継承するか無視した子プロセスは動作する（Issue #522）。
 テスト後にPowerShellの `Get-FileHash` とファイルの内容を確認し、AIの完了文だけを根拠にしない。
 
 ## 結果提出

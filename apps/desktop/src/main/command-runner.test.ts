@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { realpathSync, renameSync, writeFileSync } from 'node:fs';
@@ -28,11 +28,13 @@ import {
   posixGroupSignalIsAuthorized,
   argvRepeatsExecutable,
   prepareExecutionSpec,
+  rejectWindowsSandboxedNodeTestIsolation,
   waitForOutcomeOrTerminationFailure,
   windowsCommandEnvironment,
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
+import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 
 const prepareTestExecutionSpec: typeof prepareExecutionSpec = (input) => {
@@ -1704,6 +1706,88 @@ describe('CommandRunner', () => {
       } satisfies Partial<CommandRunnerError>);
     },
   );
+});
+
+describe('rejectWindowsSandboxedNodeTestIsolation', () => {
+  const nodeExe = 'C:\\Program Files\\nodejs\\node.exe';
+  const sandboxedWindows = { platform: 'win32' as const, sandboxed: true };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('rejects process-isolated node --test inside the Windows sandbox', () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    const cases: ReadonlyArray<readonly [string, readonly string[]]> = [
+      [nodeExe, ['--test']],
+      [nodeExe, ['--test', 'sum.test.cjs']],
+      [nodeExe, ['--test', '--test-isolation=process']],
+      [nodeExe, ['--test-concurrency', '1', '--test']],
+      [nodeExe, ['--require', './setup.cjs', '--test']],
+      ['C:\\Program Files\\nodejs\\NODE.EXE', ['--test']],
+    ];
+    for (const [executable, argv] of cases) {
+      warn.mockClear();
+      let thrown: unknown;
+      try {
+        rejectWindowsSandboxedNodeTestIsolation(executable, argv, sandboxedWindows);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CommandRunnerError);
+      if (!(thrown instanceof CommandRunnerError)) {
+        throw new Error('expected CommandRunnerError');
+      }
+      expect(thrown.code).toBe('NODE_TEST_ISOLATION_REQUIRED');
+      expect(thrown.message).toContain('--experimental-test-isolation=none');
+      expect(thrown.message).toContain('--test-isolation=none');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        {
+          canonicalExecutable: windowsPath.basename(executable),
+          argvLength: argv.length,
+        },
+        { event: 'command_node_test_isolation_rejected' },
+      );
+    }
+  });
+
+  it('allows in-process isolation and node --test that is not a node option', () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    for (const argv of [
+      ['--test', '--experimental-test-isolation=none'],
+      ['--test-isolation=none', '--test'],
+      ['--test', '--test-isolation', 'none'],
+      ['script.js', '--test'],
+      ['--', '--test'],
+      ['-e', 'x', '--test'],
+    ]) {
+      warn.mockClear();
+      expect(() =>
+        rejectWindowsSandboxedNodeTestIsolation(nodeExe, argv, sandboxedWindows),
+      ).not.toThrow();
+      expect(warn).not.toHaveBeenCalled();
+    }
+  });
+
+  it('allows node --test outside this sandbox, platform, or executable', () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    const cases: ReadonlyArray<
+      readonly [string, readonly string[], { platform?: NodeJS.Platform; sandboxed: boolean }]
+    > = [
+      [nodeExe, ['--test'], { platform: 'win32', sandboxed: false }],
+      [nodeExe, ['--test'], { platform: 'linux', sandboxed: true }],
+      ['C:\\tools\\deno.exe', ['--test'], sandboxedWindows],
+    ];
+    for (const [executable, argv, options] of cases) {
+      warn.mockClear();
+      expect(() =>
+        rejectWindowsSandboxedNodeTestIsolation(executable, argv, options),
+      ).not.toThrow();
+      expect(warn).not.toHaveBeenCalled();
+    }
+  });
 });
 
 async function expectProcessDead(pid: number): Promise<void> {

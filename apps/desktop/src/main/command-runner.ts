@@ -120,6 +120,7 @@ export class CommandRunnerError extends Error {
     readonly code:
       | 'EXECUTION_SPEC_INVALID'
       | 'ARGV_REPEATS_EXECUTABLE'
+      | 'NODE_TEST_ISOLATION_REQUIRED'
       | 'EXECUTION_IDENTITY_CHANGED'
       | 'SPAWN_FAILED'
       | 'OUTPUT_OVERFLOW'
@@ -322,6 +323,100 @@ function rejectArgvRepeatingExecutable(
   );
 }
 
+// libuv creates child stdio pipes as `\\?\pipe\uv\...`. An AppContainer only allows
+// `\\?\pipe\LOCAL\...`, and the access denial is retried forever, so default `node --test`
+// (one piped child per file) never finishes. In-process isolation does not open those pipes.
+const NODE_INLINE_SCRIPT_OPTIONS = ['-e', '--eval', '-p', '--print'] as const;
+const NODE_TEST_ISOLATION_OPTIONS = ['--experimental-test-isolation', '--test-isolation'] as const;
+const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '--test-reporter',
+  '--test-reporter-destination',
+  '--test-name-pattern',
+  '--test-skip-pattern',
+  '--test-concurrency',
+  '--test-timeout',
+  '--test-shard',
+  '--env-file',
+  '--conditions',
+  '-C',
+  '--input-type',
+  '--title',
+]);
+
+function isInlineNodeScriptOption(arg: string): boolean {
+  return NODE_INLINE_SCRIPT_OPTIONS.some(
+    (option) => arg === option || arg.startsWith(`${option}=`),
+  );
+}
+
+function nodeTestIsolationArgument(
+  arg: string,
+): { readonly mode: string } | { readonly separate: true } | undefined {
+  for (const option of NODE_TEST_ISOLATION_OPTIONS) {
+    if (arg === option) return { separate: true };
+    const prefix = `${option}=`;
+    if (arg.startsWith(prefix)) return { mode: arg.slice(prefix.length) };
+  }
+  return undefined;
+}
+
+export function rejectWindowsSandboxedNodeTestIsolation(
+  canonicalExecutable: string,
+  argv: readonly string[],
+  options: { platform?: NodeJS.Platform; sandboxed: boolean },
+): void {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32' || !options.sandboxed) return;
+  const executableName = windowsPath.basename(canonicalExecutable).toLowerCase();
+  if (executableName !== 'node.exe' && executableName !== 'node') return;
+
+  let testRequested = false;
+  let isolationMode: string | undefined;
+  let index = 0;
+  while (index < argv.length) {
+    const arg = argv[index] ?? '';
+    if (arg === '--' || !arg.startsWith('-')) break;
+    if (isInlineNodeScriptOption(arg)) break;
+    if (arg === '--test') {
+      testRequested = true;
+      index += 1;
+      continue;
+    }
+    const isolation = nodeTestIsolationArgument(arg);
+    if (isolation !== undefined) {
+      if ('separate' in isolation) {
+        isolationMode = argv[index + 1];
+        index += 2;
+      } else {
+        isolationMode = isolation.mode;
+        index += 1;
+      }
+      continue;
+    }
+    index += NODE_OPTIONS_WITH_SEPARATE_VALUE.has(arg) ? 2 : 1;
+  }
+
+  if (!testRequested || isolationMode === 'none') return;
+  secureLogger.warn(
+    'Node test process isolation was rejected before approval',
+    {
+      // Basename only. Argv values and the full executable path stay out of the log.
+      canonicalExecutable: windowsPath.basename(canonicalExecutable),
+      argvLength: argv.length,
+    },
+    { event: 'command_node_test_isolation_rejected' },
+  );
+  throw new CommandRunnerError(
+    'NODE_TEST_ISOLATION_REQUIRED',
+    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Rerun with --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) so tests run in-process. Node versions before 22.8 cannot run the test runner inside the Windows sandbox.',
+  );
+}
+
 export function normalizeTrustedWindowsCmdArgv(
   canonicalExecutable: string,
   trustedSystemDirectory: string | undefined,
@@ -429,6 +524,10 @@ export class CommandRunner {
 
   get activeCount(): number {
     return this.active.size;
+  }
+
+  get isSandboxed(): boolean {
+    return this.sandboxed;
   }
 
   writeStdin(executionId: string, chars: string, close = false): boolean {

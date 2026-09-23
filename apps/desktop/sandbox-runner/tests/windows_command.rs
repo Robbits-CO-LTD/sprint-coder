@@ -197,6 +197,63 @@ fn node_options_preserve_symlinks_resolves_workspace_modules() {
 }
 
 #[test]
+fn appcontainer_refuses_uv_named_pipes_but_allows_local_ones() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
+    let fixture = Fixture::new();
+    // libuv names the stdio pipes of a spawned child `\\?\pipe\uv\...` and retries an access
+    // denial forever, so a piped child never starts inside the AppContainer (issue #522).
+    // This probe only binds the two name forms; it never spawns a piped child.
+    let script = r#"'use strict';
+const net = require('net');
+
+function listen(name) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    const timer = setTimeout(() => {
+      server.close();
+      resolve({ ok: false, code: 'TIMEOUT' });
+    }, 2000);
+    server.once('error', (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, code: error.code });
+    });
+    server.listen(name, () => {
+      clearTimeout(timer);
+      resolve({ ok: true, server });
+    });
+  });
+}
+
+(async () => {
+  const uv = await listen(String.raw`\\.\pipe\uv\probe-` + process.pid);
+  if (uv.ok || uv.code !== 'EADDRINUSE') {
+    process.stderr.write('uv pipe ' + String(uv.code) + '\n');
+    process.exit(2);
+  }
+  const local = await listen(String.raw`\\.\pipe\LOCAL\probe-` + process.pid);
+  if (!local.ok) {
+    process.stderr.write('local pipe ' + String(local.code) + '\n');
+    process.exit(3);
+  }
+  local.server.close();
+  process.stdout.write('PIPES_OK\n');
+})().catch((error) => {
+  process.stderr.write(String(error && error.stack ? error.stack : error) + '\n');
+  process.exit(4);
+});
+"#;
+    fs::write(fixture.0.join("workspace/sub/pipes.cjs"), script).unwrap();
+    let output = fixture.run_with_node_options(&["pipes.cjs"]);
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "PIPES_OK");
+}
+
+#[test]
 fn sandbox_probe_keeps_its_explicit_workspace() {
     let _guard = EXECUTION_LOCK.lock().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
