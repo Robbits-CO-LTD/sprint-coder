@@ -49,6 +49,33 @@ impl Fixture {
             .output()
             .unwrap()
     }
+
+    // Same launch as run(), but the production command-runner passes these flags in
+    // NODE_OPTIONS instead of argv.
+    fn run_with_node_options(&self, args: &[&str]) -> Output {
+        let node = Command::new("node")
+            .env_remove("NODE_OPTIONS")
+            .args(["-p", "process.execPath"])
+            .output()
+            .unwrap();
+        assert!(node.status.success());
+        Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
+            .env(
+                "NODE_OPTIONS",
+                "--preserve-symlinks --preserve-symlinks-main",
+            )
+            .args(["--exec", "workspace-write"])
+            .arg(self.0.join("workspace"))
+            .arg("--protected-home")
+            .arg(std::env::var_os("USERPROFILE").unwrap())
+            .arg("--")
+            .arg(String::from_utf8(node.stdout).unwrap().trim())
+            .args(args)
+            .current_dir(self.0.join("workspace/sub"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
 }
 
 impl Drop for Fixture {
@@ -111,6 +138,57 @@ fn preserves_sandbox_boundary_when_using_nested_cwd() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap().trim(),
         "NODE_BOUNDARY_OK"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("outside.txt")).unwrap(),
+        "private"
+    );
+}
+
+#[test]
+fn node_options_preserve_symlinks_resolves_workspace_modules() {
+    let _guard = EXECUTION_LOCK.lock().unwrap();
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.0.join("workspace/sub/value.mjs"),
+        "export const value = 42;\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.0.join("workspace/sub/esm.mjs"),
+        "import { value } from './value.mjs';\nprocess.stdout.write(String(value));\n",
+    )
+    .unwrap();
+
+    let require_output = fixture
+        .run_with_node_options(&["-e", "process.stdout.write(String(require('./value.cjs')))"]);
+    assert!(
+        require_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&require_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(require_output.stdout).unwrap().trim(),
+        "42"
+    );
+
+    let esm_output = fixture.run_with_node_options(&["esm.mjs"]);
+    assert!(
+        esm_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&esm_output.stderr)
+    );
+    assert_eq!(String::from_utf8(esm_output.stdout).unwrap().trim(), "42");
+
+    let outside = serde_json::to_string(&fixture.0.join("outside.txt")).unwrap();
+    let boundary = format!(
+        "const fs=require('node:fs'),a=require('node:assert/strict');a.throws(()=>fs.readFileSync({outside}));a.throws(()=>fs.writeFileSync({outside},'changed'));"
+    );
+    let boundary_output = fixture.run_with_node_options(&["-e", &boundary]);
+    assert!(
+        boundary_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&boundary_output.stderr)
     );
     assert_eq!(
         fs::read_to_string(fixture.0.join("outside.txt")).unwrap(),

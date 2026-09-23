@@ -148,8 +148,9 @@ describe('CommandRunner', () => {
       SYSTEMROOT: windowsRoot,
       WINDIR: windowsRoot,
       COMSPEC: windowsPath.join(systemDirectory, 'cmd.exe'),
-      NODE_OPTIONS: '--preserve-symlinks-main',
+      NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main',
     });
+    expect(environment['NODE_OPTIONS']).not.toContain('--require');
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
     expect(environment).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
     expect(environment).not.toHaveProperty('LD_PRELOAD');
