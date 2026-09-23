@@ -326,8 +326,17 @@ function rejectArgvRepeatingExecutable(
 // libuv creates child stdio pipes as `\\?\pipe\uv\...`. An AppContainer only allows
 // `\\?\pipe\LOCAL\...`, and the access denial is retried forever, so default `node --test`
 // (one piped child per file) never finishes. In-process isolation does not open those pipes.
-const NODE_INLINE_SCRIPT_OPTIONS = ['-e', '--eval', '-p', '--print'] as const;
-const NODE_TEST_ISOLATION_OPTIONS = ['--experimental-test-isolation', '--test-isolation'] as const;
+const NODE_INLINE_SCRIPT_OPTIONS: ReadonlySet<string> = new Set([
+  '-e',
+  '--eval',
+  '-p',
+  '--print',
+  '-pe',
+]);
+const NODE_TEST_ISOLATION_OPTIONS: ReadonlySet<string> = new Set([
+  '--experimental-test-isolation',
+  '--test-isolation',
+]);
 const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
   '-r',
   '--require',
@@ -356,28 +365,16 @@ const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
   '--title',
 ]);
 
-// Node stops reading its own options at the first positional argument. Before `--test` is seen, a
-// bare token that does not name a JavaScript/TypeScript file is treated as the value of an option
-// that is not listed above (for example `--inspect-port 0`), so a later `--test` is not missed.
-// After `--test`, the first bare token is a test file or directory, so scanning stops there and an
-// isolation flag placed after it (which Node does not read) is not trusted.
-const NODE_SCRIPT_FILE = /\.[cm]?[jt]sx?$/iu;
+type NodeOptionToken = Readonly<{ name: string; value: string | undefined }>;
 
-function isInlineNodeScriptOption(arg: string): boolean {
-  return NODE_INLINE_SCRIPT_OPTIONS.some(
-    (option) => arg === option || arg.startsWith(`${option}=`),
-  );
-}
-
-function nodeTestIsolationArgument(
-  arg: string,
-): { readonly mode: string } | { readonly separate: true } | undefined {
-  for (const option of NODE_TEST_ISOLATION_OPTIONS) {
-    if (arg === option) return { separate: true };
-    const prefix = `${option}=`;
-    if (arg.startsWith(prefix)) return { mode: arg.slice(prefix.length) };
-  }
-  return undefined;
+// Node accepts `_` in place of `-` in long option names (`--experimental_test_isolation`).
+function nodeOptionToken(arg: string): NodeOptionToken {
+  if (!arg.startsWith('--')) return { name: arg, value: undefined };
+  const equals = arg.indexOf('=');
+  return {
+    name: (equals < 0 ? arg : arg.slice(0, equals)).replaceAll('_', '-'),
+    value: equals < 0 ? undefined : arg.slice(equals + 1),
+  };
 }
 
 export function rejectWindowsSandboxedNodeTestIsolation(
@@ -392,32 +389,40 @@ export function rejectWindowsSandboxedNodeTestIsolation(
 
   let testRequested = false;
   let isolationMode: string | undefined;
-  let index = 0;
-  while (index < argv.length) {
+  // What the previous option does with a following bare token: `value` for a listed option that
+  // takes one, `maybe` for an unlisted option given without `=`, `none` otherwise.
+  let pending: 'value' | 'maybe' | 'none' = 'none';
+  for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? '';
-    if (arg === '--' || isInlineNodeScriptOption(arg)) break;
+    if (arg === '--' || arg === '-') break;
     if (!arg.startsWith('-')) {
-      if (testRequested || NODE_SCRIPT_FILE.test(arg)) break;
-      index += 1;
-      continue;
-    }
-    if (arg === '--test') {
-      testRequested = true;
-      index += 1;
-      continue;
-    }
-    const isolation = nodeTestIsolationArgument(arg);
-    if (isolation !== undefined) {
-      if ('separate' in isolation) {
-        isolationMode = argv[index + 1];
-        index += 2;
-      } else {
-        isolationMode = isolation.mode;
-        index += 1;
+      // Node stops reading its own options at the first positional argument. A bare token counts
+      // as an option value only right after an option given without `=`. Before `--test` an
+      // unlisted option may take it (for example `--inspect-port 0`), so scanning continues and a
+      // later `--test` is not missed. After `--test` the same token may be the first test file, so
+      // scanning stops and an isolation flag after it (which Node would not read) is not trusted.
+      if (pending === 'value' || (pending === 'maybe' && !testRequested)) {
+        pending = 'none';
+        continue;
       }
+      break;
+    }
+    const option = nodeOptionToken(arg);
+    pending = 'none';
+    if (NODE_INLINE_SCRIPT_OPTIONS.has(option.name)) break;
+    if (option.name === '--test') {
+      testRequested = true;
       continue;
     }
-    index += NODE_OPTIONS_WITH_SEPARATE_VALUE.has(arg) ? 2 : 1;
+    if (NODE_TEST_ISOLATION_OPTIONS.has(option.name)) {
+      if (option.value === undefined) {
+        isolationMode = argv[index + 1];
+        index += 1;
+      } else isolationMode = option.value;
+      continue;
+    }
+    if (option.value === undefined)
+      pending = NODE_OPTIONS_WITH_SEPARATE_VALUE.has(option.name) ? 'value' : 'maybe';
   }
 
   if (!testRequested || isolationMode === 'none') return;
@@ -432,7 +437,7 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   );
   throw new CommandRunnerError(
     'NODE_TEST_ISOLATION_REQUIRED',
-    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Rerun with --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) so tests run in-process. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
+    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Put --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) right after node.exe, before --test and every other option, so tests run in-process. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
   );
 }
 
