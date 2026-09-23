@@ -617,6 +617,132 @@ describe('Runtime Host protocol', () => {
     ).toBe(false);
   });
 
+  it('accepts Grok billing and rate-limit diagnostics and rejects them on other runtimes', () => {
+    const base = {
+      version: 1,
+      diagnosticId: '123e4567-e89b-42d3-a456-426614174000',
+      runtimeKind: 'grok',
+      failureStage: 'billing_error',
+      httpStatus: 402,
+      elapsedMs: 10,
+      appVersion: '0.7.0',
+      cliVersion: 'grok 1.0.0',
+      teamMcp: { enabled: false, status: 'not_configured' },
+      lastRecognizedNotification: null,
+      lastReceivedNotification: null,
+      unsupportedNotificationCount: 0,
+      stderrObserved: false,
+      stderrTruncated: false,
+      recordedAt: '2026-09-23T00:00:00.000Z',
+    };
+    const envelope = (
+      diagnostic: Record<string, unknown>,
+      code: 'RUNTIME_BILLING_REQUIRED' | 'RUNTIME_RATE_LIMIT' = 'RUNTIME_BILLING_REQUIRED',
+    ) => ({
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'error',
+      error: {
+        code,
+        userMessage:
+          code === 'RUNTIME_BILLING_REQUIRED'
+            ? 'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。'
+            : 'Grokの利用上限に達しました。時間を置いて再試行してください。',
+        retryable: code !== 'RUNTIME_BILLING_REQUIRED',
+      },
+      diagnostic,
+    });
+    const { httpStatus: _status, ...withoutStatus } = base;
+    expect(isRuntimeToMainEnvelope(envelope(base))).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope(envelope({ ...withoutStatus }, 'RUNTIME_BILLING_REQUIRED')),
+    ).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope(
+        envelope({ ...base, failureStage: 'rate_limit', httpStatus: 429 }, 'RUNTIME_RATE_LIMIT'),
+      ),
+    ).toBe(true);
+    expect(
+      isRuntimeToMainEnvelope(
+        envelope({ ...withoutStatus, failureStage: 'rate_limit' }, 'RUNTIME_RATE_LIMIT'),
+      ),
+    ).toBe(true);
+    for (const status of [100, 599]) {
+      expect(isRuntimeToMainEnvelope(envelope({ ...base, httpStatus: status }))).toBe(true);
+    }
+    for (const diagnostic of [
+      { ...base, runtimeKind: 'codex', cliVersion: 'codex 1.0.0', failureStage: 'protocol_error' },
+      { ...withoutStatus, runtimeKind: 'codex', cliVersion: 'codex 1.0.0' },
+      {
+        ...withoutStatus,
+        runtimeKind: 'claude',
+        cliVersion: '2.1.218 (Claude Code)',
+        failureStage: 'rate_limit',
+      },
+      {
+        ...base,
+        runtimeKind: 'claude',
+        cliVersion: '2.1.218 (Claude Code)',
+        failureStage: 'protocol_error',
+        httpStatus: 429,
+      },
+      { ...base, httpStatus: 99 },
+      { ...base, httpStatus: 600 },
+      { ...base, httpStatus: 402.5 },
+      { ...base, httpStatus: '402' },
+      { ...base, httpStatus: null },
+      { ...base, failureStage: ['billing_error'] },
+      {
+        ...withoutStatus,
+        runtimeKind: 'codex',
+        cliVersion: 'codex 1.0.0',
+        failureStage: ['billing_error'],
+      },
+      {
+        ...withoutStatus,
+        runtimeKind: 'claude',
+        cliVersion: '2.1.218 (Claude Code)',
+        failureStage: ['protocol_error'],
+      },
+    ]) {
+      expect(isRuntimeToMainEnvelope(envelope(diagnostic))).toBe(false);
+    }
+    // Controls for the rejections above: the same Codex/Claude shapes pass once the Grok-only
+    // stage and status are removed, so the rejections are about those fields and nothing else.
+    for (const diagnostic of [
+      {
+        ...withoutStatus,
+        runtimeKind: 'codex',
+        cliVersion: 'codex 1.0.0',
+        failureStage: 'protocol_error',
+      },
+      {
+        ...withoutStatus,
+        runtimeKind: 'claude',
+        cliVersion: '2.1.218 (Claude Code)',
+        failureStage: 'protocol_error',
+      },
+    ]) {
+      expect(isRuntimeToMainEnvelope(envelope(diagnostic))).toBe(true);
+    }
+    // A billing failure whose process stop was not confirmed still reaches Main: the public
+    // error becomes RUNTIME_STOP_UNCONFIRMED while the diagnostic keeps the billing stage.
+    expect(
+      isRuntimeToMainEnvelope({
+        ...envelope(base),
+        error: {
+          code: 'RUNTIME_STOP_UNCONFIRMED',
+          userMessage: 'Grok CLIの停止を確認できませんでした。',
+          retryable: false,
+        },
+      }),
+    ).toBe(true);
+  });
+
   it('validates the additive optional resolvedModel field on the completed canonical event', () => {
     const event = {
       protocolVersion: RUNTIME_PROTOCOL_VERSION,

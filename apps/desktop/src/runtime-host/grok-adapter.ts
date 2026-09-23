@@ -387,7 +387,9 @@ export class GrokRuntimeAdapter {
       stage: 'protocol_error' | 'startup_error' | 'spawn_error' | 'abnormal_exit',
       error?: unknown,
     ): void => {
-      failAfterStop(grokPublicError(error), stage);
+      if (error instanceof GrokRpcError && error.httpStatus !== undefined)
+        diagnostics.recordGrokHttpStatus(error.httpStatus);
+      failAfterStop(grokPublicError(error), grokDiagnosticStage(stage, error));
     };
     const deadline = new RuntimeProgressDeadline(
       {
@@ -626,7 +628,24 @@ function grokStopUnconfirmed(): PublicError {
   };
 }
 
+function grokDiagnosticStage(
+  stage: 'protocol_error' | 'startup_error' | 'spawn_error' | 'abnormal_exit',
+  error: unknown,
+): typeof stage | 'billing_error' | 'rate_limit' {
+  if ((stage === 'protocol_error' || stage === 'startup_error') && error instanceof GrokRpcError) {
+    if (error.category === 'billing') return 'billing_error';
+    if (error.category === 'rate_limit') return 'rate_limit';
+  }
+  return stage;
+}
+
 function grokPublicError(error: unknown): PublicError {
+  if (error instanceof GrokRpcError && error.category === 'billing')
+    return {
+      code: 'RUNTIME_BILLING_REQUIRED',
+      userMessage: 'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。',
+      retryable: false,
+    };
   if (error instanceof GrokRpcError && error.category === 'rate_limit')
     return {
       code: 'RUNTIME_RATE_LIMIT',

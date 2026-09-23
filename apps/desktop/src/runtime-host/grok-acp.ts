@@ -7,15 +7,22 @@ export function grokRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+export type GrokRpcCategory = 'authentication' | 'rate_limit' | 'billing' | 'other';
+
 export class GrokRpcError extends Error {
+  readonly category: GrokRpcCategory;
+  readonly httpStatus?: number;
+
   constructor(
     readonly code: number,
-    readonly category: 'authentication' | 'rate_limit' | 'other' = code === -32000
-      ? 'authentication'
-      : 'other',
+    category: GrokRpcCategory = code === -32000 ? 'authentication' : 'other',
+    httpStatus?: number,
   ) {
     // Provider error text can contain prompts, paths and credentials.
     super('Grok ACP request failed');
+    this.category = category;
+    const observed = observedHttpStatus(httpStatus);
+    if (observed !== undefined) this.httpStatus = observed;
   }
 }
 
@@ -144,17 +151,82 @@ export class GrokAcpClient {
     this.pending.delete(id);
     clearTimeout(pending.timer);
     if (rpcError !== null) {
-      const error = rpcError;
-      const code = typeof error['code'] === 'number' ? error['code'] : -32603;
-      const text = typeof error['message'] === 'string' ? error['message'] : '';
-      const category = /rate.limit|usage.limit|quota|too many requests|\b429\b/iu.test(text)
-        ? 'rate_limit'
-        : code === -32000 ||
-            /unauthenticated|authentication|not logged in|token expired|\b401\b/iu.test(text)
-          ? 'authentication'
-          : 'other';
-      pending.reject(new GrokRpcError(code, category));
+      const code = typeof rpcError['code'] === 'number' ? rpcError['code'] : -32603;
+      const classified = classifyGrokRpcFailure(code, rpcError['message'], rpcError['data']);
+      pending.reject(new GrokRpcError(code, classified.category, classified.httpStatus));
     } else if ('result' in message) pending.resolve(message['result']);
     else pending.reject(new Error('Missing Grok result'));
   }
+}
+
+const CLASSIFY_TEXT_BYTES = 4 * 1024;
+const GROK_RATE_LIMIT_TEXT = /rate.limit|usage.limit|quota|too many requests|\b429\b/iu;
+const GROK_AUTH_TEXT = /unauthenticated|authentication|not logged in|token expired|\b401\b/iu;
+const GROK_BILLING_TEXT = /payment required|\bbalance\b|\bbilling\b|quota exhausted/iu;
+
+function classifyGrokRpcFailure(
+  code: number,
+  message: unknown,
+  data: unknown,
+): { readonly category: GrokRpcCategory; readonly httpStatus?: number } {
+  const record = plainGrokErrorData(data);
+  const httpStatus = record === undefined ? undefined : observedHttpStatus(record['http_status']);
+  const fromStatus =
+    httpStatus === 402
+      ? 'billing'
+      : httpStatus === 429
+        ? 'rate_limit'
+        : httpStatus === 401
+          ? 'authentication'
+          : undefined;
+  const category =
+    fromStatus ?? categoryFromGrokText(code, message, record, httpStatus !== undefined);
+  if (httpStatus === undefined) return { category };
+  return { category, httpStatus };
+}
+
+function plainGrokErrorData(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function observedHttpStatus(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 100 || value > 599)
+    return undefined;
+  return value;
+}
+
+function categoryFromGrokText(
+  code: number,
+  message: unknown,
+  record: Record<string, unknown> | undefined,
+  statusObserved: boolean,
+): GrokRpcCategory {
+  const samples = [message, record?.['message']]
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => classifyTextPrefix(value));
+  // Billing is final (retryable false), so provider text may decide it only when no HTTP status was
+  // observed. An observed 500/503 whose body quotes a 402 is a transient failure, not billing.
+  if (
+    !statusObserved &&
+    samples.some((sample) => /\b402\b/u.test(sample) && GROK_BILLING_TEXT.test(sample))
+  )
+    return 'billing';
+  if (samples.some((sample) => GROK_RATE_LIMIT_TEXT.test(sample))) return 'rate_limit';
+  if (code === -32000 || samples.some((sample) => GROK_AUTH_TEXT.test(sample)))
+    return 'authentication';
+  return 'other';
+}
+
+function classifyTextPrefix(text: string): string {
+  if (Buffer.byteLength(text) <= CLASSIFY_TEXT_BYTES) return text;
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const size = Buffer.byteLength(char);
+    if (bytes + size > CLASSIFY_TEXT_BYTES) break;
+    bytes += size;
+    end += char.length;
+  }
+  return text.slice(0, end);
 }

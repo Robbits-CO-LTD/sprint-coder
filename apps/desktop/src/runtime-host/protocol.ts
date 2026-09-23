@@ -157,7 +157,9 @@ export type RuntimeFailureStage =
   | 'protocol_error'
   | 'startup_error'
   | 'spawn_error'
-  | 'abnormal_exit';
+  | 'abnormal_exit'
+  | 'billing_error'
+  | 'rate_limit';
 
 export type RuntimeStartRejectionReasonCode =
   | 'invalid_project_context_authority'
@@ -204,6 +206,8 @@ export type RuntimeFailureDiagnostic = Readonly<{
   diagnosticId: string;
   runtimeKind: RuntimeKind;
   failureStage: RuntimeFailureStage;
+  /** Observed Grok HTTP status. Absent unless it was an integer from 100 to 599. */
+  httpStatus?: number;
   elapsedMs: number;
   appVersion: string;
   cliVersion: string | null;
@@ -987,6 +991,39 @@ function isResolvedCliCommand(value: unknown): value is ResolvedCliCommand {
   );
 }
 
+function isAllowedFailureStage(runtimeKind: unknown, stage: unknown): boolean {
+  // Checked as a string first: `String(['billing_error'])` would otherwise pass the list below and
+  // then miss the Grok-only comparison, letting another runtime carry a Grok stage.
+  if (typeof stage !== 'string') return false;
+  if (
+    ![
+      'first_event_timeout',
+      'idle_timeout',
+      'total_timeout',
+      'protocol_error',
+      'startup_error',
+      'spawn_error',
+      'abnormal_exit',
+      'billing_error',
+      'rate_limit',
+    ].includes(stage)
+  )
+    return false;
+  // These stages describe Grok's own HTTP classification. Codex and Claude keep their stages.
+  if (stage === 'billing_error' || stage === 'rate_limit') return runtimeKind === 'grok';
+  return true;
+}
+
+function isAllowedDiagnosticHttpStatus(runtimeKind: unknown, value: unknown): boolean {
+  return (
+    runtimeKind === 'grok' &&
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 100 &&
+    value <= 599
+  );
+}
+
 export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFailureDiagnostic {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
@@ -998,6 +1035,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
         'diagnosticId',
         'runtimeKind',
         'failureStage',
+        'httpStatus',
         'elapsedMs',
         'appVersion',
         'cliVersion',
@@ -1022,15 +1060,10 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     (record['runtimeKind'] === 'codex' ||
       record['runtimeKind'] === 'claude' ||
       record['runtimeKind'] === 'grok') &&
-    [
-      'first_event_timeout',
-      'idle_timeout',
-      'total_timeout',
-      'protocol_error',
-      'startup_error',
-      'spawn_error',
-      'abnormal_exit',
-    ].includes(String(record['failureStage'])) &&
+    isAllowedFailureStage(record['runtimeKind'], record['failureStage']) &&
+    (!('httpStatus' in record) ||
+      record['httpStatus'] === undefined ||
+      isAllowedDiagnosticHttpStatus(record['runtimeKind'], record['httpStatus'])) &&
     typeof record['elapsedMs'] === 'number' &&
     Number.isSafeInteger(record['elapsedMs']) &&
     record['elapsedMs'] >= 0 &&

@@ -4386,6 +4386,62 @@ const migrations = [
       DROP TABLE grok_v94_fk_guard;
     `,
   },
+  {
+    version: 95,
+    checksum: 'runtime-failure-diagnostics-v95-grok-billing',
+    sql: `
+      ALTER TABLE runtime_failure_diagnostics RENAME TO runtime_failure_diagnostics_v94;
+      DROP INDEX runtime_failure_diagnostics_task_created_idx;
+      CREATE TABLE runtime_failure_diagnostics (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude', 'grok', 'provider')),
+        failure_stage TEXT NOT NULL CHECK (
+          (runtime_kind IN ('codex', 'claude') AND failure_stage IN (
+            'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+            'startup_error', 'spawn_error', 'abnormal_exit'
+          )) OR
+          (runtime_kind = 'grok' AND failure_stage IN (
+            'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+            'startup_error', 'spawn_error', 'abnormal_exit',
+            'billing_error', 'rate_limit'
+          )) OR
+          (runtime_kind = 'provider' AND failure_stage IN (
+            'model_preparation', 'first_event_timeout', 'idle_timeout', 'provider_error',
+            'network', 'stream_error'
+          ))
+        ),
+        diagnostic_json TEXT NOT NULL
+          CHECK (length(CAST(diagnostic_json AS BLOB)) <= 16384),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO runtime_failure_diagnostics(
+        id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+      )
+      SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+      FROM runtime_failure_diagnostics_v94;
+      CREATE TEMP TABLE runtime_failure_diagnostics_v95_guard(
+        valid INTEGER NOT NULL CHECK (valid = 1)
+      );
+      INSERT INTO runtime_failure_diagnostics_v95_guard(valid)
+      SELECT CASE WHEN
+        (SELECT COUNT(*) FROM runtime_failure_diagnostics) =
+          (SELECT COUNT(*) FROM runtime_failure_diagnostics_v94)
+        AND NOT EXISTS (
+          SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+          FROM runtime_failure_diagnostics_v94
+          EXCEPT
+          SELECT id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+          FROM runtime_failure_diagnostics
+        )
+      THEN 1 ELSE 0 END;
+      DROP TABLE runtime_failure_diagnostics_v95_guard;
+      DROP TABLE runtime_failure_diagnostics_v94;
+      CREATE INDEX runtime_failure_diagnostics_task_created_idx
+        ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -14126,6 +14182,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
             diagnosticId: diagnostic.diagnosticId,
             runtimeKind: diagnostic.runtimeKind,
             failureStage: diagnostic.failureStage,
+            ...(diagnostic.runtimeKind === 'grok' &&
+            typeof diagnostic.httpStatus === 'number' &&
+            Number.isInteger(diagnostic.httpStatus) &&
+            diagnostic.httpStatus >= 100 &&
+            diagnostic.httpStatus <= 599
+              ? { httpStatus: diagnostic.httpStatus }
+              : {}),
             elapsedMs: diagnostic.elapsedMs,
             appVersion: diagnostic.appVersion,
             cliVersion: diagnostic.cliVersion,

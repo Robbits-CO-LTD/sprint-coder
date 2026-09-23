@@ -98,4 +98,75 @@ describe('Provider failure diagnostic', () => {
       modelPreparation: 'not_required',
     });
   });
+
+  it('accepts Grok billing and rate-limit diagnostics and rejects them for other runtimes', () => {
+    const grok = {
+      version: 1,
+      diagnosticId: '123e4567-e89b-42d3-a456-426614174000',
+      runtimeKind: 'grok',
+      failureStage: 'billing_error',
+      httpStatus: 402,
+      elapsedMs: 10,
+      appVersion: '0.7.0',
+      cliVersion: null,
+      teamMcp: { enabled: false, status: 'not_configured' },
+      lastRecognizedNotification: null,
+      lastReceivedNotification: null,
+      unsupportedNotificationCount: 0,
+      stderrObserved: false,
+      stderrTruncated: false,
+      recordedAt: '2026-09-23T00:00:00.000Z',
+    };
+    const { httpStatus: _status, ...withoutStatus } = grok;
+    expect(isPersistedFailureDiagnostic(grok)).toBe(true);
+    expect(isPersistedFailureDiagnostic(withoutStatus)).toBe(true);
+    expect(
+      isPersistedFailureDiagnostic({ ...grok, failureStage: 'rate_limit', httpStatus: 429 }),
+    ).toBe(true);
+    expect(isPersistedFailureDiagnostic({ ...withoutStatus, failureStage: 'rate_limit' })).toBe(
+      true,
+    );
+    for (const httpStatus of [100, 599]) {
+      expect(isPersistedFailureDiagnostic({ ...grok, httpStatus })).toBe(true);
+    }
+    expect(
+      isPersistedFailureDiagnostic({
+        ...grok,
+        runtimeKind: 'codex',
+        failureStage: 'billing_error',
+      }),
+    ).toBe(false);
+    expect(
+      isPersistedFailureDiagnostic({
+        ...grok,
+        runtimeKind: 'codex',
+        failureStage: 'protocol_error',
+      }),
+    ).toBe(false);
+    expect(
+      isPersistedFailureDiagnostic({
+        ...withoutStatus,
+        runtimeKind: 'claude',
+        failureStage: 'rate_limit',
+      }),
+    ).toBe(false);
+    for (const httpStatus of [99, 600, 402.5, '402', null]) {
+      expect(isPersistedFailureDiagnostic({ ...grok, httpStatus })).toBe(false);
+    }
+    const provider = buildProviderFailureDiagnostic({
+      cause: {
+        failureStage: 'provider_error',
+        category: 'provider_unavailable',
+        retryable: true,
+        providerCode: 'http_503',
+        modelPreparation: 'completed',
+      },
+      providerId: 'ollama',
+      profileId: 'ollama',
+      elapsedMs: 1,
+      appVersion: '0.7.0',
+      recordedAt: '2026-09-23T00:00:00.000Z',
+    });
+    expect(isPersistedFailureDiagnostic({ ...provider, httpStatus: 402 })).toBe(false);
+  });
 });
