@@ -323,6 +323,126 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await stat(created.path)).isDirectory()).toBe(true);
   });
 
+  it('removes an unchanged worktree at its base and unregisters it', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-unchanged', repoPath });
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-unchanged',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(stat(created.path)).rejects.toThrow();
+    const listed = await git(['-C', repoPath, 'worktree', 'list', '--porcelain']);
+    expect(listed.split('\n').filter((line) => line.startsWith('worktree '))).toHaveLength(1);
+  });
+
+  it('keeps a worktree whose HEAD moved past its base even when its status is clean', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-moved', repoPath });
+    await writeFile(join(created.path, 'README.md'), 'committed by worker\n');
+    await git(['-C', created.path, 'add', 'README.md']);
+    await git([
+      '-C',
+      created.path,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'worker commit',
+    ]);
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-moved',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
+
+    expect((await stat(created.path)).isDirectory()).toBe(true);
+    expect((await git(['-C', created.path, 'rev-parse', 'HEAD'])).trim()).not.toBe(
+      created.baseHead,
+    );
+  });
+
+  it('keeps untracked files hidden by a repository status.showUntrackedFiles setting', async () => {
+    const { repoPath, manager } = await fixture();
+    await git(['-C', repoPath, 'config', 'status.showUntrackedFiles', 'no']);
+    const created = await manager.create({ agentId: 'agent-hidden', repoPath });
+    await writeFile(join(created.path, 'hidden.txt'), 'untracked\n');
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-hidden',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
+
+    expect(await readFile(join(created.path, 'hidden.txt'), 'utf8')).toBe('untracked\n');
+  });
+
+  it('removes ignored files together with an otherwise unchanged worktree', async () => {
+    const { repoPath, manager } = await fixture();
+    await writeFile(join(repoPath, '.gitignore'), 'build/\n');
+    await git(['-C', repoPath, 'add', '.gitignore']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'ignore build',
+    ]);
+    const created = await manager.create({ agentId: 'agent-ignored', repoPath });
+    await mkdir(join(created.path, 'build'));
+    await writeFile(join(created.path, 'build', 'out.txt'), 'ignored\n');
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-ignored',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(stat(created.path)).rejects.toThrow();
+  });
+
+  it('keeps an unchanged Windows worktree quarantined while access denial persists', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-unchanged-locked', repoPath });
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      execFileImpl: interceptWorktreeRemove(() => {
+        throw Object.assign(new Error('Access is denied'), { code: 'EPERM' });
+      }),
+    });
+
+    await expect(
+      retrying.cleanupUnchanged({
+        agentId: 'agent-unchanged-locked',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
+    expect((await stat(created.path)).isDirectory()).toBe(true);
+  });
+
   it('collapses Worker changes into one commit and integrates them into a clean workspace', async () => {
     const { repoPath, head, manager } = await fixture();
     const worktreeId = 'execution-1';

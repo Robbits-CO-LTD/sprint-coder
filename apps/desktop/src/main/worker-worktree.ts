@@ -70,6 +70,14 @@ export type CleanupWorktreeResult = Readonly<{
   outcome: 'removed' | 'quarantined';
 }>;
 
+export type CleanupUnchangedWorktreeInput = CleanupWorktreeInput & Readonly<{ baseHead: string }>;
+/**
+ * `changed: true` marks a worktree kept because its HEAD or status differs from its base: it will
+ * never qualify, so a caller need not retry it. A worktree kept for any other reason (a Windows
+ * lock that outlasted the backoff) may qualify on a later attempt.
+ */
+export type CleanupUnchangedWorktreeResult = CleanupWorktreeResult & Readonly<{ changed?: true }>;
+
 export type FinalizeWorktreeInput = Readonly<{
   agentId: string;
   repoPath: string;
@@ -390,6 +398,45 @@ export class WorkerWorktreeManager {
     // Cleanup policy: never destroy work. If the worktree has any changes, quarantine it
     // (leave it on disk, untouched) instead of removing it.
     if (statusOutput.trim().length > 0) return { outcome: 'quarantined' };
+    return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Remove a terminal worktree only when HEAD is still exactly `baseHead` and status is empty.
+   * A Worker commit is clean in `git status`, so HEAD is checked before any removal. Ignored
+   * files do not block removal: they are never integrated, and `git worktree remove` deletes
+   * them with the directory.
+   */
+  async cleanupUnchanged({
+    agentId,
+    repoPath,
+    worktreeId = agentId,
+    baseHead,
+  }: CleanupUnchangedWorktreeInput): Promise<CleanupUnchangedWorktreeResult> {
+    validateWorktreeId(agentId);
+    validateGitHead(baseHead);
+    const worktreePath = this.worktreePathFor(worktreeId);
+    if (!(await pathExists(worktreePath))) {
+      await this.runGit(repoPath, ['worktree', 'prune'], 'remove_failed');
+      return { outcome: 'removed' };
+    }
+    const head = (
+      await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'remove_failed')
+    ).stdout.trim();
+    if (head !== baseHead) return { outcome: 'quarantined', changed: true };
+    const status = await this.runGit(
+      worktreePath,
+      ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'],
+      'remove_failed',
+    );
+    if (status.stdout.trim().length > 0) return { outcome: 'quarantined', changed: true };
+    return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  private async removeRegisteredWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupWorktreeResult> {
     try {
       await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
     } catch (error) {

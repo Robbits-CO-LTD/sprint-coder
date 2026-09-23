@@ -9476,6 +9476,7 @@ if (runsWithElectronAbi)
         { version: 94 },
         { version: 95 },
         { version: 96 },
+        { version: 97 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -9508,6 +9509,7 @@ if (runsWithElectronAbi)
         ['messages', ['work_content']],
         ['teams', ['policy_json']],
         ['team_messages', ['execution_id', 'attempt_id']],
+        ['team_execution_isolations', ['reclaim_confirmed_at']],
       ] as const) {
         const actual = new Set(
           (

@@ -725,6 +725,7 @@ type TeamExecutionIsolationRow = {
   repositories_json: string;
   roots_json: string;
   reason: string | null;
+  reclaim_confirmed_at?: string | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -4478,6 +4479,13 @@ const migrations = [
         ON team_attempt_failure_diagnostics(task_id, created_at DESC, attempt_id DESC);
     `,
   },
+  {
+    version: 97,
+    checksum: 'team-execution-isolation-v97-reclaim-confirmed-at',
+    sql: `
+      ALTER TABLE team_execution_isolations ADD COLUMN reclaim_confirmed_at TEXT;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -5336,6 +5344,11 @@ export interface PersistenceClient {
   }): TeamExecutionIsolationRecord;
   getTeamExecutionIsolation(executionId: string): TeamExecutionIsolationRecord | null;
   listTeamExecutionIsolations(): readonly TeamExecutionIsolationRecord[];
+  setTeamExecutionIsolationReclaimConfirmedAt(
+    executionId: string,
+    confirmedAt: string | null,
+  ): void;
+  listReclaimConfirmedTeamExecutionIsolations(): readonly TeamExecutionIsolationRecord[];
   saveTeamExecutionIsolationCompletion(input: {
     executionId: string;
     attemptId: string;
@@ -11953,6 +11966,31 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return (
       this.db
         .prepare('SELECT * FROM team_execution_isolations ORDER BY created_at, execution_id')
+        .all() as TeamExecutionIsolationRow[]
+    ).map(toTeamExecutionIsolation);
+  }
+
+  setTeamExecutionIsolationReclaimConfirmedAt(
+    executionId: string,
+    confirmedAt: string | null,
+  ): void {
+    // Bookkeeping only: do not bump revision or updated_at.
+    const result = this.db
+      .prepare(
+        'UPDATE team_execution_isolations SET reclaim_confirmed_at = ? WHERE execution_id = ?',
+      )
+      .run(confirmedAt, executionId);
+    if (result.changes !== 1) throw new NotFoundError('Team execution isolation not found');
+  }
+
+  listReclaimConfirmedTeamExecutionIsolations(): readonly TeamExecutionIsolationRecord[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM team_execution_isolations
+           WHERE phase = 'quarantined' AND reclaim_confirmed_at IS NOT NULL
+           ORDER BY created_at, execution_id`,
+        )
         .all() as TeamExecutionIsolationRow[]
     ).map(toTeamExecutionIsolation);
   }
