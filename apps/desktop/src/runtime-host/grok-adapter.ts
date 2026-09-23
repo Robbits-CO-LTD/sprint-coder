@@ -101,6 +101,17 @@ export function grokAuthenticationMethod(value: unknown): string | null {
   return methods.includes('xai.api_key') ? 'xai.api_key' : null;
 }
 
+function isGrokModelId(value: unknown): value is string {
+  return typeof value === 'string' && /^grok-[a-zA-Z0-9._-]{1,120}$/u.test(value);
+}
+
+/** Returns the model a `session/set_model` acknowledged, failing closed unless it is `requested`. */
+export function grokBoundSessionModel(value: unknown, requested: string): string {
+  const model = grokRecord(grokRecord(grokRecord(value)['_meta'] ?? {})['model'] ?? {})['Ok'];
+  if (model !== requested) throw new Error('Grok did not bind the requested model');
+  return model;
+}
+
 export function buildGrokArgs(model = 'auto'): string[] {
   return [
     '--no-auto-update',
@@ -501,6 +512,15 @@ export class GrokRuntimeAdapter {
         if (typeof session['sessionId'] !== 'string' || session['sessionId'].length > 256)
           throw new Error('Missing Grok session');
         sessionId = session['sessionId'];
+        // The CLI applies its campaign default to every new session and ignores `--model` there
+        // (issue #515), so an explicit selection is bound to the session before the prompt.
+        const boundModel =
+          model === 'auto'
+            ? undefined
+            : grokBoundSessionModel(
+                await rpc.request('session/set_model', { sessionId, modelId: model }),
+                model,
+              );
         for (const params of earlyUpdates) update(params);
         earlyUpdates.length = 0;
         const start = Date.now();
@@ -538,20 +558,29 @@ export class GrokRuntimeAdapter {
         if (failed || control.canceled) return;
         if (result['stopReason'] !== 'end_turn' || pendingTools.size > 0 || !assistantText)
           throw new Error('Grok turn did not finish');
+        const promptMeta = result['_meta'];
+        const promptModel =
+          typeof promptMeta === 'object' && promptMeta !== null && !Array.isArray(promptMeta)
+            ? (promptMeta as Record<string, unknown>)['modelId']
+            : undefined;
+        // An explicitly selected model that did not run must not be reported as a success.
+        if (boundModel !== undefined && promptModel !== undefined && promptModel !== boundModel)
+          throw new Error('Grok ran a different model than requested');
         terminalReceived = true;
         deadline.stop();
         rpc.close();
         if (!(await control.stop())) throw new Error('Grok process exit was not confirmed');
         if (failed || control.canceled) return;
         completed = true;
-        const models = grokRecord(session['models'] ?? {});
-        const resolved = models['currentModelId'];
+        // Prefer the model that actually answered; an explicit selection never falls back to the
+        // session's pre-binding default.
+        const resolved = isGrokModelId(promptModel)
+          ? promptModel
+          : (boundModel ?? grokRecord(session['models'] ?? {})['currentModelId']);
         emit({ type: 'stage', stage: 'synthesizing' });
         emit({
           type: 'completed',
-          ...(typeof resolved === 'string' && /^grok-[a-zA-Z0-9._-]{1,120}$/u.test(resolved)
-            ? { resolvedModel: resolved }
-            : {}),
+          ...(isGrokModelId(resolved) ? { resolvedModel: resolved } : {}),
         });
       } catch (error) {
         abort(sessionId === null ? 'startup_error' : 'protocol_error', error);
