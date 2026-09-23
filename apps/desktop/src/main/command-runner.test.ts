@@ -1728,6 +1728,8 @@ describe('rejectWindowsSandboxedNodeTestIsolation', () => {
       [nodeExe, ['--inspect-port', '0', '--test', 'sum.test.cjs']],
       [nodeExe, ['--unlisted-option', 'value', '--test']],
       [nodeExe, ['--test', 'sum.test.cjs', '--test-isolation=none']],
+      [nodeExe, ['--test', 'test/', '--test-isolation=none']],
+      [nodeExe, ['--test', 'test', '--experimental-test-isolation=none']],
       ['C:\\Program Files\\nodejs\\NODE.EXE', ['--test']],
     ];
     for (const [executable, argv] of cases) {
