@@ -11,6 +11,7 @@ import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-cod
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
+  WorkerRuntimeExitUnconfirmedError,
   WorkerRuntimeFailureError,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
@@ -549,7 +550,17 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       return { finalText, writes };
     } finally {
       try {
-        if (runtimeStarted) await this.client(choice.kind).waitForTurnExit(turnId);
+        if (runtimeStarted)
+          // Starting inside a promise turns a synchronous throw from the exit wait into a rejection,
+          // which is just as unconfirmed.
+          await Promise.resolve()
+            .then(() => this.client(choice.kind).waitForTurnExit(turnId))
+            .catch((error: unknown) => {
+              throw new WorkerRuntimeExitUnconfirmedError(
+                error instanceof Error ? error.message : String(error),
+                { cause: error },
+              );
+            });
       } finally {
         input.signal?.removeEventListener('abort', abort);
         this.pending.delete(turnId);

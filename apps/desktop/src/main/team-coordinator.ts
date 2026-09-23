@@ -163,6 +163,14 @@ export class WorkerRuntimeControlError extends Error {
   }
 }
 
+/** The runtime turn ended, but Main could not confirm that its process tree exited. */
+export class WorkerRuntimeExitUnconfirmedError extends Error {
+  constructor(message: string, options?: Readonly<{ cause?: unknown }>) {
+    super(message, options);
+    this.name = 'WorkerRuntimeExitUnconfirmedError';
+  }
+}
+
 export class WorkerRuntimeFailureError extends Error {
   constructor(
     readonly publicError: PublicError,
@@ -3148,6 +3156,13 @@ export class TeamCoordinator {
       });
       this.finalizeTeamIfWorkersTerminal(input.teamId);
       this.emit(input.taskId, input.teamId);
+      // The runtime call returned, so its turn (and CLI process tree) has already ended.
+      if (
+        failedWorkspaceWrite &&
+        executionIsolation !== null &&
+        (await this.reclaimTerminalExecutionIsolation(input.executionId, worker.id, true))
+      )
+        this.emit(input.taskId, input.teamId);
     } catch (error) {
       if (this.executionScheduler.isCancellationRequested(input.executionId)) {
         await this.cleanupCanceledPreflight(
@@ -3210,7 +3225,17 @@ export class TeamCoordinator {
             this.quarantineExecutionIsolation(persistedIsolation.executionId, error);
         }
       }
-      if (attemptId !== null && this.handleRequestedInterruption({ ...input, attemptId })) return;
+      if (attemptId !== null && this.handleRequestedInterruption({ ...input, attemptId })) {
+        if (
+          await this.reclaimTerminalExecutionIsolation(
+            input.executionId,
+            worker.id,
+            runtimeStopConfirmed(error),
+          )
+        )
+          this.emit(input.taskId, input.teamId);
+        return;
+      }
       const failureSummary = (
         error instanceof Error ? error.message : 'Worker runtime failed'
       ).slice(0, 4_000);
@@ -3315,6 +3340,16 @@ export class TeamCoordinator {
         });
       this.finalizeTeamIfWorkersTerminal(input.teamId);
       this.emit(input.taskId, input.teamId);
+      if (
+        attemptId !== null &&
+        !integrationResume &&
+        (await this.reclaimTerminalExecutionIsolation(
+          input.executionId,
+          worker.id,
+          runtimeStopConfirmed(error),
+        ))
+      )
+        this.emit(input.taskId, input.teamId);
       throw error;
     }
   }
@@ -3822,6 +3857,7 @@ export class TeamCoordinator {
       }
     }
     void this.recoverIntegratedWorktreeCleanup();
+    void this.recoverTerminalWorktreeReclaim();
     return recovered;
   }
 
@@ -5040,6 +5076,95 @@ export class TeamCoordinator {
     }
   }
 
+  private async reclaimTerminalExecutionIsolation(
+    executionId: string,
+    agentId: string,
+    runtimeStopConfirmed: boolean,
+  ): Promise<boolean> {
+    const worktreeManager = this.worktreeManager;
+    if (worktreeManager === undefined || !runtimeStopConfirmed) return false;
+    try {
+      const execution = this.persistence.getTeamExecution(executionId);
+      if (execution.state !== 'failed' && execution.state !== 'canceled') return false;
+      if (this.persistence.getTeamMissionForExecution(executionId)?.mode === 'graph') return false;
+      const isolation = this.persistence.getTeamExecutionIsolation(executionId);
+      if (
+        isolation === null ||
+        isolation.phase !== 'quarantined' ||
+        isolation.resumeKind !== null ||
+        this.persistence.getTeamExecutionIsolationCompletion(executionId) !== null
+      )
+        return false;
+      this.persistence.setTeamExecutionIsolationReclaimConfirmedAt(executionId, this.isoNow());
+      let current = isolation;
+      let reclaimed = false;
+      for (const repository of current.repositories) {
+        if (repository.state !== 'quarantined') continue;
+        const worktreeId = isolationWorktreeId(executionId, repository.ordinal);
+        if (!worktreeManager.ownsWorktreePath(worktreeId, repository.worktreePath)) continue;
+        // Each repository waits on Git, so confirm the isolation is still terminal before touching it.
+        const before = this.persistence.getTeamExecutionIsolation(executionId);
+        if (before === null || before.phase !== 'quarantined' || before.resumeKind !== null)
+          return reclaimed;
+        try {
+          const result = await worktreeManager.cleanupUnchanged({
+            agentId,
+            worktreeId,
+            repoPath: repository.repoPath,
+            baseHead: repository.baseHead,
+          });
+          if (result.outcome !== 'removed') continue;
+          // Re-read after the Git await, so a concurrent update to this isolation is neither
+          // reverted nor overridden with a stale phase.
+          const latest = this.persistence.getTeamExecutionIsolation(executionId);
+          if (latest === null || latest.phase !== 'quarantined' || latest.resumeKind !== null)
+            return reclaimed;
+          const latestRepository =
+            latest.repositories.find(({ ordinal }) => ordinal === repository.ordinal) ?? repository;
+          current = this.persistence.updateTeamExecutionIsolation({
+            executionId,
+            phase: 'quarantined',
+            repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
+              ...latestRepository,
+              state: 'cleaned',
+            }),
+            now: this.isoNow(),
+          });
+          reclaimed = true;
+        } catch {
+          // One repository must not hide the original Worker failure or skip the others.
+        }
+      }
+      const settled = this.persistence.getTeamExecutionIsolation(executionId) ?? current;
+      if (settled.repositories.every(({ state }) => state === 'cleaned'))
+        this.persistence.setTeamExecutionIsolationReclaimConfirmedAt(executionId, null);
+      return reclaimed;
+    } catch {
+      return false;
+    }
+  }
+
+  private async recoverTerminalWorktreeReclaim(): Promise<void> {
+    if (this.worktreeManager === undefined) return;
+    let confirmed: readonly TeamExecutionIsolationRecord[];
+    try {
+      confirmed = this.persistence.listReclaimConfirmedTeamExecutionIsolations();
+    } catch {
+      return;
+    }
+    for (const isolation of confirmed) {
+      try {
+        await this.reclaimTerminalExecutionIsolation(
+          isolation.executionId,
+          this.persistence.getTeamExecution(isolation.executionId).assigneeAgentId,
+          true,
+        );
+      } catch {
+        // Startup reclaim is best-effort. A confirmed isolation is retried on the next launch.
+      }
+    }
+  }
+
   private quarantineExecutionIsolation(executionId: string, error: unknown): void {
     const current = this.persistence.getTeamExecutionIsolation(executionId);
     if (current === null || current.phase === 'quarantined') return;
@@ -5346,6 +5471,22 @@ export function priorConversationForAgent(
   }
 
   return selected.reverse();
+}
+
+/**
+ * Whether Main confirmed the Worker runtime stopped before this error settled the execution
+ * (issue #529). Watchdog timeouts and an unconfirmed process-tree exit leave that open, so a
+ * worktree the CLI might still be using is never reclaimed after them.
+ */
+export function runtimeStopConfirmed(error: unknown): boolean {
+  if (error instanceof WorkerRuntimeExitUnconfirmedError) return false;
+  return !(
+    error instanceof WorkerRuntimeControlError &&
+    (error.code === 'stop_unconfirmed' ||
+      error.code === 'heartbeat_timeout' ||
+      error.code === 'idle_timeout' ||
+      error.code === 'hard_timeout')
+  );
 }
 
 export function executeWithWatchdog<T>(input: {

@@ -20,10 +20,13 @@ import {
   DeterministicTeamWorkerRuntime,
   TeamCoordinator,
   WORKER_SELF_REPORTED_EVIDENCE_PREFIX,
+  WorkerRuntimeControlError,
+  WorkerRuntimeExitUnconfirmedError,
   WorkerRuntimeFailureError,
   captureGitWorkspaceFingerprint,
   executeWithWatchdog,
   priorConversationForAgent,
+  runtimeStopConfirmed,
   type TeamDiagnosticEvent,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
@@ -793,6 +796,30 @@ describe('executeWithWatchdog', () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     await rejected;
     expect(stops).toBe(1);
+  });
+});
+
+describe('runtimeStopConfirmed', () => {
+  it.each(['stop_unconfirmed', 'heartbeat_timeout', 'idle_timeout', 'hard_timeout'] as const)(
+    'does not treat a %s control error as a confirmed runtime stop',
+    (code) => {
+      expect(runtimeStopConfirmed(new WorkerRuntimeControlError(code, 'stopped'))).toBe(false);
+    },
+  );
+
+  it('does not treat an unconfirmed process-tree exit as a confirmed runtime stop', () => {
+    expect(
+      runtimeStopConfirmed(new WorkerRuntimeExitUnconfirmedError('exit was not confirmed')),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['a plain runtime error', new Error('runtime failed')],
+    ['a user cancel', new WorkerRuntimeControlError('user_canceled', 'canceled')],
+    ['a runtime failure code', new WorkerRuntimeControlError('runtime_failure', 'failed')],
+    ['a non-error value', 'stopped'],
+  ])('treats %s as a confirmed runtime stop', (_label, error) => {
+    expect(runtimeStopConfirmed(error)).toBe(true);
   });
 });
 
@@ -4518,6 +4545,429 @@ if (runsWithElectronAbi)
       });
       persistence.close();
     });
+
+    it('reclaims an unchanged isolated worktree when a running write execution is canceled', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel unchanged isolated write');
+      const runtime = new InterruptibleWorkerRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'canceled writer',
+        objective: 'stop before editing',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'do not edit',
+        doneCriteria: ['execution is canceled'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => runtime.contents.length === 1, 15_000);
+
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+        15_000,
+      );
+
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(existsSync(repository.worktreePath)).toBe(false);
+      const listed = spawnSync('git', ['-C', workspace, 'worktree', 'list', '--porcelain'], {
+        encoding: 'utf8',
+      });
+      expect(listed.status).toBe(0);
+      expect(
+        listed.stdout.split(/\r?\n/).filter((line) => line.startsWith('worktree ')),
+      ).toHaveLength(1);
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { terminalReason: 'user_canceled' },
+      ]);
+      persistence.close();
+    }, 30_000);
+
+    it('keeps the isolated worktree when a canceled write execution cannot confirm its runtime exit', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel unconfirmed isolated write');
+      let rejectRun: ((error: Error) => void) | undefined;
+      let started = false;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          started = true;
+          await new Promise<void>((_resolve, reject) => {
+            rejectRun = reject;
+          });
+          throw new Error('the execution was expected to be stopped');
+        },
+        async stop() {
+          rejectRun?.(
+            new WorkerRuntimeExitUnconfirmedError(
+              'Runtime process tree exit was not confirmed within 30 seconds',
+            ),
+          );
+        },
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const reclaim = vi.spyOn(manager, 'cleanupUnchanged');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'unconfirmed canceled writer',
+        objective: 'stop without a confirmed exit',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'do not edit',
+        doneCriteria: ['execution is canceled'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => started, 15_000);
+
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+
+      // A reclaim would have recorded its stop confirmation and called Git before this point.
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'quarantined' }],
+      });
+      expect(existsSync(isolation.repositories[0]!.worktreePath)).toBe(true);
+      expect(reclaim).not.toHaveBeenCalled();
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).not.toContain(submission.executionId);
+      persistence.close();
+    }, 30_000);
+
+    it('reclaims an unchanged isolated worktree after a write Worker runtime failure', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Failed unchanged isolated write');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          throw new Error('deliberate write runtime failure');
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'failing writer',
+        objective: 'fail before editing',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'fail cleanly',
+        doneCriteria: ['runtime fails'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () =>
+          persistence.getTeamExecution(submission.executionId).state === 'failed' &&
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+            'cleaned',
+        15_000,
+      );
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(existsSync(repository.worktreePath)).toBe(false);
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'failed', terminalReason: 'runtime_failure' },
+      ]);
+      persistence.close();
+    }, 30_000);
+
+    it('reclaims an unchanged isolated worktree when a write Worker reports failure', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Reported unchanged isolated failure');
+      const runtime = new TestWorkerRuntime();
+      runtime.completionStatus = 'failed';
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reporting writer',
+        objective: 'report failure without edits',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'report failure',
+        doneCriteria: ['worker reports failure'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+        15_000,
+      );
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('failed');
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'failed', terminalReason: 'worker_reported_failure' },
+      ]);
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(existsSync(repository.worktreePath)).toBe(false);
+      persistence.close();
+    }, 30_000);
+
+    it('keeps a failed write Worker worktree that committed inside it', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Committed isolated failure');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          if (input.workspacePath === undefined || input.workspacePath === null)
+            throw new Error('write step did not receive an isolated worktree');
+          writeFileSync(join(input.workspacePath, 'committed.txt'), 'keep this commit\n');
+          expect(spawnSync('git', ['-C', input.workspacePath, 'add', 'committed.txt']).status).toBe(
+            0,
+          );
+          expect(
+            spawnSync('git', [
+              '-C',
+              input.workspacePath,
+              '-c',
+              'user.name=Test',
+              '-c',
+              'user.email=test@example.com',
+              'commit',
+              '-q',
+              '-m',
+              'worker commit',
+            ]).status,
+          ).toBe(0);
+          throw new Error('deliberate committed failure');
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'committing writer',
+        objective: 'commit inside the worktree and fail',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'commit then fail',
+        doneCriteria: ['commit is retained'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await expect(cleanupUnchanged.mock.results[0]?.value).resolves.toEqual({
+        outcome: 'quarantined',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(repository.state).toBe('quarantined');
+      expect(existsSync(repository.worktreePath)).toBe(true);
+      const head = spawnSync('git', ['-C', repository.worktreePath, 'rev-parse', 'HEAD'], {
+        encoding: 'utf8',
+      });
+      expect(head.status).toBe(0);
+      expect(head.stdout.trim()).not.toBe(repository.baseHead);
+      persistence.close();
+    }, 30_000);
+
+    it('keeps the worktree when the runtime exit was not confirmed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Unconfirmed isolated exit');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          throw new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+          );
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'unconfirmed writer',
+        objective: 'exit without confirmation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'exit unconfirmed',
+        doneCriteria: ['worktree stays'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      expect(cleanupUnchanged).not.toHaveBeenCalled();
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(repository.state).toBe('quarantined');
+      expect(existsSync(repository.worktreePath)).toBe(true);
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).not.toContain(submission.executionId);
+      persistence.close();
+    }, 30_000);
+
+    it('reclaims a stop-confirmed unchanged worktree on restart and keeps unconfirmed ones', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-reclaim-restart-'));
+      cleanup.push(databaseDirectory);
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Terminal reclaim restart');
+      const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      class PersistentLockWorktreeManager extends WorkerWorktreeManager {
+        override async cleanupUnchanged(): Promise<{ outcome: 'quarantined' }> {
+          return { outcome: 'quarantined' };
+        }
+      }
+      // B fails first, so a reclaim that ignored the stop record would reach B before A.
+      let unconfirmed = true;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          if (unconfirmed)
+            throw new WorkerRuntimeExitUnconfirmedError(
+              'Runtime process tree exit was not confirmed within 30 seconds',
+            );
+          throw new Error('persistent lock failure');
+        },
+        async stop() {},
+      };
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new PersistentLockWorktreeManager({ worktreesRoot }),
+      );
+      const writerA = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'locked writer',
+        objective: 'fail with a confirmed stop',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const writerB = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'unconfirmed writer',
+        objective: 'fail without a confirmed stop',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submissionB = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writerB.id,
+        content: 'unconfirmed failure',
+        doneCriteria: ['stop is unconfirmed'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submissionB.executionId).state === 'failed',
+        15_000,
+      );
+
+      unconfirmed = false;
+      const submissionA = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writerA.id,
+        content: 'confirmed failure',
+        doneCriteria: ['stop is confirmed'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submissionA.executionId).state === 'failed',
+        15_000,
+      );
+      const pathA = persistence.getTeamExecutionIsolation(submissionA.executionId)!.repositories[0]!
+        .worktreePath;
+      const pathB = persistence.getTeamExecutionIsolation(submissionB.executionId)!.repositories[0]!
+        .worktreePath;
+      expect(existsSync(pathA)).toBe(true);
+      expect(existsSync(pathB)).toBe(true);
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).toEqual([submissionA.executionId]);
+      persistence.close();
+
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('reclaim-restart', '2026-08-08T10:00:00.000Z');
+      const restartManager = new WorkerWorktreeManager({ worktreesRoot });
+      const restartCleanup = vi.spyOn(restartManager, 'cleanupUnchanged');
+      coordinatorWithWorktrees(persistence, runtime, restartManager).recoverOnStartup();
+      await waitFor(
+        () =>
+          !existsSync(pathA) &&
+          persistence
+            .getTeamExecutionIsolation(submissionA.executionId)
+            ?.repositories.every(({ state }) => state === 'cleaned') === true,
+        15_000,
+      );
+      // Only the stop-confirmed isolation is ever handed to the reclaim.
+      expect(
+        restartCleanup.mock.calls.map(([input]) =>
+          input.worktreeId?.includes(submissionA.executionId),
+        ),
+      ).toEqual([true]);
+      expect(existsSync(pathB)).toBe(true);
+      expect(persistence.getTeamExecutionIsolation(submissionB.executionId)).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'quarantined' }],
+      });
+      persistence.close();
+    }, 30_000);
 
     it('persists a terminal, identity-bound report when a scheduled runtime fails', async () => {
       const persistence = createPersistence();

@@ -120,7 +120,7 @@ import {
   chooseWorkerRuntime,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
-import { WorkerRuntimeFailureError } from './team-coordinator';
+import { WorkerRuntimeExitUnconfirmedError, WorkerRuntimeFailureError } from './team-coordinator';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
@@ -560,6 +560,54 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(settled).toBe(false);
     confirmExit?.();
     await expect(execution).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+  });
+
+  it('reports an unconfirmed process-tree exit as WorkerRuntimeExitUnconfirmedError', async () => {
+    runtimeHostMock.waitForExit.mockRejectedValueOnce(
+      new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+    );
+    const subject = runtime();
+
+    const error = await subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+      })
+      .then(
+        () => {
+          throw new Error('expected execute to reject');
+        },
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    expect(error).toMatchObject({
+      message: 'Runtime process tree exit was not confirmed within 30 seconds',
+    });
+  });
+
+  it('reports a synchronously failing process-tree exit wait as WorkerRuntimeExitUnconfirmedError', async () => {
+    runtimeHostMock.waitForExit.mockImplementationOnce(() => {
+      throw new Error('Runtime host is disposed');
+    });
+    const subject = runtime();
+
+    const error = await subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+      })
+      .then(
+        () => {
+          throw new Error('expected execute to reject');
+        },
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    expect(error).toMatchObject({ message: 'Runtime host is disposed' });
   });
 
   it('applies inherited context and write capability to the CLI turn', async () => {
