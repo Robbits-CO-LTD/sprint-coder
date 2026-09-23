@@ -253,6 +253,7 @@ function coordinatorWithWorktrees(
   runtime: TeamWorkerRuntime,
   manager: WorkerWorktreeManager,
   integrationScheduler?: TeamIntegrationScheduler,
+  diagnostic?: (event: TeamDiagnosticEvent) => void,
 ): TeamCoordinator {
   return new TeamCoordinator(
     persistence,
@@ -266,6 +267,7 @@ function coordinatorWithWorktrees(
     manager,
     undefined,
     integrationScheduler,
+    diagnostic,
   );
 }
 
@@ -1228,7 +1230,14 @@ if (runsWithElectronAbi)
       const task = persistence.createTask('Standalone writable execution');
       const runtime = new WorktreeWritingRuntime();
       const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
       const writer = await coordinator.hireWorker({
         taskId: task.id,
         role: 'writer',
@@ -1262,6 +1271,17 @@ if (runsWithElectronAbi)
         repositories: [{ state: 'cleaned' }],
       });
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(diagnostics.filter(({ event }) => event.startsWith('team.isolation.'))).toEqual([
+        {
+          event: 'team.isolation.sagas_unverified',
+          taskId: task.id,
+          teamId: persistence.getTeamExecution(submission.executionId).teamId,
+          missionId: expect.any(String),
+          workerId: writer.id,
+          status: 'unverified',
+          result: '1',
+        },
+      ]);
       persistence.close();
     });
 
@@ -1270,7 +1290,14 @@ if (runsWithElectronAbi)
       const task = persistence.createTask('Standalone writable execution');
       const runtime = new WorktreeWritingRuntime();
       const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
       const writer = await coordinator.hireWorker({
         taskId: task.id,
         role: 'writer',
@@ -1307,6 +1334,18 @@ if (runsWithElectronAbi)
         repositories: [{ state: 'cleaned' }],
       });
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      const isolationEvents = diagnostics.filter(({ event }) =>
+        event.startsWith('team.isolation.'),
+      );
+      expect(isolationEvents).toEqual([
+        expect.objectContaining({
+          event: 'team.isolation.verification_failed',
+          workerId: writer.id,
+          status: 'unverified',
+          result: 'Error',
+        }),
+      ]);
+      expect(JSON.stringify(isolationEvents)).not.toContain('verification observer failed');
       persistence.close();
     });
 
