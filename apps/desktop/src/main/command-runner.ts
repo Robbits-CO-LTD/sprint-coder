@@ -120,6 +120,7 @@ export class CommandRunnerError extends Error {
     readonly code:
       | 'EXECUTION_SPEC_INVALID'
       | 'ARGV_REPEATS_EXECUTABLE'
+      | 'NODE_TEST_ISOLATION_REQUIRED'
       | 'EXECUTION_IDENTITY_CHANGED'
       | 'SPAWN_FAILED'
       | 'OUTPUT_OVERFLOW'
@@ -322,6 +323,202 @@ function rejectArgvRepeatingExecutable(
   );
 }
 
+// libuv creates child stdio pipes as `\\?\pipe\uv\...`. An AppContainer only allows
+// `\\?\pipe\LOCAL\...`, and the access denial is retried forever, so default `node --test`
+// (one piped child per file) never finishes. In-process isolation does not open those pipes.
+const NODE_INLINE_SCRIPT_OPTIONS: ReadonlySet<string> = new Set([
+  '-e',
+  '--eval',
+  '-p',
+  '--print',
+  '-pe',
+]);
+const NODE_TEST_ISOLATION_OPTIONS: ReadonlySet<string> = new Set([
+  '--experimental-test-isolation',
+  '--test-isolation',
+]);
+const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '--test-reporter',
+  '--test-reporter-destination',
+  '--test-name-pattern',
+  '--test-skip-pattern',
+  '--test-concurrency',
+  '--test-timeout',
+  '--test-shard',
+  '--test-coverage-include',
+  '--test-coverage-exclude',
+  '--test-coverage-branches',
+  '--test-coverage-functions',
+  '--test-coverage-lines',
+  '--disable-warning',
+  '--watch-path',
+  '--env-file',
+  '--env-file-if-exists',
+  '--conditions',
+  '-C',
+  '--input-type',
+  '--title',
+  '--inspect-port',
+  '--debug-port',
+  '--cpu-prof-dir',
+  '--cpu-prof-name',
+  '--heap-prof-dir',
+  '--heap-prof-name',
+  '--diagnostic-dir',
+  '--report-dir',
+  '--report-directory',
+  '--report-filename',
+  '--redirect-warnings',
+  '--openssl-config',
+  '--icu-data-dir',
+  '--tls-keylog',
+  '--snapshot-blob',
+  '--localstorage-file',
+  '--experimental-config-file',
+  '--experimental-sea-config',
+  '--experimental-default-type',
+  '--unhandled-rejections',
+  '--dns-result-order',
+  '--test-global-setup',
+  '--allow-fs-read',
+  '--allow-fs-write',
+]);
+// Common flags that never take a separate value, so a bare token after them is a positional.
+const NODE_BOOLEAN_OPTIONS: ReadonlySet<string> = new Set([
+  '-i',
+  '-c',
+  '--check',
+  '--interactive',
+  '--enable-source-maps',
+  '--no-warnings',
+  '--no-deprecation',
+  '--pending-deprecation',
+  '--throw-deprecation',
+  '--trace-deprecation',
+  '--trace-warnings',
+  '--trace-uncaught',
+  '--trace-exit',
+  '--abort-on-uncaught-exception',
+  '--expose-gc',
+  '--preserve-symlinks',
+  '--preserve-symlinks-main',
+  '--watch',
+  '--watch-preserve-output',
+  '--inspect',
+  '--inspect-brk',
+  '--inspect-wait',
+  '--cpu-prof',
+  '--heap-prof',
+  '--frozen-intrinsics',
+  '--no-addons',
+  '--no-global-search-paths',
+  '--experimental-vm-modules',
+  '--experimental-strip-types',
+  '--no-experimental-strip-types',
+  '--experimental-transform-types',
+  '--experimental-detect-module',
+  '--experimental-require-module',
+  '--no-experimental-require-module',
+  '--experimental-test-coverage',
+  '--experimental-test-module-mocks',
+  '--experimental-test-snapshots',
+  '--test-only',
+  '--test-force-exit',
+  '--test-update-snapshots',
+]);
+type NodeOptionToken = Readonly<{ name: string; value: string | undefined }>;
+
+// Node accepts `_` in place of `-` in long option names (`--experimental_test_isolation`).
+function nodeOptionToken(arg: string): NodeOptionToken {
+  if (!arg.startsWith('--')) return { name: arg, value: undefined };
+  const equals = arg.indexOf('=');
+  return {
+    name: (equals < 0 ? arg : arg.slice(0, equals)).replaceAll('_', '-'),
+    value: equals < 0 ? undefined : arg.slice(equals + 1),
+  };
+}
+
+export function rejectWindowsSandboxedNodeTestIsolation(
+  canonicalExecutable: string,
+  argv: readonly string[],
+  options: { platform?: NodeJS.Platform; sandboxed: boolean },
+): void {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32' || !options.sandboxed) return;
+  const executableName = windowsPath.basename(canonicalExecutable).toLowerCase();
+  if (executableName !== 'node.exe' && executableName !== 'node') return;
+
+  let testRequested = false;
+  let isolationMode: string | undefined;
+  // What the previous option does with a following bare token: `value` for a listed option that
+  // takes one, `maybe` for an unlisted option given without `=`, `none` otherwise.
+  let pending: 'value' | 'maybe' | 'none' = 'none';
+  // Set once a bare token after `--test` could have been either an option value or the first test
+  // file. From then on Node may already have stopped reading options, so `none` is not trusted.
+  let ambiguousAfterTest = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index] ?? '';
+    if (arg === '--' || arg === '-') break;
+    if (!arg.startsWith('-')) {
+      // Node stops reading its own options at the first positional argument (the script, or the
+      // first test file with `--test`). Scanning stops only where Node certainly stops, so a
+      // `--test` or an isolation override that Node reads is never missed: a bare token after a
+      // listed value option is its value, one after an unlisted option may be either and scanning
+      // continues, and any other bare token is the first positional.
+      const previous = pending;
+      pending = 'none';
+      if (previous === 'value') continue;
+      if (previous === 'maybe') {
+        if (testRequested) ambiguousAfterTest = true;
+        continue;
+      }
+      break;
+    }
+    const option = nodeOptionToken(arg);
+    pending = 'none';
+    if (NODE_INLINE_SCRIPT_OPTIONS.has(option.name)) break;
+    if (option.name === '--test') {
+      testRequested = true;
+      continue;
+    }
+    if (NODE_TEST_ISOLATION_OPTIONS.has(option.name)) {
+      let mode = option.value;
+      if (mode === undefined) {
+        mode = argv[index + 1];
+        index += 1;
+      }
+      isolationMode = mode === 'none' && ambiguousAfterTest ? undefined : mode;
+      continue;
+    }
+    if (option.value === undefined)
+      pending = NODE_OPTIONS_WITH_SEPARATE_VALUE.has(option.name)
+        ? 'value'
+        : NODE_BOOLEAN_OPTIONS.has(option.name) || option.name.startsWith('--no-')
+          ? 'none'
+          : 'maybe';
+  }
+
+  if (!testRequested || isolationMode === 'none') return;
+  secureLogger.warn(
+    'Node test process isolation was rejected before approval',
+    {
+      // Basename only. Argv values and the full executable path stay out of the log.
+      canonicalExecutable: windowsPath.basename(canonicalExecutable),
+      argvLength: argv.length,
+    },
+    { event: 'command_node_test_isolation_rejected' },
+  );
+  throw new CommandRunnerError(
+    'NODE_TEST_ISOLATION_REQUIRED',
+    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Put --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) right after node.exe, before --test and every other option, so tests run in-process. If --test is an argument to your own script, the same placement also passes, and Node ignores the flag without --test. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
+  );
+}
+
 export function normalizeTrustedWindowsCmdArgv(
   canonicalExecutable: string,
   trustedSystemDirectory: string | undefined,
@@ -429,6 +626,10 @@ export class CommandRunner {
 
   get activeCount(): number {
     return this.active.size;
+  }
+
+  get isSandboxed(): boolean {
+    return this.sandboxed;
   }
 
   writeStdin(executionId: string, chars: string, close = false): boolean {
