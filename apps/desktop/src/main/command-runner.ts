@@ -363,8 +363,74 @@ const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
   '-C',
   '--input-type',
   '--title',
+  '--inspect-port',
+  '--debug-port',
+  '--cpu-prof-dir',
+  '--cpu-prof-name',
+  '--heap-prof-dir',
+  '--heap-prof-name',
+  '--diagnostic-dir',
+  '--report-dir',
+  '--report-directory',
+  '--report-filename',
+  '--redirect-warnings',
+  '--openssl-config',
+  '--icu-data-dir',
+  '--tls-keylog',
+  '--snapshot-blob',
+  '--localstorage-file',
+  '--experimental-config-file',
+  '--experimental-sea-config',
+  '--experimental-default-type',
+  '--unhandled-rejections',
+  '--dns-result-order',
+  '--test-global-setup',
+  '--allow-fs-read',
+  '--allow-fs-write',
 ]);
-
+// Common flags that never take a separate value, so a bare token after them is a positional.
+const NODE_BOOLEAN_OPTIONS: ReadonlySet<string> = new Set([
+  '-i',
+  '-c',
+  '--check',
+  '--interactive',
+  '--enable-source-maps',
+  '--no-warnings',
+  '--no-deprecation',
+  '--pending-deprecation',
+  '--throw-deprecation',
+  '--trace-deprecation',
+  '--trace-warnings',
+  '--trace-uncaught',
+  '--trace-exit',
+  '--abort-on-uncaught-exception',
+  '--expose-gc',
+  '--preserve-symlinks',
+  '--preserve-symlinks-main',
+  '--watch',
+  '--watch-preserve-output',
+  '--inspect',
+  '--inspect-brk',
+  '--inspect-wait',
+  '--cpu-prof',
+  '--heap-prof',
+  '--frozen-intrinsics',
+  '--no-addons',
+  '--no-global-search-paths',
+  '--experimental-vm-modules',
+  '--experimental-strip-types',
+  '--no-experimental-strip-types',
+  '--experimental-transform-types',
+  '--experimental-detect-module',
+  '--experimental-require-module',
+  '--no-experimental-require-module',
+  '--experimental-test-coverage',
+  '--experimental-test-module-mocks',
+  '--experimental-test-snapshots',
+  '--test-only',
+  '--test-force-exit',
+  '--test-update-snapshots',
+]);
 type NodeOptionToken = Readonly<{ name: string; value: string | undefined }>;
 
 // Node accepts `_` in place of `-` in long option names (`--experimental_test_isolation`).
@@ -392,17 +458,23 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   // What the previous option does with a following bare token: `value` for a listed option that
   // takes one, `maybe` for an unlisted option given without `=`, `none` otherwise.
   let pending: 'value' | 'maybe' | 'none' = 'none';
+  // Set once a bare token after `--test` could have been either an option value or the first test
+  // file. From then on Node may already have stopped reading options, so `none` is not trusted.
+  let ambiguousAfterTest = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index] ?? '';
     if (arg === '--' || arg === '-') break;
     if (!arg.startsWith('-')) {
-      // Node stops reading its own options at the first positional argument. A bare token counts
-      // as an option value only right after an option given without `=`. Before `--test` an
-      // unlisted option may take it (for example `--inspect-port 0`), so scanning continues and a
-      // later `--test` is not missed. After `--test` the same token may be the first test file, so
-      // scanning stops and an isolation flag after it (which Node would not read) is not trusted.
-      if (pending === 'value' || (pending === 'maybe' && !testRequested)) {
-        pending = 'none';
+      // Node stops reading its own options at the first positional argument (the script, or the
+      // first test file with `--test`). Scanning stops only where Node certainly stops, so a
+      // `--test` or an isolation override that Node reads is never missed: a bare token after a
+      // listed value option is its value, one after an unlisted option may be either and scanning
+      // continues, and any other bare token is the first positional.
+      const previous = pending;
+      pending = 'none';
+      if (previous === 'value') continue;
+      if (previous === 'maybe') {
+        if (testRequested) ambiguousAfterTest = true;
         continue;
       }
       break;
@@ -415,14 +487,20 @@ export function rejectWindowsSandboxedNodeTestIsolation(
       continue;
     }
     if (NODE_TEST_ISOLATION_OPTIONS.has(option.name)) {
-      if (option.value === undefined) {
-        isolationMode = argv[index + 1];
+      let mode = option.value;
+      if (mode === undefined) {
+        mode = argv[index + 1];
         index += 1;
-      } else isolationMode = option.value;
+      }
+      isolationMode = mode === 'none' && ambiguousAfterTest ? undefined : mode;
       continue;
     }
     if (option.value === undefined)
-      pending = NODE_OPTIONS_WITH_SEPARATE_VALUE.has(option.name) ? 'value' : 'maybe';
+      pending = NODE_OPTIONS_WITH_SEPARATE_VALUE.has(option.name)
+        ? 'value'
+        : NODE_BOOLEAN_OPTIONS.has(option.name) || option.name.startsWith('--no-')
+          ? 'none'
+          : 'maybe';
   }
 
   if (!testRequested || isolationMode === 'none') return;
@@ -437,7 +515,7 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   );
   throw new CommandRunnerError(
     'NODE_TEST_ISOLATION_REQUIRED',
-    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Put --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) right after node.exe, before --test and every other option, so tests run in-process. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
+    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Put --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) right after node.exe, before --test and every other option, so tests run in-process. If --test is an argument to your own script, the same placement also passes, and Node ignores the flag without --test. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
   );
 }
 
