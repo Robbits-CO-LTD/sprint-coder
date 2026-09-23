@@ -34,9 +34,9 @@ export function TeamExecutionStatus({
   if (execution === null) return null;
   const display = describeExecution(execution);
   const isolation = execution.isolation ?? null;
-  const integratedRepositories =
-    isolation?.repositories.filter(({ state }) => ['integrated', 'cleaned'].includes(state))
-      .length ?? 0;
+  // A repository counts as integrated only once its work reached the Workspace. A failed or
+  // canceled Worker's unchanged worktree is also `cleaned` (issue #529), but it integrated nothing.
+  const integratedRepositories = isolation?.repositories.filter(repositoryIntegrated).length ?? 0;
   const resume = isolationResumeAction(execution, onResume, onResumeIntegration);
 
   return (
@@ -106,7 +106,7 @@ export function TeamExecutionStatus({
             <span className="team-exec-key">Repository</span>
             <span className="team-exec-value">
               {integratedRepositories}/{isolation.repositories.length} repository統合済み ·{' '}
-              {isolationPhaseLabel(isolation.phase)}
+              {isolationPhaseLabel(isolation)}
             </span>
           </p>
           <details className="team-exec-repositories">
@@ -116,8 +116,8 @@ export function TeamExecutionStatus({
                 <p className="team-exec-row" key={repository.ordinal}>
                   <span className="team-exec-key">Repo {repository.ordinal}</span>
                   <span className="team-exec-value">
-                    {isolationRepositoryStateLabel(repository.state)} ·{' '}
-                    {repository.changedFiles.length}件変更
+                    {isolationRepositoryStateLabel(repository)} · {repository.changedFiles.length}
+                    件変更
                   </span>
                 </p>
               ))}
@@ -177,8 +177,15 @@ function isolationResumeAction(
     : null;
 }
 
-function isolationPhaseLabel(phase: TeamExecutionIsolation['phase']): string {
-  switch (phase) {
+function repositoryIntegrated(repository: TeamExecutionIsolation['repositories'][number]): boolean {
+  return (
+    (repository.state === 'integrated' || repository.state === 'cleaned') &&
+    repository.integratedHead !== null
+  );
+}
+
+function isolationPhaseLabel(isolation: TeamExecutionIsolation): string {
+  switch (isolation.phase) {
     case 'preparing':
       return '隔離環境を準備中';
     case 'running':
@@ -192,14 +199,20 @@ function isolationPhaseLabel(phase: TeamExecutionIsolation['phase']): string {
     case 'completed':
       return '統合完了';
     case 'quarantined':
-      return '隔離して要確認';
+      // Nothing is left to review once every worktree was removed unchanged (issue #529).
+      return isolation.repositories.length > 0 &&
+        isolation.repositories.every(
+          ({ state, integratedHead }) => state === 'cleaned' && integratedHead === null,
+        )
+        ? '片付け済み（統合なし）'
+        : '隔離して要確認';
   }
 }
 
 function isolationRepositoryStateLabel(
-  state: TeamExecutionIsolation['repositories'][number]['state'],
+  repository: TeamExecutionIsolation['repositories'][number],
 ): string {
-  switch (state) {
+  switch (repository.state) {
     case 'active':
       return '実行中';
     case 'ready':
@@ -207,7 +220,7 @@ function isolationRepositoryStateLabel(
     case 'integrated':
       return '統合済み';
     case 'cleaned':
-      return '統合・片付け済み';
+      return repository.integratedHead === null ? '片付け済み（統合なし）' : '統合・片付け済み';
     case 'quarantined':
       return '隔離済み';
   }
