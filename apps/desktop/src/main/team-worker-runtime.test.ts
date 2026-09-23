@@ -11,7 +11,7 @@ const runtimeHostMock = vi.hoisted(() => ({
   failures: new Map<
     'claude' | 'codex' | 'grok',
     {
-      code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE';
+      code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE' | 'RUNTIME_BILLING_REQUIRED';
       userMessage: string;
       retryable: boolean;
       retryAt?: string;
@@ -44,7 +44,7 @@ vi.mock('./runtime-host', () => ({
         taskId: string,
         turnId: string,
         error: {
-          code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE';
+          code: 'RUNTIME_RATE_LIMIT' | 'RUNTIME_UNAVAILABLE' | 'RUNTIME_BILLING_REQUIRED';
           userMessage: string;
           retryable: boolean;
           retryAt?: string;
@@ -314,6 +314,38 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(releaseTeamMcp).toHaveBeenCalledTimes(2);
     expect(availability.isAvailable('claude', Date.parse('2099-08-10T01:59:59.000Z'))).toBe(false);
     expect(availability.isAvailable('claude', Date.parse('2099-08-10T02:00:00.000Z'))).toBe(true);
+  });
+
+  it('does not cool down Grok or switch runtimes when the balance is exhausted', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('grok', {
+      code: 'RUNTIME_BILLING_REQUIRED',
+      userMessage: 'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。',
+      retryable: false,
+    });
+    const availability = new TeamRuntimeAvailabilityTracker();
+    const markUnavailable = vi.spyOn(availability, 'markUnavailable');
+    const subject = runtime({
+      availability,
+      selectRuntimes: () => [
+        { kind: 'grok', model: 'grok-4.5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    });
+
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      }),
+    ).rejects.toThrow('利用残高が不足');
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['grok']);
+    expect(markUnavailable).not.toHaveBeenCalled();
+    expect(availability.isAvailable('grok')).toBe(true);
+    expect(availability.isAvailable('codex')).toBe(true);
+    subject.dispose();
   });
 
   it('does not retry a workspace-write task after the runtime has started', async () => {

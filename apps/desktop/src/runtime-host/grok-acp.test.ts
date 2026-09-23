@@ -231,3 +231,176 @@ describe('grokRecord', () => {
     expect(() => grokRecord(value)).toThrow('Invalid Grok protocol object');
   });
 });
+
+async function rejectedRpc(payload: unknown): Promise<GrokRpcError> {
+  const f = fixture();
+  const settled = f.client.request('session/prompt', {}).then(
+    () => {
+      throw new Error('expected RPC rejection');
+    },
+    (value: unknown) => value,
+  );
+  f.receive({ jsonrpc: '2.0', id: 1, error: payload });
+  const error = await settled;
+  expect(error).toBeInstanceOf(GrokRpcError);
+  expect(f.failed).not.toHaveBeenCalled();
+  return error as GrokRpcError;
+}
+
+function exposedErrorText(error: object): string {
+  const names = Object.getOwnPropertyNames(error).map(
+    (key) => `${key}=${String(Reflect.get(error, key))}`,
+  );
+  const symbols = Object.getOwnPropertySymbols(error).map(
+    (key) => `${String(key)}=${String(Reflect.get(error, key))}`,
+  );
+  return [...names, ...symbols, JSON.stringify(error)].join('\n');
+}
+
+describe('Grok RPC failure classification', () => {
+  const nestedBilling = {
+    code: -32603,
+    message: 'Internal error',
+    data: {
+      message: 'API error (status 402 Payment Required): Grok Build usage balance exhausted',
+      http_status: 402,
+    },
+  };
+
+  it('classifies a nested 402 payment failure and keeps the observed status', async () => {
+    const error = await rejectedRpc(nestedBilling);
+    expect(error).toMatchObject({
+      code: -32603,
+      category: 'billing',
+      httpStatus: 402,
+      message: 'Grok ACP request failed',
+    });
+  });
+
+  it('classifies http_status 402 without billing words', async () => {
+    const error = await rejectedRpc({
+      code: -32603,
+      message: 'Internal error',
+      data: { http_status: 402 },
+    });
+    expect(error.category).toBe('billing');
+    expect(error.httpStatus).toBe(402);
+  });
+
+  it.each([
+    ['402 Payment Required', 'billing'],
+    ['status 402', 'other'],
+    ['Payment Required', 'other'],
+    ['402 quota exhausted', 'billing'],
+    ['quota exhausted', 'rate_limit'],
+  ] as const)('classifies plain text %j as %s', async (message, category) => {
+    const error = await rejectedRpc({ code: -32603, message });
+    expect(error.category).toBe(category);
+    expect(error.httpStatus).toBeUndefined();
+  });
+
+  it('classifies a nested 429 and a 429 mentioned only in data.message', async () => {
+    const nested = await rejectedRpc({
+      code: -32603,
+      message: 'Internal error',
+      data: { message: 'rate limit', http_status: 429 },
+    });
+    expect(nested.category).toBe('rate_limit');
+    expect(nested.httpStatus).toBe(429);
+    const textOnly = await rejectedRpc({
+      code: -32603,
+      message: 'Internal error',
+      data: { message: '429 too many requests' },
+    });
+    expect(textOnly.category).toBe('rate_limit');
+    expect(textOnly.httpStatus).toBeUndefined();
+  });
+
+  it('classifies a nested 401 as authentication', async () => {
+    const error = await rejectedRpc({
+      code: -32603,
+      message: 'Internal error',
+      data: { http_status: 401 },
+    });
+    expect(error.category).toBe('authentication');
+    expect(error.httpStatus).toBe(401);
+  });
+
+  it.each(['402', 402.5, 99, 600, null])('ignores an unusable http_status %j', async (status) => {
+    const error = await rejectedRpc({
+      code: -32603,
+      message: 'Internal error',
+      data: { http_status: status },
+    });
+    expect(error.category).toBe('other');
+    expect(error.httpStatus).toBeUndefined();
+  });
+
+  it.each([[{ http_status: 402, message: '402 Payment Required' }], '402 Payment Required', null])(
+    'ignores http status when data is not an object: %j',
+    async (data) => {
+      const error = await rejectedRpc({ code: -32603, message: 'Internal error', data });
+      expect(error.category).toBe('other');
+      expect(error.httpStatus).toBeUndefined();
+    },
+  );
+
+  it('keeps authentication when code -32000 carries a non-decisive status', async () => {
+    const error = await rejectedRpc({
+      code: -32000,
+      message: 'Internal error',
+      data: { http_status: 500, message: 'upstream failed' },
+    });
+    expect(error.category).toBe('authentication');
+    expect(error.httpStatus).toBe(500);
+  });
+
+  it('lets an observed 402 outrank an authentication code', async () => {
+    const error = await rejectedRpc({
+      code: -32000,
+      message: 'Internal error',
+      data: { http_status: 402 },
+    });
+    expect(error.category).toBe('billing');
+    expect(error.httpStatus).toBe(402);
+  });
+
+  it('reads billing text after a non-decisive status without inventing 402', async () => {
+    const error = await rejectedRpc({
+      code: -32603,
+      message: '402 Payment Required',
+      data: { http_status: 500 },
+    });
+    expect(error.category).toBe('billing');
+    expect(error.httpStatus).toBe(500);
+  });
+
+  it('classifies only the first 4KiB of provider text', async () => {
+    const pastLimit = `${'あ'.repeat(1365)}あ402 Payment Required`;
+    const hidden = await rejectedRpc({ code: -32603, message: pastLimit });
+    expect(hidden.category).toBe('other');
+    expect(hidden.httpStatus).toBeUndefined();
+    const visible = await rejectedRpc({
+      code: -32603,
+      message: `402 Payment Required${'あ'.repeat(2000)}`,
+    });
+    expect(visible.category).toBe('billing');
+    expect(visible.httpStatus).toBeUndefined();
+  });
+
+  it('does not copy provider billing text onto the RPC error', async () => {
+    const canary = 'CANARY_BILLING_TEXT';
+    const error = await rejectedRpc({
+      code: -32603,
+      message: `402 Payment Required ${canary}`,
+      data: {
+        message: `balance exhausted ${canary}`,
+        http_status: 402,
+        detail: canary,
+      },
+    });
+    expect(error.category).toBe('billing');
+    expect(error.httpStatus).toBe(402);
+    expect(exposedErrorText(error)).not.toContain(canary);
+  });
+});

@@ -332,4 +332,29 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     collector.setCliVersion('claude-code /Users/private');
     expect(collector.snapshot('abnormal_exit').cliVersion).toBeNull();
   });
+
+  it('records only an integer Grok HTTP status from 100 to 599', () => {
+    const grok = new RuntimeFailureDiagnosticCollector('grok', '0.7.0', 'grok 1.0.0', false);
+    grok.recordGrokHttpStatus(402.5);
+    const withoutStatus = grok.snapshot('billing_error');
+    expect(withoutStatus).not.toHaveProperty('httpStatus');
+    expect(isRuntimeFailureDiagnostic(withoutStatus)).toBe(true);
+    for (const status of [100, 402, 599]) {
+      grok.recordGrokHttpStatus(status);
+      const diagnostic = grok.snapshot(status === 100 ? 'rate_limit' : 'billing_error');
+      expect(diagnostic.httpStatus).toBe(status);
+      expect(isRuntimeFailureDiagnostic(diagnostic)).toBe(true);
+    }
+    grok.recordGrokHttpStatus(99);
+    grok.recordGrokHttpStatus(600);
+    expect(grok.snapshot('billing_error').httpStatus).toBe(599);
+
+    const codex = new RuntimeFailureDiagnosticCollector('codex', '0.2.3', 'codex 1.0.0', false);
+    codex.recordGrokHttpStatus(402);
+    const codexDiagnostic = codex.snapshot('protocol_error');
+    expect(codexDiagnostic).not.toHaveProperty('httpStatus');
+    expect(isRuntimeFailureDiagnostic(codexDiagnostic)).toBe(true);
+    expect(isRuntimeFailureDiagnostic(codex.snapshot('billing_error'))).toBe(false);
+    expect(isRuntimeFailureDiagnostic(codex.snapshot('rate_limit'))).toBe(false);
+  });
 });

@@ -1420,7 +1420,12 @@ describe('public contracts', () => {
         rawError: '/Users/alice/private/update.log',
       }),
     ).toThrow();
-    for (const code of ['STEER_UNSUPPORTED', 'USER_CANCELED', 'RUNTIME_RATE_LIMIT'] as const)
+    for (const code of [
+      'STEER_UNSUPPORTED',
+      'USER_CANCELED',
+      'RUNTIME_RATE_LIMIT',
+      'RUNTIME_BILLING_REQUIRED',
+    ] as const)
       expect(
         publicErrorSchema.parse({
           code,

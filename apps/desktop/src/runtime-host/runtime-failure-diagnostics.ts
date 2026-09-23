@@ -29,6 +29,7 @@ export class RuntimeFailureDiagnosticCollector {
   private capabilityMismatch: RuntimeFailureDiagnostic['capabilityMismatch'];
   private codexIsolation: RuntimeFailureDiagnostic['codexIsolation'];
   private cliResolution: ResolvedCliCommand | null = null;
+  private httpStatus?: number;
 
   constructor(
     private readonly runtimeKind: RuntimeKind,
@@ -91,7 +92,15 @@ export class RuntimeFailureDiagnosticCollector {
     this.codexIsolation = Object.freeze({ ...input });
   }
 
+  /** Records an observed Grok HTTP status. Other runtimes and out-of-range values are ignored. */
+  recordGrokHttpStatus(status: number): void {
+    if (this.runtimeKind !== 'grok' || !Number.isInteger(status) || status < 100 || status > 599)
+      return;
+    this.httpStatus = status;
+  }
+
   snapshot(stage: RuntimeFailureStage, now = Date.now()): RuntimeFailureDiagnostic {
+    const httpStatus = this.httpStatus;
     const diagnostic: RuntimeFailureDiagnostic = {
       version: 1,
       diagnosticId: randomUUID(),
@@ -114,6 +123,7 @@ export class RuntimeFailureDiagnosticCollector {
       stderrObserved: this.stderrObserved,
       stderrTruncated: this.stderrTruncated,
       ...(this.codexIsolation === undefined ? {} : { codexIsolation: this.codexIsolation }),
+      ...(httpStatus === undefined ? {} : { httpStatus }),
       recordedAt: new Date(now).toISOString(),
     };
     return diagnostic;

@@ -13,6 +13,19 @@ const promptMeta = () =>
     : { _meta: { modelId: mode === 'prompt-model-mismatch' ? 'grok-other' : currentModel } };
 let tools = [];
 const send = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
+function billingError(statusOnly) {
+  return {
+    code: -32603,
+    message: 'Internal error',
+    data: statusOnly
+      ? { http_status: 402 }
+      : {
+          message:
+            'API error (status 402 Payment Required): Grok Build usage balance exhausted CANARY_BILLING_TEXT',
+          http_status: 402,
+        },
+  };
+}
 const update = (update, id = sessionId) =>
   send({ method: 'session/update', params: { sessionId: id, update } });
 const mcpInventoryUpdate = () =>
@@ -44,6 +57,10 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     });
   } else if (request.method === 'authenticate') reply({});
   else if (request.method === 'session/new') {
+    if (mode === 'billing-startup') {
+      send({ id: request.id, error: billingError(false) });
+      return;
+    }
     if (request.params._meta.agentProfile.tools.join(',') !== 'search_tool,use_tool')
       process.exit(5);
     tools = request.params.mcpServers.length ? ['search_tool', 'use_tool'] : [];
@@ -121,6 +138,14 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
         id: request.id,
         error: { code: -32603, message: '429 Rate limit exceeded FAKE_SECRET_NOT_FOR_UI' },
       });
+      return;
+    }
+    if (mode === 'billing-nested') {
+      send({ id: request.id, error: billingError(false) });
+      return;
+    }
+    if (mode === 'billing-status-only') {
+      send({ id: request.id, error: billingError(true) });
       return;
     }
     update(

@@ -8,12 +8,24 @@ import {
   grokMcpInventoryReady,
   grokModelsFromInitialize,
 } from './grok-adapter';
-import type { RuntimeCanonicalEvent, RuntimeTeamMcpOption } from './protocol';
+import {
+  isRuntimeFailureDiagnostic,
+  type RuntimeCanonicalEvent,
+  type RuntimeFailureDiagnostic,
+  type RuntimeTeamMcpOption,
+} from './protocol';
 import type { PublicError } from '@sprint-coder/contracts';
 
 const fixture = fileURLToPath(new URL('./fixtures/grok-acp.cjs', import.meta.url));
-function run(model: string, timeout = 5_000, teamMcp?: RuntimeTeamMcpOption) {
-  const adapter = new GrokRuntimeAdapter(timeout, [fixture]);
+const billingMessage =
+  'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。';
+function run(
+  model: string,
+  timeout = 5_000,
+  teamMcp?: RuntimeTeamMcpOption,
+  turnId = 'turn',
+  adapter = new GrokRuntimeAdapter(timeout, [fixture]),
+) {
   adapter.setCliResolution({
     executable: process.execPath,
     source: 'explicit',
@@ -23,24 +35,28 @@ function run(model: string, timeout = 5_000, teamMcp?: RuntimeTeamMcpOption) {
   });
   const events: RuntimeCanonicalEvent[] = [];
   const errors: PublicError[] = [];
+  const diagnostics: RuntimeFailureDiagnostic[] = [];
   const accepted = vi.fn();
   let finish!: (value: { code: number; canceled: boolean }) => void;
   const exit = new Promise<{ code: number; canceled: boolean }>((resolve) => {
     finish = resolve;
   });
   adapter.start(
-    'turn',
+    turnId,
     'Synthetic test',
     [],
     accepted,
     null,
     model,
     (event) => events.push(event),
-    (error) => errors.push(error),
+    (error, diagnostic) => {
+      errors.push(error);
+      if (diagnostic !== undefined) diagnostics.push(diagnostic);
+    },
     (code, canceled) => finish({ code, canceled }),
     teamMcp,
   );
-  return { adapter, events, errors, accepted, exit };
+  return { adapter, events, errors, diagnostics, accepted, exit };
 }
 
 describe('Grok ACP adapter process lifecycle', () => {
@@ -191,8 +207,52 @@ describe('Grok ACP adapter process lifecycle', () => {
     const test = run('rate-limit');
     await test.exit;
     expect(test.errors).toHaveLength(1);
-    expect(test.errors[0]?.code).toBe('RUNTIME_RATE_LIMIT');
-    expect(JSON.stringify(test.errors)).not.toContain('FAKE_SECRET');
+    expect(test.errors[0]).toMatchObject({ code: 'RUNTIME_RATE_LIMIT', retryable: true });
+    expect(test.diagnostics).toHaveLength(1);
+    expect(test.diagnostics[0]).toMatchObject({
+      runtimeKind: 'grok',
+      failureStage: 'rate_limit',
+    });
+    expect(test.diagnostics[0]?.httpStatus).toBeUndefined();
+    expect(test.events.filter((event) => event.type === 'completed')).toHaveLength(0);
+    expect(JSON.stringify({ errors: test.errors, diagnostics: test.diagnostics })).not.toContain(
+      'FAKE_SECRET',
+    );
+  });
+  it.each(['billing-nested', 'billing-status-only', 'billing-startup'])(
+    'reports a Grok billing failure once, including during session startup: %s',
+    async (mode) => {
+      const test = run(mode);
+      await test.exit;
+      expect(test.errors).toEqual([
+        {
+          code: 'RUNTIME_BILLING_REQUIRED',
+          userMessage: billingMessage,
+          retryable: false,
+        },
+      ]);
+      expect(test.events.filter((event) => event.type === 'completed')).toHaveLength(0);
+      expect(test.diagnostics).toHaveLength(1);
+      expect(test.diagnostics[0]).toMatchObject({
+        runtimeKind: 'grok',
+        failureStage: 'billing_error',
+        httpStatus: 402,
+      });
+      expect(isRuntimeFailureDiagnostic(test.diagnostics[0])).toBe(true);
+      expect(JSON.stringify({ errors: test.errors, diagnostics: test.diagnostics })).not.toContain(
+        'CANARY_BILLING_TEXT',
+      );
+    },
+  );
+  it('completes a later turn on the same adapter after a billing failure', async () => {
+    const first = run('billing-nested');
+    await first.exit;
+    expect(first.errors).toHaveLength(1);
+    expect(first.events.filter((event) => event.type === 'completed')).toHaveLength(0);
+    const second = run('normal', 5_000, undefined, 'turn-2', first.adapter);
+    await second.exit;
+    expect(second.errors).toEqual([]);
+    expect(second.events.filter((event) => event.type === 'completed')).toHaveLength(1);
   });
   it('settles missing executables', async () => {
     const adapter = new GrokRuntimeAdapter();
