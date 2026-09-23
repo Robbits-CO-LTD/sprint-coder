@@ -4543,6 +4543,33 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       }
+      // Main verifies the Worker's Edit Sagas while the isolated worktree still exists. After integration
+      // the worktree is removed and the Leader Turn's completion gate skips these Sagas (issue #516), so
+      // their verification evidence is recorded here. An unverified Saga does not stop integration: it
+      // records nothing and keeps the Leader Turn from completing, as a Leader-written Saga would.
+      // A verification error is treated the same way: nothing is recorded (the transaction rolls
+      // back), so the completion gate still holds, and the Worker's work is integrated regardless.
+      // Both outcomes leave a diagnostic, since the worktree cannot be observed after integration.
+      try {
+        const unverified = this.persistence.verifyTeamExecutionIsolationEditSagaPostImages({
+          executionId: isolation.executionId,
+          createdAt: this.isoNow(),
+        });
+        if (unverified.length > 0)
+          this.reportIsolationVerification(
+            isolation.executionId,
+            input,
+            'team.isolation.sagas_unverified',
+            String(unverified.length),
+          );
+      } catch (error) {
+        this.reportIsolationVerification(
+          isolation.executionId,
+          input,
+          'team.isolation.verification_failed',
+          error instanceof Error ? error.name : 'Error',
+        );
+      }
       isolation = this.persistence.updateTeamExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_integration',
@@ -4565,6 +4592,28 @@ export class TeamCoordinator {
       isolation,
       changedFiles: this.isolationChangedFiles(isolation),
     };
+  }
+
+  private reportIsolationVerification(
+    executionId: string,
+    input: Readonly<{ agentId: string; missionId: string }>,
+    event: 'team.isolation.sagas_unverified' | 'team.isolation.verification_failed',
+    result: string,
+  ): void {
+    try {
+      const execution = this.persistence.getTeamExecution(executionId);
+      this.diagnostic?.({
+        event,
+        taskId: this.persistence.getTeam(execution.teamId).taskId,
+        teamId: execution.teamId,
+        missionId: input.missionId,
+        workerId: input.agentId,
+        status: 'unverified',
+        result,
+      });
+    } catch {
+      // Diagnostics are best effort and must not affect integration.
+    }
   }
 
   private async integrateIsolation(

@@ -3481,6 +3481,132 @@ if (runsWithElectronAbi)
       },
     );
 
+    it.each(['update', 'delete'] as const)(
+      'records Main verification for an isolated Worker %s Saga before integration so the Leader Turn completes without a read-back',
+      async (operation) => {
+        const fixture = await commitIsolatedWorkerEdit({
+          phase: 'completed',
+          repositoryState: 'cleaned',
+          recordVerification: false,
+          operation,
+          realIsolatedIdentity: true,
+          verifyBeforeIntegration: true,
+        });
+        try {
+          expect(fixture.verifications).toEqual([[], []]);
+          expect(existsSync(fixture.worktreePath)).toBe(false);
+          for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+            fixture.persistence.changeStage(fixture.taskId, fixture.turnId, stage);
+          expect(
+            fixture.persistence.completeTurn(fixture.taskId, fixture.turnId, 'completed'),
+          ).toMatchObject({ type: 'turn.completed', state: 'completed' });
+          expect(
+            fixture.persistence
+              .listEvidenceRecords(fixture.taskId, fixture.turnId)
+              .filter(({ kind }) => kind === 'verification_passed')
+              .map(({ criterionId, producer, trust }) => ({ criterionId, producer, trust })),
+          ).toEqual([
+            {
+              criterionId: `verification:${fixture.sagaId}`,
+              producer: 'assurance-controller',
+              trust: 'main-observed',
+            },
+          ]);
+        } finally {
+          fixture.persistence.close();
+        }
+      },
+    );
+
+    it('keeps an isolated Worker Saga criterion open when its worktree post-image no longer holds before integration', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'completed',
+        repositoryState: 'cleaned',
+        recordVerification: false,
+        operation: 'update',
+        realIsolatedIdentity: true,
+        verifyBeforeIntegration: true,
+        tamperBeforeVerification: true,
+      });
+      try {
+        expect(fixture.verifications).toEqual([
+          [`verification:${fixture.sagaId}`],
+          [`verification:${fixture.sagaId}`],
+        ]);
+        expect(
+          fixture.persistence
+            .listEvidenceRecords(fixture.taskId, fixture.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+        expect(refusedTurnCompletion(fixture).openCriterionIds).toEqual([
+          `verification:${fixture.sagaId}`,
+        ]);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
+    it('verifies only the active Turn when one isolation holds Worker Sagas from more than one Turn', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'completed',
+        repositoryState: 'cleaned',
+        recordVerification: false,
+        operation: 'update',
+        realIsolatedIdentity: true,
+        verifyBeforeIntegration: true,
+        rewriteInLaterTurn: true,
+      });
+      try {
+        // The earlier Turn has already finished, so its overwritten Saga is neither verified nor
+        // reported. The active Turn's Saga holds and its Leader Turn completes.
+        expect(fixture.verifications).toEqual([[], []]);
+        expect(
+          fixture.persistence
+            .listAssuranceRounds(fixture.taskId, fixture.earlierTurnId, fixture.earlierSagaId)
+            .map(({ decision }) => decision),
+        ).toEqual([]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          fixture.persistence.changeStage(fixture.taskId, fixture.turnId, stage);
+        expect(
+          fixture.persistence.completeTurn(fixture.taskId, fixture.turnId, 'completed'),
+        ).toMatchObject({ type: 'turn.completed', state: 'completed' });
+        expect(
+          fixture.persistence
+            .listEvidenceRecords(fixture.taskId, fixture.turnId)
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId }) => criterionId),
+        ).toEqual([`verification:${fixture.sagaId}`]);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
+    it.each(['running', 'completed'] as const)(
+      'refuses to verify isolated Worker Sagas while the isolation is %s',
+      async (phase) => {
+        const fixture = await commitIsolatedWorkerEdit({
+          phase,
+          repositoryState: phase === 'running' ? 'active' : 'cleaned',
+          recordVerification: false,
+        });
+        try {
+          expect(() =>
+            fixture.persistence.verifyTeamExecutionIsolationEditSagaPostImages({
+              executionId: fixture.executionId,
+              createdAt: '2026-07-23T00:02:00.000Z',
+            }),
+          ).toThrow(OperationConflictError);
+          expect(
+            fixture.persistence
+              .listEvidenceRecords(fixture.taskId, fixture.turnId)
+              .some(({ kind }) => kind === 'verification_passed'),
+          ).toBe(false);
+        } finally {
+          fixture.persistence.close();
+        }
+      },
+    );
+
     artifactIt(
       'keeps the criterion open when a committed post-image no longer matches on disk',
       async () => {
@@ -9857,14 +9983,25 @@ async function commitIsolatedWorkerEdit(input: {
   phase: 'running' | 'integrating' | 'completed';
   repositoryState: 'active' | 'ready' | 'integrated' | 'cleaned';
   recordVerification: boolean;
+  operation?: 'update' | 'delete';
+  realIsolatedIdentity?: boolean;
+  verifyBeforeIntegration?: boolean;
+  tamperBeforeVerification?: boolean;
+  rewriteInLaterTurn?: boolean;
 }): Promise<{
   persistence: SqlitePersistenceClient;
   taskId: string;
   turnId: string;
   sagaId: string;
+  earlierTurnId: string;
+  earlierSagaId: string;
+  executionId: string;
   worktreePath: string;
+  verifications: readonly (readonly string[])[];
 }> {
   const { persistence, path } = createPersistence();
+  const operation = input.operation ?? 'update';
+  const verifications: (readonly string[])[] = [];
   try {
     persistence.setRuntime('codex');
     persistence.setModel('gpt-5.6-terra');
@@ -9898,8 +10035,15 @@ async function commitIsolatedWorkerEdit(input: {
     const turn = persistence.startTurn(task.id, 'Worker に隔離 worktree でファイルを作らせる');
     const root = persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)?.roots[0];
     if (root === undefined) throw new Error('sealed turn root missing');
-    const isolatedIdentity = '5'.repeat(64);
+    const isolatedIdentity = (() => {
+      if (input.realIsolatedIdentity !== true) return '5'.repeat(64);
+      const digest = currentWorkspaceRootIdentityDigest(worktreePath);
+      expect(digest).not.toBeNull();
+      if (digest === null) throw new Error('isolated root identity missing');
+      return digest;
+    })();
     const isolatedMutationKey = '7'.repeat(64);
+    const editedName = operation === 'delete' ? 'doomed.txt' : 'created.txt';
     const activeRepository = {
       ordinal: 1,
       repoPath: workspacePath,
@@ -9908,7 +10052,7 @@ async function commitIsolatedWorkerEdit(input: {
       workerHead: null,
       integratedHead: null,
       state: 'active' as const,
-      changedFiles: ['created.txt'],
+      changedFiles: [editedName],
     };
     persistence.createTeamExecutionIsolation({
       executionId: execution.id,
@@ -9934,12 +10078,14 @@ async function commitIsolatedWorkerEdit(input: {
       phase: 'running',
       now: '2026-07-23T00:00:02.000Z',
     });
-    const workspaceFile = join(worktreePath, 'created.txt');
-    writeFileSync(workspaceFile, 'before');
+    const workspaceFile = join(worktreePath, editedName);
+    writeFileSync(workspaceFile, operation === 'delete' ? 'doomed' : 'before');
     const artifacts = new PersistenceTestArtifacts();
     const saga = await new EditSagaExecutor(
       new PersistenceEditSagaStore(persistence),
-      fileBoundary(workspaceFile, artifacts),
+      operation === 'delete'
+        ? deleteOnlyBoundary(workspaceFile)
+        : fileBoundary(workspaceFile, artifacts),
       artifacts,
       undefined,
       new SqliteEditSagaLeaseGuard(persistence, 'issue-516-lease'),
@@ -9948,7 +10094,10 @@ async function commitIsolatedWorkerEdit(input: {
       taskId: task.id,
       turnId: turn.turnId,
       operationId: 'issue-516-worker-operation',
-      plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+      plan:
+        operation === 'delete'
+          ? persistedDeleteOnlyPlan(workspaceFile)
+          : persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
       mutationBinding: {
         rootId: root.rootId,
         workspacePath: worktreePath,
@@ -9972,6 +10121,36 @@ async function commitIsolatedWorkerEdit(input: {
         failureClass: null,
         createdAt: new Date(Date.parse(saga.updatedAt) + 1_000).toISOString(),
       });
+    let completingTurnId = turn.turnId;
+    let completingSaga = saga;
+    if (input.rewriteInLaterTurn === true) {
+      persistence.completeTurn(task.id, turn.turnId, 'failed');
+      const later = persistence.startTurn(task.id, 'Worker の変更を次の Turn で書き直す');
+      completingSaga = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        fileBoundary(workspaceFile, artifacts, 'after', 'rewritten'),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'issue-516-later-lease'),
+      ).apply({
+        // Both Sagas have commit_sequence 1 in their own Turn, and this id sorts first, so ordering
+        // across Turns by (commit_sequence, id) would take the earlier Turn's Saga as the last writer.
+        id: 'a-issue-516-later-saga',
+        taskId: task.id,
+        turnId: later.turnId,
+        operationId: 'issue-516-later-operation',
+        plan: persistedEditPlan('after', 'rewritten', workspaceFile, workspaceFile),
+        mutationBinding: {
+          rootId: root.rootId,
+          workspacePath: worktreePath,
+          workspaceKey: isolatedMutationKey,
+          rootIdentityDigest: isolatedIdentity,
+        },
+        createdAt: '2026-07-23T00:00:04.000Z',
+      });
+      expect(completingSaga).toMatchObject({ state: 'committed', turnId: later.turnId });
+      completingTurnId = later.turnId;
+    }
     if (input.phase !== 'running') {
       const settled = {
         ...activeRepository,
@@ -9987,6 +10166,18 @@ async function commitIsolatedWorkerEdit(input: {
         phase: 'finalizing',
         now: '2026-07-23T00:00:05.000Z',
       });
+      if (input.tamperBeforeVerification === true) writeFileSync(workspaceFile, 'tampered');
+      if (input.verifyBeforeIntegration === true) {
+        const verifyAt = (createdAt: string) =>
+          persistence.verifyTeamExecutionIsolationEditSagaPostImages({
+            executionId: execution.id,
+            createdAt,
+          });
+        verifications.push(
+          verifyAt('2026-07-23T00:00:05.100Z'),
+          verifyAt('2026-07-23T00:00:05.200Z'),
+        );
+      }
       persistence.updateTeamExecutionIsolation({
         executionId: execution.id,
         phase: 'integrating',
@@ -10004,9 +10195,13 @@ async function commitIsolatedWorkerEdit(input: {
     return {
       persistence,
       taskId: task.id,
-      turnId: turn.turnId,
-      sagaId: saga.id,
+      turnId: completingTurnId,
+      sagaId: completingSaga.id,
+      earlierTurnId: turn.turnId,
+      earlierSagaId: saga.id,
+      executionId: execution.id,
       worktreePath,
+      verifications,
     };
   } catch (error) {
     persistence.close();
@@ -10371,6 +10566,62 @@ function fileBoundary(
       const value = (await artifacts.read(reference)).toString('utf8');
       writeFileSync(filePath, value);
       return observeValue(value);
+    },
+  };
+}
+
+/** Delete-only plan, the delete operation of `persistedUpdateAndDeletePlan` on its own. */
+function persistedDeleteOnlyPlan(deletePath: string): PreparedStructuredPatch {
+  const revision = Object.freeze({
+    identityDigest: editHash('identity:batch-delete'),
+    contentHash: editHash('doomed'),
+    size: Buffer.byteLength('doomed'),
+    mode: 0o100600,
+    nlink: 1 as const,
+  });
+  const facts = {
+    version: 1 as const,
+    policyEpoch: 0,
+    operations: Object.freeze([
+      Object.freeze({
+        kind: 'delete' as const,
+        path: deletePath,
+        canonicalPath: deletePath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-batch-delete',
+        preRevision: revision,
+        preImage: 'doomed',
+        postImage: null,
+        preHash: editHash('doomed'),
+        postHash: null,
+      }),
+    ]),
+  };
+  return Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+}
+
+/** Applies the delete branch of `updateAndDeleteBoundary` as a whole Saga. */
+function deleteOnlyBoundary(deletePath: string): EditEffectBoundary {
+  const present = (value: string) => persistedObservation(value, `file:${editHash(value)}`);
+  const absent = (): OperationObservation => ({
+    source: { state: 'absent' },
+    destination: { state: 'absent' },
+  });
+  return {
+    async apply(step: EditSagaStep) {
+      if (step.operation.kind !== 'delete') throw new Error('expected a delete operation');
+      rmSync(deletePath);
+      return absent();
+    },
+    async observe() {
+      return existsSync(deletePath)
+        ? { state: 'pre' as const, observation: present('doomed') }
+        : { state: 'post' as const, observation: absent() };
+    },
+    async restore() {
+      writeFileSync(deletePath, 'doomed');
+      return present('doomed');
     },
   };
 }
