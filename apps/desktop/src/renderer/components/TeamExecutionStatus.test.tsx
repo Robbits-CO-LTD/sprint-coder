@@ -285,6 +285,21 @@ describe('TeamExecutionStatus', () => {
     expect(mixed).toContain('統合・片付け済み');
     expect(mixed).toContain('隔離して要確認');
     expect(mixed).not.toContain('片付け済み（統合なし）');
+
+    // Every worktree is gone, but one repository did integrate before the isolation was
+    // quarantined, so the heading must not claim that nothing was integrated.
+    const partlyIntegrated = renderToStaticMarkup(
+      <TeamExecutionStatus
+        execution={isolation([
+          { ...repository, integratedHead: 'e'.repeat(40), state: 'cleaned' },
+          { ...repository, ordinal: 2, integratedHead: null, state: 'cleaned' },
+        ])}
+        variant="list"
+      />,
+    );
+    expect(partlyIntegrated).toContain('1/2 repository統合済み · 隔離して要確認');
+    expect(partlyIntegrated).toContain('統合・片付け済み');
+    expect(partlyIntegrated).toContain('片付け済み（統合なし）');
   });
 
   it('routes standalone integration and Worker resumes to distinct labeled actions', () => {

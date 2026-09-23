@@ -34,8 +34,8 @@ export function TeamExecutionStatus({
   if (execution === null) return null;
   const display = describeExecution(execution);
   const isolation = execution.isolation ?? null;
-  // A repository counts as integrated only once its work reached the Workspace. A failed or
-  // canceled Worker's unchanged worktree is also `cleaned` (issue #529), but it integrated nothing.
+  // Only repositories that recorded an integrated HEAD count. A failed or canceled Worker's
+  // unchanged worktree is also `cleaned` (issue #529), but it integrated nothing.
   const integratedRepositories = isolation?.repositories.filter(repositoryIntegrated).length ?? 0;
   const resume = isolationResumeAction(execution, onResume, onResumeIntegration);
 
