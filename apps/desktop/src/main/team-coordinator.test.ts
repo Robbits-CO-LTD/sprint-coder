@@ -1,4 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -18,6 +19,7 @@ import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   DeterministicTeamWorkerRuntime,
   TeamCoordinator,
+  WorkerRuntimeFailureError,
   captureGitWorkspaceFingerprint,
   executeWithWatchdog,
   priorConversationForAgent,
@@ -32,7 +34,7 @@ import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { WorkerWorktreeManager } from './worker-worktree';
-import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -643,6 +645,29 @@ class FailOnceWorkerRuntime extends TestWorkerRuntime {
     if (this.executeCount === 1) throw new Error('deliberate first-attempt failure');
     return super.execute(input);
   }
+}
+
+function grokFailureDiagnostic(
+  failureStage: 'billing_error' | 'protocol_error',
+  httpStatus?: number,
+): RuntimeFailureDiagnostic {
+  return {
+    version: 1,
+    diagnosticId: randomUUID(),
+    runtimeKind: 'grok',
+    failureStage,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    elapsedMs: 12,
+    appVersion: 'test',
+    cliVersion: null,
+    teamMcp: { enabled: false, status: 'not_configured' },
+    lastRecognizedNotification: null,
+    lastReceivedNotification: null,
+    unsupportedNotificationCount: 0,
+    stderrObserved: false,
+    stderrTruncated: false,
+    recordedAt: '2026-09-22T00:00:00.000Z',
+  };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -4536,6 +4561,233 @@ if (runsWithElectronAbi)
         status: 'failed',
         summary: 'deliberate runtime failure',
       });
+      persistence.close();
+    });
+
+    it('records the Worker runtime error code and diagnostic on the attempt without retrying a billing failure', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Billing failure');
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const userMessage = 'billing-user-message-canary';
+      const assignment = 'assignment-content-canary';
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeFailureError(
+            { code: 'RUNTIME_BILLING_REQUIRED', userMessage, retryable: false },
+            'grok',
+            'runtime-turn-billing',
+            grokFailureDiagnostic('billing_error', 402),
+          );
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'billing worker',
+        objective: 'prove billing is not retried',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: assignment,
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      const attempts = persistence.listTeamAttempts(submission.executionId);
+      expect(executeCount).toBe(1);
+      expect(attempts).toEqual([
+        expect.objectContaining({ state: 'failed', terminalReason: 'runtime_failure' }),
+      ]);
+      const attempt = attempts[0];
+      if (attempt === undefined) throw new Error('expected one attempt');
+      const record = persistence.getTeamAttemptFailureDiagnostic(attempt.id);
+      expect(record).toMatchObject({
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        runtimeKind: 'grok',
+        diagnostic: { failureStage: 'billing_error', httpStatus: 402 },
+      });
+      expect(persistence.getRuntimeFailureDiagnostic({ taskId: task.id })).toMatchObject({
+        attemptId: attempt.id,
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        httpStatus: 402,
+      });
+      expect(diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            event: 'team.attempt.runtime_failed',
+            result: 'RUNTIME_BILLING_REQUIRED',
+          }),
+        ]),
+      );
+      expect(JSON.stringify(record)).not.toContain(userMessage);
+      expect(JSON.stringify(record)).not.toContain(assignment);
+      expect(JSON.stringify(diagnostics)).not.toContain(userMessage);
+      expect(JSON.stringify(diagnostics)).not.toContain(assignment);
+      persistence.close();
+    });
+
+    it('still retries a read-only Worker once after a non-billing runtime failure and records each attempt', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Retryable runtime failure');
+      const failures = [
+        new WorkerRuntimeFailureError(
+          { code: 'RUNTIME_FAILED', userMessage: 'first runtime failed', retryable: false },
+          'grok',
+          'runtime-turn-1',
+          grokFailureDiagnostic('protocol_error'),
+        ),
+        new WorkerRuntimeFailureError(
+          {
+            code: 'RUNTIME_PROTOCOL_ERROR',
+            userMessage: 'second runtime failed',
+            retryable: true,
+          },
+          'grok',
+          'runtime-turn-2',
+          undefined,
+        ),
+      ];
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          const failure = failures[executeCount];
+          executeCount += 1;
+          if (failure === undefined) throw new Error('unexpected third execution');
+          throw failure;
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'retry worker',
+        objective: 'prove one safe retry',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail then fail again',
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      const attempts = persistence.listTeamAttempts(submission.executionId);
+      expect(attempts).toMatchObject([
+        { state: 'failed', startReason: 'initial', terminalReason: 'runtime_failure' },
+        { state: 'failed', startReason: 'automatic_retry', terminalReason: 'runtime_failure' },
+      ]);
+      const first = attempts[0];
+      const second = attempts[1];
+      if (first === undefined || second === undefined) throw new Error('expected two attempts');
+      expect(persistence.getTeamAttemptFailureDiagnostic(first.id)).toMatchObject({
+        errorCode: 'RUNTIME_FAILED',
+        diagnostic: { failureStage: 'protocol_error' },
+      });
+      expect(persistence.getTeamAttemptFailureDiagnostic(second.id)).toMatchObject({
+        errorCode: 'RUNTIME_PROTOCOL_ERROR',
+        diagnostic: null,
+      });
+      persistence.close();
+    });
+
+    it('still retries and terminalizes a Worker when recording its runtime failure throws', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Unrecorded runtime failure');
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeFailureError(
+            { code: 'RUNTIME_FAILED', userMessage: 'runtime failed', retryable: false },
+            'grok',
+            `runtime-turn-${executeCount}`,
+            undefined,
+          );
+        },
+        async stop() {},
+      };
+      const record = vi
+        .spyOn(persistence, 'recordTeamAttemptFailureDiagnostic')
+        .mockImplementation(() => {
+          throw new Error('diagnostic store unavailable');
+        });
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'unrecorded worker',
+        objective: 'prove recording failures do not stop retry or terminal handling',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail twice',
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      expect(executeCount).toBe(2);
+      expect(record).toHaveBeenCalledTimes(2);
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'failed', startReason: 'initial', terminalReason: 'runtime_failure' },
+        { state: 'failed', startReason: 'automatic_retry', terminalReason: 'runtime_failure' },
+      ]);
+      expect(
+        diagnostics
+          .filter(({ event }) => event.startsWith('team.attempt.'))
+          .map(({ event, result }) => ({ event, result })),
+      ).toEqual([
+        { event: 'team.attempt.failure_diagnostic_unrecorded', result: 'RUNTIME_FAILED' },
+        { event: 'team.attempt.runtime_failed', result: 'RUNTIME_FAILED' },
+        { event: 'team.attempt.failure_diagnostic_unrecorded', result: 'RUNTIME_FAILED' },
+        { event: 'team.attempt.runtime_failed', result: 'RUNTIME_FAILED' },
+      ]);
+      expect(JSON.stringify(diagnostics)).not.toContain('diagnostic store unavailable');
       persistence.close();
     });
 

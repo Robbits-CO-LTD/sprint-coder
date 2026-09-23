@@ -18,6 +18,7 @@ const runtimeHostMock = vi.hoisted(() => ({
       defer?: boolean;
       emitOperation?: boolean;
       emitReadOperation?: boolean;
+      diagnostic?: unknown;
     }
   >(),
 }));
@@ -49,6 +50,7 @@ vi.mock('./runtime-host', () => ({
           retryable: boolean;
           retryAt?: string;
         },
+        diagnostic?: unknown,
       ) => void,
       _prepareContext?: unknown,
       _onContextAccepted?: unknown,
@@ -79,8 +81,9 @@ vi.mock('./runtime-host', () => ({
             label: 'Claude tool call started (Read)',
             sideEffect: false,
           });
-        if (failure.defer === true) queueMicrotask(() => this.onFailure(taskId, turnId, failure));
-        else this.onFailure(taskId, turnId, failure);
+        if (failure.defer === true)
+          queueMicrotask(() => this.onFailure(taskId, turnId, failure, failure.diagnostic));
+        else this.onFailure(taskId, turnId, failure, failure.diagnostic);
         return true;
       }
       if (!runtimeHostMock.startSucceeds) {
@@ -114,6 +117,7 @@ import {
   chooseWorkerRuntime,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
+import { WorkerRuntimeFailureError } from './team-coordinator';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
@@ -345,6 +349,83 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(markUnavailable).not.toHaveBeenCalled();
     expect(availability.isAvailable('grok')).toBe(true);
     expect(availability.isAvailable('codex')).toBe(true);
+    subject.dispose();
+  });
+
+  it('passes the runtime failure diagnostic, kind, and runtime turn id to the Worker failure', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('grok', {
+      code: 'RUNTIME_BILLING_REQUIRED',
+      userMessage: 'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。',
+      retryable: false,
+      diagnostic: {
+        runtimeKind: 'grok',
+        failureStage: 'billing_error',
+        httpStatus: 402,
+      },
+    });
+    const subject = runtime({
+      selectRuntimes: () => [{ kind: 'grok', model: 'grok-4.5' }],
+    });
+
+    const error = await subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      })
+      .then(
+        () => {
+          throw new Error('expected runtime failure');
+        },
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(WorkerRuntimeFailureError);
+    if (!(error instanceof WorkerRuntimeFailureError))
+      throw new Error('expected WorkerRuntimeFailureError');
+    expect(error.publicError.code).toBe('RUNTIME_BILLING_REQUIRED');
+    expect(error.runtimeKind).toBe('grok');
+    expect(error.runtimeTurnId).toBe(runtimeHostMock.starts[0]?.args[1]);
+    expect(error.failureDiagnostic).toMatchObject({
+      failureStage: 'billing_error',
+      httpStatus: 402,
+    });
+    subject.dispose();
+  });
+
+  it('drops a failure diagnostic reported for a different runtime kind', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('grok', {
+      code: 'RUNTIME_BILLING_REQUIRED',
+      userMessage: 'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。',
+      retryable: false,
+      diagnostic: {
+        runtimeKind: 'codex',
+        failureStage: 'protocol_error',
+      },
+    });
+    const subject = runtime({
+      selectRuntimes: () => [{ kind: 'grok', model: 'grok-4.5' }],
+    });
+
+    const error = await subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      })
+      .then(
+        () => {
+          throw new Error('expected runtime failure');
+        },
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(WorkerRuntimeFailureError);
+    if (!(error instanceof WorkerRuntimeFailureError))
+      throw new Error('expected WorkerRuntimeFailureError');
+    expect(error.failureDiagnostic).toBeUndefined();
     subject.dispose();
   });
 

@@ -29,6 +29,7 @@ import {
   type ExecutionResolution,
   type ModelSelection,
   type NormalizedProviderUsage,
+  type PublicError,
   type WorkerCompletion,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
@@ -75,7 +76,7 @@ import type {
   TeamV2ActivityRecord,
 } from './persistence';
 import type { WorkerWorktreeManager } from './worker-worktree';
-import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
 
 export type WorkerRuntimeResult = Readonly<{
@@ -159,6 +160,18 @@ export class WorkerRuntimeControlError extends Error {
   ) {
     super(message, options);
     this.name = 'WorkerRuntimeControlError';
+  }
+}
+
+export class WorkerRuntimeFailureError extends Error {
+  constructor(
+    readonly publicError: PublicError,
+    readonly runtimeKind: 'claude' | 'codex' | 'grok',
+    readonly runtimeTurnId: string,
+    readonly failureDiagnostic: RuntimeFailureDiagnostic | undefined,
+  ) {
+    super(publicError.userMessage);
+    this.name = 'WorkerRuntimeFailureError';
   }
 }
 
@@ -1478,6 +1491,17 @@ export class TeamCoordinator {
         0,
         2000,
       );
+      if (
+        attemptId !== null &&
+        error instanceof WorkerRuntimeFailureError &&
+        !this.executionInterruptions.has(execution.id)
+      )
+        this.recordWorkerRuntimeFailure(
+          { taskId: graph.taskId, teamId: execution.teamId },
+          attemptId,
+          worker.id,
+          error,
+        );
       if (attemptId === null) {
         this.persistence.releaseGraphResources({
           reservationId: owner.id,
@@ -3139,6 +3163,17 @@ export class TeamCoordinator {
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
       this.releaseReservations(reservations);
+      if (
+        attemptId !== null &&
+        error instanceof WorkerRuntimeFailureError &&
+        !this.executionInterruptions.has(input.executionId)
+      )
+        this.recordWorkerRuntimeFailure(
+          { taskId: input.taskId, teamId: input.teamId },
+          attemptId,
+          worker.id,
+          error,
+        );
       let retryScheduled = false;
       try {
         if (
@@ -3383,6 +3418,41 @@ export class TeamCoordinator {
     return true;
   }
 
+  private recordWorkerRuntimeFailure(
+    scope: { taskId: string; teamId: string },
+    attemptId: string,
+    workerId: string,
+    error: WorkerRuntimeFailureError,
+  ): void {
+    const code = error.publicError.code;
+    try {
+      this.persistence.recordTeamAttemptFailureDiagnostic({
+        attemptId,
+        runtimeKind: error.runtimeKind,
+        runtimeTurnId: error.runtimeTurnId,
+        errorCode: code,
+        ...(error.failureDiagnostic === undefined ? {} : { diagnostic: error.failureDiagnostic }),
+      });
+    } catch {
+      this.diagnostic?.({
+        event: 'team.attempt.failure_diagnostic_unrecorded',
+        taskId: scope.taskId,
+        teamId: scope.teamId,
+        workerId,
+        status: 'failed',
+        result: code,
+      });
+    }
+    this.diagnostic?.({
+      event: 'team.attempt.runtime_failed',
+      taskId: scope.taskId,
+      teamId: scope.teamId,
+      workerId,
+      status: 'failed',
+      result: code,
+    });
+  }
+
   private requeueSafeRuntimeFailure(
     input: {
       taskId: string;
@@ -3402,6 +3472,8 @@ export class TeamCoordinator {
     if (
       worker.writeCapable ||
       error instanceof ProviderRateLimitedError ||
+      (error instanceof WorkerRuntimeFailureError &&
+        error.publicError.code === 'RUNTIME_BILLING_REQUIRED') ||
       (error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed') ||
       this.persistence.listTeamAttempts(input.executionId).length >= 2
     )

@@ -11,6 +11,7 @@ import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-cod
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
+  WorkerRuntimeFailureError,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerActivityEvent,
@@ -21,6 +22,7 @@ import type { PreparedContext } from './context-ledger';
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import {
   runtimeWorkspaceSetFromLegacyPath,
+  type RuntimeFailureDiagnostic,
   type RuntimeProcessIdentity,
   type RuntimeTeamMcpOption,
   type RuntimeToolRequest,
@@ -119,12 +121,15 @@ type PendingRun = {
   writeScope: RuntimeWriteScope;
 };
 
-class TeamRuntimeExecutionError extends Error {
+class TeamRuntimeExecutionError extends WorkerRuntimeFailureError {
   constructor(
-    readonly publicError: PublicError,
+    publicError: PublicError,
     readonly safeToRetry: boolean,
+    runtimeKind: 'claude' | 'codex' | 'grok',
+    runtimeTurnId: string,
+    failureDiagnostic: RuntimeFailureDiagnostic | undefined,
   ) {
-    super(publicError.userMessage);
+    super(publicError, runtimeKind, runtimeTurnId, failureDiagnostic);
     this.name = 'TeamRuntimeExecutionError';
   }
 }
@@ -187,7 +192,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           run.resolve(run.buffer.join(''));
         }
       },
-      (_taskId, turnId, error) => {
+      (_taskId, turnId, error, diagnostic) => {
         const run = this.pending.get(turnId);
         if (run === undefined) return;
         flushDelta(run);
@@ -197,6 +202,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           new TeamRuntimeExecutionError(
             error,
             !run.runtimeStarted || (run.writeScope === 'read-only' && !run.sideEffectsObserved),
+            kind,
+            turnId,
+            diagnostic?.runtimeKind === kind ? diagnostic : undefined,
           ),
         );
       },

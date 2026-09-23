@@ -1,11 +1,16 @@
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { electronTestExecutablePath } from './electron-test-runtime';
-import { SqlitePersistenceClient } from './persistence';
+import { NotFoundError, SqlitePersistenceClient } from './persistence';
+import {
+  buildProviderFailureDiagnostic,
+  type PersistedFailureDiagnostic,
+} from './provider-failure-diagnostic';
 import { TeamCoordinator } from './team-coordinator';
 
 const cleanup: string[] = [];
@@ -49,6 +54,51 @@ function createExecutionFixture(persistence: SqlitePersistenceClient) {
     now: '2026-07-28T11:00:00.000Z',
   });
   return { task, team, leader, worker, execution };
+}
+
+function createRunningAttempt(persistence: SqlitePersistenceClient) {
+  const fixture = createExecutionFixture(persistence);
+  persistence.transitionTeamExecution({
+    executionId: fixture.execution.id,
+    to: 'queued',
+    now: '2026-07-28T11:01:00.000Z',
+    queueReason: 'recovery',
+  });
+  persistence.transitionTeamExecution({
+    executionId: fixture.execution.id,
+    to: 'running',
+    now: '2026-07-28T11:02:00.000Z',
+  });
+  const attempt = persistence.createTeamAttempt(
+    fixture.execution.id,
+    '2026-07-28T11:02:00.000Z',
+    'app_restart',
+  );
+  return { ...fixture, attempt };
+}
+
+function attemptDiagnostic(
+  runtimeKind: 'codex' | 'claude' | 'grok',
+  failureStage: 'protocol_error' | 'billing_error',
+  httpStatus?: number,
+): PersistedFailureDiagnostic {
+  return {
+    version: 1,
+    diagnosticId: randomUUID(),
+    runtimeKind,
+    failureStage,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    elapsedMs: 12,
+    appVersion: 'test',
+    cliVersion: null,
+    teamMcp: { enabled: false, status: 'not_configured' },
+    lastRecognizedNotification: null,
+    lastReceivedNotification: null,
+    unsupportedNotificationCount: 0,
+    stderrObserved: false,
+    stderrTruncated: false,
+    recordedAt: '2026-09-22T00:00:00.000Z',
+  };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -788,6 +838,249 @@ if (runsWithElectronAbi)
       });
       expect(reopened.getTeamExecution(execution.id).state).toBe('failed');
       reopened.close();
+    });
+
+    it('creates the v96 attempt failure diagnostic table on a v95 database and reopens idempotently', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP TABLE team_attempt_failure_diagnostics;
+        DELETE FROM schema_migrations WHERE version = 96;
+      `);
+      legacy.close();
+
+      const migrated = new SqlitePersistenceClient(path);
+      migrated.close();
+      const db = new Database(path);
+      expect(
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_attempt_failure_diagnostics'",
+          )
+          .get(),
+      ).toEqual({ name: 'team_attempt_failure_diagnostics' });
+      expect(
+        db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'team_attempt_failure_diagnostics_task_created_idx'",
+          )
+          .get(),
+      ).toEqual({ name: 'team_attempt_failure_diagnostics_task_created_idx' });
+      expect(db.prepare('SELECT checksum FROM schema_migrations WHERE version = 96').all()).toEqual(
+        [{ checksum: 'team-attempt-failure-diagnostics-v96' }],
+      );
+      const foreignKeys = db.pragma('foreign_key_list(team_attempt_failure_diagnostics)') as {
+        table: string;
+        from: string;
+        on_delete: string;
+      }[];
+      expect(foreignKeys).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            table: 'team_attempts',
+            from: 'attempt_id',
+            on_delete: 'CASCADE',
+          }),
+          expect.objectContaining({ table: 'tasks', from: 'task_id', on_delete: 'CASCADE' }),
+        ]),
+      );
+      db.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.close();
+    });
+
+    it('rolls back v96 completely when its index cannot be created', () => {
+      const { persistence, path } = createPersistence();
+      persistence.close();
+      const legacy = new Database(path);
+      legacy.exec(`
+        DROP TABLE team_attempt_failure_diagnostics;
+        DELETE FROM schema_migrations WHERE version = 96;
+        CREATE TABLE v96_blocker(id TEXT);
+        CREATE INDEX team_attempt_failure_diagnostics_task_created_idx ON v96_blocker(id);
+      `);
+      legacy.close();
+
+      expect(() => new SqlitePersistenceClient(path)).toThrow(
+        /team_attempt_failure_diagnostics_task_created_idx already exists/u,
+      );
+      const failed = new Database(path);
+      expect(
+        failed
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'team_attempt_failure_diagnostics'",
+          )
+          .get(),
+      ).toBeUndefined();
+      expect(failed.prepare('SELECT version FROM schema_migrations WHERE version = 96').get()).toBe(
+        undefined,
+      );
+      failed.close();
+    });
+
+    it('stores an attempt error code with a Grok billing diagnostic and exposes it as the latest Task diagnostic', () => {
+      const { persistence, path } = createPersistence();
+      const { task, attempt } = createRunningAttempt(persistence);
+      const diagnostic = attemptDiagnostic('grok', 'billing_error', 402);
+      const stored = persistence.recordTeamAttemptFailureDiagnostic({
+        attemptId: attempt.id,
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-billing',
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        diagnostic,
+      });
+      const ignored = persistence.recordTeamAttemptFailureDiagnostic({
+        attemptId: attempt.id,
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-other',
+        errorCode: 'RUNTIME_FAILED',
+        diagnostic: attemptDiagnostic('grok', 'protocol_error'),
+      });
+      expect(ignored).toEqual(stored);
+      expect(stored).toMatchObject({
+        attemptId: attempt.id,
+        taskId: task.id,
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-billing',
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        diagnostic: {
+          diagnosticId: diagnostic.diagnosticId,
+          failureStage: 'billing_error',
+          httpStatus: 402,
+        },
+      });
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamAttemptFailureDiagnostic(attempt.id)).toEqual(stored);
+      expect(reopened.getRuntimeFailureDiagnostic({ taskId: task.id })).toMatchObject({
+        attemptId: attempt.id,
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        turnId: 'runtime-turn-billing',
+        httpStatus: 402,
+      });
+      expect(
+        reopened.getRuntimeFailureDiagnostic({ diagnosticId: diagnostic.diagnosticId }),
+      ).toMatchObject({
+        attemptId: attempt.id,
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        turnId: 'runtime-turn-billing',
+      });
+      reopened.close();
+    });
+
+    it('stores an error code without a diagnostic and keeps it out of the diagnostic copy', () => {
+      const { persistence } = createPersistence();
+      const { task, attempt } = createRunningAttempt(persistence);
+      const stored = persistence.recordTeamAttemptFailureDiagnostic({
+        attemptId: attempt.id,
+        runtimeKind: 'codex',
+        runtimeTurnId: 'runtime-turn-plain',
+        errorCode: 'RUNTIME_FAILED',
+      });
+      expect(stored).toMatchObject({
+        attemptId: attempt.id,
+        taskId: task.id,
+        runtimeKind: 'codex',
+        runtimeTurnId: 'runtime-turn-plain',
+        errorCode: 'RUNTIME_FAILED',
+        diagnostic: null,
+      });
+      expect(persistence.getRuntimeFailureDiagnostic({ taskId: task.id })).toBeNull();
+      persistence.close();
+    });
+
+    it('rejects invalid attempt diagnostics and enforces the v95 stage and size limits in SQL', () => {
+      const { persistence, path } = createPersistence();
+      const { task, attempt } = createRunningAttempt(persistence);
+      expect(() =>
+        persistence.recordTeamAttemptFailureDiagnostic({
+          attemptId: 'missing-attempt',
+          runtimeKind: 'grok',
+          runtimeTurnId: 'turn-1',
+          errorCode: 'RUNTIME_FAILED',
+        }),
+      ).toThrow(NotFoundError);
+      expect(() =>
+        persistence.recordTeamAttemptFailureDiagnostic({
+          attemptId: attempt.id,
+          runtimeKind: 'grok',
+          runtimeTurnId: 'turn-1',
+          errorCode: 'NOT_A_CODE' as 'RUNTIME_FAILED',
+        }),
+      ).toThrow('Invalid error code');
+      expect(() =>
+        persistence.recordTeamAttemptFailureDiagnostic({
+          attemptId: attempt.id,
+          runtimeKind: 'grok',
+          runtimeTurnId: 'turn-1',
+          errorCode: 'RUNTIME_FAILED',
+          diagnostic: attemptDiagnostic('codex', 'protocol_error'),
+        }),
+      ).toThrow('Invalid Runtime diagnostic');
+      expect(() =>
+        persistence.recordTeamAttemptFailureDiagnostic({
+          attemptId: attempt.id,
+          runtimeKind: 'codex',
+          runtimeTurnId: 'turn-1',
+          errorCode: 'RUNTIME_FAILED',
+          diagnostic: attemptDiagnostic('codex', 'billing_error'),
+        }),
+      ).toThrow('Invalid Runtime diagnostic');
+      expect(() =>
+        persistence.recordTeamAttemptFailureDiagnostic({
+          attemptId: attempt.id,
+          runtimeKind: 'grok',
+          runtimeTurnId: 'turn-1',
+          errorCode: 'RUNTIME_FAILED',
+          diagnostic: buildProviderFailureDiagnostic({
+            cause: {
+              failureStage: 'provider_error',
+              category: 'provider_unavailable',
+              retryable: true,
+              providerCode: 'http_503',
+              modelPreparation: 'completed',
+            },
+            providerId: 'ollama',
+            profileId: 'ollama',
+            elapsedMs: 45,
+            appVersion: 'test',
+            recordedAt: '2026-09-22T00:00:00.000Z',
+          }),
+        }),
+      ).toThrow('Invalid Runtime diagnostic');
+      persistence.close();
+
+      const raw = new Database(path);
+      const insert = raw.prepare(
+        `INSERT INTO team_attempt_failure_diagnostics(
+           attempt_id, task_id, runtime_kind, runtime_turn_id, error_code,
+           diagnostic_id, failure_stage, diagnostic_json, created_at
+         ) VALUES (?, ?, 'codex', 'turn-1', 'RUNTIME_FAILED', ?, ?, ?, ?)`,
+      );
+      const createdAt = '2026-09-22T00:00:00.000Z';
+      expect(() =>
+        insert.run(attempt.id, task.id, randomUUID(), 'billing_error', '{}', createdAt),
+      ).toThrow(/CHECK/u);
+      expect(() => insert.run(attempt.id, task.id, randomUUID(), null, '{}', createdAt)).toThrow(
+        /CHECK/u,
+      );
+      expect(() =>
+        insert.run(attempt.id, task.id, randomUUID(), 'protocol_error', null, createdAt),
+      ).toThrow(/CHECK/u);
+      expect(() =>
+        insert.run(
+          attempt.id,
+          task.id,
+          randomUUID(),
+          'protocol_error',
+          'x'.repeat(16_384 + 1),
+          createdAt,
+        ),
+      ).toThrow(/CHECK/u);
+      raw.close();
     });
 
     it('atomically checkpoints a Mission step and skips it after restart', async () => {
