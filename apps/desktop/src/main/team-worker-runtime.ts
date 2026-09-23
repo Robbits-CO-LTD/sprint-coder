@@ -634,7 +634,7 @@ function workerWriteFailure(input: {
   if (input.writes.denied > 0 && input.writes.committed === 0)
     return {
       name: 'worker-write-denied',
-      detail: `書き込みツールの呼び出し${input.writes.denied}件がすべて拒否され、ファイルは1件も変更されませんでした。`,
+      detail: `書き込みツールの呼び出し${input.writes.denied}件が拒否され、反映された書き込みは1件もありませんでした。`,
     };
   return null;
 }
