@@ -698,6 +698,36 @@ describe('Runtime Host protocol', () => {
     ]) {
       expect(isRuntimeToMainEnvelope(envelope(diagnostic))).toBe(false);
     }
+    // Controls for the rejections above: the same Codex/Claude shapes pass once the Grok-only
+    // stage and status are removed, so the rejections are about those fields and nothing else.
+    for (const diagnostic of [
+      {
+        ...withoutStatus,
+        runtimeKind: 'codex',
+        cliVersion: 'codex 1.0.0',
+        failureStage: 'protocol_error',
+      },
+      {
+        ...withoutStatus,
+        runtimeKind: 'claude',
+        cliVersion: '2.1.218 (Claude Code)',
+        failureStage: 'protocol_error',
+      },
+    ]) {
+      expect(isRuntimeToMainEnvelope(envelope(diagnostic))).toBe(true);
+    }
+    // A billing failure whose process stop was not confirmed still reaches Main: the public
+    // error becomes RUNTIME_STOP_UNCONFIRMED while the diagnostic keeps the billing stage.
+    expect(
+      isRuntimeToMainEnvelope({
+        ...envelope(base),
+        error: {
+          code: 'RUNTIME_STOP_UNCONFIRMED',
+          userMessage: 'Grok CLIの停止を確認できませんでした。',
+          retryable: false,
+        },
+      }),
+    ).toBe(true);
   });
 
   it('validates the additive optional resolvedModel field on the completed canonical event', () => {

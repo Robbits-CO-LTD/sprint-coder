@@ -9,7 +9,9 @@ import {
   grokModelsFromInitialize,
 } from './grok-adapter';
 import {
+  RUNTIME_PROTOCOL_VERSION,
   isRuntimeFailureDiagnostic,
+  isRuntimeToMainEnvelope,
   type RuntimeCanonicalEvent,
   type RuntimeFailureDiagnostic,
   type RuntimeTeamMcpOption,
@@ -239,6 +241,21 @@ describe('Grok ACP adapter process lifecycle', () => {
         httpStatus: 402,
       });
       expect(isRuntimeFailureDiagnostic(test.diagnostics[0])).toBe(true);
+      // Main silently drops an error envelope that fails validation, so check the pair the
+      // adapter actually produced, not just the diagnostic on its own.
+      expect(
+        isRuntimeToMainEnvelope({
+          protocolVersion: RUNTIME_PROTOCOL_VERSION,
+          runtimeInstanceId: 'runtime-1',
+          taskId: 'task-1',
+          turnId: 'turn',
+          seq: 1,
+          operationId: 'operation-1',
+          type: 'error',
+          error: test.errors[0],
+          diagnostic: test.diagnostics[0],
+        }),
+      ).toBe(true);
       expect(JSON.stringify({ errors: test.errors, diagnostics: test.diagnostics })).not.toContain(
         'CANARY_BILLING_TEXT',
       );
