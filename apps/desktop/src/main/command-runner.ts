@@ -507,6 +507,14 @@ export class CommandRunner {
       options.beforeSpawn?.();
       let child: ChildProcess;
       const sandboxExecutable = !this.sandboxed ? null : sandboxRunnerPath();
+      const commandEnvironment =
+        process.platform === 'win32'
+          ? windowsCommandEnvironment(
+              spec.envDelta,
+              executionImage.environment,
+              sandboxExecutable !== null,
+            )
+          : buildEnvironment(spec.envDelta, executionImage.environment);
       try {
         const windows = process.platform === 'win32';
         if (sandboxExecutable !== null) verifySandboxRunnerDigest(sandboxExecutable);
@@ -537,7 +545,7 @@ export class CommandRunner {
           ],
           {
             cwd: spec.cwdIdentity.canonicalPath,
-            env: buildEnvironment(spec.envDelta, executionImage.environment),
+            env: commandEnvironment,
             shell: false,
             stdio: windows
               ? ['pipe', 'pipe', 'pipe', 'pipe']
@@ -586,7 +594,7 @@ export class CommandRunner {
                       ...spec.argv,
                     ],
               cwd: spec.cwdIdentity.canonicalPath,
-              env: buildEnvironment(spec.envDelta, executionImage.environment),
+              env: commandEnvironment,
             }),
           );
         } catch (error) {
@@ -1620,6 +1628,29 @@ function buildEnvironment(
   return environment;
 }
 
+const WINDOWS_SANDBOX_NODE_OPTIONS = '--preserve-symlinks --preserve-symlinks-main';
+
+/**
+ * Environment for a Windows command launch. The Job wrapper and the sandbox runner both pass
+ * their own environment on to the command, so this is what the command sees.
+ *
+ * Inside the AppContainer sandbox, Node's realpath-based module resolution walks up to the drive
+ * root, so a workspace-relative require() or import fails with EPERM (`lstat 'C:\'`). Only
+ * sandboxed launches therefore add --preserve-symlinks, and they drop any other NODE_OPTIONS.
+ * Unsandboxed commands keep the approved environment, so pnpm, npm link and monorepo symlink
+ * layouts resolve as they do outside Sprint Coder.
+ */
+export function windowsCommandEnvironment(
+  delta: Readonly<Record<string, string>>,
+  internal: Readonly<Record<string, string>> | undefined,
+  sandboxed: boolean,
+): NodeJS.ProcessEnv {
+  return buildEnvironment(
+    delta,
+    sandboxed ? { ...internal, NODE_OPTIONS: WINDOWS_SANDBOX_NODE_OPTIONS } : internal,
+  );
+}
+
 export function buildControlledEnvironment(
   platform: NodeJS.Platform = process.platform,
   source: Readonly<NodeJS.ProcessEnv> = process.env,
@@ -1671,6 +1702,7 @@ export function buildControlledEnvironment(
     // AppContainer cannot inspect drive-root ancestors while Node resolves a relative entrypoint.
     // Preserve only the main path so workspace scripts and npm can start without granting the
     // sandbox read access to C:\ or the user's profile hierarchy. Never inherit user NODE_OPTIONS.
+    // Sandboxed launches add module preservation in windowsCommandEnvironment.
     environment['NODE_OPTIONS'] = '--preserve-symlinks-main';
     const home = environment['HOME'];
     const userProfile = environment['USERPROFILE'];
