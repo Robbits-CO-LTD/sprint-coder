@@ -1725,6 +1725,9 @@ describe('rejectWindowsSandboxedNodeTestIsolation', () => {
       [nodeExe, ['--test-concurrency', '1', '--test']],
       [nodeExe, ['--require', './setup.cjs', '--test']],
       [nodeExe, ['--test-coverage-include', 'src/**', '--test']],
+      [nodeExe, ['--inspect-port', '0', '--test', 'sum.test.cjs']],
+      [nodeExe, ['--unlisted-option', 'value', '--test']],
+      [nodeExe, ['--test', 'sum.test.cjs', '--test-isolation=none']],
       ['C:\\Program Files\\nodejs\\NODE.EXE', ['--test']],
     ];
     for (const [executable, argv] of cases) {
@@ -1762,6 +1765,7 @@ describe('rejectWindowsSandboxedNodeTestIsolation', () => {
       ['--test', '--test-isolation', 'none'],
       ['--test', '--test-coverage-include', 'src/**', '--test-isolation=none'],
       ['script.js', '--test'],
+      ['./tools/run.mjs', '--test'],
       ['--', '--test'],
       ['-e', 'x', '--test'],
     ]) {

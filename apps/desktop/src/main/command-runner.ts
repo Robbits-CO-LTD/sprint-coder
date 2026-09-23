@@ -356,6 +356,11 @@ const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
   '--title',
 ]);
 
+// Node stops reading its own options at the script or first test file. A bare token that does not
+// name a JavaScript/TypeScript file is treated as the value of an option that is not listed above
+// (for example `--inspect-port 0`), so scanning continues instead of missing a later `--test`.
+const NODE_SCRIPT_FILE = /\.[cm]?[jt]sx?$/iu;
+
 function isInlineNodeScriptOption(arg: string): boolean {
   return NODE_INLINE_SCRIPT_OPTIONS.some(
     (option) => arg === option || arg.startsWith(`${option}=`),
@@ -388,8 +393,12 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   let index = 0;
   while (index < argv.length) {
     const arg = argv[index] ?? '';
-    if (arg === '--' || !arg.startsWith('-')) break;
-    if (isInlineNodeScriptOption(arg)) break;
+    if (arg === '--' || isInlineNodeScriptOption(arg)) break;
+    if (!arg.startsWith('-')) {
+      if (NODE_SCRIPT_FILE.test(arg)) break;
+      index += 1;
+      continue;
+    }
     if (arg === '--test') {
       testRequested = true;
       index += 1;
