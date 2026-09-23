@@ -695,6 +695,19 @@ describe('Runtime Host protocol', () => {
       { ...base, httpStatus: 402.5 },
       { ...base, httpStatus: '402' },
       { ...base, httpStatus: null },
+      { ...base, failureStage: ['billing_error'] },
+      {
+        ...withoutStatus,
+        runtimeKind: 'codex',
+        cliVersion: 'codex 1.0.0',
+        failureStage: ['billing_error'],
+      },
+      {
+        ...withoutStatus,
+        runtimeKind: 'claude',
+        cliVersion: '2.1.218 (Claude Code)',
+        failureStage: ['protocol_error'],
+      },
     ]) {
       expect(isRuntimeToMainEnvelope(envelope(diagnostic))).toBe(false);
     }

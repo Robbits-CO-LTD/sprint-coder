@@ -992,6 +992,9 @@ function isResolvedCliCommand(value: unknown): value is ResolvedCliCommand {
 }
 
 function isAllowedFailureStage(runtimeKind: unknown, stage: unknown): boolean {
+  // Checked as a string first: `String(['billing_error'])` would otherwise pass the list below and
+  // then miss the Grok-only comparison, letting another runtime carry a Grok stage.
+  if (typeof stage !== 'string') return false;
   if (
     ![
       'first_event_timeout',
@@ -1003,7 +1006,7 @@ function isAllowedFailureStage(runtimeKind: unknown, stage: unknown): boolean {
       'abnormal_exit',
       'billing_error',
       'rate_limit',
-    ].includes(String(stage))
+    ].includes(stage)
   )
     return false;
   // These stages describe Grok's own HTTP classification. Codex and Claude keep their stages.
