@@ -89,9 +89,56 @@ describe('Grok ACP adapter process lifecycle', () => {
     expect(test.events.filter((e) => e.type === 'delta')).toEqual([
       { type: 'delta', messageId: expect.any(String), delta: 'こんにちは' },
     ]);
+    // The scenario name is not a Grok model id, so no resolved model is reported for it.
+    expect(test.events.filter((e) => e.type === 'completed')).toEqual([{ type: 'completed' }]);
+  });
+  it('binds an explicit model after the CLI applies its session default (issue #515)', async () => {
+    const test = run('grok-4.6');
+    await test.exit;
+    expect(test.errors).toEqual([]);
+    expect(test.events.filter((e) => e.type === 'completed')).toEqual([
+      { type: 'completed', resolvedModel: 'grok-4.6' },
+    ]);
+  });
+  it('binds an explicit model for a Team MCP turn through the same path', async () => {
+    const test = run('grok-4.7-build-fast', 5_000, teamMcp);
+    await test.exit;
+    expect(test.errors).toEqual([]);
+    expect(test.events.filter((e) => e.type === 'completed')).toEqual([
+      { type: 'completed', resolvedModel: 'grok-4.7-build-fast' },
+    ]);
+  });
+  it('leaves auto on the CLI selection without binding a model', async () => {
+    const test = run('auto');
+    await test.exit;
+    expect(test.errors).toEqual([]);
     expect(test.events.filter((e) => e.type === 'completed')).toEqual([
       { type: 'completed', resolvedModel: 'grok-fixture' },
     ]);
+  });
+  it('reports the acknowledged model when the prompt result names none', async () => {
+    const test = run('grok-no-prompt-meta');
+    await test.exit;
+    expect(test.errors).toEqual([]);
+    expect(test.events.filter((e) => e.type === 'completed')).toEqual([
+      { type: 'completed', resolvedModel: 'grok-no-prompt-meta' },
+    ]);
+  });
+  it.each(['set-model-error', 'set-model-malformed', 'set-model-mismatch'])(
+    'fails before prompting when the explicit model is not bound: %s',
+    async (mode) => {
+      const test = run(mode);
+      await test.exit;
+      expect(test.errors[0]?.code).toBe('RUNTIME_PROTOCOL_ERROR');
+      expect(test.events.some((e) => e.type === 'delta')).toBe(false);
+      expect(test.events.some((e) => e.type === 'completed')).toBe(false);
+    },
+  );
+  it('does not report success when a different model answered', async () => {
+    const test = run('prompt-model-mismatch');
+    await test.exit;
+    expect(test.errors[0]?.code).toBe('RUNTIME_PROTOCOL_ERROR');
+    expect(test.events.some((e) => e.type === 'completed')).toBe(false);
   });
   it('continues from thought to answer after an unmatched string response with MCP enabled', async () => {
     const test = run('string-response', 5_000, teamMcp);

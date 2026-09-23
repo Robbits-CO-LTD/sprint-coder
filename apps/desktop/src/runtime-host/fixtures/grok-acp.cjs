@@ -1,8 +1,16 @@
 'use strict';
 // Synthetic ACP peer; never invokes a provider or touches a user Workspace.
 const readline = require('node:readline');
-const mode = process.argv[process.argv.indexOf('--model') + 1];
+const modelArg = process.argv.indexOf('--model');
+// Without `--model` the adapter runs in auto mode; tests pass their scenario as the model id.
+const mode = modelArg >= 0 ? process.argv[modelArg + 1] : 'auto';
 const sessionId = 'grok-fixture-session';
+// Like the real CLI, a new session starts on the default model whatever `--model` said.
+let currentModel = 'grok-fixture';
+const promptMeta = () =>
+  mode === 'grok-no-prompt-meta'
+    ? {}
+    : { _meta: { modelId: mode === 'prompt-model-mismatch' ? 'grok-other' : currentModel } };
 let tools = [];
 const send = (value) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
 const update = (update, id = sessionId) =>
@@ -49,6 +57,18 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       },
     });
     reply({ sessionId, models: { currentModelId: 'grok-fixture' } });
+  } else if (request.method === 'session/set_model') {
+    if (request.params.sessionId !== sessionId) process.exit(6);
+    if (mode === 'auto' || mode === 'set-model-error') {
+      send({ id: request.id, error: { code: -32603, message: 'set_model rejected' } });
+      return;
+    }
+    if (mode === 'set-model-malformed') {
+      reply({});
+      return;
+    }
+    currentModel = mode === 'set-model-mismatch' ? 'grok-other' : request.params.modelId;
+    reply({ _meta: { model: { Ok: currentModel } } });
   } else if (request.method === '_x.ai/mcp/list') {
     if (mode === 'mcp-ready-update') mcpInventoryUpdate();
     reply({
@@ -111,10 +131,10 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       update({ sessionUpdate: 'tool_call', toolCallId: 't1', status: 'in_progress' });
       setTimeout(() => {
         update({ sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed' });
-        reply({ stopReason: 'end_turn' });
+        reply({ stopReason: 'end_turn', ...promptMeta() });
       }, 100);
       return;
     }
-    reply({ stopReason: mode === 'max-tokens' ? 'max_tokens' : 'end_turn' });
+    reply({ stopReason: mode === 'max-tokens' ? 'max_tokens' : 'end_turn', ...promptMeta() });
   } else send({ id: request.id, error: { code: -32601, message: 'unknown' } });
 });
