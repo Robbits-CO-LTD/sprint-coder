@@ -331,6 +331,23 @@ const executionEstimate = Object.freeze({
   toolCalls: 10,
 });
 
+export const WORKER_SELF_REPORTED_EVIDENCE_PREFIX = 'Worker報告（Main未検証）: ';
+
+/**
+ * Done evidence from a Worker's own report (issue #527). A failed report proves no criterion, and a
+ * successful one is labelled as the Worker's claim, which Main has not checked.
+ */
+function workerDoneEvidence(
+  doneCriteria: readonly string[],
+  completion: Pick<WorkerCompletion, 'status' | 'summary'>,
+): { criterion: string; evidence: string }[] {
+  if (completion.status !== 'succeeded') return [];
+  return doneCriteria.map((criterion) => ({
+    criterion,
+    evidence: `${WORKER_SELF_REPORTED_EVIDENCE_PREFIX}${completion.summary}`.slice(0, 4_000),
+  }));
+}
+
 export class TeamCoordinator {
   private readonly graphWorkspaceResumeDigests = new Map<string, string>();
   private readonly graphIntegrationWorkers = new Set<string>();
@@ -1399,10 +1416,7 @@ export class TeamCoordinator {
           result.resolution,
           result.providerUsage,
         );
-      const doneEvidence = dispatch.doneCriteria.map((criterion) => ({
-        criterion,
-        evidence: result.value.summary,
-      }));
+      const doneEvidence = workerDoneEvidence(dispatch.doneCriteria, result.value);
       let changedFiles = [...result.changedFiles];
       if (result.value.status !== 'succeeded') throw new Error(result.value.summary);
       if (worktree) {
@@ -2688,6 +2702,7 @@ export class TeamCoordinator {
         });
         this.settleExecution(reservations, completion.usage);
         this.persistWorkerResult(team.id, worker, leader, completion.value);
+        const doneEvidence = workerDoneEvidence(input.doneCriteria, completion.value);
         const report = workerReportSchema.parse({
           status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
           summary: completion.value.summary,
@@ -2697,19 +2712,13 @@ export class TeamCoordinator {
           verification: completion.value.verification,
           risks: completion.value.risks,
           nextActions: [],
-          doneEvidence: input.doneCriteria.map((criterion) => ({
-            criterion,
-            evidence: completion.value.summary,
-          })),
+          doneEvidence,
         });
         this.persistence.completeTeamTaskWithReport({
           teamTaskId: teamTask.id,
           agentId: worker.id,
           report,
-          doneEvidence: input.doneCriteria.map((criterion) => ({
-            criterion,
-            evidence: completion.value.summary,
-          })),
+          doneEvidence,
           now: this.isoNow(),
         });
         this.persistence.transitionWorkerState(
@@ -2961,6 +2970,7 @@ export class TeamCoordinator {
           missionWorktree = await this.queueMissionWorktreeIntegration(missionWorktree);
         }
       }
+      const doneEvidence = workerDoneEvidence(input.doneCriteria, completion.value);
       if (executionIsolation !== null) {
         if (failedWorkspaceWrite)
           this.quarantineExecutionIsolation(
@@ -2982,15 +2992,9 @@ export class TeamCoordinator {
               verification: completion.value.verification,
               risks: completion.value.risks,
               nextActions: [],
-              doneEvidence: input.doneCriteria.map((criterion) => ({
-                criterion,
-                evidence: completion.value.summary,
-              })),
+              doneEvidence,
             }),
-            doneEvidence: input.doneCriteria.map((criterion) => ({
-              criterion,
-              evidence: completion.value.summary,
-            })),
+            doneEvidence,
             now: this.isoNow(),
           });
           const finalized = await this.finalizeIsolation({
@@ -3012,15 +3016,8 @@ export class TeamCoordinator {
         verification: completion.value.verification,
         risks: completion.value.risks,
         nextActions: [],
-        doneEvidence: input.doneCriteria.map((criterion) => ({
-          criterion,
-          evidence: completion.value.summary,
-        })),
+        doneEvidence,
       });
-      const doneEvidence = input.doneCriteria.map((criterion) => ({
-        criterion,
-        evidence: completion.value.summary,
-      }));
       if (
         executionIsolation !== null &&
         completion.value.status === 'succeeded' &&

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { workerCompletionSchema } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { assessProviderEgressDisclosure } from './provider-disclosure-classifier';
@@ -8,6 +9,7 @@ const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex' | 'grok'; args: unknown[] }>,
   waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
   startSucceeds: true,
+  beforeComplete: null as ((turnId: string) => void) | null,
   failures: new Map<
     'claude' | 'codex' | 'grok',
     {
@@ -94,6 +96,7 @@ vi.mock('./runtime-host', () => ({
         });
         return false;
       }
+      runtimeHostMock.beforeComplete?.(turnId);
       this.onEvent(taskId, turnId, { type: 'delta', delta: '完了' });
       this.onEvent(taskId, turnId, { type: 'completed' });
       return true;
@@ -125,6 +128,7 @@ import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract
 afterEach(() => {
   runtimeHostMock.failures.clear();
   runtimeHostMock.startSucceeds = true;
+  runtimeHostMock.beforeComplete = null;
   runtimeHostMock.waitForExit.mockReset();
   runtimeHostMock.waitForExit.mockResolvedValue(undefined);
 });
@@ -968,5 +972,159 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       }),
     ).rejects.toThrow('Manager Team MCP is unavailable');
     expect(runtimeHostMock.starts).toHaveLength(1);
+  });
+});
+
+describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
+  const completionOf = (result: { completion: unknown }) =>
+    workerCompletionSchema.parse(result.completion);
+  const writableWorker = (): AgentRecord => ({ ...worker(false), writeCapable: true });
+  const writeInput = {
+    envelope: { ...envelope, targetAgentId: 'worker-1' },
+    content: 'ファイルを作成してください',
+    accessMode: 'workspace-write' as const,
+    workspacePath: '/isolated/worktree',
+  };
+
+  it('reports a Worker downgraded to read-only as failed and tells it that it cannot edit', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime({ writeScopeFor: () => 'read-only' });
+
+    const result = await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    const start = runtimeHostMock.starts.at(-1)!;
+    expect(start.args[9]).toBe('read-only');
+    expect(start.args[2]).toContain('Workspace書き込み: 禁止（読み取り専用）');
+    expect(start.args[2]).toContain('ファイルを変更できません');
+    expect(start.args[2]).not.toContain('隔離範囲内で可');
+    expect(completionOf(result).status).toBe('failed');
+    expect(completionOf(result).verification).toContainEqual(
+      expect.objectContaining({ name: 'worker-write-scope', outcome: 'fail' }),
+    );
+    expect(completionOf(result).summary).toContain('安全設定「確認する」');
+    subject.dispose();
+  });
+
+  it('names why a write execution ran read-only when the Worker is not write-capable or has no Workspace', async () => {
+    const notWritable = runtime({ writeScopeFor: () => 'workspace-write' });
+    const notWritableResult = await notWritable.execute({ ...writeInput, worker: worker(false) });
+    expect(completionOf(notWritableResult).status).toBe('failed');
+    expect(completionOf(notWritableResult).verification).toContainEqual(
+      expect.objectContaining({
+        name: 'worker-write-scope',
+        outcome: 'fail',
+        detail: expect.stringContaining('書き込み可能として採用されていない'),
+      }),
+    );
+    notWritable.dispose();
+
+    const noWorkspace = runtime({
+      writeScopeFor: (_worker, workspacePath) =>
+        workspacePath === null ? 'read-only' : 'workspace-write',
+    });
+    const noWorkspaceResult = await noWorkspace.execute({
+      ...writeInput,
+      workspacePath: null,
+      worker: writableWorker(),
+    });
+    expect(completionOf(noWorkspaceResult).status).toBe('failed');
+    expect(completionOf(noWorkspaceResult).verification).toContainEqual(
+      expect.objectContaining({
+        name: 'worker-write-scope',
+        outcome: 'fail',
+        detail: expect.stringContaining('書き込み先のWorkspaceがない'),
+      }),
+    );
+    noWorkspace.dispose();
+  });
+
+  it('fails a write execution whose every workspace write was denied', async () => {
+    const subject = runtime({ writeScopeFor: () => 'workspace-write' });
+    runtimeHostMock.beforeComplete = (turnId) => {
+      subject.recordManagedToolDenied(turnId, 'create_file');
+      subject.recordManagedToolDenied(turnId, 'create_file');
+    };
+
+    const result = await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(completionOf(result).status).toBe('failed');
+    expect(completionOf(result).verification).toContainEqual(
+      expect.objectContaining({ name: 'worker-write-denied', outcome: 'fail' }),
+    );
+    expect(completionOf(result).summary).toContain('2件');
+    subject.dispose();
+  });
+
+  it('keeps a write execution with a committed change successful and reports denied writes as a risk', async () => {
+    const subject = runtime({ writeScopeFor: () => 'workspace-write' });
+    runtimeHostMock.beforeComplete = (turnId) => {
+      subject.recordManagedToolDenied(turnId, 'create_file');
+      subject.recordManagedToolResult(turnId, {
+        rootId: 'root-1',
+        path: 'a.txt',
+        sagaId: 'saga-1',
+        kind: 'add',
+        state: 'committed',
+      });
+    };
+
+    const result = await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(completionOf(result).status).toBe('succeeded');
+    expect(completionOf(result).risks).toHaveLength(1);
+    expect(completionOf(result).risks[0]).toContain('1件');
+    subject.dispose();
+  });
+
+  it('counts a committed directory creation as a write when judging denied writes', async () => {
+    const subject = runtime({ writeScopeFor: () => 'workspace-write' });
+    runtimeHostMock.beforeComplete = (turnId) => {
+      subject.recordManagedToolResult(turnId, {
+        rootId: 'root-1',
+        path: 'generated',
+        sagaId: 'saga-mkdir',
+        state: 'committed',
+        kind: 'mkdir',
+      });
+      subject.recordManagedToolDenied(turnId, 'apply_patch');
+    };
+
+    const result = await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(completionOf(result).status).toBe('succeeded');
+    expect(completionOf(result).risks).toEqual([
+      expect.stringContaining('反映された書き込みは1件'),
+    ]);
+    subject.dispose();
+  });
+
+  it('ignores denied non-write tools when judging a write execution', async () => {
+    const subject = runtime({ writeScopeFor: () => 'workspace-write' });
+    runtimeHostMock.beforeComplete = (turnId) => {
+      subject.recordManagedToolDenied(turnId, 'read_file');
+    };
+
+    const result = await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(completionOf(result).status).toBe('succeeded');
+    expect(completionOf(result).risks).toEqual([]);
+    subject.dispose();
+  });
+
+  it('does not fail a read-only investigation or a write execution that attempted no writes', async () => {
+    const investigation = runtime();
+    const readResult = await investigation.execute({
+      worker: worker(false),
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      content: '調査してください',
+    });
+    expect(completionOf(readResult).status).toBe('succeeded');
+    investigation.dispose();
+
+    const writer = runtime({ writeScopeFor: () => 'workspace-write' });
+    const writeResult = await writer.execute({ ...writeInput, worker: writableWorker() });
+    expect(completionOf(writeResult).status).toBe('succeeded');
+    expect(completionOf(writeResult).risks).toEqual([]);
+    writer.dispose();
   });
 });

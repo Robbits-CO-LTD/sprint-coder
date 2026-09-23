@@ -5347,6 +5347,12 @@ export class IpcRouter {
         input: request.arguments,
         signal,
       });
+    } catch (error) {
+      // A policy denial never reaches the result path below. Tell the Worker runtime, so a write
+      // execution whose writes were all denied is not reported as succeeded (issue #527).
+      if (worker !== undefined && error instanceof ToolAuthorizationDeniedError)
+        this.cliTeamWorkerRuntime.recordManagedToolDenied(turnId, request.toolName);
+      throw error;
     } finally {
       if (worker !== undefined) this.managedWorkerCall.delete(workerCallKey);
     }
