@@ -369,7 +369,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
                   risks:
                     writes.denied > 0
                       ? [
-                          `書き込みツールの呼び出し${writes.denied}件が拒否されました（反映された変更は${writes.committed}件）。`,
+                          `書き込みツールの呼び出し${writes.denied}件が拒否されました（反映された書き込みは${writes.committed}件）。`,
                         ]
                       : [],
                 }
@@ -564,9 +564,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   recordManagedToolResult(turnId: string, result: unknown): void {
     const run = this.pending.get(turnId);
     if (run === undefined) return;
+    // Counted per committed write call, like denials, so a directory creation (which changes no
+    // file) still shows that the Worker could write.
+    if (isCommittedManagedWrite(result)) run.writes.committed += 1;
     const changes = managedResultChanges(result);
     if (changes.length === 0) return;
-    run.writes.committed += changes.length;
     run.sideEffectsObserved = true;
     run.onEvent?.({ type: 'fileChange', changes });
   }
@@ -635,6 +637,13 @@ function workerWriteFailure(input: {
       detail: `書き込みツールの呼び出し${input.writes.denied}件がすべて拒否され、ファイルは1件も変更されませんでした。`,
     };
   return null;
+}
+
+/** A managed Workspace write that its Edit Saga committed; reads and plan updates carry no Saga. */
+function isCommittedManagedWrite(result: unknown): boolean {
+  if (typeof result !== 'object' || result === null) return false;
+  const record = result as Record<string, unknown>;
+  return record['state'] === 'committed' && typeof record['sagaId'] === 'string';
 }
 
 function managedResultChanges(

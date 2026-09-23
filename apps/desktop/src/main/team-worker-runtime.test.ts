@@ -1062,6 +1062,7 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
       subject.recordManagedToolResult(turnId, {
         rootId: 'root-1',
         path: 'a.txt',
+        sagaId: 'saga-1',
         kind: 'add',
         state: 'committed',
       });
@@ -1072,6 +1073,28 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     expect(completionOf(result).status).toBe('succeeded');
     expect(completionOf(result).risks).toHaveLength(1);
     expect(completionOf(result).risks[0]).toContain('1件');
+    subject.dispose();
+  });
+
+  it('counts a committed directory creation as a write when judging denied writes', async () => {
+    const subject = runtime({ writeScopeFor: () => 'workspace-write' });
+    runtimeHostMock.beforeComplete = (turnId) => {
+      subject.recordManagedToolResult(turnId, {
+        rootId: 'root-1',
+        path: 'generated',
+        sagaId: 'saga-mkdir',
+        state: 'committed',
+        kind: 'mkdir',
+      });
+      subject.recordManagedToolDenied(turnId, 'apply_patch');
+    };
+
+    const result = await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(completionOf(result).status).toBe('succeeded');
+    expect(completionOf(result).risks).toEqual([
+      expect.stringContaining('反映された書き込みは1件'),
+    ]);
     subject.dispose();
   });
 
