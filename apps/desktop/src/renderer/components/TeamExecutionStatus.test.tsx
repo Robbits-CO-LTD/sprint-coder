@@ -237,6 +237,71 @@ describe('TeamExecutionStatus', () => {
     }
   });
 
+  it('does not count a failed Worker worktree that was only cleaned up as integrated (issue #529)', () => {
+    const repository = {
+      ordinal: 1,
+      repoPath: '/workspace/primary',
+      worktreePath: '/tmp/primary',
+      baseHead: 'a'.repeat(40),
+      workerHead: null,
+      changedFiles: [],
+    };
+    const isolation = (
+      repositories: NonNullable<TeamExecutionSummary['isolation']>['repositories'],
+    ) =>
+      execution({
+        accessMode: 'workspace-write',
+        state: 'failed',
+        isolation: {
+          phase: 'quarantined',
+          resumeKind: null,
+          repositories,
+          roots: [],
+          reason: 'Worker failed',
+        },
+      });
+    const reclaimed = isolation([{ ...repository, integratedHead: null, state: 'cleaned' }]);
+    for (const variant of ['canvas', 'list'] as const) {
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus execution={reclaimed} variant={variant} />,
+      );
+      expect(html).toContain('0/1 repository統合済み');
+      expect(html).toContain('片付け済み（統合なし）');
+      expect(html).not.toContain('統合・片付け済み');
+      expect(html).not.toContain('隔離して要確認');
+    }
+
+    // A repository that did integrate keeps its wording, and a kept worktree still needs review.
+    const mixed = renderToStaticMarkup(
+      <TeamExecutionStatus
+        execution={isolation([
+          { ...repository, integratedHead: 'e'.repeat(40), state: 'cleaned' },
+          { ...repository, ordinal: 2, integratedHead: null, state: 'quarantined' },
+        ])}
+        variant="list"
+      />,
+    );
+    expect(mixed).toContain('1/2 repository統合済み');
+    expect(mixed).toContain('統合・片付け済み');
+    expect(mixed).toContain('隔離して要確認');
+    expect(mixed).not.toContain('片付け済み（統合なし）');
+
+    // Every worktree is gone, but one repository did integrate before the isolation was
+    // quarantined, so the heading must not claim that nothing was integrated.
+    const partlyIntegrated = renderToStaticMarkup(
+      <TeamExecutionStatus
+        execution={isolation([
+          { ...repository, integratedHead: 'e'.repeat(40), state: 'cleaned' },
+          { ...repository, ordinal: 2, integratedHead: null, state: 'cleaned' },
+        ])}
+        variant="list"
+      />,
+    );
+    expect(partlyIntegrated).toContain('1/2 repository統合済み · 隔離して要確認');
+    expect(partlyIntegrated).toContain('統合・片付け済み');
+    expect(partlyIntegrated).toContain('片付け済み（統合なし）');
+  });
+
   it('routes standalone integration and Worker resumes to distinct labeled actions', () => {
     const integration = execution({
       state: 'waiting_resume',
