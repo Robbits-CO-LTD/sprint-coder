@@ -29,6 +29,7 @@ import {
   argvRepeatsExecutable,
   prepareExecutionSpec,
   waitForOutcomeOrTerminationFailure,
+  windowsCommandEnvironment,
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
@@ -148,7 +149,7 @@ describe('CommandRunner', () => {
       SYSTEMROOT: windowsRoot,
       WINDIR: windowsRoot,
       COMSPEC: windowsPath.join(systemDirectory, 'cmd.exe'),
-      NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main',
+      NODE_OPTIONS: '--preserve-symlinks-main',
     });
     expect(environment['NODE_OPTIONS']).not.toContain('--require');
     expect(environment).not.toHaveProperty('OPENAI_API_KEY');
@@ -167,6 +168,29 @@ describe('CommandRunner', () => {
       PATH: 'relative\\bin;C:\\Windows\\System32;\\\\server\\tools;D:\\Tools;;d:\\tools\\',
     });
     expect(environment['PATH']).toBe(`${pathSystemDirectory};${windowsRoot};D:\\Tools`);
+  });
+
+  it('adds module symlink preservation only to sandboxed Windows command launches', () => {
+    const approved = buildControlledEnvironment('win32', {
+      Path: 'C:\\Program Files\\nodejs',
+      UserProfile: 'C:\\Users\\example',
+      NODE_OPTIONS: '--require C:\\workspace\\attacker.cjs',
+    });
+
+    // Unsandboxed commands keep the approved environment, so pnpm and npm link layouts still
+    // resolve through realpath.
+    const unsandboxed = windowsCommandEnvironment(approved, undefined, false);
+    expect(unsandboxed).toEqual(approved);
+    expect(unsandboxed['NODE_OPTIONS']).toBe('--preserve-symlinks-main');
+
+    const sandboxed = windowsCommandEnvironment(approved, undefined, true);
+    expect(sandboxed['NODE_OPTIONS']).toBe('--preserve-symlinks --preserve-symlinks-main');
+    expect({ ...sandboxed, NODE_OPTIONS: approved['NODE_OPTIONS'] }).toEqual(approved);
+    expect(
+      windowsCommandEnvironment(approved, { NODE_OPTIONS: '--require C:\\x.cjs' }, true)[
+        'NODE_OPTIONS'
+      ],
+    ).toBe('--preserve-symlinks --preserve-symlinks-main');
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
@@ -457,6 +481,59 @@ describe('CommandRunner', () => {
       expect(chunks.map(({ text }) => text).join('')).toContain('node-main-ok');
     },
     15_000,
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'resolves workspace require() and import inside the Windows sandbox without changing unsandboxed Node',
+    async () => {
+      expect((await probeSandboxRunner()).available).toBe(true);
+      const root = await workspace();
+      const nested = join(root, 'sub');
+      await mkdir(nested);
+      await writeFile(join(nested, 'value.cjs'), 'module.exports = 42;\n');
+      await writeFile(join(nested, 'value.mjs'), 'export const value = 42;\n');
+      await writeFile(
+        join(nested, 'esm.mjs'),
+        "import { value } from './value.mjs';\nprocess.stdout.write('esm=' + value + ';');\n",
+      );
+      const output = async (runner: CommandRunner, argv: string[]): Promise<string> => {
+        const spec = await prepareExecutionSpec({
+          workspacePath: root,
+          cwd: 'sub',
+          executable: process.execPath,
+          argv,
+        });
+        const chunks: CommandOutputChunk[] = [];
+        const result = await runner.run(spec, {
+          onChunk: (chunk) => {
+            chunks.push(chunk);
+          },
+        });
+        const text = chunks.map(({ text }) => text).join('');
+        expect(result.exitCode, text).toBe(0);
+        return text;
+      };
+      const printOptions = [
+        '-e',
+        "process.stdout.write('options=' + process.env.NODE_OPTIONS + ';')",
+      ];
+
+      const sandboxed = new CommandRunner({ sandboxed: true });
+      expect(
+        await output(sandboxed, [
+          '-e',
+          "process.stdout.write('cjs=' + require('./value.cjs') + ';')",
+        ]),
+      ).toContain('cjs=42;');
+      expect(await output(sandboxed, ['esm.mjs'])).toContain('esm=42;');
+      expect(await output(sandboxed, printOptions)).toContain(
+        'options=--preserve-symlinks --preserve-symlinks-main;',
+      );
+      expect(await output(new CommandRunner(), printOptions)).toContain(
+        'options=--preserve-symlinks-main;',
+      );
+    },
+    60_000,
   );
 
   it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
