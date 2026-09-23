@@ -179,7 +179,8 @@ function classifyGrokRpcFailure(
         : httpStatus === 401
           ? 'authentication'
           : undefined;
-  const category = fromStatus ?? categoryFromGrokText(code, message, record);
+  const category =
+    fromStatus ?? categoryFromGrokText(code, message, record, httpStatus !== undefined);
   if (httpStatus === undefined) return { category };
   return { category, httpStatus };
 }
@@ -199,11 +200,17 @@ function categoryFromGrokText(
   code: number,
   message: unknown,
   record: Record<string, unknown> | undefined,
+  statusObserved: boolean,
 ): GrokRpcCategory {
   const samples = [message, record?.['message']]
     .filter((value): value is string => typeof value === 'string')
     .map((value) => classifyTextPrefix(value));
-  if (samples.some((sample) => /\b402\b/u.test(sample) && GROK_BILLING_TEXT.test(sample)))
+  // Billing is final (retryable false), so provider text may decide it only when no HTTP status was
+  // observed. An observed 500/503 whose body quotes a 402 is a transient failure, not billing.
+  if (
+    !statusObserved &&
+    samples.some((sample) => /\b402\b/u.test(sample) && GROK_BILLING_TEXT.test(sample))
+  )
     return 'billing';
   if (samples.some((sample) => GROK_RATE_LIMIT_TEXT.test(sample))) return 'rate_limit';
   if (code === -32000 || samples.some((sample) => GROK_AUTH_TEXT.test(sample)))

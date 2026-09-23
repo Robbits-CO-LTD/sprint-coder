@@ -365,14 +365,21 @@ describe('Grok RPC failure classification', () => {
     expect(error.httpStatus).toBe(402);
   });
 
-  it('reads billing text after a non-decisive status without inventing 402', async () => {
+  it('does not let provider text turn an observed non-billing status into billing', async () => {
     const error = await rejectedRpc({
       code: -32603,
       message: '402 Payment Required',
       data: { http_status: 500 },
     });
-    expect(error.category).toBe('billing');
+    expect(error.category).toBe('other');
     expect(error.httpStatus).toBe(500);
+    const limited = await rejectedRpc({
+      code: -32603,
+      message: '429 Too Many Requests',
+      data: { http_status: 503 },
+    });
+    expect(limited.category).toBe('rate_limit');
+    expect(limited.httpStatus).toBe(503);
   });
 
   it('classifies only the first 4KiB of provider text', async () => {
