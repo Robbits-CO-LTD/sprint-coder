@@ -7,6 +7,7 @@ import {
   MODEL_ACCESS_OPTIONS,
   catalogQuery,
   connectionLabel,
+  selectionNameQuery,
   describeModel,
   groupAtScrollTop,
   modelGroup,
@@ -100,6 +101,27 @@ describe('catalogQuery', () => {
       accessType: 'subscription',
       cursor: null,
     });
+    expect(modelCatalogQueryInputSchema.parse(query)).toEqual(query);
+  });
+});
+
+describe('selectionNameQuery', () => {
+  it('narrows to one connection and searches that exact model id', () => {
+    const query = selectionNameQuery({
+      taskId: 'task-a',
+      connectionId: 'builtin:claude-cli',
+      requestedModel: 'sonnet',
+    });
+    expect(query.taskId).toBe('task-a');
+    expect(query.text).toBe('sonnet');
+    expect(query.connectionIds).toEqual(['builtin:claude-cli']);
+    expect(query.providerIds).toEqual([]);
+    expect(query.accessTypes).toEqual([]);
+    expect(query.capabilities).toEqual([]);
+    expect(query.availableOnly).toBe(false);
+    expect(query.cursor).toBeNull();
+    expect(query.limit).toBe(100);
+    // `.strict()`, so a field the contract does not have fails here as well as one the lookup forgot.
     expect(modelCatalogQueryInputSchema.parse(query)).toEqual(query);
   });
 });

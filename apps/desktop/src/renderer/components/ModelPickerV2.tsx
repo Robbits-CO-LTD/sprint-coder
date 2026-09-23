@@ -10,6 +10,8 @@ import type {
 import { requestOpenLocalAiSettings } from '../lib/settings-navigation';
 import { useAppStore } from '../store/appStore';
 import {
+  chosenFromCatalog,
+  namesSelection,
   resolveTriggerLabel,
   selectionForTask,
   type ChosenModel,
@@ -229,6 +231,30 @@ export function catalogQuery(args: {
   };
 }
 
+/** Catalog read that recovers the display name of a selection the picker did not click itself.
+ *
+ * Issue #530. Main treats `text` as a lowercase substring of the display name or the model id, and
+ * `connectionIds` as an exact connection filter, so this narrows the page to one connection and the
+ * renderer keeps only the row whose `modelId` is exactly `requestedModel`. `availableOnly` stays
+ * off: a model the user already selected should keep its name even while it is unavailable. */
+export function selectionNameQuery(args: {
+  taskId: string;
+  connectionId: string;
+  requestedModel: string;
+}): ModelCatalogQueryInput {
+  return {
+    taskId: args.taskId,
+    text: args.requestedModel,
+    connectionIds: [args.connectionId],
+    providerIds: [],
+    accessTypes: [],
+    capabilities: [],
+    availableOnly: false,
+    cursor: null,
+    limit: 100,
+  };
+}
+
 /** The API / サブスク / ローカル segmented control.
  *
  * Three real `<button>`s in a group rather than a custom widget: they are keyboard-native already, and
@@ -289,10 +315,9 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   const [failed, setFailed] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
-  // The row the user picked, so the trigger can show a name rather than an id between the write and
-  // the next time the catalog is queried. Its identity is kept with the name so the name can be
-  // disowned as soon as the canonical selection points somewhere else — a local label is a display
-  // convenience, never a second answer to "which model is this Task on".
+  // Display name for the canonical selection. A click fills it immediately; a remount recovers it
+  // from the catalog (Issue #530). Identity stays with the name so a selection that moves elsewhere
+  // drops the label instead of asserting a model the Task is no longer on.
   const [chosen, setChosen] = useState<ChosenModel | null>(null);
 
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -540,10 +565,53 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
     }
   }
 
+  // A row already on the loaded page can name the selection without another round trip. Otherwise
+  // `chosen` does — once a click or the remount lookup (below) has filled it. Either way the name
+  // is used only while it still *is* the canonical selection.
+  const listed = chosenFromCatalog(selection, page.items);
+  const selectedConnectionId = selection?.connectionId ?? null;
+  const selectedModel = selection?.requestedModel ?? null;
+  const named = listed !== null || namesSelection(selection, chosen);
+
+  // Issue #530: after a Task switch or restart the local name is gone, and the persisted selection
+  // has only ids. Ask the catalog for this exact connection and model. An answer that lands after
+  // the selection has moved is dropped — `current` is cleared by the cleanup before the next lookup.
+  useEffect(() => {
+    const query = window.sprintCoder?.models?.query;
+    if (
+      named ||
+      selectedConnectionId === null ||
+      selectedModel === null ||
+      typeof query !== 'function'
+    ) {
+      return;
+    }
+    let current = true;
+    void query(
+      selectionNameQuery({
+        taskId,
+        connectionId: selectedConnectionId,
+        requestedModel: selectedModel,
+      }),
+    )
+      .then((result) => {
+        if (!current) return;
+        const found = chosenFromCatalog(
+          { connectionId: selectedConnectionId, requestedModel: selectedModel },
+          result.items,
+        );
+        if (found !== null) setChosen(found);
+      })
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [taskId, selectedConnectionId, selectedModel, named]);
+
   // Reads through the canonical selection every render, so an external change — a legacy
   // Runtime/Model write, a Main answer that normalised the request, a rejected write rolled back —
   // takes the local name with it instead of leaving the trigger asserting the old choice.
-  const triggerLabel = resolveTriggerLabel(selection, chosen);
+  const triggerLabel = resolveTriggerLabel(selection, listed ?? chosen);
   const countMessage = failed
     ? 'モデル一覧を取得できませんでした'
     : loading && page.items.length === 0

@@ -1,4 +1,4 @@
-import type { ModelSelection } from '@sprint-coder/contracts';
+import type { ModelSelection, ProviderModel } from '@sprint-coder/contracts';
 
 /**
  * The rules that keep the legacy Runtime/Model chips and the V2 Model Picker on *one* selection
@@ -72,6 +72,20 @@ export function selectionForTask(
   return snapshot.taskId === taskId ? snapshot.selection : null;
 }
 
+/** Whether `chosen` still names this selection: the same connection and the same model id.
+ * A display name for any other row, including the same id on another connection, does not count. */
+export function namesSelection(
+  selection: ModelSelection | null,
+  chosen: ChosenModel | null,
+): boolean {
+  return (
+    selection !== null &&
+    chosen !== null &&
+    selection.connectionId === chosen.connectionId &&
+    selection.requestedModel === chosen.requestedModel
+  );
+}
+
 /** What the trigger says.
  *
  * `chosen` is a *display* convenience, never a second source of truth: it is used only while it
@@ -83,14 +97,35 @@ export function resolveTriggerLabel(
   selection: ModelSelection | null,
   chosen: ChosenModel | null,
 ): string {
-  if (
-    chosen !== null &&
-    selection !== null &&
-    selection.connectionId === chosen.connectionId &&
-    selection.requestedModel === chosen.requestedModel
-  )
-    return chosen.displayName;
+  if (chosen !== null && namesSelection(selection, chosen)) return chosen.displayName;
   return selection?.requestedModel ?? MODEL_PICKER_AUTO_LABEL;
+}
+
+/**
+ * The catalog row that *is* this selection, reduced to the display name the trigger can show.
+ *
+ * Issue #530: the persisted selection carries no display name, so a remounted picker has to recover
+ * it from a catalog row. Only an exact `connectionId` and `modelId` match counts — the same model
+ * id on another connection, or a longer id that merely contains this one, is a different model.
+ * Pure: no store, no `window`.
+ */
+export function chosenFromCatalog(
+  selection: Pick<ModelSelection, 'connectionId' | 'requestedModel'> | null,
+  items: readonly ProviderModel[],
+): ChosenModel | null {
+  if (selection === null || selection.connectionId === null || selection.requestedModel === null) {
+    return null;
+  }
+  const row = items.find(
+    (item) =>
+      item.connectionId === selection.connectionId && item.modelId === selection.requestedModel,
+  );
+  if (row === undefined) return null;
+  return {
+    connectionId: row.connectionId,
+    requestedModel: row.modelId,
+    displayName: row.displayName,
+  };
 }
 
 /**
