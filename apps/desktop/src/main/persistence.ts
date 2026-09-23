@@ -5828,6 +5828,10 @@ export interface PersistenceClient {
     turnId: string;
     createdAt: string;
   }): readonly string[];
+  verifyTeamExecutionIsolationEditSagaPostImages(input: {
+    executionId: string;
+    createdAt: string;
+  }): readonly string[];
   hasCommittedEditSagas(taskId: string, turnId: string): boolean;
   updateEditSaga(
     id: string,
@@ -17779,6 +17783,101 @@ export class SqlitePersistenceClient implements PersistenceClient {
     }
   }
 
+  /**
+   * Verifies the committed Edit Sagas a Team Worker sealed inside one isolation, while that
+   * worktree still exists. Issue #516 follow-up: this is the last point where Main can observe
+   * these post-images. After integration the worktree is removed and the Leader Turn's completion
+   * gate no longer re-reads them. An unverified Saga records nothing and keeps its criterion open.
+   */
+  verifyTeamExecutionIsolationEditSagaPostImages(input: {
+    executionId: string;
+    createdAt: string;
+  }): readonly string[] {
+    const isolation = this.requireTeamExecutionIsolation(input.executionId);
+    if (isolation.phase !== 'finalizing' && isolation.phase !== 'waiting_integration')
+      throw new OperationConflictError();
+    const task = this.db
+      .prepare(
+        `SELECT team.task_id AS task_id
+         FROM team_executions execution
+         INNER JOIN teams team ON team.id = execution.team_id
+         WHERE execution.id = ?`,
+      )
+      .get(input.executionId) as { task_id: string } | undefined;
+    if (task === undefined) throw new NotFoundError('Team execution not found');
+    const roots = isolation.roots.flatMap((root) =>
+      root.isolatedMutationKey === null || root.isolatedIdentity === null
+        ? []
+        : [
+            {
+              rootId: root.rootId,
+              isolatedPath: root.isolatedPath,
+              isolatedMutationKey: root.isolatedMutationKey,
+              isolatedIdentity: root.isolatedIdentity,
+            },
+          ],
+    );
+    const rows = (
+      this.db
+        .prepare(
+          `SELECT * FROM edit_sagas
+           WHERE task_id = ? AND state = 'committed'
+           ORDER BY commit_sequence, id`,
+        )
+        .all(task.task_id) as EditSagaRow[]
+    ).filter((row) =>
+      roots.some(
+        (root) =>
+          row.root_id === root.rootId &&
+          row.workspace_key === root.isolatedMutationKey &&
+          row.root_identity_digest === root.isolatedIdentity,
+      ),
+    );
+    if (rows.length === 0) return Object.freeze([]);
+    const rootPaths = new Map(
+      roots.map(
+        (root) =>
+          [
+            root.rootId,
+            {
+              canonical_path: root.isolatedPath,
+              workspace_key: root.isolatedMutationKey,
+            },
+          ] as const,
+      ),
+    );
+    const observation = this.openSealedObservationOver(rows, rootPaths);
+    try {
+      return this.db.transaction(() => {
+        const rootIsSealed = this.sealedRootPredicate(
+          (rootId) => (rootId === null ? null : (rootPaths.get(rootId)?.canonical_path ?? null)),
+          observation,
+        );
+        const holds = turnPostImageVerifier(observation.sagas, observation.observe);
+        const unverified: string[] = [];
+        for (const saga of observation.sagas) {
+          if (!rootIsSealed(saga) || !holds(saga)) {
+            unverified.push(`verification:${saga.id}`);
+            continue;
+          }
+          const settled = this.listAssuranceRounds(saga.taskId, saga.turnId, saga.id).at(-1);
+          if (settled?.decision === 'complete' || settled?.decision === 'blocked') continue;
+          this.recordAssuranceVerification({
+            taskId: saga.taskId,
+            turnId: saga.turnId,
+            sagaId: saga.id,
+            outcome: 'passed',
+            failureClass: null,
+            createdAt: input.createdAt,
+          });
+        }
+        return Object.freeze(unverified);
+      })();
+    } finally {
+      observation.close();
+    }
+  }
+
   /** Whether the Turn committed any Edit Saga, i.e. whether it has a post-image to verify. */
   hasCommittedEditSagas(taskId: string, turnId: string): boolean {
     return (
@@ -17812,8 +17911,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * root's current identity with the digest sealed into the Saga is what distinguishes them.
    *
    * A Saga written in an integrated Team Worker isolation is not re-read here: its worktree is
-   * removed after integration (issue #516). Its verification rests on the evidence recorded when
-   * the Worker's Saga committed, which decideCompletion still requires.
+   * removed after integration (issue #516). Main records that Saga's verification evidence while
+   * the worktree still exists (`verifyTeamExecutionIsolationEditSagaPostImages`). decideCompletion
+   * still requires the evidence; a Saga that was not verified records nothing and keeps its
+   * criterion open.
    */
   private verifyEditSagaPostImagesInTransaction(
     taskId: string,
@@ -17883,6 +17984,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY commit_sequence, id`,
       )
       .all(taskId, turnId) as EditSagaRow[];
+    const rootPaths = new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT root_id, canonical_path, workspace_key
+             FROM turn_workspace_roots WHERE turn_id = ?`,
+          )
+          .all(turnId) as { root_id: string; canonical_path: string; workspace_key: string }[]
+      ).map((row) => [row.root_id, row] as const),
+    );
+    return this.openSealedObservationOver(rows, rootPaths);
+  }
+
+  private openSealedObservationOver(
+    rows: EditSagaRow[],
+    rootPaths: ReadonlyMap<string, { canonical_path: string; workspace_key: string }>,
+  ): TurnSealedObservation {
     const sagas = rows.map(toEditSaga);
     const ambiguousPaths = ambiguousLegacyPostImagePaths(
       sagas,
@@ -17896,16 +18014,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
         rootIdentity: () => undefined,
         close: () => undefined,
       });
-    const rootPaths = new Map(
-      (
-        this.db
-          .prepare(
-            `SELECT root_id, canonical_path, workspace_key
-             FROM turn_workspace_roots WHERE turn_id = ?`,
-          )
-          .all(turnId) as { root_id: string; canonical_path: string; workspace_key: string }[]
-      ).map((row) => [row.root_id, row] as const),
-    );
     // Last writer wins, exactly as the expectations do, so a path is observed through the root of
     // the Saga that owns its final state.
     const rootOfPath = new Map<string, string | null>();
@@ -17996,6 +18104,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
       ).map((row) => [row.root_id, row.canonical_path] as const),
     );
     const taskWorkspacePath = this.getTaskRow(taskId).workspace_path;
+    return this.sealedRootPredicate(
+      (rootId) => (rootId === null ? taskWorkspacePath : (rootPaths.get(rootId) ?? null)),
+      observation,
+    );
+  }
+
+  private sealedRootPredicate(
+    rootPathOf: (rootId: string | null) => string | null,
+    observation: TurnSealedObservation,
+  ): (saga: EditSagaSnapshot) => boolean {
     const observed = new Map<string, string | null>();
     const identityOf = (rootPath: string): string | null => {
       if (!observed.has(rootPath))
@@ -18012,8 +18130,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // have moved since.
       const pinned = observation.rootIdentity(saga.rootId);
       if (pinned !== undefined) return pinned === saga.rootIdentityDigest;
-      const rootPath =
-        saga.rootId === null ? taskWorkspacePath : (rootPaths.get(saga.rootId) ?? null);
+      const rootPath = rootPathOf(saga.rootId);
       if (rootPath === null) return false;
       return identityOf(rootPath) === saga.rootIdentityDigest;
     };

@@ -4543,6 +4543,20 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       }
+      // Main verifies the Worker's Edit Sagas while the isolated worktree still exists. After integration
+      // the worktree is removed and the Leader Turn's completion gate skips these Sagas (issue #516), so
+      // their verification evidence is recorded here. An unverified Saga does not stop integration: it
+      // records nothing and keeps the Leader Turn from completing, as a Leader-written Saga would.
+      // A verification error is treated the same way: nothing is recorded (the transaction rolls
+      // back), so the completion gate still holds, and the Worker's work is integrated regardless.
+      try {
+        this.persistence.verifyTeamExecutionIsolationEditSagaPostImages({
+          executionId: isolation.executionId,
+          createdAt: this.isoNow(),
+        });
+      } catch (error) {
+        this.reportIsolationVerificationError(isolation.executionId, input, error);
+      }
       isolation = this.persistence.updateTeamExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_integration',
@@ -4565,6 +4579,27 @@ export class TeamCoordinator {
       isolation,
       changedFiles: this.isolationChangedFiles(isolation),
     };
+  }
+
+  private reportIsolationVerificationError(
+    executionId: string,
+    input: Readonly<{ agentId: string; missionId: string }>,
+    error: unknown,
+  ): void {
+    try {
+      const execution = this.persistence.getTeamExecution(executionId);
+      this.diagnostic?.({
+        event: 'team.isolation.verification_failed',
+        taskId: this.persistence.getTeam(execution.teamId).taskId,
+        teamId: execution.teamId,
+        missionId: input.missionId,
+        workerId: input.agentId,
+        status: 'unverified',
+        result: error instanceof Error ? error.name : 'Error',
+      });
+    } catch {
+      // Diagnostics are best effort and must not affect integration.
+    }
   }
 
   private async integrateIsolation(

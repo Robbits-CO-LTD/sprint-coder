@@ -1155,6 +1155,161 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('verifies Worker Edit Sagas while the isolated worktree still exists, before integration', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Standalone writable execution');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write one bounded change',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const observed: {
+        executionId: string;
+        phase: string;
+        repositoryStates: string[];
+        worktreeExists: boolean;
+      }[] = [];
+      const original = persistence.verifyTeamExecutionIsolationEditSagaPostImages.bind(persistence);
+      vi.spyOn(persistence, 'verifyTeamExecutionIsolationEditSagaPostImages').mockImplementation(
+        (input) => {
+          const isolation = persistence.getTeamExecutionIsolation(input.executionId);
+          const isolatedPath = isolation?.roots[0]?.isolatedPath;
+          if (isolation === null || isolatedPath === undefined)
+            throw new Error('isolation root missing during verification');
+          observed.push({
+            executionId: input.executionId,
+            phase: isolation.phase,
+            repositoryStates: isolation.repositories.map(({ state }) => state),
+            worktreeExists: existsSync(isolatedPath),
+          });
+          return original(input);
+        },
+      );
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the output',
+        doneCriteria: ['worker-output.txt is integrated'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15_000,
+      );
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+      );
+      expect(observed).toEqual([
+        {
+          executionId: submission.executionId,
+          phase: 'finalizing',
+          repositoryStates: ['ready'],
+          worktreeExists: true,
+        },
+      ]);
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'completed',
+        repositories: [{ state: 'cleaned' }],
+      });
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    });
+
+    it('integrates a Worker isolation even when its Edit Sagas are left unverified', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Standalone writable execution');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write one bounded change',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      vi.spyOn(persistence, 'verifyTeamExecutionIsolationEditSagaPostImages').mockReturnValue([
+        'verification:unverified-fixture',
+      ]);
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the output',
+        doneCriteria: ['worker-output.txt is integrated'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15_000,
+      );
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+      );
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'completed',
+        repositories: [{ state: 'cleaned' }],
+      });
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    });
+
+    it('integrates a Worker isolation when verifying its Edit Sagas throws', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Standalone writable execution');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write one bounded change',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const verify = vi
+        .spyOn(persistence, 'verifyTeamExecutionIsolationEditSagaPostImages')
+        .mockImplementation(() => {
+          throw new Error('verification observer failed');
+        });
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the output',
+        doneCriteria: ['worker-output.txt is integrated'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15_000,
+      );
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+          'cleaned',
+      );
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'completed',
+        resumeKind: null,
+        repositories: [{ state: 'cleaned' }],
+      });
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    });
+
     it('restarts a steered writable execution without quarantining its reusable isolation', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Steered isolation');
