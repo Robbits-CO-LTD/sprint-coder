@@ -341,7 +341,15 @@ const NODE_OPTIONS_WITH_SEPARATE_VALUE: ReadonlySet<string> = new Set([
   '--test-concurrency',
   '--test-timeout',
   '--test-shard',
+  '--test-coverage-include',
+  '--test-coverage-exclude',
+  '--test-coverage-branches',
+  '--test-coverage-functions',
+  '--test-coverage-lines',
+  '--disable-warning',
+  '--watch-path',
   '--env-file',
+  '--env-file-if-exists',
   '--conditions',
   '-C',
   '--input-type',
@@ -413,7 +421,7 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   );
   throw new CommandRunnerError(
     'NODE_TEST_ISOLATION_REQUIRED',
-    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Rerun with --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) so tests run in-process. Node versions before 22.8 cannot run the test runner inside the Windows sandbox.',
+    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Rerun with --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) so tests run in-process. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
   );
 }
 
