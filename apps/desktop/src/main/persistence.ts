@@ -17805,6 +17805,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       )
       .get(input.executionId) as { task_id: string } | undefined;
     if (task === undefined) throw new NotFoundError('Team execution not found');
+    // Only the Task's active Turn still has a completion gate to satisfy; a finished Turn's gate has
+    // already run. commit_sequence is numbered per Turn, so one Turn also keeps it a valid order.
+    const turnId = this.getActiveTurnId(task.task_id);
+    if (turnId === null) return Object.freeze([]);
     const roots = isolation.roots.flatMap((root) =>
       root.isolatedMutationKey === null || root.isolatedIdentity === null
         ? []
@@ -17821,10 +17825,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       this.db
         .prepare(
           `SELECT * FROM edit_sagas
-           WHERE task_id = ? AND state = 'committed'
+           WHERE task_id = ? AND turn_id = ? AND state = 'committed'
            ORDER BY commit_sequence, id`,
         )
-        .all(task.task_id) as EditSagaRow[]
+        .all(task.task_id, turnId) as EditSagaRow[]
     ).filter((row) =>
       roots.some(
         (root) =>

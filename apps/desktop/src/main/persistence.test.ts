@@ -3546,6 +3546,41 @@ if (runsWithElectronAbi)
       }
     });
 
+    it('verifies only the active Turn when one isolation holds Worker Sagas from more than one Turn', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'completed',
+        repositoryState: 'cleaned',
+        recordVerification: false,
+        operation: 'update',
+        realIsolatedIdentity: true,
+        verifyBeforeIntegration: true,
+        rewriteInLaterTurn: true,
+      });
+      try {
+        // The earlier Turn has already finished, so its overwritten Saga is neither verified nor
+        // reported. The active Turn's Saga holds and its Leader Turn completes.
+        expect(fixture.verifications).toEqual([[], []]);
+        expect(
+          fixture.persistence
+            .listAssuranceRounds(fixture.taskId, fixture.earlierTurnId, fixture.earlierSagaId)
+            .map(({ decision }) => decision),
+        ).toEqual([]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          fixture.persistence.changeStage(fixture.taskId, fixture.turnId, stage);
+        expect(
+          fixture.persistence.completeTurn(fixture.taskId, fixture.turnId, 'completed'),
+        ).toMatchObject({ type: 'turn.completed', state: 'completed' });
+        expect(
+          fixture.persistence
+            .listEvidenceRecords(fixture.taskId, fixture.turnId)
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId }) => criterionId),
+        ).toEqual([`verification:${fixture.sagaId}`]);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
     it.each(['running', 'completed'] as const)(
       'refuses to verify isolated Worker Sagas while the isolation is %s',
       async (phase) => {
@@ -9952,11 +9987,14 @@ async function commitIsolatedWorkerEdit(input: {
   realIsolatedIdentity?: boolean;
   verifyBeforeIntegration?: boolean;
   tamperBeforeVerification?: boolean;
+  rewriteInLaterTurn?: boolean;
 }): Promise<{
   persistence: SqlitePersistenceClient;
   taskId: string;
   turnId: string;
   sagaId: string;
+  earlierTurnId: string;
+  earlierSagaId: string;
   executionId: string;
   worktreePath: string;
   verifications: readonly (readonly string[])[];
@@ -10083,6 +10121,36 @@ async function commitIsolatedWorkerEdit(input: {
         failureClass: null,
         createdAt: new Date(Date.parse(saga.updatedAt) + 1_000).toISOString(),
       });
+    let completingTurnId = turn.turnId;
+    let completingSaga = saga;
+    if (input.rewriteInLaterTurn === true) {
+      persistence.completeTurn(task.id, turn.turnId, 'failed');
+      const later = persistence.startTurn(task.id, 'Worker の変更を次の Turn で書き直す');
+      completingSaga = await new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        fileBoundary(workspaceFile, artifacts, 'after', 'rewritten'),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'issue-516-later-lease'),
+      ).apply({
+        // Both Sagas have commit_sequence 1 in their own Turn, and this id sorts first, so ordering
+        // across Turns by (commit_sequence, id) would take the earlier Turn's Saga as the last writer.
+        id: 'a-issue-516-later-saga',
+        taskId: task.id,
+        turnId: later.turnId,
+        operationId: 'issue-516-later-operation',
+        plan: persistedEditPlan('after', 'rewritten', workspaceFile, workspaceFile),
+        mutationBinding: {
+          rootId: root.rootId,
+          workspacePath: worktreePath,
+          workspaceKey: isolatedMutationKey,
+          rootIdentityDigest: isolatedIdentity,
+        },
+        createdAt: '2026-07-23T00:00:04.000Z',
+      });
+      expect(completingSaga).toMatchObject({ state: 'committed', turnId: later.turnId });
+      completingTurnId = later.turnId;
+    }
     if (input.phase !== 'running') {
       const settled = {
         ...activeRepository,
@@ -10127,8 +10195,10 @@ async function commitIsolatedWorkerEdit(input: {
     return {
       persistence,
       taskId: task.id,
-      turnId: turn.turnId,
-      sagaId: saga.id,
+      turnId: completingTurnId,
+      sagaId: completingSaga.id,
+      earlierTurnId: turn.turnId,
+      earlierSagaId: saga.id,
       executionId: execution.id,
       worktreePath,
       verifications,
