@@ -7,6 +7,7 @@ import {
   EFFORT_LEVELS,
   RUNTIME_LABEL,
   effortUnavailableReason,
+  runtimeCliFoundOf,
   runtimeReadinessHint,
 } from '../lib/runtime-labels';
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
@@ -419,11 +420,17 @@ export function availabilityOf(
     codexReadiness: 'ready' | 'authentication_required' | 'unavailable';
     claudeReadiness: 'ready' | 'authentication_required' | 'unavailable';
     grokReadiness: 'ready' | 'authentication_required' | 'unavailable';
+    codexAvailable?: boolean;
+    claudeAvailable?: boolean;
+    grokAvailable?: boolean;
   },
 ): { available: boolean; reason: string | null } {
   if (kind === 'mock') return { available: true, reason: null };
   const readiness = runtime[`${kind}Readiness`];
-  return { available: readiness !== 'unavailable', reason: runtimeReadinessHint(kind, readiness) };
+  return {
+    available: readiness !== 'unavailable',
+    reason: runtimeReadinessHint(kind, readiness, runtimeCliFoundOf(kind, runtime)),
+  };
 }
 
 function ModelGroup() {

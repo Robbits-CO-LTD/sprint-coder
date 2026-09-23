@@ -111,26 +111,30 @@ describe('Grok CLI runtime controls', () => {
   });
 
   it.each([
-    ['unavailable', 'Grok CLIが見つかりません'],
-    ['authentication_required', 'grok login'],
-  ] as const)('blocks selection when Grok is %s and explains recovery', async (readiness, hint) => {
-    const runtime = grokRuntime({ grokReadiness: readiness });
-    const settings = bridge(runtime);
-    useAppStore.setState({ runtime });
-    await render(<Composer taskId="task-grok" />);
-    expect(button('model-selector').disabled).toBe(true);
-    expect(button('model-selector').title).toContain(hint);
-    await act(async () => button('runtime-selector').click());
-    const option = button('runtime-option-grok');
-    expect(option.disabled).toBe(true);
-    expect(option.title).toContain(hint);
-    await act(async () => option.click());
-    expect(settings.setRuntime).not.toHaveBeenCalled();
-    await act(async () =>
-      option.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
-    );
-    expect(button('runtime-selector').getAttribute('aria-expanded')).toBe('false');
-  });
+    ['unavailable', false, 'Grok CLIが見つかりません'],
+    ['unavailable', true, 'Grok CLIは見つかりましたが'],
+    ['authentication_required', true, 'grok login'],
+  ] as const)(
+    'blocks selection when Grok is %s (CLI found: %s) and explains recovery',
+    async (readiness, found, hint) => {
+      const runtime = grokRuntime({ grokReadiness: readiness, grokAvailable: found });
+      const settings = bridge(runtime);
+      useAppStore.setState({ runtime });
+      await render(<Composer taskId="task-grok" />);
+      expect(button('model-selector').disabled).toBe(true);
+      expect(button('model-selector').title).toContain(hint);
+      await act(async () => button('runtime-selector').click());
+      const option = button('runtime-option-grok');
+      expect(option.disabled).toBe(true);
+      expect(option.title).toContain(hint);
+      await act(async () => option.click());
+      expect(settings.setRuntime).not.toHaveBeenCalled();
+      await act(async () =>
+        option.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
+      );
+      expect(button('runtime-selector').getAttribute('aria-expanded')).toBe('false');
+    },
+  );
 
   it('rolls back a failed switch and names Grok in the unavailable message', async () => {
     const settings = bridge();
@@ -163,10 +167,18 @@ describe('Grok settings and Team display', () => {
       ).toContain('grok-test は未検証のCLI');
 
       await act(async () =>
-        useAppStore.setState({ runtime: grokRuntime({ grokReadiness: 'unavailable' }) }),
+        useAppStore.setState({
+          runtime: grokRuntime({ grokReadiness: 'unavailable', grokAvailable: false }),
+        }),
       );
       expect(detection?.textContent).toContain('Grok CLIが見つかりません');
       expect(detection?.querySelector('.settings-missing')).not.toBeNull();
+      // Found but not confirmed (issue #517): never reported as missing.
+      await act(async () =>
+        useAppStore.setState({ runtime: grokRuntime({ grokReadiness: 'unavailable' }) }),
+      );
+      expect(detection?.textContent).not.toContain('Grok CLIが見つかりません');
+      expect(detection?.textContent).toContain('grok login');
       await act(async () => useAppStore.setState({ runtime: grokRuntime() }));
       expect(detection?.textContent).toContain('利用可能');
     },

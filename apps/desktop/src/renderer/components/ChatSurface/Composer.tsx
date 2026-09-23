@@ -34,6 +34,7 @@ import {
   RUNTIME_DESC,
   RUNTIME_KINDS,
   RUNTIME_LABEL,
+  runtimeCliFoundOf,
   runtimeReadinessHint,
   runtimeReadinessOf,
 } from '../../lib/runtime-labels';
@@ -1148,7 +1149,11 @@ function RuntimeChip() {
                 disabled={disabled}
                 title={
                   disabled && kind !== 'mock'
-                    ? (runtimeReadinessHint(kind, runtimeReadinessOf(kind, runtime)) ?? undefined)
+                    ? (runtimeReadinessHint(
+                        kind,
+                        runtimeReadinessOf(kind, runtime),
+                        runtimeCliFoundOf(kind, runtime),
+                      ) ?? undefined)
                     : undefined
                 }
                 onClick={() => choose(kind)}
@@ -1219,8 +1224,11 @@ function ModelChip() {
               : 'Modelを選択'
             : runtime.kind === 'mock'
               ? 'CLI Runtime選択時にモデルを変更できます'
-              : (runtimeReadinessHint(runtime.kind, runtimeReadinessOf(runtime.kind, runtime)) ??
-                undefined)
+              : (runtimeReadinessHint(
+                  runtime.kind,
+                  runtimeReadinessOf(runtime.kind, runtime),
+                  runtimeCliFoundOf(runtime.kind, runtime),
+                ) ?? undefined)
         }
       >
         {selected.displayName}

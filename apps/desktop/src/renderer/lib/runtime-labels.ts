@@ -37,13 +37,26 @@ export function runtimeReadinessOf(
   return kind === 'mock' ? 'ready' : runtime[`${kind}Readiness`];
 }
 
+/** Whether the CLI executable itself was found, independently of whether it is usable. */
+export function runtimeCliFoundOf(
+  kind: RuntimeKind,
+  runtime: { codexAvailable?: boolean; claudeAvailable?: boolean; grokAvailable?: boolean },
+): boolean {
+  return kind === 'mock' || runtime[`${kind}Available`] === true;
+}
+
 export function runtimeReadinessHint(
   kind: Exclude<RuntimeKind, 'mock'>,
   readiness: 'ready' | 'authentication_required' | 'unavailable',
+  cliFound = false,
 ): string | null {
   if (readiness === 'ready') return null;
   if (readiness === 'authentication_required')
     return `${RUNTIME_LABEL[kind]}はインストール済みですが、ログインが必要です${kind === 'grok' ? '（ターミナルで grok login を実行）' : ''}`;
+  // A CLI that was found but whose state could not be confirmed must not be reported as missing:
+  // that sends people to reinstall when the real problem is elsewhere (issue #517).
+  if (cliFound)
+    return `${RUNTIME_LABEL[kind]}は見つかりましたが、利用できる状態か確認できませんでした${kind === 'grok' ? '（ターミナルで grok login の状態を確認してください）' : ''}`;
   return RUNTIME_CLI_MISSING_HINT[kind];
 }
 

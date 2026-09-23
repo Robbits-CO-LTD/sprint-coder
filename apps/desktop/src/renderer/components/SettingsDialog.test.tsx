@@ -163,6 +163,30 @@ describe('which body the flag selects', () => {
 });
 
 describe('CLI detection status', () => {
+  it('does not report a found CLI as missing when its state could not be confirmed', () => {
+    const runtime = {
+      codexReadiness: 'unavailable',
+      claudeReadiness: 'unavailable',
+      grokReadiness: 'unavailable',
+      codexAvailable: false,
+      claudeAvailable: true,
+      grokAvailable: true,
+    } as const;
+    expect(availabilityOf('codex', runtime)).toEqual({
+      available: false,
+      reason: 'Codex CLIが見つかりません',
+    });
+    expect(availabilityOf('claude', runtime)).toEqual({
+      available: false,
+      reason: 'Claude Codeは見つかりましたが、利用できる状態か確認できませんでした',
+    });
+    expect(availabilityOf('grok', runtime)).toEqual({
+      available: false,
+      reason:
+        'Grok CLIは見つかりましたが、利用できる状態か確認できませんでした（ターミナルで grok login の状態を確認してください）',
+    });
+  });
+
   it('keeps an installed but unauthenticated CLI detected while explaining that login is needed', () => {
     expect(
       availabilityOf('codex', {
