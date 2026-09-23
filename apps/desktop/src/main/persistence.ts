@@ -117,6 +117,7 @@ import {
   turnEventSchema,
   turnSnapshotSchema,
   workerReportSchema,
+  publicErrorCodeSchema,
   type ChatMessage,
   type ApprovalDecision,
   type AutoPermissionDecision,
@@ -143,6 +144,7 @@ import {
   type ProjectContextManifestSummary,
   type ProjectSummary,
   type ProviderRuntimeKind,
+  type PublicErrorCode,
   type QueuedInput,
   type RuntimeKind,
   type SkillDraft,
@@ -4442,6 +4444,40 @@ const migrations = [
         ON runtime_failure_diagnostics(task_id, created_at DESC, id DESC);
     `,
   },
+  {
+    version: 96,
+    checksum: 'team-attempt-failure-diagnostics-v96',
+    sql: `
+      CREATE TABLE team_attempt_failure_diagnostics (
+        attempt_id TEXT PRIMARY KEY REFERENCES team_attempts(id) ON DELETE CASCADE,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('codex', 'claude', 'grok')),
+        runtime_turn_id TEXT NOT NULL CHECK (length(runtime_turn_id) BETWEEN 1 AND 128),
+        error_code TEXT NOT NULL CHECK (length(error_code) BETWEEN 1 AND 64),
+        diagnostic_id TEXT UNIQUE,
+        failure_stage TEXT,
+        diagnostic_json TEXT
+          CHECK (diagnostic_json IS NULL OR length(CAST(diagnostic_json AS BLOB)) <= 16384),
+        created_at TEXT NOT NULL,
+        CHECK (
+          (diagnostic_id IS NULL AND failure_stage IS NULL AND diagnostic_json IS NULL) OR
+          (diagnostic_id IS NOT NULL AND failure_stage IS NOT NULL AND diagnostic_json IS NOT NULL AND (
+            (runtime_kind IN ('codex', 'claude') AND failure_stage IN (
+              'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+              'startup_error', 'spawn_error', 'abnormal_exit'
+            )) OR
+            (runtime_kind = 'grok' AND failure_stage IN (
+              'first_event_timeout', 'idle_timeout', 'total_timeout', 'protocol_error',
+              'startup_error', 'spawn_error', 'abnormal_exit',
+              'billing_error', 'rate_limit'
+            ))
+          ))
+        )
+      );
+      CREATE INDEX team_attempt_failure_diagnostics_task_created_idx
+        ON team_attempt_failure_diagnostics(task_id, created_at DESC, attempt_id DESC);
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -4725,7 +4761,16 @@ export type BackgroundCompletionRecord = Readonly<{
   runtimeAckedAt: string | null;
 }>;
 export type PersistedRuntimeFailureDiagnostic = PersistedFailureDiagnostic &
-  Readonly<{ taskId: string; turnId: string }>;
+  Readonly<{ taskId: string; turnId: string; attemptId?: string; errorCode?: string }>;
+export type TeamAttemptFailureDiagnosticRecord = Readonly<{
+  attemptId: string;
+  taskId: string;
+  runtimeKind: 'claude' | 'codex' | 'grok';
+  runtimeTurnId: string;
+  errorCode: string;
+  diagnostic: PersistedFailureDiagnostic | null;
+  createdAt: string;
+}>;
 type PersistedJsonValue =
   | string
   | number
@@ -5497,6 +5542,14 @@ export interface PersistenceClient {
     taskId?: string | undefined;
     diagnosticId?: string | undefined;
   }): PersistedRuntimeFailureDiagnostic | null;
+  recordTeamAttemptFailureDiagnostic(input: {
+    attemptId: string;
+    runtimeKind: 'claude' | 'codex' | 'grok';
+    runtimeTurnId: string;
+    errorCode: PublicErrorCode;
+    diagnostic?: PersistedFailureDiagnostic;
+  }): TeamAttemptFailureDiagnosticRecord;
+  getTeamAttemptFailureDiagnostic(attemptId: string): TeamAttemptFailureDiagnosticRecord | null;
   cancelTurnAndFinishGoal(
     taskId: string,
     turnId: string,
@@ -6545,6 +6598,76 @@ function removeOrphanedPreMigrationValidationFiles(databasePath: string): void {
       continue;
     }
     rmSync(candidate, { force: true });
+  }
+}
+
+function isTeamAttemptRuntimeKind(value: string): value is 'claude' | 'codex' | 'grok' {
+  return value === 'claude' || value === 'codex' || value === 'grok';
+}
+
+function safePersistedFailureDiagnostic(
+  diagnostic: PersistedFailureDiagnostic,
+  recordedAt: string,
+): PersistedFailureDiagnostic {
+  return diagnostic.runtimeKind === 'provider'
+    ? {
+        version: 1,
+        diagnosticId: diagnostic.diagnosticId,
+        runtimeKind: 'provider',
+        failureStage: diagnostic.failureStage,
+        category: diagnostic.category,
+        retryable: diagnostic.retryable,
+        providerId: diagnostic.providerId,
+        profileId: diagnostic.profileId,
+        providerCode: diagnostic.providerCode,
+        modelPreparation: diagnostic.modelPreparation,
+        elapsedMs: diagnostic.elapsedMs,
+        appVersion: diagnostic.appVersion,
+        recordedAt,
+      }
+    : {
+        version: 1,
+        diagnosticId: diagnostic.diagnosticId,
+        runtimeKind: diagnostic.runtimeKind,
+        failureStage: diagnostic.failureStage,
+        ...(diagnostic.runtimeKind === 'grok' &&
+        typeof diagnostic.httpStatus === 'number' &&
+        Number.isInteger(diagnostic.httpStatus) &&
+        diagnostic.httpStatus >= 100 &&
+        diagnostic.httpStatus <= 599
+          ? { httpStatus: diagnostic.httpStatus }
+          : {}),
+        elapsedMs: diagnostic.elapsedMs,
+        appVersion: diagnostic.appVersion,
+        cliVersion: diagnostic.cliVersion,
+        ...(diagnostic.capabilityMismatch === undefined
+          ? {}
+          : { capabilityMismatch: diagnostic.capabilityMismatch }),
+        ...(diagnostic.cliResolution === undefined
+          ? {}
+          : { cliResolution: diagnostic.cliResolution }),
+        teamMcp: diagnostic.teamMcp,
+        lastRecognizedNotification: diagnostic.lastRecognizedNotification,
+        lastReceivedNotification: diagnostic.lastReceivedNotification,
+        unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
+        stderrObserved: diagnostic.stderrObserved,
+        stderrTruncated: diagnostic.stderrTruncated,
+        ...(diagnostic.codexIsolation === undefined
+          ? {}
+          : { codexIsolation: diagnostic.codexIsolation }),
+        recordedAt,
+        ...(diagnostic.reasonCode === undefined ? {} : { reasonCode: diagnostic.reasonCode }),
+      };
+}
+
+function readStoredFailureDiagnostic(serialized: string | null): PersistedFailureDiagnostic | null {
+  if (serialized === null) return null;
+  if (Buffer.byteLength(serialized, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES) return null;
+  try {
+    const diagnostic = JSON.parse(serialized) as unknown;
+    return isPersistedFailureDiagnostic(diagnostic) ? diagnostic : null;
+  } catch {
+    return null;
   }
 }
 
@@ -14209,56 +14332,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.getTurn(taskId, turnId);
     if (!isPersistedFailureDiagnostic(diagnostic)) throw new Error('Invalid Runtime diagnostic');
     const recordedAt = new Date().toISOString();
-    const safeDiagnostic: PersistedFailureDiagnostic =
-      diagnostic.runtimeKind === 'provider'
-        ? {
-            version: 1,
-            diagnosticId: diagnostic.diagnosticId,
-            runtimeKind: 'provider',
-            failureStage: diagnostic.failureStage,
-            category: diagnostic.category,
-            retryable: diagnostic.retryable,
-            providerId: diagnostic.providerId,
-            profileId: diagnostic.profileId,
-            providerCode: diagnostic.providerCode,
-            modelPreparation: diagnostic.modelPreparation,
-            elapsedMs: diagnostic.elapsedMs,
-            appVersion: diagnostic.appVersion,
-            recordedAt,
-          }
-        : {
-            version: 1,
-            diagnosticId: diagnostic.diagnosticId,
-            runtimeKind: diagnostic.runtimeKind,
-            failureStage: diagnostic.failureStage,
-            ...(diagnostic.runtimeKind === 'grok' &&
-            typeof diagnostic.httpStatus === 'number' &&
-            Number.isInteger(diagnostic.httpStatus) &&
-            diagnostic.httpStatus >= 100 &&
-            diagnostic.httpStatus <= 599
-              ? { httpStatus: diagnostic.httpStatus }
-              : {}),
-            elapsedMs: diagnostic.elapsedMs,
-            appVersion: diagnostic.appVersion,
-            cliVersion: diagnostic.cliVersion,
-            ...(diagnostic.capabilityMismatch === undefined
-              ? {}
-              : { capabilityMismatch: diagnostic.capabilityMismatch }),
-            ...(diagnostic.cliResolution === undefined
-              ? {}
-              : { cliResolution: diagnostic.cliResolution }),
-            teamMcp: diagnostic.teamMcp,
-            lastRecognizedNotification: diagnostic.lastRecognizedNotification,
-            lastReceivedNotification: diagnostic.lastReceivedNotification,
-            unsupportedNotificationCount: diagnostic.unsupportedNotificationCount,
-            stderrObserved: diagnostic.stderrObserved,
-            stderrTruncated: diagnostic.stderrTruncated,
-            ...(diagnostic.codexIsolation === undefined
-              ? {}
-              : { codexIsolation: diagnostic.codexIsolation }),
-            recordedAt,
-            ...(diagnostic.reasonCode === undefined ? {} : { reasonCode: diagnostic.reasonCode }),
-          };
+    const safeDiagnostic = safePersistedFailureDiagnostic(diagnostic, recordedAt);
     const serialized = JSON.stringify(safeDiagnostic);
     if (Buffer.byteLength(serialized, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES)
       throw new Error('Runtime diagnostic exceeds byte limit');
@@ -14305,22 +14379,43 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }): PersistedRuntimeFailureDiagnostic | null {
     if (input.taskId === undefined && input.diagnosticId === undefined)
       throw new Error('Task id or diagnostic id is required');
+    const source = `
+      SELECT id, task_id, turn_id, attempt_id, error_code, diagnostic_json, created_at
+      FROM (
+        SELECT id, task_id, turn_id, NULL AS attempt_id, NULL AS error_code,
+               diagnostic_json, created_at
+        FROM runtime_failure_diagnostics
+        UNION ALL
+        SELECT diagnostic_id, task_id, runtime_turn_id, attempt_id, error_code,
+               diagnostic_json, created_at
+        FROM team_attempt_failure_diagnostics
+        WHERE diagnostic_json IS NOT NULL
+      ) AS failure_diagnostics`;
     const row = (
       input.diagnosticId !== undefined
         ? this.db
             .prepare(
-              `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
-               WHERE id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?`,
+              `${source}
+               WHERE id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?
+               ORDER BY created_at DESC, id DESC LIMIT 1`,
             )
             .get(input.diagnosticId, RUNTIME_DIAGNOSTIC_MAX_BYTES)
         : this.db
             .prepare(
-              `SELECT task_id, turn_id, diagnostic_json FROM runtime_failure_diagnostics
+              `${source}
                WHERE task_id = ? AND length(CAST(diagnostic_json AS BLOB)) <= ?
                ORDER BY created_at DESC, id DESC LIMIT 1`,
             )
             .get(input.taskId, RUNTIME_DIAGNOSTIC_MAX_BYTES)
-    ) as { task_id: string; turn_id: string; diagnostic_json: string } | undefined;
+    ) as
+      | {
+          task_id: string;
+          turn_id: string;
+          attempt_id: string | null;
+          error_code: string | null;
+          diagnostic_json: string;
+        }
+      | undefined;
     if (row === undefined) return null;
     let diagnostic: unknown;
     try {
@@ -14329,7 +14424,112 @@ export class SqlitePersistenceClient implements PersistenceClient {
       return null;
     }
     if (!isPersistedFailureDiagnostic(diagnostic)) return null;
+    if (row.attempt_id !== null && row.error_code !== null)
+      return Object.freeze({
+        ...diagnostic,
+        taskId: row.task_id,
+        turnId: row.turn_id,
+        attemptId: row.attempt_id,
+        errorCode: row.error_code,
+      });
     return Object.freeze({ ...diagnostic, taskId: row.task_id, turnId: row.turn_id });
+  }
+
+  recordTeamAttemptFailureDiagnostic(input: {
+    attemptId: string;
+    runtimeKind: 'claude' | 'codex' | 'grok';
+    runtimeTurnId: string;
+    errorCode: PublicErrorCode;
+    diagnostic?: PersistedFailureDiagnostic;
+  }): TeamAttemptFailureDiagnosticRecord {
+    if (!isTeamAttemptRuntimeKind(input.runtimeKind)) throw new Error('Invalid runtime kind');
+    const errorCode = publicErrorCodeSchema.safeParse(input.errorCode);
+    if (!errorCode.success) throw new Error('Invalid error code');
+    if (input.runtimeTurnId.length < 1 || input.runtimeTurnId.length > 128)
+      throw new Error('Invalid runtime turn id');
+    const recordedAt = new Date().toISOString();
+    let diagnosticId: string | null = null;
+    let failureStage: string | null = null;
+    let diagnosticJson: string | null = null;
+    if (input.diagnostic !== undefined) {
+      if (
+        !isPersistedFailureDiagnostic(input.diagnostic) ||
+        input.diagnostic.runtimeKind !== input.runtimeKind
+      )
+        throw new Error('Invalid Runtime diagnostic');
+      const safeDiagnostic = safePersistedFailureDiagnostic(input.diagnostic, recordedAt);
+      diagnosticJson = JSON.stringify(safeDiagnostic);
+      if (Buffer.byteLength(diagnosticJson, 'utf8') > RUNTIME_DIAGNOSTIC_MAX_BYTES)
+        throw new Error('Runtime diagnostic exceeds byte limit');
+      diagnosticId = safeDiagnostic.diagnosticId;
+      failureStage = safeDiagnostic.failureStage;
+    }
+    this.db.transaction(() => {
+      const owner = this.db
+        .prepare(
+          `SELECT teams.task_id AS task_id
+           FROM team_attempts
+           JOIN team_executions ON team_executions.id = team_attempts.execution_id
+           JOIN teams ON teams.id = team_executions.team_id
+           WHERE team_attempts.id = ?`,
+        )
+        .get(input.attemptId) as { task_id: string } | undefined;
+      if (owner === undefined) throw new NotFoundError('Team attempt not found');
+      this.db
+        .prepare(
+          `INSERT INTO team_attempt_failure_diagnostics(
+             attempt_id, task_id, runtime_kind, runtime_turn_id, error_code,
+             diagnostic_id, failure_stage, diagnostic_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(attempt_id) DO NOTHING`,
+        )
+        .run(
+          input.attemptId,
+          owner.task_id,
+          input.runtimeKind,
+          input.runtimeTurnId,
+          errorCode.data,
+          diagnosticId,
+          failureStage,
+          diagnosticJson,
+          recordedAt,
+        );
+    })();
+    const stored = this.getTeamAttemptFailureDiagnostic(input.attemptId);
+    if (stored === null) throw new Error('Team attempt failure diagnostic was not persisted');
+    return stored;
+  }
+
+  getTeamAttemptFailureDiagnostic(attemptId: string): TeamAttemptFailureDiagnosticRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT attempt_id, task_id, runtime_kind, runtime_turn_id, error_code,
+                diagnostic_json, created_at
+         FROM team_attempt_failure_diagnostics
+         WHERE attempt_id = ?`,
+      )
+      .get(attemptId) as
+      | {
+          attempt_id: string;
+          task_id: string;
+          runtime_kind: string;
+          runtime_turn_id: string;
+          error_code: string;
+          diagnostic_json: string | null;
+          created_at: string;
+        }
+      | undefined;
+    if (row === undefined) return null;
+    if (!isTeamAttemptRuntimeKind(row.runtime_kind)) throw new Error('Invalid runtime kind');
+    return Object.freeze({
+      attemptId: row.attempt_id,
+      taskId: row.task_id,
+      runtimeKind: row.runtime_kind,
+      runtimeTurnId: row.runtime_turn_id,
+      errorCode: row.error_code,
+      diagnostic: readStoredFailureDiagnostic(row.diagnostic_json),
+      createdAt: row.created_at,
+    });
   }
 
   /**
