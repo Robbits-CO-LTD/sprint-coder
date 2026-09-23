@@ -3406,6 +3406,81 @@ if (runsWithElectronAbi)
       },
     );
 
+    it('completes a Leader Turn after an integrated Worker worktree has been removed', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'completed',
+        repositoryState: 'cleaned',
+        recordVerification: true,
+      });
+      try {
+        expect(existsSync(fixture.worktreePath)).toBe(false);
+        expect(
+          fixture.persistence.verifyCommittedEditSagaPostImages({
+            taskId: fixture.taskId,
+            turnId: fixture.turnId,
+            createdAt: '2026-07-23T00:01:00.000Z',
+          }),
+        ).toEqual([]);
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          fixture.persistence.changeStage(fixture.taskId, fixture.turnId, stage);
+        expect(
+          fixture.persistence.completeTurn(fixture.taskId, fixture.turnId, 'completed'),
+        ).toMatchObject({ type: 'turn.completed', state: 'completed' });
+        expect(
+          fixture.persistence
+            .listEvidenceRecords(fixture.taskId, fixture.turnId)
+            .filter(({ kind }) => kind === 'verification_passed')
+            .map(({ criterionId }) => criterionId),
+        ).toEqual([`verification:${fixture.sagaId}`]);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
+    it('still requires verification evidence after an integrated Worker worktree is gone', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'completed',
+        repositoryState: 'cleaned',
+        recordVerification: false,
+      });
+      try {
+        expect(existsSync(fixture.worktreePath)).toBe(false);
+        expect(refusedTurnCompletion(fixture).openCriterionIds).toEqual([
+          `verification:${fixture.sagaId}`,
+        ]);
+        expect(
+          fixture.persistence
+            .listEvidenceRecords(fixture.taskId, fixture.turnId)
+            .some(({ kind }) => kind === 'verification_passed'),
+        ).toBe(false);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
+    it.each([
+      { phase: 'integrating', repositoryState: 'ready' },
+      { phase: 'integrating', repositoryState: 'integrated' },
+      { phase: 'running', repositoryState: 'active' },
+    ] as const)(
+      'keeps Worker Saga verification open while isolation is $phase/$repositoryState',
+      async ({ phase, repositoryState }) => {
+        const fixture = await commitIsolatedWorkerEdit({
+          phase,
+          repositoryState,
+          recordVerification: true,
+        });
+        try {
+          expect(existsSync(fixture.worktreePath)).toBe(false);
+          expect(refusedTurnCompletion(fixture).openCriterionIds).toEqual([
+            `verification:${fixture.sagaId}`,
+          ]);
+        } finally {
+          fixture.persistence.close();
+        }
+      },
+    );
+
     artifactIt(
       'keeps the criterion open when a committed post-image no longer matches on disk',
       async () => {
@@ -9778,6 +9853,181 @@ async function createCommitOrderFixture(
   }
 }
 
+async function commitIsolatedWorkerEdit(input: {
+  phase: 'running' | 'integrating' | 'completed';
+  repositoryState: 'active' | 'ready' | 'integrated' | 'cleaned';
+  recordVerification: boolean;
+}): Promise<{
+  persistence: SqlitePersistenceClient;
+  taskId: string;
+  turnId: string;
+  sagaId: string;
+  worktreePath: string;
+}> {
+  const { persistence, path } = createPersistence();
+  try {
+    persistence.setRuntime('codex');
+    persistence.setModel('gpt-5.6-terra');
+    const task = persistence.createTask('issue 516');
+    const workspacePath = join(dirname(path), 'issue-516-workspace');
+    const worktreePath = join(dirname(path), 'issue-516-worktree');
+    mkdirSync(workspacePath);
+    mkdirSync(worktreePath);
+    const sourceIdentity = currentWorkspaceRootIdentityDigest(workspacePath);
+    if (sourceIdentity === null) throw new Error('workspace root identity missing');
+    const sourceKey = bindMutationWorkspace(persistence, task.id, workspacePath, sourceIdentity);
+    const team = persistence.promoteTaskToTeam(task.id);
+    persistence.transitionTeamState(team.id, 'forming');
+    const leader = persistence.getTaskLeader(task.id);
+    const worker = persistence.registerTeamWorker({
+      teamId: team.id,
+      role: 'implementer',
+      objective: 'Write one file inside the isolated worktree.',
+      parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+      contextInheritancePolicy: 'summary',
+      writeCapable: true,
+    });
+    const execution = persistence.createTeamExecution({
+      teamId: team.id,
+      assigneeAgentId: worker.id,
+      createdByAgentId: leader.id,
+      instruction: 'Create the file in the isolated worktree.',
+      accessMode: 'workspace-write',
+      now: '2026-07-23T00:00:00.000Z',
+    });
+    const turn = persistence.startTurn(task.id, 'Worker に隔離 worktree でファイルを作らせる');
+    const root = persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)?.roots[0];
+    if (root === undefined) throw new Error('sealed turn root missing');
+    const isolatedIdentity = '5'.repeat(64);
+    const isolatedMutationKey = '7'.repeat(64);
+    const activeRepository = {
+      ordinal: 1,
+      repoPath: workspacePath,
+      worktreePath,
+      baseHead: 'a'.repeat(40),
+      workerHead: null,
+      integratedHead: null,
+      state: 'active' as const,
+      changedFiles: ['created.txt'],
+    };
+    persistence.createTeamExecutionIsolation({
+      executionId: execution.id,
+      repositories: [activeRepository],
+      roots: [
+        {
+          rootId: root.rootId,
+          rootLabel: root.label,
+          role: 'primary',
+          repositoryOrdinal: 1,
+          sourcePath: workspacePath,
+          isolatedPath: worktreePath,
+          identity: sourceIdentity,
+          mutationKey: sourceKey,
+          isolatedIdentity,
+          isolatedMutationKey,
+        },
+      ],
+      now: '2026-07-23T00:00:01.000Z',
+    });
+    persistence.updateTeamExecutionIsolation({
+      executionId: execution.id,
+      phase: 'running',
+      now: '2026-07-23T00:00:02.000Z',
+    });
+    const workspaceFile = join(worktreePath, 'created.txt');
+    writeFileSync(workspaceFile, 'before');
+    const artifacts = new PersistenceTestArtifacts();
+    const saga = await new EditSagaExecutor(
+      new PersistenceEditSagaStore(persistence),
+      fileBoundary(workspaceFile, artifacts),
+      artifacts,
+      undefined,
+      new SqliteEditSagaLeaseGuard(persistence, 'issue-516-lease'),
+    ).apply({
+      id: 'issue-516-worker-saga',
+      taskId: task.id,
+      turnId: turn.turnId,
+      operationId: 'issue-516-worker-operation',
+      plan: persistedEditPlan('before', 'after', workspaceFile, workspaceFile),
+      mutationBinding: {
+        rootId: root.rootId,
+        workspacePath: worktreePath,
+        workspaceKey: isolatedMutationKey,
+        rootIdentityDigest: isolatedIdentity,
+      },
+      createdAt: '2026-07-23T00:00:03.000Z',
+    });
+    expect(saga).toMatchObject({
+      state: 'committed',
+      rootId: root.rootId,
+      workspaceKey: isolatedMutationKey,
+      rootIdentityDigest: isolatedIdentity,
+    });
+    if (input.recordVerification)
+      persistence.recordAssuranceVerification({
+        taskId: task.id,
+        turnId: turn.turnId,
+        sagaId: saga.id,
+        outcome: 'passed',
+        failureClass: null,
+        createdAt: new Date(Date.parse(saga.updatedAt) + 1_000).toISOString(),
+      });
+    if (input.phase !== 'running') {
+      const settled = {
+        ...activeRepository,
+        workerHead: 'b'.repeat(40),
+        integratedHead:
+          input.repositoryState === 'integrated' || input.repositoryState === 'cleaned'
+            ? 'c'.repeat(40)
+            : null,
+        state: input.repositoryState,
+      };
+      persistence.updateTeamExecutionIsolation({
+        executionId: execution.id,
+        phase: 'finalizing',
+        now: '2026-07-23T00:00:05.000Z',
+      });
+      persistence.updateTeamExecutionIsolation({
+        executionId: execution.id,
+        phase: 'integrating',
+        repositories: [settled],
+        now: '2026-07-23T00:00:06.000Z',
+      });
+      if (input.phase === 'completed')
+        persistence.updateTeamExecutionIsolation({
+          executionId: execution.id,
+          phase: 'completed',
+          now: '2026-07-23T00:00:07.000Z',
+        });
+    }
+    rmSync(worktreePath, { recursive: true, force: true });
+    return {
+      persistence,
+      taskId: task.id,
+      turnId: turn.turnId,
+      sagaId: saga.id,
+      worktreePath,
+    };
+  } catch (error) {
+    persistence.close();
+    throw error;
+  }
+}
+
+function refusedTurnCompletion(fixture: {
+  persistence: SqlitePersistenceClient;
+  taskId: string;
+  turnId: string;
+}): AcceptanceEvidenceMissingError {
+  try {
+    fixture.persistence.completeTurn(fixture.taskId, fixture.turnId, 'completed');
+  } catch (error) {
+    expect(error).toBeInstanceOf(AcceptanceEvidenceMissingError);
+    return error as AcceptanceEvidenceMissingError;
+  }
+  throw new Error('Turn completion was accepted');
+}
+
 function persistedEditPlan(
   preImage = 'before',
   postImage = 'after',
@@ -10092,7 +10342,7 @@ function persistedObservation(value: string, identityDigest: string): OperationO
 
 function fileBoundary(
   filePath: string,
-  artifacts: EditArtifactStore,
+  artifacts: EditArtifactRepository,
   expectedBefore = 'before',
   expectedAfter = 'after',
 ): EditEffectBoundary {

@@ -13957,6 +13957,51 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return null;
   }
 
+  /**
+   * The isolated root of an integrated Team Worker isolation that sealed this Saga, if any.
+   * Nothing is returned for a Saga without a rootId, workspaceKey or rootIdentityDigest. When the
+   * root maps to exactly one repository by ordinal, only that repository's state is checked;
+   * otherwise every repository of the isolation must be integrated or cleaned.
+   */
+  private findIntegratedTeamIsolationRoot(
+    taskId: string,
+    rootId: string | null,
+    workspaceKey: string | null,
+    rootIdentityDigest: string | null,
+  ): TeamExecutionIsolation['roots'][number] | null {
+    if (rootId === null || workspaceKey === null || rootIdentityDigest === null) return null;
+    const rows = this.db
+      .prepare(
+        `SELECT isolation.* FROM team_execution_isolations isolation
+         INNER JOIN team_executions execution ON execution.id = isolation.execution_id
+         INNER JOIN teams team ON team.id = execution.team_id
+         WHERE team.task_id = ?
+           AND isolation.phase = 'completed'
+         ORDER BY isolation.created_at DESC, isolation.execution_id DESC`,
+      )
+      .all(taskId) as TeamExecutionIsolationRow[];
+    for (const row of rows) {
+      const isolation = toTeamExecutionIsolation(row);
+      const root = isolation.roots.find(
+        (candidate) =>
+          candidate.rootId === rootId &&
+          candidate.isolatedMutationKey === workspaceKey &&
+          candidate.isolatedIdentity === rootIdentityDigest,
+      );
+      if (root === undefined) continue;
+      const matched = isolation.repositories.filter(
+        (repository) => repository.ordinal === root.repositoryOrdinal,
+      );
+      const repositories = matched.length === 1 ? matched : isolation.repositories;
+      if (
+        repositories.length > 0 &&
+        repositories.every((repository) => ['integrated', 'cleaned'].includes(repository.state))
+      )
+        return root;
+    }
+    return null;
+  }
+
   getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet {
     const task = this.getTaskRow(taskId);
     if (task.project_id !== null) {
@@ -17750,8 +17795,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * The body of the verification, so the completion gate can run it inside the transaction that
    * decides and writes the Turn's outcome rather than in one of its own.
    *
-   * Every committed Saga is re-checked, including Sagas that already hold `verification_passed`
-   * evidence. Evidence is a record of what was true when it was written, not a standing promise:
+   * Committed Sagas are re-checked, including Sagas that already hold `verification_passed`
+   * evidence. A Saga sealed in an integrated Team Worker isolation is the exception below.
+   * Evidence is a record of what was true when it was written, not a standing promise:
    * `apply_patch(A→B)`, a trusted `read_file(B)` that closed the criterion, then `apply_patch(B→C)`
    * leaves the first Saga's evidence valid while the B it attested to no longer exists anywhere.
    * A Saga that no longer holds has its criterion reported open however much evidence it carries.
@@ -17764,6 +17810,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * directory they name: rename the root away, put a fresh directory of the same name in its place,
    * and every canonical path still resolves — to a tree the Saga never touched. Comparing the
    * root's current identity with the digest sealed into the Saga is what distinguishes them.
+   *
+   * A Saga written in an integrated Team Worker isolation is not re-read here: its worktree is
+   * removed after integration (issue #516). Its verification rests on the evidence recorded when
+   * the Worker's Saga committed, which decideCompletion still requires.
    */
   private verifyEditSagaPostImagesInTransaction(
     taskId: string,
@@ -17776,6 +17826,17 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const failed: string[] = [];
     const holds = turnPostImageVerifier(sagas, observation.observe);
     for (const saga of sagas) {
+      // The isolated worktree is gone after integration; re-checking rootIsSealed/holds here would
+      // fail an integrated Turn on paths that no longer exist. The recorded evidence still gates it.
+      if (
+        this.findIntegratedTeamIsolationRoot(
+          taskId,
+          saga.rootId,
+          saga.workspaceKey,
+          saga.rootIdentityDigest,
+        ) !== null
+      )
+        continue;
       if (!rootIsSealed(saga) || !holds(saga)) {
         failed.push(`verification:${saga.id}`);
         continue;
