@@ -108,6 +108,16 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   allowSimulation?: boolean;
 }>;
 
+// Managed tools that change the Workspace. Only their policy denials count against a write
+// execution; a denied read or search does not mean the Worker failed to write.
+const WORKSPACE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'create_file',
+  'create_directory',
+  'apply_patch',
+]);
+
+type WorkerWriteObservation = { committed: number; denied: number };
+
 type PendingRun = {
   resolve: (finalText: string) => void;
   reject: (error: Error) => void;
@@ -119,6 +129,7 @@ type PendingRun = {
   runtimeStarted: boolean;
   sideEffectsObserved: boolean;
   writeScope: RuntimeWriteScope;
+  writes: WorkerWriteObservation;
 };
 
 class TeamRuntimeExecutionError extends WorkerRuntimeFailureError {
@@ -256,16 +267,32 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     }
 
     const taskId = input.worker.taskId;
+    const workspacePath =
+      input.workspaceSet?.roots.find(({ rootId }) => rootId === input.workspaceSet?.primaryRootId)
+        ?.path ??
+      (input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath);
+    const runtimeWorkspace = input.workspaceSet ?? workspacePath;
+    const requestedWriteScope =
+      input.accessMode === 'workspace-write' && input.worker.writeCapable === true
+        ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
+        : 'read-only';
+    const writeScope = requestedWriteScope === 'full' ? 'workspace-write' : requestedWriteScope;
+    // The prompt states the scope the Worker actually runs with, so it never promises edits that
+    // its tool catalog cannot make.
+    const writable = writeScope !== 'read-only';
     const prompt = [
       `あなたはチームの「${input.worker.role}」担当Workerです。`,
       `あなたのAgent ID: ${input.worker.id}`,
       `親Agent ID: ${input.worker.parentAgentId ?? 'Leader'}`,
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
       `Context継承: ${input.worker.contextInheritancePolicy}`,
-      `Workspace書き込み: ${input.accessMode === 'workspace-write' ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
+      `Workspace書き込み: ${writable ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
+      input.accessMode === 'workspace-write' && !writable
+        ? 'Leaderは編集を依頼していますが、今回の実行ではファイルを変更できません。ファイルは変更せず、必要な変更内容を報告してください。'
+        : '',
       input.workspacePath === undefined
         ? ''
-        : `隔離worktree: ${input.workspacePath ?? '利用不可'}（このディレクトリ内だけを変更してください）`,
+        : `隔離worktree: ${input.workspacePath ?? '利用不可'}${writable ? '（このディレクトリ内だけを変更してください）' : '（読み取り専用）'}`,
       input.workspaceSet === undefined
         ? ''
         : `隔離root: ${input.workspaceSet.roots.map(({ label, path }) => `${label}=${path}`).join(', ')}`,
@@ -282,16 +309,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.contextFor?.(input.worker, input.executionId) ?? emptyPreparedContext(),
       ),
     );
-    const workspacePath =
-      input.workspaceSet?.roots.find(({ rootId }) => rootId === input.workspaceSet?.primaryRootId)
-        ?.path ??
-      (input.workspacePath === undefined ? this.deps.workspaceFor(taskId) : input.workspacePath);
-    const runtimeWorkspace = input.workspaceSet ?? workspacePath;
-    const requestedWriteScope =
-      input.accessMode === 'workspace-write' && input.worker.writeCapable === true
-        ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
-        : 'read-only';
-    const writeScope = requestedWriteScope === 'full' ? 'workspace-write' : requestedWriteScope;
     const startedAt = Date.now();
     if (input.signal?.aborted) throw new Error('Worker execution was canceled before start');
     input.onEvent?.({ type: 'accepted', at: new Date().toISOString() });
@@ -312,7 +329,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           at: new Date().toISOString(),
         });
       try {
-        const finalText = await this.executeChoice(
+        const { finalText, writes } = await this.executeChoice(
           input,
           choice,
           taskId,
@@ -323,19 +340,49 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           writeScope,
         );
         const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();
+        const runtimeVerification = {
+          name: `worker-runtime:${choice.kind}`,
+          outcome: 'pass' as const,
+        };
+        const writeFailure = workerWriteFailure({
+          accessMode: input.accessMode,
+          writeCapable: input.worker.writeCapable === true,
+          workspacePath,
+          writeScope,
+          writes,
+        });
         return {
           claims: {
             deliveryId: input.envelope.deliveryId,
             sourceAgentId: input.envelope.sourceAgentId,
             targetAgentId: input.envelope.targetAgentId,
           },
-          completion: {
-            status: 'succeeded',
-            summary,
-            artifacts: [],
-            verification: [{ name: `worker-runtime:${choice.kind}`, outcome: 'pass' }],
-            risks: [],
-          },
+          // A write execution that could not change any file did not do what the Leader asked,
+          // whatever the Worker's own summary says.
+          completion:
+            writeFailure === null
+              ? {
+                  status: 'succeeded',
+                  summary,
+                  artifacts: [],
+                  verification: [runtimeVerification],
+                  risks:
+                    writes.denied > 0
+                      ? [
+                          `書き込みツールの呼び出し${writes.denied}件が拒否されました（反映された変更は${writes.committed}件）。`,
+                        ]
+                      : [],
+                }
+              : {
+                  status: 'failed',
+                  summary: `${writeFailure.detail}\n\nWorkerの報告:\n${summary}`.slice(0, 4_000),
+                  artifacts: [],
+                  verification: [
+                    runtimeVerification,
+                    { name: writeFailure.name, outcome: 'fail', detail: writeFailure.detail },
+                  ],
+                  risks: [writeFailure.detail.slice(0, 500)],
+                },
           usage: {
             costCents: 0,
             tokens: Math.max(1, Math.ceil((prompt.length + summary.length) / 4)),
@@ -371,8 +418,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     workspacePath: string | null,
     runtimeWorkspace: RuntimeWorkspaceSet | string | null,
     writeScope: RuntimeWriteScope,
-  ): Promise<string> {
+  ): Promise<{ finalText: string; writes: WorkerWriteObservation }> {
     const turnId = randomUUID();
+    const writes: WorkerWriteObservation = { committed: 0, denied: 0 };
     const normalizedWorkspace =
       typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
         ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
@@ -465,7 +513,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         throw new Error(`${choice.kind} Team Worker egress was denied`);
       input.signal?.addEventListener('abort', abort, { once: true });
       input.signal?.throwIfAborted();
-      return await new Promise<string>((resolve, reject) => {
+      const finalText = await new Promise<string>((resolve, reject) => {
         this.pending.set(turnId, {
           resolve,
           reject,
@@ -477,6 +525,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           runtimeStarted: false,
           sideEffectsObserved: false,
           writeScope,
+          writes,
         });
         this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
         runtimeStarted = this.client(choice.kind).start(
@@ -497,6 +546,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         const run = this.pending.get(turnId);
         if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
+      return { finalText, writes };
     } finally {
       try {
         if (runtimeStarted) await this.client(choice.kind).waitForTurnExit(turnId);
@@ -516,8 +566,16 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     if (run === undefined) return;
     const changes = managedResultChanges(result);
     if (changes.length === 0) return;
+    run.writes.committed += changes.length;
     run.sideEffectsObserved = true;
     run.onEvent?.({ type: 'fileChange', changes });
+  }
+
+  /** Main reports a managed Workspace write that policy denied, so the outcome can say so. */
+  recordManagedToolDenied(turnId: string, toolName: string): void {
+    const run = this.pending.get(turnId);
+    if (run === undefined || !WORKSPACE_WRITE_TOOL_NAMES.has(toolName)) return;
+    run.writes.denied += 1;
   }
 
   async stop(agentId: string): Promise<void> {
@@ -547,6 +605,36 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     for (const client of this.clients.values()) client.dispose();
     this.clients.clear();
   }
+}
+
+/**
+ * Why a write execution could not change the Workspace, or null when it could (issue #527).
+ * Read-only investigations never fail here, and neither does a write execution that simply made
+ * no write call.
+ */
+function workerWriteFailure(input: {
+  accessMode: TeamWorkerExecutionInput['accessMode'];
+  writeCapable: boolean;
+  workspacePath: string | null;
+  writeScope: RuntimeWriteScope;
+  writes: WorkerWriteObservation;
+}): { name: 'worker-write-scope' | 'worker-write-denied'; detail: string } | null {
+  if (input.accessMode !== 'workspace-write') return null;
+  if (input.writeScope === 'read-only')
+    return {
+      name: 'worker-write-scope',
+      detail: !input.writeCapable
+        ? 'このWorkerは書き込み可能として採用されていないため、読み取り専用で実行されました。ファイルは変更されていません。'
+        : input.workspacePath === null
+          ? '書き込み先のWorkspaceがないため、読み取り専用で実行されました。ファイルは変更されていません。'
+          : '安全設定「確認する」ではTeam Workerは読み取り専用で実行されるため、ファイルを変更できませんでした。',
+    };
+  if (input.writes.denied > 0 && input.writes.committed === 0)
+    return {
+      name: 'worker-write-denied',
+      detail: `書き込みツールの呼び出し${input.writes.denied}件がすべて拒否され、ファイルは1件も変更されませんでした。`,
+    };
+  return null;
 }
 
 function managedResultChanges(

@@ -19,6 +19,7 @@ import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   DeterministicTeamWorkerRuntime,
   TeamCoordinator,
+  WORKER_SELF_REPORTED_EVIDENCE_PREFIX,
   WorkerRuntimeFailureError,
   captureGitWorkspaceFingerprint,
   executeWithWatchdog,
@@ -4561,6 +4562,71 @@ if (runsWithElectronAbi)
         status: 'failed',
         summary: 'deliberate runtime failure',
       });
+      persistence.close();
+    });
+
+    it('records no done evidence when the Worker reports failure', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Failed Worker report');
+      const runtime = new TestWorkerRuntime();
+      runtime.completionStatus = 'failed';
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reporter',
+        objective: 'report a failure',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'find the answer',
+        doneCriteria: ['answer found'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+        status: 'failed',
+        doneEvidence: [],
+      });
+      // The Worker's own failed report was recorded, so the task failed through the report path
+      // rather than through an error raised while saving the empty evidence.
+      const reports = coordinator.listWorkerReports(task.id, 0);
+      expect(JSON.parse(reports.at(-1)!.content)).toMatchObject({
+        status: 'failed',
+        summary: 'reporter: find the answer',
+      });
+      persistence.close();
+    });
+
+    it('labels completed done evidence as an unverified Worker self-report', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Succeeded Worker report');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reporter',
+        objective: 'report an answer',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'find the answer',
+        doneCriteria: ['answer found'],
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      const evidence = persistence.getTeamTask(dispatch.teamTaskId).doneEvidence;
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]?.criterion).toBe('answer found');
+      expect(evidence[0]?.evidence.startsWith(WORKER_SELF_REPORTED_EVIDENCE_PREFIX)).toBe(true);
       persistence.close();
     });
 

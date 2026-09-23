@@ -200,6 +200,7 @@ import { ManagedCodingHarness } from './provider-workspace-tools';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { workspaceMutationBinding } from './path-guard';
 import { ToolImageBridge } from './tool-image-bridge';
+import { ToolAuthorizationDeniedError } from './tool-broker';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
 import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
@@ -2122,6 +2123,75 @@ describe('Main image attachment dispatch boundary', () => {
       ),
     ).rejects.toThrow('canceled before generic image denial');
     expect(brokerDispatch).not.toHaveBeenCalled();
+  });
+
+  it('reports only policy-denied managed Worker calls to the CLI Worker runtime', async () => {
+    const denied = new ToolAuthorizationDeniedError({
+      decision: 'deny',
+      reason: 'permission_denied',
+    });
+    const dispatch = vi
+      .fn()
+      .mockRejectedValueOnce(denied)
+      .mockRejectedValueOnce(new Error('patch did not apply'));
+    const cliTeamWorkerRuntime = {
+      recordManagedToolDenied: vi.fn(),
+      recordManagedToolResult: vi.fn(),
+    };
+    const managedWorkerCall = new Map();
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      managedWorkerTurn: new Map([
+        [
+          'turn-worker',
+          {
+            taskId: 'task-worker',
+            parentTurnId: 'mission-turn',
+            snapshot: {
+              digest: 'd'.repeat(64),
+              providerId: 'grok',
+              entries: [{ providerName: 'create_file' }, { providerName: 'apply_patch' }],
+            },
+            workspace: {},
+            mutationBindings: new Map(),
+          },
+        ],
+      ]),
+      managedWorkerCall,
+      managedCodingHarness: { broker: { dispatch } },
+      cliTeamWorkerRuntime,
+    });
+    const probe = router as unknown as {
+      dispatchManagedRuntimeTool(
+        taskId: string,
+        turnId: string,
+        request: unknown,
+        signal: AbortSignal,
+      ): Promise<unknown>;
+    };
+
+    await expect(
+      probe.dispatchManagedRuntimeTool(
+        'task-worker',
+        'turn-worker',
+        { callId: 'call-1', toolName: 'create_file', arguments: {} },
+        new AbortController().signal,
+      ),
+    ).rejects.toBe(denied);
+    await expect(
+      probe.dispatchManagedRuntimeTool(
+        'task-worker',
+        'turn-worker',
+        { callId: 'call-2', toolName: 'apply_patch', arguments: {} },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('patch did not apply');
+
+    expect(cliTeamWorkerRuntime.recordManagedToolDenied.mock.calls).toEqual([
+      ['turn-worker', 'create_file'],
+    ]);
+    expect(cliTeamWorkerRuntime.recordManagedToolResult).not.toHaveBeenCalled();
+    expect(managedWorkerCall.size).toBe(0);
   });
 
   it('contains hostile broker thenable failures inside the provider image bridge', async () => {
