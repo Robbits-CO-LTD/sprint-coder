@@ -188,3 +188,91 @@ describe('ApprovalCard standard input wording', () => {
     expect(html).toContain('session-1');
   });
 });
+
+describe('ApprovalCard Project memory wording (Issue #531)', () => {
+  const memoryApproval: ApprovalSummary = {
+    ...approval,
+    toolName: 'project_memory_remember',
+    reason: 'Tool project_memory_remember requests external.open',
+    target: 'requested resource',
+    impact: 'control',
+    risk: 'medium',
+    capability: 'external.open',
+    execution: JSON.stringify({ content: 'Use pnpm for installs' }),
+  };
+
+  it('names the Project memory and the text being saved, and still shows the real capability', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard approval={memoryApproval} busy={false} onDecision={() => undefined} />,
+    );
+    expect(html).toContain('Project メモリに追加');
+    expect(html).toContain('この Project のメモリ');
+    expect(html).toContain('この Turn が成功すると追加され、以後の Turn の文脈に入ります');
+    expect(html).toContain('保存する内容');
+    expect(html).toContain('Use pnpm for installs');
+    // The saved text is shown on its own, not as the raw JSON it arrived in.
+    expect(html).not.toContain('&quot;content&quot;');
+    expect(html).toContain('external.open');
+    expect(html).not.toContain('requested resource');
+    expect(html).not.toContain('実行の承認が必要です');
+    expect(html).not.toContain('requests external.open');
+    expect(html.match(/<button/g) ?? []).toHaveLength(3);
+    expect(allowButtonsDisabled(html)).toBe(false);
+  });
+
+  it('keeps the Project memory heading when the execution is not JSON', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{ ...memoryApproval, execution: 'not-json' }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(html).toContain('Project メモリに追加');
+    expect(html).toContain('この Project のメモリ');
+    expect(html).toContain('not-json');
+  });
+
+  it('shows the raw execution when the content is not a string', () => {
+    const raw = JSON.stringify({ content: 5 });
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{ ...memoryApproval, execution: raw }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(html).toContain('Project メモリに追加');
+    expect(html).toContain('&quot;content&quot;:5');
+  });
+
+  it('keeps the generic wording when the same tool name asks for another capability', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{ ...memoryApproval, capability: 'workspace.write' }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(html).toContain('実行の承認が必要です');
+    expect(html).toContain('requested resource');
+    expect(html).not.toContain('Project メモリに追加');
+  });
+
+  it('leaves a different tool on the generic wording', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{
+          ...approval,
+          toolName: 'some_tool',
+          target: 'requested resource',
+          capability: 'external.open',
+        }}
+        busy={false}
+        onDecision={() => undefined}
+      />,
+    );
+    expect(html).toContain('実行の承認が必要です');
+    expect(html).toContain('requested resource');
+  });
+});

@@ -19,9 +19,17 @@ export function ApprovalCard({
   // closed — deny stays available, allow does not.
   const stdinApproval = approval.toolName === 'write_stdin';
   const liveDetailMissing = stdinApproval && approval.ephemeralExecution === undefined;
-  const execution = liveDetailMissing
-    ? describeWithheldStdin(approval.execution)
-    : (approval.ephemeralExecution ?? approval.execution);
+  // Display-only copy for project_memory_remember (Issue #531). Must not affect capability,
+  // resource identity, or the decision sent back.
+  const projectMemory =
+    approval.toolName === 'project_memory_remember' && approval.capability === 'external.open';
+  const execution = projectMemory
+    ? (projectMemoryContent(approval.ephemeralExecution ?? approval.execution) ??
+      approval.ephemeralExecution ??
+      approval.execution)
+    : liveDetailMissing
+      ? describeWithheldStdin(approval.execution)
+      : (approval.ephemeralExecution ?? approval.execution);
   // Never collapsed for stdin: an allow must not be reachable over a partially rendered value.
   const executionIsLong = !stdinApproval && execution.length > 512;
   const userInput =
@@ -47,14 +55,20 @@ export function ApprovalCard({
           <TriangleAlert size={16} />
         </span>
         <div>
-          <strong>{userInput === null ? '実行の承認が必要です' : userInput.question}</strong>
+          <strong>
+            {projectMemory
+              ? 'Project メモリに追加'
+              : userInput === null
+                ? '実行の承認が必要です'
+                : userInput.question}
+          </strong>
           <div className="approval-card__tool">
             {approval.toolName} · {approval.capability}
           </div>
         </div>
         <span className={`approval-card__risk risk-${approval.risk}`}>{approval.risk}</span>
       </div>
-      {userInput === null ? <p>{approval.reason}</p> : null}
+      {userInput === null && !projectMemory ? <p>{approval.reason}</p> : null}
       {approval.capability === 'shell.execute' ? (
         <p className="approval-card__warning" role="note">
           OS
@@ -74,14 +88,18 @@ export function ApprovalCard({
       <dl className="approval-card__facts">
         <div>
           <dt>対象</dt>
-          <dd>{approval.target}</dd>
+          <dd>{projectMemory ? 'この Project のメモリ' : approval.target}</dd>
         </div>
         <div>
           <dt>影響</dt>
-          <dd>{approval.impact}</dd>
+          <dd>
+            {projectMemory
+              ? 'この Turn が成功すると追加され、以後の Turn の文脈に入ります'
+              : approval.impact}
+          </dd>
         </div>
         <div>
-          <dt>実行内容</dt>
+          <dt>{projectMemory ? '保存する内容' : '実行内容'}</dt>
           <dd>
             <code className={executionIsLong && !executionExpanded ? 'is-collapsed' : undefined}>
               {executionIsLong && !executionExpanded ? `${execution.slice(0, 512)}…` : execution}
@@ -172,6 +190,16 @@ function describeWithheldStdin(execution: string): string {
     return `stdin ${value.charsBytes} bytes, mac=${value.charsMac}\n（送信内容は保存していないため表示できません）`;
   } catch {
     return execution;
+  }
+}
+
+/** Display-only (Issue #531). Returns the memory text, or null when it is not `{ content: string }`. */
+function projectMemoryContent(execution: string): string | null {
+  try {
+    const value = JSON.parse(execution) as { content?: unknown };
+    return typeof value.content === 'string' ? value.content : null;
+  } catch {
+    return null;
   }
 }
 
