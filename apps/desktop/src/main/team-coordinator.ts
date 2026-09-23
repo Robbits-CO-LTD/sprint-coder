@@ -5098,6 +5098,9 @@ export class TeamCoordinator {
       this.persistence.setTeamExecutionIsolationReclaimConfirmedAt(executionId, this.isoNow());
       let current = isolation;
       let reclaimed = false;
+      // A repository kept only because removal failed (a lock, an error) is retried on the next
+      // launch. One kept because it changed never qualifies, so it does not keep the record.
+      let retryLater = false;
       for (const repository of current.repositories) {
         if (repository.state !== 'quarantined') continue;
         const worktreeId = isolationWorktreeId(executionId, repository.ordinal);
@@ -5113,7 +5116,10 @@ export class TeamCoordinator {
             repoPath: repository.repoPath,
             baseHead: repository.baseHead,
           });
-          if (result.outcome !== 'removed') continue;
+          if (result.outcome !== 'removed') {
+            if (result.changed !== true) retryLater = true;
+            continue;
+          }
           // Re-read after the Git await, so a concurrent update to this isolation is neither
           // reverted nor overridden with a stale phase.
           const latest = this.persistence.getTeamExecutionIsolation(executionId);
@@ -5133,10 +5139,11 @@ export class TeamCoordinator {
           reclaimed = true;
         } catch {
           // One repository must not hide the original Worker failure or skip the others.
+          retryLater = true;
         }
       }
       const settled = this.persistence.getTeamExecutionIsolation(executionId) ?? current;
-      if (settled.repositories.every(({ state }) => state === 'cleaned'))
+      if (!retryLater || settled.repositories.every(({ state }) => state === 'cleaned'))
         this.persistence.setTeamExecutionIsolationReclaimConfirmedAt(executionId, null);
       return reclaimed;
     } catch {

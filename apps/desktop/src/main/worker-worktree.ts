@@ -71,6 +71,12 @@ export type CleanupWorktreeResult = Readonly<{
 }>;
 
 export type CleanupUnchangedWorktreeInput = CleanupWorktreeInput & Readonly<{ baseHead: string }>;
+/**
+ * `changed: true` marks a worktree kept because its HEAD or status differs from its base: it will
+ * never qualify, so a caller need not retry it. A worktree kept for any other reason (a Windows
+ * lock that outlasted the backoff) may qualify on a later attempt.
+ */
+export type CleanupUnchangedWorktreeResult = CleanupWorktreeResult & Readonly<{ changed?: true }>;
 
 export type FinalizeWorktreeInput = Readonly<{
   agentId: string;
@@ -406,7 +412,7 @@ export class WorkerWorktreeManager {
     repoPath,
     worktreeId = agentId,
     baseHead,
-  }: CleanupUnchangedWorktreeInput): Promise<CleanupWorktreeResult> {
+  }: CleanupUnchangedWorktreeInput): Promise<CleanupUnchangedWorktreeResult> {
     validateWorktreeId(agentId);
     validateGitHead(baseHead);
     const worktreePath = this.worktreePathFor(worktreeId);
@@ -417,13 +423,13 @@ export class WorkerWorktreeManager {
     const head = (
       await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'remove_failed')
     ).stdout.trim();
-    if (head !== baseHead) return { outcome: 'quarantined' };
+    if (head !== baseHead) return { outcome: 'quarantined', changed: true };
     const status = await this.runGit(
       worktreePath,
       ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'],
       'remove_failed',
     );
-    if (status.stdout.trim().length > 0) return { outcome: 'quarantined' };
+    if (status.stdout.trim().length > 0) return { outcome: 'quarantined', changed: true };
     return this.removeRegisteredWorktree(repoPath, worktreePath);
   }
 

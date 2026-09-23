@@ -364,7 +364,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         repoPath,
         baseHead: created.baseHead,
       }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
 
     expect((await stat(created.path)).isDirectory()).toBe(true);
     expect((await git(['-C', created.path, 'rev-parse', 'HEAD'])).trim()).not.toBe(
@@ -384,7 +384,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         repoPath,
         baseHead: created.baseHead,
       }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
 
     expect(await readFile(join(created.path, 'hidden.txt'), 'utf8')).toBe('untracked\n');
   });

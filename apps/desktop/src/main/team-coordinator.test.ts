@@ -4793,7 +4793,17 @@ if (runsWithElectronAbi)
       await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
       await expect(cleanupUnchanged.mock.results[0]?.value).resolves.toEqual({
         outcome: 'quarantined',
+        changed: true,
       });
+      // A worktree kept because it changed never qualifies, so it does not stay queued for the
+      // next launch.
+      await waitFor(
+        () =>
+          !persistence
+            .listReclaimConfirmedTeamExecutionIsolations()
+            .some(({ executionId }) => executionId === submission.executionId),
+        15_000,
+      );
       await waitFor(
         () => persistence.getTeamExecution(submission.executionId).state === 'failed',
         15_000,
