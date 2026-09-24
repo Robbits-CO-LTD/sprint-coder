@@ -4,6 +4,7 @@ on:
     branches: [claude/issue-544-retained-worktrees]
     paths:
       - 'apps/desktop/src/main/.restore-pr564/**'
+      - '.github/workflows/pr564-restore-assemble.yml'
   workflow_dispatch:
 permissions:
   contents: write
@@ -14,36 +15,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: claude/issue-544-retained-worktrees
-      - name: Assemble worker-worktree.test.ts
+          fetch-depth: 0
+      - name: Restore worker-worktree.test.ts from 75b79fa + portable gitignore
         run: |
           set -euo pipefail
-          D=apps/desktop/src/main/.restore-pr564
-          test -f "$D/p00.b64"
-          test -f "$D/p01.b64"
-          test -f "$D/p02.b64"
-          test -f "$D/p03.b64"
-          test -f "$D/p04.b64"
-          test -f "$D/p05.b64"
-          test -f "$D/p06.b64"
-          test -f "$D/p07.b64"
-          test -f "$D/p08.b64"
-          test -f "$D/p09.b64"
-          test -f "$D/p10.b64"
-          test -f "$D/p11.b64"
           python3 - <<'PY'
-          import base64, hashlib, json, pathlib
-          D = pathlib.Path('apps/desktop/src/main/.restore-pr564')
-          exp = json.loads((D / 'expected.json').read_text())
-          parts = []
-          for i in range(exp['parts']):
-              parts.append(base64.b64decode((D / f'p{i:02d}.b64').read_text().strip()))
-          c = b''.join(parts)
-          pathlib.Path('apps/desktop/src/main/worker-worktree.test.ts').write_bytes(c)
+          import hashlib, pathlib, subprocess
+          src = '75b79fa4cf76edfac5acb28331560d8735a4851c:apps/desktop/src/main/worker-worktree.test.ts'
+          dest = pathlib.Path('apps/desktop/src/main/worker-worktree.test.ts')
+          orig = subprocess.check_output(['git', 'show', src])
+          old = b"    await writeFile(join(repoPath, '.gitignore'), 'linked/\\n');\n"
+          new = (
+              b"    // No trailing slash: on Unix a directory symlink is a file entry for gitignore,\n"
+              b"    // so `linked/` (directories only) leaves `?? linked` and the reclaim path never runs.\n"
+              b"    // Windows junctions match both `linked` and `linked/`; use the portable form.\n"
+              b"    await writeFile(join(repoPath, '.gitignore'), 'linked\\n');\n"
+          )
+          assert old in orig, 'expected linked/ gitignore write missing from 75b79fa'
+          c = orig.replace(old, new, 1)
+          dest.write_bytes(c)
           blob = hashlib.sha1(b'blob %d\0' % len(c) + c).hexdigest()
           print('assembled', len(c), blob)
-          assert blob == exp['blob'], (blob, exp['blob'])
+          assert blob == '43db91cec0bfa2a56e3cc97a4399d44c4d6c50e2', blob
           assert b'PLACEHOLDER' not in c
-          assert b'@/workspace' not in c
           PY
       - name: Commit assembled file and remove restore leftovers
         run: |
