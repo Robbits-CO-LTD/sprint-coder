@@ -148,6 +148,36 @@ describe('describeExecution', () => {
   it('echoes an unparseable timestamp instead of rendering nothing', () => {
     expect(formatClockTime('not-a-date')).toBe('not-a-date');
   });
+
+  it('labels the write scope from accessMode (issue #551)', () => {
+    expect(describeExecution(execution({ accessMode: 'read-only' })).writeScopeLabel).toBe(
+      '読み取り専用（依頼どおり）',
+    );
+    expect(describeExecution(execution({ accessMode: 'workspace-write' })).writeScopeLabel).toBe(
+      'Workspaceへ書き込み（隔離worktreeで変更し、完了後に統合）',
+    );
+  });
+
+  it('translates a known terminalReason code into Japanese (issue #551)', () => {
+    expect(
+      describeExecution(execution({ terminalReason: 'heartbeat_timeout' })).terminalReasonLabel,
+    ).toBe('Workerの応答が途絶えたため停止');
+    expect(
+      describeExecution(execution({ terminalReason: 'worker_reported_failure' }))
+        .terminalReasonLabel,
+    ).toBe('Workerが失敗を報告');
+    // Existing translation kept as-is (see the module comment on why this one is not renamed).
+    expect(
+      describeExecution(execution({ terminalReason: 'stop_unconfirmed' })).terminalReasonLabel,
+    ).toBe('強制停止');
+  });
+
+  it('falls back to the raw code for an unknown terminalReason (e.g. a Graph Mission free-text reason)', () => {
+    expect(
+      describeExecution(execution({ terminalReason: 'some future runtime error message' }))
+        .terminalReasonLabel,
+    ).toBe('some future runtime error message');
+  });
 });
 
 describe('TeamExecutionStatus', () => {
@@ -156,6 +186,22 @@ describe('TeamExecutionStatus', () => {
       '',
     );
     expect(renderToStaticMarkup(<TeamExecutionStatus execution={null} variant="list" />)).toBe('');
+  });
+
+  it('shows the write scope row for both accessMode values (issue #551)', () => {
+    for (const [accessMode, expectedText] of [
+      ['read-only', '読み取り専用（依頼どおり）'],
+      ['workspace-write', 'Workspaceへ書き込み（隔離worktreeで変更し、完了後に統合）'],
+    ] as const) {
+      const row = execution({ accessMode });
+      for (const variant of ['canvas', 'list'] as const) {
+        const html = renderToStaticMarkup(
+          <TeamExecutionStatus execution={row} variant={variant} />,
+        );
+        expect(html).toContain('team-execution-write-scope');
+        expect(html).toContain(expectedText);
+      }
+    }
   });
 
   it('shows isolated worktree integration and quarantine state in both views', () => {

@@ -28,6 +28,7 @@ import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
 import { leaderWriteLimitNote } from './workspace-write-limits';
+import { writeScopeNote } from './write-scope';
 
 const teamToolDefinition = (
   providerName: string,
@@ -841,6 +842,8 @@ export async function executeTeamTool(
           workerId: request.workerId,
           executionId: execution.executionId,
           state: execution.state,
+          writeScope: request.access,
+          writeScopeNote: writeScopeNote(request.access, coordinator.taskAccessPreset?.(taskId)),
           ...(workspaceWriteLimitNote === ''
             ? {}
             : { workspaceWriteLimit: workspaceWriteLimitNote }),
@@ -872,20 +875,28 @@ export async function executeTeamTool(
                 options.requesterAgentId ?? null,
                 options.contextOwner,
               );
-        const workspaceWriteLimitNote = request.steps.some(
+        const missionHasWorkspaceWrite = request.steps.some(
           ({ access }) => access === 'workspace-write',
-        )
+        );
+        const workspaceWriteLimitNote = missionHasWorkspaceWrite
           ? leaderWriteLimitNote(coordinator.workspaceWriteLimits)
           : '';
+        const missionWriteScopeNote = missionHasWorkspaceWrite
+          ? writeScopeNote('workspace-write', coordinator.taskAccessPreset?.(taskId))
+          : writeScopeNote('read-only', undefined);
         return {
           ok: true,
           missionId: mission.id,
           state: mission.state,
           currentStepOrdinal: mission.currentStepOrdinal,
-          executions: mission.steps.map(({ ordinal, executionId }) => ({
+          // ステップごとに request.steps と同じ並び順で作られる（team-coordinator.assignMission）ので、
+          // index で access を引き当てられる。
+          executions: mission.steps.map(({ ordinal, executionId }, index) => ({
             ordinal,
             executionId,
+            writeScope: request.steps[index]?.access ?? 'read-only',
           })),
+          writeScopeNote: missionWriteScopeNote,
           ...(workspaceWriteLimitNote === ''
             ? {}
             : { workspaceWriteLimit: workspaceWriteLimitNote }),

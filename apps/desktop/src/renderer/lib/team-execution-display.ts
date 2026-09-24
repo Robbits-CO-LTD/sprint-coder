@@ -45,6 +45,58 @@ export const BUILTIN_CONNECTION_LABELS: Readonly<Record<string, string>> = {
 export const UNKNOWN_CONNECTION_LABEL = 'Connection不明';
 export const EMPTY_INSTRUCTION_LABEL = '指示プレビューなし';
 export const UNKNOWN_STATE_LABEL = '状態不明';
+
+/** `TeamExecutionSummary.accessMode` のTeam画面向け日本語表示（issue #551）。安全設定（Taskの
+ * Access preset）は画面が知らない情報なので、確認のされ方（ask/auto/full）はここでは出さない —
+ * それは割り当て結果（team_assign_task/team_assign_mission）の writeScopeNote の役目。 */
+export const WRITE_SCOPE_LABELS: Readonly<Record<TeamExecutionSummary['accessMode'], string>> = {
+  'read-only': '読み取り専用（依頼どおり）',
+  'workspace-write': 'Workspaceへ書き込み（隔離worktreeで変更し、完了後に統合）',
+};
+
+export function writeScopeLabel(accessMode: TeamExecutionSummary['accessMode']): string {
+  return WRITE_SCOPE_LABELS[accessMode];
+}
+
+/**
+ * Main が team_executions/team_attempts の terminal_reason に書く値の日本語ラベル（issue #551）。
+ * 出どころ（file:line、apps/desktop/src/main 配下）:
+ *  - 'heartbeat_timeout' / 'idle_timeout' / 'hard_timeout': team-coordinator.ts の
+ *    WorkerRuntimeControlErrorCode（163-168行）。runScheduledExecution の監視タイマーが
+ *    expire(code, message) で送出し（5690, 5698, 5704行）、失敗経路で error.code がそのまま
+ *    terminalReason になる（3337-3341行）。
+ *  - 'runtime_failure': 上と同じ失敗経路のデフォルト（3341, 3587行）で、WorkerRuntimeControlError
+ *    でも ProviderRateLimitedError でもない実行時エラー全般。
+ *  - 'user_canceled': ユーザーからの通常キャンセル（handleRequestedInterruption、3650行、
+ *    control.kind !== 'steer' のとき）。
+ *  - 'stop_unconfirmed': WorkerRuntimeControlErrorCode の1値（168行）。プロセス終了を確認できずに
+ *    強制停止したとき。既存の訳（強制停止）をそのまま維持する。
+ *  - 'worker_reported_failure': team-coordinator.ts 3148行。Worker自身が失敗を報告した通常完了経路。
+ *  - 'rate_limited': team-coordinator.ts 3340行。ProviderRateLimitedError による失敗。
+ *  - 'steered': team-coordinator.ts 3650行。修正指示（team_steer_execution）による中断。
+ *  - 'app_restart': persistence.ts 12377/12459行。アプリ再起動からの復元時に未確定のまま終了扱いに
+ *    した実行の起点。
+ * Graph Mission の中断（persistence.ts の interruptGraphStep、team-coordinator.ts 1551/1593/1616行）
+ * は呼び出し元のエラーメッセージをそのまま terminalReason にするため固定値ではなく、辞書に無い値
+ * として下のフォールバック（コードのまま表示）に落ちる — 挙動は変えていない。
+ */
+export const TERMINAL_REASON_LABELS: Readonly<Record<string, string>> = {
+  heartbeat_timeout: 'Workerの応答が途絶えたため停止',
+  idle_timeout: '進捗が止まったため停止',
+  hard_timeout: '実行時間の上限に到達',
+  runtime_failure: '実行時エラー',
+  user_canceled: '利用者がキャンセル',
+  stop_unconfirmed: '強制停止',
+  worker_reported_failure: 'Workerが失敗を報告',
+  rate_limited: 'レート制限で停止',
+  steered: '修正指示により中断',
+  app_restart: 'アプリ再起動で中断',
+};
+
+/** 辞書に無い値（未知のコードや Graph Mission の自由記述の理由）はコードのまま表示する。 */
+export function terminalReasonLabel(reason: string): string {
+  return TERMINAL_REASON_LABELS[reason] ?? reason;
+}
 export const ATTEMPT_START_REASON_LABELS = {
   initial: '通常開始',
   automatic_retry: '自動再試行',
@@ -159,6 +211,9 @@ export type TeamExecutionDisplay = {
   progressLabel: string | null;
   attemptReasonLabel: string | null;
   terminalReasonLabel: string | null;
+  /** `execution.accessMode` の日本語表示（issue #551）。安全設定は画面が知らないので、確認の
+   * され方はここに出ない。 */
+  writeScopeLabel: string;
   /** Single-sentence announcement for the polite live region. */
   ariaSummary: string;
 };
@@ -196,12 +251,8 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
     execution.attemptStartReason === null
       ? null
       : (ATTEMPT_START_REASON_LABELS[execution.attemptStartReason] ?? execution.attemptStartReason);
-  const terminalReasonLabel =
-    execution.terminalReason === null
-      ? null
-      : execution.terminalReason === 'stop_unconfirmed'
-        ? '強制停止'
-        : execution.terminalReason;
+  const terminalReasonText =
+    execution.terminalReason === null ? null : terminalReasonLabel(execution.terminalReason);
 
   return {
     state: execution.state,
@@ -216,7 +267,8 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
     instructionLabel: instruction,
     progressLabel,
     attemptReasonLabel,
-    terminalReasonLabel,
+    terminalReasonLabel: terminalReasonText,
+    writeScopeLabel: writeScopeLabel(execution.accessMode),
     ariaSummary: parts.join('、'),
   };
 }

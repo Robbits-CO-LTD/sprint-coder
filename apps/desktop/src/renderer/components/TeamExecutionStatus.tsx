@@ -55,6 +55,10 @@ export function TeamExecutionStatus({
         <span className="team-exec-key">実行状態</span>
         <span className="team-exec-value">{display.stateLabel}</span>
       </p>
+      <p className="team-exec-row" data-testid="team-execution-write-scope">
+        <span className="team-exec-key">書き込み</span>
+        <span className="team-exec-value">{display.writeScopeLabel}</span>
+      </p>
       {execution.state === 'running' && (execution.workerQueueDepth ?? 0) > 0 ? (
         <p className="team-exec-row" data-testid="team-execution-worker-queue">
           後続{execution.workerQueueDepth}件が待機中
