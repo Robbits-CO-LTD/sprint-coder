@@ -1033,6 +1033,22 @@ export const workerCompletionSchema = z
       )
       .max(20),
     risks: z.array(z.string().min(1).max(500)).max(20),
+    /**
+     * The Worker's own report for each done criterion of its task (issue #550). `criterion` is the
+     * task's canonical text, never the model's rewording. Absent when no report could be read.
+     */
+    criteria: z
+      .array(
+        z
+          .object({
+            criterion: z.string().min(1).max(1_000),
+            status: z.enum(['done', 'not_done']),
+            evidence: z.string().max(4_000),
+          })
+          .strict(),
+      )
+      .max(50)
+      .optional(),
   })
   .strict();
 export type WorkerCompletion = z.infer<typeof workerCompletionSchema>;

@@ -436,6 +436,97 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       }
     });
     it(
+      'fails a WRITE step whose worktree did not change, whatever its Worker reported, and integrates nothing',
+      async () => {
+        const f = fixture(undefined, true);
+        const workspace = join(dirname(f.path), 'workspace');
+        mkdirSync(workspace);
+        writeFileSync(join(workspace, 'a.ts'), 'before\n');
+        for (const args of [
+          ['init', '-q', workspace],
+          ['-C', workspace, 'add', 'a.ts'],
+          [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ],
+        ])
+          expect(spawnSync('git', args).status).toBe(0);
+        const binding = await workspaceMutationBinding(workspace);
+        f.persistence.setWorkspaceBinding(f.task.id, {
+          path: binding.canonicalPath,
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        });
+        const context = graphMissionContextFor(f.persistence, f.task.id);
+        const plan = structuredClone(f.plan);
+        plan.steps[0]!.access = 'workspace-write';
+        plan.steps[0]!.writeClaims = [
+          { rootId: context.workspace.primaryRootId!, path: 'a.ts', semanticKeys: [] },
+        ];
+        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(initial, 1);
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const original = runtime.execute.bind(runtime);
+        // A Worker that reports every criterion done but writes nothing, and is not the simulation
+        // that Main exempts from the check.
+        const execute = vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+          const { simulated: _simulated, ...result } = await original(input);
+          return result;
+        });
+        const scheduler = new TeamExecutionScheduler(1);
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+          undefined,
+          undefined,
+          new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') }),
+        );
+        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+          ...f.input,
+          renderRevision: initial.renderRevision,
+          semanticRevision: initial.semanticRevision,
+          semanticDigest: initial.semanticDigest,
+          workspaceDigest: context.workspace.digest,
+          policyEpoch: context.policyEpoch,
+          contextDigest: graphMissionContextDigest(
+            context,
+            new Set(f.workers.map((worker) => worker.id)),
+          ),
+        }));
+        const executionId = mission.steps[0]!.executionId;
+        await vi.waitFor(
+          () =>
+            expect(f.persistence.listTeamAttempts(executionId).map(({ state }) => state)).toEqual([
+              'failed',
+            ]),
+          { timeout: gitPreflightTimeout },
+        );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+
+        expect(execute).toHaveBeenCalledTimes(1);
+        const writer = f.persistence
+          .getTeamSnapshot(f.persistence.getTeamByTask(f.task.id)!.id)
+          .agents.find(({ id }) => id === f.workers[0]!.id);
+        expect(writer?.currentActivity).toContain('ファイルが1つも変わらないまま');
+        expect(f.persistence.getTeamExecution(executionId).state).not.toBe('completed');
+        expect(f.persistence.getTeamMission(mission.id).state).not.toBe('completed');
+        expect(readFileSync(join(workspace, 'a.ts'), 'utf8')).toBe('before\n');
+        f.persistence.close();
+      },
+      gitScenarioTimeout,
+    );
+    it(
       'keeps a running independent WRITE branch on its original owner consent through sealed integration after re-agreement',
       async () => {
         const f = fixture(undefined, true, ['a', 'b', 'c']);

@@ -416,17 +416,42 @@ export class WorkerWorktreeManager {
     const worktreePath = this.worktreePathFor(worktreeId);
     if (!(await pathExists(worktreePath)))
       return this.removeMissingWorktreeRegistration(repoPath, worktreePath);
-    const head = (
-      await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'remove_failed')
-    ).stdout.trim();
-    if (head !== baseHead) return { outcome: 'quarantined', changed: true };
+    if (await this.differsFromBase(worktreePath, baseHead, 'remove_failed'))
+      return { outcome: 'quarantined', changed: true };
+    return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Whether a worktree differs from its base by the same test `cleanupUnchanged` uses: HEAD moved
+   * (a commit, including one an earlier Attempt left) or status shows any change. Reads only.
+   */
+  async hasChangesFromBase({
+    agentId,
+    worktreeId = agentId,
+    baseHead,
+  }: Readonly<{ agentId: string; worktreeId?: string; baseHead: string }>): Promise<boolean> {
+    validateWorktreeId(agentId);
+    validateGitHead(baseHead);
+    const worktreePath = this.worktreePathFor(worktreeId);
+    // The same codes `finalizeChanges` reports when it reads this worktree before integration.
+    if (!(await pathExists(worktreePath)))
+      throw new WorktreeError('create_failed', `worktree does not exist: ${worktreePath}`);
+    return this.differsFromBase(worktreePath, baseHead, 'integration_failed');
+  }
+
+  private async differsFromBase(
+    worktreePath: string,
+    baseHead: string,
+    code: Exclude<WorktreeErrorCode, 'git_unavailable' | 'invalid_input'>,
+  ): Promise<boolean> {
+    const head = (await this.runGit(worktreePath, ['rev-parse', 'HEAD'], code)).stdout.trim();
+    if (head !== baseHead) return true;
     const status = await this.runGit(
       worktreePath,
       ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'],
-      'remove_failed',
+      code,
     );
-    if (status.stdout.trim().length > 0) return { outcome: 'quarantined', changed: true };
-    return this.removeRegisteredWorktree(repoPath, worktreePath);
+    return status.stdout.trim().length > 0;
   }
 
   /**

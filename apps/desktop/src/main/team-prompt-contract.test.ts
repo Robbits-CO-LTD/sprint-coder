@@ -94,6 +94,17 @@ describe('Leader guidance describes the real assign-task arguments', () => {
     ).toBe(false);
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('追加フィールドにせず');
   });
+
+  it('keeps workspace-write for work whose completion is a file change (issue #550)', () => {
+    // Main fails a write execution that changed no file, so a check-and-fix-if-needed task has to
+    // be checked read-only first.
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
+      'workspace-writeはファイルを変えることが完了条件の作業だけに付ける',
+    );
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
+      'まずread-onlyで確認し、変更が必要と分かってからworkspace-writeで割り当て直す',
+    );
+  });
 });
 
 describe('Leader guidance stays within its budget and its digest stays honest', () => {

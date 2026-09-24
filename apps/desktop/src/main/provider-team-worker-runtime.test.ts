@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ProviderConnection } from '@sprint-coder/contracts';
+import { workerCompletionSchema, type ProviderConnection } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
@@ -434,6 +434,193 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(
       (requests[0] as { messages: Array<{ content: string }> }).messages.at(-1)?.content,
     ).toContain('この内容を取得し直すためにTeamツールを呼ぶ必要はありません。');
+  });
+
+  it('asks an external Worker for a per-criterion report and returns it', async () => {
+    const prompts: string[] = [];
+    const replies = [
+      [
+        '調査しました。',
+        '```json',
+        JSON.stringify({
+          criteria: [
+            { index: 1, status: 'done', evidence: '公式資料で確認' },
+            { index: 2, status: 'not_done', evidence: '比較表は作れませんでした' },
+          ],
+        }),
+        '```',
+      ].join('\n'),
+      '調査しました。',
+    ];
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute(_connection, request) {
+        prompts.push(String(request.messages.at(-1)?.content));
+        yield { type: 'output_delta', text: replies[prompts.length - 1]! };
+        yield { type: 'completed', stopReason: 'completed' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+    const input = {
+      worker: providerWorker(),
+      envelope,
+      content: '調査してください',
+      doneCriteria: ['仕様を確認する', '比較表を作る'],
+    };
+
+    const reported = await adapter.execute(input);
+    const unreported = await adapter.execute(input);
+
+    expect(prompts[0]).toContain('依頼: 調査してください');
+    expect(prompts[0]).toContain('1. 仕様を確認する');
+    expect(prompts[0]).toContain('2. 比較表を作る');
+    expect(reported.completion).toMatchObject({
+      status: 'succeeded',
+      summary: '調査しました。',
+      criteria: [
+        { criterion: '仕様を確認する', status: 'done', evidence: '公式資料で確認' },
+        { criterion: '比較表を作る', status: 'not_done', evidence: '比較表は作れませんでした' },
+      ],
+    });
+    expect(unreported.completion).not.toHaveProperty('criteria');
+    expect(unreported.completion).toMatchObject({
+      verification: expect.arrayContaining([
+        expect.objectContaining({ name: 'criteria-report', outcome: 'fail' }),
+      ]),
+    });
+  });
+
+  it.each([
+    ['only in an earlier round', false],
+    ['in the final round', true],
+  ])(
+    'reads the per-criterion report from the final answer, not a report %s',
+    async (_label, reportInFinalRound) => {
+      const allDone = [
+        '```json',
+        JSON.stringify({
+          criteria: [
+            { index: 1, status: 'done', evidence: 'テストを実行します' },
+            { index: 2, status: 'done', evidence: '結果を確認します' },
+          ],
+        }),
+        '```',
+      ].join('\n');
+      let round = 0;
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute() {
+          round += 1;
+          if (round === 1) {
+            // A report claimed before the check whose result the Worker then acts on.
+            yield { type: 'output_delta', text: `全部できました。\n${allDone}\n` };
+            yield { type: 'tool_call', callId: 'check-1', name: 'team_send_message', input: {} };
+            yield { type: 'completed', stopReason: 'tool_calls' };
+            return;
+          }
+          yield {
+            type: 'output_delta',
+            text: reportInFinalRound ? `確認できました。\n${allDone}` : '未完了です。',
+          };
+          yield { type: 'completed', stopReason: 'completed' };
+        },
+      };
+      const adapter = controlledProviderAdapter(runtime, {
+        workerTools: [
+          { name: 'team_send_message', description: 'check', inputSchema: { type: 'object' } },
+        ],
+        executeManagerTool: vi.fn(async () => ({ ok: false, error: 'check failed' })),
+      });
+
+      const result = await adapter.execute({
+        worker: providerWorker(),
+        envelope,
+        content: '検証してください',
+        doneCriteria: ['テストが通る', '結果を報告する'],
+      });
+
+      const completion = workerCompletionSchema.parse(result.completion);
+      expect(completion.summary).toContain('全部できました。');
+      if (reportInFinalRound) {
+        expect(completion.criteria).toHaveLength(2);
+        expect(completion.summary).toContain('確認できました。');
+        expect(completion.verification.map(({ name }) => name)).not.toContain('criteria-report');
+      } else {
+        expect(completion.criteria).toBeUndefined();
+        expect(completion.summary).toContain('未完了です。');
+        expect(completion.verification).toContainEqual(
+          expect.objectContaining({ name: 'criteria-report', outcome: 'fail' }),
+        );
+      }
+    },
+  );
+
+  it('takes no criteria from a final answer whose report block is followed by more text', async () => {
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute() {
+        yield {
+          type: 'output_delta',
+          text: [
+            '調べました。',
+            '```json',
+            JSON.stringify({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] }),
+            '```',
+            'やはり未確認です。',
+          ].join('\n'),
+        };
+        yield { type: 'completed', stopReason: 'completed' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: '調査してください',
+      doneCriteria: ['仕様を確認する'],
+    });
+
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.criteria).toBeUndefined();
+    expect(completion.verification).toContainEqual(
+      expect.objectContaining({
+        name: 'criteria-report',
+        outcome: 'fail',
+        detail: expect.stringContaining('最終回答の最後にありません'),
+      }),
+    );
+    expect(completion.summary).toContain('やはり未確認です。');
+  });
+
+  it('keeps an external Worker answer longer than 4000 characters within the summary', async () => {
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute() {
+        yield { type: 'output_delta', text: 'x'.repeat(5_000) };
+        yield { type: 'completed', stopReason: 'completed' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: '調査してください',
+      doneCriteria: ['仕様を確認する'],
+    });
+
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.summary.length).toBeLessThanOrEqual(4_000);
+    expect(completion.criteria).toBeUndefined();
   });
 
   it('enables provider-hosted Web Search for an OpenRouter Team Worker', async () => {

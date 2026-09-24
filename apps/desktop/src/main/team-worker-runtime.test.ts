@@ -9,6 +9,9 @@ const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex' | 'grok'; args: unknown[] }>,
   waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
   startSucceeds: true,
+  finalText: '完了',
+  // When set, the Turn emits these instead of one `finalText` delta; a function runs in its place.
+  stream: null as Array<Record<string, unknown> | ((turnId: string) => void)> | null,
   beforeComplete: null as ((turnId: string) => void) | null,
   failures: new Map<
     'claude' | 'codex' | 'grok',
@@ -97,7 +100,12 @@ vi.mock('./runtime-host', () => ({
         return false;
       }
       runtimeHostMock.beforeComplete?.(turnId);
-      this.onEvent(taskId, turnId, { type: 'delta', delta: '完了' });
+      if (runtimeHostMock.stream === null)
+        this.onEvent(taskId, turnId, { type: 'delta', delta: runtimeHostMock.finalText });
+      else
+        for (const item of runtimeHostMock.stream)
+          if (typeof item === 'function') item(turnId);
+          else this.onEvent(taskId, turnId, item);
       this.onEvent(taskId, turnId, { type: 'completed' });
       return true;
     }
@@ -132,6 +140,8 @@ import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract
 afterEach(() => {
   runtimeHostMock.failures.clear();
   runtimeHostMock.startSucceeds = true;
+  runtimeHostMock.finalText = '完了';
+  runtimeHostMock.stream = null;
   runtimeHostMock.beforeComplete = null;
   runtimeHostMock.waitForExit.mockReset();
   runtimeHostMock.waitForExit.mockResolvedValue(undefined);
@@ -1723,5 +1733,233 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     expect(completionOf(writeResult).status).toBe('succeeded');
     expect(completionOf(writeResult).risks).toEqual([]);
     writer.dispose();
+  });
+});
+
+describe('RuntimeHostTeamWorkerRuntime done criteria report', () => {
+  let subjectForManagedTool: RuntimeHostTeamWorkerRuntime | undefined;
+  const completionOf = (result: { completion: unknown }) =>
+    workerCompletionSchema.parse(result.completion);
+  const doneCriteria = ['答えを見つける', '出典を示す'];
+  const input = {
+    worker: worker(false),
+    envelope: { ...envelope, targetAgentId: 'worker-1' },
+    content: '調査してください',
+    doneCriteria,
+  };
+
+  it('gives the CLI the numbered criteria and the report format', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime();
+
+    await subject.execute(input);
+
+    const prompt = runtimeHostMock.starts[0]?.args[2] as string;
+    expect(prompt).toContain('1. 答えを見つける');
+    expect(prompt).toContain('2. 出典を示す');
+    expect(prompt).toContain('```json');
+    expect(prompt.indexOf('依頼: 調査してください')).toBeLessThan(
+      prompt.indexOf('1. 答えを見つける'),
+    );
+    subject.dispose();
+  });
+
+  it('returns the per-criterion report with the task criteria and a summary without the block', async () => {
+    runtimeHostMock.finalText = [
+      '答えは42です。',
+      '```json',
+      JSON.stringify({
+        criteria: [
+          { index: 1, status: 'done', evidence: 'read_file で確認しました' },
+          { index: 2, status: 'not_done', evidence: '出典が見つかりません' },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.status).toBe('succeeded');
+    expect(completion.summary).toBe('答えは42です。');
+    expect(completion.criteria).toEqual([
+      { criterion: '答えを見つける', status: 'done', evidence: 'read_file で確認しました' },
+      { criterion: '出典を示す', status: 'not_done', evidence: '出典が見つかりません' },
+    ]);
+    expect(completion.verification.map(({ name }) => name)).toEqual(['worker-runtime:claude']);
+    subject.dispose();
+  });
+
+  it('keeps an answer longer than 4000 characters within the completion summary', async () => {
+    runtimeHostMock.finalText = [
+      'x'.repeat(5_000),
+      '```json',
+      JSON.stringify({
+        criteria: [
+          { index: 1, status: 'done', evidence: 'ok' },
+          { index: 2, status: 'done', evidence: 'ok' },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.summary.length).toBeLessThanOrEqual(4_000);
+    expect(completion.criteria).toHaveLength(2);
+    subject.dispose();
+  });
+
+  const allDone = [
+    '```json',
+    JSON.stringify({
+      criteria: [
+        { index: 1, status: 'done', evidence: '確認しました' },
+        { index: 2, status: 'done', evidence: '出典を示しました' },
+      ],
+    }),
+    '```',
+  ].join('\n');
+
+  it.each([
+    [
+      'a report followed by more text',
+      `答えは42です。\n${allDone}\n補足: 以上です。`,
+      '補足: 以上です。',
+    ],
+    [
+      'a report written mid-turn and then only "未完了です"',
+      `全部できました。\n${allDone}\n未完了です。`,
+      '未完了です。',
+    ],
+  ])('takes no criteria from %s', async (_label, finalText, remains) => {
+    runtimeHostMock.finalText = finalText;
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toBeUndefined();
+    expect(completion.verification).toContainEqual({
+      name: 'criteria-report',
+      outcome: 'fail',
+      detail: expect.stringContaining('最終回答の最後にありません'),
+    });
+    expect(completion.summary).toContain(remains);
+    subject.dispose();
+  });
+
+  const toolCall = {
+    type: 'operation',
+    phase: 'tool_call_start',
+    label: 'Claude tool call started (mcp__managed__run_tests)',
+    sideEffect: false,
+  };
+
+  it.each([
+    ['an operation event', [toolCall]],
+    [
+      'a managed tool result',
+      [(turnId: string) => subjectForManagedTool?.recordManagedToolResult(turnId, { ok: false })],
+    ],
+  ])(
+    'takes no criteria from a report the Worker wrote before %s, even with no text after',
+    async (_label, afterReport) => {
+      const subject = runtime();
+      subjectForManagedTool = subject;
+      runtimeHostMock.stream = [
+        { type: 'delta', delta: `確認します。\n${allDone}` },
+        ...afterReport,
+      ];
+
+      const completion = completionOf(await subject.execute(input));
+
+      expect(completion.criteria).toBeUndefined();
+      expect(completion.verification).toContainEqual({
+        name: 'criteria-report',
+        outcome: 'fail',
+        detail: expect.stringContaining('ツールが実行されたため'),
+      });
+      expect(completion.summary).toBe('確認します。');
+      subject.dispose();
+    },
+  );
+
+  it('takes the criteria from a report written after the last tool call', async () => {
+    runtimeHostMock.stream = [
+      { type: 'delta', delta: '確認します。' },
+      toolCall,
+      { type: 'delta', delta: `\n確認できました。\n${allDone}` },
+    ];
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    expect(completion.summary).toBe('確認します。\n確認できました。');
+    subject.dispose();
+  });
+
+  it('takes the criteria from a Codex-shaped Turn whose final message holds the report', async () => {
+    // Codex sends each agentMessage as its own item, joined by a blank line, and reports tool and
+    // command items as they start and finish.
+    runtimeHostMock.stream = [
+      { type: 'delta', delta: 'テストを実行します。' },
+      { type: 'operation', phase: 'tool_call_start', label: 'Codex tool call started (run)' },
+      { type: 'operation', phase: 'tool_call_end', label: 'Codex tool call finished (run)' },
+      { type: 'operation', phase: 'command_start', label: 'Codex command started' },
+      { type: 'operation', phase: 'command_end', label: 'Codex command finished' },
+      { type: 'delta', delta: '\n\n' },
+      { type: 'delta', delta: `確認できました。\n${allDone}` },
+    ];
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    expect(completion.summary).toBe('テストを実行します。\n\n確認できました。');
+    subject.dispose();
+  });
+
+  it('does not count reasoning, heartbeat or stage events as tool calls', async () => {
+    runtimeHostMock.stream = [
+      { type: 'delta', delta: `確認しました。\n${allDone}` },
+      { type: 'reasoning', text: '念のため見直す' },
+      { type: 'heartbeat', at: '2026-09-24T00:00:00.000Z' },
+      { type: 'stage', stage: 'synthesizing' },
+    ];
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    subject.dispose();
+  });
+
+  it('takes the criteria from a report followed only by whitespace', async () => {
+    runtimeHostMock.finalText = `答えは42です。\n${allDone}\n\n  \n`;
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    expect(completion.summary).toBe('答えは42です。');
+    subject.dispose();
+  });
+
+  it('returns no criteria and a failed criteria-report verification for a missing report', async () => {
+    runtimeHostMock.finalText = '全部終わりました。';
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.summary).toBe('全部終わりました。');
+    expect(completion.criteria).toBeUndefined();
+    expect(completion.verification).toContainEqual({
+      name: 'criteria-report',
+      outcome: 'fail',
+      detail: expect.stringContaining('```json'),
+    });
+    subject.dispose();
   });
 });
