@@ -6,6 +6,7 @@ import type {
   PublicError,
   RuntimeKind,
   RuntimeWriteScope,
+  WorkerCompletion,
 } from '@sprint-coder/contracts';
 import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-coder/domain';
 import { RuntimeHostClient } from './runtime-host';
@@ -120,13 +121,17 @@ export type TeamWorkerRuntimeDeps = Readonly<{
 
 // Managed tools that change the Workspace. Only their policy denials count against a write
 // execution; a denied read or search does not mean the Worker failed to write.
-const WORKSPACE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
+export const WORKSPACE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'create_file',
   'create_directory',
   'apply_patch',
 ]);
 
-type WorkerWriteObservation = { committed: number; denied: number };
+export type WorkerWriteObservation = { committed: number; denied: number };
+
+/** Told to a Worker whose Leader asked for edits that this run cannot make. */
+export const WORKER_CANNOT_WRITE_NOTICE =
+  'Leaderは編集を依頼していますが、今回の実行ではファイルを変更できません。ファイルは変更せず、必要な変更内容を報告してください。';
 
 /**
  * How much text the Turn has produced, and how much of it came before its last tool call. The
@@ -337,9 +342,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
       `Context継承: ${input.worker.contextInheritancePolicy}`,
       `Workspace書き込み: ${writable ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
-      input.accessMode === 'workspace-write' && !writable
-        ? 'Leaderは編集を依頼していますが、今回の実行ではファイルを変更できません。ファイルは変更せず、必要な変更内容を報告してください。'
-        : '',
+      input.accessMode === 'workspace-write' && !writable ? WORKER_CANNOT_WRITE_NOTICE : '',
       input.workspacePath === undefined
         ? ''
         : `隔離worktree: ${input.workspacePath ?? '利用不可'}${writable ? '（このディレクトリ内だけを変更してください）' : '（読み取り専用）'}`,
@@ -392,11 +395,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         );
         const report = readWorkerCriteriaReport(finalText, input.doneCriteria, { reportFrom });
         const summary = report.summary;
-        const criteria = report.criteria === undefined ? {} : { criteria: report.criteria };
-        const runtimeVerification = {
-          name: `worker-runtime:${choice.kind}`,
-          outcome: 'pass' as const,
-        };
         const writeFailure = workerWriteFailure({
           accessMode: input.accessMode,
           writeCapable: input.worker.writeCapable === true,
@@ -410,35 +408,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             sourceAgentId: input.envelope.sourceAgentId,
             targetAgentId: input.envelope.targetAgentId,
           },
-          // A write execution that could not change any file did not do what the Leader asked,
-          // whatever the Worker's own summary says.
-          completion:
-            writeFailure === null
-              ? {
-                  status: 'succeeded',
-                  summary,
-                  artifacts: [],
-                  verification: [runtimeVerification, ...report.verification],
-                  risks:
-                    writes.denied > 0
-                      ? [
-                          `書き込みツールの呼び出し${writes.denied}件が拒否されました（反映された書き込みは${writes.committed}件）。`,
-                        ]
-                      : [],
-                  ...criteria,
-                }
-              : {
-                  status: 'failed',
-                  summary: `${writeFailure.detail}\n\nWorkerの報告:\n${summary}`.slice(0, 4_000),
-                  artifacts: [],
-                  verification: [
-                    runtimeVerification,
-                    { name: writeFailure.name, outcome: 'fail', detail: writeFailure.detail },
-                    ...report.verification,
-                  ],
-                  risks: [writeFailure.detail.slice(0, 500)],
-                  ...criteria,
-                },
+          completion: workerWriteCheckedCompletion({
+            runtimeVerification: { name: `worker-runtime:${choice.kind}`, outcome: 'pass' },
+            report,
+            writes,
+            writeFailure,
+          }),
           usage: {
             costCents: 0,
             tokens: Math.max(1, Math.ceil((prompt.length + summary.length) / 4)),
@@ -841,13 +816,18 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
  * call in this Turn: an earlier Attempt may already have written to the isolation it reuses, so
  * Main judges that from the isolation itself (issue #550).
  */
-function workerWriteFailure(input: {
+export function workerWriteFailure(input: {
   accessMode: TeamWorkerExecutionInput['accessMode'];
   writeCapable: boolean;
   workspacePath: string | null;
   writeScope: RuntimeWriteScope;
   writes: WorkerWriteObservation;
-}): { name: 'worker-write-scope' | 'worker-write-denied'; detail: string } | null {
+  /**
+   * Why a write-capable Worker with a Workspace still ran read-only, when the runtime knows a
+   * cause other than the CLI's: its safety setting narrowing the scope.
+   */
+  readOnlyCause?: string;
+}): WorkerWriteFailure | null {
   if (input.accessMode !== 'workspace-write') return null;
   if (input.writeScope === 'read-only')
     return {
@@ -856,7 +836,8 @@ function workerWriteFailure(input: {
         ? 'このWorkerは書き込み可能として採用されていないため、読み取り専用で実行されました。ファイルは変更されていません。'
         : input.workspacePath === null
           ? '書き込み先のWorkspaceがないため、読み取り専用で実行されました。ファイルは変更されていません。'
-          : '安全設定「確認する」ではTeam Workerは読み取り専用で実行されるため、ファイルを変更できませんでした。',
+          : (input.readOnlyCause ??
+            '安全設定「確認する」ではTeam Workerは読み取り専用で実行されるため、ファイルを変更できませんでした。'),
     };
   if (input.writes.denied > 0 && input.writes.committed === 0)
     return {
@@ -866,8 +847,55 @@ function workerWriteFailure(input: {
   return null;
 }
 
+export type WorkerWriteFailure = {
+  name: 'worker-write-scope' | 'worker-write-denied';
+  detail: string;
+};
+
+/**
+ * A Worker's completion, judged by its writes. A write execution that could not change any file
+ * did not do what the Leader asked, whatever the Worker's own summary says; one whose writes were
+ * only partly denied still succeeds, with the denials as a risk. The CLI and the Managed Local
+ * Worker both build their completion here, so they judge a write execution alike (issue #552).
+ */
+export function workerWriteCheckedCompletion(input: {
+  runtimeVerification: { name: string; outcome: 'pass' };
+  report: ReturnType<typeof readWorkerCriteriaReport>;
+  writes: WorkerWriteObservation;
+  writeFailure: WorkerWriteFailure | null;
+}): WorkerCompletion {
+  const { runtimeVerification, report, writes, writeFailure } = input;
+  const criteria = report.criteria === undefined ? {} : { criteria: report.criteria };
+  return writeFailure === null
+    ? {
+        status: 'succeeded',
+        summary: report.summary,
+        artifacts: [],
+        verification: [runtimeVerification, ...report.verification],
+        risks:
+          writes.denied > 0
+            ? [
+                `書き込みツールの呼び出し${writes.denied}件が拒否されました（反映された書き込みは${writes.committed}件）。`,
+              ]
+            : [],
+        ...criteria,
+      }
+    : {
+        status: 'failed',
+        summary: `${writeFailure.detail}\n\nWorkerの報告:\n${report.summary}`.slice(0, 4_000),
+        artifacts: [],
+        verification: [
+          runtimeVerification,
+          { name: writeFailure.name, outcome: 'fail', detail: writeFailure.detail },
+          ...report.verification,
+        ],
+        risks: [writeFailure.detail.slice(0, 500)],
+        ...criteria,
+      };
+}
+
 /** A managed Workspace write that its Edit Saga committed; reads and plan updates carry no Saga. */
-function isCommittedManagedWrite(result: unknown): boolean {
+export function isCommittedManagedWrite(result: unknown): boolean {
   if (typeof result !== 'object' || result === null) return false;
   const record = result as Record<string, unknown>;
   return record['state'] === 'committed' && typeof record['sagaId'] === 'string';

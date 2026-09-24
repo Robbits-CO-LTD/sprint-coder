@@ -13,6 +13,7 @@ import { acquireProviderModelLease, type ProviderRegistry } from './provider-run
 import type { ProviderModelLease } from './ollama-model-lifecycle';
 import type { ProviderVerificationService } from './provider-verification';
 import type {
+  TeamExecutionAccess,
   TeamRuntimeConversationItem,
   TeamWorkerRuntime,
   WorkerActivityEvent,
@@ -25,8 +26,16 @@ import { projectContextProviderMessages } from './project-context-delivery';
 import {
   applyWorkerContextInheritance,
   canonicalWorkspaceRoots,
+  isCommittedManagedWrite,
   reserveTeamWorkerContext,
+  WORKER_CANNOT_WRITE_NOTICE,
+  WORKSPACE_WRITE_TOOL_NAMES,
+  workerWriteCheckedCompletion,
+  workerWriteFailure,
+  type WorkerWriteObservation,
 } from './team-worker-runtime';
+import { ToolAuthorizationDeniedError } from './tool-broker';
+import { redactSecrets } from './secret-redactor';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
@@ -114,6 +123,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
     workspaceSet?: RuntimeWorkspaceSet;
@@ -163,12 +173,6 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.executionId ?? input.envelope.deliveryId;
-    const prompt = workerPrompt(
-      input.worker,
-      input.content,
-      input.priorConversation,
-      input.doneCriteria,
-    );
     const inheritedContext = reserveTeamWorkerContext(
       applyWorkerContextInheritance(
         input.worker,
@@ -187,6 +191,22 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
+    // Whether a managed write tool is among the tools handed to the model. The prompt and the
+    // write outcome both go by it, so a Worker given managed write tools is never told it cannot
+    // write, and one without them is judged as having run read-only (issue #552).
+    const writable =
+      managedToolSession?.tools.some(({ name }) => WORKSPACE_WRITE_TOOL_NAMES.has(name)) === true;
+    const prompt = workerPrompt(
+      input.worker,
+      input.content,
+      input.priorConversation,
+      input.doneCriteria,
+      {
+        writable,
+        managedLocal: connection.id === this.deps.managedToolsConnectionId,
+        writeRequested: input.accessMode === 'workspace-write',
+      },
+    );
 
     const controller = new AbortController();
     const abortFromCaller = (): void => controller.abort(input.signal?.reason);
@@ -205,6 +225,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     let finalRound: readonly string[] = [];
     let reportCursorValue = 0;
     let modelCatalogQueried = false;
+    // Managed Workspace writes this execution committed and policy denied, judged as the CLI
+    // Worker's are (issue #552).
+    const writes: WorkerWriteObservation = { committed: 0, denied: 0 };
     const heartbeat = setInterval(
       () => input.onEvent?.({ type: 'heartbeat', at: new Date().toISOString() }),
       15_000,
@@ -383,23 +406,53 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             label: `${input.worker.canDelegate ? 'Manager' : 'Worker'}が${toolCall.name}を実行中`,
             at: new Date().toISOString(),
           });
-          const result = managedToolSession?.tools.some(({ name }) => name === toolCall.name)
-            ? await managedToolSession.execute(toolCall.name, toolCall.input, controller.signal)
-            : await this.deps.executeManagerTool({
+          let toolResult: string;
+          let deniedCall = false;
+          if (managedToolSession?.tools.some(({ name }) => name === toolCall.name)) {
+            try {
+              const result = await managedToolSession.execute(
+                toolCall.name,
+                toolCall.input,
+                controller.signal,
+              );
+              if (isCommittedManagedWrite(result)) writes.committed += 1;
+              toolResult = JSON.stringify(result ?? null);
+            } catch (error) {
+              // A Workspace write that policy denied goes back to the model as a tool error, as
+              // it does for the CLI Worker, so it can go on; the outcome then counts the denial.
+              // Any other failure still ends the execution.
+              if (
+                controller.signal.aborted ||
+                !(error instanceof ToolAuthorizationDeniedError) ||
+                !WORKSPACE_WRITE_TOOL_NAMES.has(toolCall.name)
+              )
+                throw error;
+              writes.denied += 1;
+              deniedCall = true;
+              toolResult = redactSecrets(
+                JSON.stringify({
+                  ok: false,
+                  error: { code: 'PERMISSION_DENIED', message: error.authorization.reason },
+                }),
+              );
+            }
+          } else
+            toolResult = JSON.stringify(
+              (await this.deps.executeManagerTool({
                 worker: input.worker,
                 name: toolCall.name,
                 input: toolCall.input,
                 reportCursor,
                 modelCatalogAudit,
                 ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
-              });
+              })) ?? null,
+            );
           input.onEvent?.({
             type: 'activity',
             phase: 'executing',
-            label: `${toolCall.name}の実行完了`,
+            label: deniedCall ? `${toolCall.name}は拒否されました` : `${toolCall.name}の実行完了`,
             at: new Date().toISOString(),
           });
-          const toolResult = JSON.stringify(result ?? null);
           streamBudget.consumeToolResult(toolResult);
           messages.push({
             role: 'tool',
@@ -421,26 +474,36 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         precedingText: output.slice(0, output.length - finalRound.length).join(''),
       });
       const summary = report.summary;
+      // Judged as the CLI Worker is, from the tools the model was actually handed: a write
+      // execution without a managed write tool ran read-only, and one whose every write was
+      // denied changed nothing.
+      const writeFailure = workerWriteFailure({
+        accessMode: input.accessMode,
+        writeCapable: input.worker.writeCapable === true,
+        workspacePath:
+          input.workspaceSet?.roots.find(
+            ({ rootId }) => rootId === input.workspaceSet?.primaryRootId,
+          )?.path ?? null,
+        writeScope: writable ? 'workspace-write' : 'read-only',
+        writes,
+        readOnlyCause:
+          'このWorkerに渡されたツールに書き込み用のものが無かったため、読み取り専用で実行されました。ファイルは変更されていません。',
+      });
       return {
         claims: {
           deliveryId: input.envelope.deliveryId,
           sourceAgentId: input.envelope.sourceAgentId,
           targetAgentId: input.envelope.targetAgentId,
         },
-        completion: {
-          status: 'succeeded',
-          summary,
-          artifacts: [],
-          verification: [
-            {
-              name: `worker-runtime:${connection.providerId}:official-api`,
-              outcome: 'pass',
-            },
-            ...report.verification,
-          ],
-          risks: [],
-          ...(report.criteria === undefined ? {} : { criteria: report.criteria }),
-        },
+        completion: workerWriteCheckedCompletion({
+          runtimeVerification: {
+            name: `worker-runtime:${connection.providerId}:official-api`,
+            outcome: 'pass',
+          },
+          report,
+          writes,
+          writeFailure,
+        }),
         usage: {
           costCents: costCents(providerUsage),
           tokens: tokenCount(providerUsage, prompt, summary),
@@ -533,6 +596,14 @@ function workerPrompt(
   content: string,
   priorConversation: readonly TeamRuntimeConversationItem[] | undefined,
   doneCriteria: readonly string[] | undefined,
+  workspace: Readonly<{
+    /** A managed Workspace write tool is among the tools handed to the model. */
+    writable: boolean;
+    /** The Worker runs on Managed Local, whose Workspace tools are managed ones. */
+    managedLocal: boolean;
+    /** The Leader asked this execution to edit the Workspace. */
+    writeRequested: boolean;
+  }>,
 ): string {
   return [
     `あなたはチームの「${worker.role}」担当Workerです。`,
@@ -540,7 +611,14 @@ function workerPrompt(
     `親Agent ID: ${worker.parentAgentId ?? 'Leader'}`,
     worker.objective === null ? '' : `目的: ${worker.objective}`,
     `Context継承: ${worker.contextInheritancePolicy}`,
-    'Workspace書き込み: 公式API Workerでは利用不可',
+    `Workspace書き込み: ${
+      workspace.writable
+        ? '隔離範囲内で可（管理ツール経由）'
+        : workspace.managedLocal
+          ? '禁止（読み取り専用）'
+          : '公式API Workerでは利用不可'
+    }`,
+    workspace.writeRequested && !workspace.writable ? WORKER_CANNOT_WRITE_NOTICE : '',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     formatPriorTeamConversation(priorConversation),
     '',
