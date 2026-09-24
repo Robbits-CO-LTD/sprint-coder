@@ -13,6 +13,7 @@ import { acquireProviderModelLease, type ProviderRegistry } from './provider-run
 import type { ProviderModelLease } from './ollama-model-lifecycle';
 import type { ProviderVerificationService } from './provider-verification';
 import type {
+  TeamExecutionAccess,
   TeamRuntimeConversationItem,
   TeamWorkerRuntime,
   WorkerActivityEvent,
@@ -25,8 +26,15 @@ import { projectContextProviderMessages } from './project-context-delivery';
 import {
   applyWorkerContextInheritance,
   canonicalWorkspaceRoots,
+  isCommittedManagedWrite,
   reserveTeamWorkerContext,
+  WORKSPACE_WRITE_TOOL_NAMES,
+  workerWriteCheckedCompletion,
+  workerWriteFailure,
+  type WorkerWriteObservation,
 } from './team-worker-runtime';
+import { ToolAuthorizationDeniedError } from './tool-broker';
+import { redactSecrets } from './secret-redactor';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
@@ -114,6 +122,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    accessMode?: TeamExecutionAccess;
     executionId?: string;
     workspacePath?: string | null;
     workspaceSet?: RuntimeWorkspaceSet;
@@ -205,6 +214,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     let finalRound: readonly string[] = [];
     let reportCursorValue = 0;
     let modelCatalogQueried = false;
+    // Managed Workspace writes this execution committed and policy denied, judged as the CLI
+    // Worker's are (issue #552).
+    const writes: WorkerWriteObservation = { committed: 0, denied: 0 };
     const heartbeat = setInterval(
       () => input.onEvent?.({ type: 'heartbeat', at: new Date().toISOString() }),
       15_000,
@@ -383,23 +395,51 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             label: `${input.worker.canDelegate ? 'Manager' : 'Worker'}が${toolCall.name}を実行中`,
             at: new Date().toISOString(),
           });
-          const result = managedToolSession?.tools.some(({ name }) => name === toolCall.name)
-            ? await managedToolSession.execute(toolCall.name, toolCall.input, controller.signal)
-            : await this.deps.executeManagerTool({
+          let toolResult: string;
+          if (managedToolSession?.tools.some(({ name }) => name === toolCall.name)) {
+            try {
+              const result = await managedToolSession.execute(
+                toolCall.name,
+                toolCall.input,
+                controller.signal,
+              );
+              if (isCommittedManagedWrite(result)) writes.committed += 1;
+              toolResult = JSON.stringify(result ?? null);
+            } catch (error) {
+              // A Workspace write that policy denied goes back to the model as a tool error, as
+              // it does for the CLI Worker, so it can go on; the outcome then counts the denial.
+              // Any other failure still ends the execution.
+              if (
+                controller.signal.aborted ||
+                !(error instanceof ToolAuthorizationDeniedError) ||
+                !WORKSPACE_WRITE_TOOL_NAMES.has(toolCall.name)
+              )
+                throw error;
+              writes.denied += 1;
+              toolResult = redactSecrets(
+                JSON.stringify({
+                  ok: false,
+                  error: { code: 'PERMISSION_DENIED', message: error.authorization.reason },
+                }),
+              );
+            }
+          } else
+            toolResult = JSON.stringify(
+              (await this.deps.executeManagerTool({
                 worker: input.worker,
                 name: toolCall.name,
                 input: toolCall.input,
                 reportCursor,
                 modelCatalogAudit,
                 ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
-              });
+              })) ?? null,
+            );
           input.onEvent?.({
             type: 'activity',
             phase: 'executing',
             label: `${toolCall.name}の実行完了`,
             at: new Date().toISOString(),
           });
-          const toolResult = JSON.stringify(result ?? null);
           streamBudget.consumeToolResult(toolResult);
           messages.push({
             role: 'tool',
@@ -421,26 +461,37 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         precedingText: output.slice(0, output.length - finalRound.length).join(''),
       });
       const summary = report.summary;
+      // The Managed Local catalog of a write-capable Worker is always workspace-write (safety
+      // settings do not narrow it to read-only), so only a write execution whose every write
+      // was denied can fail here.
+      const writeFailure =
+        input.accessMode === 'workspace-write' && input.worker.writeCapable
+          ? workerWriteFailure({
+              accessMode: input.accessMode,
+              writeCapable: true,
+              workspacePath:
+                input.workspaceSet?.roots.find(
+                  ({ rootId }) => rootId === input.workspaceSet?.primaryRootId,
+                )?.path ?? null,
+              writeScope: 'workspace-write',
+              writes,
+            })
+          : null;
       return {
         claims: {
           deliveryId: input.envelope.deliveryId,
           sourceAgentId: input.envelope.sourceAgentId,
           targetAgentId: input.envelope.targetAgentId,
         },
-        completion: {
-          status: 'succeeded',
-          summary,
-          artifacts: [],
-          verification: [
-            {
-              name: `worker-runtime:${connection.providerId}:official-api`,
-              outcome: 'pass',
-            },
-            ...report.verification,
-          ],
-          risks: [],
-          ...(report.criteria === undefined ? {} : { criteria: report.criteria }),
-        },
+        completion: workerWriteCheckedCompletion({
+          runtimeVerification: {
+            name: `worker-runtime:${connection.providerId}:official-api`,
+            outcome: 'pass',
+          },
+          report,
+          writes,
+          writeFailure,
+        }),
         usage: {
           costCents: costCents(providerUsage),
           tokens: tokenCount(providerUsage, prompt, summary),

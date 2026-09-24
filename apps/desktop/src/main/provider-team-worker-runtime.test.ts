@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { workerCompletionSchema, type ProviderConnection } from '@sprint-coder/contracts';
+import {
+  workerCompletionSchema,
+  type ProviderConnection,
+  type ProviderExecutionRequest,
+} from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
@@ -8,6 +12,7 @@ import {
   ProviderAwareTeamWorkerRuntime,
   type ProviderTeamWorkerRuntimeDeps,
 } from './provider-team-worker-runtime';
+import { ToolAuthorizationDeniedError } from './tool-broker';
 
 const connection: ProviderConnection = {
   id: 'openai:primary',
@@ -1018,6 +1023,226 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
       summary: '共有して完了しました',
     });
     expect(result.usage?.toolCalls).toBe(1);
+  });
+});
+
+describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
+  const managedConnection: ProviderConnection = {
+    ...connection,
+    id: 'managed-local:runtime',
+    providerId: 'sprint-managed-local',
+    runtimeKind: 'openai_compatible',
+    secretReference: null,
+    verification: { status: 'not_required', verifiedAt: null, expiresAt: null, message: null },
+  };
+  const denied = () =>
+    new ToolAuthorizationDeniedError({ decision: 'deny', reason: 'workspace_write_denied' });
+  const committed = (path: string) => ({
+    rootId: 'root-1',
+    path,
+    sagaId: `saga:${path}`,
+    kind: 'add',
+    state: 'committed',
+  });
+  const deniedToolMessage =
+    '{"ok":false,"error":{"code":"PERMISSION_DENIED","message":"workspace_write_denied"}}';
+
+  /** A Managed Local Worker that calls `toolRounds[n]` in round n+1, then gives `finalAnswer`. */
+  function managedLocalWorker(options: {
+    toolRounds: readonly (readonly string[])[];
+    executeTool: (name: string) => Promise<unknown>;
+    finalAnswer?: string;
+  }) {
+    const requests: ProviderExecutionRequest[] = [];
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute(_connection, request) {
+        requests.push(request);
+        const calls = options.toolRounds[requests.length - 1];
+        if (calls !== undefined) {
+          for (const [index, name] of calls.entries())
+            yield {
+              type: 'tool_call',
+              callId: `call-${requests.length}-${index}`,
+              name,
+              input: {},
+            };
+          yield { type: 'completed', stopReason: 'tool_calls' };
+          return;
+        }
+        yield { type: 'output_delta', text: options.finalAnswer ?? '作業を終えました' };
+        yield { type: 'completed', stopReason: 'stop' };
+      },
+    };
+    const registry = new MainProviderRegistry();
+    registry.register({
+      runtimeKind: 'openai_compatible',
+      providerId: managedConnection.providerId,
+      runtime,
+    });
+    const release = vi.fn();
+    const adapter = new ProviderAwareTeamWorkerRuntime({
+      fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
+      verification: {
+        requireVerifiedForExecution: async () => managedConnection,
+      } as unknown as ProviderVerificationService,
+      registry,
+      getConnection: () => managedConnection,
+      authorizeEgress: () => true,
+      managerGuidance: '',
+      managerTools: [],
+      workerGuidance: 'Use workspace tools.',
+      workerTools: [],
+      managedToolsConnectionId: managedConnection.id,
+      prepareManagedTools: async () => ({
+        tools: ['create_file', 'create_directory', 'apply_patch', 'read_file'].map((name) => ({
+          name,
+          description: name,
+          inputSchema: { type: 'object' },
+        })),
+        execute: (name) => options.executeTool(name),
+        release,
+      }),
+      executeManagerTool: vi.fn(),
+    });
+    const toolMessages = () =>
+      (requests.at(-1)?.messages ?? []).filter(({ role }) => role === 'tool');
+    return { adapter, requests, release, toolMessages };
+  }
+
+  const execution = (accessMode: 'read-only' | 'workspace-write' = 'workspace-write') => ({
+    worker: {
+      ...providerWorker(),
+      writeCapable: accessMode === 'workspace-write',
+      modelSelection: {
+        connectionId: managedConnection.id,
+        requestedProvider: managedConnection.providerId,
+        requestedModel: 'a'.repeat(64),
+      },
+    },
+    envelope,
+    content: 'ファイルを作成してください',
+    accessMode,
+    executionId: 'managed-execution',
+    workspaceSet: {
+      primaryRootId: 'root-1',
+      roots: [
+        { rootId: 'root-1', path: '/workspace', label: 'workspace', role: 'primary' as const },
+      ],
+      digest: 'b'.repeat(64),
+    },
+  });
+
+  it('returns a denied write to the model as a tool error and fails a write execution none of whose writes committed', async () => {
+    const { adapter, requests, release, toolMessages } = managedLocalWorker({
+      toolRounds: [['create_file'], ['apply_patch']],
+      executeTool: async () => {
+        throw denied();
+      },
+      finalAnswer: [
+        'ファイルを作成しました。',
+        '```json',
+        JSON.stringify({ criteria: [{ index: 1, status: 'done', evidence: '作成しました' }] }),
+        '```',
+      ].join('\n'),
+    });
+
+    const result = await adapter.execute({ ...execution(), doneCriteria: ['ファイルを作る'] });
+
+    // The model saw each denial and went on to answer.
+    expect(requests).toHaveLength(3);
+    expect(toolMessages()).toEqual([
+      expect.objectContaining({ toolName: 'create_file', content: deniedToolMessage }),
+      expect.objectContaining({ toolName: 'apply_patch', content: deniedToolMessage }),
+    ]);
+    const detail =
+      '書き込みツールの呼び出し2件が拒否され、反映された書き込みは1件もありませんでした。';
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.status).toBe('failed');
+    expect(completion.summary).toBe(`${detail}\n\nWorkerの報告:\nファイルを作成しました。`);
+    expect(completion.verification).toEqual([
+      { name: 'worker-runtime:sprint-managed-local:official-api', outcome: 'pass' },
+      { name: 'worker-write-denied', outcome: 'fail', detail },
+    ]);
+    expect(completion.risks).toEqual([detail]);
+    // The per-criterion report is kept as it is (issue #550); the failure alone decides.
+    expect(completion.criteria).toEqual([
+      { criterion: 'ファイルを作る', status: 'done', evidence: '作成しました' },
+    ]);
+    expect(result.usage?.toolCalls).toBe(2);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a write execution with a committed write successful and reports the denied writes as a risk', async () => {
+    const { adapter, toolMessages } = managedLocalWorker({
+      toolRounds: [['create_file', 'apply_patch', 'create_directory']],
+      executeTool: async (name) => {
+        if (name === 'apply_patch') throw denied();
+        return name === 'create_file' ? committed('a.txt') : { ok: true };
+      },
+    });
+
+    const result = await adapter.execute(execution());
+
+    expect(toolMessages().map(({ content }) => content)).toEqual([
+      JSON.stringify(committed('a.txt')),
+      deniedToolMessage,
+      '{"ok":true}',
+    ]);
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.status).toBe('succeeded');
+    expect(completion.summary).toBe('作業を終えました');
+    expect(completion.risks).toEqual([
+      '書き込みツールの呼び出し1件が拒否されました（反映された書き込みは1件）。',
+    ]);
+    expect(completion.verification.map(({ name }) => name)).toEqual([
+      'worker-runtime:sprint-managed-local:official-api',
+    ]);
+  });
+
+  it.each([
+    ['a read-only investigation', 'read-only', [['read_file']]],
+    ['a write execution that made no write call here', 'workspace-write', [['read_file']]],
+    ['a write execution whose writes all committed', 'workspace-write', [['create_file']]],
+  ] as const)('leaves %s succeeded without a risk', async (_label, accessMode, toolRounds) => {
+    const { adapter } = managedLocalWorker({
+      toolRounds,
+      executeTool: async (name) =>
+        name === 'read_file'
+          ? { rootId: 'root-1', path: 'a.txt', content: 'x' }
+          : committed('a.txt'),
+    });
+
+    const result = await adapter.execute(execution(accessMode));
+
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion).toMatchObject({
+      status: 'succeeded',
+      summary: '作業を終えました',
+      risks: [],
+    });
+    expect(completion.verification.map(({ name }) => name)).toEqual([
+      'worker-runtime:sprint-managed-local:official-api',
+    ]);
+  });
+
+  it.each([
+    ['a denied non-write tool', 'read_file', denied],
+    ['a write tool failing for another reason', 'create_file', () => new Error('patch rejected')],
+  ] as const)('still ends the execution on %s', async (_label, tool, failure) => {
+    const error = failure();
+    const { adapter, requests, release } = managedLocalWorker({
+      toolRounds: [[tool]],
+      executeTool: async () => {
+        throw error;
+      },
+    });
+
+    await expect(adapter.execute(execution())).rejects.toBe(error);
+    expect(requests).toHaveLength(1);
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 
