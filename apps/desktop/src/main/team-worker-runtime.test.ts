@@ -1900,6 +1900,42 @@ describe('RuntimeHostTeamWorkerRuntime done criteria report', () => {
     subject.dispose();
   });
 
+  it('takes the criteria from a Codex-shaped Turn whose final message holds the report', async () => {
+    // Codex sends each agentMessage as its own item, joined by a blank line, and reports tool and
+    // command items as they start and finish.
+    runtimeHostMock.stream = [
+      { type: 'delta', delta: 'テストを実行します。' },
+      { type: 'operation', phase: 'tool_call_start', label: 'Codex tool call started (run)' },
+      { type: 'operation', phase: 'tool_call_end', label: 'Codex tool call finished (run)' },
+      { type: 'operation', phase: 'command_start', label: 'Codex command started' },
+      { type: 'operation', phase: 'command_end', label: 'Codex command finished' },
+      { type: 'delta', delta: '\n\n' },
+      { type: 'delta', delta: `確認できました。\n${allDone}` },
+    ];
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    expect(completion.summary).toBe('テストを実行します。\n\n確認できました。');
+    subject.dispose();
+  });
+
+  it('does not count reasoning, heartbeat or stage events as tool calls', async () => {
+    runtimeHostMock.stream = [
+      { type: 'delta', delta: `確認しました。\n${allDone}` },
+      { type: 'reasoning', text: '念のため見直す' },
+      { type: 'heartbeat', at: '2026-09-24T00:00:00.000Z' },
+      { type: 'stage', stage: 'synthesizing' },
+    ];
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    subject.dispose();
+  });
+
   it('takes the criteria from a report followed only by whitespace', async () => {
     runtimeHostMock.finalText = `答えは42です。\n${allDone}\n\n  \n`;
     const subject = runtime();

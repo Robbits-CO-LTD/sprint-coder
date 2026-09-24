@@ -43,6 +43,10 @@ describe('workerCriteriaPrompt', () => {
     expect(prompt).toContain('```json\n{"criteria":[{"index":1,"status":"done"');
     expect(prompt).toContain('"status":"not_done"');
     expect(prompt).toContain('このブロックのあとには何も書かないでください。');
+    expect(prompt).toContain('```json と ``` はそれぞれ単独の行に書いてください。');
+    expect(prompt).toContain(
+      'ツールの呼び出しをすべて終えてから、最後に報告ブロックを書いてください（報告のあとにツールを呼ぶと、その報告は使われません）。',
+    );
   });
 
   it('asks a single criterion only for number 1 and asks nothing without criteria', () => {
@@ -99,6 +103,57 @@ describe('parseWorkerCriteriaReport', () => {
       ok: true,
       criteria: [{ criterion: 'テストが通る', status: 'done', evidence }],
       text: '終わりました。',
+    });
+  });
+
+  describe('fences that do not stand alone at the start of a line', () => {
+    const report = { criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] };
+    const json = JSON.stringify(report);
+    const pretty = JSON.stringify(report, null, 2);
+    const withFence = JSON.stringify({
+      criteria: [{ index: 1, status: 'done', evidence: 'ran ``` npm test ```' }],
+    });
+
+    it.each([
+      [
+        'indented inside a list item',
+        ['- 報告:', '  ```json', `  ${json}`, '  ```'].join('\n'),
+        '確認済み',
+      ],
+      [
+        'closed right after the JSON',
+        ['終わりました。', '```json', `${json}\`\`\``].join('\n'),
+        '確認済み',
+      ],
+      [
+        'closed right after the JSON, then a newline',
+        ['```json', `${json}\`\`\``, ''].join('\n'),
+        '確認済み',
+      ],
+      ['written on one line', `終わりました。\n\`\`\`json ${json}\`\`\``, '確認済み'],
+      [
+        'written on one line with ``` in its evidence',
+        `\`\`\`json ${withFence}\`\`\``,
+        'ran ``` npm test ```',
+      ],
+      [
+        'pretty-printed with CRLF line ends',
+        ['終わりました。', '```json', pretty.replaceAll('\n', '\r\n'), '```', ''].join('\r\n'),
+        '確認済み',
+      ],
+    ])('takes a report block %s', (_label, text, evidence) => {
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'])).toMatchObject({
+        ok: true,
+        criteria: [{ criterion: '答えを見つける', status: 'done', evidence }],
+      });
+    });
+
+    it('does not take a fence indented four spaces', () => {
+      const text = ['終わりました。', '    ```json', `    ${json}`, '    ```'].join('\n');
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'])).toEqual({
+        ok: false,
+        reason: expect.stringContaining('```json ブロック）がありません'),
+      });
     });
   });
 

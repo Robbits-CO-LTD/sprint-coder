@@ -54,7 +54,8 @@ export function workerCriteriaPrompt(doneCriteria: readonly string[]): string {
     '- status: 満たした条件は "done"、満たしていない・確かめられなかった条件は "not_done"',
     '- evidence: done なら何をしてどう確かめたか、not_done ならできなかった理由（4000文字以内）',
     '満たしていない条件を "done" と報告しないでください。報告が無い・形式が違う・"not_done" の条件は未達として扱われ、この実行は失敗になります。',
-    'このブロックのあとには何も書かないでください。',
+    'ツールの呼び出しをすべて終えてから、最後に報告ブロックを書いてください（報告のあとにツールを呼ぶと、その報告は使われません）。',
+    '```json と ``` はそれぞれ単独の行に書いてください。このブロックのあとには何も書かないでください。',
     '```json',
     JSON.stringify({ criteria: example }),
     '```',
@@ -295,25 +296,33 @@ function failWorkerCompletion(
 
 /**
  * Where the last ```json block of a Worker answer starts, where its body ends and where the block
- * ends, if it is closed. Both fences must stand on their own line: JSON escapes a newline inside a
- * string, so a ``` inside an evidence string can never start a line and close the block early.
+ * ends, if it is closed. A fence starts a line, after at most three spaces of indent (a block in a
+ * list item). JSON escapes a newline inside a string, so a ``` inside an evidence string can never
+ * start a line and close the block early. Two closings that do not stand on their own line are
+ * also taken: a one-line block (```json {...}```) closed by the ``` that ends its line, and a ```
+ * written right after the JSON that ends the whole answer.
  */
 function lastJsonBlock(
   finalText: string,
 ): { start: number; bodyStart: number; bodyEnd: number | null; end: number | null } | null {
   let opening: RegExpExecArray | null = null;
-  for (const match of finalText.matchAll(/^```json[^\S\r\n]*\r?$/gimu)) opening = match;
+  for (const match of finalText.matchAll(/^[ \t]{0,3}```json\b([^\r\n]*)/gimu)) opening = match;
   if (opening === null) return null;
-  const bodyStart = opening.index + opening[0].length;
-  const closing = /^```[^\S\r\n]*\r?$/gmu;
-  closing.lastIndex = bodyStart;
+  const start = opening.index;
+  const lineEnd = start + opening[0].length;
+  const rest = opening[1]!.trimEnd();
+  const bodyStart = lineEnd - opening[1]!.length;
+  if (rest.trim() !== '' && rest.endsWith('```'))
+    return { start, bodyStart, bodyEnd: bodyStart + rest.length - 3, end: bodyStart + rest.length };
+  const closing = /^[ \t]{0,3}```[^\S\r\n]*\r?$/gmu;
+  closing.lastIndex = lineEnd;
   const close = closing.exec(finalText);
-  return {
-    start: opening.index,
-    bodyStart,
-    bodyEnd: close === null ? null : close.index,
-    end: close === null ? null : close.index + close[0].length,
-  };
+  if (close !== null)
+    return { start, bodyStart, bodyEnd: close.index, end: close.index + close[0].length };
+  const answer = finalText.trimEnd();
+  if (answer.endsWith('```') && answer.length - 3 >= lineEnd)
+    return { start, bodyStart, bodyEnd: answer.length - 3, end: answer.length };
+  return { start, bodyStart, bodyEnd: null, end: null };
 }
 
 /**
