@@ -712,6 +712,36 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     ).rejects.toThrow('External API Worker cannot write');
   });
 
+  it.each([
+    ['a read-only execution', 'read-only', false],
+    ['an execution asked to edit', 'workspace-write', true],
+  ] as const)(
+    'tells an external API Worker in %s that it cannot write',
+    async (_label, accessMode, cannotWriteNotice) => {
+      const prompts: string[] = [];
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute(_connection, request) {
+          prompts.push(workerPromptOf(request));
+          yield { type: 'output_delta', text: '調査しました' };
+          yield { type: 'completed', stopReason: 'completed' };
+        },
+      };
+      const adapter = controlledProviderAdapter(runtime);
+
+      await adapter.execute({ worker: providerWorker(), envelope, content: '調査', accessMode });
+
+      expect(prompts[0]?.match(/^Workspace書き込み: .*$/mu)?.[0]).toBe(
+        'Workspace書き込み: 公式API Workerでは利用不可',
+      );
+      expect(prompts[0]?.includes('今回の実行ではファイルを変更できません')).toBe(
+        cannotWriteNotice,
+      );
+    },
+  );
+
   it('lets only the Managed Local connection give a write-capable Worker audited workspace tools', async () => {
     const managedConnection: ProviderConnection = {
       ...connection,
@@ -1052,6 +1082,8 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     toolRounds: readonly (readonly string[])[];
     executeTool: (name: string) => Promise<unknown>;
     finalAnswer?: string;
+    /** The managed tools the catalog hands to the model. */
+    tools?: readonly string[];
   }) {
     const requests: ProviderExecutionRequest[] = [];
     const runtime: ProviderRuntime = {
@@ -1097,7 +1129,9 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       workerTools: [],
       managedToolsConnectionId: managedConnection.id,
       prepareManagedTools: async () => ({
-        tools: ['create_file', 'create_directory', 'apply_patch', 'read_file'].map((name) => ({
+        tools: (
+          options.tools ?? ['create_file', 'create_directory', 'apply_patch', 'read_file']
+        ).map((name) => ({
           name,
           description: name,
           inputSchema: { type: 'object' },
@@ -1112,10 +1146,13 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     return { adapter, requests, release, toolMessages };
   }
 
-  const execution = (accessMode: 'read-only' | 'workspace-write' = 'workspace-write') => ({
+  const execution = (
+    accessMode: 'read-only' | 'workspace-write' = 'workspace-write',
+    writeCapable = accessMode === 'workspace-write',
+  ) => ({
     worker: {
       ...providerWorker(),
-      writeCapable: accessMode === 'workspace-write',
+      writeCapable,
       modelSelection: {
         connectionId: managedConnection.id,
         requestedProvider: managedConnection.providerId,
@@ -1244,7 +1281,53 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     expect(requests).toHaveLength(1);
     expect(release).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    [
+      'a Worker given write tools',
+      'workspace-write',
+      true,
+      undefined,
+      '隔離範囲内で可（管理ツール経由）',
+      false,
+    ],
+    ['a read-only Worker', 'read-only', false, ['read_file'], '禁止（読み取り専用）', false],
+    [
+      'a Worker asked to edit without write tools',
+      'workspace-write',
+      false,
+      ['read_file'],
+      '禁止（読み取り専用）',
+      true,
+    ],
+  ] as const)(
+    'tells %s what its tools let it write',
+    async (_label, accessMode, writeCapable, tools, statement, cannotWriteNotice) => {
+      const { adapter, requests } = managedLocalWorker({
+        toolRounds: [],
+        executeTool: vi.fn(),
+        ...(tools === undefined ? {} : { tools }),
+      });
+
+      await adapter.execute(execution(accessMode, writeCapable));
+
+      const prompt = workerPromptOf(requests[0]);
+      expect(prompt.match(/^Workspace書き込み: .*$/mu)?.[0]).toBe(
+        `Workspace書き込み: ${statement}`,
+      );
+      expect(prompt).not.toContain('利用不可');
+      expect(prompt.includes('今回の実行ではファイルを変更できません')).toBe(cannotWriteNotice);
+    },
+  );
 });
+
+/** The Worker prompt: the user message that carries the Leader's request. */
+function workerPromptOf(request: ProviderExecutionRequest | undefined): string {
+  return (
+    request?.messages.find(({ role, content }) => role === 'user' && content.includes('依頼: '))
+      ?.content ?? ''
+  );
+}
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   let resolve!: (value: T) => void;

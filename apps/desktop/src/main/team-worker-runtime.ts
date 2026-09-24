@@ -129,6 +129,10 @@ export const WORKSPACE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 export type WorkerWriteObservation = { committed: number; denied: number };
 
+/** Told to a Worker whose Leader asked for edits that this run cannot make. */
+export const WORKER_CANNOT_WRITE_NOTICE =
+  'Leaderは編集を依頼していますが、今回の実行ではファイルを変更できません。ファイルは変更せず、必要な変更内容を報告してください。';
+
 /**
  * How much text the Turn has produced, and how much of it came before its last tool call. The
  * Turn's text is every delta joined, what the Worker wrote before a tool call included, so a
@@ -338,9 +342,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
       `Context継承: ${input.worker.contextInheritancePolicy}`,
       `Workspace書き込み: ${writable ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
-      input.accessMode === 'workspace-write' && !writable
-        ? 'Leaderは編集を依頼していますが、今回の実行ではファイルを変更できません。ファイルは変更せず、必要な変更内容を報告してください。'
-        : '',
+      input.accessMode === 'workspace-write' && !writable ? WORKER_CANNOT_WRITE_NOTICE : '',
       input.workspacePath === undefined
         ? ''
         : `隔離worktree: ${input.workspacePath ?? '利用不可'}${writable ? '（このディレクトリ内だけを変更してください）' : '（読み取り専用）'}`,

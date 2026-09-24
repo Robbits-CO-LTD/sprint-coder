@@ -28,6 +28,7 @@ import {
   canonicalWorkspaceRoots,
   isCommittedManagedWrite,
   reserveTeamWorkerContext,
+  WORKER_CANNOT_WRITE_NOTICE,
   WORKSPACE_WRITE_TOOL_NAMES,
   workerWriteCheckedCompletion,
   workerWriteFailure,
@@ -172,12 +173,6 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.executionId ?? input.envelope.deliveryId;
-    const prompt = workerPrompt(
-      input.worker,
-      input.content,
-      input.priorConversation,
-      input.doneCriteria,
-    );
     const inheritedContext = reserveTeamWorkerContext(
       applyWorkerContextInheritance(
         input.worker,
@@ -196,6 +191,21 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
+    // The prompt states what the tools handed to the model can do, so a Worker given managed
+    // write tools is never told it cannot write (issue #552).
+    const prompt = workerPrompt(
+      input.worker,
+      input.content,
+      input.priorConversation,
+      input.doneCriteria,
+      {
+        writable:
+          managedToolSession?.tools.some(({ name }) => WORKSPACE_WRITE_TOOL_NAMES.has(name)) ===
+          true,
+        managedLocal: connection.id === this.deps.managedToolsConnectionId,
+        writeRequested: input.accessMode === 'workspace-write',
+      },
+    );
 
     const controller = new AbortController();
     const abortFromCaller = (): void => controller.abort(input.signal?.reason);
@@ -584,6 +594,14 @@ function workerPrompt(
   content: string,
   priorConversation: readonly TeamRuntimeConversationItem[] | undefined,
   doneCriteria: readonly string[] | undefined,
+  workspace: Readonly<{
+    /** A managed Workspace write tool is among the tools handed to the model. */
+    writable: boolean;
+    /** The Worker runs on Managed Local, whose Workspace tools are managed ones. */
+    managedLocal: boolean;
+    /** The Leader asked this execution to edit the Workspace. */
+    writeRequested: boolean;
+  }>,
 ): string {
   return [
     `あなたはチームの「${worker.role}」担当Workerです。`,
@@ -591,7 +609,14 @@ function workerPrompt(
     `親Agent ID: ${worker.parentAgentId ?? 'Leader'}`,
     worker.objective === null ? '' : `目的: ${worker.objective}`,
     `Context継承: ${worker.contextInheritancePolicy}`,
-    'Workspace書き込み: 公式API Workerでは利用不可',
+    `Workspace書き込み: ${
+      workspace.writable
+        ? '隔離範囲内で可（管理ツール経由）'
+        : workspace.managedLocal
+          ? '禁止（読み取り専用）'
+          : '公式API Workerでは利用不可'
+    }`,
+    workspace.writeRequested && !workspace.writable ? WORKER_CANNOT_WRITE_NOTICE : '',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     formatPriorTeamConversation(priorConversation),
     '',
