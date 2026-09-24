@@ -18,20 +18,28 @@ jobs:
         run: |
           set -euo pipefail
           D=apps/desktop/src/main/.restore-pr564
-          test -f "$D/q0a.ts"
-          test -f "$D/q0b.ts"
-          test -f "$D/q1a.ts"
-          test -f "$D/q1b.ts"
-          test -f "$D/q2a.ts"
-          test -f "$D/q2b.ts"
-          test -f "$D/q3a.ts"
-          test -f "$D/q3b.ts"
-          cat $D/q0a.ts $D/q0b.ts $D/q1a.ts $D/q1b.ts $D/q2a.ts $D/q2b.ts $D/q3a.ts $D/q3b.ts > apps/desktop/src/main/worker-worktree.test.ts
+          test -f "$D/p00.b64"
+          test -f "$D/p01.b64"
+          test -f "$D/p02.b64"
+          test -f "$D/p03.b64"
+          test -f "$D/p04.b64"
+          test -f "$D/p05.b64"
+          test -f "$D/p06.b64"
+          test -f "$D/p07.b64"
+          test -f "$D/p08.b64"
+          test -f "$D/p09.b64"
+          test -f "$D/p10.b64"
+          test -f "$D/p11.b64"
           python3 - <<'PY'
-          import hashlib, json, pathlib
-          c = pathlib.Path('apps/desktop/src/main/worker-worktree.test.ts').read_bytes()
+          import base64, hashlib, json, pathlib
+          D = pathlib.Path('apps/desktop/src/main/.restore-pr564')
+          exp = json.loads((D / 'expected.json').read_text())
+          parts = []
+          for i in range(exp['parts']):
+              parts.append(base64.b64decode((D / f'p{i:02d}.b64').read_text().strip()))
+          c = b''.join(parts)
+          pathlib.Path('apps/desktop/src/main/worker-worktree.test.ts').write_bytes(c)
           blob = hashlib.sha1(b'blob %d\0' % len(c) + c).hexdigest()
-          exp = json.loads(pathlib.Path('apps/desktop/src/main/.restore-pr564/expected.json').read_text())
           print('assembled', len(c), blob)
           assert blob == exp['blob'], (blob, exp['blob'])
           assert b'PLACEHOLDER' not in c
