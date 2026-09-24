@@ -723,6 +723,105 @@ describe('executeTeamTool workspaceWriteLimit in assignment results', () => {
   });
 });
 
+describe('executeTeamTool writeScope/writeScopeNote in assignment results (issue #551)', () => {
+  it('reports a read-only team_assign_task with the read-only note', async () => {
+    const coordinator = fakeCoordinator();
+    const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '調べる',
+      doneCriteria: ['done'],
+      access: 'read-only',
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      writeScope: 'read-only',
+      writeScopeNote: expect.stringContaining('読み取り専用'),
+    });
+  });
+
+  it('adds the ask/auto/full confirmation wording to a workspace-write team_assign_task', async () => {
+    for (const [preset, expected] of [
+      ['ask', '承認カード'],
+      ['auto', '自動レビュー'],
+      ['full', '確認なしで反映'],
+    ] as const) {
+      const coordinator = fakeCoordinator({ taskAccessPreset: vi.fn(() => preset) as never });
+      const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+        workerId: 'worker-1',
+        objective: '実装する',
+        doneCriteria: ['done'],
+        access: 'workspace-write',
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        writeScope: 'workspace-write',
+        writeScopeNote: expect.stringContaining(expected),
+      });
+    }
+  });
+
+  it('omits the confirmation wording for a workspace-write team_assign_task when the preset is not readable', async () => {
+    const coordinator = fakeCoordinator();
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '実装する',
+      doneCriteria: ['done'],
+      access: 'workspace-write',
+    })) as { writeScopeNote: string };
+    expect(result.writeScopeNote).toContain('隔離worktree');
+    expect(result.writeScopeNote).not.toMatch(/承認カード|自動レビュー|確認なしで反映/);
+  });
+
+  it('reports a per-step writeScope and a workspace-write note for team_assign_mission', async () => {
+    const coordinator = fakeCoordinator({
+      taskAccessPreset: vi.fn(() => 'ask') as never,
+      assignMission: vi.fn(
+        async () =>
+          ({
+            id: 'mission-1',
+            state: 'running',
+            currentStepOrdinal: 0,
+            steps: [
+              { ordinal: 0, executionId: 'execution-step-0' },
+              { ordinal: 1, executionId: 'execution-step-1' },
+            ],
+          }) as never,
+      ),
+    });
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_mission', {
+      objective: 'mission',
+      doneCriteria: ['done'],
+      steps: [
+        { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+        {
+          workerId: 'worker-2',
+          objective: 'two',
+          doneCriteria: ['two'],
+          access: 'workspace-write',
+        },
+      ],
+    })) as { executions: { ordinal: number; writeScope: string }[]; writeScopeNote: string };
+    expect(result.executions).toEqual([
+      { ordinal: 0, executionId: 'execution-step-0', writeScope: 'read-only' },
+      { ordinal: 1, executionId: 'execution-step-1', writeScope: 'workspace-write' },
+    ]);
+    expect(result.writeScopeNote).toContain('承認カード');
+  });
+
+  it('reports the read-only note for team_assign_mission when every step is read-only', async () => {
+    const coordinator = fakeCoordinator();
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_mission', {
+      objective: 'mission',
+      doneCriteria: ['done'],
+      steps: [
+        { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+        { workerId: 'worker-2', objective: 'two', doneCriteria: ['two'], access: 'read-only' },
+      ],
+    })) as { writeScopeNote: string };
+    expect(result.writeScopeNote).toContain('読み取り専用');
+  });
+});
+
 describe('executeTeamTool team_wait_reports long-poll', () => {
   it('returns immediately (no polling) when longPoll is not requested, matching the mock path', async () => {
     const coordinator = fakeCoordinator({ hasBusyWorkers: vi.fn(() => true) });

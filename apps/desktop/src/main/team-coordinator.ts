@@ -12,6 +12,7 @@ import {
   workerCompletionSchema,
   workerReportSchema,
   workerSummarySchema,
+  type AccessPreset,
   type TeamDetail,
   type TeamHireWorkerInput,
   type TeamMessageSummary,
@@ -565,6 +566,19 @@ export class TeamCoordinator {
   get(taskId: string): TeamDetail | null {
     const team = this.persistence.getTeamByTask(taskId);
     return team === null ? null : this.detail(team.id);
+  }
+
+  /**
+   * その Task の今の Access preset（issue #551）。team_assign_task/team_assign_mission の割り当て
+   * 結果に、workspace-write を頼んだときの書き込みの確認のされ方を添えるために読む。Task が存在
+   * しない呼び出し（未知の taskId）では undefined を返し、呼び出し側はその部分を書かない。
+   */
+  taskAccessPreset(taskId: string): AccessPreset | undefined {
+    try {
+      return this.persistence.getPermissionPolicy(taskId).preset;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Authority-scoped status for Manager/Worker runtimes. A caller may inspect itself, its

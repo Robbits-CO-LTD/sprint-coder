@@ -7,6 +7,7 @@ import {
   resolveWriteScope,
   workerWriteScopeFor,
   workerWritesNeedApproval,
+  writeScopeNote,
 } from './write-scope';
 
 const rel = (workspace: string, candidate: string): string | null =>
@@ -76,6 +77,37 @@ describe('workerWritesNeedApproval (issue #525)', () => {
     ['full', false],
   ] as const)('tells the Worker at %s that each write waits for approval: %s', (preset, needed) => {
     expect(workerWritesNeedApproval(preset)).toBe(needed);
+  });
+});
+
+describe('writeScopeNote (issue #551)', () => {
+  it('describes a read-only request regardless of preset', () => {
+    for (const preset of [undefined, 'ask', 'auto', 'full'] as const) {
+      const note = writeScopeNote('read-only', preset);
+      expect(note).toContain('読み取り専用');
+      expect(note).toContain('変更しません');
+    }
+  });
+
+  it('describes workspace-write with the worktree/integration explanation plus the confirmation for each known preset', () => {
+    expect(writeScopeNote('workspace-write', 'ask')).toBe(
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは1回ごとに利用者の承認カードで確認されます。',
+    );
+    expect(writeScopeNote('workspace-write', 'auto')).toBe(
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは自動レビューで判定されます。',
+    );
+    expect(writeScopeNote('workspace-write', 'full')).toBe(
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは確認なしで反映されます。',
+    );
+  });
+
+  it('omits the confirmation sentence when the preset is unreadable or unexpected', () => {
+    expect(writeScopeNote('workspace-write', undefined)).toBe(
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。',
+    );
+    expect(writeScopeNote('workspace-write', 'unknown' as AccessPreset)).toBe(
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。',
+    );
   });
 });
 

@@ -1,6 +1,11 @@
 import type { AccessPreset, RuntimeWriteScope } from '@sprint-coder/contracts';
 import { sep } from 'node:path';
 
+/** team_assign_task/team_assign_mission が Worker へ実際に依頼する書き込み範囲（issue #551）。
+ * #525 により Team Worker の実効の書き込み範囲は常に request.access と一致するため、割り当て結果
+ * にはこの値をそのまま載せる。 */
+export type TeamAssignmentWriteScope = 'read-only' | 'workspace-write';
+
 /**
  * The Access preset a Task is set to, plus whether it has a Workspace, decides how much the Runtime
  * may write this Turn (issue #37).
@@ -101,4 +106,40 @@ export function relativizeWorkspacePath(
 
 function isAbsoluteLike(path: string): boolean {
   return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+/**
+ * `workspace-write` を依頼したときの、Taskの安全設定による確認のされ方（issue #551）。#525により
+ * Worker はどの安全設定でも書き込みツール自体は渡されるので、ここが変わるのは承認の待ち方だけ。
+ * `preset` が未指定（安全設定を読めない呼び出し元）または想定外の値のときは空文字列を返し、
+ * 呼び出し側はその部分を書かない。
+ */
+function writeApprovalNote(preset: AccessPreset | undefined): string {
+  switch (preset) {
+    case 'ask':
+      return '書き込みは1回ごとに利用者の承認カードで確認されます。';
+    case 'auto':
+      return '書き込みは自動レビューで判定されます。';
+    case 'full':
+      return '書き込みは確認なしで反映されます。';
+    default:
+      return '';
+  }
+}
+
+/**
+ * team_assign_task/team_assign_mission の割り当て結果へ載せる、Leader/Manager 向けの日本語の
+ * 実効書き込み範囲の説明（issue #551）。`preset` はその Task の今の Access preset（読めないときは
+ * undefined）で、`workspace-write` のときだけ確認のされ方を付け足す。
+ */
+export function writeScopeNote(
+  scope: TeamAssignmentWriteScope,
+  preset: AccessPreset | undefined,
+): string {
+  if (scope === 'read-only') return '読み取り専用で依頼しました。Workerはファイルを変更しません。';
+  const approvalNote = writeApprovalNote(preset);
+  return (
+    'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。' +
+    (approvalNote === '' ? '' : approvalNote)
+  );
 }
