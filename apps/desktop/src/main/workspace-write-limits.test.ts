@@ -78,7 +78,7 @@ describe('workerWriteLimitNotice', () => {
     const notice = workerWriteLimitNotice(addOnly, 'win32');
     expect(notice).toContain('既存ファイルの編集・削除');
     expect(notice).toContain('フォルダの作成');
-    expect(notice).toContain('新しいファイルの作成はできます');
+    expect(notice).toContain('新しいファイルは、既にあるフォルダの中だけに作れます');
     expect(notice).toContain('別名のファイルを作って代わりにせず');
     expect(notice).toContain('必要な変更内容を報告してください');
   });
@@ -89,8 +89,8 @@ describe('workerWriteLimitNotice', () => {
     expect(win).toContain(
       'Windows では、安全に書き込める操作が今は新しいファイルの作成に限られるため',
     );
-    expect(linux).toContain('この環境の安全な書き込みの制限のため');
-    expect(win).not.toContain('この環境の安全な書き込みの制限のため');
+    expect(linux).toContain('この環境では、安全に書き込める操作が限られているため');
+    expect(win).not.toContain('この環境では、安全に書き込める操作が限られているため');
     expect(linux).not.toContain('Windows では');
   });
 
@@ -107,6 +107,11 @@ describe('workerWriteLimitNotice', () => {
     expect(dirOk).toContain('既存ファイルの編集・削除');
     expect(dirOk).not.toContain('フォルダの作成はできません');
     expect(dirOk).not.toContain('既にあるフォルダの中だけ');
+    // Only the add-only combination Windows really has gets the Windows reason.
+    for (const partial of [editOk, dirOk]) {
+      expect(partial).toContain('この環境では、安全に書き込める操作が限られているため');
+      expect(partial).not.toContain('Windows では');
+    }
   });
 });
 
@@ -128,7 +133,7 @@ describe('leaderWriteLimitNote', () => {
 
   it('states only the non-Windows reason off Windows', () => {
     const note = leaderWriteLimitNote(addOnly, 'darwin');
-    expect(note).toContain('この環境の安全な書き込みの制限のため');
+    expect(note).toContain('この環境では、安全に書き込める操作が限られているため');
     expect(note).not.toContain('Windows では');
   });
 });

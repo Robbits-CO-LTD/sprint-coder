@@ -54,17 +54,19 @@ function hasNoLimit(limits: WorkspaceWriteLimits | null): boolean {
   return limits === null || (limits.editExisting && limits.createDirectory);
 }
 
-function cannotList(limits: WorkspaceWriteLimits): string {
+function cannotList(limits: WorkspaceWriteLimits, joiner: 'と' | 'や'): string {
   const cannot: string[] = [];
   if (!limits.editExisting) cannot.push('既存ファイルの編集・削除');
   if (!limits.createDirectory) cannot.push('フォルダの作成');
-  return cannot.join('と');
+  return cannot.join(joiner);
 }
 
-function writeLimitReason(platform: NodeJS.Platform): string {
-  return platform === 'win32'
+// The Windows reason is stated only for the add-only limit the Windows NativeSafeFs actually has;
+// any other combination gets the general reason rather than a claim about new files only.
+function writeLimitReason(limits: WorkspaceWriteLimits, platform: NodeJS.Platform): string {
+  return platform === 'win32' && !limits.editExisting && !limits.createDirectory
     ? 'Windows では、安全に書き込める操作が今は新しいファイルの作成に限られるため'
-    : 'この環境の安全な書き込みの制限のため';
+    : 'この環境では、安全に書き込める操作が限られているため';
 }
 
 /**
@@ -77,11 +79,12 @@ export function workerWriteLimitNotice(
 ): string {
   if (hasNoLimit(limits)) return '';
   const limitsChecked = limits as WorkspaceWriteLimits;
-  const canNote = limitsChecked.createDirectory ? '' : '（既にあるフォルダの中だけです）';
   return (
-    `${cannotList(limitsChecked)}はできません。` +
-    `新しいファイルの作成はできます${canNote}が、${writeLimitReason(platform)}です。` +
-    '既存ファイルの変更・削除やフォルダの作成が必要なときは、別名のファイルを作って代わりにせず、' +
+    `${writeLimitReason(limitsChecked, platform)}、${cannotList(limitsChecked, 'と')}はできません。` +
+    (limitsChecked.createDirectory
+      ? '新しいファイルは作れます。'
+      : '新しいファイルは、既にあるフォルダの中だけに作れます。') +
+    `${cannotList(limitsChecked, 'や')}が必要なときは、別名のファイルを作って代わりにせず、` +
     'ファイルは変えずに必要な変更内容を報告してください。'
   );
 }
@@ -97,7 +100,7 @@ export function leaderWriteLimitNote(
   if (hasNoLimit(limits)) return '';
   const limitsChecked = limits as WorkspaceWriteLimits;
   return (
-    `このWorkerは${cannotList(limitsChecked)}ができません（${writeLimitReason(platform)}）。` +
-    '既存ファイルの変更が必要な作業は、Workerに変更内容の報告を頼んでください。'
+    `このWorkerは${cannotList(limitsChecked, 'と')}ができません（${writeLimitReason(limitsChecked, platform)}）。` +
+    `${cannotList(limitsChecked, 'や')}が必要な作業は、Workerに変更内容の報告を頼んでください。`
   );
 }
