@@ -433,6 +433,9 @@ export class WorkerWorktreeManager {
     validateWorktreeId(agentId);
     const worktreePath = this.worktreePathFor(worktreeId);
     if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
+    const withoutGit = await this.remainsWithoutGit(worktreePath);
+    if (withoutGit === 'empty') return this.removeEmptiedWorktree(repoPath, worktreePath);
+    if (withoutGit === 'contents') return { outcome: 'quarantined' };
     const { stdout: statusOutput } = await this.runGit(
       worktreePath,
       ['status', '--porcelain'],
@@ -461,9 +464,63 @@ export class WorkerWorktreeManager {
     validateGitHead(baseHead);
     const worktreePath = this.worktreePathFor(worktreeId);
     if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
+    const withoutGit = await this.remainsWithoutGit(worktreePath);
+    if (withoutGit === 'empty') return this.removeEmptiedWorktree(repoPath, worktreePath);
+    // Git cannot say what these files are, so they never qualify; a discard may remove them.
+    if (withoutGit === 'contents') return { outcome: 'quarantined', changed: true };
     if (await this.differsFromBase(worktreePath, baseHead, 'remove_failed'))
       return { outcome: 'quarantined', changed: true };
     return this.removeUnreviewedWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * What is left of a worktree directory without its `.git`, or null while `.git` is there. A
+   * removal deletes `.git` last (see `removeTreeWithoutFollowingLinks`), so `empty` is a removal
+   * that only failed to remove the folder itself, such as a Windows terminal or Explorer window
+   * holding it open. Git must not be asked about such a folder: it would look upward for a
+   * repository and could read whichever one contains the worktrees root.
+   */
+  private async remainsWithoutGit(worktreePath: string): Promise<'empty' | 'contents' | null> {
+    if (await entryPresent(join(worktreePath, '.git'))) return null;
+    return (await directoryHasContent(worktreePath)) ? 'contents' : 'empty';
+  }
+
+  /**
+   * Finishes a removal that left only the empty folder and its registration, without Git reading
+   * the folder. The folder goes only while it is still empty; a Windows lock is waited out as in any
+   * removal, and one that outlasts the backoff keeps it `quarantined`. A worktree Git holds locked
+   * keeps its registration.
+   */
+  private async removeEmptiedWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupWorktreeResult> {
+    if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
+    if (!(await this.removeEmptyDirectory(worktreePath))) return { outcome: 'quarantined' };
+    return this.unregisterWorktree(repoPath, worktreePath);
+  }
+
+  /** Removes a directory only while it is empty; false when it stayed (a lock, or new content). */
+  private async removeEmptyDirectory(path: string): Promise<boolean> {
+    const attempt = async (): Promise<'removed' | 'retry' | 'kept'> => {
+      try {
+        await this.treeRemovalFs.rmdir(path);
+        return 'removed';
+      } catch (error) {
+        if (isEnoent(error)) return 'removed';
+        // Something was written into it meanwhile: leave it for a later look.
+        if (errorCode(error) === 'ENOTEMPTY' || errorCode(error) === 'EEXIST') return 'kept';
+        if (this.platform === 'win32' && isTransientRemovalError(error)) return 'retry';
+        throw new WorktreeError('remove_failed', errorMessage(error), { cause: error });
+      }
+    };
+    let result = await attempt();
+    for (const delayMs of WINDOWS_REMOVE_RETRY_DELAYS_MS) {
+      if (result !== 'retry') break;
+      await this.delay(delayMs);
+      result = await attempt();
+    }
+    return result === 'removed';
   }
 
   /**
@@ -494,6 +551,10 @@ export class WorkerWorktreeManager {
    * populated gitlink; any content counts here.
    */
   private async containsSubmodules(worktreePath: string): Promise<boolean> {
+    // Without `.git` Git would read another repository: an emptied folder holds nothing, and
+    // contents Git cannot account for count as a possible submodule.
+    const withoutGit = await this.remainsWithoutGit(worktreePath);
+    if (withoutGit !== null) return withoutGit === 'contents';
     const modules = (
       await this.runGit(worktreePath, ['rev-parse', '--git-path', 'modules'], 'remove_failed')
     ).stdout.trim();
@@ -1255,8 +1316,11 @@ const nodeTreeRemovalFs: TreeRemovalFs = Object.freeze({
  * folder behind a junction (the latter in the Node that Electron ships).
  *
  * An entry that is already gone counts as removed, so a removal that stopped part way, or one that
- * raced another, can simply run again. At the root `.git` goes last, so a worktree that could not
- * be removed completely stays one Git can still read. Errors reach the caller unchanged.
+ * raced another, can simply run again. At the root `.git` goes last, so a removal that stops at a
+ * file inside still leaves a worktree Git can read. One that stops only at the root folder itself
+ * (a Windows terminal or Explorer window holding it open) leaves an empty folder without `.git`:
+ * `cleanup` and `cleanupUnchanged` recognize that and finish it without asking Git, and a discard
+ * finishes it as any other. Errors reach the caller unchanged.
  */
 export async function removeTreeWithoutFollowingLinks(
   root: string,
