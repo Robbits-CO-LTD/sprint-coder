@@ -1,0 +1,49 @@
+name: pr564-restore-assemble
+on:
+  push:
+    branches: [claude/issue-544-retained-worktrees]
+    paths:
+      - 'apps/desktop/src/main/.restore-pr564/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/issue-544-retained-worktrees
+      - name: Assemble worker-worktree.test.ts
+        run: |
+          set -euo pipefail
+          D=apps/desktop/src/main/.restore-pr564
+          test -f "$D/q0.ts"
+          test -f "$D/q1.ts"
+          test -f "$D/q2.ts"
+          test -f "$D/q3.ts"
+          cat "$D/q0.ts" "$D/q1.ts" "$D/q2.ts" "$D/q3.ts" > apps/desktop/src/main/worker-worktree.test.ts
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          c = pathlib.Path('apps/desktop/src/main/worker-worktree.test.ts').read_bytes()
+          blob = hashlib.sha1(b'blob %d\0' % len(c) + c).hexdigest()
+          exp = json.loads(pathlib.Path('apps/desktop/src/main/.restore-pr564/expected.json').read_text())
+          print('assembled', len(c), blob)
+          assert blob == exp['blob'], (blob, exp['blob'])
+          assert b'PLACEHOLDER' not in c
+          assert b'@/workspace' not in c
+          PY
+      - name: Commit assembled file and remove restore leftovers
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/desktop/src/main/worker-worktree.test.ts
+          git rm -r --ignore-unmatch apps/desktop/src/main/.restore-pr564 || true
+          git rm --ignore-unmatch .github/workflows/pr564-restore-assemble.yml || true
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git commit -m "fix(team): restore worker-worktree.test.ts (portable linked gitignore)"
+          git push
