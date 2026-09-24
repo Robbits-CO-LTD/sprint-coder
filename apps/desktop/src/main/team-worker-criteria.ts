@@ -116,19 +116,21 @@ export function parseWorkerCriteriaReport(
   return {
     ok: true,
     criteria: [...reports.entries()].sort(([a], [b]) => a - b).map(([, report]) => report),
-    text: withoutLastJsonBlock(finalText, block),
+    text: withoutLastJsonBlock(finalText, block).trim(),
   };
 }
 
 /**
  * What a runtime puts in its completion from a Worker's final answer: a summary without the
  * report block, and either the criteria or a failed `criteria-report` verification. With no
- * `doneCriteria` nothing was asked for, so nothing is read. The summary always fits the
- * completion's 4000 characters, whatever the Worker wrote.
+ * `doneCriteria` nothing was asked for, so nothing is read. Only `finalText` is read for the
+ * report; `precedingText`, what the Worker wrote before its final answer, only leads the summary.
+ * The summary always fits the completion's 4000 characters, whatever the Worker wrote.
  */
 export function readWorkerCriteriaReport(
   finalText: string,
   doneCriteria: readonly string[] | undefined,
+  precedingText = '',
 ): {
   summary: string;
   criteria: WorkerCriterionReport[] | undefined;
@@ -136,22 +138,19 @@ export function readWorkerCriteriaReport(
 } {
   const report =
     doneCriteria === undefined ? null : parseWorkerCriteriaReport(finalText, doneCriteria);
-  const block = report === null || report.ok ? null : lastJsonBlock(finalText);
+  const block = report === null ? null : lastJsonBlock(finalText);
   // An unreadable report block is left out too: why it could not be read is in the verification.
   // Any other JSON block is part of the answer, such as a file the Worker was asked to produce.
-  const text =
-    report === null
-      ? finalText.trim()
-      : report.ok
-        ? report.text
-        : isFailedReportBlock(finalText, block)
-          ? withoutLastJsonBlock(finalText, block)
-          : finalText.trim();
+  const withoutReport =
+    report !== null &&
+    (report.ok ? (doneCriteria?.length ?? 0) > 0 : isFailedReportBlock(finalText, block));
+  const answer = withoutReport ? withoutLastJsonBlock(finalText, block) : finalText;
+  const text = `${precedingText}${answer}`.trim();
   return {
     summary:
       text !== ''
         ? clipSummary(text)
-        : finalText.trim() === ''
+        : `${precedingText}${finalText}`.trim() === ''
           ? EMPTY_WORKER_ANSWER
           : REPORT_ONLY_WORKER_ANSWER,
     criteria: report?.ok === true ? report.criteria : undefined,
@@ -306,9 +305,9 @@ function isFailedReportBlock(finalText: string, block: ReturnType<typeof lastJso
 
 /** The answer without its last ```json block; an unclosed block runs to the end. */
 function withoutLastJsonBlock(finalText: string, block: ReturnType<typeof lastJsonBlock>): string {
-  if (block === null) return finalText.trim();
+  if (block === null) return finalText;
   const after = block.close === null ? '' : finalText.slice(block.close + 3);
-  return `${finalText.slice(0, block.start)}${after}`.trim();
+  return `${finalText.slice(0, block.start)}${after}`;
 }
 
 function clipSummary(text: string): string {

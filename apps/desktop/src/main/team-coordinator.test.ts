@@ -1163,7 +1163,8 @@ if (runsWithElectronAbi)
       expect(persistence.getTeamExecution(mission.steps[1]!.executionId).state).toBe('running');
 
       runtime.releases.shift()?.();
-      await waitFor(() => persistence.getTeamMission(assigned.id).state === 'completed', 5_000);
+      // The write step's change is finalized and integrated for real before the Mission completes.
+      await waitFor(() => persistence.getTeamMission(assigned.id).state === 'completed', 15_000);
       mission = persistence.getTeamMission(assigned.id);
       expect(mission.steps.every(({ checkpoint }) => checkpoint !== null)).toBe(true);
       expect(
@@ -2279,10 +2280,12 @@ if (runsWithElectronAbi)
       });
 
       for (const release of runtime.releases.splice(0)) release();
+      // Both writes are finalized and integrated for real, one at a time.
       await waitFor(
         () =>
           persistence.getTeamExecution(first.executionId).state === 'completed' &&
           persistence.getTeamExecution(second.executionId).state === 'completed',
+        15_000,
       );
       expect(spawnSync('git', ['-C', repo, 'status', '--porcelain']).stdout.toString().trim()).toBe(
         '',
@@ -3277,7 +3280,8 @@ if (runsWithElectronAbi)
       ]);
 
       await coordinator.resumeMission(task.id, mission.id);
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed');
+      // The resumed write is finalized and integrated for real before the Mission completes.
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'completed', 15_000);
       expect(runtime.executeCount).toBe(3);
       expect(runtime.contents[1]).toContain('前回の部分変更を最初に検査');
       expect(persistence.listTeamAttempts(firstExecutionId)).toMatchObject([

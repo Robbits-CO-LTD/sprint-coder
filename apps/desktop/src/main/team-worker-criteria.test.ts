@@ -234,6 +234,22 @@ describe('readWorkerCriteriaReport', () => {
     expect(report.summary).toBe(text);
   });
 
+  it('reads the report from the final answer only, while the text before it leads the summary', () => {
+    const earlier = `${answer({ criteria: [{ index: 1, status: 'done', evidence: '先に報告' }] }, '途中です。')}\n`;
+    const unreported = readWorkerCriteriaReport('未完了です。', ['答えを見つける'], earlier);
+    expect(unreported.criteria).toBeUndefined();
+    expect(unreported.summary).toBe(`${earlier}未完了です。`);
+    const reported = readWorkerCriteriaReport(
+      answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] }, '終わりました。'),
+      ['答えを見つける'],
+      '途中です。\n',
+    );
+    expect(reported.criteria).toEqual([
+      { criterion: '答えを見つける', status: 'done', evidence: '確認済み' },
+    ]);
+    expect(reported.summary).toBe('途中です。\n終わりました。');
+  });
+
   it('gives a fixed summary when the answer is only the report block', () => {
     const text = answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] }, '');
     expect(readWorkerCriteriaReport(text, ['答えを見つける']).summary).toBe(

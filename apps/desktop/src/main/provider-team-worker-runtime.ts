@@ -201,6 +201,8 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     let providerCallCount = 0;
     let toolCallCount = 0;
     let finished = false;
+    // The output of the round that ended without a tool call: the Worker's final answer.
+    let finalRound: readonly string[] = [];
     let reportCursorValue = 0;
     let modelCatalogQueried = false;
     const heartbeat = setInterval(
@@ -363,6 +365,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         }
         if (roundToolCalls.length === 0) {
           finished = true;
+          finalRound = roundOutput;
           break;
         }
 
@@ -411,7 +414,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           `External API Manager exceeded ${MAX_PROVIDER_MANAGER_ROUNDS} provider rounds`,
         );
       input.onEvent?.({ type: 'completed' });
-      const report = readWorkerCriteriaReport(output.join(''), input.doneCriteria);
+      // The per-criterion report is read from the final answer only: a report written in an
+      // earlier round, before a tool call whose result the Worker then acted on, is not its final
+      // word. The summary still carries every round's text, as it always has.
+      const report = readWorkerCriteriaReport(
+        finalRound.join(''),
+        input.doneCriteria,
+        output.slice(0, output.length - finalRound.length).join(''),
+      );
       const summary = report.summary;
       return {
         claims: {

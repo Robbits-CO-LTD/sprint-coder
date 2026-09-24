@@ -492,6 +492,73 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
   });
 
+  it.each([
+    ['only in an earlier round', false],
+    ['in the final round', true],
+  ])(
+    'reads the per-criterion report from the final answer, not a report %s',
+    async (_label, reportInFinalRound) => {
+      const allDone = [
+        '```json',
+        JSON.stringify({
+          criteria: [
+            { index: 1, status: 'done', evidence: 'テストを実行します' },
+            { index: 2, status: 'done', evidence: '結果を確認します' },
+          ],
+        }),
+        '```',
+      ].join('\n');
+      let round = 0;
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        async *execute() {
+          round += 1;
+          if (round === 1) {
+            // A report claimed before the check whose result the Worker then acts on.
+            yield { type: 'output_delta', text: `全部できました。\n${allDone}\n` };
+            yield { type: 'tool_call', callId: 'check-1', name: 'team_send_message', input: {} };
+            yield { type: 'completed', stopReason: 'tool_calls' };
+            return;
+          }
+          yield {
+            type: 'output_delta',
+            text: reportInFinalRound ? `確認できました。\n${allDone}` : '未完了です。',
+          };
+          yield { type: 'completed', stopReason: 'completed' };
+        },
+      };
+      const adapter = controlledProviderAdapter(runtime, {
+        workerTools: [
+          { name: 'team_send_message', description: 'check', inputSchema: { type: 'object' } },
+        ],
+        executeManagerTool: vi.fn(async () => ({ ok: false, error: 'check failed' })),
+      });
+
+      const result = await adapter.execute({
+        worker: providerWorker(),
+        envelope,
+        content: '検証してください',
+        doneCriteria: ['テストが通る', '結果を報告する'],
+      });
+
+      const completion = workerCompletionSchema.parse(result.completion);
+      expect(completion.summary).toContain('全部できました。');
+      if (reportInFinalRound) {
+        expect(completion.criteria).toHaveLength(2);
+        expect(completion.summary).toContain('確認できました。');
+        expect(completion.verification.map(({ name }) => name)).not.toContain('criteria-report');
+      } else {
+        expect(completion.criteria).toBeUndefined();
+        expect(completion.summary).toContain('未完了です。');
+        expect(completion.verification).toContainEqual(
+          expect.objectContaining({ name: 'criteria-report', outcome: 'fail' }),
+        );
+      }
+    },
+  );
+
   it('keeps an external Worker answer longer than 4000 characters within the summary', async () => {
     const runtime: ProviderRuntime = {
       verify: vi.fn(),
