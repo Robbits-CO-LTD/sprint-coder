@@ -561,6 +561,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     }
   }
 
+  /**
+   * A Provider execution has settled before its `stop` returns, so only a CLI Turn of the fallback
+   * runtime can outlive the execution it ran for (issue #544).
+   */
+  hasUnsettledTurn(agentId: string, executionId: string): boolean {
+    return this.deps.fallback.hasUnsettledTurn?.(agentId, executionId) === true;
+  }
+
   dispose(): void {
     for (const execution of this.executions.values()) execution.controller.abort();
     for (const active of this.active.values()) active.controller.abort();

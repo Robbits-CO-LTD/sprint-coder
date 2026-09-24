@@ -6460,6 +6460,133 @@ button.composer-permission-chip[aria-expanded='true'] {
   font-size: 12.5px;
   line-height: 1.5;
 }
+/* Retained Worker worktrees (issue #544): the Team Policy dialog's frame and form controls, a wider
+   body for paths, and plain rows. The discard button reuses the settings danger style, and every
+   state is carried by words, so nothing depends on colour alone. */
+.team-retained-dialog {
+  width: min(720px, calc(100vw - 32px));
+}
+.team-retained-confirm {
+  width: min(520px, calc(100vw - 32px));
+}
+.team-retained-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.team-retained-notice:empty {
+  display: none;
+}
+.team-retained-notice {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.team-retained-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.team-retained-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--neutral-wash);
+}
+.team-retained-heading {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.team-retained-facts {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  font-size: 12px;
+}
+.team-retained-facts > div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.team-retained-facts dt {
+  flex: none;
+  width: 7em;
+  color: var(--text-secondary);
+}
+.team-retained-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.team-retained-blocked {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.team-retained-warning {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--danger);
+}
+.team-retained-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.team-retained-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.team-retained-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.team-retained-inspection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+.team-retained-inspection h4 {
+  margin: 4px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.team-retained-files {
+  display: grid;
+  gap: 2px;
+  max-height: 180px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+  font-size: 12px;
+}
+.team-retained-files li {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.team-retained-file-label {
+  flex: none;
+  width: 5em;
+  color: var(--text-secondary);
+}
+.team-retained-files code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
 @media (max-width: 560px) {
   .team-policy-actions {
     align-items: stretch;

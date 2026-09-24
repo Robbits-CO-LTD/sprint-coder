@@ -6,9 +6,13 @@ import type { GraphMissionCommitInput, GraphMissionRecord } from './graph-missio
 import type { GraphResourceReservation } from './graph-resource';
 import type { GraphIntegrationHold } from './graph-integration-hold';
 import {
+  TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT,
+  TEAM_RETAINED_WORKTREE_LIST_LIMIT,
   teamDetailSchema,
   teamActivitySummarySchema,
   teamMessageSummarySchema,
+  teamRetainedWorktreeInspectionSchema,
+  teamRetainedWorktreeListSchema,
   workerCompletionSchema,
   workerReportSchema,
   workerSummarySchema,
@@ -26,6 +30,9 @@ import {
   type GraphMissionUpdateReview,
   type GraphMissionUpdateAgreement,
   type TeamExecutionIsolation,
+  type TeamRetainedWorktree,
+  type TeamRetainedWorktreeInspection,
+  type TeamRetainedWorktreeList,
   type TeamSendMessageInput,
   type ExecutionResolution,
   type ModelSelection,
@@ -35,7 +42,7 @@ import {
   type WorkerSummary,
 } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
-import { realpath as fsRealpath } from 'node:fs/promises';
+import { lstat, realpath as fsRealpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import {
   assertEnvelopeMatchesClaims,
@@ -76,8 +83,9 @@ import type {
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
-import type { WorkerWorktreeManager } from './worker-worktree';
+import { WorktreeError, type WorkerWorktreeManager } from './worker-worktree';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
+import { RetainedWorktreeError, retainedWorktreeBlockedReason } from './team-retained-worktrees';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
 import {
@@ -247,6 +255,12 @@ export interface TeamWorkerRuntime {
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult>;
   stop(agentId: string): Promise<void>;
+  /**
+   * Whether a Turn this Worker ran for `executionId` may still be running: its process-tree exit is
+   * still awaited or was not confirmed (issue #544). Main keeps that execution's worktree until it
+   * is not. The answer is this process's knowledge only; a runtime without Turns omits it.
+   */
+  hasUnsettledTurn?(agentId: string, executionId: string): boolean;
 }
 
 const E2E_HOLD_TEAM_WORKER_FLAG = 'SPRINT_CODER_E2E_HOLD_TEAM_WORKER_AFTER_FIRST_EVENT';
@@ -2450,6 +2464,228 @@ export class TeamCoordinator {
         throw error;
       }
     });
+  }
+
+  /**
+   * Worktrees this Task's Team Workers left on disk (issue #544): every repository an execution
+   * isolation recorded as `quarantined`. Automatic reclaim keeps these on purpose (changed work, a
+   * stop Main could not confirm, a record from before #537, a Graph Mission step, or an integrated
+   * worktree whose cleanup failed), so only the user can discard one. Reads only; the discard checks
+   * the same rule again.
+   */
+  async listRetainedWorktrees(taskId: string): Promise<TeamRetainedWorktreeList> {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return { worktrees: [], total: 0 };
+    const agents = this.persistence.getTeamSnapshot(team.id).agents;
+    const worktrees: TeamRetainedWorktree[] = [];
+    let total = 0;
+    for (const execution of this.persistence.listTeamExecutions(team.id)) {
+      const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+      if (isolation === null) continue;
+      for (const repository of isolation.repositories) {
+        if (repository.state !== 'quarantined') continue;
+        total += 1;
+        if (worktrees.length >= TEAM_RETAINED_WORKTREE_LIST_LIMIT) continue;
+        const blockedReason = this.retainedWorktreeBlockedReason(execution, isolation, repository);
+        const role = agents.find(({ id }) => id === execution.assigneeAgentId)?.role.trim() ?? '';
+        worktrees.push({
+          executionId: execution.id,
+          repositoryOrdinal: repository.ordinal,
+          agentId: execution.assigneeAgentId,
+          role: role === '' ? 'Worker' : role.slice(0, 200),
+          repoPath: repository.repoPath,
+          worktreePath: repository.worktreePath,
+          baseHead: repository.baseHead,
+          workerHead: repository.workerHead,
+          integratedHead: repository.integratedHead,
+          changedFileCount: repository.changedFiles.length,
+          reason: isolation.reason,
+          executionState: execution.state,
+          existsOnDisk: await pathPresent(repository.worktreePath),
+          discardable: blockedReason === null,
+          blockedReason,
+        });
+      }
+    }
+    return teamRetainedWorktreeListSchema.parse({ worktrees, total });
+  }
+
+  /** What a retained worktree holds now, read from Git without changing it (issue #544). */
+  async inspectRetainedWorktree(
+    taskId: string,
+    executionId: string,
+    repositoryOrdinal: number,
+  ): Promise<TeamRetainedWorktreeInspection> {
+    const { execution, repository } = this.retainedWorktreeTarget(
+      taskId,
+      executionId,
+      repositoryOrdinal,
+    );
+    const { manager } = await this.retainedWorktreeFolder(execution, repository);
+    const inspection = await retainedWorktreeGit('中身を確認できませんでした', () =>
+      manager.inspectChanges({
+        agentId: execution.assigneeAgentId,
+        worktreeId: isolationWorktreeId(execution.id, repository.ordinal),
+        repoPath: repository.repoPath,
+        path: repository.worktreePath,
+        baseHead: repository.baseHead,
+        limit: TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT,
+      }),
+    );
+    return teamRetainedWorktreeInspectionSchema.parse({
+      executionId: execution.id,
+      repositoryOrdinal: repository.ordinal,
+      ...inspection,
+    });
+  }
+
+  /**
+   * Hands `openFolder` the retained worktree's directory, and only when it is the directory Sprint
+   * Coder created for that repository and is still on disk (issue #544). Main owns the OS call.
+   */
+  async openRetainedWorktree(
+    taskId: string,
+    executionId: string,
+    repositoryOrdinal: number,
+    openFolder: (path: string) => Promise<void>,
+  ): Promise<void> {
+    const { execution, repository } = this.retainedWorktreeTarget(
+      taskId,
+      executionId,
+      repositoryOrdinal,
+    );
+    await openFolder((await this.retainedWorktreeFolder(execution, repository)).folder);
+  }
+
+  /**
+   * Deletes a retained worktree with every change in it, once the user confirmed it (issue #544).
+   * Inside the Task queue the rule is checked again right before Git, whatever the list showed, and
+   * only that repository is then recorded as `cleaned`: the isolation keeps its phase and reason.
+   */
+  async discardRetainedWorktree(
+    taskId: string,
+    executionId: string,
+    repositoryOrdinal: number,
+  ): Promise<TeamRetainedWorktreeList> {
+    return this.enqueue(taskId, async () => {
+      const { team, execution, isolation, repository } = this.retainedWorktreeTarget(
+        taskId,
+        executionId,
+        repositoryOrdinal,
+      );
+      const manager = this.worktreeManager;
+      const blockedReason = this.retainedWorktreeBlockedReason(execution, isolation, repository);
+      if (blockedReason !== null || manager === undefined)
+        throw new RetainedWorktreeError(blockedReason ?? RETAINED_WORKTREE_UNMANAGED);
+      const result = await retainedWorktreeGit('worktreeを破棄できませんでした', () =>
+        manager.discard({
+          agentId: execution.assigneeAgentId,
+          worktreeId: isolationWorktreeId(execution.id, repository.ordinal),
+          repoPath: repository.repoPath,
+          path: repository.worktreePath,
+        }),
+      );
+      if (result.outcome !== 'removed')
+        throw new RetainedWorktreeError(
+          'worktreeのファイルが使用中のため破棄できませんでした。このフォルダを開いているエディタやターミナルを閉じてから、もう一度お試しください。',
+          true,
+        );
+      // Re-read after the Git await, so a concurrent update to this isolation is not reverted.
+      const latest = this.persistence.getTeamExecutionIsolation(execution.id);
+      const latestRepository = latest?.repositories.find(
+        ({ ordinal }) => ordinal === repository.ordinal,
+      );
+      if (latest !== null && latestRepository?.state === 'quarantined')
+        this.persistence.updateTeamExecutionIsolation({
+          executionId: execution.id,
+          phase: latest.phase,
+          repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
+            ...latestRepository,
+            state: 'cleaned',
+          }),
+          now: this.isoNow(),
+        });
+      this.diagnostic?.({
+        event: 'team.worktree.discarded',
+        taskId,
+        teamId: team.id,
+        workerId: execution.assigneeAgentId,
+        status: 'cleaned',
+      });
+      this.emit(taskId, team.id);
+      return this.listRetainedWorktrees(taskId);
+    });
+  }
+
+  private retainedWorktreeTarget(
+    taskId: string,
+    executionId: string,
+    repositoryOrdinal: number,
+  ): {
+    team: NonNullable<ReturnType<PersistenceClient['getTeamByTask']>>;
+    execution: TeamExecutionRecord;
+    isolation: TeamExecutionIsolationRecord;
+    repository: TeamExecutionIsolation['repositories'][number];
+  } {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) throw new Error('Team not found');
+    const execution = this.persistence.getTeamExecution(executionId);
+    if (execution.teamId !== team.id) throw new Error('Team execution does not belong to Task');
+    const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+    const repository = isolation?.repositories.find(({ ordinal }) => ordinal === repositoryOrdinal);
+    if (isolation === null || repository?.state !== 'quarantined')
+      throw new RetainedWorktreeError('このworktreeはもう残っていません。一覧を更新してください。');
+    return { team, execution, isolation, repository };
+  }
+
+  /** The one rule both the list and the discard read (issue #544). Synchronous, so the discard
+   * checks it with nothing in between it and Git. */
+  private retainedWorktreeBlockedReason(
+    execution: TeamExecutionRecord,
+    isolation: TeamExecutionIsolationRecord,
+    repository: TeamExecutionIsolation['repositories'][number],
+  ): string | null {
+    const mission = this.persistence.getTeamMissionForExecution(execution.id);
+    return retainedWorktreeBlockedReason({
+      managerAvailable: this.worktreeManager !== undefined,
+      owned:
+        this.worktreeManager?.ownsWorktreePath(
+          isolationWorktreeId(execution.id, repository.ordinal),
+          repository.worktreePath,
+        ) === true,
+      executionState: execution.state,
+      isolationPhase: isolation.phase,
+      resumeKind: isolation.resumeKind,
+      graphMissionState: mission?.mode === 'graph' ? mission.state : null,
+      // A CLI Turn whose exit Main could not confirm may still be writing into this worktree.
+      runtimeUnsettled:
+        this.runtime.hasUnsettledTurn?.(execution.assigneeAgentId, execution.id) === true,
+    });
+  }
+
+  /** The retained worktree's own directory, refused unless Sprint Coder created it and it exists. */
+  private async retainedWorktreeFolder(
+    execution: TeamExecutionRecord,
+    repository: TeamExecutionIsolation['repositories'][number],
+  ): Promise<{ manager: WorkerWorktreeManager; folder: string }> {
+    const manager = this.worktreeManager;
+    if (manager === undefined) throw new RetainedWorktreeError(RETAINED_WORKTREE_UNMANAGED);
+    const worktreeId = isolationWorktreeId(execution.id, repository.ordinal);
+    if (!manager.ownsWorktreePath(worktreeId, repository.worktreePath))
+      throw new RetainedWorktreeError(
+        '記録されたパスがSprint Coderの作ったworktreeの場所と一致しないため、開けません。',
+      );
+    const folder = await retainedWorktreeGit('worktreeを確認できませんでした', () =>
+      manager.locateOwnedWorktree({
+        agentId: execution.assigneeAgentId,
+        worktreeId,
+        repoPath: repository.repoPath,
+        path: repository.worktreePath,
+      }),
+    );
+    if (folder === null)
+      throw new RetainedWorktreeError('このworktreeのフォルダはもうディスクにありません。');
+    return { manager, folder };
   }
 
   private async assignTaskWithAuthority(
@@ -5808,6 +6044,29 @@ function workerResultMessageContent(completion: WorkerCompletion): string {
 
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {
   return `${executionId}-${repositoryOrdinal}`;
+}
+
+const RETAINED_WORKTREE_UNMANAGED = 'この環境ではWorkerのworktreeを管理できません。';
+
+/** Runs a Git step on a retained worktree, reporting its failure to the user in Japanese. */
+async function retainedWorktreeGit<T>(failure: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof WorktreeError)
+      throw new RetainedWorktreeError(`${failure}: ${error.message}`, false, { cause: error });
+    throw error;
+  }
+}
+
+/** Whether anything is at `path`, without following a link. An unreadable entry counts as present. */
+async function pathPresent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
 }
 
 async function bindIsolatedMutationRoots(

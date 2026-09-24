@@ -807,6 +807,12 @@ export type TeamExecutionIsolation = {
   reason: string | null;
 };
 export type TeamMissionSummary = import('@sprint-coder/contracts').TeamMissionSummary;
+/** A worktree a Team Worker left on disk, and whether Main lets it be discarded (issue #544). */
+export type TeamRetainedWorktree = import('@sprint-coder/contracts').TeamRetainedWorktree;
+export type TeamRetainedWorktreeList = import('@sprint-coder/contracts').TeamRetainedWorktreeList;
+export type TeamRetainedWorktreeInspection =
+  import('@sprint-coder/contracts').TeamRetainedWorktreeInspection;
+export type TeamRetainedWorktreeRef = import('@sprint-coder/contracts').TeamRetainedWorktreeRef;
 export type TeamDetail = {
   team: TeamSummary;
   workers: WorkerSummary[];
@@ -996,6 +1002,12 @@ export interface SprintCoderApi {
     }): Promise<WorkerSummary>;
     resumeMission(input: { taskId: string; missionId: string }): Promise<TeamMissionSummary>;
     resumeExecutionIntegration(input: { taskId: string; executionId: string }): Promise<TeamDetail>;
+    listRetainedWorktrees(taskId: string): Promise<TeamRetainedWorktreeList>;
+    inspectRetainedWorktree(
+      input: TeamRetainedWorktreeRef,
+    ): Promise<TeamRetainedWorktreeInspection>;
+    openRetainedWorktree(input: TeamRetainedWorktreeRef): Promise<void>;
+    discardRetainedWorktree(input: TeamRetainedWorktreeRef): Promise<TeamRetainedWorktreeList>;
     sendToWorker(input: {
       taskId: string;
       targetAgentId: string;

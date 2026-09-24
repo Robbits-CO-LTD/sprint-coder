@@ -531,6 +531,218 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await stat(created.path)).isDirectory()).toBe(true);
   });
 
+  it('discards a changed worktree with its commit and untracked files and unregisters it (issue #544)', async () => {
+    const { repoPath, head, worktreesRoot } = await fixture();
+    const commands: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        commands.push([...args]);
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const branchesBefore = await git(['-C', repoPath, 'branch', '--list']);
+    const created = await manager.create({
+      agentId: 'agent-discard',
+      worktreeId: 'execution-discard-1',
+      repoPath,
+    });
+    await writeFile(join(created.path, 'committed.txt'), 'committed by worker\n');
+    await git(['-C', created.path, 'add', 'committed.txt']);
+    await git([
+      '-C',
+      created.path,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'worker commit',
+    ]);
+    await writeFile(join(created.path, 'README.md'), 'edited\n');
+    await writeFile(join(created.path, 'untracked.txt'), 'untracked\n');
+    // cleanup keeps changed work, which is why the retained worktree needs an explicit discard.
+    await expect(
+      manager.cleanup({ agentId: 'agent-discard', worktreeId: 'execution-discard-1', repoPath }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+
+    await expect(
+      manager.discard({
+        agentId: 'agent-discard',
+        worktreeId: 'execution-discard-1',
+        repoPath,
+        path: created.path,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(stat(created.path)).rejects.toThrow();
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await git(['-C', repoPath, 'status', '--porcelain'])).toBe('');
+    expect(await git(['-C', repoPath, 'branch', '--list'])).toBe(branchesBefore);
+    expect(commands.some((args) => args.includes('remove') && args.includes('--force'))).toBe(true);
+    expect(commands.some((args) => args.includes('prune'))).toBe(false);
+  });
+
+  it('discards only its own missing worktree registration and keeps the user missing worktree', async () => {
+    const { repoPath, worktreesRoot } = await fixture();
+    const commands: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        commands.push([...args]);
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const created = await manager.create({ agentId: 'agent-discard-gone', repoPath });
+    const userRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-user-worktree-'));
+    cleanupRoots.push(userRoot);
+    const userWorktree = join(userRoot, 'on-unplugged-drive');
+    await git(['-C', repoPath, 'worktree', 'add', '-q', '--detach', userWorktree]);
+    await rm(created.path, { recursive: true, force: true });
+    await rm(userWorktree, { recursive: true, force: true });
+
+    await expect(
+      manager.discard({ agentId: 'agent-discard-gone', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    const registered = await registeredWorktrees(repoPath);
+    expect(registered).toContain(await samePathKey(userWorktree));
+    expect(registered).not.toContain(await samePathKey(created.path));
+    expect(commands.some((args) => args.includes('prune'))).toBe(false);
+    // Nothing is registered there any more, so a second discard has nothing left to do.
+    await expect(
+      manager.discard({ agentId: 'agent-discard-gone', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+  });
+
+  it('refuses to discard a path it does not own, a path unlike its record, or a link', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-owned', repoPath });
+    await writeFile(join(created.path, 'kept.txt'), 'kept\n');
+    const other = await manager.create({ agentId: 'agent-other', repoPath });
+
+    for (const path of [repoPath, other.path, join(created.path, '..', 'worktree-elsewhere')])
+      await expect(
+        manager.discard({ agentId: 'agent-owned', repoPath, path }),
+      ).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(await readFile(join(created.path, 'kept.txt'), 'utf8')).toBe('kept\n');
+    expect((await stat(other.path)).isDirectory()).toBe(true);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    // A link standing in for the owned directory is refused, and its target is left alone.
+    const linkedPath = manager.worktreePathFor('agent-linked');
+    await symlink(repoPath, linkedPath, process.platform === 'win32' ? 'junction' : 'dir');
+    await expect(
+      manager.discard({ agentId: 'agent-linked', repoPath, path: linkedPath }),
+    ).rejects.toThrow('own directory');
+    expect((await stat(join(repoPath, 'README.md'))).isFile()).toBe(true);
+  });
+
+  it('retries a discard through temporary Windows access denial', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-discard-retry', repoPath });
+    await writeFile(join(created.path, 'change.txt'), 'changed\n');
+    let removeAttempts = 0;
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      execFileImpl: interceptWorktreeRemove(() => {
+        removeAttempts += 1;
+        if (removeAttempts < 3)
+          throw Object.assign(new Error('Permission denied'), { code: 'EACCES' });
+      }),
+    });
+
+    await expect(
+      retrying.discard({ agentId: 'agent-discard-retry', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    expect(removeAttempts).toBe(3);
+    expect(delays).toEqual([100, 200]);
+    await expect(stat(created.path)).rejects.toThrow();
+  });
+
+  it('inspects a retained worktree without changing it', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-inspect', repoPath });
+    await writeFile(join(created.path, 'committed.txt'), 'committed by worker\n');
+    await git(['-C', created.path, 'add', 'committed.txt']);
+    await git([
+      '-C',
+      created.path,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'worker commit',
+    ]);
+    await writeFile(join(created.path, 'README.md'), 'edited\n');
+    await mkdir(join(created.path, 'nested'));
+    await writeFile(join(created.path, 'nested', '日本語.txt'), 'untracked\n');
+    const input = {
+      agentId: 'agent-inspect',
+      repoPath,
+      path: created.path,
+      baseHead: created.baseHead,
+      limit: 500,
+    };
+    const statusBefore = await git(['-C', created.path, 'status', '--porcelain']);
+
+    const inspection = await manager.inspectChanges(input);
+
+    expect(inspection.head).not.toBe(created.baseHead);
+    expect(inspection.commitsSinceBase).toBe(1);
+    expect(inspection.status).toEqual([
+      { code: ' M', path: 'README.md' },
+      { code: '??', path: 'nested/日本語.txt' },
+    ]);
+    expect(inspection.statusTruncated).toBe(false);
+    expect(inspection.changesFromBase).toEqual([
+      { status: 'M', path: 'README.md' },
+      { status: 'A', path: 'committed.txt' },
+    ]);
+    expect(inspection.changesFromBaseTruncated).toBe(false);
+    expect(await git(['-C', created.path, 'status', '--porcelain'])).toBe(statusBefore);
+
+    const cut = await manager.inspectChanges({ ...input, limit: 1 });
+    expect(cut.status).toHaveLength(1);
+    expect(cut.statusTruncated).toBe(true);
+    expect(cut.changesFromBase).toHaveLength(1);
+    expect(cut.changesFromBaseTruncated).toBe(true);
+
+    const untouched = await manager.create({ agentId: 'agent-inspect-clean', repoPath });
+    await expect(
+      manager.inspectChanges({
+        ...input,
+        agentId: 'agent-inspect-clean',
+        path: untouched.path,
+      }),
+    ).resolves.toMatchObject({
+      head: untouched.baseHead,
+      commitsSinceBase: 0,
+      status: [],
+      changesFromBase: [],
+    });
+    await expect(manager.inspectChanges({ ...input, path: repoPath })).rejects.toMatchObject({
+      code: 'invalid_input',
+    });
+  });
+
   it('collapses Worker changes into one commit and integrates them into a clean workspace', async () => {
     const { repoPath, head, manager } = await fixture();
     const worktreeId = 'execution-1';

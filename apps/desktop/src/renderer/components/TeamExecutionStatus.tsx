@@ -182,8 +182,12 @@ function isolationResumeAction(
 }
 
 function repositoryIntegrated(repository: TeamExecutionIsolation['repositories'][number]): boolean {
+  // A repository whose worktree cleanup failed after it integrated keeps its integrated HEAD while
+  // it is quarantined (issue #544): its change is in the Workspace, so it counts as integrated.
   return (
-    (repository.state === 'integrated' || repository.state === 'cleaned') &&
+    (repository.state === 'integrated' ||
+      repository.state === 'cleaned' ||
+      repository.state === 'quarantined') &&
     repository.integratedHead !== null
   );
 }
@@ -202,14 +206,24 @@ function isolationPhaseLabel(isolation: TeamExecutionIsolation): string {
       return '再開待ち';
     case 'completed':
       return '統合完了';
-    case 'quarantined':
+    case 'quarantined': {
+      const { repositories } = isolation;
       // Nothing is left to review once every worktree was removed unchanged (issue #529).
-      return isolation.repositories.length > 0 &&
-        isolation.repositories.every(
+      if (
+        repositories.length > 0 &&
+        repositories.every(
           ({ state, integratedHead }) => state === 'cleaned' && integratedHead === null,
         )
-        ? '片付け済み（統合なし）'
-        : '隔離して要確認';
+      )
+        return '片付け済み（統合なし）';
+      // Every change reached the Workspace; only removing a worktree afterwards failed, or the
+      // user has since discarded what was left (issue #544). Nothing unintegrated needs review.
+      if (repositories.length > 0 && repositories.every(repositoryIntegrated))
+        return repositories.some(({ state }) => state === 'quarantined')
+          ? '統合後の片付けに失敗'
+          : '統合・片付け済み';
+      return '隔離して要確認';
+    }
   }
 }
 
@@ -226,7 +240,8 @@ function isolationRepositoryStateLabel(
     case 'cleaned':
       return repository.integratedHead === null ? '片付け済み（統合なし）' : '統合・片付け済み';
     case 'quarantined':
-      return '隔離済み';
+      // Integrated, then kept on disk only because removing its worktree failed (issue #544).
+      return repository.integratedHead === null ? '隔離済み' : '統合済み（片付けに失敗）';
   }
 }
 

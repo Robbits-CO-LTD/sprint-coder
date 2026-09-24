@@ -112,6 +112,7 @@ import {
   teamModelSelectionGuidanceSetInputSchema,
   teamResumeMissionInputSchema,
   teamResumeExecutionIntegrationInputSchema,
+  teamRetainedWorktreeRefSchema,
   teamPolicySchema,
   teamPolicyUpdateInputSchema,
   teamModelResearchSettingsSetInputSchema,
@@ -192,6 +193,7 @@ import {
 } from './image-attachment-capability';
 import { BUILTIN_CODEX_CONNECTION_ID } from './connection-identity';
 import { requiresTeamWorkersInput } from './team-tools';
+import { RetainedWorktreeError } from './team-retained-worktrees';
 import { RuntimeFailureDiagnosticCollector } from '../runtime-host/runtime-failure-diagnostics';
 import { secureLogger } from './secure-logger';
 import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
@@ -773,6 +775,27 @@ describe('image attachment public errors', () => {
       userMessage: '画像添付の状態が変わりました。最新の一覧を確認してください。',
       retryable: false,
     });
+  });
+});
+
+describe('retained worktree public errors (issue #544)', () => {
+  it('shows why a retained worktree was refused in its own Japanese words', () => {
+    expect(
+      toPublicError(new RetainedWorktreeError('この実行はまだ終わっていないため破棄できません。')),
+    ).toEqual({
+      code: 'INVALID_REQUEST',
+      userMessage: 'この実行はまだ終わっていないため破棄できません。',
+      retryable: false,
+    });
+    expect(toPublicError(new RetainedWorktreeError('使用中です。', true))).toMatchObject({
+      retryable: true,
+    });
+    // A Git message spread over lines is flattened and clipped like every public message.
+    const clipped = toPublicError(
+      new RetainedWorktreeError(`破棄できませんでした:\n${'x'.repeat(600)}`),
+    );
+    expect(clipped.userMessage).toHaveLength(500);
+    expect(clipped.userMessage).not.toContain('\n');
   });
 });
 
@@ -5901,6 +5924,10 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.teamsHireWorker]: teamHireWorkerInputSchema,
   [IPC_CHANNELS.teamsResumeMission]: teamResumeMissionInputSchema,
   [IPC_CHANNELS.teamsResumeExecutionIntegration]: teamResumeExecutionIntegrationInputSchema,
+  [IPC_CHANNELS.teamsListRetainedWorktrees]: taskIdPayloadSchema,
+  [IPC_CHANNELS.teamsInspectRetainedWorktree]: teamRetainedWorktreeRefSchema,
+  [IPC_CHANNELS.teamsOpenRetainedWorktree]: teamRetainedWorktreeRefSchema,
+  [IPC_CHANNELS.teamsDiscardRetainedWorktree]: teamRetainedWorktreeRefSchema,
   [IPC_CHANNELS.teamsSend]: teamSendMessageInputSchema,
   [IPC_CHANNELS.teamsStopWorker]: teamWorkerRefSchema,
   [IPC_CHANNELS.teamsStopAll]: taskIdPayloadSchema,

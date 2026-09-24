@@ -5,8 +5,10 @@ import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
 import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
+import { TeamRetainedWorktreesDialog, TeamRetainedWorktreesTrigger } from './TeamRetainedWorktrees';
 import { latestExecutionForWorker } from '../lib/team-execution-display';
 import { currentTeamWorkerCount } from '../lib/team-progress';
+import { retainedWorktreeCount } from '../lib/team-retained-worktrees';
 import {
   describeMessagePeer,
   describeWorkerModel,
@@ -55,6 +57,8 @@ export function TeamListView({
   // Open state is local to the view, not the store: the dialog is a modal task (open, adjust,
   // close), and each view owns its own instance of the SAME component — see TeamPolicyDialog.tsx.
   const [policyOpen, setPolicyOpen] = useState(false);
+  // Same shared list and discard dialog the Canvas mounts (issue #544).
+  const [retainedOpen, setRetainedOpen] = useState(false);
 
   // Mount-time focus (a11y fix, Phase 7 / NFR-A11Y-02), mirroring TeamCanvas's own mount-focus
   // fix: switching from Canvas to List view (the "List表示" button, itself INSIDE TeamCanvas)
@@ -126,6 +130,11 @@ export function TeamListView({
             <LayoutGrid size={14} /> Canvas表示
           </button>
           <TeamPolicyTrigger onOpen={() => setPolicyOpen(true)} />
+          <TeamRetainedWorktreesTrigger
+            count={retainedWorktreeCount(detail)}
+            open={retainedOpen}
+            onOpen={() => setRetainedOpen(true)}
+          />
           <button
             type="button"
             className="team-stop-all-btn"
@@ -325,6 +334,13 @@ export function TeamListView({
           taskId={task.id}
           detail={detail}
           onClose={() => setPolicyOpen(false)}
+        />
+      )}
+      {retainedOpen && (
+        <TeamRetainedWorktreesDialog
+          taskId={task.id}
+          detail={detail}
+          onClose={() => setRetainedOpen(false)}
         />
       )}
     </section>

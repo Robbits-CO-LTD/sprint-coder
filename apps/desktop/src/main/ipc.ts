@@ -243,6 +243,9 @@ import {
   teamMissionSummarySchema,
   teamResumeMissionInputSchema,
   teamResumeExecutionIntegrationInputSchema,
+  teamRetainedWorktreeInspectionSchema,
+  teamRetainedWorktreeListSchema,
+  teamRetainedWorktreeRefSchema,
   teamMessageSummarySchema,
   teamPolicyUpdateInputSchema,
   teamPolicySchema,
@@ -696,6 +699,7 @@ import {
 } from './graph-mission-review';
 import { collectThreadImages } from './generated-image-collector';
 import { TeamCoordinator } from './team-coordinator';
+import { RetainedWorktreeError } from './team-retained-worktrees';
 import { WorkerWorktreeManager } from './worker-worktree';
 import {
   RuntimeHostTeamWorkerRuntime,
@@ -4218,6 +4222,57 @@ export class IpcRouter {
         await this.stopComputerUseForTask(input.taskId, 'turn_started');
         return this.teamCoordinator.resumeExecutionIntegration(input.taskId, input.executionId);
       },
+    );
+    // Worktrees Team Workers left on disk (issue #544): list and read them, show one in the OS file
+    // manager, or discard one the user confirmed. The coordinator checks every path it touches.
+    this.handle(
+      IPC_CHANNELS.teamsListRetainedWorktrees,
+      taskIdPayloadSchema,
+      teamRetainedWorktreeListSchema,
+      (input) => this.teamCoordinator.listRetainedWorktrees(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.teamsInspectRetainedWorktree,
+      teamRetainedWorktreeRefSchema,
+      teamRetainedWorktreeInspectionSchema,
+      (input) =>
+        this.teamCoordinator.inspectRetainedWorktree(
+          input.taskId,
+          input.executionId,
+          input.repositoryOrdinal,
+        ),
+    );
+    this.handle(
+      IPC_CHANNELS.teamsOpenRetainedWorktree,
+      teamRetainedWorktreeRefSchema,
+      z.undefined(),
+      async (input) => {
+        await this.teamCoordinator.openRetainedWorktree(
+          input.taskId,
+          input.executionId,
+          input.repositoryOrdinal,
+          async (path) => {
+            const failure = await shell.openPath(path);
+            if (failure !== '')
+              throw new RetainedWorktreeError(
+                `OSのファイル表示がエラーを返しました（${failure}）`,
+                true,
+              );
+          },
+        );
+        return undefined;
+      },
+    );
+    this.handleMutation(
+      IPC_CHANNELS.teamsDiscardRetainedWorktree,
+      teamRetainedWorktreeRefSchema,
+      teamRetainedWorktreeListSchema,
+      (input) =>
+        this.teamCoordinator.discardRetainedWorktree(
+          input.taskId,
+          input.executionId,
+          input.repositoryOrdinal,
+        ),
     );
     this.handleMutation(
       IPC_CHANNELS.teamsSend,
@@ -10692,6 +10747,13 @@ export function toPublicError(error: unknown): PublicError {
     };
   if (error instanceof SecurityError)
     return { code: 'FORBIDDEN', userMessage: 'この操作は許可されていません。', retryable: false };
+  // A retained worktree refusal says why in Japanese, and the Team screen shows it as is (#544).
+  if (error instanceof RetainedWorktreeError)
+    return {
+      code: 'INVALID_REQUEST',
+      userMessage: clipPublicMessage(error.message),
+      retryable: error.retryable,
+    };
   if (error instanceof SkillSettingsError)
     return {
       code:

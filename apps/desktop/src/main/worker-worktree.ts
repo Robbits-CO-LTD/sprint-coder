@@ -70,6 +70,28 @@ export type CleanupWorktreeResult = Readonly<{
   outcome: 'removed' | 'quarantined';
 }>;
 
+export type DiscardWorktreeInput = CleanupWorktreeInput &
+  Readonly<{
+    /** The path the caller recorded for this worktree. It must be this manager's own path. */
+    path: string;
+  }>;
+
+export type InspectWorktreeChangesInput = DiscardWorktreeInput &
+  Readonly<{
+    baseHead: string;
+    /** The most entries each list returns; the rest are only flagged as truncated. */
+    limit: number;
+  }>;
+
+export type WorktreeChangeInspection = Readonly<{
+  head: string;
+  commitsSinceBase: number;
+  status: readonly Readonly<{ code: string; path: string }>[];
+  statusTruncated: boolean;
+  changesFromBase: readonly Readonly<{ status: string; path: string }>[];
+  changesFromBaseTruncated: boolean;
+}>;
+
 export type CleanupUnchangedWorktreeInput = CleanupWorktreeInput & Readonly<{ baseHead: string }>;
 /**
  * `changed: true` marks a worktree kept because its HEAD or status differs from its base: it will
@@ -439,6 +461,142 @@ export class WorkerWorktreeManager {
     return this.differsFromBase(worktreePath, baseHead, 'integration_failed');
   }
 
+  /**
+   * Delete a worktree this app created, with every change in it (issue #544). Only a discard the
+   * user confirmed comes here: `cleanup` and `cleanupUnchanged` never destroy work. The recorded
+   * path must be this manager's own path for `worktreeId`, and a link standing in for that directory
+   * is refused rather than followed. A directory that is already gone unregisters only this worktree,
+   * as `cleanup` does (never `git worktree prune`). Worker worktrees are created detached, so there
+   * is no branch to delete. A Windows lock that outlasts the backoff keeps the worktree and reports
+   * `quarantined`.
+   */
+  async discard({
+    agentId,
+    repoPath,
+    path,
+    worktreeId = agentId,
+  }: DiscardWorktreeInput): Promise<CleanupWorktreeResult> {
+    validateWorktreeId(agentId);
+    const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
+    if (worktreePath === null)
+      return this.removeMissingWorktreeRegistration(repoPath, this.worktreePathFor(worktreeId));
+    return this.removeRegisteredWorktree(repoPath, worktreePath, ['--force']);
+  }
+
+  /**
+   * This manager's own directory for `worktreeId` when the recorded `path` names it and it is on
+   * disk, or null when it is gone. Throws for a path this app does not own, or for a link standing
+   * in for the directory.
+   */
+  async locateOwnedWorktree({
+    agentId,
+    path,
+    worktreeId = agentId,
+  }: DiscardWorktreeInput): Promise<string | null> {
+    validateWorktreeId(agentId);
+    if (!this.ownsWorktreePath(worktreeId, path))
+      throw new WorktreeError('invalid_input', 'Worktree path is not owned by Sprint Coder');
+    const worktreePath = this.worktreePathFor(worktreeId);
+    let entry;
+    try {
+      entry = await lstat(worktreePath);
+    } catch (error) {
+      if (isEnoent(error)) return null;
+      throw error;
+    }
+    if (!entry.isDirectory())
+      throw new WorktreeError('invalid_input', 'Worktree must be its own directory');
+    return worktreePath;
+  }
+
+  /**
+   * What a retained worktree holds now (issue #544), read without changing it: its HEAD, the
+   * commits since its base, `git status` with every untracked file, and the tracked files changed
+   * since the base. Each list stops at `limit` entries and says whether it was cut.
+   */
+  async inspectChanges({
+    agentId,
+    repoPath,
+    path,
+    baseHead,
+    limit,
+    worktreeId = agentId,
+  }: InspectWorktreeChangesInput): Promise<WorktreeChangeInspection> {
+    validateGitHead(baseHead);
+    const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
+    if (worktreePath === null)
+      throw new WorktreeError(
+        'invalid_input',
+        `worktree does not exist: ${this.worktreePathFor(worktreeId)}`,
+      );
+    // Git looks upward for a repository, so a directory that is no longer a worktree would be read
+    // as whichever repository contains the worktrees root.
+    if ((await this.resolveRepositoryPath(worktreePath)) !== (await realpath(worktreePath)))
+      throw new WorktreeError('invalid_input', 'Worktree directory is no longer a Git worktree');
+    const head = (
+      await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed')
+    ).stdout.trim();
+    validateGitHead(head);
+    let commitsSinceBase = 0;
+    if (head !== baseHead) {
+      const counted = (
+        await this.runGit(
+          worktreePath,
+          ['rev-list', '--count', `${baseHead}..${head}`],
+          'create_failed',
+        )
+      ).stdout.trim();
+      if (!/^\d+$/u.test(counted))
+        throw new WorktreeError(
+          'create_failed',
+          `Unexpected commit count: ${JSON.stringify(counted)}`,
+        );
+      commitsSinceBase = Number(counted);
+    }
+    // `-z` keeps every path byte-exact and `--no-renames` gives each entry exactly one path.
+    const status = (
+      await this.runGit(
+        worktreePath,
+        [
+          'status',
+          '--porcelain=v1',
+          '-z',
+          '--no-renames',
+          '--untracked-files=all',
+          '--ignore-submodules=none',
+        ],
+        'create_failed',
+      )
+    ).stdout
+      .split('\0')
+      .filter((entry) => entry.length > 3)
+      .map((entry) => ({ code: entry.slice(0, 2), path: entry.slice(3) }));
+    const diffTokens = (
+      await this.runGit(
+        worktreePath,
+        ['diff', '--no-renames', '--name-status', '-z', baseHead, '--'],
+        'create_failed',
+      )
+    ).stdout.split('\0');
+    const changesFromBase: { status: string; path: string }[] = [];
+    for (let index = 0; index + 1 < diffTokens.length; index += 2) {
+      const change = diffTokens[index]!;
+      const changedPath = diffTokens[index + 1]!;
+      if (change !== '' && changedPath !== '')
+        changesFromBase.push({ status: change, path: changedPath });
+    }
+    const bounded = <T extends { path: string }>(entries: readonly T[]): T[] =>
+      entries.slice(0, limit).map((entry) => ({ ...entry, path: entry.path.slice(0, 4_096) }));
+    return {
+      head,
+      commitsSinceBase,
+      status: bounded(status),
+      statusTruncated: status.length > limit,
+      changesFromBase: bounded(changesFromBase),
+      changesFromBaseTruncated: changesFromBase.length > limit,
+    };
+  }
+
   private async differsFromBase(
     worktreePath: string,
     baseHead: string,
@@ -478,9 +636,12 @@ export class WorkerWorktreeManager {
   private async removeRegisteredWorktree(
     repoPath: string,
     worktreePath: string,
+    /** Extra `git worktree remove` options; only a user-confirmed discard passes `--force`. */
+    options: readonly string[] = [],
   ): Promise<CleanupWorktreeResult> {
+    const remove = ['worktree', 'remove', ...options, worktreePath];
     try {
-      await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
+      await this.runGit(repoPath, remove, 'remove_failed');
     } catch (error) {
       // Defensive: a race could dirty the worktree between our status check and the
       // remove call. Surface that distinctly rather than reporting a generic failure.
@@ -490,7 +651,7 @@ export class WorkerWorktreeManager {
         for (const delayMs of [100, 200, 400, 800, 1_600, 3_200]) {
           await this.delay(delayMs);
           try {
-            await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
+            await this.runGit(repoPath, remove, 'remove_failed');
             return { outcome: 'removed' };
           } catch (retryError) {
             if (!isPermissionDenied(retryError)) throw retryError;
