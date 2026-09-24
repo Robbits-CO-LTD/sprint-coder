@@ -828,6 +828,16 @@ describe('runtimeStopConfirmed', () => {
     ).toBe(false);
   });
 
+  it('treats an execution refused before it started anything as a confirmed runtime stop', () => {
+    expect(
+      runtimeStopConfirmed(
+        new WorkerRuntimeExitUnconfirmedError('previous Turn exit is unconfirmed', {
+          startRefused: true,
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it.each([
     ['a plain runtime error', new Error('runtime failed')],
     ['a user cancel', new WorkerRuntimeControlError('user_canceled', 'canceled')],
@@ -4884,6 +4894,53 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 30_000);
 
+    it('reclaims the worktree of an execution refused before it started because an earlier exit is unconfirmed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Refused isolated start');
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeExitUnconfirmedError('previous Turn exit is unconfirmed', {
+            startRefused: true,
+          });
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'refused writer',
+        objective: 'be refused before starting',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'refused before start',
+        doneCriteria: ['worktree is reclaimed'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () =>
+          persistence.getTeamExecution(submission.executionId).state === 'failed' &&
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+            'cleaned',
+        15_000,
+      );
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(existsSync(repository.worktreePath)).toBe(false);
+      expect(executeCount).toBe(1);
+      persistence.close();
+    }, 30_000);
+
     it('reclaims a stop-confirmed unchanged worktree on restart and keeps unconfirmed ones', async () => {
       const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-reclaim-restart-'));
       cleanup.push(databaseDirectory);
@@ -5386,20 +5443,23 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it.each([
+    it.each<[string, ConstructorParameters<typeof WorkerRuntimeExitUnconfirmedError>[1]]>([
       ['after a completed Turn', undefined],
       [
         'after a non-billing Turn failure',
-        new WorkerRuntimeFailureError(
-          { code: 'RUNTIME_FAILED', userMessage: 'runtime failed', retryable: false },
-          'grok',
-          'runtime-turn-failed',
-          undefined,
-        ),
+        {
+          originalError: new WorkerRuntimeFailureError(
+            { code: 'RUNTIME_FAILED', userMessage: 'runtime failed', retryable: false },
+            'grok',
+            'runtime-turn-failed',
+            undefined,
+          ),
+        },
       ],
+      ['when it was refused before starting', { startRefused: true }],
     ])(
       'does not retry a read-only Worker whose Turn exit is unconfirmed %s',
-      async (_label, originalError) => {
+      async (_label, options) => {
         const persistence = createPersistence();
         const task = persistence.createTask('Unconfirmed read-only exit');
         let executeCount = 0;
@@ -5411,7 +5471,7 @@ if (runsWithElectronAbi)
             executeCount += 1;
             throw new WorkerRuntimeExitUnconfirmedError(
               'Runtime process tree exit was not confirmed within 30 seconds',
-              originalError === undefined ? undefined : { originalError },
+              options,
             );
           },
           async stop() {},

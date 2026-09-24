@@ -173,11 +173,20 @@ export class WorkerRuntimeExitUnconfirmedError extends Error {
    * failure's diagnostic is still recorded. Undefined when the Turn completed or never ran.
    */
   readonly originalError: unknown;
+  /**
+   * The new execution was refused before it started anything, because an earlier Turn of its
+   * Worker is still unconfirmed. This execution itself left nothing running.
+   */
+  readonly startRefused: boolean;
 
-  constructor(message: string, options?: Readonly<{ cause?: unknown; originalError?: unknown }>) {
+  constructor(
+    message: string,
+    options?: Readonly<{ cause?: unknown; originalError?: unknown; startRefused?: boolean }>,
+  ) {
     super(message, options);
     this.name = 'WorkerRuntimeExitUnconfirmedError';
     this.originalError = options?.originalError;
+    this.startRefused = options?.startRefused === true;
   }
 }
 
@@ -3519,7 +3528,8 @@ export class TeamCoordinator {
       (error instanceof WorkerRuntimeFailureError &&
         error.publicError.code === 'RUNTIME_BILLING_REQUIRED') ||
       (error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed') ||
-      // A CLI that may still be running must not get a second one beside it (issue #548).
+      // A CLI that may still be running must not get a second one beside it (issue #548); an
+      // execution refused for that reason would only be refused again.
       error instanceof WorkerRuntimeExitUnconfirmedError ||
       this.persistence.listTeamAttempts(input.executionId).length >= 2
     )
@@ -5514,7 +5524,8 @@ function workerRuntimeFailureOf(error: unknown): WorkerRuntimeFailureError | nul
  * worktree the CLI might still be using is never reclaimed after them.
  */
 export function runtimeStopConfirmed(error: unknown): boolean {
-  if (error instanceof WorkerRuntimeExitUnconfirmedError) return false;
+  // An execution refused before it started ran nothing, so its own worktree is free to reclaim.
+  if (error instanceof WorkerRuntimeExitUnconfirmedError) return error.startRefused;
   return !(
     error instanceof WorkerRuntimeControlError &&
     (error.code === 'stop_unconfirmed' ||

@@ -44,6 +44,9 @@ const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
 // Pause before asking the Runtime Host again whether an unconfirmed Turn has exited. The Host keeps
 // an exit that arrives with nobody waiting for 60 seconds, so no exit is missed in between.
 const UNCONFIRMED_EXIT_RECHECK_DELAY_MS = 1_000;
+// Longest a new execution waits for its Worker's previous Turn to finish its own exit wait, which the
+// Runtime Host bounds at 30 seconds.
+const PREVIOUS_TURN_EXIT_WAIT_MS = 30_000;
 const PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE =
   'このWorkerの前回のCLI実行が終了したことをまだ確認できていないため、新しい実行を開始しませんでした。終了を確認でき次第、次の実行を開始できます。確認できないままの場合は、前回のCLIのプロセスが残っていないことを確かめてからアプリを再起動してください。';
 
@@ -172,6 +175,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     { agentId: string; kind: 'claude' | 'codex' | 'grok' }
   >();
   private readonly unconfirmedExitRechecks = new Set<NodeJS.Timeout>();
+  /**
+   * Turns still inside their post-Turn exit wait, keyed by Turn id. A stopped or timed-out
+   * execution returns before that wait ends, so its Worker can be dispatched again meanwhile;
+   * `settled` resolves once the wait has ended and any unconfirmed exit has been recorded.
+   */
+  private readonly exitWaits = new Map<string, { agentId: string; settled: Promise<void> }>();
   private disposed = false;
 
   constructor(private readonly deps: TeamWorkerRuntimeDeps) {}
@@ -258,20 +267,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 
   async execute(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
     input.signal?.throwIfAborted();
-    // A CLI whose exit is unconfirmed may still be running and writing; never start another one for
-    // the same Worker beside it.
-    if ([...this.unconfirmedExits.values()].some(({ agentId }) => agentId === input.worker.id))
-      throw new WorkerRuntimeExitUnconfirmedError(PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE);
     const controller = new AbortController();
     this.executionAborts.set(input.worker.id, controller);
     try {
-      return await this.executeWithSignal({
-        ...input,
-        signal:
-          input.signal === undefined
-            ? controller.signal
-            : AbortSignal.any([input.signal, controller.signal]),
-      });
+      const signal =
+        input.signal === undefined
+          ? controller.signal
+          : AbortSignal.any([input.signal, controller.signal]);
+      await this.awaitPreviousTurnExit(input.worker.id, signal);
+      return await this.executeWithSignal({ ...input, signal });
     } finally {
       if (this.executionAborts.get(input.worker.id) === controller)
         this.executionAborts.delete(input.worker.id);
@@ -574,10 +578,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       throw error;
     } finally {
       try {
-        if (runtimeStarted)
+        if (runtimeStarted) {
           // Starting inside a promise turns a synchronous throw from the exit wait into a rejection,
           // which is just as unconfirmed.
-          await Promise.resolve()
+          const exited = Promise.resolve()
             .then(() => this.client(choice.kind).waitForTurnExit(turnId))
             .catch((error: unknown) => {
               this.watchUnconfirmedExit(input.worker.id, choice.kind, turnId);
@@ -590,6 +594,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
                 },
               );
             });
+          this.trackExitWait(input.worker.id, turnId, exited);
+          await exited;
+        }
       } finally {
         input.signal?.removeEventListener('abort', abort);
         this.pending.delete(turnId);
@@ -599,6 +606,59 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.releaseManagedTurn?.(turnId);
       }
     }
+  }
+
+  /**
+   * Holds a new execution until its Worker's previous Turn has finished its exit wait (for at most
+   * PREVIOUS_TURN_EXIT_WAIT_MS), then refuses it before anything starts if that exit is still not
+   * confirmed (issue #548). A CLI that may still be running and writing never gets a second one
+   * beside it.
+   */
+  private async awaitPreviousTurnExit(agentId: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const pending = [...this.exitWaits.values()]
+      .filter((wait) => wait.agentId === agentId)
+      .map(({ settled }) => settled);
+    if (pending.length > 0) {
+      let stopWaiting = (): void => undefined;
+      const gaveUp = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, PREVIOUS_TURN_EXIT_WAIT_MS);
+        const onAbort = (): void => resolve();
+        signal.addEventListener('abort', onAbort, { once: true });
+        stopWaiting = () => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', onAbort);
+        };
+      });
+      try {
+        await Promise.race([Promise.all(pending), gaveUp]);
+      } finally {
+        stopWaiting();
+      }
+    }
+    signal.throwIfAborted();
+    if (
+      [...this.exitWaits.values(), ...this.unconfirmedExits.values()].some(
+        (turn) => turn.agentId === agentId,
+      )
+    )
+      throw new WorkerRuntimeExitUnconfirmedError(PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE, {
+        startRefused: true,
+      });
+  }
+
+  /** Records a Turn's exit wait until it ends; see `exitWaits`. */
+  private trackExitWait(agentId: string, turnId: string, exited: Promise<void>): void {
+    const wait = { agentId, settled: Promise.resolve() };
+    wait.settled = exited
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .then(() => {
+        if (this.exitWaits.get(turnId) === wait) this.exitWaits.delete(turnId);
+      });
+    this.exitWaits.set(turnId, wait);
   }
 
   /**

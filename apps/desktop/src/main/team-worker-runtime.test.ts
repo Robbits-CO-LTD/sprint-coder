@@ -587,6 +587,8 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     });
     // The Turn itself completed, so there is no earlier failure to carry.
     expect(error).toHaveProperty('originalError', undefined);
+    // It did run, so its own worktree must not be treated as free.
+    expect(error).toHaveProperty('startRefused', false);
     subject.dispose();
   });
 
@@ -695,6 +697,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(blocked).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
     expect(blocked).toMatchObject({
       message: expect.stringContaining('前回のCLI実行が終了したことをまだ確認できていない'),
+      startRefused: true,
     });
     expect(runtimeHostMock.starts).toHaveLength(1);
 
@@ -789,6 +792,133 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       subject.dispose();
       vi.useRealTimers();
     }
+  });
+
+  describe('while the previous Turn of the Worker still waits for its exit', () => {
+    const run = (subject: RuntimeHostTeamWorkerRuntime) =>
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      });
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+    it('holds a new execution without starting a CLI and starts it once that exit is confirmed', async () => {
+      runtimeHostMock.starts.length = 0;
+      let confirmExit: (() => void) | undefined;
+      runtimeHostMock.waitForExit.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            confirmExit = resolve;
+          }),
+      );
+      const subject = runtime();
+      const first = run(subject);
+      await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+      // A watchdog timeout stops the Worker and hands it straight back to the Scheduler, while the
+      // stopped Turn is still waiting for its process tree to exit.
+      await subject.stop('worker-1');
+      const second = run(subject);
+      await settle();
+      expect(runtimeHostMock.starts).toHaveLength(1);
+
+      confirmExit?.();
+      await expect(first).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+      await expect(second).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+      expect(runtimeHostMock.starts).toHaveLength(2);
+      subject.dispose();
+    });
+
+    it('refuses the held execution without starting a CLI when that exit goes unconfirmed', async () => {
+      runtimeHostMock.starts.length = 0;
+      let failExit: ((error: Error) => void) | undefined;
+      runtimeHostMock.waitForExit
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((_resolve, reject) => {
+              failExit = reject;
+            }),
+        )
+        // The background check keeps waiting, so the exit stays unconfirmed.
+        .mockImplementationOnce(() => new Promise<void>(() => undefined));
+      const subject = runtime();
+      const first = run(subject).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+      await subject.stop('worker-1');
+      const second = run(subject).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      await settle();
+      expect(runtimeHostMock.starts).toHaveLength(1);
+
+      failExit?.(new Error('Runtime process tree exit was not confirmed within 30 seconds'));
+      const refused = await second;
+      expect(refused).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(refused).toMatchObject({
+        message: expect.stringContaining('前回のCLI実行が終了したことをまだ確認できていない'),
+        startRefused: true,
+      });
+      const unconfirmed = await first;
+      expect(unconfirmed).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(unconfirmed).toMatchObject({ startRefused: false });
+      expect(runtimeHostMock.starts).toHaveLength(1);
+      subject.dispose();
+    });
+
+    it('lets a stop end the hold without starting a CLI', async () => {
+      runtimeHostMock.starts.length = 0;
+      runtimeHostMock.waitForExit.mockImplementationOnce(() => new Promise<void>(() => undefined));
+      const subject = runtime();
+      void run(subject).catch(() => undefined);
+      await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+      await subject.stop('worker-1');
+      const second = run(subject);
+      await settle();
+
+      await subject.stop('worker-1');
+      await expect(second).rejects.toThrow('Worker execution stopped');
+      expect(runtimeHostMock.starts).toHaveLength(1);
+      subject.dispose();
+    });
+
+    it('gives up holding after 30 seconds and refuses while that exit is still unsettled', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const subject = runtime();
+      try {
+        runtimeHostMock.starts.length = 0;
+        runtimeHostMock.waitForExit.mockImplementationOnce(
+          () => new Promise<void>(() => undefined),
+        );
+        void run(subject).catch(() => undefined);
+        await settle();
+        expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce();
+        let outcome: unknown = 'pending';
+        void run(subject).then(
+          () => {
+            outcome = 'started';
+          },
+          (caught: unknown) => {
+            outcome = caught;
+          },
+        );
+
+        await vi.advanceTimersByTimeAsync(29_999);
+        await settle();
+        expect(outcome).toBe('pending');
+        await vi.advanceTimersByTimeAsync(1);
+        await settle();
+        expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+        expect(outcome).toMatchObject({ startRefused: true });
+        expect(runtimeHostMock.starts).toHaveLength(1);
+      } finally {
+        subject.dispose();
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('applies inherited context and write capability to the CLI turn', async () => {
