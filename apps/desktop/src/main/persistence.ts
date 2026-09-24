@@ -5976,6 +5976,9 @@ export interface PersistenceClient {
     usage: NormalizedProviderUsage,
   ): NormalizedProviderUsage;
   getTurnProviderUsage(taskId: string, turnId: string): NormalizedProviderUsage | null;
+  /** The Turn's own creation timestamp (ISO 8601), for ordering it against other records
+   * (e.g. a Worker hired during it) that were also stamped with `new Date().toISOString()`. */
+  getTurnCreatedAt(taskId: string, turnId: string): string;
   queueInput(
     taskId: string,
     text: string,
@@ -19215,6 +19218,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return row.provider_usage_json === null
       ? null
       : normalizedProviderUsageSchema.parse(JSON.parse(row.provider_usage_json));
+  }
+
+  getTurnCreatedAt(taskId: string, turnId: string): string {
+    return this.getTurn(taskId, turnId).created_at;
   }
 
   queueInput(
