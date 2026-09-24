@@ -46,47 +46,66 @@ export function TeamRetainedWorktreesTrigger({
 
 const UNINTEGRATED_DISCARD_BODY =
   'このworktreeの変更はWorkspaceに統合されていません。破棄すると元に戻せません。';
+export const SUBMODULE_DISCARD_WARNING =
+  'このworktreeにはsubmoduleがあります。submoduleの中のコミットはこのworktreeにしか無い可能性があり、Workspaceのsubmoduleがそれを参照していることがあります。破棄すると元に戻せません。';
 
 /**
  * What the discard confirmation says. A worktree whose change is not in the Workspace may hold the
  * only copy of that work, so that case says so first and plainly. Only an integration Main found in
  * the repository's current history counts: one it merely recorded is warned about as unintegrated.
+ * A submodule voids the reassurance of an integration too: the integrated gitlink may point at a
+ * commit only this worktree's submodule store holds (issue #544). `submodule` is a second warning
+ * shown beside `body`, or null.
  */
 export function retainedWorktreeDiscardWarning(
-  worktree: Pick<TeamRetainedWorktree, 'integration'>,
-): { title: string; body: string; note: string } {
+  worktree: Pick<TeamRetainedWorktree, 'integration' | 'submodules'>,
+): { title: string; body: string; submodule: string | null; note: string } {
+  const submodule = worktree.submodules ? SUBMODULE_DISCARD_WARNING : null;
   switch (worktree.integration) {
     case 'confirmed':
-      return {
-        title: '残っているworktreeを削除しますか？',
-        body: '変更はWorkspaceに統合済みです。残っている隔離worktreeを削除します。',
-        note: '統合の後でこのworktreeに残ったファイルがあれば、それも削除され元に戻せません。',
-      };
+      return submodule === null
+        ? {
+            title: '残っているworktreeを削除しますか？',
+            body: '変更はWorkspaceに統合済みです。残っている隔離worktreeを削除します。',
+            submodule: null,
+            note: '統合の後でこのworktreeに残ったファイルがあれば、それも削除され元に戻せません。',
+          }
+        : {
+            title: 'submoduleのあるworktreeを破棄しますか？',
+            body: SUBMODULE_DISCARD_WARNING,
+            submodule: null,
+            note: '記録上の変更はWorkspaceに入っていますが、submoduleの中のコミットまでは確かめられません。',
+          };
     case 'unconfirmed':
       return {
         title: '統合を確認できない変更を破棄しますか？',
         body: UNINTEGRATED_DISCARD_BODY,
+        submodule,
         note: '統合したと記録されていますが、今のWorkspaceの履歴には見つかりません。このworktreeにしか残っていない可能性があります。',
       };
     case 'none':
       return {
         title: '統合されていない変更を破棄しますか？',
         body: UNINTEGRATED_DISCARD_BODY,
+        submodule,
         note: 'Workerが作ったコミットも、未コミットのファイルも、すべて削除されます。',
       };
   }
 }
 
-/** The state column: how far the execution got, and whether its change is in the Workspace. */
+/** The state column: how far the execution got, whether its change is in the Workspace, and
+ * whether a submodule may hold more than that. */
 export function retainedWorktreeStateLabel(
-  worktree: Pick<TeamRetainedWorktree, 'executionState' | 'integration'>,
+  worktree: Pick<TeamRetainedWorktree, 'executionState' | 'integration' | 'submodules'>,
 ): string {
   const integration = {
     none: '未統合（変更を保持）',
     confirmed: '統合済み（片付けに失敗）',
     unconfirmed: '統合を確認できません（Workspaceの履歴に見つかりません）',
   }[worktree.integration];
-  return `${EXECUTION_STATE_LABELS[worktree.executionState]} · ${integration}`;
+  return `${EXECUTION_STATE_LABELS[worktree.executionState]} · ${integration}${
+    worktree.submodules ? ' · submoduleあり' : ''
+  }`;
 }
 
 type InspectionState =
@@ -551,6 +570,11 @@ function DiscardConfirmDialog({
           <p className="team-retained-warning" data-testid="team-retained-confirm-warning">
             {warning.body}
           </p>
+          {warning.submodule !== null && (
+            <p className="team-retained-warning" data-testid="team-retained-confirm-submodule">
+              {warning.submodule}
+            </p>
+          )}
           <p className="settings-note">{warning.note}</p>
         </div>
         <dl className="team-retained-facts">

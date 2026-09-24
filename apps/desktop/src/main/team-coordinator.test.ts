@@ -5219,6 +5219,7 @@ if (runsWithElectronAbi)
             workerHead: null,
             integratedHead: null,
             integration: 'none',
+            submodules: false,
             changedFileCount: 0,
             reason: before.reason,
             executionState: 'failed',
@@ -5286,6 +5287,34 @@ if (runsWithElectronAbi)
       expect(discard).not.toHaveBeenCalled();
       expect(existsSync(join(repository.worktreePath, 'kept.txt'))).toBe(true);
       unsettled = false;
+
+      // A submodule in the worktree is reported, so the confirmation can say what it may hold.
+      const source = mkdtempSync(join(tmpdir(), 'sprint-coder-team-submodule-source-'));
+      cleanup.push(source);
+      for (const args of [
+        ['init', '-q', source],
+        ['-C', source, 'commit', '-q', '--allow-empty', '-m', 'source'],
+        [
+          '-C',
+          repository.worktreePath,
+          '-c',
+          'protocol.file.allow=always',
+          '-c',
+          'core.autocrlf=false',
+          'submodule',
+          'add',
+          '-q',
+          source,
+          'sub',
+        ],
+      ])
+        expect(
+          spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args])
+            .status,
+        ).toBe(0);
+      await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        worktrees: [{ executionId: failed.executionId, submodules: true, discardable: true }],
+      });
 
       published.length = 0;
       await expect(

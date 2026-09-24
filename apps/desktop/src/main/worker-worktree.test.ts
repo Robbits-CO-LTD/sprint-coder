@@ -981,6 +981,19 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       (await git(['-C', created.path, 'rev-parse', '--git-dir'])).trim(),
     );
 
+    // The list reads the same test, so the discard confirmation can warn about the submodule.
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-submodule', repoPath, path: created.path }),
+    ).resolves.toBe(true);
+    const plain = await manager.create({ agentId: 'agent-no-submodule', repoPath });
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-no-submodule', repoPath, path: plain.path }),
+    ).resolves.toBe(false);
+    // A worktree it cannot read counts as holding one, so the user is warned, not reassured.
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-no-submodule', repoPath, path: repoPath }),
+    ).resolves.toBe(true);
+
     await expect(manager.cleanup({ agentId: 'agent-submodule', repoPath })).resolves.toEqual({
       outcome: 'quarantined',
     });

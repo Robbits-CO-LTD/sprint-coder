@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import {
+  SUBMODULE_DISCARD_WARNING,
   TeamRetainedWorktreesDialog,
   TeamRetainedWorktreesTrigger,
   retainedWorktreeDiscardWarning,
@@ -42,6 +43,7 @@ function worktree(overrides: Partial<TeamRetainedWorktree> = {}): TeamRetainedWo
     workerHead: null,
     integratedHead: null,
     integration: 'none',
+    submodules: false,
     changedFileCount: 0,
     reason: 'Worker failed after writing',
     executionState: 'failed',
@@ -196,14 +198,35 @@ describe('TeamRetainedWorktreesTrigger (issue #544)', () => {
 
 describe('retainedWorktreeDiscardWarning (issue #544)', () => {
   it('warns plainly unless Main found the change in the Workspace history', () => {
-    expect(retainedWorktreeDiscardWarning({ integration: 'none' }).body).toBe(UNINTEGRATED_WARNING);
-    expect(retainedWorktreeDiscardWarning({ integration: 'confirmed' }).body).toBe(
-      INTEGRATED_WARNING,
+    expect(retainedWorktreeDiscardWarning({ integration: 'none', submodules: false }).body).toBe(
+      UNINTEGRATED_WARNING,
     );
+    expect(
+      retainedWorktreeDiscardWarning({ integration: 'confirmed', submodules: false }).body,
+    ).toBe(INTEGRATED_WARNING);
     // Recorded as integrated but no longer found: the worktree may hold the only copy.
-    const unconfirmed = retainedWorktreeDiscardWarning({ integration: 'unconfirmed' });
+    const unconfirmed = retainedWorktreeDiscardWarning({
+      integration: 'unconfirmed',
+      submodules: false,
+    });
     expect(unconfirmed.body).toBe(UNINTEGRATED_WARNING);
     expect(unconfirmed.note).toContain('今のWorkspaceの履歴には見つかりません');
+    // A submodule takes the reassurance away from an integrated change and warns every case.
+    const integratedWithSubmodule = retainedWorktreeDiscardWarning({
+      integration: 'confirmed',
+      submodules: true,
+    });
+    expect(integratedWithSubmodule.body).toBe(SUBMODULE_DISCARD_WARNING);
+    expect(JSON.stringify(integratedWithSubmodule)).not.toContain('統合済みです');
+    for (const integration of ['none', 'unconfirmed'] as const) {
+      const warned = retainedWorktreeDiscardWarning({ integration, submodules: true });
+      expect(warned.body).toBe(UNINTEGRATED_WARNING);
+      expect(warned.submodule).toBe(SUBMODULE_DISCARD_WARNING);
+    }
+    for (const integration of ['none', 'confirmed', 'unconfirmed'] as const)
+      expect(retainedWorktreeDiscardWarning({ integration, submodules: false }).submodule).toBe(
+        null,
+      );
   });
 });
 
@@ -335,6 +358,66 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     expect(
       container.querySelector('[data-testid="team-retained-confirm-warning"]')?.textContent,
     ).toBe(UNINTEGRATED_WARNING);
+  });
+
+  it('never calls a worktree with a submodule safely integrated, and warns about the submodule (issue #544)', async () => {
+    const integratedWithSubmodule = worktree({
+      executionId: 'execution-5',
+      role: 'submodule writer',
+      workerHead: 'b'.repeat(40),
+      integratedHead: 'c'.repeat(40),
+      integration: 'confirmed',
+      submodules: true,
+      executionState: 'completed',
+    });
+    const unintegratedWithSubmodule = worktree({
+      executionId: 'execution-6',
+      submodules: true,
+    });
+    api.listRetainedWorktrees.mockResolvedValueOnce({
+      worktrees: [integratedWithSubmodule, unintegratedWithSubmodule, failed],
+      total: 3,
+    });
+    await renderDialog();
+    const [integratedItem, unintegratedItem, plainItem] = items();
+    expect(integratedItem!.querySelector('[data-testid="team-retained-state"]')?.textContent).toBe(
+      '完了 · 統合済み（片付けに失敗） · submoduleあり',
+    );
+    expect(plainItem!.querySelector('[data-testid="team-retained-state"]')?.textContent).toBe(
+      '失敗 · 未統合（変更を保持）',
+    );
+
+    await click(button(integratedItem!, 'team-retained-discard'));
+    let confirm = container.querySelector('[data-testid="team-retained-confirm"]');
+    expect(confirm?.textContent).toContain('submoduleのあるworktreeを破棄しますか？');
+    expect(
+      confirm?.querySelector('[data-testid="team-retained-confirm-warning"]')?.textContent,
+    ).toBe(SUBMODULE_DISCARD_WARNING);
+    expect(confirm?.textContent).not.toContain(INTEGRATED_WARNING);
+    expect(confirm?.textContent).not.toContain('統合済みです');
+    await click(
+      confirm!.querySelector<HTMLButtonElement>('[data-testid="team-retained-confirm-cancel"]')!,
+    );
+
+    // An unintegrated one keeps its own warning and gains the submodule one.
+    await click(button(unintegratedItem!, 'team-retained-discard'));
+    confirm = container.querySelector('[data-testid="team-retained-confirm"]');
+    expect(
+      confirm?.querySelector('[data-testid="team-retained-confirm-warning"]')?.textContent,
+    ).toBe(UNINTEGRATED_WARNING);
+    expect(
+      confirm?.querySelector('[data-testid="team-retained-confirm-submodule"]')?.textContent,
+    ).toBe(SUBMODULE_DISCARD_WARNING);
+    await click(
+      confirm!.querySelector<HTMLButtonElement>('[data-testid="team-retained-confirm-cancel"]')!,
+    );
+
+    // Without a submodule nothing changes.
+    await click(button(plainItem!, 'team-retained-discard'));
+    confirm = container.querySelector('[data-testid="team-retained-confirm"]');
+    expect(confirm?.querySelector('[data-testid="team-retained-confirm-submodule"]')).toBeNull();
+    expect(confirm?.textContent).not.toContain('submodule');
+    expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
   });
 
   it("keeps the confirmation open with Main's reason when the discard is refused", async () => {

@@ -910,6 +910,12 @@ export const teamRetainedWorktreeSchema = z
      * it was recorded but Main no longer finds it there (or could not check).
      */
     integration: z.enum(['none', 'confirmed', 'unconfirmed']),
+    /**
+     * The worktree on disk holds a submodule (or Main could not tell). A Worker's commits inside
+     * one may exist only in this worktree while the Workspace refers to them, so an integrated
+     * change is no assurance that discarding it loses nothing.
+     */
+    submodules: z.boolean(),
     /** Files the isolation recorded when it sealed a commit; the live state comes from inspect. */
     changedFileCount: z.number().int().min(0).max(500),
     reason: z.string().min(1).max(2_000).nullable(),

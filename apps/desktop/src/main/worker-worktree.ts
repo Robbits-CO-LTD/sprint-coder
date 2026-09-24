@@ -584,6 +584,20 @@ export class WorkerWorktreeManager {
   }
 
   /**
+   * Whether a retained worktree holds a submodule, by the same test the automatic cleanup keeps one
+   * with (issue #544). Reads only. A worktree that is gone has none on disk; one this manager cannot
+   * read, or does not own, counts as holding one, so the user is warned rather than reassured.
+   */
+  async hasSubmodules(input: DiscardWorktreeInput): Promise<boolean> {
+    try {
+      const worktreePath = await this.locateOwnedWorktree(input);
+      return worktreePath !== null && (await this.containsSubmodules(worktreePath));
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * Whether `commit` is in the history of the repository's current HEAD, read without changing
    * anything. False also when Git cannot tell, so a caller never treats unverified work as merged.
    */

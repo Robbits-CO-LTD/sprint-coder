@@ -1099,6 +1099,7 @@ describe('public contracts', () => {
       workerHead: null,
       integratedHead: null,
       integration: 'none',
+      submodules: false,
       changedFileCount: 0,
       reason: 'Worker failed',
       executionState: 'failed',

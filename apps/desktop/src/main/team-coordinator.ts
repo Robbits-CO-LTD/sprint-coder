@@ -2499,6 +2499,7 @@ export class TeamCoordinator {
           workerHead: repository.workerHead,
           integratedHead: repository.integratedHead,
           integration: await this.retainedWorktreeIntegration(repository),
+          submodules: await this.retainedWorktreeSubmodules(execution, repository),
           changedFileCount: repository.changedFiles.length,
           reason: isolation.reason,
           executionState: execution.state,
@@ -2680,6 +2681,26 @@ export class TeamCoordinator {
       ?.headContains(repository.repoPath, repository.integratedHead)
       .catch(() => false);
     return contained === true ? 'confirmed' : 'unconfirmed';
+  }
+
+  /**
+   * Whether a retained worktree on disk holds a submodule, read only (issue #544). The automatic
+   * cleanup keeps such a worktree, and its integrated gitlink may point at a commit only its
+   * submodule store holds, so the discard confirmation must not call it safely integrated. Without
+   * a worktree manager Main cannot tell, and says there may be one.
+   */
+  private async retainedWorktreeSubmodules(
+    execution: TeamExecutionRecord,
+    repository: TeamExecutionIsolation['repositories'][number],
+  ): Promise<boolean> {
+    return (
+      (await this.worktreeManager?.hasSubmodules({
+        agentId: execution.assigneeAgentId,
+        worktreeId: isolationWorktreeId(execution.id, repository.ordinal),
+        repoPath: repository.repoPath,
+        path: repository.worktreePath,
+      })) ?? true
+    );
   }
 
   /** The retained worktree's own directory, refused unless Sprint Coder created it and it exists. */
