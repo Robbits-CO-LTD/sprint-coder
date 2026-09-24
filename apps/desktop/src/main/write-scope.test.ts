@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { AccessPreset } from '@sprint-coder/contracts';
 import { posix, win32 } from 'node:path';
-import { relativizeWorkspacePath, resolveWorkerWriteScope, resolveWriteScope } from './write-scope';
+import {
+  relativizeWorkspacePath,
+  resolveWorkerWriteScope,
+  resolveWriteScope,
+  workerWriteScopeFor,
+  workerWritesNeedApproval,
+} from './write-scope';
 
 const rel = (workspace: string, candidate: string): string | null =>
   relativizeWorkspacePath(workspace, candidate, posix.resolve, posix.relative, posix.sep);
@@ -39,6 +45,37 @@ describe('resolveWorkerWriteScope (issue #525)', () => {
 
   it('keeps a Team Worker read-only for a preset value outside AccessPreset', () => {
     expect(resolveWorkerWriteScope('unknown' as AccessPreset, '/tmp/ws')).toBe('read-only');
+  });
+});
+
+describe('workerWriteScopeFor (issue #525)', () => {
+  // What ipc.ts hands the CLI Team Worker runtime as its writeScopeFor.
+  it.each([
+    [true, 'ask', '/tmp/ws', 'workspace-write'],
+    [true, 'auto', '/tmp/ws', 'workspace-write'],
+    [true, 'full', '/tmp/ws', 'full'],
+    [true, 'ask', null, 'read-only'],
+    [true, 'auto', null, 'read-only'],
+    [true, 'full', null, 'read-only'],
+    [false, 'ask', '/tmp/ws', 'read-only'],
+    [false, 'auto', '/tmp/ws', 'read-only'],
+    [false, 'full', '/tmp/ws', 'read-only'],
+  ] as const)(
+    'gives a Worker with writeCapable=%s at %s and Workspace %s the scope %s',
+    (writeCapable, preset, workspacePath, scope) => {
+      expect(workerWriteScopeFor(writeCapable, preset, workspacePath)).toBe(scope);
+    },
+  );
+});
+
+describe('workerWritesNeedApproval (issue #525)', () => {
+  // What ipc.ts hands both Team Worker runtimes as their writeApprovalRequiredFor.
+  it.each([
+    ['ask', true],
+    ['auto', false],
+    ['full', false],
+  ] as const)('tells the Worker at %s that each write waits for approval: %s', (preset, needed) => {
+    expect(workerWritesNeedApproval(preset)).toBe(needed);
   });
 });
 

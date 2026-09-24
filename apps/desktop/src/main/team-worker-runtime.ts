@@ -141,7 +141,8 @@ export const WORKER_CANNOT_WRITE_NOTICE =
 
 /**
  * 安全設定「確認する」の Task で、書き込み可能な実行の Worker に伝える（issue #525）。書き込みは
- * 1回ごとに Leader の Turn の承認カードで利用者の許可を待つ。
+ * 1回ごとに親の Turn（Leader の Turn、Graph Mission ではそのセッション Turn）の承認カードで利用者の
+ * 許可を待つ。
  */
 export const WORKER_WRITE_APPROVAL_NOTICE =
   'ファイルの書き込みは、1回ごとに利用者の承認を待ってから反映されます。拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。';
