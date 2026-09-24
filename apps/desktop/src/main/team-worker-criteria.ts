@@ -54,6 +54,7 @@ export function workerCriteriaPrompt(doneCriteria: readonly string[]): string {
     '- status: 満たした条件は "done"、満たしていない・確かめられなかった条件は "not_done"',
     '- evidence: done なら何をしてどう確かめたか、not_done ならできなかった理由（4000文字以内）',
     '満たしていない条件を "done" と報告しないでください。報告が無い・形式が違う・"not_done" の条件は未達として扱われ、この実行は失敗になります。',
+    'このブロックのあとには何も書かないでください。',
     '```json',
     JSON.stringify({ criteria: example }),
     '```',
@@ -64,10 +65,12 @@ export type WorkerCriteriaReportResult =
   { ok: true; criteria: WorkerCriterionReport[]; text: string } | { ok: false; reason: string };
 
 /**
- * Reads the per-criterion report from the last ```json block of a Worker's final answer. Every
+ * Reads the per-criterion report from the ```json block that ends a Worker's final answer. Every
  * criterion number must appear exactly once with a valid status, and a done criterion needs
- * evidence. Anything else — no block, an unclosed (cut off) block, invalid JSON, an unknown,
- * duplicate or missing number — is a reason, never a partial report. The criterion text is always
+ * evidence. Anything else — no block, an unclosed (cut off) block, a block followed by more text,
+ * invalid JSON, an unknown, duplicate or missing number — is a reason, never a partial report. A
+ * block with text after it was written before the answer ended (say, before a tool call whose
+ * result the Worker then acted on), so it is not the final report. The criterion text is always
  * the task's own, whatever the model wrote. `text` is the answer without the report block.
  */
 export function parseWorkerCriteriaReport(
@@ -81,6 +84,10 @@ export function parseWorkerCriteriaReport(
   if (block.close === null)
     return fail(
       '完了条件ごとの報告の ```json ブロックが閉じられていません（途中で切れています）。',
+    );
+  if (finalText.slice(block.close + 3).trim() !== '')
+    return fail(
+      '完了条件ごとの報告の ```json ブロックが最終回答の最後にありません（ブロックのあとに文章が続いています）。',
     );
   let parsed: unknown;
   try {

@@ -559,6 +559,46 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     },
   );
 
+  it('takes no criteria from a final answer whose report block is followed by more text', async () => {
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute() {
+        yield {
+          type: 'output_delta',
+          text: [
+            '調べました。',
+            '```json',
+            JSON.stringify({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] }),
+            '```',
+            'やはり未確認です。',
+          ].join('\n'),
+        };
+        yield { type: 'completed', stopReason: 'completed' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: '調査してください',
+      doneCriteria: ['仕様を確認する'],
+    });
+
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.criteria).toBeUndefined();
+    expect(completion.verification).toContainEqual(
+      expect.objectContaining({
+        name: 'criteria-report',
+        outcome: 'fail',
+        detail: expect.stringContaining('最終回答の最後にありません'),
+      }),
+    );
+    expect(completion.summary).toContain('やはり未確認です。');
+  });
+
   it('keeps an external Worker answer longer than 4000 characters within the summary', async () => {
     const runtime: ProviderRuntime = {
       verify: vi.fn(),

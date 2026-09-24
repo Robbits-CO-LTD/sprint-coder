@@ -1802,6 +1802,55 @@ describe('RuntimeHostTeamWorkerRuntime done criteria report', () => {
     subject.dispose();
   });
 
+  const allDone = [
+    '```json',
+    JSON.stringify({
+      criteria: [
+        { index: 1, status: 'done', evidence: '確認しました' },
+        { index: 2, status: 'done', evidence: '出典を示しました' },
+      ],
+    }),
+    '```',
+  ].join('\n');
+
+  it.each([
+    [
+      'a report followed by more text',
+      `答えは42です。\n${allDone}\n補足: 以上です。`,
+      '補足: 以上です。',
+    ],
+    [
+      'a report written mid-turn and then only "未完了です"',
+      `全部できました。\n${allDone}\n未完了です。`,
+      '未完了です。',
+    ],
+  ])('takes no criteria from %s', async (_label, finalText, remains) => {
+    runtimeHostMock.finalText = finalText;
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toBeUndefined();
+    expect(completion.verification).toContainEqual({
+      name: 'criteria-report',
+      outcome: 'fail',
+      detail: expect.stringContaining('最終回答の最後にありません'),
+    });
+    expect(completion.summary).toContain(remains);
+    subject.dispose();
+  });
+
+  it('takes the criteria from a report followed only by whitespace', async () => {
+    runtimeHostMock.finalText = `答えは42です。\n${allDone}\n\n  \n`;
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    expect(completion.summary).toBe('答えは42です。');
+    subject.dispose();
+  });
+
   it('returns no criteria and a failed criteria-report verification for a missing report', async () => {
     runtimeHostMock.finalText = '全部終わりました。';
     const subject = runtime();

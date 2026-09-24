@@ -42,6 +42,7 @@ describe('workerCriteriaPrompt', () => {
     expect(prompt).toContain('番号1〜2をちょうど1回ずつ');
     expect(prompt).toContain('```json\n{"criteria":[{"index":1,"status":"done"');
     expect(prompt).toContain('"status":"not_done"');
+    expect(prompt).toContain('このブロックのあとには何も書かないでください。');
   });
 
   it('asks a single criterion only for number 1 and asks nothing without criteria', () => {
@@ -78,17 +79,26 @@ describe('parseWorkerCriteriaReport', () => {
     });
   });
 
-  it('uses the last json block and keeps text written after it', () => {
+  it('uses the block that ends the answer, with only whitespace after it', () => {
     const example = answer({ criteria: [{ index: 1, status: 'done', evidence: '例' }] });
     const parsed = parseWorkerCriteriaReport(
-      `${example}\n\n${answer({ criteria: [{ index: 1, status: 'not_done', evidence: '' }] }, '最終報告', '\n以上です。')}`,
+      `${example}\n\n${answer({ criteria: [{ index: 1, status: 'not_done', evidence: '' }] }, '最終報告', '\n \n\t')}`,
       ['答えを見つける'],
     );
     expect(parsed).toMatchObject({
       ok: true,
       criteria: [{ status: 'not_done', evidence: '' }],
     });
-    expect(parsed.ok && parsed.text.endsWith('最終報告\n\n以上です。')).toBe(true);
+    expect(parsed.ok && parsed.text.endsWith('最終報告')).toBe(true);
+  });
+
+  it('rejects a report block followed by more text, as it is not the final report', () => {
+    const done = answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] });
+    const parsed = parseWorkerCriteriaReport(`${done}\n未完了です。`, ['答えを見つける']);
+    expect(parsed).toEqual({
+      ok: false,
+      reason: expect.stringContaining('最終回答の最後にありません'),
+    });
   });
 
   it.each([
