@@ -74,3 +74,4 @@ export function retainedWorktreeBlockedReason(facts: RetainedWorktreeFacts): str
     return 'Workerの処理（CLI）が終了したことをまだ確認できていないため破棄できません。終了を確認できると破棄できるようになります。';
   return null;
 }
+
