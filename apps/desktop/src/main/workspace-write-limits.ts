@@ -84,14 +84,15 @@ export function workerWriteLimitNotice(
     (limitsChecked.createDirectory
       ? '新しいファイルは作れます。'
       : '新しいファイルは、既にあるフォルダの中だけに作れます。') +
-    `${cannotList(limitsChecked, 'や')}が必要なときは、別名のファイルを作って代わりにせず、` +
-    'ファイルは変えずに必要な変更内容を報告してください。'
+    `${cannotList(limitsChecked, 'や')}が必要な部分は、別名のファイルを作って代わりにせず、` +
+    'その部分は変えずに必要な変更内容を報告してください。'
   );
 }
 
 /**
  * 割り当て結果（team_assign_task/team_assign_mission）へ載せる、Leader/Manager 向けの日本語の
- * 注記。制限が無いときは空文字列。
+ * 注記。制限はホスト全体のもので、Mission の複数の Worker にも同じくかかるため、特定の Worker を
+ * 指さない書き方にする。制限が無いときは空文字列。
  */
 export function leaderWriteLimitNote(
   limits: WorkspaceWriteLimits | null,
@@ -100,7 +101,7 @@ export function leaderWriteLimitNote(
   if (hasNoLimit(limits)) return '';
   const limitsChecked = limits as WorkspaceWriteLimits;
   return (
-    `このWorkerは${cannotList(limitsChecked, 'と')}ができません（${writeLimitReason(limitsChecked, platform)}）。` +
+    `この環境のWorkerは${cannotList(limitsChecked, 'と')}ができません（${writeLimitReason(limitsChecked, platform)}）。` +
     `${cannotList(limitsChecked, 'や')}が必要な作業は、Workerに変更内容の報告を頼んでください。`
   );
 }

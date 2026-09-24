@@ -1386,6 +1386,10 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     expect(
       (prompt.match(/既存ファイルの編集・削除とフォルダの作成はできません/g) ?? []).length,
     ).toBe(1);
+    // The notice sits on the line right after the Workspace write line.
+    const lines = prompt.split('\n');
+    const writeLine = lines.findIndex((line) => line.startsWith('Workspace書き込み:'));
+    expect(lines[writeLine + 1]).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
   });
 
   it('adds no write limit notice when the managed tools include apply_patch and create_directory too', async () => {

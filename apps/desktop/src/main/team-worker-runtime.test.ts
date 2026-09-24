@@ -1780,6 +1780,10 @@ describe('RuntimeHostTeamWorkerRuntime workspace write limit notice', () => {
     expect(startPrompt).toContain('Workspace書き込み: 隔離範囲内で可');
     expect(startPrompt).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
     expect(occurrences('既存ファイルの編集・削除とフォルダの作成はできません')).toBe(1);
+    // The notice sits on the line right after the Workspace write line.
+    const lines = startPrompt.split('\n');
+    const writeLine = lines.findIndex((line) => line.startsWith('Workspace書き込み:'));
+    expect(lines[writeLine + 1]).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
 
     // The same final instruction text reaches authorizeEgress's serialized payload and client.start.
     const egressText = authorizeEgress.mock.calls[0]?.[3] as string;
@@ -1804,6 +1808,39 @@ describe('RuntimeHostTeamWorkerRuntime workspace write limit notice', () => {
     const start = runtimeHostMock.starts.at(-1)!;
     expect(start.args[2]).toContain('Workspace書き込み: 隔離範囲内で可');
     expect(start.args[2]).not.toContain('はできません');
+    subject.dispose();
+  });
+
+  it('decides the notice from the catalog of each fallback choice', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      retryAt: '2099-08-10T02:00:00.000Z',
+    });
+    const subject = runtime({
+      writeScopeFor: () => 'workspace-write',
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+      catalogFor: (kind) =>
+        kind === 'claude'
+          ? catalogWith([WORKSPACE_CREATE_FILE_TOOL])
+          : catalogWith([
+              WORKSPACE_CREATE_FILE_TOOL,
+              WORKSPACE_PATCH_TOOL,
+              WORKSPACE_CREATE_DIRECTORY_TOOL,
+            ]),
+    });
+
+    await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude', 'codex']);
+    const [claudeStart, codexStart] = runtimeHostMock.starts;
+    expect(claudeStart?.args[2]).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+    expect(codexStart?.args[2]).not.toContain('はできません');
     subject.dispose();
   });
 
