@@ -201,7 +201,13 @@ import { ManagedCodingHarness } from './provider-workspace-tools';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { workspaceMutationBinding } from './path-guard';
 import { ToolImageBridge } from './tool-image-bridge';
-import { ToolAuthorizationDeniedError } from './tool-broker';
+import {
+  ToolAuthorizationDeniedError,
+  ToolBroker,
+  type ToolAuthorizationDecision,
+} from './tool-broker';
+import { ToolRegistry } from '@sprint-coder/domain';
+import { WORKSPACE_CREATE_FILE_TOOL } from './workspace-patch-tool';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
 import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
@@ -2155,6 +2161,7 @@ describe('Main image attachment dispatch boundary', () => {
             },
             workspace: {},
             mutationBindings: new Map(),
+            released: new AbortController(),
           },
         ],
       ]),
@@ -2766,6 +2773,137 @@ describe('Main image attachment dispatch boundary', () => {
       await prepare('runtime-c', 'execution-c');
       expect(startTurn).toHaveBeenCalledTimes(2);
       expect(startTurn.mock.calls[1]![0]).toMatchObject({ turnId: missionTurnId });
+    });
+  });
+
+  describe('Worker write waiting on an Approval Card when its Worker Turn ends (issue #525)', () => {
+    const prepareWorkerManagedCatalog = Reflect.get(
+      IpcRouter.prototype,
+      'prepareWorkerManagedCatalog',
+    ) as (
+      this: unknown,
+      kind: 'claude' | 'codex' | 'grok' | 'provider',
+      taskId: string,
+      runtimeTurnId: string,
+      runtimeWorkspace: { primaryRootId: string | null; digest: string; roots: readonly never[] },
+      canDelegate: boolean,
+      writeScope: 'read-only' | 'workspace-write' | 'full',
+      executionId?: string,
+    ) => Promise<{ digest: string }>;
+    const releaseManagedWorkerTurn = Reflect.get(
+      IpcRouter.prototype,
+      'releaseManagedWorkerTurn',
+    ) as (this: unknown, runtimeTurnId: string) => void;
+    const createHandlers = Reflect.get(
+      IpcRouter.prototype,
+      'createGenericManagedRuntimeToolHandlers',
+    ) as (this: unknown) => {
+      teamMcp(
+        input: unknown,
+        context: {
+          taskId: string;
+          turnId: string;
+          callId: string;
+          toolName: string;
+          catalogDigest: string;
+        },
+      ): Promise<unknown>;
+    };
+
+    /**
+     * A Claude/Grok Worker's create_file through Team MCP, on a real ToolBroker whose authorizer
+     * holds each call the way a durable Approval Card does. The parent Turn stays active throughout.
+     */
+    async function workerWriteAwaitingApproval() {
+      const registry = new ToolRegistry();
+      registry.register(WORKSPACE_CREATE_FILE_TOOL);
+      const approvals: Array<(decision: ToolAuthorizationDecision) => void> = [];
+      const broker = new ToolBroker(
+        registry,
+        () => 9,
+        () =>
+          new Promise<ToolAuthorizationDecision>((resolve) => {
+            approvals.push(resolve);
+          }),
+      );
+      const execute = vi.fn(async () => ({}));
+      broker.registerImplementation({
+        toolId: WORKSPACE_CREATE_FILE_TOOL.toolId,
+        implementationKind: WORKSPACE_CREATE_FILE_TOOL.implementationKind,
+        execute,
+      });
+      broker.startTurn(
+        { taskId: 'task-1', turnId: 'turn-parent', workspaceId: 'workspace-1', policyEpoch: 9 },
+        'claude',
+      );
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        managedWorkerTurn: new Map(),
+        managedWorkerCall: new Map(),
+        managedCodingHarness: { broker },
+        cliTeamWorkerRuntime: {
+          recordManagedToolDenied: vi.fn(),
+          recordManagedToolResult: vi.fn(),
+        },
+        persistence: {
+          getActiveTurnId: () => 'turn-parent',
+          getTeamMissionForExecution: () => null,
+          readTurnWorkspaceSetForTask: () => null,
+          getPermissionPolicy: () => ({ policyEpoch: 9 }),
+        },
+      });
+      const catalog = await prepareWorkerManagedCatalog.call(
+        router,
+        'claude',
+        'task-1',
+        'runtime-worker',
+        { primaryRootId: null, digest: 'x'.repeat(64), roots: [] },
+        false,
+        'workspace-write',
+      );
+      const call = (callId: string) =>
+        createHandlers.call(router).teamMcp(
+          { path: 'a.txt', content: 'hello' },
+          {
+            taskId: 'task-1',
+            turnId: 'runtime-worker',
+            callId,
+            toolName: 'create_file',
+            catalogDigest: catalog.digest,
+          },
+        );
+      const allow = (index: number) =>
+        approvals[index]!({ decision: 'allow', reason: 'test_allow', beforeExecute: () => true });
+      return { router, execute, approvals, call, allow };
+    }
+
+    it('writes when the card is allowed while the Worker Turn is still running', async () => {
+      const { execute, approvals, call, allow } = await workerWriteAwaitingApproval();
+
+      const pending = call('call-1');
+      await vi.waitFor(() => expect(approvals).toHaveLength(1));
+      allow(0);
+
+      await expect(pending).resolves.toEqual({});
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('does not write when the card is allowed after the Worker Turn was released', async () => {
+      const { router, execute, approvals, call, allow } = await workerWriteAwaitingApproval();
+
+      const pending = call('call-1');
+      await vi.waitFor(() => expect(approvals).toHaveLength(1));
+      releaseManagedWorkerTurn.call(router, 'runtime-worker');
+      allow(0);
+
+      await expect(pending).rejects.toThrow('Team Worker Turn ended');
+      expect(execute).not.toHaveBeenCalled();
+      // A call arriving after the release has no Worker record, and is refused before the broker.
+      await expect(Promise.resolve().then(() => call('call-2'))).rejects.toThrow(
+        'Managed tool catalog digest changed',
+      );
+      expect(approvals).toHaveLength(1);
+      expect(execute).not.toHaveBeenCalled();
     });
   });
 });

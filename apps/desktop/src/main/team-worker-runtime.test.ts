@@ -136,6 +136,7 @@ import {
   buildInheritedWorkerContext,
   TeamRuntimeAvailabilityTracker,
   chooseWorkerRuntime,
+  WORKER_WRITE_APPROVAL_NOTICE,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
 import {
@@ -209,6 +210,7 @@ function runtime(
     releaseManagedTurn?: (turnId: string) => void;
     contextFor?: TeamWorkerRuntimeDeps['contextFor'];
     writeScopeFor?: TeamWorkerRuntimeDeps['writeScopeFor'];
+    writeApprovalRequiredFor?: TeamWorkerRuntimeDeps['writeApprovalRequiredFor'];
     authorizeEgress?: TeamWorkerRuntimeDeps['authorizeEgress'];
     selectRuntimes?: TeamWorkerRuntimeDeps['selectRuntimes'];
     availability?: TeamRuntimeAvailabilityTracker;
@@ -229,6 +231,9 @@ function runtime(
       : { releaseManagedTurn: overrides.releaseManagedTurn }),
     ...(overrides.contextFor === undefined ? {} : { contextFor: overrides.contextFor }),
     ...(overrides.writeScopeFor === undefined ? {} : { writeScopeFor: overrides.writeScopeFor }),
+    ...(overrides.writeApprovalRequiredFor === undefined
+      ? {}
+      : { writeApprovalRequiredFor: overrides.writeApprovalRequiredFor }),
   });
 }
 
@@ -1618,7 +1623,9 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     expect(completionOf(result).verification).toContainEqual(
       expect.objectContaining({ name: 'worker-write-scope', outcome: 'fail' }),
     );
-    expect(completionOf(result).summary).toContain('安全設定「確認する」');
+    // 安全設定「確認する」でも Worker は書き込めるので（issue #525）、その設定を理由にしない。
+    expect(completionOf(result).summary).toContain('書き込みが許可されなかった');
+    expect(completionOf(result).summary).not.toContain('確認する');
     subject.dispose();
   });
 
@@ -1860,6 +1867,92 @@ describe('RuntimeHostTeamWorkerRuntime workspace write limit notice', () => {
     expect(start.args[2]).toContain('Workspace書き込み: 禁止（読み取り専用）');
     expect(start.args[2]).not.toContain('既存ファイルの編集・削除');
     subject.dispose();
+  });
+});
+
+describe('RuntimeHostTeamWorkerRuntime write approval notice (issue #525)', () => {
+  const writableWorker = (): AgentRecord => ({ ...worker(false), writeCapable: true });
+  const writeInput = {
+    envelope: { ...envelope, targetAgentId: 'worker-1' },
+    content: 'ファイルを編集してください',
+    accessMode: 'workspace-write' as const,
+    workspacePath: '/isolated/worktree',
+  };
+  const occurrences = (prompt: string): number =>
+    prompt.split(WORKER_WRITE_APPROVAL_NOTICE).length - 1;
+
+  function catalogWith(tools: readonly ToolDefinition[]): ToolCatalogSnapshot {
+    const registry = new ToolRegistry();
+    for (const tool of tools) registry.register(tool);
+    return registry.createSnapshot({ providerId: 'claude', workspaceId: 'workspace-1' });
+  }
+
+  async function startPrompt(
+    overrides: Parameters<typeof runtime>[0],
+    input: Omit<Parameters<RuntimeHostTeamWorkerRuntime['execute']>[0], 'worker'> = writeInput,
+    subjectWorker: AgentRecord = writableWorker(),
+  ): Promise<string> {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime(overrides);
+    try {
+      await subject.execute({ ...input, worker: subjectWorker });
+      return runtimeHostMock.starts.at(-1)!.args[2] as string;
+    } finally {
+      subject.dispose();
+    }
+  }
+
+  it('tells a write-capable Worker exactly once, after the write limit notice, that each write waits for approval', async () => {
+    const writeApprovalRequiredFor = vi.fn(() => true);
+
+    const prompt = await startPrompt({
+      writeScopeFor: () => 'workspace-write',
+      writeApprovalRequiredFor,
+      catalogFor: () => catalogWith([WORKSPACE_CREATE_FILE_TOOL]),
+    });
+
+    expect(writeApprovalRequiredFor).toHaveBeenCalledWith('task-1');
+    expect(occurrences(prompt)).toBe(1);
+    const lines = prompt.split('\n');
+    const writeLine = lines.findIndex((line) => line.startsWith('Workspace書き込み:'));
+    expect(lines[writeLine]).toBe('Workspace書き込み: 隔離範囲内で可');
+    expect(lines[writeLine + 1]).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+    expect(lines[writeLine + 2]).toBe(WORKER_WRITE_APPROVAL_NOTICE);
+  });
+
+  it('adds only that line: without it the prompt is the one given when approval is not required', async () => {
+    const overrides = { writeScopeFor: () => 'workspace-write' as const };
+    const unspecified = await startPrompt(overrides);
+    const notRequired = await startPrompt({ ...overrides, writeApprovalRequiredFor: () => false });
+    const required = await startPrompt({ ...overrides, writeApprovalRequiredFor: () => true });
+
+    expect(occurrences(unspecified)).toBe(0);
+    expect(notRequired).toBe(unspecified);
+    expect(
+      required
+        .split('\n')
+        .filter((line) => line !== WORKER_WRITE_APPROVAL_NOTICE)
+        .join('\n'),
+    ).toBe(unspecified);
+  });
+
+  it('adds no approval notice to an execution that cannot write', async () => {
+    // A read-only investigation by a Worker that is not write-capable.
+    const investigation = await startPrompt(
+      { writeScopeFor: () => 'workspace-write', writeApprovalRequiredFor: () => true },
+      { ...writeInput, accessMode: 'read-only' },
+      worker(false),
+    );
+    expect(investigation).toContain('Workspace書き込み: 禁止（読み取り専用）');
+    expect(occurrences(investigation)).toBe(0);
+
+    // A write execution whose scope still came out read-only (e.g. no Workspace).
+    const downgraded = await startPrompt({
+      writeScopeFor: () => 'read-only',
+      writeApprovalRequiredFor: () => true,
+    });
+    expect(downgraded).toContain('Workspace書き込み: 禁止（読み取り専用）');
+    expect(occurrences(downgraded)).toBe(0);
   });
 });
 

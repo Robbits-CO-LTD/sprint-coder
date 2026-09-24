@@ -12,6 +12,7 @@ import {
   ProviderAwareTeamWorkerRuntime,
   type ProviderTeamWorkerRuntimeDeps,
 } from './provider-team-worker-runtime';
+import { WORKER_WRITE_APPROVAL_NOTICE } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError } from './tool-broker';
 
 const connection: ProviderConnection = {
@@ -1084,6 +1085,7 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     finalAnswer?: string;
     /** The managed tools the catalog hands to the model. */
     tools?: readonly string[];
+    writeApprovalRequiredFor?: (taskId: string) => boolean;
   }) {
     const requests: ProviderExecutionRequest[] = [];
     const runtime: ProviderRuntime = {
@@ -1123,6 +1125,9 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       registry,
       getConnection: () => managedConnection,
       authorizeEgress: () => true,
+      ...(options.writeApprovalRequiredFor === undefined
+        ? {}
+        : { writeApprovalRequiredFor: options.writeApprovalRequiredFor }),
       managerGuidance: '',
       managerTools: [],
       workerGuidance: 'Use workspace tools.',
@@ -1414,6 +1419,74 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     const prompt = workerPromptOf(requests[0]);
     expect(prompt).toContain('Workspace書き込み: 禁止（読み取り専用）');
     expect(prompt).not.toContain('既存ファイルの編集・削除');
+  });
+
+  describe('write approval notice (issue #525)', () => {
+    const occurrences = (prompt: string): number =>
+      prompt.split(WORKER_WRITE_APPROVAL_NOTICE).length - 1;
+
+    async function promptWith(
+      options: Partial<Parameters<typeof managedLocalWorker>[0]>,
+      run: ReturnType<typeof execution> = execution(),
+    ): Promise<string> {
+      const { adapter, requests } = managedLocalWorker({
+        toolRounds: [],
+        executeTool: vi.fn(),
+        ...options,
+      });
+      await adapter.execute(run);
+      return workerPromptOf(requests[0]);
+    }
+
+    it('tells a Worker given write tools exactly once, after the write limit notice, that each write waits for approval', async () => {
+      const writeApprovalRequiredFor = vi.fn(() => true);
+
+      const prompt = await promptWith({
+        tools: ['create_file', 'read_file'],
+        writeApprovalRequiredFor,
+      });
+
+      expect(writeApprovalRequiredFor).toHaveBeenCalledWith('task-1');
+      expect(occurrences(prompt)).toBe(1);
+      const lines = prompt.split('\n');
+      const writeLine = lines.findIndex((line) => line.startsWith('Workspace書き込み:'));
+      expect(lines[writeLine]).toBe('Workspace書き込み: 隔離範囲内で可（管理ツール経由）');
+      expect(lines[writeLine + 1]).toContain(
+        '既存ファイルの編集・削除とフォルダの作成はできません',
+      );
+      expect(lines[writeLine + 2]).toBe(WORKER_WRITE_APPROVAL_NOTICE);
+    });
+
+    it('adds only that line: without it the prompt is the one given when approval is not required', async () => {
+      const unspecified = await promptWith({});
+      const notRequired = await promptWith({ writeApprovalRequiredFor: () => false });
+      const required = await promptWith({ writeApprovalRequiredFor: () => true });
+
+      expect(occurrences(unspecified)).toBe(0);
+      expect(notRequired).toBe(unspecified);
+      expect(
+        required
+          .split('\n')
+          .filter((line) => line !== WORKER_WRITE_APPROVAL_NOTICE)
+          .join('\n'),
+      ).toBe(unspecified);
+    });
+
+    it('adds no approval notice to an execution handed no write tool', async () => {
+      const readOnly = await promptWith(
+        { tools: ['read_file'], writeApprovalRequiredFor: () => true },
+        execution('read-only', false),
+      );
+      expect(readOnly).toContain('Workspace書き込み: 禁止（読み取り専用）');
+      expect(occurrences(readOnly)).toBe(0);
+
+      const noWriteTool = await promptWith(
+        { tools: ['read_file'], writeApprovalRequiredFor: () => true },
+        execution('workspace-write', true),
+      );
+      expect(noWriteTool).toContain('今回の実行ではファイルを変更できません');
+      expect(occurrences(noWriteTool)).toBe(0);
+    });
   });
 });
 

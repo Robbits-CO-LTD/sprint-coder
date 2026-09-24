@@ -383,7 +383,12 @@ import {
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
-import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
+import {
+  relativizeWorkspacePath,
+  resolveWriteScope,
+  workerWriteScopeFor,
+  workerWritesNeedApproval,
+} from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
 import { openWorkspaceFileForEdit, recoverWorkspaceFileForEdit } from './workspace-edit';
@@ -1086,6 +1091,12 @@ export class IpcRouter {
         string,
         Readonly<{ workspaceKey: string; rootIdentityDigest: string }>
       >;
+      /**
+       * Worker の Turn が解放されたときに中断する（issue #525）。この Worker の管理ツール呼び出しは
+       * すべてこの signal を持つので、承認カードを待つ間に Worker が止まると、後で許可されても
+       * ToolBroker は実行前の中断確認で書き込みを実行しない。
+       */
+      released: AbortController;
     }>
   >();
   private readonly managedWorkerCall = new Map<
@@ -1389,6 +1400,10 @@ export class IpcRouter {
       this.skillSettings.pinnedAutoCandidates(runtime),
     );
     const genericManagedRuntimeTools = this.createGenericManagedRuntimeToolHandlers();
+    // 「確認する」では Worker の書き込みも1回ずつ、親の Turn（Leader の Turn、Graph Mission では
+    // そのセッション Turn）の承認カードで確認する（issue #525）。
+    const workerWriteApprovalRequiredFor = (taskId: string): boolean =>
+      workerWritesNeedApproval(this.persistence.getPermissionPolicy(taskId).preset);
     this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
@@ -1466,12 +1481,12 @@ export class IpcRouter {
           ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
           : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
       writeScopeFor: (worker, workspacePath) =>
-        worker.writeCapable
-          ? resolveWriteScope(
-              this.persistence.getPermissionPolicy(worker.taskId).preset,
-              workspacePath,
-            )
-          : 'read-only',
+        workerWriteScopeFor(
+          worker.writeCapable,
+          this.persistence.getPermissionPolicy(worker.taskId).preset,
+          workspacePath,
+        ),
+      writeApprovalRequiredFor: workerWriteApprovalRequiredFor,
       teamMcpFor: (worker, turnId, executionId, toolCatalog) =>
         worker.canDelegate
           ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog)
@@ -1514,6 +1529,7 @@ export class IpcRouter {
         executionId === undefined
           ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
           : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
+      writeApprovalRequiredFor: workerWriteApprovalRequiredFor,
       managerGuidance: () =>
         teamGuidance(
           MANAGER_MCP_SYSTEM_PROMPT,
@@ -5351,7 +5367,9 @@ export class IpcRouter {
         callId: brokerCallId,
         providerName: request.toolName,
         input: request.arguments,
-        signal,
+        // A Worker call also ends with its Worker Turn (issue #525). Team MCP hands this path a
+        // signal nothing aborts, and a write can wait on an Approval Card past the Worker's end.
+        signal: worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]),
       });
     } catch (error) {
       // A policy denial never reaches the result path below. Tell the Worker runtime, so a write
@@ -5399,6 +5417,9 @@ export class IpcRouter {
     const worker = this.managedWorkerTurn.get(runtimeTurnId);
     if (worker === undefined) return;
     this.managedWorkerTurn.delete(runtimeTurnId);
+    // A call still waiting on its Approval Card must not write once the Worker is gone, even if the
+    // card is allowed later while the parent Turn goes on (issue #525).
+    worker.released.abort(new Error('Team Worker Turn ended before its managed tool call ran'));
     if (
       !authorizationTurnIsActive(
         this.persistence.getActiveTurnId(worker.taskId),
@@ -7426,6 +7447,7 @@ export class IpcRouter {
       snapshot,
       workspace,
       mutationBindings,
+      released: new AbortController(),
     });
     return snapshot;
   }

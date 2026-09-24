@@ -29,6 +29,7 @@ import {
   isCommittedManagedWrite,
   reserveTeamWorkerContext,
   WORKER_CANNOT_WRITE_NOTICE,
+  WORKER_WRITE_APPROVAL_NOTICE,
   WORKSPACE_WRITE_TOOL_NAMES,
   workerWriteCheckedCompletion,
   workerWriteFailure,
@@ -56,6 +57,11 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     knownWorkspaceRoots: readonly string[];
   }): boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
+  /**
+   * Task の安全設定が書き込みのたびに利用者の承認を求めるとき true（issue #525）。未指定は false で、
+   * そのとき指示文は変わらない。
+   */
+  writeApprovalRequiredFor?: (taskId: string) => boolean;
   managerGuidance: string | ((worker: AgentRecord) => string);
   managerTools: readonly ProviderTool[];
   workerGuidance: string;
@@ -215,6 +221,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         managedLocal: connection.id === this.deps.managedToolsConnectionId,
         writeRequested: input.accessMode === 'workspace-write',
         writeLimitNotice,
+        writeApprovalRequired: this.deps.writeApprovalRequiredFor?.(input.worker.taskId) === true,
       },
     );
 
@@ -615,6 +622,8 @@ function workerPrompt(
     writeRequested: boolean;
     /** What the actually-handed-over managed tools cannot do, e.g. the Windows add-only limit. */
     writeLimitNotice: string;
+    /** The Task asks the user before each write (issue #525). */
+    writeApprovalRequired: boolean;
   }>,
 ): string {
   return [
@@ -631,6 +640,7 @@ function workerPrompt(
           : '公式API Workerでは利用不可'
     }`,
     workspace.writable ? workspace.writeLimitNotice : '',
+    workspace.writable && workspace.writeApprovalRequired ? WORKER_WRITE_APPROVAL_NOTICE : '',
     workspace.writeRequested && !workspace.writable ? WORKER_CANNOT_WRITE_NOTICE : '',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     formatPriorTeamConversation(priorConversation),

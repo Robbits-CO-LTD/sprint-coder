@@ -100,6 +100,11 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   ) => boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
+  /**
+   * Task の安全設定が書き込みのたびに利用者の承認を求めるとき true（issue #525）。未指定は false で、
+   * そのとき指示文は変わらない。
+   */
+  writeApprovalRequiredFor?: (taskId: string) => boolean;
   teamMcpFor?: (
     worker: AgentRecord,
     turnId: string,
@@ -133,6 +138,14 @@ export type WorkerWriteObservation = { committed: number; denied: number };
 /** Told to a Worker whose Leader asked for edits that this run cannot make. */
 export const WORKER_CANNOT_WRITE_NOTICE =
   'Leaderは編集を依頼していますが、今回の実行ではファイルを変更できません。ファイルは変更せず、必要な変更内容を報告してください。';
+
+/**
+ * 安全設定「確認する」の Task で、書き込み可能な実行の Worker に伝える（issue #525）。書き込みは
+ * 1回ごとに親の Turn（Leader の Turn、Graph Mission ではそのセッション Turn）の承認カードで利用者の
+ * 許可を待つ。
+ */
+export const WORKER_WRITE_APPROVAL_NOTICE =
+  'ファイルの書き込みは、1回ごとに利用者の承認を待ってから反映されます。拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。';
 
 /**
  * How much text the Turn has produced, and how much of it came before its last tool call. The
@@ -480,7 +493,12 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             ),
           )
         : '';
-      const prompt = buildWorkerPrompt(input, writable, writeLimitNotice);
+      const prompt = buildWorkerPrompt(
+        input,
+        writable,
+        writeLimitNotice,
+        this.deps.writeApprovalRequiredFor?.(taskId) === true,
+      );
       teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
       if (input.worker.canDelegate === true && teamMcp === undefined)
         throw new Error('Manager Team MCP is unavailable');
@@ -833,7 +851,7 @@ export function workerWriteFailure(input: {
         : input.workspacePath === null
           ? '書き込み先のWorkspaceがないため、読み取り専用で実行されました。ファイルは変更されていません。'
           : (input.readOnlyCause ??
-            '安全設定「確認する」ではTeam Workerは読み取り専用で実行されるため、ファイルを変更できませんでした。'),
+            'このWorkerには今回の実行で書き込みが許可されなかったため、読み取り専用で実行されました。ファイルは変更されていません。'),
     };
   if (input.writes.denied > 0 && input.writes.committed === 0)
     return {
@@ -1048,12 +1066,14 @@ export function applyWorkerContextInheritance(
  * The CLI Worker's instruction text. `writeLimitNotice` — computed from this choice's own tool
  * catalog once it is known — is placed right after the "Workspace書き込み" line, and only when the
  * Worker is actually write-capable; a Worker with no write access at all keeps its existing
- * WORKER_CANNOT_WRITE_NOTICE instead.
+ * WORKER_CANNOT_WRITE_NOTICE instead. When the Task asks before each write, a write-capable Worker
+ * is also told so, right after that notice (issue #525).
  */
 function buildWorkerPrompt(
   input: TeamWorkerExecutionInput,
   writable: boolean,
   writeLimitNotice: string,
+  writeApprovalRequired: boolean,
 ): string {
   return [
     `あなたはチームの「${input.worker.role}」担当Workerです。`,
@@ -1063,6 +1083,7 @@ function buildWorkerPrompt(
     `Context継承: ${input.worker.contextInheritancePolicy}`,
     `Workspace書き込み: ${writable ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
     writable ? writeLimitNotice : '',
+    writable && writeApprovalRequired ? WORKER_WRITE_APPROVAL_NOTICE : '',
     input.accessMode === 'workspace-write' && !writable ? WORKER_CANNOT_WRITE_NOTICE : '',
     input.workspacePath === undefined
       ? ''
