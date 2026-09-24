@@ -425,6 +425,41 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     );
   });
 
+  it('tells whether a worktree changed from its base without removing it', async () => {
+    const { repoPath, manager } = await fixture();
+    const unchanged = await manager.create({ agentId: 'agent-read', repoPath });
+    const check = (agentId: string) =>
+      manager.hasChangesFromBase({ agentId, baseHead: unchanged.baseHead });
+
+    await expect(check('agent-read')).resolves.toBe(false);
+    expect((await stat(unchanged.path)).isDirectory()).toBe(true);
+
+    const untracked = await manager.create({ agentId: 'agent-untracked', repoPath });
+    await writeFile(join(untracked.path, 'new.txt'), 'untracked\n');
+    await expect(check('agent-untracked')).resolves.toBe(true);
+
+    const committed = await manager.create({ agentId: 'agent-committed', repoPath });
+    await writeFile(join(committed.path, 'README.md'), 'committed by an earlier attempt\n');
+    await git(['-C', committed.path, 'add', 'README.md']);
+    await git([
+      '-C',
+      committed.path,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'earlier attempt',
+    ]);
+    // A clean status after a commit still differs from the base.
+    await expect(check('agent-committed')).resolves.toBe(true);
+    expect((await stat(committed.path)).isDirectory()).toBe(true);
+
+    await expect(check('agent-missing')).rejects.toMatchObject({ code: 'create_failed' });
+  });
+
   it('keeps untracked files hidden by a repository status.showUntrackedFiles setting', async () => {
     const { repoPath, manager } = await fixture();
     await git(['-C', repoPath, 'config', 'status.showUntrackedFiles', 'no']);

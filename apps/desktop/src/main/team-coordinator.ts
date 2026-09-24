@@ -80,7 +80,9 @@ import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-h
 import { workspaceMutationBinding } from './path-guard';
 import {
   allCriteriaDone,
+  confirmWorkerReport,
   judgeWorkerCompletion,
+  workerWriteNotAttempted,
   type WorkerDoneEvidence,
 } from './team-worker-criteria';
 
@@ -101,6 +103,11 @@ export type WorkerRuntimeResult = Readonly<{
   }>;
   resolution?: ExecutionResolution;
   providerUsage?: NormalizedProviderUsage;
+  /**
+   * Set only by the in-process simulation (`DeterministicTeamWorkerRuntime`), which writes no file.
+   * Main then does not require a write execution's isolation to have changed (issue #550).
+   */
+  simulated?: true;
 }>;
 
 export type TeamExecutionSubmission = Readonly<{
@@ -340,6 +347,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
         timeMs: 1,
         toolCalls: 0,
       },
+      simulated: true as const,
     };
     input.onEvent?.({ type: 'completed' });
     return result;
@@ -1409,7 +1417,7 @@ export class TeamCoordinator {
         this.isoNow(),
       );
       this.emit(graph.taskId, execution.teamId);
-      const result = await this.dispatchWithRetry(
+      const dispatched = await this.dispatchWithRetry(
         execution.teamId,
         leader,
         worker,
@@ -1437,14 +1445,21 @@ export class TeamCoordinator {
         to: 'acked',
         now: this.isoNow(),
       });
-      this.settleExecution(budgets, result.usage);
+      this.settleExecution(budgets, dispatched.usage);
       budgets = [];
-      if (result.resolution || result.providerUsage)
+      if (dispatched.resolution || dispatched.providerUsage)
         this.persistence.recordTeamAttemptProviderResult(
           attemptId,
-          result.resolution,
-          result.providerUsage,
+          dispatched.resolution,
+          dispatched.providerUsage,
         );
+      const result = await this.requireWorkspaceWrite(dispatched, {
+        worker,
+        accessMode: execution.accessMode,
+        executionId: execution.id,
+        worktree,
+        isolation,
+      });
       const doneEvidence = result.doneEvidence;
       let changedFiles = [...result.changedFiles];
       if (result.value.status !== 'succeeded') throw new Error(result.value.summary);
@@ -2715,7 +2730,9 @@ export class TeamCoordinator {
       this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
 
       try {
-        const completion = await this.dispatchWithRetry(
+        // A direct message's only criterion is that the Worker reports back, which Main checks
+        // itself, so the Worker is not asked to report it (issue #550).
+        const dispatched = await this.dispatchWithRetry(
           team.id,
           leader,
           worker,
@@ -2723,8 +2740,14 @@ export class TeamCoordinator {
           message.seq,
           input.content,
           teamTask.id,
-          input.doneCriteria,
+          [],
         );
+        const confirmed = confirmWorkerReport(input.doneCriteria, dispatched.value);
+        const completion = {
+          ...dispatched,
+          value: confirmed.completion,
+          doneEvidence: confirmed.doneEvidence,
+        };
         this.persistence.transitionTeamMessageState(message.id, 'delivered');
         this.persistence.transitionTeamDelivery({
           messageId: message.id,
@@ -2915,7 +2938,7 @@ export class TeamCoordinator {
       this.persistence.setWorkerCurrentActivity(worker.id, content, this.isoNow());
       this.emit(input.taskId, input.teamId);
 
-      const completion = await this.dispatchWithRetry(
+      const dispatched = await this.dispatchWithRetry(
         input.teamId,
         leader,
         worker,
@@ -2952,14 +2975,21 @@ export class TeamCoordinator {
         to: 'acked',
         now: this.isoNow(),
       });
-      this.settleExecution(reservations, completion.usage);
+      this.settleExecution(reservations, dispatched.usage);
       reservations = [];
-      if (completion.resolution !== undefined || completion.providerUsage !== undefined)
+      if (dispatched.resolution !== undefined || dispatched.providerUsage !== undefined)
         this.persistence.recordTeamAttemptProviderResult(
           attempt.id,
-          completion.resolution,
-          completion.providerUsage,
+          dispatched.resolution,
+          dispatched.providerUsage,
         );
+      const completion = await this.requireWorkspaceWrite(dispatched, {
+        worker,
+        accessMode: execution.accessMode,
+        executionId: input.executionId,
+        worktree: missionWorktree,
+        isolation: executionIsolation,
+      });
       let changedFiles = [...completion.changedFiles];
       // The status is Main's verdict, so a run that left a criterion unmet is quarantined here
       // rather than integrated.
@@ -4063,6 +4093,7 @@ export class TeamCoordinator {
     /** Already judged against `doneCriteria`: unmet criteria turn a success into a failure. */
     value: WorkerCompletion;
     doneEvidence: WorkerDoneEvidence[];
+    simulated: boolean;
     usage: WorkerRuntimeResult['usage'];
     resolution: WorkerRuntimeResult['resolution'];
     providerUsage: WorkerRuntimeResult['providerUsage'];
@@ -4152,6 +4183,7 @@ export class TeamCoordinator {
         return {
           value: judged.completion,
           doneEvidence: judged.doneEvidence,
+          simulated: result.simulated === true,
           usage: result.usage,
           resolution: result.resolution,
           providerUsage: result.providerUsage,
@@ -4180,6 +4212,50 @@ export class TeamCoordinator {
     throw lastError instanceof Error ? lastError : new Error('Worker delivery failed');
   }
 
+  /**
+   * A write execution whose isolation Main finds unchanged from its base did not write, whatever
+   * it reported (issue #550). Main reads the isolation itself, so what an earlier Attempt of the
+   * same execution left there (a resume or a steer reuses it) counts as written. Called once the
+   * runtime returned and before anything is integrated or saved. A Manager is exempt: it may meet
+   * the request through the Workers it delegates to, whose writes land in their own isolations. So
+   * is the simulation, which writes nothing. Every write execution runs in an isolation or a
+   * Mission worktree, so there is always something to read.
+   */
+  private async requireWorkspaceWrite<
+    T extends { value: WorkerCompletion; doneEvidence: WorkerDoneEvidence[]; simulated: boolean },
+  >(
+    dispatched: T,
+    input: {
+      worker: AgentRecord;
+      accessMode: TeamExecutionAccess;
+      executionId: string;
+      worktree: TeamMissionWorktreeRecord | null;
+      isolation: TeamExecutionIsolationRecord | null;
+    },
+  ): Promise<T> {
+    if (
+      dispatched.value.status !== 'succeeded' ||
+      input.accessMode !== 'workspace-write' ||
+      input.worker.canDelegate ||
+      dispatched.simulated
+    )
+      return dispatched;
+    const worktrees =
+      input.worktree !== null
+        ? [{ worktreeId: input.executionId, baseHead: input.worktree.baseHead }]
+        : (input.isolation?.repositories ?? [])
+            .filter(({ state }) => state === 'active')
+            .map(({ ordinal, baseHead }) => ({
+              worktreeId: isolationWorktreeId(input.executionId, ordinal),
+              baseHead,
+            }));
+    if (this.worktreeManager === undefined || worktrees.length === 0) return dispatched;
+    for (const worktree of worktrees)
+      if (await this.worktreeManager.hasChangesFromBase({ agentId: input.worker.id, ...worktree }))
+        return dispatched;
+    return { ...dispatched, value: workerWriteNotAttempted(dispatched.value), doneEvidence: [] };
+  }
+
   private persistWorkerResult(
     teamId: string,
     worker: AgentRecord,
@@ -4192,7 +4268,7 @@ export class TeamCoordinator {
       teamId,
       sourceAgentId: worker.id,
       targetAgentId: leader.id,
-      content: JSON.stringify(completion),
+      content: workerResultMessageContent(completion),
       ...(executionId === undefined ? {} : { executionId }),
       ...(attemptId === undefined ? {} : { attemptId }),
     });
@@ -5691,6 +5767,21 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
       .update(untrackedHashes?.stdout ?? '')
       .digest('hex'),
   };
+}
+
+// The most a Team message may hold (persistence `createTeamMessage`).
+const TEAM_MESSAGE_CONTENT_LIMIT = 100_000;
+
+/**
+ * The Worker result the Leader reads. Per-criterion reports can push it past what a Team message
+ * holds; they are then left out of the message, since the task's report and done evidence keep
+ * what they proved and its summary names every unmet criterion.
+ */
+function workerResultMessageContent(completion: WorkerCompletion): string {
+  const content = JSON.stringify(completion);
+  if (content.length <= TEAM_MESSAGE_CONTENT_LIMIT || completion.criteria === undefined)
+    return content;
+  return JSON.stringify({ ...completion, criteria: undefined });
 }
 
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {

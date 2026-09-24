@@ -3,12 +3,18 @@ import { workerCompletionSchema, type WorkerCompletion } from '@sprint-coder/con
 import {
   CRITERIA_REPORT_VERIFICATION,
   DONE_CRITERIA_VERIFICATION,
+  EMPTY_WORKER_ANSWER,
+  MAIN_CONFIRMED_REPORT_EVIDENCE,
+  REPORT_ONLY_WORKER_ANSWER,
   WORKER_SELF_REPORTED_EVIDENCE_PREFIX,
+  WRITE_NOT_ATTEMPTED_VERIFICATION,
   allCriteriaDone,
+  confirmWorkerReport,
   judgeWorkerCompletion,
   parseWorkerCriteriaReport,
   readWorkerCriteriaReport,
   workerCriteriaPrompt,
+  workerWriteNotAttempted,
 } from './team-worker-criteria';
 
 const criteria = ['team-a.txt を作成する', 'team-c.txt を削除する'];
@@ -195,7 +201,7 @@ describe('readWorkerCriteriaReport', () => {
     });
   });
 
-  it('keeps the whole answer and records a failed criteria-report verification when unreadable', () => {
+  it('keeps the answer and records a failed criteria-report verification when unreadable', () => {
     const report = readWorkerCriteriaReport('全部終わりました。', ['答えを見つける']);
     expect(report.summary).toBe('全部終わりました。');
     expect(report.criteria).toBeUndefined();
@@ -204,14 +210,60 @@ describe('readWorkerCriteriaReport', () => {
     ]);
   });
 
-  it('keeps the report as the summary when the answer is only the report', () => {
+  it('leaves an unreadable or cut-off report block out of the summary', () => {
+    const broken = ['調べました。', '```json', '{"criteria":[}', '```', '以上です。'].join('\n');
+    expect(readWorkerCriteriaReport(broken, ['答えを見つける']).summary).toBe(
+      '調べました。\n\n以上です。',
+    );
+    const cutOff = ['調べました。', '```json', '{"criteria":[{"index":1,'].join('\n');
+    expect(readWorkerCriteriaReport(cutOff, ['答えを見つける']).summary).toBe('調べました。');
+  });
+
+  it('gives a fixed summary when the answer is only the report block', () => {
     const text = answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] }, '');
-    expect(readWorkerCriteriaReport(text, ['答えを見つける']).summary).toBe(text.trim());
+    expect(readWorkerCriteriaReport(text, ['答えを見つける']).summary).toBe(
+      REPORT_ONLY_WORKER_ANSWER,
+    );
+    const unreadable = ['```json', '{"criteria":[}', '```'].join('\n');
+    expect(readWorkerCriteriaReport(unreadable, ['答えを見つける']).summary).toBe(
+      REPORT_ONLY_WORKER_ANSWER,
+    );
+  });
+
+  it.each([
+    [
+      'a readable report',
+      answer({ criteria: [{ index: 1, status: 'done', evidence: 'ok' }] }, 'x'.repeat(5_000)),
+    ],
+    ['no report', 'x'.repeat(5_000)],
+    [
+      'a report with evidence too long to read',
+      answer(
+        { criteria: [{ index: 1, status: 'done', evidence: 'y'.repeat(4_001) }] },
+        'x'.repeat(10),
+      ),
+    ],
+  ])('keeps the summary within 4000 characters for %s', (_label, text) => {
+    const report = readWorkerCriteriaReport(text, ['答えを見つける']);
+    expect(report.summary.length).toBeLessThanOrEqual(4_000);
+    expect(
+      workerCompletionSchema.safeParse({
+        status: 'succeeded',
+        summary: report.summary,
+        artifacts: [],
+        verification: report.verification,
+        risks: [],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('keeps an answer to a task that asked for nothing within 4000 characters', () => {
+    expect(readWorkerCriteriaReport('x'.repeat(5_000), undefined).summary).toHaveLength(4_000);
   });
 
   it('reads nothing when no criteria were asked for', () => {
     expect(readWorkerCriteriaReport('  ', undefined)).toEqual({
-      summary: '(空の応答)',
+      summary: EMPTY_WORKER_ANSWER,
       criteria: undefined,
       verification: [],
     });
@@ -343,5 +395,49 @@ describe('judgeWorkerCompletion', () => {
     );
     expect(judged.completion.status).toBe('succeeded');
     expect(judged.doneEvidence).toHaveLength(2);
+  });
+});
+
+describe('confirmWorkerReport', () => {
+  const directCriteria = ['Workerが依頼に対する検証可能な報告を返す'];
+
+  it('confirms a succeeded non-empty report itself, without a per-criterion report', () => {
+    expect(confirmWorkerReport(directCriteria, completion())).toEqual({
+      completion: completion(),
+      doneEvidence: [{ criterion: directCriteria[0], evidence: MAIN_CONFIRMED_REPORT_EVIDENCE }],
+    });
+  });
+
+  it('fails an empty report and keeps a failed one as it is', () => {
+    const empty = confirmWorkerReport(directCriteria, completion({ summary: EMPTY_WORKER_ANSWER }));
+    expect(empty.completion.status).toBe('failed');
+    expect(empty.completion.summary).toContain('Workerの報告が空だった');
+    expect(empty.doneEvidence).toEqual([]);
+    const failed = completion({ status: 'failed' });
+    expect(confirmWorkerReport(directCriteria, failed)).toEqual({
+      completion: failed,
+      doneEvidence: [],
+    });
+  });
+});
+
+describe('workerWriteNotAttempted', () => {
+  it('fails the run and says the workspace did not change, within the completion limits', () => {
+    const failed = workerWriteNotAttempted(
+      completion({
+        summary: 'x'.repeat(4_000),
+        verification: Array.from({ length: 20 }, (_, index) => ({
+          name: `check-${index}`,
+          outcome: 'pass' as const,
+        })),
+      }),
+    );
+    expect(failed.status).toBe('failed');
+    expect(failed.summary.startsWith('書き込みを頼まれましたが')).toBe(true);
+    expect(failed.verification.at(-1)).toMatchObject({
+      name: WRITE_NOT_ATTEMPTED_VERIFICATION,
+      outcome: 'fail',
+    });
+    expect(() => workerCompletionSchema.parse(failed)).not.toThrow();
   });
 });

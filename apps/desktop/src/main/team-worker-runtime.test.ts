@@ -1701,13 +1701,6 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     const subject = runtime({ writeScopeFor: () => 'workspace-write' });
     runtimeHostMock.beforeComplete = (turnId) => {
       subject.recordManagedToolDenied(turnId, 'read_file');
-      subject.recordManagedToolResult(turnId, {
-        rootId: 'root-1',
-        path: 'a.txt',
-        sagaId: 'saga-1',
-        kind: 'add',
-        state: 'committed',
-      });
     };
 
     const result = await subject.execute({ ...writeInput, worker: writableWorker() });
@@ -1717,7 +1710,7 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     subject.dispose();
   });
 
-  it('does not fail a read-only investigation that made no write', async () => {
+  it('does not fail a read-only investigation or a write execution that attempted no writes', async () => {
     const investigation = runtime();
     const readResult = await investigation.execute({
       worker: worker(false),
@@ -1726,58 +1719,12 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     });
     expect(completionOf(readResult).status).toBe('succeeded');
     investigation.dispose();
-  });
 
-  it('fails a write execution that never attempted a write, whatever the Worker says', async () => {
     const writer = runtime({ writeScopeFor: () => 'workspace-write' });
-    runtimeHostMock.beforeComplete = (turnId) => {
-      // A denied read is not a write attempt.
-      writer.recordManagedToolDenied(turnId, 'read_file');
-    };
-    runtimeHostMock.finalText = [
-      'ファイルを作成しました。',
-      '```json',
-      '{"criteria":[{"index":1,"status":"done","evidence":"作成しました"}]}',
-      '```',
-    ].join('\n');
-
-    const result = await writer.execute({
-      ...writeInput,
-      worker: writableWorker(),
-      doneCriteria: ['result.txt を作成する'],
-    });
-
-    const completion = completionOf(result);
-    expect(completion.status).toBe('failed');
-    expect(completion.verification).toContainEqual({
-      name: 'worker-write-not-attempted',
-      outcome: 'fail',
-      detail: '書き込みを頼まれましたが、ファイルを1回も書き込まずに終わりました。',
-    });
-    expect(completion.summary).toContain('ファイルを1回も書き込まずに終わりました');
-    expect(completion.summary).toContain('ファイルを作成しました。');
+    const writeResult = await writer.execute({ ...writeInput, worker: writableWorker() });
+    expect(completionOf(writeResult).status).toBe('succeeded');
+    expect(completionOf(writeResult).risks).toEqual([]);
     writer.dispose();
-  });
-
-  it('lets a Manager meet a write request through its Workers without writing itself', async () => {
-    const manager = runtime({
-      writeScopeFor: () => 'workspace-write',
-      teamMcpFor: () => ({
-        socketPath: '/tmp/team.sock',
-        token: 'manager-token',
-        guidance: 'manager guidance',
-        toolNames: TEAM_CORE_MCP_TOOL_NAMES,
-      }),
-    });
-
-    const result = await manager.execute({
-      ...writeInput,
-      envelope,
-      worker: { ...worker(true), writeCapable: true },
-    });
-
-    expect(completionOf(result).status).toBe('succeeded');
-    manager.dispose();
   });
 });
 
@@ -1831,6 +1778,27 @@ describe('RuntimeHostTeamWorkerRuntime done criteria report', () => {
       { criterion: '出典を示す', status: 'not_done', evidence: '出典が見つかりません' },
     ]);
     expect(completion.verification.map(({ name }) => name)).toEqual(['worker-runtime:claude']);
+    subject.dispose();
+  });
+
+  it('keeps an answer longer than 4000 characters within the completion summary', async () => {
+    runtimeHostMock.finalText = [
+      'x'.repeat(5_000),
+      '```json',
+      JSON.stringify({
+        criteria: [
+          { index: 1, status: 'done', evidence: 'ok' },
+          { index: 2, status: 'done', evidence: 'ok' },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.summary.length).toBeLessThanOrEqual(4_000);
+    expect(completion.criteria).toHaveLength(2);
     subject.dispose();
   });
 

@@ -388,7 +388,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         const writeFailure = workerWriteFailure({
           accessMode: input.accessMode,
           writeCapable: input.worker.writeCapable === true,
-          canDelegate: input.worker.canDelegate === true,
           workspacePath,
           writeScope,
           writes,
@@ -820,23 +819,18 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 }
 
 /**
- * Why a write execution did not change the Workspace, or null when it did (issues #527, #550).
- * Read-only investigations never fail here. A write execution fails when it ran read-only, when
- * every write it attempted was denied, and when it never attempted a write at all. A Manager is
- * exempt from the last rule: it may meet a write request through the Workers it delegates to,
- * whose writes land in their own isolations rather than in its count.
+ * Why a write execution could not change the Workspace, or null when it could (issue #527).
+ * Read-only investigations never fail here, and neither does a write execution that made no write
+ * call in this Turn: an earlier Attempt may already have written to the isolation it reuses, so
+ * Main judges that from the isolation itself (issue #550).
  */
 function workerWriteFailure(input: {
   accessMode: TeamWorkerExecutionInput['accessMode'];
   writeCapable: boolean;
-  canDelegate: boolean;
   workspacePath: string | null;
   writeScope: RuntimeWriteScope;
   writes: WorkerWriteObservation;
-}): {
-  name: 'worker-write-scope' | 'worker-write-denied' | 'worker-write-not-attempted';
-  detail: string;
-} | null {
+}): { name: 'worker-write-scope' | 'worker-write-denied'; detail: string } | null {
   if (input.accessMode !== 'workspace-write') return null;
   if (input.writeScope === 'read-only')
     return {
@@ -851,11 +845,6 @@ function workerWriteFailure(input: {
     return {
       name: 'worker-write-denied',
       detail: `書き込みツールの呼び出し${input.writes.denied}件が拒否され、反映された書き込みは1件もありませんでした。`,
-    };
-  if (input.writes.committed === 0 && input.writes.denied === 0 && !input.canDelegate)
-    return {
-      name: 'worker-write-not-attempted',
-      detail: '書き込みを頼まれましたが、ファイルを1回も書き込まずに終わりました。',
     };
   return null;
 }

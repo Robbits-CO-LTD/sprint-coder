@@ -14,10 +14,23 @@ export const CRITERIA_REPORT_VERIFICATION = 'criteria-report';
 /** Verification Main adds when it records a succeeded run as failed for unmet criteria. */
 export const DONE_CRITERIA_VERIFICATION = 'worker-done-criteria';
 
+/** Verification Main adds when a write execution left its isolation unchanged. */
+export const WRITE_NOT_ATTEMPTED_VERIFICATION = 'worker-write-not-attempted';
+
+/** Evidence for a criterion Main checks itself: that a direct message got a non-empty report. */
+export const MAIN_CONFIRMED_REPORT_EVIDENCE = 'Main確認: Workerが報告を返しました。';
+
+/** The summary of a Worker that answered nothing. */
+export const EMPTY_WORKER_ANSWER = '(空の応答)';
+
+/** The summary of a Worker whose whole answer was its per-criterion report block. */
+export const REPORT_ONLY_WORKER_ANSWER = 'Workerは完了条件ごとの報告だけを返しました。';
+
 export type WorkerCriterionReport = NonNullable<WorkerCompletion['criteria']>[number];
 export type WorkerDoneEvidence = { criterion: string; evidence: string };
 
 const MAX_EVIDENCE_LENGTH = 4_000;
+const MAX_SUMMARY_LENGTH = 4_000;
 const MAX_QUOTED_LENGTH = 200;
 
 /**
@@ -63,19 +76,15 @@ export function parseWorkerCriteriaReport(
 ): WorkerCriteriaReportResult {
   if (doneCriteria.length === 0) return { ok: true, criteria: [], text: finalText.trim() };
   const fail = (reason: string): WorkerCriteriaReportResult => ({ ok: false, reason });
-  let opening: RegExpExecArray | null = null;
-  for (const match of finalText.matchAll(/```json\b/giu)) opening = match;
-  if (opening === null)
-    return fail('最終回答に完了条件ごとの報告（```json ブロック）がありません。');
-  const bodyStart = opening.index + opening[0].length;
-  const close = finalText.indexOf('```', bodyStart);
-  if (close < 0)
+  const block = lastJsonBlock(finalText);
+  if (block === null) return fail('最終回答に完了条件ごとの報告（```json ブロック）がありません。');
+  if (block.close === null)
     return fail(
       '完了条件ごとの報告の ```json ブロックが閉じられていません（途中で切れています）。',
     );
   let parsed: unknown;
   try {
-    parsed = JSON.parse(finalText.slice(bodyStart, close));
+    parsed = JSON.parse(finalText.slice(block.bodyStart, block.close));
   } catch {
     return fail('完了条件ごとの報告をJSONとして読み取れません。');
   }
@@ -107,14 +116,15 @@ export function parseWorkerCriteriaReport(
   return {
     ok: true,
     criteria: [...reports.entries()].sort(([a], [b]) => a - b).map(([, report]) => report),
-    text: `${finalText.slice(0, opening.index)}${finalText.slice(close + 3)}`.trim(),
+    text: withoutLastJsonBlock(finalText, block),
   };
 }
 
 /**
- * What a runtime puts in its completion from a Worker's final answer: the summary without the
- * parsed report block, and either the criteria or a failed `criteria-report` verification. With
- * no `doneCriteria` nothing was asked for, so nothing is read.
+ * What a runtime puts in its completion from a Worker's final answer: a summary without the
+ * report block, and either the criteria or a failed `criteria-report` verification. With no
+ * `doneCriteria` nothing was asked for, so nothing is read. The summary always fits the
+ * completion's 4000 characters, whatever the Worker wrote.
  */
 export function readWorkerCriteriaReport(
   finalText: string,
@@ -126,9 +136,20 @@ export function readWorkerCriteriaReport(
 } {
   const report =
     doneCriteria === undefined ? null : parseWorkerCriteriaReport(finalText, doneCriteria);
-  const text = report?.ok === true && report.text !== '' ? report.text : finalText.trim();
+  // An unreadable report block is left out too: why it could not be read is in the verification.
+  const text =
+    report === null
+      ? finalText.trim()
+      : report.ok
+        ? report.text
+        : withoutLastJsonBlock(finalText, lastJsonBlock(finalText));
   return {
-    summary: text === '' ? '(空の応答)' : text,
+    summary:
+      text !== ''
+        ? clipSummary(text)
+        : finalText.trim() === ''
+          ? EMPTY_WORKER_ANSWER
+          : REPORT_ONLY_WORKER_ANSWER,
     criteria: report?.ok === true ? report.criteria : undefined,
     verification:
       report === null || report.ok
@@ -193,18 +214,86 @@ export function judgeWorkerCompletion(
     ...unmet.map((line) => `- ${line}`),
   ].join('\n');
   return {
-    completion: {
-      ...completion,
-      status: 'failed',
-      summary: `${detail}\n\nWorkerの報告:\n${completion.summary}`.slice(0, 4_000),
-      verification: [
-        ...completion.verification.slice(0, 19),
-        { name: DONE_CRITERIA_VERIFICATION, outcome: 'fail', detail: detail.slice(0, 2_000) },
-      ],
-      risks: [...completion.risks.slice(0, 19), headline],
-    },
+    completion: failWorkerCompletion(completion, DONE_CRITERIA_VERIFICATION, headline, detail),
     doneEvidence: [],
   };
+}
+
+/**
+ * Main's verdict on a direct message, whose only criterion Main checks itself: a succeeded run
+ * that returned a non-empty report meets it, so the Worker is asked for no per-criterion report.
+ */
+export function confirmWorkerReport(
+  doneCriteria: readonly string[],
+  completion: WorkerCompletion,
+): { completion: WorkerCompletion; doneEvidence: WorkerDoneEvidence[] } {
+  if (completion.status !== 'succeeded') return { completion, doneEvidence: [] };
+  if (completion.summary.trim() === '' || completion.summary === EMPTY_WORKER_ANSWER) {
+    const headline = 'Workerの報告が空だったため、失敗として記録しました。';
+    return {
+      completion: failWorkerCompletion(completion, DONE_CRITERIA_VERIFICATION, headline, headline),
+      doneEvidence: [],
+    };
+  }
+  return {
+    completion,
+    doneEvidence: [...new Set(doneCriteria)].map((criterion) => ({
+      criterion,
+      evidence: MAIN_CONFIRMED_REPORT_EVIDENCE,
+    })),
+  };
+}
+
+/**
+ * The verdict on a write execution whose isolation Main found unchanged from its base: whatever
+ * the Worker reported, it did not write what it was asked to (issue #550).
+ */
+export function workerWriteNotAttempted(completion: WorkerCompletion): WorkerCompletion {
+  const detail =
+    '書き込みを頼まれましたが、この実行の作業場所ではファイルが1つも変わらないまま終わりました。';
+  return failWorkerCompletion(completion, WRITE_NOT_ATTEMPTED_VERIFICATION, detail, detail);
+}
+
+/** A completion turned into a failure that states why first, within the completion limits. */
+function failWorkerCompletion(
+  completion: WorkerCompletion,
+  verification: string,
+  headline: string,
+  detail: string,
+): WorkerCompletion {
+  return {
+    ...completion,
+    status: 'failed',
+    summary: `${detail}\n\nWorkerの報告:\n${completion.summary}`.slice(0, MAX_SUMMARY_LENGTH),
+    verification: [
+      ...completion.verification.slice(0, 19),
+      { name: verification, outcome: 'fail', detail: detail.slice(0, 2_000) },
+    ],
+    risks: [...completion.risks.slice(0, 19), headline.slice(0, 500)],
+  };
+}
+
+/** Where the last ```json block of a Worker answer starts, and where it closes if it does. */
+function lastJsonBlock(
+  finalText: string,
+): { start: number; bodyStart: number; close: number | null } | null {
+  let opening: RegExpExecArray | null = null;
+  for (const match of finalText.matchAll(/```json\b/giu)) opening = match;
+  if (opening === null) return null;
+  const bodyStart = opening.index + opening[0].length;
+  const close = finalText.indexOf('```', bodyStart);
+  return { start: opening.index, bodyStart, close: close < 0 ? null : close };
+}
+
+/** The answer without its last ```json block; an unclosed block runs to the end. */
+function withoutLastJsonBlock(finalText: string, block: ReturnType<typeof lastJsonBlock>): string {
+  if (block === null) return finalText.trim();
+  const after = block.close === null ? '' : finalText.slice(block.close + 3);
+  return `${finalText.slice(0, block.start)}${after}`.trim();
+}
+
+function clipSummary(text: string): string {
+  return text.length <= MAX_SUMMARY_LENGTH ? text : `${text.slice(0, MAX_SUMMARY_LENGTH - 1)}…`;
 }
 
 function clip(text: string): string {

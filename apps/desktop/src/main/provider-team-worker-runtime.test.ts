@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ProviderConnection } from '@sprint-coder/contracts';
+import { workerCompletionSchema, type ProviderConnection } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
@@ -490,6 +490,30 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
         expect.objectContaining({ name: 'criteria-report', outcome: 'fail' }),
       ]),
     });
+  });
+
+  it('keeps an external Worker answer longer than 4000 characters within the summary', async () => {
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute() {
+        yield { type: 'output_delta', text: 'x'.repeat(5_000) };
+        yield { type: 'completed', stopReason: 'completed' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: '調査してください',
+      doneCriteria: ['仕様を確認する'],
+    });
+
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.summary.length).toBeLessThanOrEqual(4_000);
+    expect(completion.criteria).toBeUndefined();
   });
 
   it('enables provider-hosted Web Search for an OpenRouter Team Worker', async () => {

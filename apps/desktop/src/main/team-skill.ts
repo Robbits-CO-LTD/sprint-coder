@@ -26,8 +26,8 @@ MCPサーバー \`team\` の実結果だけを使う。ツール名を文章へ�
 1. \`team_list_models\`で現在availableなConnection／modelとsource付き能力を確認する。能力filterが0件ならcapabilitiesを空にして再検索し、unknownをfalseや0と解釈せず、名前から能力を推測しない。呼び出せなければ「Sprint Coder Team MCPを利用できない」と報告して終了する。
 Claudeを選ぶ場合、利用可能な\`builtin:claude-cli\`候補があるならOpenRouter上のClaudeよりClaude CLIを優先する。ユーザーがOpenRouterを明示指定した場合を除き、同じClaudeをAPI経由で採用しない。
 2. \`team_hire_worker\`で重複しない役割を必要人数だけ採用する。workspace-write予定なら最初から\`writeCapable: true\`。leafは\`agentKind: "worker"\`かつmanagerPolicyなし。再委譲するManagerだけ\`agentKind: "manager"\`とmanagerPolicyを使う。直属Workerだけなら\`{ maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false }\`。実際に選んだconnection／provider／modelと根拠をmodelSelection／modelSelectionReasonへ入れる。
-3. Taskフローは\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡し、execution IDを記録する。scope、nonGoals、targetPaths、constraintsは追加フィールドにせず\`objective\`本文へ含める。accessはread-onlyかworkspace-write。queuedは失敗ではない。
-4. Missionフローは\`team_assign_mission\`へ全体のobjective、doneCriteria、2〜12工程のstepsを渡す。各工程へworkerId、objective、doneCriteria、accessを明示し、workspace-writeはwriteCapableなWorkerだけに割り当てる。
+3. Taskフローは\`team_assign_task\`へ\`workerId\`、\`objective\`、\`doneCriteria\`、\`access\`を渡し、execution IDを記録する。scope、nonGoals、targetPaths、constraintsは追加フィールドにせず\`objective\`本文へ含める。accessはread-onlyかworkspace-write。workspace-writeはファイルを変えることが完了条件の作業だけに付ける（ファイルが1つも変わらなければ失敗になる）。「確認して必要なら直す」作業は、まずread-onlyで確認し、変更が必要と分かってからworkspace-writeで割り当て直す。queuedは失敗ではない。
+4. Missionフローは\`team_assign_mission\`へ全体のobjective、doneCriteria、2〜12工程のstepsを渡す。各工程へworkerId、objective、doneCriteria、accessを明示し、accessは3と同じ基準で選び、workspace-writeはwriteCapableなWorkerだけに割り当てる。
 5. 実行中は\`team_get_status\`でcurrentActivity、liveOutput、階層、待機理由を確認する。逸脱、誤実装、重複作業には\`team_steer_execution\`をexecutionId付きで呼ぶ。runningへのsteerは同じexecution IDの新attemptになる。不要なら\`team_cancel_execution\`をexecutionId付きで呼ぶ。Agent間共有は認証済み送信元identityで\`team_send_message\`、受信は\`team_read_messages\`。Team Policyを迂回しない。
 6. 記録した全execution IDについて\`team_wait_reports\`を繰り返し、終端reportを集める。
 
