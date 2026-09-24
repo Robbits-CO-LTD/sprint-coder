@@ -20,6 +20,8 @@ import { sep } from 'node:path';
  * permission-prompt hook on supported CLI versions (the flag is absent from help). Pretending to ask
  * and then silently allowing would be the worst of the three options, so `ask` means "propose, do
  * not write", and what was refused is reported after the fact from Claude's `permission_denials`.
+ *
+ * Team Worker はこの関数ではなく resolveWorkerWriteScope を使う（issue #525）。
  */
 export function resolveWriteScope(
   preset: AccessPreset,
@@ -27,6 +29,25 @@ export function resolveWriteScope(
 ): RuntimeWriteScope {
   if (workspacePath === null) return 'read-only';
   return preset === 'full' ? 'full' : preset === 'auto' ? 'workspace-write' : 'read-only';
+}
+
+/**
+ * Team Worker の書き込み範囲（issue #525）。resolveWriteScope と違うのは `ask` だけで、`ask` でも
+ * `workspace-write` にする。
+ *
+ * Worker は CLI 自身の機能では書き込まない。3つの CLI アダプタは内蔵のファイル・シェル機能を無効に
+ * して書き込み範囲を無視するので、Worker がファイルを変える手段は、Main がこの範囲から作るカタログ
+ * の管理ツールだけになる。その呼び出しは1回ごとに ToolBroker が Task の安全設定で判定し、`ask`
+ * では親 Leader の Turn の承認カードで利用者の許可を待つ。だから `ask` でも Worker に書き込み
+ * ツールを渡したまま、書き込みの前に毎回確認できる。Managed Local の Worker もすでに同じ扱いで
+ * ある。Workspace が無いときは、resolveWriteScope と同じ理由でどの設定でも読み取り専用にする。
+ */
+export function resolveWorkerWriteScope(
+  preset: AccessPreset,
+  workspacePath: string | null,
+): RuntimeWriteScope {
+  if (workspacePath === null) return 'read-only';
+  return preset === 'full' ? 'full' : 'workspace-write';
 }
 
 /**

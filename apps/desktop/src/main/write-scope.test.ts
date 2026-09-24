@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { posix, win32 } from 'node:path';
-import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
+import { relativizeWorkspacePath, resolveWorkerWriteScope, resolveWriteScope } from './write-scope';
 
 const rel = (workspace: string, candidate: string): string | null =>
   relativizeWorkspacePath(workspace, candidate, posix.resolve, posix.relative, posix.sep);
@@ -19,6 +19,21 @@ describe('resolveWriteScope (issue #37)', () => {
     // fewer restrictions, and it must still not write into a directory that is about to vanish.
     for (const preset of ['ask', 'auto', 'full'] as const)
       expect(resolveWriteScope(preset, null)).toBe('read-only');
+  });
+});
+
+describe('resolveWorkerWriteScope (issue #525)', () => {
+  it('gives a Team Worker write tools at ask too, so each write waits on an Approval Card', () => {
+    // Only `ask` differs from resolveWriteScope: the Worker writes through managed tools alone, and
+    // the ToolBroker asks the user before each call.
+    expect(resolveWorkerWriteScope('ask', '/tmp/ws')).toBe('workspace-write');
+    expect(resolveWorkerWriteScope('auto', '/tmp/ws')).toBe('workspace-write');
+    expect(resolveWorkerWriteScope('full', '/tmp/ws')).toBe('full');
+  });
+
+  it('keeps a Team Worker read-only at every preset when there is no Workspace', () => {
+    for (const preset of ['ask', 'auto', 'full'] as const)
+      expect(resolveWorkerWriteScope(preset, null)).toBe('read-only');
   });
 });
 

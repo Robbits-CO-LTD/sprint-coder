@@ -383,7 +383,7 @@ import {
   sandboxProfileForToolAuthorization,
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
-import { relativizeWorkspacePath, resolveWriteScope } from './write-scope';
+import { relativizeWorkspacePath, resolveWorkerWriteScope, resolveWriteScope } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
 import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
 import { openWorkspaceFileForEdit, recoverWorkspaceFileForEdit } from './workspace-edit';
@@ -1389,6 +1389,9 @@ export class IpcRouter {
       this.skillSettings.pinnedAutoCandidates(runtime),
     );
     const genericManagedRuntimeTools = this.createGenericManagedRuntimeToolHandlers();
+    // 「確認する」では Worker の書き込みも1回ずつ Leader の Turn の承認カードで確認する（issue #525）。
+    const workerWriteApprovalRequiredFor = (taskId: string): boolean =>
+      this.persistence.getPermissionPolicy(taskId).preset === 'ask';
     this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({
       // Real worker execution is opt-in when the selected chat runtime is mock. Availability and
       // quota failures may use another policy-allowed real AI; permission failures remain explicit,
@@ -1467,11 +1470,12 @@ export class IpcRouter {
           : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
       writeScopeFor: (worker, workspacePath) =>
         worker.writeCapable
-          ? resolveWriteScope(
+          ? resolveWorkerWriteScope(
               this.persistence.getPermissionPolicy(worker.taskId).preset,
               workspacePath,
             )
           : 'read-only',
+      writeApprovalRequiredFor: workerWriteApprovalRequiredFor,
       teamMcpFor: (worker, turnId, executionId, toolCatalog) =>
         worker.canDelegate
           ? this.registerManagerMcp(turnId, worker.taskId, worker.id, executionId, toolCatalog)
@@ -1514,6 +1518,7 @@ export class IpcRouter {
         executionId === undefined
           ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
           : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
+      writeApprovalRequiredFor: workerWriteApprovalRequiredFor,
       managerGuidance: () =>
         teamGuidance(
           MANAGER_MCP_SYSTEM_PROMPT,
