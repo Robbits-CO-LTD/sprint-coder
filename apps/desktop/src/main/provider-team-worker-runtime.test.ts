@@ -1221,13 +1221,25 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       },
     });
 
-    const result = await adapter.execute(execution());
+    const labels: string[] = [];
+
+    const result = await adapter.execute({
+      ...execution(),
+      onEvent: (event) => {
+        if (event.type === 'activity') labels.push(event.label);
+      },
+    });
 
     expect(toolMessages().map(({ content }) => content)).toEqual([
       JSON.stringify(committed('a.txt')),
       deniedToolMessage,
       '{"ok":true}',
     ]);
+    // A denied call is shown as denied, not as run to completion.
+    expect(labels.filter((label) => label.startsWith('apply_patch'))).toEqual([
+      'apply_patchは拒否されました',
+    ]);
+    expect(labels).toContain('create_fileの実行完了');
     const completion = workerCompletionSchema.parse(result.completion);
     expect(completion.status).toBe('succeeded');
     expect(completion.summary).toBe('作業を終えました');
@@ -1280,6 +1292,45 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     await expect(adapter.execute(execution())).rejects.toBe(error);
     expect(requests).toHaveLength(1);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('ends the execution on a write denied while it is being stopped', async () => {
+    const stop = new AbortController();
+    const error = denied();
+    const { adapter, requests, release } = managedLocalWorker({
+      toolRounds: [['create_file']],
+      executeTool: async () => {
+        stop.abort();
+        throw error;
+      },
+    });
+
+    await expect(adapter.execute({ ...execution(), signal: stop.signal })).rejects.toBe(error);
+    expect(requests).toHaveLength(1);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('fails a write execution whose write-capable Worker was handed no write tool, as the CLI does for a read-only run', async () => {
+    const { adapter, requests } = managedLocalWorker({
+      toolRounds: [],
+      executeTool: vi.fn(),
+      tools: ['read_file'],
+    });
+
+    const result = await adapter.execute(execution('workspace-write', true));
+
+    const detail =
+      'このWorkerに渡されたツールに書き込み用のものが無かったため、読み取り専用で実行されました。ファイルは変更されていません。';
+    const completion = workerCompletionSchema.parse(result.completion);
+    expect(completion.status).toBe('failed');
+    expect(completion.verification).toContainEqual({
+      name: 'worker-write-scope',
+      outcome: 'fail',
+      detail,
+    });
+    expect(completion.risks).toEqual([detail]);
+    // The prompt told the Worker the same thing the outcome says.
+    expect(workerPromptOf(requests[0])).toContain('Workspace書き込み: 禁止（読み取り専用）');
   });
 
   it.each([

@@ -191,17 +191,18 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       throw new Error(
         'External API Worker cannot write to the workspace; select a built-in CLI Connection',
       );
-    // The prompt states what the tools handed to the model can do, so a Worker given managed
-    // write tools is never told it cannot write (issue #552).
+    // Whether a managed write tool is among the tools handed to the model. The prompt and the
+    // write outcome both go by it, so a Worker given managed write tools is never told it cannot
+    // write, and one without them is judged as having run read-only (issue #552).
+    const writable =
+      managedToolSession?.tools.some(({ name }) => WORKSPACE_WRITE_TOOL_NAMES.has(name)) === true;
     const prompt = workerPrompt(
       input.worker,
       input.content,
       input.priorConversation,
       input.doneCriteria,
       {
-        writable:
-          managedToolSession?.tools.some(({ name }) => WORKSPACE_WRITE_TOOL_NAMES.has(name)) ===
-          true,
+        writable,
         managedLocal: connection.id === this.deps.managedToolsConnectionId,
         writeRequested: input.accessMode === 'workspace-write',
       },
@@ -406,6 +407,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             at: new Date().toISOString(),
           });
           let toolResult: string;
+          let deniedCall = false;
           if (managedToolSession?.tools.some(({ name }) => name === toolCall.name)) {
             try {
               const result = await managedToolSession.execute(
@@ -426,6 +428,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
               )
                 throw error;
               writes.denied += 1;
+              deniedCall = true;
               toolResult = redactSecrets(
                 JSON.stringify({
                   ok: false,
@@ -447,7 +450,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           input.onEvent?.({
             type: 'activity',
             phase: 'executing',
-            label: `${toolCall.name}の実行完了`,
+            label: deniedCall ? `${toolCall.name}は拒否されました` : `${toolCall.name}の実行完了`,
             at: new Date().toISOString(),
           });
           streamBudget.consumeToolResult(toolResult);
@@ -471,22 +474,21 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         precedingText: output.slice(0, output.length - finalRound.length).join(''),
       });
       const summary = report.summary;
-      // The Managed Local catalog of a write-capable Worker is always workspace-write (safety
-      // settings do not narrow it to read-only), so only a write execution whose every write
-      // was denied can fail here.
-      const writeFailure =
-        input.accessMode === 'workspace-write' && input.worker.writeCapable
-          ? workerWriteFailure({
-              accessMode: input.accessMode,
-              writeCapable: true,
-              workspacePath:
-                input.workspaceSet?.roots.find(
-                  ({ rootId }) => rootId === input.workspaceSet?.primaryRootId,
-                )?.path ?? null,
-              writeScope: 'workspace-write',
-              writes,
-            })
-          : null;
+      // Judged as the CLI Worker is, from the tools the model was actually handed: a write
+      // execution without a managed write tool ran read-only, and one whose every write was
+      // denied changed nothing.
+      const writeFailure = workerWriteFailure({
+        accessMode: input.accessMode,
+        writeCapable: input.worker.writeCapable === true,
+        workspacePath:
+          input.workspaceSet?.roots.find(
+            ({ rootId }) => rootId === input.workspaceSet?.primaryRootId,
+          )?.path ?? null,
+        writeScope: writable ? 'workspace-write' : 'read-only',
+        writes,
+        readOnlyCause:
+          'このWorkerに渡されたツールに書き込み用のものが無かったため、読み取り専用で実行されました。ファイルは変更されていません。',
+      });
       return {
         claims: {
           deliveryId: input.envelope.deliveryId,

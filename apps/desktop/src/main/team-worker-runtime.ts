@@ -822,6 +822,11 @@ export function workerWriteFailure(input: {
   workspacePath: string | null;
   writeScope: RuntimeWriteScope;
   writes: WorkerWriteObservation;
+  /**
+   * Why a write-capable Worker with a Workspace still ran read-only, when the runtime knows a
+   * cause other than the CLI's: its safety setting narrowing the scope.
+   */
+  readOnlyCause?: string;
 }): WorkerWriteFailure | null {
   if (input.accessMode !== 'workspace-write') return null;
   if (input.writeScope === 'read-only')
@@ -831,7 +836,8 @@ export function workerWriteFailure(input: {
         ? 'このWorkerは書き込み可能として採用されていないため、読み取り専用で実行されました。ファイルは変更されていません。'
         : input.workspacePath === null
           ? '書き込み先のWorkspaceがないため、読み取り専用で実行されました。ファイルは変更されていません。'
-          : '安全設定「確認する」ではTeam Workerは読み取り専用で実行されるため、ファイルを変更できませんでした。',
+          : (input.readOnlyCause ??
+            '安全設定「確認する」ではTeam Workerは読み取り専用で実行されるため、ファイルを変更できませんでした。'),
     };
   if (input.writes.denied > 0 && input.writes.committed === 0)
     return {
