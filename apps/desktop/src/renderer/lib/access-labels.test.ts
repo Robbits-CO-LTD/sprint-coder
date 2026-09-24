@@ -14,6 +14,12 @@ describe('managed access labels', () => {
     expect(commandSandboxDescription(capability)).not.toMatch(/Codex|Claude|Mock/u);
   });
 
+  it('describes Auto as auto-allowing Workspace file edits and reviewing the rest (issue #526)', () => {
+    const description = accessDescription('auto', null);
+    expect(description).toContain('Workspace内のファイルの作成・編集は自動で許可します');
+    expect(description).toContain('コマンドなどそれ以外の操作は自動レビューで判定します');
+  });
+
   it('reports fail-closed command removal with the probe reason', () => {
     const capability = {
       available: false,

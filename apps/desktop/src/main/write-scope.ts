@@ -119,7 +119,8 @@ function writeApprovalNote(preset: AccessPreset | undefined): string {
     case 'ask':
       return '書き込みは1回ごとに利用者の承認カードで確認されます。';
     case 'auto':
-      return '書き込みは自動レビューで判定されます。';
+      // issue #526: Workspace内のファイルの作成・編集は自動で許可され、それ以外は自動レビューが判定する。
+      return 'Workspace内のファイルの作成・編集は自動で許可されます。コマンドなどは自動レビューで判定されます。';
     case 'full':
       return '書き込みは確認なしで反映されます。';
     default:

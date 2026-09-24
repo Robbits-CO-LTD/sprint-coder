@@ -57,7 +57,11 @@ import {
   resolve as resolvePath,
   sep,
 } from 'node:path';
-import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
+import {
+  workspaceMutationBinding,
+  workspacePermissionResourceFromGuard,
+  type PathGuard,
+} from './path-guard';
 import { CommandRunnerError } from './command-runner';
 import { ManagedStdinRejection } from './managed-command-stdin';
 import { configureApprovalDigestKey } from './approval-digest-key';
@@ -655,6 +659,7 @@ import type {
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
+  AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON,
   FULL_PRESET_DISCLOSURE_AUDIT_REASON,
   digestToolCatalogValue,
   permissionRequestFingerprint,
@@ -771,7 +776,7 @@ import {
   WorkspaceToolRejection,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
-  workspaceToolAuthorizationGuard,
+  workspaceToolPermissionGuard,
 } from './provider-workspace-tools';
 import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
 import { workspaceWriteLimitsOf } from './workspace-write-limits';
@@ -6100,22 +6105,7 @@ export class IpcRouter {
     // classify as Workspace files relative to that sealed root.
     const workspaceAuthority =
       managedWorkerWorkspace === undefined ? undefined : ('sealed-team-isolation' as const);
-    const rawFacts = approvalFactsForTool(request, capability, workspaceAuthority);
-    const pathGuard = workspaceToolAuthorizationGuard(
-      request.input,
-      rawFacts.operation === 'read' || rawFacts.operation === 'write'
-        ? rawFacts.operation
-        : undefined,
-    );
-    const facts =
-      managedWorkerWorkspace !== undefined &&
-      rawFacts.resource.kind === 'workspace-path' &&
-      pathGuard !== undefined
-        ? {
-            ...rawFacts,
-            resource: workspacePermissionResourceFromGuard(pathGuard, 'sealed-team-isolation'),
-          }
-        : rawFacts;
+    const { facts, pathGuard } = toolPermissionFacts(request, capability, workspaceAuthority);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     // Provider-issued process authority covers both starting a command and feeding one that is
     // already running: `write_stdin` carries `shell.execute` without being a command-runner Tool
@@ -6227,12 +6217,10 @@ export class IpcRouter {
             callId: request.callId,
             reviewRequestId,
             capability,
-            source:
-              reviewerDecision !== undefined
-                ? 'reviewer'
-                : evaluation.reason === 'preset_auto_safe'
-                  ? 'narrow_allow'
-                  : 'policy',
+            source: autoPermissionDecisionSource({
+              reviewed: reviewerDecision !== undefined,
+              evaluationReason: evaluation.reason,
+            }),
             decision:
               evaluation.decision === 'allow' || evaluation.decision === 'allow_once'
                 ? evaluation.decision
@@ -10250,6 +10238,56 @@ export function managedLocalForcedRoundMessages(
     ...messages.filter(({ role }) => role === 'system'),
     { role: 'user', content: currentUserText },
   ];
+}
+
+/**
+ * A Tool call's permission facts and the PathGuard they were taken from, for the Main Turn
+ * (`workspaceAuthority` undefined) and for a managed Team Worker (`sealed-team-isolation`).
+ *
+ * The guard is `workspaceToolPermissionGuard`'s, not simply the first one: a batch that also
+ * touches a protected path is evaluated as that path, so the immutable deny refuses the whole call
+ * instead of a preset allow or an approval card covering it (issue #526). The resource and the
+ * guard come from the same choice, which is what PermissionBroker checks them against.
+ */
+export function toolPermissionFacts(
+  request: ToolAuthorizationRequest,
+  capability: Capability,
+  workspaceAuthority: 'sealed-team-isolation' | undefined,
+): { facts: ReturnType<typeof approvalFactsForTool>; pathGuard: PathGuard | undefined } {
+  const rawFacts = approvalFactsForTool(request, capability, workspaceAuthority);
+  const pathGuard = workspaceToolPermissionGuard(
+    request.input,
+    rawFacts.operation === 'read' || rawFacts.operation === 'write'
+      ? rawFacts.operation
+      : undefined,
+    workspaceAuthority,
+  );
+  const facts =
+    workspaceAuthority !== undefined &&
+    rawFacts.resource.kind === 'workspace-path' &&
+    pathGuard !== undefined
+      ? {
+          ...rawFacts,
+          resource: workspacePermissionResourceFromGuard(pathGuard, workspaceAuthority),
+        }
+      : rawFacts;
+  return { facts, pathGuard };
+}
+
+/**
+ * 「安全時は自動」の判定を監査に残すときの出どころ。自動レビューを経たものは `reviewer`、
+ * プリセットの限定許可ルール（Workspace の読み取りと、issue #526 からの Workspace 内のファイルの
+ * 作成・編集）で許可したものは `narrow_allow`、それ以外は `policy`。
+ */
+export function autoPermissionDecisionSource(input: {
+  reviewed: boolean;
+  evaluationReason: string;
+}): 'policy' | 'narrow_allow' | 'reviewer' {
+  if (input.reviewed) return 'reviewer';
+  return input.evaluationReason === 'preset_auto_safe' ||
+    input.evaluationReason === AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON
+    ? 'narrow_allow'
+    : 'policy';
 }
 
 /**

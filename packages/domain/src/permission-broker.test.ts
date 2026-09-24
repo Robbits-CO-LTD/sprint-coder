@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON,
   PermissionBroker,
   createSessionGrant,
   evaluatePermissionPolicy,
@@ -621,8 +622,10 @@ describe('access preset expansion', () => {
   });
 
   it('routes an operation not proven safe by Auto to approval', () => {
+    // A Workspace file edit is auto-allowed since issue #526, so a command stands in for "not
+    // proven safe" here.
     const result = evaluatePermissionPolicy({
-      request: workspaceWriteRequest,
+      request: { ...workspaceWriteRequest, capability: 'shell.execute', operation: 'execute' },
       policy: {
         ...basePolicy(),
         ...expandAccessPreset('auto'),
@@ -633,6 +636,273 @@ describe('access preset expansion', () => {
     expect(result).toMatchObject({
       decision: 'approval_required',
       reason: 'preset_auto_unknown',
+    });
+  });
+
+  // issue #526: 「安全時は自動」は Workspace 内のファイルの作成・編集（Edit Saga の workspace.write）
+  // だけを自動許可し、コマンド・Workspace 外への書き込みは自動レビューのまま。
+  describe('Workspace file edits under Auto (issue #526)', () => {
+    const PROTECTED = [
+      'app-private',
+      'os-protected',
+      'credential',
+      'signing-key',
+      'update-key',
+      'unclassified',
+    ] as const;
+    // The expansions as they stood before #526 (commit e0fa25c), key order included: persistence
+    // compares stored rows by their JSON, so "unchanged" has to mean byte-identical.
+    const PRE_526_IMMUTABLE_DENY = [
+      {
+        capability: 'workspace.read',
+        resourceSet: { kind: 'path-classification', classifications: PROTECTED },
+        operations: ['read'],
+        auditReason: 'immutable_protected_resource',
+      },
+      {
+        capability: 'filesystem.external.read',
+        resourceSet: { kind: 'path-classification', classifications: PROTECTED },
+        operations: ['read'],
+        auditReason: 'immutable_protected_resource',
+      },
+      {
+        capability: 'workspace.write',
+        resourceSet: { kind: 'path-classification', classifications: PROTECTED },
+        operations: ['write'],
+        auditReason: 'immutable_protected_resource',
+      },
+      {
+        capability: 'filesystem.external.write',
+        resourceSet: { kind: 'path-classification', classifications: PROTECTED },
+        operations: ['write'],
+        auditReason: 'immutable_protected_resource',
+      },
+      {
+        capability: 'workspace.read',
+        resourceSet: {
+          kind: 'provider-disclosure',
+          pathClassifications: PROTECTED,
+          classifications: ['sensitive', 'uncertain'],
+        },
+        operations: ['read'],
+        auditReason: 'immutable_protected_resource',
+      },
+    ];
+    const PRE_526_AUTO_READ = {
+      capability: 'workspace.read',
+      resourceSet: { kind: 'path-classification', classifications: ['workspace'] },
+      operations: ['read'],
+      auditReason: 'preset_auto_safe',
+    };
+    const PRE_526_ASK = {
+      approvalPolicy: 'ask',
+      approvalReason: 'approval_policy_ask',
+      allowRules: [],
+      immutableDeny: PRE_526_IMMUTABLE_DENY,
+    };
+    const PRE_526_FULL = {
+      approvalPolicy: 'ask',
+      approvalReason: 'preset_full_unknown',
+      allowRules: [
+        PRE_526_AUTO_READ,
+        {
+          capability: 'workspace.read',
+          resourceSet: {
+            kind: 'provider-disclosure',
+            pathClassifications: ['workspace'],
+            classifications: ['sensitive', 'uncertain'],
+          },
+          operations: ['read'],
+          auditReason: 'preset_full_disclosure',
+        },
+        {
+          capability: 'workspace.write',
+          resourceSet: { kind: 'path-classification', classifications: ['workspace'] },
+          operations: ['write'],
+          auditReason: 'preset_full',
+        },
+        {
+          capability: 'filesystem.external.read',
+          resourceSet: { kind: 'path-classification', classifications: ['external'] },
+          operations: ['read'],
+          auditReason: 'preset_full',
+        },
+        {
+          capability: 'filesystem.external.write',
+          resourceSet: { kind: 'path-classification', classifications: ['external'] },
+          operations: ['write'],
+          auditReason: 'preset_full',
+        },
+        {
+          capability: 'shell.execute',
+          resourceSet: { kind: 'all' },
+          operations: ['execute'],
+          auditReason: 'preset_full',
+        },
+        {
+          capability: 'network.fetch',
+          resourceSet: { kind: 'all' },
+          operations: ['fetch'],
+          auditReason: 'preset_full',
+        },
+        {
+          capability: 'external.open',
+          resourceSet: { kind: 'all' },
+          operations: ['open'],
+          auditReason: 'preset_full',
+        },
+      ],
+      immutableDeny: PRE_526_IMMUTABLE_DENY,
+    };
+
+    const policyFor = (preset: AccessPreset) => ({
+      ...basePolicy(),
+      ...expandAccessPreset(preset),
+    });
+
+    it('leaves the Ask and Full expansions byte-identical to the ones before #526', () => {
+      expect(JSON.stringify(expandAccessPreset('ask'))).toBe(JSON.stringify(PRE_526_ASK));
+      expect(JSON.stringify(expandAccessPreset('full'))).toBe(JSON.stringify(PRE_526_FULL));
+    });
+
+    it('only adds the Workspace edit allow to the Auto expansion', () => {
+      expect(JSON.stringify(expandAccessPreset('auto'))).toBe(
+        JSON.stringify({
+          approvalPolicy: 'auto',
+          approvalReason: 'preset_auto_unknown',
+          allowRules: [
+            PRE_526_AUTO_READ,
+            {
+              capability: 'workspace.write',
+              resourceSet: { kind: 'path-classification', classifications: ['workspace'] },
+              operations: ['write'],
+              auditReason: 'preset_auto_safe_edit',
+            },
+          ],
+          immutableDeny: PRE_526_IMMUTABLE_DENY,
+        }),
+      );
+      expect(AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON).toBe('preset_auto_safe_edit');
+    });
+
+    it('allows a Workspace file write under Auto without the reviewer', () => {
+      const result = evaluatePermissionPolicy({
+        request: workspaceWriteRequest,
+        policy: policyFor('auto'),
+        now: NOW,
+      });
+
+      expect(result).toMatchObject({
+        decision: 'allow',
+        reason: 'preset_auto_safe_edit',
+        permit: { source: 'narrow_allow', capability: 'workspace.write' },
+      });
+      expect(result.evaluationTrace.at(-1)).toBe('narrow-allow');
+    });
+
+    it.each(PROTECTED)('still denies a write to a %s path under Auto', (classification) => {
+      expect(
+        evaluatePermissionPolicy({
+          request: {
+            ...workspaceWriteRequest,
+            resource: { ...workspaceWriteRequest.resource, classification },
+          },
+          policy: policyFor('auto'),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'deny', reason: 'immutable_protected_resource' });
+    });
+
+    it('leaves a write that is not classified as Workspace to the reviewer', () => {
+      const external = {
+        ...workspaceWriteRequest,
+        capability: 'filesystem.external.write',
+        resource: {
+          kind: 'external-path',
+          canonicalPath: '/outside/notes.txt',
+          identityDigest: PATH_DIGEST,
+          classification: 'external',
+        },
+      } as const satisfies PermissionRequest;
+      const externalCeiling = {
+        ...permissiveCeiling,
+        entries: [
+          ...permissiveCeiling.entries,
+          {
+            capability: 'filesystem.external.write',
+            resourceSet: { kind: 'all' },
+            operations: ['write'],
+            expiresAt: '2026-07-22T13:00:00.000Z',
+            providerEgress: ['none'],
+            sandboxProfiles: ['workspace-write'],
+          },
+        ],
+      } as const satisfies CapabilityCeiling;
+      const misclassified = {
+        ...workspaceWriteRequest,
+        resource: { ...workspaceWriteRequest.resource, classification: 'external' },
+      } as const satisfies PermissionRequest;
+
+      for (const request of [external, misclassified]) {
+        const result = evaluatePermissionPolicy({
+          request,
+          policy: {
+            ...policyFor('auto'),
+            parentCeiling: externalCeiling,
+            modeCeiling: externalCeiling,
+          },
+          now: NOW,
+        });
+        expect(result).toMatchObject({
+          decision: 'approval_required',
+          reason: 'preset_auto_unknown',
+        });
+        expect(result.evaluationTrace.at(-1)).toBe('reviewer');
+      }
+    });
+
+    it('leaves a command under Auto to the reviewer, which still cannot allow a high-risk one', () => {
+      const shell = {
+        ...workspaceWriteRequest,
+        capability: 'shell.execute',
+        operation: 'execute',
+      } as const satisfies PermissionRequest;
+      const pending = evaluatePermissionPolicy({
+        request: shell,
+        policy: policyFor('auto'),
+        now: NOW,
+      });
+      expect(pending).toMatchObject({
+        decision: 'approval_required',
+        reason: 'preset_auto_unknown',
+      });
+      expect(pending.evaluationTrace.at(-1)).toBe('reviewer');
+
+      const highRisk = { ...shell, risk: 'high' } as const;
+      expect(
+        evaluatePermissionPolicy({
+          request: highRisk,
+          policy: { ...policyFor('auto'), reviewerDecision: reviewerAllow(highRisk) },
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'deny', reason: 'reviewer_binding_invalid_or_high_risk' });
+    });
+
+    it('keeps asking under Ask and keeps the Full allow unchanged', () => {
+      expect(
+        evaluatePermissionPolicy({
+          request: workspaceWriteRequest,
+          policy: policyFor('ask'),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'approval_required', reason: 'approval_policy_ask' });
+      expect(
+        evaluatePermissionPolicy({
+          request: workspaceWriteRequest,
+          policy: policyFor('full'),
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'allow', reason: 'preset_full' });
     });
   });
 

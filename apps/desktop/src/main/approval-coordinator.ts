@@ -15,6 +15,7 @@ import {
   providerDisclosureAuthorizationFacts,
   workspaceToolAuthorizationGuard,
   workspaceToolAuthorizationGuards,
+  workspaceToolPermissionGuard,
 } from './provider-workspace-tools';
 import {
   managedStdinApprovalExecution,
@@ -492,12 +493,13 @@ export function approvalFactsForTool(
     request.input,
     operation === 'read' || operation === 'write' ? operation : undefined,
   );
-  const workspaceGuard =
-    workspaceGuards[0] ??
-    workspaceToolAuthorizationGuard(
-      request.input,
-      operation === 'read' || operation === 'write' ? operation : undefined,
-    );
+  // A batch touches several paths: the request stands for all of them, so a protected one among
+  // them is the resource that gets evaluated rather than whichever came first (issue #526).
+  const workspaceGuard = workspaceToolPermissionGuard(
+    request.input,
+    operation === 'read' || operation === 'write' ? operation : undefined,
+    workspaceAuthority,
+  );
   const workspaceResource =
     workspaceGuard === undefined
       ? undefined

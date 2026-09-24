@@ -26,6 +26,7 @@ import {
   openGuardedExistingFile,
   revalidatePathGuard,
   PathGuardError,
+  workspacePermissionResourceFromGuard,
   type PathGuard,
 } from './path-guard';
 import {
@@ -1318,6 +1319,35 @@ export function workspaceToolAuthorizationGuards(
     ...(prepared.readGuards ?? []),
   ];
   return guards.filter((guard) => operation === undefined || guard.operation === operation);
+}
+
+/**
+ * 権限判定の対象にするガード（issue #526）。
+ *
+ * まとめた apply_patch や rename は1回の呼び出しで複数のパス（rename の書き込み先を含む）に
+ * 触れるが、権限の要求は1つのリソースで判定する。先頭のガードだけを使うと、2つ目以降が保護パス
+ * でも要求は Workspace に分類され、プリセットの許可（auto の preset_auto_safe_edit、full の
+ * preset_full）や承認カードで通ってしまう。そこで、その操作のガードのうち Workspace に分類
+ * されないものが1つでもあれば、それを要求のリソースと PathGuard にする。保護分類なら不変の
+ * 拒否が呼び出し全体を拒否し、プリセットの許可が効くのはすべてのガードが Workspace 分類の
+ * ときだけになる。Workspace の外を指すパスは PathGuard の作成（PATH_ESCAPE）で拒否されるので、
+ * ここには来ない。分類は判定と同じ `workspaceAuthority` で行う。
+ */
+export function workspaceToolPermissionGuard(
+  input: unknown,
+  operation?: 'read' | 'write',
+  workspaceAuthority?: 'sealed-team-isolation',
+): PathGuard | undefined {
+  const guards = workspaceToolAuthorizationGuards(input, operation);
+  return (
+    guards.find(
+      (guard) =>
+        workspacePermissionResourceFromGuard(guard, workspaceAuthority).classification !==
+        'workspace',
+    ) ??
+    guards[0] ??
+    workspaceToolAuthorizationGuard(input, operation)
+  );
 }
 
 export function providerDisclosureAuthorizationFacts(input: unknown):
