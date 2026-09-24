@@ -386,10 +386,8 @@ export class WorkerWorktreeManager {
   }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath))) {
-      await this.runGit(repoPath, ['worktree', 'prune'], 'remove_failed');
-      return { outcome: 'removed' };
-    }
+    if (!(await pathExists(worktreePath)))
+      return this.removeMissingWorktreeRegistration(repoPath, worktreePath);
     const { stdout: statusOutput } = await this.runGit(
       worktreePath,
       ['status', '--porcelain'],
@@ -416,10 +414,8 @@ export class WorkerWorktreeManager {
     validateWorktreeId(agentId);
     validateGitHead(baseHead);
     const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath))) {
-      await this.runGit(repoPath, ['worktree', 'prune'], 'remove_failed');
-      return { outcome: 'removed' };
-    }
+    if (!(await pathExists(worktreePath)))
+      return this.removeMissingWorktreeRegistration(repoPath, worktreePath);
     const head = (
       await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'remove_failed')
     ).stdout.trim();
@@ -431,6 +427,27 @@ export class WorkerWorktreeManager {
     );
     if (status.stdout.trim().length > 0) return { outcome: 'quarantined', changed: true };
     return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * The directory is already gone, so unregister only this worktree. `git worktree prune` would
+   * also drop every other registration whose directory is missing, including the user's own
+   * worktrees on an unplugged drive. A registration Git refuses to remove (for example a locked
+   * one) stays, and the error reaches the caller so it records the reason.
+   */
+  private async removeMissingWorktreeRegistration(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupWorktreeResult> {
+    try {
+      await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
+    } catch (error) {
+      // Nothing is registered at this path any more: there is nothing left to remove.
+      if (error instanceof WorktreeError && /is not a working tree/i.test(error.message))
+        return { outcome: 'removed' };
+      throw error;
+    }
+    return { outcome: 'removed' };
   }
 
   private async removeRegisteredWorktree(
