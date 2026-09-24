@@ -40,6 +40,7 @@ import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
 import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
+import { workerWriteLimitNotice, workspaceWriteLimitsFromTools } from './workspace-write-limits';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -196,6 +197,14 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     // write, and one without them is judged as having run read-only (issue #552).
     const writable =
       managedToolSession?.tools.some(({ name }) => WORKSPACE_WRITE_TOOL_NAMES.has(name)) === true;
+    // Managed Local's actual write limits come from the same tool names handed to the model — the
+    // Windows NativeSafeFs add-only limit (Issue #542) applies here exactly as it does to the CLI
+    // Workers registered through provider-workspace-tools.ts.
+    const writeLimitNotice = writable
+      ? workerWriteLimitNotice(
+          workspaceWriteLimitsFromTools((managedToolSession?.tools ?? []).map((tool) => tool.name)),
+        )
+      : '';
     const prompt = workerPrompt(
       input.worker,
       input.content,
@@ -205,6 +214,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
         writable,
         managedLocal: connection.id === this.deps.managedToolsConnectionId,
         writeRequested: input.accessMode === 'workspace-write',
+        writeLimitNotice,
       },
     );
 
@@ -603,6 +613,8 @@ function workerPrompt(
     managedLocal: boolean;
     /** The Leader asked this execution to edit the Workspace. */
     writeRequested: boolean;
+    /** What the actually-handed-over managed tools cannot do, e.g. the Windows add-only limit. */
+    writeLimitNotice: string;
   }>,
 ): string {
   return [
@@ -618,6 +630,7 @@ function workerPrompt(
           ? '禁止（読み取り専用）'
           : '公式API Workerでは利用不可'
     }`,
+    workspace.writable ? workspace.writeLimitNotice : '',
     workspace.writeRequested && !workspace.writable ? WORKER_CANNOT_WRITE_NOTICE : '',
     '以下の依頼を実行し、結果を日本語で簡潔に報告してください。',
     formatPriorTeamConversation(priorConversation),

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ModelSelection } from '@sprint-coder/contracts';
 import { executeTeamTool } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
+import type { WorkspaceWriteLimits } from './workspace-write-limits';
 
 // executeTeamTool is the single execution path shared by the mock ToolBroker (team-tools.test.ts,
 // gated behind the Electron ABI because it needs real SQLite persistence) and the MCP bridge. Its
@@ -65,6 +66,7 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     ),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
+    workspaceWriteLimits: null,
     ...overrides,
   } as unknown as TeamCoordinator;
 }
@@ -616,6 +618,108 @@ describe('executeTeamTool routing', () => {
       executeTeamTool(coordinator, 'task-1', 'team_wait_reports', { extra: true }),
     ).rejects.toThrow();
     await expect(executeTeamTool(coordinator, 'task-1', 'team_stop_worker', {})).rejects.toThrow();
+  });
+});
+
+describe('executeTeamTool workspaceWriteLimit in assignment results', () => {
+  const limited: WorkspaceWriteLimits = { editExisting: false, createDirectory: false };
+  const unlimited: WorkspaceWriteLimits = { editExisting: true, createDirectory: true };
+
+  it('adds workspaceWriteLimit to a workspace-write team_assign_task result when the coordinator has a limit', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: limited });
+    const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '実装する',
+      doneCriteria: ['done'],
+      access: 'workspace-write',
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      workspaceWriteLimit: expect.stringContaining(
+        '既存ファイルの編集・削除とフォルダの作成ができません',
+      ),
+    });
+  });
+
+  it('omits workspaceWriteLimit for a read-only team_assign_task even with a limited coordinator', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: limited });
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+      workerId: 'worker-1',
+      objective: '調べる',
+      doneCriteria: ['done'],
+    })) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('workspaceWriteLimit');
+  });
+
+  it('omits workspaceWriteLimit for a workspace-write team_assign_task when the coordinator has no limit', async () => {
+    for (const workspaceWriteLimits of [null, unlimited]) {
+      const coordinator = fakeCoordinator({ workspaceWriteLimits });
+      const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_task', {
+        workerId: 'worker-1',
+        objective: '実装する',
+        doneCriteria: ['done'],
+        access: 'workspace-write',
+      })) as Record<string, unknown>;
+      expect(result.ok).toBe(true);
+      expect(result).not.toHaveProperty('workspaceWriteLimit');
+    }
+  });
+
+  it('adds workspaceWriteLimit to team_assign_mission when any step is workspace-write', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: limited });
+    const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_mission', {
+      objective: 'mission',
+      doneCriteria: ['done'],
+      steps: [
+        { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+        {
+          workerId: 'worker-2',
+          objective: 'two',
+          doneCriteria: ['two'],
+          access: 'workspace-write',
+        },
+      ],
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      workspaceWriteLimit: expect.stringContaining(
+        '既存ファイルの編集・削除とフォルダの作成ができません',
+      ),
+    });
+  });
+
+  it('omits workspaceWriteLimit from team_assign_mission when every step is read-only', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: limited });
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_mission', {
+      objective: 'mission',
+      doneCriteria: ['done'],
+      steps: [
+        { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+        { workerId: 'worker-2', objective: 'two', doneCriteria: ['two'], access: 'read-only' },
+      ],
+    })) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('workspaceWriteLimit');
+  });
+
+  it('omits workspaceWriteLimit from a workspace-write team_assign_mission when the coordinator has no limit', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: null });
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_mission', {
+      objective: 'mission',
+      doneCriteria: ['done'],
+      steps: [
+        { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
+        {
+          workerId: 'worker-2',
+          objective: 'two',
+          doneCriteria: ['two'],
+          access: 'workspace-write',
+        },
+      ],
+    })) as Record<string, unknown>;
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('workspaceWriteLimit');
   });
 });
 

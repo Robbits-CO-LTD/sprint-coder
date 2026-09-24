@@ -1370,6 +1370,47 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       expect(prompt.includes('今回の実行ではファイルを変更できません')).toBe(cannotWriteNotice);
     },
   );
+
+  it('adds the write limit notice when the managed tools omit apply_patch and create_directory', async () => {
+    const { adapter, requests } = managedLocalWorker({
+      toolRounds: [],
+      executeTool: vi.fn(),
+      tools: ['create_file', 'read_file'],
+    });
+
+    await adapter.execute(execution());
+
+    const prompt = workerPromptOf(requests[0]);
+    expect(prompt).toContain('Workspace書き込み: 隔離範囲内で可（管理ツール経由）');
+    expect(prompt).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+    expect(
+      (prompt.match(/既存ファイルの編集・削除とフォルダの作成はできません/g) ?? []).length,
+    ).toBe(1);
+  });
+
+  it('adds no write limit notice when the managed tools include apply_patch and create_directory too', async () => {
+    const { adapter, requests } = managedLocalWorker({ toolRounds: [], executeTool: vi.fn() });
+
+    await adapter.execute(execution());
+
+    const prompt = workerPromptOf(requests[0]);
+    expect(prompt).toContain('Workspace書き込み: 隔離範囲内で可（管理ツール経由）');
+    expect(prompt).not.toContain('はできません');
+  });
+
+  it('adds no write limit notice for a read-only execution even without apply_patch/create_directory', async () => {
+    const { adapter, requests } = managedLocalWorker({
+      toolRounds: [],
+      executeTool: vi.fn(),
+      tools: ['read_file'],
+    });
+
+    await adapter.execute(execution('read-only', false));
+
+    const prompt = workerPromptOf(requests[0]);
+    expect(prompt).toContain('Workspace書き込み: 禁止（読み取り専用）');
+    expect(prompt).not.toContain('既存ファイルの編集・削除');
+  });
 });
 
 /** The Worker prompt: the user message that carries the Leader's request. */

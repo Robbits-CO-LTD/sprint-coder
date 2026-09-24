@@ -32,6 +32,7 @@ import {
 } from '../runtime-host/protocol';
 import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
+import { workerWriteLimitNotice, workspaceWriteLimitsFromTools } from './workspace-write-limits';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
@@ -332,31 +333,6 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         ? (this.deps.writeScopeFor?.(input.worker, workspacePath) ?? 'read-only')
         : 'read-only';
     const writeScope = requestedWriteScope === 'full' ? 'workspace-write' : requestedWriteScope;
-    // The prompt states the scope the Worker actually runs with, so it never promises edits that
-    // its tool catalog cannot make.
-    const writable = writeScope !== 'read-only';
-    const prompt = [
-      `あなたはチームの「${input.worker.role}」担当Workerです。`,
-      `あなたのAgent ID: ${input.worker.id}`,
-      `親Agent ID: ${input.worker.parentAgentId ?? 'Leader'}`,
-      input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
-      `Context継承: ${input.worker.contextInheritancePolicy}`,
-      `Workspace書き込み: ${writable ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
-      input.accessMode === 'workspace-write' && !writable ? WORKER_CANNOT_WRITE_NOTICE : '',
-      input.workspacePath === undefined
-        ? ''
-        : `隔離worktree: ${input.workspacePath ?? '利用不可'}${writable ? '（このディレクトリ内だけを変更してください）' : '（読み取り専用）'}`,
-      input.workspaceSet === undefined
-        ? ''
-        : `隔離root: ${input.workspaceSet.roots.map(({ label, path }) => `${label}=${path}`).join(', ')}`,
-      '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
-      formatPriorTeamConversation(input.priorConversation),
-      '',
-      `依頼: ${input.content}`,
-      workerCriteriaPrompt(input.doneCriteria ?? []),
-    ]
-      .filter((line) => line !== '')
-      .join('\n');
     const context = reserveTeamWorkerContext(
       applyWorkerContextInheritance(
         input.worker,
@@ -383,11 +359,15 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           at: new Date().toISOString(),
         });
       try {
-        const { finalText, writes, reportFrom } = await this.executeChoice(
+        const {
+          finalText,
+          writes,
+          reportFrom,
+          prompt: usedPrompt,
+        } = await this.executeChoice(
           input,
           choice,
           taskId,
-          prompt,
           context,
           workspacePath,
           runtimeWorkspace,
@@ -416,7 +396,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           }),
           usage: {
             costCents: 0,
-            tokens: Math.max(1, Math.ceil((prompt.length + summary.length) / 4)),
+            tokens: Math.max(1, Math.ceil((usedPrompt.length + summary.length) / 4)),
             timeMs: Date.now() - startedAt,
             toolCalls: 0,
           },
@@ -444,12 +424,16 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     input: TeamWorkerExecutionInput,
     choice: RealRuntimeChoice,
     taskId: string,
-    prompt: string,
     context: PreparedContext,
     workspacePath: string | null,
     runtimeWorkspace: RuntimeWorkspaceSet | string | null,
     writeScope: RuntimeWriteScope,
-  ): Promise<{ finalText: string; writes: WorkerWriteObservation; reportFrom: number }> {
+  ): Promise<{
+    finalText: string;
+    writes: WorkerWriteObservation;
+    reportFrom: number;
+    prompt: string;
+  }> {
     const turnId = randomUUID();
     const writes: WorkerWriteObservation = { committed: 0, denied: 0 };
     const output: WorkerOutputObservation = { length: 0, lastToolAt: 0 };
@@ -485,6 +469,18 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             entries: [],
             digest: 'unavailable',
           };
+      // The prompt states the scope the Worker actually runs with, and — now that this choice's own
+      // tool catalog is known — the operations that scope's managed tools cannot reach, so it never
+      // promises edits its tool catalog cannot make.
+      const writable = writeScope !== 'read-only';
+      const writeLimitNotice = writable
+        ? workerWriteLimitNotice(
+            workspaceWriteLimitsFromTools(
+              promptToolCatalog.entries.map((entry) => entry.providerName),
+            ),
+          )
+        : '';
+      const prompt = buildWorkerPrompt(input, writable, writeLimitNotice);
       teamMcp = this.deps.teamMcpFor?.(input.worker, turnId, input.executionId, promptToolCatalog);
       if (input.worker.canDelegate === true && teamMcp === undefined)
         throw new Error('Manager Team MCP is unavailable');
@@ -580,7 +576,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         const run = this.pending.get(turnId);
         if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
-      return { finalText, writes, reportFrom: output.lastToolAt };
+      return { finalText, writes, reportFrom: output.lastToolAt, prompt };
     } catch (error) {
       turnFailure = { error };
       throw error;
@@ -1046,6 +1042,42 @@ export function applyWorkerContextInheritance(
           ],
     compacted: content !== '',
   };
+}
+
+/**
+ * The CLI Worker's instruction text. `writeLimitNotice` — computed from this choice's own tool
+ * catalog once it is known — is placed right after the "Workspace書き込み" line, and only when the
+ * Worker is actually write-capable; a Worker with no write access at all keeps its existing
+ * WORKER_CANNOT_WRITE_NOTICE instead.
+ */
+function buildWorkerPrompt(
+  input: TeamWorkerExecutionInput,
+  writable: boolean,
+  writeLimitNotice: string,
+): string {
+  return [
+    `あなたはチームの「${input.worker.role}」担当Workerです。`,
+    `あなたのAgent ID: ${input.worker.id}`,
+    `親Agent ID: ${input.worker.parentAgentId ?? 'Leader'}`,
+    input.worker.objective === null ? '' : `目的: ${input.worker.objective}`,
+    `Context継承: ${input.worker.contextInheritancePolicy}`,
+    `Workspace書き込み: ${writable ? '隔離範囲内で可' : '禁止（読み取り専用）'}`,
+    writable ? writeLimitNotice : '',
+    input.accessMode === 'workspace-write' && !writable ? WORKER_CANNOT_WRITE_NOTICE : '',
+    input.workspacePath === undefined
+      ? ''
+      : `隔離worktree: ${input.workspacePath ?? '利用不可'}${writable ? '（このディレクトリ内だけを変更してください）' : '（読み取り専用）'}`,
+    input.workspaceSet === undefined
+      ? ''
+      : `隔離root: ${input.workspaceSet.roots.map(({ label, path }) => `${label}=${path}`).join(', ')}`,
+    '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
+    formatPriorTeamConversation(input.priorConversation),
+    '',
+    `依頼: ${input.content}`,
+    workerCriteriaPrompt(input.doneCriteria ?? []),
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
 }
 
 export function formatPriorTeamConversation(
