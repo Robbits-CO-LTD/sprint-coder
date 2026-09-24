@@ -76,6 +76,7 @@ import type {
   TeamV2ActivityRecord,
 } from './persistence';
 import type { WorkerWorktreeManager } from './worker-worktree';
+import type { WorkspaceWriteLimits } from './workspace-write-limits';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
 import {
@@ -419,6 +420,8 @@ export class TeamCoordinator {
     private readonly verifyWorkspace?: (taskId: string) => Promise<void>,
     integrationScheduler?: TeamIntegrationScheduler,
     private readonly diagnostic?: (event: TeamDiagnosticEvent) => void,
+    /** What a workspace-write Worker's managed tools cannot do (Issue #542); null = no limit known. */
+    readonly workspaceWriteLimits: WorkspaceWriteLimits | null = null,
   ) {
     this.integrationScheduler = integrationScheduler ?? new TeamIntegrationScheduler();
     if (executionScheduler !== undefined) {

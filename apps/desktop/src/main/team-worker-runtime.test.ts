@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { workerCompletionSchema } from '@sprint-coder/contracts';
-import type { TeamEnvelope } from '@sprint-coder/domain';
+import {
+  ToolRegistry,
+  type TeamEnvelope,
+  type ToolCatalogSnapshot,
+  type ToolDefinition,
+} from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { assessProviderEgressDisclosure } from './provider-disclosure-classifier';
 import type * as PromptContextModule from './prompt-context';
+import {
+  WORKSPACE_CREATE_DIRECTORY_TOOL,
+  WORKSPACE_CREATE_FILE_TOOL,
+  WORKSPACE_PATCH_TOOL,
+} from './workspace-patch-tool';
 
 const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex' | 'grok'; args: unknown[] }>,
@@ -1733,6 +1743,123 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     expect(completionOf(writeResult).status).toBe('succeeded');
     expect(completionOf(writeResult).risks).toEqual([]);
     writer.dispose();
+  });
+});
+
+describe('RuntimeHostTeamWorkerRuntime workspace write limit notice', () => {
+  const writableWorker = (): AgentRecord => ({ ...worker(false), writeCapable: true });
+  const writeInput = {
+    envelope: { ...envelope, targetAgentId: 'worker-1' },
+    content: 'ファイルを編集してください',
+    accessMode: 'workspace-write' as const,
+    workspacePath: '/isolated/worktree',
+  };
+
+  function catalogWith(tools: readonly ToolDefinition[]): ToolCatalogSnapshot {
+    const registry = new ToolRegistry();
+    for (const tool of tools) registry.register(tool);
+    // workspaceBinding: { kind: 'any' } (every WORKSPACE_*_TOOL) is only eligible for a non-null
+    // workspaceId — see ToolRegistry#createSnapshotForAudience.
+    return registry.createSnapshot({ providerId: 'claude', workspaceId: 'workspace-1' });
+  }
+
+  it('adds the notice exactly once to the final prompt when create_directory/apply_patch are missing', async () => {
+    runtimeHostMock.starts.length = 0;
+    const authorizeEgress = vi.fn<TeamWorkerRuntimeDeps['authorizeEgress']>(() => true);
+    const subject = runtime({
+      writeScopeFor: () => 'workspace-write',
+      authorizeEgress,
+      catalogFor: () => catalogWith([WORKSPACE_CREATE_FILE_TOOL]),
+    });
+
+    await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    const start = runtimeHostMock.starts.at(-1)!;
+    const startPrompt = start.args[2] as string;
+    const occurrences = (text: string) => (startPrompt.match(new RegExp(text, 'g')) ?? []).length;
+    expect(startPrompt).toContain('Workspace書き込み: 隔離範囲内で可');
+    expect(startPrompt).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+    expect(occurrences('既存ファイルの編集・削除とフォルダの作成はできません')).toBe(1);
+    // The notice sits on the line right after the Workspace write line.
+    const lines = startPrompt.split('\n');
+    const writeLine = lines.findIndex((line) => line.startsWith('Workspace書き込み:'));
+    expect(lines[writeLine + 1]).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+
+    // The same final instruction text reaches authorizeEgress's serialized payload and client.start.
+    const egressText = authorizeEgress.mock.calls[0]?.[3] as string;
+    expect(egressText).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+    subject.dispose();
+  });
+
+  it('adds no notice when the catalog carries apply_patch and create_directory too', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime({
+      writeScopeFor: () => 'workspace-write',
+      catalogFor: () =>
+        catalogWith([
+          WORKSPACE_CREATE_FILE_TOOL,
+          WORKSPACE_PATCH_TOOL,
+          WORKSPACE_CREATE_DIRECTORY_TOOL,
+        ]),
+    });
+
+    await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    const start = runtimeHostMock.starts.at(-1)!;
+    expect(start.args[2]).toContain('Workspace書き込み: 隔離範囲内で可');
+    expect(start.args[2]).not.toContain('はできません');
+    subject.dispose();
+  });
+
+  it('decides the notice from the catalog of each fallback choice', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('claude', {
+      code: 'RUNTIME_RATE_LIMIT',
+      userMessage: 'Claude Codeの利用上限に達しました。',
+      retryable: false,
+      retryAt: '2099-08-10T02:00:00.000Z',
+    });
+    const subject = runtime({
+      writeScopeFor: () => 'workspace-write',
+      selectRuntimes: () => [
+        { kind: 'claude', model: 'claude-sonnet-5' },
+        { kind: 'codex', model: 'gpt-5.6-terra' },
+      ],
+      catalogFor: (kind) =>
+        kind === 'claude'
+          ? catalogWith([WORKSPACE_CREATE_FILE_TOOL])
+          : catalogWith([
+              WORKSPACE_CREATE_FILE_TOOL,
+              WORKSPACE_PATCH_TOOL,
+              WORKSPACE_CREATE_DIRECTORY_TOOL,
+            ]),
+    });
+
+    await subject.execute({ ...writeInput, worker: writableWorker() });
+
+    expect(runtimeHostMock.starts.map(({ kind }) => kind)).toEqual(['claude', 'codex']);
+    const [claudeStart, codexStart] = runtimeHostMock.starts;
+    expect(claudeStart?.args[2]).toContain('既存ファイルの編集・削除とフォルダの作成はできません');
+    expect(codexStart?.args[2]).not.toContain('はできません');
+    subject.dispose();
+  });
+
+  it('adds no notice for a read-only execution even with a limited catalog', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime({
+      catalogFor: () => catalogWith([WORKSPACE_CREATE_FILE_TOOL]),
+    });
+
+    await subject.execute({
+      worker: worker(false),
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      content: '調査してください',
+    });
+
+    const start = runtimeHostMock.starts.at(-1)!;
+    expect(start.args[2]).toContain('Workspace書き込み: 禁止（読み取り専用）');
+    expect(start.args[2]).not.toContain('既存ファイルの編集・削除');
+    subject.dispose();
   });
 });
 

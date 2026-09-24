@@ -765,6 +765,7 @@ import {
   workspaceToolAuthorizationGuard,
 } from './provider-workspace-tools';
 import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
+import { workspaceWriteLimitsOf } from './workspace-write-limits';
 import { probeSandboxRunner, type SandboxRunnerCapability } from './sandbox-runner';
 import {
   BUILTIN_CODEX_CONNECTION_ID,
@@ -1574,6 +1575,10 @@ export class IpcRouter {
           modelCatalogAudit,
         }),
     });
+    // Windows NativeSafeFs always reports add-only mutation (Issue #542): derived once here from
+    // the same workspaceEdit wiring index.ts builds, so team-tools.ts can tell an assigning
+    // Leader/Manager what a workspace-write Worker actually cannot do, without recomputing it.
+    const workspaceWriteLimits = workspaceWriteLimitsOf(workspaceEdit);
     this.teamCoordinator = new TeamCoordinator(
       persistence,
       this.teamWorkerRuntime,
@@ -1636,6 +1641,7 @@ export class IpcRouter {
           ...(event.status === undefined ? {} : { status: event.status }),
           ...(event.result === undefined ? {} : { result: event.result }),
         }),
+      workspaceWriteLimits,
     );
     // Leader MCP (default on; SPRINT_CODER_LEADER_MCP=0 opts out): the socket the real CLI Leader
     // connects back through to reach this same TeamCoordinator. Starting it here (rather than

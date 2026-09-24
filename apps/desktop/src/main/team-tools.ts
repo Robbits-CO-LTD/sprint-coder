@@ -27,6 +27,7 @@ import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
+import { leaderWriteLimitNote } from './workspace-write-limits';
 
 const teamToolDefinition = (
   providerName: string,
@@ -831,11 +832,18 @@ export async function executeTeamTool(
                   options.requesterAgentId,
                   options.contextOwner,
                 );
+        const workspaceWriteLimitNote =
+          request.access === 'workspace-write'
+            ? leaderWriteLimitNote(coordinator.workspaceWriteLimits)
+            : '';
         return {
           ok: true,
           workerId: request.workerId,
           executionId: execution.executionId,
           state: execution.state,
+          ...(workspaceWriteLimitNote === ''
+            ? {}
+            : { workspaceWriteLimit: workspaceWriteLimitNote }),
         };
       } catch (error) {
         return teamToolError(error);
@@ -864,6 +872,11 @@ export async function executeTeamTool(
                 options.requesterAgentId ?? null,
                 options.contextOwner,
               );
+        const workspaceWriteLimitNote = request.steps.some(
+          ({ access }) => access === 'workspace-write',
+        )
+          ? leaderWriteLimitNote(coordinator.workspaceWriteLimits)
+          : '';
         return {
           ok: true,
           missionId: mission.id,
@@ -873,6 +886,9 @@ export async function executeTeamTool(
             ordinal,
             executionId,
           })),
+          ...(workspaceWriteLimitNote === ''
+            ? {}
+            : { workspaceWriteLimit: workspaceWriteLimitNote }),
         };
       } catch (error) {
         return teamToolError(error);
