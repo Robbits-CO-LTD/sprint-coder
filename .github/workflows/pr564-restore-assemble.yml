@@ -18,11 +18,15 @@ jobs:
         run: |
           set -euo pipefail
           D=apps/desktop/src/main/.restore-pr564
-          test -f "$D/q0.ts"
-          test -f "$D/q1.ts"
-          test -f "$D/q2.ts"
-          test -f "$D/q3.ts"
-          cat "$D/q0.ts" "$D/q1.ts" "$D/q2.ts" "$D/q3.ts" > apps/desktop/src/main/worker-worktree.test.ts
+          test -f "$D/q0a.ts"
+          test -f "$D/q0b.ts"
+          test -f "$D/q1a.ts"
+          test -f "$D/q1b.ts"
+          test -f "$D/q2a.ts"
+          test -f "$D/q2b.ts"
+          test -f "$D/q3a.ts"
+          test -f "$D/q3b.ts"
+          cat $D/q0a.ts $D/q0b.ts $D/q1a.ts $D/q1b.ts $D/q2a.ts $D/q2b.ts $D/q3a.ts $D/q3b.ts > apps/desktop/src/main/worker-worktree.test.ts
           python3 - <<'PY'
           import hashlib, json, pathlib
           c = pathlib.Path('apps/desktop/src/main/worker-worktree.test.ts').read_bytes()
