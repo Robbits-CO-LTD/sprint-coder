@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { AccessPreset } from '@sprint-coder/contracts';
 import { posix, win32 } from 'node:path';
 import { relativizeWorkspacePath, resolveWorkerWriteScope, resolveWriteScope } from './write-scope';
 
@@ -34,6 +35,10 @@ describe('resolveWorkerWriteScope (issue #525)', () => {
   it('keeps a Team Worker read-only at every preset when there is no Workspace', () => {
     for (const preset of ['ask', 'auto', 'full'] as const)
       expect(resolveWorkerWriteScope(preset, null)).toBe('read-only');
+  });
+
+  it('keeps a Team Worker read-only for a preset value outside AccessPreset', () => {
+    expect(resolveWorkerWriteScope('unknown' as AccessPreset, '/tmp/ws')).toBe('read-only');
   });
 });
 

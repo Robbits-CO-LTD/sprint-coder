@@ -47,7 +47,9 @@ export function resolveWorkerWriteScope(
   workspacePath: string | null,
 ): RuntimeWriteScope {
   if (workspacePath === null) return 'read-only';
-  return preset === 'full' ? 'full' : 'workspace-write';
+  // Each preset is named, so a value outside AccessPreset stays read-only as in resolveWriteScope.
+  if (preset === 'full') return 'full';
+  return preset === 'ask' || preset === 'auto' ? 'workspace-write' : 'read-only';
 }
 
 /**

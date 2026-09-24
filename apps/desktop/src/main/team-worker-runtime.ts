@@ -144,7 +144,7 @@ export const WORKER_CANNOT_WRITE_NOTICE =
  * 1回ごとに Leader の Turn の承認カードで利用者の許可を待つ。
  */
 export const WORKER_WRITE_APPROVAL_NOTICE =
-  'ファイルの書き込みは1回ごとに利用者の承認を待ってから反映されるため、拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。';
+  'ファイルの書き込みは、1回ごとに利用者の承認を待ってから反映されます。拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。';
 
 /**
  * How much text the Turn has produced, and how much of it came before its last tool call. The
