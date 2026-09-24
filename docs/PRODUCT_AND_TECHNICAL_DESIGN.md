@@ -624,6 +624,8 @@ Command sandboxはmacOS Seatbelt、Linux bubblewrap、Windows AppContainerを使
 
 Harnessがcommitしたファイルは`files.changed` TurnEventとして永続化する。pathとpost-imageはBroker／Edit Sagaの結果だけを正本とし、CLI eventやmodel proseから推測しない。
 
+Turnの完了判定は、commit済みEdit Sagaのpost-imageを完了時に読み直して確かめる。Team Workerの隔離worktreeで書いたSagaは例外で、統合後に隔離worktreeを削除するため完了時には読み直さず、Mainが統合の直前に隔離worktree上で検証して残した証拠で判定する（検証されていないSagaは完了条件を開いたままにする）。そのため、統合からLeader Turnの完了までの間に、外部のエディターやシェルでWorkspaceのファイルが書き換えられても検出しない。Harness外でのこうした書き換えはTurnの完了判定の対象外とする（#547）。
+
 2026-08-01時点で、Inspectorパネルとその専用UI（ライブ本文、差分、手動編集、Project Context表示）は製品から削除した。ユーザーに見せるファイル変更の正本はTimelineの`files.changed`カードである。Main側のtransient file-edit channelとworkspace read/save IPCは既存Runtimeとの互換性のため現状維持するが、現行rendererからは利用しない。
 
 Policy evaluation order:
