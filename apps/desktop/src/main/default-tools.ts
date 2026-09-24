@@ -13,9 +13,11 @@ import {
   CommandRunner,
   prepareExecutionSpec,
   rejectWindowsSandboxedNodeTestIsolation,
+  shouldRejectWindowsSandboxedNodeTestIsolation,
   type CommandOutputChunk,
   type CommandResult,
 } from './command-runner';
+import { readWindowsExecutableFileVersion } from './windows-pe-version';
 import type { PersistenceClient } from './persistence';
 import type { TurnEvent } from '@sprint-coder/contracts';
 import type { TeamCoordinator } from './team-coordinator';
@@ -397,6 +399,21 @@ export function registerApprovalProbeTool(broker: ToolBroker): void {
   });
 }
 
+// Reading a node.exe's file version means opening and parsing it, so this only does that work
+// when the command is actually about to be rejected (Issue #549 acceptance criteria) — the cheap
+// `shouldReject...` check runs first, and the version is read only on the path that is about to
+// throw anyway.
+export async function rejectWindowsSandboxedNodeTestIsolationWithVersion(
+  absoluteExecutable: string,
+  argv: readonly string[],
+  sandboxed: boolean,
+): Promise<void> {
+  if (!shouldRejectWindowsSandboxedNodeTestIsolation(absoluteExecutable, argv, { sandboxed }))
+    return;
+  const nodeVersion = await readWindowsExecutableFileVersion(absoluteExecutable);
+  rejectWindowsSandboxedNodeTestIsolation(absoluteExecutable, argv, { sandboxed, nodeVersion });
+}
+
 export function registerCommandRunnerTool(
   broker: ToolBroker,
   commandRunner: CommandRunner,
@@ -448,9 +465,11 @@ export function registerCommandRunnerTool(
         argv: request.argv,
         ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
       });
-      rejectWindowsSandboxedNodeTestIsolation(spec.absoluteExecutable, spec.argv, {
-        sandboxed: commandRunner.isSandboxed,
-      });
+      await rejectWindowsSandboxedNodeTestIsolationWithVersion(
+        spec.absoluteExecutable,
+        spec.argv,
+        commandRunner.isSandboxed,
+      );
       const persisted = command.persistence.prepareCommand({
         id: randomUUID(),
         taskId: context.taskId,

@@ -1,11 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_EXEC_COMMAND_TOOL,
   POLL_COMMAND_TOOL,
   TERMINATE_COMMAND_TOOL,
   WRITE_STDIN_TOOL,
+  rejectWindowsSandboxedNodeTestIsolationWithVersion,
 } from './default-tools';
 import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
+import type { CommandRunnerError } from './command-runner';
+import { secureLogger } from './secure-logger';
+import { readWindowsExecutableFileVersion } from './windows-pe-version';
+
+vi.mock('./windows-pe-version', () => ({ readWindowsExecutableFileVersion: vi.fn() }));
 
 describe('managed exec command guidance', () => {
   it('explains the Windows sealed-executable and Node test constraints', () => {
@@ -52,4 +58,81 @@ describe('managed command session control authority', () => {
       expect(definition.risk).toBe('low');
     }
   });
+});
+
+describe('rejectWindowsSandboxedNodeTestIsolationWithVersion', () => {
+  const readVersionMock = vi.mocked(readWindowsExecutableFileVersion);
+
+  afterEach(() => {
+    readVersionMock.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  it('never reads the file version when the command would not be rejected', async () => {
+    // sandboxed: false alone is enough to make shouldReject false regardless of platform, so this
+    // exercises the gate without depending on which OS actually runs the test (Issue #549).
+    await expect(
+      rejectWindowsSandboxedNodeTestIsolationWithVersion(
+        'C:\\Program Files\\nodejs\\node.exe',
+        ['--test'],
+        false,
+      ),
+    ).resolves.toBeUndefined();
+    expect(readVersionMock).not.toHaveBeenCalled();
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'reads the file version only on the path that is about to reject, and folds it into the thrown message',
+    async () => {
+      vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+      readVersionMock.mockResolvedValue({ major: 22, minor: 14, build: 0 });
+
+      await expect(
+        rejectWindowsSandboxedNodeTestIsolationWithVersion(
+          'C:\\Program Files\\nodejs\\node.exe',
+          ['--test'],
+          true,
+        ),
+      ).rejects.toMatchObject({
+        name: 'CommandRunnerError',
+        code: 'NODE_TEST_ISOLATION_REQUIRED',
+        message: expect.stringContaining('v22.14.0'),
+      } satisfies Partial<CommandRunnerError>);
+      expect(readVersionMock).toHaveBeenCalledOnce();
+      expect(readVersionMock).toHaveBeenCalledWith('C:\\Program Files\\nodejs\\node.exe');
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'still rejects, without a version in the message, when reading the version fails',
+    async () => {
+      vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+      readVersionMock.mockResolvedValue(null);
+
+      await expect(
+        rejectWindowsSandboxedNodeTestIsolationWithVersion(
+          'C:\\Program Files\\nodejs\\node.exe',
+          ['--test'],
+          true,
+        ),
+      ).rejects.toMatchObject({
+        code: 'NODE_TEST_ISOLATION_REQUIRED',
+        message: expect.stringContaining('First check the version with node.exe --version'),
+      } satisfies Partial<CommandRunnerError>);
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'does not read the version when isolation is already disabled',
+    async () => {
+      await expect(
+        rejectWindowsSandboxedNodeTestIsolationWithVersion(
+          'C:\\Program Files\\nodejs\\node.exe',
+          ['--test', '--test-isolation=none'],
+          true,
+        ),
+      ).resolves.toBeUndefined();
+      expect(readVersionMock).not.toHaveBeenCalled();
+    },
+  );
 });

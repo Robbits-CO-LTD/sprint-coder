@@ -47,6 +47,7 @@ import {
   windowsJobWrapperCommand,
 } from './windows-process-job';
 import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
+import type { WindowsExecutableFileVersion } from './windows-pe-version';
 
 export type CommandOutputChunk = Readonly<{
   seq: number;
@@ -443,15 +444,20 @@ function nodeOptionToken(arg: string): NodeOptionToken {
   };
 }
 
-export function rejectWindowsSandboxedNodeTestIsolation(
+// Pure judgment of whether `argv` would run `canonicalExecutable` as process-isolated `node
+// --test` inside the Windows command sandbox. Kept separate from
+// `rejectWindowsSandboxedNodeTestIsolation` so a caller can check this first, before doing any
+// work (such as reading the executable's file version) that is only worth doing when a rejection
+// is actually about to happen (Issue #549).
+export function shouldRejectWindowsSandboxedNodeTestIsolation(
   canonicalExecutable: string,
   argv: readonly string[],
   options: { platform?: NodeJS.Platform; sandboxed: boolean },
-): void {
+): boolean {
   const platform = options.platform ?? process.platform;
-  if (platform !== 'win32' || !options.sandboxed) return;
+  if (platform !== 'win32' || !options.sandboxed) return false;
   const executableName = windowsPath.basename(canonicalExecutable).toLowerCase();
-  if (executableName !== 'node.exe' && executableName !== 'node') return;
+  if (executableName !== 'node.exe' && executableName !== 'node') return false;
 
   let testRequested = false;
   let isolationMode: string | undefined;
@@ -503,7 +509,84 @@ export function rejectWindowsSandboxedNodeTestIsolation(
           : 'maybe';
   }
 
-  if (!testRequested || isolationMode === 'none') return;
+  return testRequested && isolationMode !== 'none';
+}
+
+const NODE_TEST_ISOLATION_REJECTION_PREAMBLE =
+  'Inside the Windows command sandbox, node --test with process isolation starts every test ' +
+  'file as a child process with piped stdio. The sandbox cannot create those pipes and Node ' +
+  'retries forever, so the command would never finish.';
+
+const NODE_TEST_ISOLATION_OWN_SCRIPT_NOTE =
+  'If --test is an argument to your own script, the same placement also passes, and Node ' +
+  'ignores the flag without --test.';
+
+function formatWindowsExecutableFileVersion(version: WindowsExecutableFileVersion): string {
+  return `v${version.major}.${version.minor}.${version.build}`;
+}
+
+// Node 22.8 introduced --experimental-test-isolation=none; Node 23.6 stabilized it (without the
+// `experimental-` prefix) as --test-isolation=none. Compares only major.minor: the flag a given
+// Node accepts never depends on the patch/build number.
+function compareMajorMinor(a: readonly [number, number], b: readonly [number, number]): number {
+  return a[0] !== b[0] ? a[0] - b[0] : a[1] - b[1];
+}
+
+// Builds the one instruction that matches `nodeVersion`, or — when the version could not be
+// read — the same both-flags guidance the message always carried, plus a prompt to check the
+// version first (Issue #549 acceptance criteria).
+function buildNodeTestIsolationRejectionMessage(
+  nodeVersion: WindowsExecutableFileVersion | null | undefined,
+): string {
+  if (nodeVersion === null || nodeVersion === undefined) {
+    return [
+      NODE_TEST_ISOLATION_REJECTION_PREAMBLE,
+      'First check the version with node.exe --version, then put ' +
+        '--experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none ' +
+        '(Node 23.6 and later) right after node.exe, before --test and every other option, so ' +
+        'tests run in-process.',
+      NODE_TEST_ISOLATION_OWN_SCRIPT_NOTE,
+      'On any Node version, running one test file directly with node.exe <file> (without ' +
+        '--test) also runs in-process.',
+    ].join(' ');
+  }
+
+  const versionText = formatWindowsExecutableFileVersion(nodeVersion);
+  const majorMinor: readonly [number, number] = [nodeVersion.major, nodeVersion.minor];
+  if (compareMajorMinor(majorMinor, [22, 8]) < 0) {
+    return [
+      NODE_TEST_ISOLATION_REJECTION_PREAMBLE,
+      `This node.exe is ${versionText}, which is older than 22.8 and has no in-process ` +
+        'isolation flag, so run one test file at a time directly with node.exe <file> ' +
+        '(without --test) instead.',
+    ].join(' ');
+  }
+
+  const flag =
+    compareMajorMinor(majorMinor, [23, 6]) < 0
+      ? '--experimental-test-isolation=none'
+      : '--test-isolation=none';
+  return [
+    NODE_TEST_ISOLATION_REJECTION_PREAMBLE,
+    `This node.exe is ${versionText}, so put ${flag} right after node.exe, before --test and ` +
+      'every other option, so tests run in-process.',
+    NODE_TEST_ISOLATION_OWN_SCRIPT_NOTE,
+  ].join(' ');
+}
+
+export function rejectWindowsSandboxedNodeTestIsolation(
+  canonicalExecutable: string,
+  argv: readonly string[],
+  options: {
+    platform?: NodeJS.Platform;
+    sandboxed: boolean;
+    // The rejected node.exe's own file version, when the caller could read it (Issue #549). Only
+    // used to pick the one instruction that matches this Node; never used to decide whether to
+    // reject.
+    nodeVersion?: WindowsExecutableFileVersion | null;
+  },
+): void {
+  if (!shouldRejectWindowsSandboxedNodeTestIsolation(canonicalExecutable, argv, options)) return;
   secureLogger.warn(
     'Node test process isolation was rejected before approval',
     {
@@ -515,7 +598,7 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   );
   throw new CommandRunnerError(
     'NODE_TEST_ISOLATION_REQUIRED',
-    'Inside the Windows command sandbox, node --test with process isolation starts every test file as a child process with piped stdio. The sandbox cannot create those pipes and Node retries forever, so the command would never finish. Put --experimental-test-isolation=none (Node 22.8 to 23.5) or --test-isolation=none (Node 23.6 and later) right after node.exe, before --test and every other option, so tests run in-process. If --test is an argument to your own script, the same placement also passes, and Node ignores the flag without --test. On any Node version, running one test file directly with node.exe <file> (without --test) also runs in-process.',
+    buildNodeTestIsolationRejectionMessage(options.nodeVersion),
   );
 }
 
