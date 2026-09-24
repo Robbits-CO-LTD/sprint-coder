@@ -136,13 +136,17 @@ export function readWorkerCriteriaReport(
 } {
   const report =
     doneCriteria === undefined ? null : parseWorkerCriteriaReport(finalText, doneCriteria);
+  const block = report === null || report.ok ? null : lastJsonBlock(finalText);
   // An unreadable report block is left out too: why it could not be read is in the verification.
+  // Any other JSON block is part of the answer, such as a file the Worker was asked to produce.
   const text =
     report === null
       ? finalText.trim()
       : report.ok
         ? report.text
-        : withoutLastJsonBlock(finalText, lastJsonBlock(finalText));
+        : isFailedReportBlock(finalText, block)
+          ? withoutLastJsonBlock(finalText, block)
+          : finalText.trim();
   return {
     summary:
       text !== ''
@@ -283,6 +287,21 @@ function lastJsonBlock(
   const bodyStart = opening.index + opening[0].length;
   const close = finalText.indexOf('```', bodyStart);
   return { start: opening.index, bodyStart, close: close < 0 ? null : close };
+}
+
+/**
+ * Whether the last ```json block is a per-criterion report that could not be used: an object with
+ * a "criteria" key, or a block that is not readable JSON at all (one cut off included).
+ */
+function isFailedReportBlock(finalText: string, block: ReturnType<typeof lastJsonBlock>): boolean {
+  if (block === null) return false;
+  if (block.close === null) return true;
+  try {
+    const parsed: unknown = JSON.parse(finalText.slice(block.bodyStart, block.close));
+    return isRecord(parsed) && Object.hasOwn(parsed, 'criteria');
+  } catch {
+    return true;
+  }
 }
 
 /** The answer without its last ```json block; an unclosed block runs to the end. */

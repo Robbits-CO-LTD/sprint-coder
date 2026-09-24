@@ -5572,6 +5572,65 @@ if (runsWithElectronAbi)
       },
     );
 
+    it('fails a write execution whose isolation Main cannot read, even though its Worker wrote', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Unreadable write isolation');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      // A state that should never occur: the isolation handed to the run has no active repository.
+      const internals = coordinator as unknown as {
+        prepareExecutionIsolation(
+          ...args: unknown[]
+        ): Promise<{ repositories: readonly { state: string }[] }>;
+      };
+      const prepare = internals.prepareExecutionIsolation.bind(coordinator);
+      vi.spyOn(internals, 'prepareExecutionIsolation').mockImplementation(async (...args) => {
+        const isolation = await prepare(...args);
+        return {
+          ...isolation,
+          repositories: isolation.repositories.map((repository) => ({
+            ...repository,
+            state: 'ready',
+          })),
+        };
+      });
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write the output',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the output',
+        doneCriteria: ['worker-output.txt is written'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+
+      const report = JSON.parse(coordinator.listWorkerReports(task.id, 0).at(-1)!.content) as {
+        status: string;
+        summary: string;
+      };
+      expect(report).toMatchObject({
+        status: 'failed',
+        summary: expect.stringContaining('作業場所をMainが確かめられない'),
+      });
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'failed' },
+      ]);
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(existsSync(join(workspace, 'worker-output.txt'))).toBe(false);
+      persistence.close();
+    });
+
     it('fails a write execution whose isolation Main finds unchanged, without integrating it', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Unchanged write');

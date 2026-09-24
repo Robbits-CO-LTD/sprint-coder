@@ -4218,8 +4218,7 @@ export class TeamCoordinator {
    * same execution left there (a resume or a steer reuses it) counts as written. Called once the
    * runtime returned and before anything is integrated or saved. A Manager is exempt: it may meet
    * the request through the Workers it delegates to, whose writes land in their own isolations. So
-   * is the simulation, which writes nothing. Every write execution runs in an isolation or a
-   * Mission worktree, so there is always something to read.
+   * is the simulation, which writes nothing. A write execution with nothing Main can read fails.
    */
   private async requireWorkspaceWrite<
     T extends { value: WorkerCompletion; doneEvidence: WorkerDoneEvidence[]; simulated: boolean },
@@ -4249,7 +4248,13 @@ export class TeamCoordinator {
               worktreeId: isolationWorktreeId(input.executionId, ordinal),
               baseHead,
             }));
-    if (this.worktreeManager === undefined || worktrees.length === 0) return dispatched;
+    // Should never happen, since a write execution cannot start without them. If it does, Main
+    // cannot confirm the write, so the run fails through the same path as other preparation
+    // failures (quarantine, no integration, no retry for a write Worker) rather than succeeding.
+    if (this.worktreeManager === undefined || worktrees.length === 0)
+      throw new Error(
+        '書き込み実行の作業場所をMainが確かめられないため、変更を統合せず失敗として記録しました。',
+      );
     for (const worktree of worktrees)
       if (await this.worktreeManager.hasChangesFromBase({ agentId: input.worker.id, ...worktree }))
         return dispatched;

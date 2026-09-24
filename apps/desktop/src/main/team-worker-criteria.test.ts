@@ -217,6 +217,21 @@ describe('readWorkerCriteriaReport', () => {
     );
     const cutOff = ['調べました。', '```json', '{"criteria":[{"index":1,'].join('\n');
     expect(readWorkerCriteriaReport(cutOff, ['答えを見つける']).summary).toBe('調べました。');
+    const invalid = answer(
+      { criteria: [{ index: 2, status: 'done', evidence: 'x' }] },
+      '調べました。',
+    );
+    expect(readWorkerCriteriaReport(invalid, ['答えを見つける']).summary).toBe('調べました。');
+  });
+
+  it('keeps an ordinary JSON block the Worker answered with, though the report is missing', () => {
+    const text = ['設定ファイルを作りました。', '```json', '{"port":8080}', '```'].join('\n');
+    const report = readWorkerCriteriaReport(text, ['設定を作る']);
+    expect(report.criteria).toBeUndefined();
+    expect(report.verification).toEqual([
+      { name: CRITERIA_REPORT_VERIFICATION, outcome: 'fail', detail: expect.any(String) },
+    ]);
+    expect(report.summary).toBe(text);
   });
 
   it('gives a fixed summary when the answer is only the report block', () => {
