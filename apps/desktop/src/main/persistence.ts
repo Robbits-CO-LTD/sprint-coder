@@ -18169,7 +18169,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * removed after integration (issue #516). Main records that Saga's verification evidence while
    * the worktree still exists (`verifyTeamExecutionIsolationEditSagaPostImages`). decideCompletion
    * still requires the evidence; a Saga that was not verified records nothing and keeps its
-   * criterion open.
+   * criterion open. A change made to the Workspace outside the Harness after integration (an
+   * editor, a shell) is therefore not detected here; the design leaves it outside Turn completion
+   * (issue #547).
    */
   private verifyEditSagaPostImagesInTransaction(
     taskId: string,
