@@ -366,6 +366,34 @@ const SAFE_AUTO_RULES: readonly PermissionRule[] = [
 ];
 
 /**
+ * 「安全時は自動」で Workspace 内のファイルの作成・編集を自動許可した監査理由（issue #526）。
+ * Main はこれで、その許可がプリセットの限定許可ルールから来たことを見分ける。
+ */
+export const AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON = 'preset_auto_safe_edit';
+
+/**
+ * 「安全時は自動」だけが持つ、Workspace 内のファイルの作成・編集の自動許可（issue #526）。
+ *
+ * - `workspace.write` を要求するツールは Edit Saga の3つ（apply_patch / create_file /
+ *   create_directory）だけなので、自動になるのはそれらによる Workspace 内のファイル変更だけ。
+ * - 対象は Workspace に分類されたパスだけ。credential・アプリ領域・署名鍵などの保護パスは、
+ *   評価順で先に来る IMMUTABLE_DENY_RULES が拒否したまま。
+ * - コマンド（shell.execute）、Workspace 外への書き込み、ネットワーク、外部で開く操作は
+ *   ここに含めず、これまでどおり自動レビューが判定する。
+ *
+ * FULL_RULES が SAFE_AUTO_RULES を展開しているので、SAFE_AUTO_RULES には入れない。入れると
+ * フルアクセスの展開が変わり、保存済みの規則がすべて改ざん扱いになる。
+ */
+const AUTO_WORKSPACE_EDIT_RULES: readonly PermissionRule[] = [
+  {
+    capability: 'workspace.write',
+    resourceSet: { kind: 'path-classification', classifications: ['workspace'] },
+    operations: ['write'],
+    auditReason: AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON,
+  },
+];
+
+/**
  * Audit reason for the Full preset's Workspace-file disclosure allow. Exported so Main can tell
  * "the user already allowed this lane" apart from any other allow without matching a bare string.
  */
@@ -491,7 +519,7 @@ export function expandAccessPreset(preset: AccessPreset): ExpandedAccessPolicy {
     return Object.freeze({
       approvalPolicy: 'auto',
       approvalReason: 'preset_auto_unknown',
-      allowRules: cloneRules(SAFE_AUTO_RULES),
+      allowRules: cloneRules([...SAFE_AUTO_RULES, ...AUTO_WORKSPACE_EDIT_RULES]),
       immutableDeny: cloneRules(IMMUTABLE_DENY_RULES),
     });
   return Object.freeze({

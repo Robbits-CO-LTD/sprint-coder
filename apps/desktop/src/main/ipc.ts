@@ -655,6 +655,7 @@ import type {
 import { serializeCliExecutionPayload } from '../runtime-host/execution-payload';
 import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure-diagnostics';
 import {
+  AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON,
   FULL_PRESET_DISCLOSURE_AUDIT_REASON,
   digestToolCatalogValue,
   permissionRequestFingerprint,
@@ -6227,12 +6228,10 @@ export class IpcRouter {
             callId: request.callId,
             reviewRequestId,
             capability,
-            source:
-              reviewerDecision !== undefined
-                ? 'reviewer'
-                : evaluation.reason === 'preset_auto_safe'
-                  ? 'narrow_allow'
-                  : 'policy',
+            source: autoPermissionDecisionSource({
+              reviewed: reviewerDecision !== undefined,
+              evaluationReason: evaluation.reason,
+            }),
             decision:
               evaluation.decision === 'allow' || evaluation.decision === 'allow_once'
                 ? evaluation.decision
@@ -10250,6 +10249,22 @@ export function managedLocalForcedRoundMessages(
     ...messages.filter(({ role }) => role === 'system'),
     { role: 'user', content: currentUserText },
   ];
+}
+
+/**
+ * 「安全時は自動」の判定を監査に残すときの出どころ。自動レビューを経たものは `reviewer`、
+ * プリセットの限定許可ルール（Workspace の読み取りと、issue #526 からの Workspace 内のファイルの
+ * 作成・編集）で許可したものは `narrow_allow`、それ以外は `policy`。
+ */
+export function autoPermissionDecisionSource(input: {
+  reviewed: boolean;
+  evaluationReason: string;
+}): 'policy' | 'narrow_allow' | 'reviewer' {
+  if (input.reviewed) return 'reviewer';
+  return input.evaluationReason === 'preset_auto_safe' ||
+    input.evaluationReason === AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON
+    ? 'narrow_allow'
+    : 'policy';
 }
 
 /**

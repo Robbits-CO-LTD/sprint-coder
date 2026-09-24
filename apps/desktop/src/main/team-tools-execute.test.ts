@@ -742,7 +742,7 @@ describe('executeTeamTool writeScope/writeScopeNote in assignment results (issue
   it('adds the ask/auto/full confirmation wording to a workspace-write team_assign_task', async () => {
     for (const [preset, expected] of [
       ['ask', '承認カード'],
-      ['auto', '自動レビュー'],
+      ['auto', '作成・編集は自動で許可'],
       ['full', '確認なしで反映'],
     ] as const) {
       const coordinator = fakeCoordinator({ taskAccessPreset: vi.fn(() => preset) as never });
@@ -769,7 +769,7 @@ describe('executeTeamTool writeScope/writeScopeNote in assignment results (issue
       access: 'workspace-write',
     })) as { writeScopeNote: string };
     expect(result.writeScopeNote).toContain('隔離worktree');
-    expect(result.writeScopeNote).not.toMatch(/承認カード|自動レビュー|確認なしで反映/);
+    expect(result.writeScopeNote).not.toMatch(/承認カード|自動で許可|自動レビュー|確認なしで反映/);
   });
 
   it('reports a per-step writeScope and a workspace-write note for team_assign_mission', async () => {

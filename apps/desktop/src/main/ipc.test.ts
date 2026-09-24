@@ -161,6 +161,7 @@ import {
   providerEventsWithSafeFailure,
   providerWorkspaceToolFailure,
   providerDisclosureRequiresExplicitApproval,
+  autoPermissionDecisionSource,
   requireExplicitProviderCommandApproval,
   requiredTeamWorkerFailure,
   shouldRetryProviderWithoutTools,
@@ -5649,6 +5650,17 @@ describe('Provider workspace tool capability fallback', () => {
         evaluationReason: 'preset_full',
       }),
     ).toBe(false);
+  });
+
+  it('records an Auto preset rule allow as narrow_allow, Workspace edits included (issue #526)', () => {
+    const source = (evaluationReason: string, reviewed = false) =>
+      autoPermissionDecisionSource({ reviewed, evaluationReason });
+
+    expect(source('preset_auto_safe')).toBe('narrow_allow');
+    expect(source('preset_auto_safe_edit')).toBe('narrow_allow');
+    expect(source('immutable_protected_resource')).toBe('policy');
+    expect(source('preset_auto_unknown')).toBe('policy');
+    expect(source('reviewer_safe', true)).toBe('reviewer');
   });
 });
 

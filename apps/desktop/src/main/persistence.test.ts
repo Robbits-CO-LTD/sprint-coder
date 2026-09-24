@@ -29,7 +29,11 @@ import {
   expandAccessPreset,
   type AccessPreset,
 } from '@sprint-coder/domain';
-import { legacyExpandAccessPreset } from './permission-preset-legacy-rules';
+import {
+  legacyExpandAccessPreset,
+  legacyExpandAccessPresetBefore526,
+  type LegacyExpandedAccessPolicy,
+} from './permission-preset-legacy-rules';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
 import {
@@ -7145,8 +7149,13 @@ if (runsWithElectronAbi)
           .sort();
       };
 
-      const writeLegacyRules = (path: string, taskId: string, preset: AccessPreset) => {
-        const legacy = legacyExpandAccessPreset(preset);
+      const writeLegacyRules = (
+        path: string,
+        taskId: string,
+        preset: AccessPreset,
+        expand: (preset: AccessPreset) => LegacyExpandedAccessPolicy = legacyExpandAccessPreset,
+      ) => {
+        const legacy = expand(preset);
         const database = new Database(path);
         database.prepare('DELETE FROM permission_rules WHERE task_id = ?').run(taskId);
         const insert = database.prepare(
@@ -7304,6 +7313,84 @@ if (runsWithElectronAbi)
         const reopened = new SqlitePersistenceClient(path);
         expect(() => reopened.getPermissionPolicy(task.id)).toThrow();
         reopened.close();
+      });
+
+      // issue #526 added the Workspace edit allow to Auto only, so a database written between
+      // #487 and #526 (the e0fa25c snapshot) needs rewriting for its Auto Tasks and nothing else.
+      describe('rules written before #526', () => {
+        it('re-materializes an Auto Task and moves its epoch', () => {
+          const { persistence, path } = createPersistence();
+          const task = persistence.createTask();
+          persistence.setAccessPreset(task.id, 'auto');
+          const epochBefore = persistence.getPermissionPolicy(task.id).policyEpoch;
+          persistence.close();
+          writeLegacyRules(path, task.id, 'auto', legacyExpandAccessPresetBefore526);
+
+          const reopened = new SqlitePersistenceClient(path);
+          const policy = reopened.getPermissionPolicy(task.id);
+          expect(policy).toMatchObject({ preset: 'auto', policyEpoch: epochBefore + 1 });
+          expect(policy.expandedPolicy.allowRules).toContainEqual(
+            expect.objectContaining({
+              capability: 'workspace.write',
+              auditReason: 'preset_auto_safe_edit',
+            }),
+          );
+          expect(storedRuleKeys(path, task.id)).toEqual(expectedRuleKeys('auto'));
+          expect(reopened.listPendingPermissionPolicyEpochs()).toContainEqual(
+            expect.objectContaining({ taskId: task.id, policyEpoch: epochBefore + 1 }),
+          );
+          reopened.close();
+        });
+
+        it.each(['ask', 'full'] as const)(
+          'leaves a %s Task alone because its expansion did not change',
+          (preset) => {
+            const { persistence, path } = createPersistence();
+            const task = persistence.createTask();
+            persistence.setAccessPreset(task.id, preset);
+            const epoch = persistence.getPermissionPolicy(task.id).policyEpoch;
+            persistence.close();
+            writeLegacyRules(path, task.id, preset, legacyExpandAccessPresetBefore526);
+
+            for (const _attempt of [0, 1]) {
+              const reopened = new SqlitePersistenceClient(path);
+              expect(reopened.getPermissionPolicy(task.id)).toMatchObject({
+                preset,
+                policyEpoch: epoch,
+              });
+              expect(storedRuleKeys(path, task.id)).toEqual(expectedRuleKeys(preset));
+              reopened.close();
+            }
+          },
+        );
+
+        it('still fails closed for an Auto Task whose pre-#526 rows were changed by hand', () => {
+          const { persistence, path } = createPersistence();
+          const task = persistence.createTask();
+          persistence.setAccessPreset(task.id, 'auto');
+          const epoch = persistence.getPermissionPolicy(task.id).policyEpoch;
+          persistence.close();
+          writeLegacyRules(path, task.id, 'auto', legacyExpandAccessPresetBefore526);
+          const tamper = new Database(path);
+          tamper
+            .prepare(
+              `UPDATE permission_rules SET capability = 'shell.execute',
+               resource_json = '{"kind":"all"}', operations_json = '["execute"]'
+               WHERE task_id = ? AND capability = 'workspace.read' AND effect = 'allow'`,
+            )
+            .run(task.id);
+          tamper.close();
+          const tamperedKeys = storedRuleKeys(path, task.id);
+
+          const reopened = new SqlitePersistenceClient(path);
+          expect(reopened.getPermissionPolicy(task.id)).toMatchObject({
+            preset: 'ask',
+            policyEpoch: epoch,
+            expandedPolicy: { approvalPolicy: 'ask', allowRules: [] },
+          });
+          expect(storedRuleKeys(path, task.id)).toEqual(tamperedKeys);
+          reopened.close();
+        });
       });
     });
 

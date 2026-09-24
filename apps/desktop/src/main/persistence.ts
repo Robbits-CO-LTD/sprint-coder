@@ -290,7 +290,7 @@ import {
   type PersistedFailureDiagnostic,
 } from './provider-failure-diagnostic';
 import { pathComparisonKey, pathsEquivalent } from '../path-comparison';
-import { legacyExpandAccessPreset } from './permission-preset-legacy-rules';
+import { LEGACY_ACCESS_PRESET_EXPANSIONS } from './permission-preset-legacy-rules';
 import { displayWorkspaceRootLabel } from './workspace-root-resolution';
 import {
   canonicalizeWorkspaceFileChangePath,
@@ -7821,10 +7821,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * Provider-disclosure rules — makes every database written by the previous build look modified,
    * silently dropping the user's Access preset.
    *
-   * So at open, a Task whose stored rows are *exactly* the previous expansion (the frozen
-   * 3260f08 snapshot, never the current one) has its rules re-written to the current expansion and
-   * keeps its preset. Anything else still falls back to Ask, unchanged. An expansion that turns
-   * out not to have changed rewrites nothing, so this cannot bump epochs on every start.
+   * So at open, a Task whose stored rows are *exactly* a previous expansion (one of the frozen
+   * snapshots in `LEGACY_ACCESS_PRESET_EXPANSIONS` — 3260f08 before #487, e0fa25c before #526 —
+   * never the current one) has its rules re-written to the current expansion and keeps its preset.
+   * Anything else still falls back to Ask, unchanged. An expansion that turns out not to have
+   * changed rewrites nothing, so this cannot bump epochs on every start.
    *
    * The rules the engine evaluates under are not the ones the Task's grants were issued against,
    * so the epoch moves and those grants are revoked, exactly as `bumpProjectTaskPolicyEpochs`
@@ -7846,15 +7847,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const now = new Date().toISOString();
     this.db.transaction(() => {
       for (const state of states) {
-        // `legacyExpandAccessPreset` treats anything that is not ask/auto as Full, so never hand
-        // it a label this build does not recognize, CHECK constraint or not.
+        // The legacy expansions treat anything that is not ask/auto as Full, so never hand them a
+        // label this build does not recognize, CHECK constraint or not.
         if (!(['ask', 'auto', 'full'] as const).includes(state.preset_label)) continue;
-        const legacy = legacyExpandAccessPreset(state.preset_label);
-        if (
-          state.approval_policy !== legacy.approvalPolicy ||
-          state.approval_reason !== legacy.approvalReason
-        )
-          continue;
+        const presetLabel = state.preset_label;
+        // Only the frozen snapshots whose approval policy and reason match the stored state can
+        // have written this Task's rows (3260f08 before #487, e0fa25c before #526).
+        const candidates = LEGACY_ACCESS_PRESET_EXPANSIONS.map((expand) =>
+          expand(presetLabel),
+        ).filter(
+          (legacy) =>
+            state.approval_policy === legacy.approvalPolicy &&
+            state.approval_reason === legacy.approvalReason,
+        );
+        if (candidates.length === 0) continue;
         let storedKey: string;
         try {
           storedKey = permissionRuleSetKey(
@@ -7874,11 +7880,15 @@ export class SqlitePersistenceClient implements PersistenceClient {
           })),
         ]);
         if (storedKey === canonicalKey) continue;
-        const legacyKey = permissionRuleSetKey([
-          ...legacy.allowRules.map((rule) => ({ effect: 'allow' as const, rule })),
-          ...legacy.immutableDeny.map((rule) => ({ effect: 'immutable-deny' as const, rule })),
-        ]);
-        if (storedKey !== legacyKey) continue;
+        const matchesLegacy = candidates.some(
+          (legacy) =>
+            storedKey ===
+            permissionRuleSetKey([
+              ...legacy.allowRules.map((rule) => ({ effect: 'allow' as const, rule })),
+              ...legacy.immutableDeny.map((rule) => ({ effect: 'immutable-deny' as const, rule })),
+            ]),
+        );
+        if (!matchesLegacy) continue;
         this.writePresetRules(state.task_id, canonical, now);
         const policyEpoch = state.policy_epoch + 1;
         this.db
