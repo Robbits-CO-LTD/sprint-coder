@@ -29,6 +29,7 @@ import {
   argvRepeatsExecutable,
   prepareExecutionSpec,
   rejectWindowsSandboxedNodeTestIsolation,
+  shouldRejectWindowsSandboxedNodeTestIsolation,
   waitForOutcomeOrTerminationFailure,
   windowsCommandEnvironment,
   type CommandOutputChunk,
@@ -1828,6 +1829,129 @@ describe('rejectWindowsSandboxedNodeTestIsolation', () => {
       ).not.toThrow();
       expect(warn).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('rejectWindowsSandboxedNodeTestIsolation node version instruction', () => {
+  const nodeExe = 'C:\\Program Files\\nodejs\\node.exe';
+  const sandboxedWindows = { platform: 'win32' as const, sandboxed: true };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('does not read or mention a version when reading it was skipped', () => {
+    vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    let thrown: unknown;
+    try {
+      rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], sandboxedWindows);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(CommandRunnerError);
+    const message = (thrown as CommandRunnerError).message;
+    expect(message).toContain('First check the version with node.exe --version');
+    expect(message).toContain('--experimental-test-isolation=none');
+    expect(message).toContain('--test-isolation=none');
+  });
+
+  it('writes only --experimental-test-isolation=none for 22.8 through 23.5', () => {
+    vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    for (const nodeVersion of [
+      { major: 22, minor: 8, build: 0 },
+      { major: 22, minor: 14, build: 0 },
+      { major: 23, minor: 5, build: 9 },
+    ]) {
+      let thrown: unknown;
+      try {
+        rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], {
+          ...sandboxedWindows,
+          nodeVersion,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CommandRunnerError);
+      const message = (thrown as CommandRunnerError).message;
+      expect(message).toContain(`v${nodeVersion.major}.${nodeVersion.minor}.${nodeVersion.build}`);
+      expect(message).toContain('--experimental-test-isolation=none');
+      expect(message).not.toContain('--test-isolation=none');
+      expect(message).not.toContain('node.exe --version');
+    }
+  });
+
+  it('writes only --test-isolation=none for 23.6 and later', () => {
+    vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    for (const nodeVersion of [
+      { major: 23, minor: 6, build: 0 },
+      { major: 24, minor: 0, build: 1 },
+    ]) {
+      let thrown: unknown;
+      try {
+        rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], {
+          ...sandboxedWindows,
+          nodeVersion,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CommandRunnerError);
+      const message = (thrown as CommandRunnerError).message;
+      expect(message).toContain(`v${nodeVersion.major}.${nodeVersion.minor}.${nodeVersion.build}`);
+      expect(message).toContain('--test-isolation=none');
+      expect(message).not.toContain('--experimental-test-isolation=none');
+    }
+  });
+
+  // A version below 22.8 may come from a shim or another binary named node.exe, so it gets the
+  // guidance for an unread version rather than an instruction that withholds both flags.
+  it('falls back to checking the version and both flags below 22.8', () => {
+    vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    for (const nodeVersion of [
+      { major: 22, minor: 7, build: 0 },
+      { major: 18, minor: 20, build: 4 },
+      { major: 1, minor: 0, build: 0 },
+      { major: 0, minor: 0, build: 0 },
+    ]) {
+      let thrown: unknown;
+      try {
+        rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], {
+          ...sandboxedWindows,
+          nodeVersion,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CommandRunnerError);
+      const message = (thrown as CommandRunnerError).message;
+      expect(message).not.toContain(
+        `v${nodeVersion.major}.${nodeVersion.minor}.${nodeVersion.build}`,
+      );
+      expect(message).toContain('First check the version with node.exe --version');
+      expect(message).toContain('--experimental-test-isolation=none (Node 22.8 to 23.5)');
+      expect(message).toContain('--test-isolation=none (Node 23.6 and later)');
+      expect(message).toContain('If --test is an argument to your own script');
+      expect(message).toContain('node.exe <file>');
+    }
+  });
+
+  it('never reads a version or logs when the check does not reject the command', () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    expect(
+      shouldRejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test', '--test-isolation=none'], {
+        sandboxed: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], { sandboxed: false }),
+    ).toBe(false);
+    expect(() =>
+      rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test', '--test-isolation=none'], {
+        ...sandboxedWindows,
+        nodeVersion: { major: 22, minor: 14, build: 0 },
+      }),
+    ).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
