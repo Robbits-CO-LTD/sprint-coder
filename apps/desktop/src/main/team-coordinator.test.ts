@@ -33,7 +33,10 @@ import {
   type WorkerRuntimeResult,
   type WorkerActivityEvent,
 } from './team-coordinator';
+import type { GraphMissionPlan } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
+import { nextGraphDocument } from './graph-document';
+import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
@@ -651,6 +654,41 @@ class FailOnceWorkerRuntime extends TestWorkerRuntime {
   }
 }
 
+/**
+ * Every stop leaves the stopped Turn's exit unconfirmed, like a CLI tree that outlived its stop
+ * (issue #548). `startRefused` stays false: neither that Turn nor a re-run of the same execution
+ * held behind it is a confirmed stop of this execution.
+ */
+function unconfirmedStopRuntime(): { runtime: TeamWorkerRuntime; executions(): number } {
+  const running = new Map<string, (error: Error) => void>();
+  let executions = 0;
+  return {
+    executions: () => executions,
+    runtime: {
+      async start() {
+        return { pid: null };
+      },
+      async execute(input) {
+        executions += 1;
+        await new Promise<void>((_resolve, reject) => {
+          running.set(input.worker.id, reject);
+        });
+        throw new Error('the execution was expected to be stopped');
+      },
+      async stop(agentId) {
+        const reject = running.get(agentId);
+        running.delete(agentId);
+        reject?.(
+          new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+            { startRefused: false },
+          ),
+        );
+      },
+    },
+  };
+}
+
 function grokFailureDiagnostic(
   failureStage: 'billing_error' | 'protocol_error',
   httpStatus?: number,
@@ -811,6 +849,28 @@ describe('runtimeStopConfirmed', () => {
     expect(
       runtimeStopConfirmed(new WorkerRuntimeExitUnconfirmedError('exit was not confirmed')),
     ).toBe(false);
+    expect(
+      runtimeStopConfirmed(
+        new WorkerRuntimeExitUnconfirmedError('exit was not confirmed', {
+          originalError: new WorkerRuntimeFailureError(
+            { code: 'RUNTIME_BILLING_REQUIRED', userMessage: 'billing', retryable: false },
+            'grok',
+            'runtime-turn-billing',
+            undefined,
+          ),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('treats an execution refused before it started anything as a confirmed runtime stop', () => {
+    expect(
+      runtimeStopConfirmed(
+        new WorkerRuntimeExitUnconfirmedError('previous Turn exit is unconfirmed', {
+          startRefused: true,
+        }),
+      ),
+    ).toBe(true);
   });
 
   it.each([
@@ -4657,6 +4717,122 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 30_000);
 
+    it('keeps the isolated worktree when a steered write execution is canceled behind its unconfirmed earlier Turn', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Steer then cancel unconfirmed isolated write');
+      const { runtime, executions } = unconfirmedStopRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const reclaim = vi.spyOn(manager, 'cleanupUnchanged');
+      const remove = vi.spyOn(manager, 'cleanup');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'steered writer',
+        objective: 'be steered and then canceled',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'first instruction',
+        doneCriteria: ['execution is canceled'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => executions() === 1, 15_000);
+
+      // The steer re-runs the same execution in the same isolation while the stopped Turn's exit is
+      // still unconfirmed, and the cancel of that re-run is no confirmed stop either.
+      await coordinator.steerExecution(task.id, submission.executionId, 'revised instruction');
+      await waitFor(() => executions() === 2, 15_000);
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'quarantined' }],
+      });
+      expect(existsSync(isolation.repositories[0]!.worktreePath)).toBe(true);
+      expect(reclaim).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).not.toContain(submission.executionId);
+      persistence.close();
+    }, 30_000);
+
+    it('quarantines rather than removes the worktree of a steered write execution canceled before its re-dispatch', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel steered isolated write during preflight');
+      const { runtime, executions } = unconfirmedStopRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const remove = vi.spyOn(manager, 'cleanup');
+      let holdPreflight = false;
+      let preflightHeld = false;
+      let releasePreflight!: () => void;
+      const preflight = new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      });
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        manager,
+        async () => {
+          if (!holdPreflight) return;
+          preflightHeld = true;
+          await preflight;
+        },
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'steered writer',
+        objective: 'be canceled before the re-dispatch',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'first instruction',
+        doneCriteria: ['execution is canceled'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => executions() === 1, 15_000);
+
+      // The steer re-queues the same execution, which reuses the isolation the stopped Turn may
+      // still be using; hold that re-dispatch in preflight and cancel it there.
+      holdPreflight = true;
+      await coordinator.steerExecution(task.id, submission.executionId, 'revised instruction');
+      await waitFor(() => preflightHeld, 15_000);
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+      releasePreflight();
+      await waitFor(() => scheduler.snapshot().activeCount === 0, 15_000);
+
+      expect(executions()).toBe(1);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'quarantined' }],
+      });
+      expect(existsSync(isolation.repositories[0]!.worktreePath)).toBe(true);
+      expect(remove).not.toHaveBeenCalled();
+      persistence.close();
+    }, 30_000);
+
     it('reclaims an unchanged isolated worktree after a write Worker runtime failure', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Failed unchanged isolated write');
@@ -4866,6 +5042,53 @@ if (runsWithElectronAbi)
           .listReclaimConfirmedTeamExecutionIsolations()
           .map(({ executionId }) => executionId),
       ).not.toContain(submission.executionId);
+      persistence.close();
+    }, 30_000);
+
+    it('reclaims the worktree of an execution refused before it started because an earlier exit is unconfirmed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Refused isolated start');
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeExitUnconfirmedError('previous Turn exit is unconfirmed', {
+            startRefused: true,
+          });
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'refused writer',
+        objective: 'be refused before starting',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'refused before start',
+        doneCriteria: ['worktree is reclaimed'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(
+        () =>
+          persistence.getTeamExecution(submission.executionId).state === 'failed' &&
+          persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
+            'cleaned',
+        15_000,
+      );
+      const repository = persistence.getTeamExecutionIsolation(submission.executionId)!
+        .repositories[0]!;
+      expect(existsSync(repository.worktreePath)).toBe(false);
+      expect(executeCount).toBe(1);
       persistence.close();
     }, 30_000);
 
@@ -5314,6 +5537,234 @@ if (runsWithElectronAbi)
         { event: 'team.attempt.runtime_failed', result: 'RUNTIME_FAILED' },
       ]);
       expect(JSON.stringify(diagnostics)).not.toContain('diagnostic store unavailable');
+      persistence.close();
+    });
+
+    it('records the failed Turn diagnostic without retrying when that Turn exit is then unconfirmed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Billing failure with an unconfirmed exit');
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+            {
+              originalError: new WorkerRuntimeFailureError(
+                { code: 'RUNTIME_BILLING_REQUIRED', userMessage: 'billing', retryable: false },
+                'grok',
+                'runtime-turn-billing',
+                grokFailureDiagnostic('billing_error', 402),
+              ),
+            },
+          );
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'unconfirmed billing worker',
+        objective: 'keep the billing diagnostic',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail on billing',
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      expect(executeCount).toBe(1);
+      const attempts = persistence.listTeamAttempts(submission.executionId);
+      expect(attempts).toEqual([
+        expect.objectContaining({ state: 'failed', terminalReason: 'runtime_failure' }),
+      ]);
+      expect(persistence.getTeamAttemptFailureDiagnostic(attempts[0]!.id)).toMatchObject({
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-billing',
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        diagnostic: { failureStage: 'billing_error', httpStatus: 402 },
+      });
+      persistence.close();
+    });
+
+    it.each<[string, ConstructorParameters<typeof WorkerRuntimeExitUnconfirmedError>[1]]>([
+      ['after a completed Turn', undefined],
+      [
+        'after a non-billing Turn failure',
+        {
+          originalError: new WorkerRuntimeFailureError(
+            { code: 'RUNTIME_FAILED', userMessage: 'runtime failed', retryable: false },
+            'grok',
+            'runtime-turn-failed',
+            undefined,
+          ),
+        },
+      ],
+      ['when it was refused before starting', { startRefused: true }],
+    ])(
+      'does not retry a read-only Worker whose Turn exit is unconfirmed %s',
+      async (_label, options) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Unconfirmed read-only exit');
+        let executeCount = 0;
+        const runtime: TeamWorkerRuntime = {
+          async start() {
+            return { pid: null };
+          },
+          async execute() {
+            executeCount += 1;
+            throw new WorkerRuntimeExitUnconfirmedError(
+              'Runtime process tree exit was not confirmed within 30 seconds',
+              options,
+            );
+          },
+          async stop() {},
+        };
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'unconfirmed reader',
+          objective: 'never run a second CLI beside the first',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'read without a confirmed exit',
+          doneCriteria: ['never satisfied'],
+        });
+
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        );
+        expect(executeCount).toBe(1);
+        expect(persistence.listTeamAttempts(submission.executionId)).toEqual([
+          expect.objectContaining({ state: 'failed', startReason: 'initial' }),
+        ]);
+        persistence.close();
+      },
+    );
+
+    it('records the failed Turn diagnostic for a Graph step whose Turn exit is then unconfirmed', async () => {
+      const persistence = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('Graph unconfirmed exit');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      // A Graph plan needs two steps; only the first one runs, and it fails.
+      const keys = ['a', 'b'];
+      const workers = keys.map((role) => {
+        const worker = persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: role,
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: false,
+        });
+        persistence.transitionWorkerState(worker.id, 'spawning');
+        persistence.transitionWorkerState(worker.id, 'ready');
+        return worker;
+      });
+      persistence.transitionTeamState(team.id, 'active');
+      const plan: GraphMissionPlan = {
+        mode: 'graph',
+        objective: 'Review',
+        doneCriteria: ['Reviewed'],
+        steps: workers.map((worker, index) => ({
+          key: keys[index]!,
+          nodeId: keys[index]!,
+          workerId: worker.id,
+          objective: worker.role,
+          doneCriteria: ['Reviewed'],
+          access: 'read-only',
+          dependsOn: index === 0 ? [] : ['a'],
+          writeClaims: [],
+          resourceClaims: [],
+        })),
+      };
+      const diagram = {
+        schema_version: 2,
+        diagram_type: 'workflow',
+        meta: { title: 'Review' },
+        lanes: [{ id: 'work', label: 'Work' }],
+        nodes: keys.map((id, col) => ({ id, col, lane: 'work', label: id, type: 'backend' })),
+        edges: [{ id: 'ab', from: 'a', to: 'b' }],
+      };
+      const document = nextGraphDocument(task.id, diagram, null, [], [], plan);
+      persistence.saveGraphDocument(document, 0);
+      const context = graphMissionContextFor(persistence, task.id);
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+            {
+              originalError: new WorkerRuntimeFailureError(
+                { code: 'RUNTIME_BILLING_REQUIRED', userMessage: 'billing', retryable: false },
+                'grok',
+                'runtime-turn-graph',
+                grokFailureDiagnostic('billing_error', 402),
+              ),
+            },
+          );
+        },
+        async stop() {},
+      };
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+
+      const mission = await coordinator.startGraphMission(task.id, async () => ({
+        taskId: task.id,
+        graphId: document.id,
+        renderRevision: 1,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+        workspaceDigest: context.workspace.digest,
+        policyEpoch: context.policyEpoch,
+        contextDigest: graphMissionContextDigest(context, new Set(workers.map(({ id }) => id))),
+        consentId: randomUUID(),
+        now: new Date().toISOString(),
+      }));
+      const executionId = persistence.getTeamMission(mission.id).steps[0]!.executionId;
+      await waitFor(
+        () =>
+          persistence
+            .listTeamAttempts(executionId)
+            .some(({ state }) => ['failed', 'interrupted', 'canceled'].includes(state)),
+        15_000,
+      );
+      await waitFor(() => scheduler.snapshot().activeCount === 0, 15_000);
+
+      expect(executeCount).toBe(1);
+      const attempts = persistence.listTeamAttempts(executionId);
+      expect(attempts).toHaveLength(1);
+      expect(persistence.getTeamAttemptFailureDiagnostic(attempts[0]!.id)).toMatchObject({
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-graph',
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        diagnostic: { failureStage: 'billing_error', httpStatus: 402 },
+      });
       persistence.close();
     });
 

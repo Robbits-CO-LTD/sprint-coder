@@ -163,11 +163,31 @@ export class WorkerRuntimeControlError extends Error {
   }
 }
 
-/** The runtime turn ended, but Main could not confirm that its process tree exited. */
+/**
+ * Main could not confirm that a Worker runtime process tree exited: either the Turn that just
+ * ended, or an earlier Turn of the same Worker that a new execution would otherwise run beside.
+ */
 export class WorkerRuntimeExitUnconfirmedError extends Error {
-  constructor(message: string, options?: Readonly<{ cause?: unknown }>) {
+  /**
+   * What the Turn itself failed with before its exit went unconfirmed (issue #548), so that
+   * failure's diagnostic is still recorded. Undefined when the Turn completed or never ran.
+   */
+  readonly originalError: unknown;
+  /**
+   * The new execution was refused before it started anything, and every unconfirmed Turn that
+   * blocked it ran for another execution, so nothing of this execution can still be using its
+   * worktree. False when a blocking Turn may belong to this same execution (a steer reuses it).
+   */
+  readonly startRefused: boolean;
+
+  constructor(
+    message: string,
+    options?: Readonly<{ cause?: unknown; originalError?: unknown; startRefused?: boolean }>,
+  ) {
     super(message, options);
     this.name = 'WorkerRuntimeExitUnconfirmedError';
+    this.originalError = options?.originalError;
+    this.startRefused = options?.startRefused === true;
   }
 }
 
@@ -1513,16 +1533,17 @@ export class TeamCoordinator {
         0,
         2000,
       );
+      const runtimeFailure = workerRuntimeFailureOf(error);
       if (
         attemptId !== null &&
-        error instanceof WorkerRuntimeFailureError &&
+        runtimeFailure !== null &&
         !this.executionInterruptions.has(execution.id)
       )
         this.recordWorkerRuntimeFailure(
           { taskId: graph.taskId, teamId: execution.teamId },
           attemptId,
           worker.id,
-          error,
+          runtimeFailure,
         );
       if (attemptId === null) {
         this.persistence.releaseGraphResources({
@@ -3175,16 +3196,17 @@ export class TeamCoordinator {
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
       this.releaseReservations(reservations);
+      const runtimeFailure = workerRuntimeFailureOf(error);
       if (
         attemptId !== null &&
-        error instanceof WorkerRuntimeFailureError &&
+        runtimeFailure !== null &&
         !this.executionInterruptions.has(input.executionId)
       )
         this.recordWorkerRuntimeFailure(
           { taskId: input.taskId, teamId: input.teamId },
           attemptId,
           worker.id,
-          error,
+          runtimeFailure,
         );
       let retryScheduled = false;
       try {
@@ -3364,8 +3386,18 @@ export class TeamCoordinator {
     missionWorktree: TeamMissionWorktreeRecord | null,
     executionIsolation: TeamExecutionIsolationRecord | null,
   ): Promise<void> {
-    const canceled = new Error('Execution canceled before runtime dispatch');
-    if (missionWorktree !== null) {
+    // A steered or resumed execution re-runs in the worktree its earlier attempt used, and that
+    // attempt's CLI may still be running in it (issue #548). Only a first dispatch, with no attempt
+    // yet, owns a worktree nothing else can be using, so only then is it removed here.
+    const reusedWorktree = this.persistence.listTeamAttempts(input.executionId).length > 0;
+    const canceled = new Error(
+      reusedWorktree
+        ? 'Execution canceled before runtime dispatch; an earlier attempt may still use its worktree'
+        : 'Execution canceled before runtime dispatch',
+    );
+    if (missionWorktree !== null && reusedWorktree)
+      this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
+    else if (missionWorktree !== null) {
       try {
         if (this.worktreeManager !== undefined) {
           const result = await this.worktreeManager.cleanup({
@@ -3389,11 +3421,12 @@ export class TeamCoordinator {
     }
     if (executionIsolation !== null) {
       this.quarantineExecutionIsolation(executionIsolation.executionId, canceled);
-      await this.cleanupIntegratedExecutionIsolation(
-        this.persistence.getTeamExecutionIsolation(executionIsolation.executionId) ??
-          executionIsolation,
-        workerId,
-      );
+      if (!reusedWorktree)
+        await this.cleanupIntegratedExecutionIsolation(
+          this.persistence.getTeamExecutionIsolation(executionIsolation.executionId) ??
+            executionIsolation,
+          workerId,
+        );
     }
     this.persistence.setWorkerCurrentActivity(workerId, null, this.isoNow());
     this.emit(input.taskId, input.teamId);
@@ -3507,6 +3540,9 @@ export class TeamCoordinator {
       (error instanceof WorkerRuntimeFailureError &&
         error.publicError.code === 'RUNTIME_BILLING_REQUIRED') ||
       (error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed') ||
+      // A CLI that may still be running must not get a second one beside it (issue #548); an
+      // execution refused for that reason would only be refused again.
+      error instanceof WorkerRuntimeExitUnconfirmedError ||
       this.persistence.listTeamAttempts(input.executionId).length >= 2
     )
       return false;
@@ -5481,12 +5517,27 @@ export function priorConversationForAgent(
 }
 
 /**
+ * The runtime failure a Worker Turn reported, also when its process-tree exit then went
+ * unconfirmed and replaced it (issue #548), so the attempt keeps that failure's diagnostic.
+ */
+function workerRuntimeFailureOf(error: unknown): WorkerRuntimeFailureError | null {
+  if (error instanceof WorkerRuntimeFailureError) return error;
+  if (
+    error instanceof WorkerRuntimeExitUnconfirmedError &&
+    error.originalError instanceof WorkerRuntimeFailureError
+  )
+    return error.originalError;
+  return null;
+}
+
+/**
  * Whether Main confirmed the Worker runtime stopped before this error settled the execution
  * (issue #529). Watchdog timeouts and an unconfirmed process-tree exit leave that open, so a
  * worktree the CLI might still be using is never reclaimed after them.
  */
 export function runtimeStopConfirmed(error: unknown): boolean {
-  if (error instanceof WorkerRuntimeExitUnconfirmedError) return false;
+  // Only a refusal caused by other executions' Turns leaves this execution's worktree unused.
+  if (error instanceof WorkerRuntimeExitUnconfirmedError) return error.startRefused;
   return !(
     error instanceof WorkerRuntimeControlError &&
     (error.code === 'stop_unconfirmed' ||

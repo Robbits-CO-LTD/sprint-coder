@@ -41,6 +41,14 @@ import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex' | 'grok'; model: string }>;
 
 const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
+// Pause before asking the Runtime Host again whether an unconfirmed Turn has exited. The Host keeps
+// an exit that arrives with nobody waiting for 60 seconds, so no exit is missed in between.
+const UNCONFIRMED_EXIT_RECHECK_DELAY_MS = 1_000;
+// Longest a new execution waits for its Worker's previous Turn to finish its own exit wait, which the
+// Runtime Host bounds at 30 seconds.
+const PREVIOUS_TURN_EXIT_WAIT_MS = 30_000;
+const PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE =
+  'このWorkerの前回のCLI実行が終了したことをまだ確認できていないため、新しい実行を開始しませんでした。終了を確認でき次第、次の実行を開始できます。確認できないままの場合は、前回のCLIのプロセスが残っていないことを確かめてからアプリを再起動してください。';
 
 export class TeamRuntimeAvailabilityTracker {
   private readonly unavailableUntil = new Map<'claude' | 'codex' | 'grok', number>();
@@ -148,6 +156,9 @@ class TeamRuntimeExecutionError extends WorkerRuntimeFailureError {
 
 type TeamWorkerExecutionInput = Parameters<TeamWorkerRuntime['execute']>[0];
 
+/** The Worker and the Team execution a Turn ran for; the execution is unknown when none was given. */
+type TurnOwner = { agentId: string; executionId: string | undefined };
+
 export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly executionAborts = new Map<string, AbortController>();
   private readonly simulator = new DeterministicTeamWorkerRuntime();
@@ -157,6 +168,24 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     string,
     { kind: 'claude' | 'codex' | 'grok'; taskId: string; turnId: string }
   >();
+  /**
+   * Turns whose process-tree exit Main could not confirm, keyed by Turn id (issue #548). Their
+   * Worker starts no other CLI Turn until the Runtime Host reports the exit. Kept in memory only:
+   * an app restart clears it. `cleared` resolves once the exit is confirmed and the record is gone;
+   * a disposed runtime never resolves it.
+   */
+  private readonly unconfirmedExits = new Map<
+    string,
+    TurnOwner & { kind: 'claude' | 'codex' | 'grok'; cleared: Promise<void> }
+  >();
+  private readonly unconfirmedExitRechecks = new Set<NodeJS.Timeout>();
+  /**
+   * Turns still inside their post-Turn exit wait, keyed by Turn id. A stopped or timed-out
+   * execution returns before that wait ends, so its Worker can be dispatched again meanwhile;
+   * `settled` resolves once the wait has ended and any unconfirmed exit has been recorded.
+   */
+  private readonly exitWaits = new Map<string, TurnOwner & { settled: Promise<void> }>();
+  private disposed = false;
 
   constructor(private readonly deps: TeamWorkerRuntimeDeps) {}
 
@@ -241,17 +270,24 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 
   async execute(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
-    input.signal?.throwIfAborted();
+    const execution: TurnOwner = { agentId: input.worker.id, executionId: input.executionId };
+    if (input.signal?.aborted === true) {
+      // Stopping this execution does not end an earlier Turn that still blocks its Worker, so it is
+      // reported as that refusal: a plain stop would pass for a confirmed one and free a worktree
+      // that Turn may still use.
+      const refusal = this.previousTurnRefusal(execution, input.signal);
+      if (refusal !== null) throw refusal;
+      input.signal.throwIfAborted();
+    }
     const controller = new AbortController();
     this.executionAborts.set(input.worker.id, controller);
     try {
-      return await this.executeWithSignal({
-        ...input,
-        signal:
-          input.signal === undefined
-            ? controller.signal
-            : AbortSignal.any([input.signal, controller.signal]),
-      });
+      const signal =
+        input.signal === undefined
+          ? controller.signal
+          : AbortSignal.any([input.signal, controller.signal]);
+      await this.awaitPreviousTurnExit(execution, signal);
+      return await this.executeWithSignal({ ...input, signal });
     } finally {
       if (this.executionAborts.get(input.worker.id) === controller)
         this.executionAborts.delete(input.worker.id);
@@ -440,6 +476,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     // Mission session Turn is closed by that release, so skipping it strands the whole Mission.
     let teamMcp: RuntimeTeamMcpOption | undefined;
     let runtimeStarted = false;
+    let turnFailure: { error: unknown } | null = null;
     const abort = (): void => {
       void this.stop(input.worker.id).catch(() => undefined);
     };
@@ -548,19 +585,31 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
       return { finalText, writes };
+    } catch (error) {
+      turnFailure = { error };
+      throw error;
     } finally {
       try {
-        if (runtimeStarted)
+        if (runtimeStarted) {
+          const owner: TurnOwner = { agentId: input.worker.id, executionId: input.executionId };
           // Starting inside a promise turns a synchronous throw from the exit wait into a rejection,
           // which is just as unconfirmed.
-          await Promise.resolve()
+          const exited = Promise.resolve()
             .then(() => this.client(choice.kind).waitForTurnExit(turnId))
             .catch((error: unknown) => {
+              this.watchUnconfirmedExit(owner, choice.kind, turnId);
+              // This error replaces the Turn's own failure, so it carries that failure along.
               throw new WorkerRuntimeExitUnconfirmedError(
                 error instanceof Error ? error.message : String(error),
-                { cause: error },
+                {
+                  cause: error,
+                  ...(turnFailure === null ? {} : { originalError: turnFailure.error }),
+                },
               );
             });
+          this.trackExitWait(owner, turnId, exited);
+          await exited;
+        }
       } finally {
         input.signal?.removeEventListener('abort', abort);
         this.pending.delete(turnId);
@@ -570,6 +619,144 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.releaseManagedTurn?.(turnId);
       }
     }
+  }
+
+  /**
+   * Holds a new execution while its Worker has a Turn whose exit is still awaited or unconfirmed
+   * (for at most PREVIOUS_TURN_EXIT_WAIT_MS), then refuses it before anything starts if one is
+   * still there (issue #548). A CLI that may still be running and writing never gets a second one
+   * beside it, and an exit confirmed during the hold lets the execution start after all.
+   */
+  private async awaitPreviousTurnExit(execution: TurnOwner, signal: AbortSignal): Promise<void> {
+    // `execute` has already handled a signal aborted before this call, and nothing can abort it in
+    // between, so the first place a stop is seen is the end of the hold.
+    if (this.blockingTurns(execution.agentId).length > 0) {
+      let stopWaiting = (): void => undefined;
+      const gaveUp = new Promise<true>((resolve) => {
+        const timer = setTimeout(() => resolve(true), PREVIOUS_TURN_EXIT_WAIT_MS);
+        const onAbort = (): void => resolve(true);
+        signal.addEventListener('abort', onAbort, { once: true });
+        stopWaiting = () => {
+          clearTimeout(timer);
+          signal.removeEventListener('abort', onAbort);
+        };
+      });
+      try {
+        // An exit wait that fails leaves an unconfirmed record behind, whose background re-check can
+        // still confirm the exit; keep waiting on such new records within the same budget.
+        const awaited = new Set<TurnOwner>();
+        for (;;) {
+          const fresh = this.blockingTurns(execution.agentId).filter(
+            ({ owner }) => !awaited.has(owner),
+          );
+          if (fresh.length === 0) break;
+          for (const { owner } of fresh) awaited.add(owner);
+          const expired = await Promise.race([
+            Promise.all(fresh.map(({ released }) => released)).then(() => false),
+            gaveUp,
+          ]);
+          if (expired) break;
+        }
+      } finally {
+        stopWaiting();
+      }
+    }
+    // A stop during the hold does not end a Turn that still blocks the Worker, so that refusal comes
+    // first; only without one is this merely a stopped execution.
+    const refusal = this.previousTurnRefusal(execution, signal);
+    if (refusal !== null) throw refusal;
+    signal.throwIfAborted();
+  }
+
+  /**
+   * The refusal owed to an execution whose Worker still has a blocking Turn, or null. A stop that
+   * already ended the execution becomes the refusal's cause.
+   */
+  private previousTurnRefusal(
+    execution: TurnOwner,
+    signal: AbortSignal,
+  ): WorkerRuntimeExitUnconfirmedError | null {
+    const blocking = this.blockingTurns(execution.agentId).map(({ owner }) => owner);
+    if (blocking.length === 0) return null;
+    return new WorkerRuntimeExitUnconfirmedError(PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE, {
+      ...(signal.aborted ? { cause: signal.reason as unknown } : {}),
+      // Refusing leaves this execution's own worktree unused only when every blocking Turn ran for
+      // another execution. A steered execution reuses its worktree, which an earlier Turn of it may
+      // still be using, and an unknown execution may be this one.
+      startRefused: blocking.every(
+        (turn) =>
+          turn.executionId !== undefined &&
+          execution.executionId !== undefined &&
+          turn.executionId !== execution.executionId,
+      ),
+    });
+  }
+
+  /** The Worker's Turns whose exit is still awaited or unconfirmed, each with when it goes away. */
+  private blockingTurns(agentId: string): { owner: TurnOwner; released: Promise<void> }[] {
+    return [
+      ...[...this.exitWaits.values()].map((wait) => ({ owner: wait, released: wait.settled })),
+      ...[...this.unconfirmedExits.values()].map((record) => ({
+        owner: record,
+        released: record.cleared,
+      })),
+    ].filter(({ owner }) => owner.agentId === agentId);
+  }
+
+  /** Records a Turn's exit wait until it ends; see `exitWaits`. */
+  private trackExitWait(owner: TurnOwner, turnId: string, exited: Promise<void>): void {
+    const wait = { ...owner, settled: Promise.resolve() };
+    wait.settled = exited
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .then(() => {
+        if (this.exitWaits.get(turnId) === wait) this.exitWaits.delete(turnId);
+      });
+    this.exitWaits.set(turnId, wait);
+  }
+
+  /**
+   * Keeps asking the Runtime Host whether an unconfirmed Turn has exited, and lifts its Worker's
+   * block once it has. A Host that went away rejects the wait without the CLI tree being known to
+   * have ended (the CLI is not in a job and on POSIX runs in its own process group), so a rejection
+   * never counts as an exit; only the Host's exit report does.
+   */
+  private watchUnconfirmedExit(
+    owner: TurnOwner,
+    kind: 'claude' | 'codex' | 'grok',
+    turnId: string,
+  ): void {
+    let clear = (): void => undefined;
+    const cleared = new Promise<void>((resolve) => {
+      clear = resolve;
+    });
+    const record = { ...owner, kind, cleared };
+    this.unconfirmedExits.set(turnId, record);
+    const watching = (): boolean => !this.disposed && this.unconfirmedExits.get(turnId) === record;
+    const wait = (): void => {
+      if (!watching()) return;
+      void Promise.resolve()
+        .then(() => this.client(kind).waitForTurnExit(turnId))
+        .then(
+          () => {
+            if (!watching()) return;
+            this.unconfirmedExits.delete(turnId);
+            clear();
+          },
+          () => {
+            if (!watching()) return;
+            const timer = setTimeout(() => {
+              this.unconfirmedExitRechecks.delete(timer);
+              wait();
+            }, UNCONFIRMED_EXIT_RECHECK_DELAY_MS);
+            timer.unref();
+            this.unconfirmedExitRechecks.add(timer);
+          },
+        );
+    };
+    wait();
   }
 
   recordManagedToolResult(turnId: string, result: unknown): void {
@@ -613,6 +800,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 
   dispose(): void {
+    // Stop watching, but keep the blocks: a disposed Host can no longer confirm those exits.
+    this.disposed = true;
+    for (const timer of this.unconfirmedExitRechecks) clearTimeout(timer);
+    this.unconfirmedExitRechecks.clear();
     for (const controller of this.executionAborts.values()) controller.abort();
     this.executionAborts.clear();
     for (const client of this.clients.values()) client.dispose();
