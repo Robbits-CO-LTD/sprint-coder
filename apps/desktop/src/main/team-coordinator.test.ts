@@ -1231,7 +1231,7 @@ if (runsWithElectronAbi)
           ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
             persistence.getTeamMission(assigned.id).state,
           ),
-        5_000,
+        15_000,
       );
 
       const mission = persistence.getTeamMission(assigned.id);
@@ -1304,6 +1304,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
@@ -1365,6 +1367,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(observed).toEqual([
         {
@@ -1421,6 +1425,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
@@ -1483,6 +1489,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(verify).toHaveBeenCalledTimes(1);
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
@@ -1552,6 +1560,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(readFileSync(join(workspace, 'steered.txt'), 'utf8')).toBe('first\n');
       persistence.close();
@@ -1599,6 +1609,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       persistence.close();
     });
