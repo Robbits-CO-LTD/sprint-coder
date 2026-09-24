@@ -12,7 +12,7 @@ import {
   symlink,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { WorkerWorktreeManager, type ExecFileImpl } from './worker-worktree';
 
@@ -278,6 +278,59 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const result = await manager.cleanup({ agentId: 'agent-5', repoPath });
 
     expect(result).toEqual({ outcome: 'removed' });
+  });
+
+  it.each(['cleanup', 'cleanupUnchanged'] as const)(
+    '%s unregisters only its own missing worktree and keeps the user missing worktree',
+    async (method) => {
+      const { repoPath, worktreesRoot } = await fixture();
+      const commands: string[][] = [];
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot,
+        execFileImpl: async (file, args, options) => {
+          commands.push([...args]);
+          const result = await execFileAsync(file, [...args], {
+            env: options.env,
+            timeout: options.timeout,
+          });
+          return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        },
+      });
+      const created = await manager.create({ agentId: 'agent-gone', repoPath });
+      const userRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-user-worktree-'));
+      cleanupRoots.push(userRoot);
+      const userWorktree = join(userRoot, 'on-unplugged-drive');
+      await git(['-C', repoPath, 'worktree', 'add', '-q', '--detach', userWorktree]);
+      await rm(created.path, { recursive: true, force: true });
+      await rm(userWorktree, { recursive: true, force: true });
+
+      const result =
+        method === 'cleanup'
+          ? await manager.cleanup({ agentId: 'agent-gone', repoPath })
+          : await manager.cleanupUnchanged({
+              agentId: 'agent-gone',
+              repoPath,
+              baseHead: created.baseHead,
+            });
+
+      expect(result).toEqual({ outcome: 'removed' });
+      const registered = await registeredWorktrees(repoPath);
+      expect(registered).toContain(await samePathKey(userWorktree));
+      expect(registered).not.toContain(await samePathKey(created.path));
+      expect(commands.some((args) => args.includes('prune'))).toBe(false);
+    },
+  );
+
+  it('keeps a locked missing worktree registered and reports why it could not be removed', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-locked-gone', repoPath });
+    await git(['-C', repoPath, 'worktree', 'lock', '--reason', 'offline media', created.path]);
+    await rm(created.path, { recursive: true, force: true });
+
+    await expect(manager.cleanup({ agentId: 'agent-locked-gone', repoPath })).rejects.toMatchObject(
+      { code: 'remove_failed', message: expect.stringMatching(/locked/i) },
+    );
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
   });
 
   it('retries temporary Windows access denial with exponential backoff', async () => {
@@ -884,6 +937,26 @@ async function makeRepo(): Promise<{ repoPath: string; head: string }> {
 async function git(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args);
   return stdout;
+}
+
+/**
+ * A registration may point at a directory that no longer exists, so compare through the real path
+ * of its (existing) parent: macOS temp paths are symlinks (/var -> /private/var) and Git records
+ * the real one. Git prints forward slashes on Windows, where paths are also case-insensitive.
+ */
+async function samePathKey(path: string): Promise<string> {
+  const real = join(await realpath(dirname(path)), basename(path));
+  return process.platform === 'win32' ? real.toLocaleLowerCase('en-US') : real;
+}
+
+async function registeredWorktrees(repoPath: string): Promise<string[]> {
+  const listed = await git(['-C', repoPath, 'worktree', 'list', '--porcelain']);
+  return Promise.all(
+    listed
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '))
+      .map((line) => samePathKey(line.slice('worktree '.length))),
+  );
 }
 
 function isGitAvailable(): boolean {
