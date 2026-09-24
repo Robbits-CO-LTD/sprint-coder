@@ -535,10 +535,19 @@ function compareMajorMinor(a: readonly [number, number], b: readonly [number, nu
 // Builds the one instruction that matches `nodeVersion`, or — when the version could not be
 // read — the same both-flags guidance the message always carried, plus a prompt to check the
 // version first (Issue #549 acceptance criteria).
+//
+// A file version below 22.8 gets that same guidance instead of an instruction of its own: an
+// executable named node.exe may be a shim or another binary whose version resource is not its
+// Node version (0.0.0, 1.0.0, ...), and stating "older than 22.8" would then withhold both flags
+// from a Node that accepts one.
 function buildNodeTestIsolationRejectionMessage(
   nodeVersion: WindowsExecutableFileVersion | null | undefined,
 ): string {
-  if (nodeVersion === null || nodeVersion === undefined) {
+  if (
+    nodeVersion === null ||
+    nodeVersion === undefined ||
+    compareMajorMinor([nodeVersion.major, nodeVersion.minor], [22, 8]) < 0
+  ) {
     return [
       NODE_TEST_ISOLATION_REJECTION_PREAMBLE,
       'First check the version with node.exe --version, then put ' +
@@ -553,15 +562,6 @@ function buildNodeTestIsolationRejectionMessage(
 
   const versionText = formatWindowsExecutableFileVersion(nodeVersion);
   const majorMinor: readonly [number, number] = [nodeVersion.major, nodeVersion.minor];
-  if (compareMajorMinor(majorMinor, [22, 8]) < 0) {
-    return [
-      NODE_TEST_ISOLATION_REJECTION_PREAMBLE,
-      `This node.exe is ${versionText}, which is older than 22.8 and has no in-process ` +
-        'isolation flag, so run one test file at a time directly with node.exe <file> ' +
-        '(without --test) instead.',
-    ].join(' ');
-  }
-
   const flag =
     compareMajorMinor(majorMinor, [23, 6]) < 0
       ? '--experimental-test-isolation=none'
