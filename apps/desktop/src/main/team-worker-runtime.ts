@@ -41,6 +41,11 @@ import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex' | 'grok'; model: string }>;
 
 const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
+// Pause before asking the Runtime Host again whether an unconfirmed Turn has exited. The Host keeps
+// an exit that arrives with nobody waiting for 60 seconds, so no exit is missed in between.
+const UNCONFIRMED_EXIT_RECHECK_DELAY_MS = 1_000;
+const PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE =
+  'このWorkerの前回のCLI実行が終了したことをまだ確認できていないため、新しい実行を開始しませんでした。終了を確認でき次第、次の実行を開始できます。確認できないままの場合は、前回のCLIのプロセスが残っていないことを確かめてからアプリを再起動してください。';
 
 export class TeamRuntimeAvailabilityTracker {
   private readonly unavailableUntil = new Map<'claude' | 'codex' | 'grok', number>();
@@ -157,6 +162,17 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     string,
     { kind: 'claude' | 'codex' | 'grok'; taskId: string; turnId: string }
   >();
+  /**
+   * Turns whose process-tree exit Main could not confirm, keyed by Turn id (issue #548). Their
+   * Worker starts no other CLI Turn until the Runtime Host reports the exit. Kept in memory only:
+   * an app restart clears it.
+   */
+  private readonly unconfirmedExits = new Map<
+    string,
+    { agentId: string; kind: 'claude' | 'codex' | 'grok' }
+  >();
+  private readonly unconfirmedExitRechecks = new Set<NodeJS.Timeout>();
+  private disposed = false;
 
   constructor(private readonly deps: TeamWorkerRuntimeDeps) {}
 
@@ -242,6 +258,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 
   async execute(input: TeamWorkerExecutionInput): Promise<WorkerRuntimeResult> {
     input.signal?.throwIfAborted();
+    // A CLI whose exit is unconfirmed may still be running and writing; never start another one for
+    // the same Worker beside it.
+    if ([...this.unconfirmedExits.values()].some(({ agentId }) => agentId === input.worker.id))
+      throw new WorkerRuntimeExitUnconfirmedError(PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE);
     const controller = new AbortController();
     this.executionAborts.set(input.worker.id, controller);
     try {
@@ -440,6 +460,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     // Mission session Turn is closed by that release, so skipping it strands the whole Mission.
     let teamMcp: RuntimeTeamMcpOption | undefined;
     let runtimeStarted = false;
+    let turnFailure: { error: unknown } | null = null;
     const abort = (): void => {
       void this.stop(input.worker.id).catch(() => undefined);
     };
@@ -548,6 +569,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
       return { finalText, writes };
+    } catch (error) {
+      turnFailure = { error };
+      throw error;
     } finally {
       try {
         if (runtimeStarted)
@@ -556,9 +580,14 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           await Promise.resolve()
             .then(() => this.client(choice.kind).waitForTurnExit(turnId))
             .catch((error: unknown) => {
+              this.watchUnconfirmedExit(input.worker.id, choice.kind, turnId);
+              // This error replaces the Turn's own failure, so it carries that failure along.
               throw new WorkerRuntimeExitUnconfirmedError(
                 error instanceof Error ? error.message : String(error),
-                { cause: error },
+                {
+                  cause: error,
+                  ...(turnFailure === null ? {} : { originalError: turnFailure.error }),
+                },
               );
             });
       } finally {
@@ -570,6 +599,42 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         this.deps.releaseManagedTurn?.(turnId);
       }
     }
+  }
+
+  /**
+   * Keeps asking the Runtime Host whether an unconfirmed Turn has exited, and lifts its Worker's
+   * block once it has. A Host that went away rejects the wait without the CLI tree being known to
+   * have ended (the CLI is not in a job and on POSIX runs in its own process group), so a rejection
+   * never counts as an exit; only the Host's exit report does.
+   */
+  private watchUnconfirmedExit(
+    agentId: string,
+    kind: 'claude' | 'codex' | 'grok',
+    turnId: string,
+  ): void {
+    const record = { agentId, kind };
+    this.unconfirmedExits.set(turnId, record);
+    const watching = (): boolean => !this.disposed && this.unconfirmedExits.get(turnId) === record;
+    const wait = (): void => {
+      if (!watching()) return;
+      void Promise.resolve()
+        .then(() => this.client(kind).waitForTurnExit(turnId))
+        .then(
+          () => {
+            if (watching()) this.unconfirmedExits.delete(turnId);
+          },
+          () => {
+            if (!watching()) return;
+            const timer = setTimeout(() => {
+              this.unconfirmedExitRechecks.delete(timer);
+              wait();
+            }, UNCONFIRMED_EXIT_RECHECK_DELAY_MS);
+            timer.unref();
+            this.unconfirmedExitRechecks.add(timer);
+          },
+        );
+    };
+    wait();
   }
 
   recordManagedToolResult(turnId: string, result: unknown): void {
@@ -613,6 +678,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   }
 
   dispose(): void {
+    // Stop watching, but keep the blocks: a disposed Host can no longer confirm those exits.
+    this.disposed = true;
+    for (const timer of this.unconfirmedExitRechecks) clearTimeout(timer);
+    this.unconfirmedExitRechecks.clear();
     for (const controller of this.executionAborts.values()) controller.abort();
     this.executionAborts.clear();
     for (const client of this.clients.values()) client.dispose();

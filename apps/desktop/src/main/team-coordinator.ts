@@ -163,11 +163,21 @@ export class WorkerRuntimeControlError extends Error {
   }
 }
 
-/** The runtime turn ended, but Main could not confirm that its process tree exited. */
+/**
+ * Main could not confirm that a Worker runtime process tree exited: either the Turn that just
+ * ended, or an earlier Turn of the same Worker that a new execution would otherwise run beside.
+ */
 export class WorkerRuntimeExitUnconfirmedError extends Error {
-  constructor(message: string, options?: Readonly<{ cause?: unknown }>) {
+  /**
+   * What the Turn itself failed with before its exit went unconfirmed (issue #548), so that
+   * failure's diagnostic is still recorded. Undefined when the Turn completed or never ran.
+   */
+  readonly originalError: unknown;
+
+  constructor(message: string, options?: Readonly<{ cause?: unknown; originalError?: unknown }>) {
     super(message, options);
     this.name = 'WorkerRuntimeExitUnconfirmedError';
+    this.originalError = options?.originalError;
   }
 }
 
@@ -1513,16 +1523,17 @@ export class TeamCoordinator {
         0,
         2000,
       );
+      const runtimeFailure = workerRuntimeFailureOf(error);
       if (
         attemptId !== null &&
-        error instanceof WorkerRuntimeFailureError &&
+        runtimeFailure !== null &&
         !this.executionInterruptions.has(execution.id)
       )
         this.recordWorkerRuntimeFailure(
           { taskId: graph.taskId, teamId: execution.teamId },
           attemptId,
           worker.id,
-          error,
+          runtimeFailure,
         );
       if (attemptId === null) {
         this.persistence.releaseGraphResources({
@@ -3175,16 +3186,17 @@ export class TeamCoordinator {
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
       this.releaseReservations(reservations);
+      const runtimeFailure = workerRuntimeFailureOf(error);
       if (
         attemptId !== null &&
-        error instanceof WorkerRuntimeFailureError &&
+        runtimeFailure !== null &&
         !this.executionInterruptions.has(input.executionId)
       )
         this.recordWorkerRuntimeFailure(
           { taskId: input.taskId, teamId: input.teamId },
           attemptId,
           worker.id,
-          error,
+          runtimeFailure,
         );
       let retryScheduled = false;
       try {
@@ -3507,6 +3519,8 @@ export class TeamCoordinator {
       (error instanceof WorkerRuntimeFailureError &&
         error.publicError.code === 'RUNTIME_BILLING_REQUIRED') ||
       (error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed') ||
+      // A CLI that may still be running must not get a second one beside it (issue #548).
+      error instanceof WorkerRuntimeExitUnconfirmedError ||
       this.persistence.listTeamAttempts(input.executionId).length >= 2
     )
       return false;
@@ -5478,6 +5492,20 @@ export function priorConversationForAgent(
   }
 
   return selected.reverse();
+}
+
+/**
+ * The runtime failure a Worker Turn reported, also when its process-tree exit then went
+ * unconfirmed and replaced it (issue #548), so the attempt keeps that failure's diagnostic.
+ */
+function workerRuntimeFailureOf(error: unknown): WorkerRuntimeFailureError | null {
+  if (error instanceof WorkerRuntimeFailureError) return error;
+  if (
+    error instanceof WorkerRuntimeExitUnconfirmedError &&
+    error.originalError instanceof WorkerRuntimeFailureError
+  )
+    return error.originalError;
+  return null;
 }
 
 /**

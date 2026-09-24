@@ -585,6 +585,9 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(error).toMatchObject({
       message: 'Runtime process tree exit was not confirmed within 30 seconds',
     });
+    // The Turn itself completed, so there is no earlier failure to carry.
+    expect(error).toHaveProperty('originalError', undefined);
+    subject.dispose();
   });
 
   it('reports a synchronously failing process-tree exit wait as WorkerRuntimeExitUnconfirmedError', async () => {
@@ -608,6 +611,184 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
 
     expect(error).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
     expect(error).toMatchObject({ message: 'Runtime host is disposed' });
+    subject.dispose();
+  });
+
+  it('keeps the Turn failure and its diagnostic when that Turn exit is then unconfirmed', async () => {
+    runtimeHostMock.starts.length = 0;
+    runtimeHostMock.failures.set('grok', {
+      code: 'RUNTIME_BILLING_REQUIRED',
+      userMessage: 'Grok Buildの利用残高が不足しています。残高を追加してから再試行してください。',
+      retryable: false,
+      diagnostic: { runtimeKind: 'grok', failureStage: 'billing_error', httpStatus: 402 },
+    });
+    runtimeHostMock.waitForExit.mockRejectedValueOnce(
+      new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+    );
+    const subject = runtime({ selectRuntimes: () => [{ kind: 'grok', model: 'grok-4.5' }] });
+
+    const error = await subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '調査する',
+      })
+      .then(
+        () => {
+          throw new Error('expected runtime failure');
+        },
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    if (!(error instanceof WorkerRuntimeExitUnconfirmedError))
+      throw new Error('expected WorkerRuntimeExitUnconfirmedError');
+    expect(error.message).toBe('Runtime process tree exit was not confirmed within 30 seconds');
+    const original = error.originalError;
+    expect(original).toBeInstanceOf(WorkerRuntimeFailureError);
+    if (!(original instanceof WorkerRuntimeFailureError))
+      throw new Error('expected the original WorkerRuntimeFailureError');
+    expect(original.publicError.code).toBe('RUNTIME_BILLING_REQUIRED');
+    expect(original.runtimeKind).toBe('grok');
+    expect(original.runtimeTurnId).toBe(runtimeHostMock.starts[0]?.args[1]);
+    expect(original.failureDiagnostic).toMatchObject({
+      failureStage: 'billing_error',
+      httpStatus: 402,
+    });
+    subject.dispose();
+  });
+
+  it('starts no other CLI Turn for a Worker until its unconfirmed Turn is confirmed to have exited', async () => {
+    runtimeHostMock.starts.length = 0;
+    let confirmExit: (() => void) | undefined;
+    runtimeHostMock.waitForExit
+      .mockRejectedValueOnce(
+        new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            confirmExit = resolve;
+          }),
+      );
+    const subject = runtime();
+    const readOnlyWorker = worker(false);
+    const run = (agent: AgentRecord) =>
+      subject.execute({
+        worker: agent,
+        envelope: { ...envelope, targetAgentId: agent.id },
+        content: '調査する',
+      });
+
+    await expect(run(readOnlyWorker)).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    const unconfirmedTurnId = runtimeHostMock.starts[0]?.args[1];
+    // The Worker keeps waiting for that same Turn to exit.
+    await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(2));
+    expect(runtimeHostMock.waitForExit).toHaveBeenLastCalledWith(unconfirmedTurnId);
+
+    const blocked = await run(readOnlyWorker).then(
+      () => {
+        throw new Error('expected the Worker to stay blocked');
+      },
+      (caught: unknown) => caught,
+    );
+    expect(blocked).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    expect(blocked).toMatchObject({
+      message: expect.stringContaining('前回のCLI実行が終了したことをまだ確認できていない'),
+    });
+    expect(runtimeHostMock.starts).toHaveLength(1);
+
+    // Only that Worker is held back.
+    await expect(run({ ...readOnlyWorker, id: 'worker-2' })).resolves.toMatchObject({
+      completion: { status: 'succeeded' },
+    });
+    expect(runtimeHostMock.starts).toHaveLength(2);
+
+    confirmExit?.();
+    await new Promise((resolve) => setImmediate(resolve));
+    await expect(run(readOnlyWorker)).resolves.toMatchObject({
+      completion: { status: 'succeeded' },
+    });
+    expect(runtimeHostMock.starts).toHaveLength(3);
+    subject.dispose();
+  });
+
+  it('keeps a Worker blocked and checking again when the Runtime Host goes away before the exit is confirmed', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const subject = runtime();
+    try {
+      runtimeHostMock.starts.length = 0;
+      let confirmExit: (() => void) | undefined;
+      runtimeHostMock.waitForExit
+        .mockRejectedValueOnce(
+          new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+        )
+        .mockRejectedValueOnce(new Error('Runtime Host exited before process exit confirmation'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              confirmExit = resolve;
+            }),
+        );
+      const run = () =>
+        subject.execute({
+          worker: worker(false),
+          envelope: { ...envelope, targetAgentId: 'worker-1' },
+          content: '調査する',
+        });
+      const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+      await expect(run()).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      await settle();
+      // A Host that went away does not prove the CLI process tree ended with it.
+      expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(2);
+      await expect(run()).rejects.toThrow('前回のCLI実行が終了したことをまだ確認できていない');
+      expect(runtimeHostMock.starts).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle();
+      expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(3);
+      await expect(run()).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(runtimeHostMock.starts).toHaveLength(1);
+
+      confirmExit?.();
+      await settle();
+      await expect(run()).resolves.toMatchObject({ completion: { status: 'succeeded' } });
+      expect(runtimeHostMock.starts).toHaveLength(2);
+    } finally {
+      subject.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops checking an unconfirmed exit once disposed and still starts no CLI for that Worker', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const subject = runtime();
+    try {
+      runtimeHostMock.starts.length = 0;
+      runtimeHostMock.waitForExit.mockRejectedValue(
+        new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+      );
+      const run = () =>
+        subject.execute({
+          worker: worker(false),
+          envelope: { ...envelope, targetAgentId: 'worker-1' },
+          content: '調査する',
+        });
+
+      await expect(run()).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(2);
+
+      subject.dispose();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(2);
+      await expect(run()).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(runtimeHostMock.starts).toHaveLength(1);
+    } finally {
+      subject.dispose();
+      vi.useRealTimers();
+    }
   });
 
   it('applies inherited context and write capability to the CLI turn', async () => {

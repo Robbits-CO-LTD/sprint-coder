@@ -33,7 +33,10 @@ import {
   type WorkerRuntimeResult,
   type WorkerActivityEvent,
 } from './team-coordinator';
+import type { GraphMissionPlan } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
+import { nextGraphDocument } from './graph-document';
+import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
@@ -810,6 +813,18 @@ describe('runtimeStopConfirmed', () => {
   it('does not treat an unconfirmed process-tree exit as a confirmed runtime stop', () => {
     expect(
       runtimeStopConfirmed(new WorkerRuntimeExitUnconfirmedError('exit was not confirmed')),
+    ).toBe(false);
+    expect(
+      runtimeStopConfirmed(
+        new WorkerRuntimeExitUnconfirmedError('exit was not confirmed', {
+          originalError: new WorkerRuntimeFailureError(
+            { code: 'RUNTIME_BILLING_REQUIRED', userMessage: 'billing', retryable: false },
+            'grok',
+            'runtime-turn-billing',
+            undefined,
+          ),
+        }),
+      ),
     ).toBe(false);
   });
 
@@ -5314,6 +5329,231 @@ if (runsWithElectronAbi)
         { event: 'team.attempt.runtime_failed', result: 'RUNTIME_FAILED' },
       ]);
       expect(JSON.stringify(diagnostics)).not.toContain('diagnostic store unavailable');
+      persistence.close();
+    });
+
+    it('records the failed Turn diagnostic without retrying when that Turn exit is then unconfirmed', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Billing failure with an unconfirmed exit');
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+            {
+              originalError: new WorkerRuntimeFailureError(
+                { code: 'RUNTIME_BILLING_REQUIRED', userMessage: 'billing', retryable: false },
+                'grok',
+                'runtime-turn-billing',
+                grokFailureDiagnostic('billing_error', 402),
+              ),
+            },
+          );
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'unconfirmed billing worker',
+        objective: 'keep the billing diagnostic',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'fail on billing',
+        doneCriteria: ['never satisfied'],
+      });
+
+      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+      expect(executeCount).toBe(1);
+      const attempts = persistence.listTeamAttempts(submission.executionId);
+      expect(attempts).toEqual([
+        expect.objectContaining({ state: 'failed', terminalReason: 'runtime_failure' }),
+      ]);
+      expect(persistence.getTeamAttemptFailureDiagnostic(attempts[0]!.id)).toMatchObject({
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-billing',
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        diagnostic: { failureStage: 'billing_error', httpStatus: 402 },
+      });
+      persistence.close();
+    });
+
+    it.each([
+      ['after a completed Turn', undefined],
+      [
+        'after a non-billing Turn failure',
+        new WorkerRuntimeFailureError(
+          { code: 'RUNTIME_FAILED', userMessage: 'runtime failed', retryable: false },
+          'grok',
+          'runtime-turn-failed',
+          undefined,
+        ),
+      ],
+    ])(
+      'does not retry a read-only Worker whose Turn exit is unconfirmed %s',
+      async (_label, originalError) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Unconfirmed read-only exit');
+        let executeCount = 0;
+        const runtime: TeamWorkerRuntime = {
+          async start() {
+            return { pid: null };
+          },
+          async execute() {
+            executeCount += 1;
+            throw new WorkerRuntimeExitUnconfirmedError(
+              'Runtime process tree exit was not confirmed within 30 seconds',
+              originalError === undefined ? undefined : { originalError },
+            );
+          },
+          async stop() {},
+        };
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'unconfirmed reader',
+          objective: 'never run a second CLI beside the first',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'read without a confirmed exit',
+          doneCriteria: ['never satisfied'],
+        });
+
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        );
+        expect(executeCount).toBe(1);
+        expect(persistence.listTeamAttempts(submission.executionId)).toEqual([
+          expect.objectContaining({ state: 'failed', startReason: 'initial' }),
+        ]);
+        persistence.close();
+      },
+    );
+
+    it('records the failed Turn diagnostic for a Graph step whose Turn exit is then unconfirmed', async () => {
+      const persistence = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('Graph unconfirmed exit');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      // A Graph plan needs two steps; only the first one runs, and it fails.
+      const keys = ['a', 'b'];
+      const workers = keys.map((role) => {
+        const worker = persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: role,
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: false,
+        });
+        persistence.transitionWorkerState(worker.id, 'spawning');
+        persistence.transitionWorkerState(worker.id, 'ready');
+        return worker;
+      });
+      persistence.transitionTeamState(team.id, 'active');
+      const plan: GraphMissionPlan = {
+        mode: 'graph',
+        objective: 'Review',
+        doneCriteria: ['Reviewed'],
+        steps: workers.map((worker, index) => ({
+          key: keys[index]!,
+          nodeId: keys[index]!,
+          workerId: worker.id,
+          objective: worker.role,
+          doneCriteria: ['Reviewed'],
+          access: 'read-only',
+          dependsOn: index === 0 ? [] : ['a'],
+          writeClaims: [],
+          resourceClaims: [],
+        })),
+      };
+      const diagram = {
+        schema_version: 2,
+        diagram_type: 'workflow',
+        meta: { title: 'Review' },
+        lanes: [{ id: 'work', label: 'Work' }],
+        nodes: keys.map((id, col) => ({ id, col, lane: 'work', label: id, type: 'backend' })),
+        edges: [{ id: 'ab', from: 'a', to: 'b' }],
+      };
+      const document = nextGraphDocument(task.id, diagram, null, [], [], plan);
+      persistence.saveGraphDocument(document, 0);
+      const context = graphMissionContextFor(persistence, task.id);
+      let executeCount = 0;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute() {
+          executeCount += 1;
+          throw new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+            {
+              originalError: new WorkerRuntimeFailureError(
+                { code: 'RUNTIME_BILLING_REQUIRED', userMessage: 'billing', retryable: false },
+                'grok',
+                'runtime-turn-graph',
+                grokFailureDiagnostic('billing_error', 402),
+              ),
+            },
+          );
+        },
+        async stop() {},
+      };
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+
+      const mission = await coordinator.startGraphMission(task.id, async () => ({
+        taskId: task.id,
+        graphId: document.id,
+        renderRevision: 1,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+        workspaceDigest: context.workspace.digest,
+        policyEpoch: context.policyEpoch,
+        contextDigest: graphMissionContextDigest(context, new Set(workers.map(({ id }) => id))),
+        consentId: randomUUID(),
+        now: new Date().toISOString(),
+      }));
+      const executionId = persistence.getTeamMission(mission.id).steps[0]!.executionId;
+      await waitFor(
+        () =>
+          persistence
+            .listTeamAttempts(executionId)
+            .some(({ state }) => ['failed', 'interrupted', 'canceled'].includes(state)),
+        15_000,
+      );
+      await waitFor(() => scheduler.snapshot().activeCount === 0, 15_000);
+
+      expect(executeCount).toBe(1);
+      const attempts = persistence.listTeamAttempts(executionId);
+      expect(attempts).toHaveLength(1);
+      expect(persistence.getTeamAttemptFailureDiagnostic(attempts[0]!.id)).toMatchObject({
+        runtimeKind: 'grok',
+        runtimeTurnId: 'runtime-turn-graph',
+        errorCode: 'RUNTIME_BILLING_REQUIRED',
+        diagnostic: { failureStage: 'billing_error', httpStatus: 402 },
+      });
       persistence.close();
     });
 
