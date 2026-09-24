@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, readdir, realpath, rmdir, stat, unlink } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeGitExec } from './safe-git';
 
 // Independent git-worktree isolation manager for write-capable Workers. Each agent gets
@@ -17,7 +17,9 @@ export type WorktreeErrorCode =
   | 'remove_failed'
   | 'invalid_input'
   /** A read whose Git output is larger than this manager reads at once. */
-  | 'too_large';
+  | 'too_large'
+  /** A worktree Git holds locked (`git worktree lock`), which a discard does not override. */
+  | 'locked';
 
 export class WorktreeError extends Error {
   constructor(
@@ -155,8 +157,8 @@ const WORKTREE_ID_PATTERN = /^[0-9a-zA-Z-]+$/;
 const GIT_TIMEOUT_MS = 30_000;
 /** How long a Windows lock on a worktree being removed is waited out before it is kept. */
 const WINDOWS_REMOVE_RETRY_DELAYS_MS = [100, 200, 400, 800, 1_600, 3_200] as const;
-/** Git output an inspection reads at once; a larger listing is refused as too large. */
-const INSPECTION_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+/** Git file listings are read up to this size; a larger one is refused rather than cut. */
+const GIT_LISTING_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 const WORKER_GIT_IDENTITY = [
   '-c',
   'user.name=Sprint Coder Worker',
@@ -439,7 +441,8 @@ export class WorkerWorktreeManager {
     // Cleanup policy: never destroy work. If the worktree has any changes, quarantine it
     // (leave it on disk, untouched) instead of removing it.
     if (statusOutput.trim().length > 0) return { outcome: 'quarantined' };
-    return this.removeRegisteredWorktree(repoPath, worktreePath);
+    const { outcome } = await this.removeUnreviewedWorktree(repoPath, worktreePath);
+    return { outcome };
   }
 
   /**
@@ -460,7 +463,79 @@ export class WorkerWorktreeManager {
     if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
     if (await this.differsFromBase(worktreePath, baseHead, 'remove_failed'))
       return { outcome: 'quarantined', changed: true };
+    return this.removeUnreviewedWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * The removal `cleanup` and `cleanupUnchanged` make without anyone having looked at the worktree.
+   * It keeps two kinds of worktree `git status` cannot vouch for, as `git worktree remove` did before
+   * this manager deleted the files itself (issue #544):
+   *
+   * - One with a submodule: a Worker's commits inside it live only in this worktree's own submodule
+   *   store, and a submodule configured to be ignored hides its changes from `git status`. Such a
+   *   worktree will never qualify, so `cleanupUnchanged` reports it as `changed`.
+   * - One locked with `git worktree lock` (by the user, or by a `git worktree add` that stopped part
+   *   way). It is kept without `changed`: once unlocked it may qualify.
+   */
+  private async removeUnreviewedWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupUnchangedWorktreeResult> {
+    if (await this.containsSubmodules(worktreePath))
+      return { outcome: 'quarantined', changed: true };
+    if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
     return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Whether the worktree holds a submodule, by the test `git worktree remove` refuses a worktree
+   * with, or wider: this worktree's submodule store (`git rev-parse --git-path modules`) exists, or a
+   * gitlink (mode 160000) in its index has a directory that is not empty. Git itself only counts a
+   * populated gitlink; any content counts here.
+   */
+  private async containsSubmodules(worktreePath: string): Promise<boolean> {
+    const modules = (
+      await this.runGit(worktreePath, ['rev-parse', '--git-path', 'modules'], 'remove_failed')
+    ).stdout.trim();
+    if (modules === '' || (await entryPresent(resolve(worktreePath, modules)))) return true;
+    const staged = (
+      await this.runGit(
+        worktreePath,
+        ['ls-files', '--stage', '-z'],
+        'remove_failed',
+        GIT_LISTING_MAX_BUFFER_BYTES,
+      )
+    ).stdout;
+    for (const entry of staged.split('\0')) {
+      // `<mode> <object> <stage>\t<path>`
+      const tab = entry.indexOf('\t');
+      if (!entry.startsWith('160000 ') || tab < 0) continue;
+      if (await directoryHasContent(join(worktreePath, entry.slice(tab + 1)))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether Git holds the worktree locked (`git worktree lock`, or the lock `git worktree add` keeps
+   * while it initializes). Read from the repository's own worktree list, so it answers even when the
+   * worktree's `.git` is already gone.
+   */
+  private async isLocked(repoPath: string, worktreePath: string): Promise<boolean> {
+    const listed = (
+      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
+    ).stdout;
+    const wanted = await pathKeys(worktreePath);
+    let current: string | null = null;
+    for (const line of listed.split('\0')) {
+      if (line.startsWith('worktree ')) {
+        current = line.slice('worktree '.length);
+        continue;
+      }
+      if (current === null || (line !== 'locked' && !line.startsWith('locked '))) continue;
+      const keys = await pathKeys(current);
+      if (keys.some((key) => wanted.includes(key))) return true;
+    }
+    return false;
   }
 
   /**
@@ -489,7 +564,9 @@ export class WorkerWorktreeManager {
    * first, never following a link inside it, then only this worktree's registration (never
    * `git worktree prune`), so a removal that stops part way can be finished by the next discard.
    * Worker worktrees are created detached, so there is no branch to delete. A Windows lock that
-   * outlasts the backoff keeps the rest of the worktree and reports `quarantined`.
+   * outlasts the backoff keeps the rest of the worktree and reports `quarantined`. A submodule goes
+   * with it, since the user confirmed the discard; a worktree Git holds locked is refused before
+   * anything is deleted, with code `locked`.
    */
   async discard({
     agentId,
@@ -499,8 +576,10 @@ export class WorkerWorktreeManager {
   }: DiscardWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
-    if (worktreePath === null)
-      return this.unregisterWorktree(repoPath, this.worktreePathFor(worktreeId));
+    const ownPath = worktreePath ?? this.worktreePathFor(worktreeId);
+    if (await this.isLocked(repoPath, ownPath))
+      throw new WorktreeError('locked', `Worktree is locked by Git: ${ownPath}`);
+    if (worktreePath === null) return this.unregisterWorktree(repoPath, ownPath);
     return this.removeRegisteredWorktree(repoPath, worktreePath);
   }
 
@@ -589,8 +668,9 @@ export class WorkerWorktreeManager {
     // rather than cut at an arbitrary byte.
     const readList = async (args: readonly string[]): Promise<string> => {
       try {
-        return (await this.runGit(worktreePath, args, 'create_failed', INSPECTION_MAX_BUFFER_BYTES))
-          .stdout;
+        return (
+          await this.runGit(worktreePath, args, 'create_failed', GIT_LISTING_MAX_BUFFER_BYTES)
+        ).stdout;
       } catch (error) {
         if (isMaxBufferExceeded(error))
           throw new WorktreeError('too_large', 'Worktree change list is too large to read', {
@@ -1096,6 +1176,43 @@ async function pathExists(path: string): Promise<boolean> {
     if (isEnoent(error)) return false;
     throw error;
   }
+}
+
+/** Whether anything is at `path`, without following a link; an unreadable entry counts. */
+async function entryPresent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    return !isEnoent(error);
+  }
+}
+
+/** Whether `path` has anything in it. Anything but an empty directory or nothing at all counts. */
+async function directoryHasContent(path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path);
+    return !entry.isDirectory() || (await readdir(path)).length > 0;
+  } catch (error) {
+    return !isEnoent(error);
+  }
+}
+
+/**
+ * The spellings a worktree path can have in `git worktree list`: resolved as given, and through the
+ * real path of its parent (Git records a real path where the temp folder is itself a link). Case is
+ * folded on Windows, where paths are case-insensitive.
+ */
+async function pathKeys(path: string): Promise<string[]> {
+  const fold = (value: string): string =>
+    process.platform === 'win32' ? value.toLocaleLowerCase('en-US') : value;
+  const keys = [fold(resolve(path))];
+  try {
+    keys.push(fold(join(await realpath(dirname(resolve(path))), basename(path))));
+  } catch {
+    // A parent that is gone leaves only the resolved spelling.
+  }
+  return keys;
 }
 
 function isEnoent(error: unknown): boolean {

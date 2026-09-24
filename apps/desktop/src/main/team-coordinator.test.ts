@@ -5407,6 +5407,22 @@ if (runsWithElectronAbi)
         });
       };
 
+      // A worktree Git holds locked is refused in words before anything is deleted.
+      const locked = persistence.getTeamExecutionIsolation(first)!.repositories[0]!;
+      const lockFirst = (action: 'lock' | 'unlock') =>
+        expect(
+          spawnSync('git', ['-C', locked.repoPath, 'worktree', action, locked.worktreePath]).status,
+        ).toBe(0);
+      lockFirst('lock');
+      await expect(coordinator.discardRetainedWorktree(task.id, first, 1)).rejects.toThrow(
+        'このworktreeはGitでロックされているため破棄できません。',
+      );
+      expect(existsSync(join(locked.worktreePath, 'kept.txt'))).toBe(true);
+      expect(persistence.getTeamExecutionIsolation(first)!.repositories[0]!.state).toBe(
+        'quarantined',
+      );
+      lockFirst('unlock');
+
       // Something else records a fact on the same repository while Git removes the worktree.
       vi.spyOn(manager, 'discard').mockImplementationOnce(async (input) => {
         const result = await removeWorktree(input);

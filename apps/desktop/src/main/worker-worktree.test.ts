@@ -17,7 +17,7 @@ import {
   symlink,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
   WorkerWorktreeManager,
@@ -28,6 +28,14 @@ import {
 
 const execFileAsync = promisify(execFile);
 const gitAvailable = isGitAvailable();
+const TEST_IDENTITY = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
+/**
+ * Clones a local submodule: Git refuses the file protocol unless it is allowed, and the clone keeps
+ * the committed bytes. A host `core.autocrlf` would otherwise leave the submodule looking modified to
+ * the manager's own Git (which reads no host configuration), and a status showing that change would
+ * keep the worktree whether or not submodules are checked.
+ */
+const SUBMODULE_CLONE = ['-c', 'protocol.file.allow=always', '-c', 'core.autocrlf=false'];
 /** A Windows junction needs no privilege; elsewhere a directory symlink is the same kind of link. */
 const DIRECTORY_LINK = process.platform === 'win32' ? 'junction' : 'dir';
 
@@ -949,6 +957,169 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
   });
 
+  it('keeps a worktree whose submodule holds a Worker commit when cleaning up without review (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    const created = await manager.create({ agentId: 'agent-submodule', repoPath });
+    await git(['-C', created.path, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    await git(['-C', created.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'add submodule']);
+    const sub = join(created.path, 'sub');
+    await writeFile(join(sub, 'worker.txt'), 'only here\n');
+    await git(['-C', sub, 'add', 'worker.txt']);
+    await git(['-C', sub, ...TEST_IDENTITY, 'commit', '-q', '-m', 'worker commit in submodule']);
+    const workerCommit = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', created.path, 'add', 'sub']);
+    await git(['-C', created.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'point at it']);
+    // Status is clean: nothing but the submodule store holds the Worker's submodule commit.
+    expect(await git(['-C', created.path, 'status', '--porcelain'])).toBe('');
+    const modules = resolve(
+      created.path,
+      (await git(['-C', created.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+    );
+    const gitDir = resolve(
+      created.path,
+      (await git(['-C', created.path, 'rev-parse', '--git-dir'])).trim(),
+    );
+
+    await expect(manager.cleanup({ agentId: 'agent-submodule', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect((await stat(modules)).isDirectory()).toBe(true);
+    expect((await git(['-C', sub, 'cat-file', '-t', workerCommit])).trim()).toBe('commit');
+    expect(await readFile(join(sub, 'worker.txt'), 'utf8')).toBe('only here\n');
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    // A discard the user confirmed removes it, submodule store and all.
+    await expect(
+      manager.discard({ agentId: 'agent-submodule', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(gitDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('keeps an unchanged worktree with an initialized submodule, whose store status cannot vouch for (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    await git(['-C', repoPath, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    await git(['-C', repoPath, ...TEST_IDENTITY, 'commit', '-q', '-m', 'add submodule']);
+    const created = await manager.create({ agentId: 'agent-submodule-unchanged', repoPath });
+    await git(['-C', created.path, ...SUBMODULE_CLONE, 'submodule', 'update', '--init', '-q']);
+    const sub = join(created.path, 'sub');
+    const recorded = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', sub, 'checkout', '-q', '-b', 'worker']);
+    await git(['-C', sub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'worker']);
+    const workerCommit = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', sub, 'checkout', '-q', '--detach', recorded]);
+    expect(
+      await git([
+        '-C',
+        created.path,
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--ignore-submodules=none',
+      ]),
+    ).toBe('');
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-submodule-unchanged',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
+    expect((await git(['-C', sub, 'rev-parse', 'worker'])).trim()).toBe(workerCommit);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+  });
+
+  it('keeps a worktree when only its submodule store, or only a filled gitlink, holds Worker work (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    const cleanStatus = async (path: string) =>
+      expect(await git(['-C', path, 'status', '--porcelain'])).toBe('');
+
+    // A repository embedded as a gitlink keeps its own `.git`; there is no submodule store.
+    const embedded = await manager.create({ agentId: 'agent-embedded', repoPath });
+    const embeddedSub = join(embedded.path, 'sub');
+    await git(['-C', embedded.path, ...SUBMODULE_CLONE, 'clone', '-q', source, 'sub']);
+    await git(['-C', embeddedSub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'w']);
+    const embeddedCommit = (await git(['-C', embeddedSub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', embedded.path, 'add', 'sub']);
+    await git(['-C', embedded.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'embed']);
+    await cleanStatus(embedded.path);
+    const embeddedModules = resolve(
+      embedded.path,
+      (await git(['-C', embedded.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+    );
+    await expect(lstat(embeddedModules)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(manager.cleanup({ agentId: 'agent-embedded', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect((await git(['-C', embeddedSub, 'cat-file', '-t', embeddedCommit])).trim()).toBe(
+      'commit',
+    );
+
+    // A deinitialized submodule leaves an empty directory, and its commits only in the store.
+    const deinited = await manager.create({ agentId: 'agent-deinit', repoPath });
+    const deinitedSub = join(deinited.path, 'sub');
+    await git(['-C', deinited.path, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    await git(['-C', deinitedSub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'w']);
+    const storedCommit = (await git(['-C', deinitedSub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', deinited.path, 'add', 'sub']);
+    await git(['-C', deinited.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'point at it']);
+    await git(['-C', deinited.path, 'submodule', 'deinit', '-q', '-f', 'sub']);
+    expect(await readdir(deinitedSub)).toEqual([]);
+    await cleanStatus(deinited.path);
+    const store = join(
+      resolve(
+        deinited.path,
+        (await git(['-C', deinited.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+      ),
+      'sub',
+    );
+    await expect(manager.cleanup({ agentId: 'agent-deinit', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect((await git(['--git-dir', store, 'cat-file', '-t', storedCommit])).trim()).toBe('commit');
+  });
+
+  it('keeps a worktree Git holds locked when cleaning up, and refuses to discard it (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-git-locked', repoPath });
+    await git(['-C', repoPath, 'worktree', 'lock', '--reason', 'kept by the user', created.path]);
+
+    await expect(manager.cleanup({ agentId: 'agent-git-locked', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    // Unlocking may let it qualify later, so it is not reported as changed.
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-git-locked',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+    await expect(
+      manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
+    ).rejects.toMatchObject({ code: 'locked' });
+    expect(await readFile(join(created.path, 'README.md'), 'utf8')).toBe('hello\n');
+
+    // The lock is read from the repository, so it holds even once the worktree's `.git` is gone.
+    await rm(join(created.path, '.git'));
+    await expect(
+      manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
+    ).rejects.toMatchObject({ code: 'locked' });
+    expect(await readFile(join(created.path, 'README.md'), 'utf8')).toBe('hello\n');
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    await git(['-C', repoPath, 'worktree', 'unlock', created.path]);
+    await expect(
+      manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
   it('reads long change lists with a wide buffer and refuses one past it as too large', async () => {
     const { repoPath, worktreesRoot, manager } = await fixture();
     const created = await manager.create({ agentId: 'agent-inspect-large', repoPath });
@@ -1393,6 +1564,13 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const worktreesRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-root-'));
     cleanupRoots.push(repoPath, worktreesRoot);
     return { repoPath, head, worktreesRoot, manager: new WorkerWorktreeManager({ worktreesRoot }) };
+  }
+
+  /** A separate local repository with one commit, to add as a submodule. */
+  async function submoduleSource(): Promise<string> {
+    const { repoPath } = await makeRepo();
+    cleanupRoots.push(repoPath);
+    return repoPath;
   }
 
   /** A folder outside every worktree, with a file at its top and one below. */

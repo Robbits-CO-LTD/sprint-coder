@@ -6072,6 +6072,12 @@ async function retainedWorktreeGit<T>(failure: string, run: () => Promise<T>): P
   try {
     return await run();
   } catch (error) {
+    if (error instanceof WorktreeError && error.code === 'locked')
+      throw new RetainedWorktreeError(
+        'このworktreeはGitでロックされているため破棄できません。git worktree unlock で解除してから破棄してください。',
+        false,
+        { cause: error },
+      );
     if (error instanceof WorktreeError && error.code === 'too_large')
       throw new RetainedWorktreeError(
         '変更が多すぎて一覧を表示できません。「フォルダを開く」から直接確認してください。',
