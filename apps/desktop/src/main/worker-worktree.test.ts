@@ -12,7 +12,7 @@ import {
   symlink,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { WorkerWorktreeManager, type ExecFileImpl } from './worker-worktree';
 
@@ -315,8 +315,8 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
 
       expect(result).toEqual({ outcome: 'removed' });
       const registered = await registeredWorktrees(repoPath);
-      expect(registered).toContain(samePathKey(userWorktree));
-      expect(registered).not.toContain(samePathKey(created.path));
+      expect(registered).toContain(await samePathKey(userWorktree));
+      expect(registered).not.toContain(await samePathKey(created.path));
       expect(commands.some((args) => args.includes('prune'))).toBe(false);
     },
   );
@@ -330,7 +330,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     await expect(manager.cleanup({ agentId: 'agent-locked-gone', repoPath })).rejects.toMatchObject(
       { code: 'remove_failed', message: expect.stringMatching(/locked/i) },
     );
-    expect(await registeredWorktrees(repoPath)).toContain(samePathKey(created.path));
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
   });
 
   it('retries temporary Windows access denial with exponential backoff', async () => {
@@ -939,18 +939,24 @@ async function git(args: string[]): Promise<string> {
   return stdout;
 }
 
-/** Git prints forward slashes on Windows; compare registrations by resolved, case-folded path. */
-function samePathKey(path: string): string {
-  const resolved = resolve(path);
-  return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+/**
+ * A registration may point at a directory that no longer exists, so compare through the real path
+ * of its (existing) parent: macOS temp paths are symlinks (/var -> /private/var) and Git records
+ * the real one. Git prints forward slashes on Windows, where paths are also case-insensitive.
+ */
+async function samePathKey(path: string): Promise<string> {
+  const real = join(await realpath(dirname(path)), basename(path));
+  return process.platform === 'win32' ? real.toLocaleLowerCase('en-US') : real;
 }
 
 async function registeredWorktrees(repoPath: string): Promise<string[]> {
   const listed = await git(['-C', repoPath, 'worktree', 'list', '--porcelain']);
-  return listed
-    .split('\n')
-    .filter((line) => line.startsWith('worktree '))
-    .map((line) => samePathKey(line.slice('worktree '.length)));
+  return Promise.all(
+    listed
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '))
+      .map((line) => samePathKey(line.slice('worktree '.length))),
+  );
 }
 
 function isGitAvailable(): boolean {
