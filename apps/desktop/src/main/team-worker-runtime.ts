@@ -702,6 +702,16 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     });
   }
 
+  /**
+   * Whether a Turn this Worker ran for `executionId`, or for an execution it cannot name, may still
+   * be running (issue #544): the same Turns that hold back its next execution.
+   */
+  hasUnsettledTurn(agentId: string, executionId: string): boolean {
+    return this.blockingTurns(agentId).some(
+      ({ owner }) => owner.executionId === undefined || owner.executionId === executionId,
+    );
+  }
+
   /** The Worker's Turns whose exit is still awaited or unconfirmed, each with when it goes away. */
   private blockingTurns(agentId: string): { owner: TurnOwner; released: Promise<void> }[] {
     return [

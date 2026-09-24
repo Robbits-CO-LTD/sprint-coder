@@ -144,6 +144,29 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     expect(runtime.cancel).toHaveBeenCalledTimes(1);
   });
 
+  it('asks the CLI fallback whether a Turn may still be writing for an execution (issue #544)', () => {
+    const hasUnsettledTurn = vi.fn((agentId: string) => agentId === 'worker-1');
+    const adapter = controlledProviderAdapter(
+      {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        execute: vi.fn(),
+      },
+      { fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn(), hasUnsettledTurn } },
+    );
+    expect(adapter.hasUnsettledTurn('worker-1', 'execution-1')).toBe(true);
+    expect(adapter.hasUnsettledTurn('worker-2', 'execution-1')).toBe(false);
+    expect(hasUnsettledTurn).toHaveBeenCalledWith('worker-1', 'execution-1');
+    // A fallback that runs no Turns never holds a worktree.
+    expect(
+      controlledProviderAdapter(
+        { verify: vi.fn(), listModels: vi.fn(), cancel: vi.fn(), execute: vi.fn() },
+        { fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() } },
+      ).hasUnsettledTurn('worker-1', 'execution-1'),
+    ).toBe(false);
+  });
+
   it('cancels during Connection verification without starting the Provider', async () => {
     const verification = deferred<ProviderConnection>();
     const runtime: ProviderRuntime = {

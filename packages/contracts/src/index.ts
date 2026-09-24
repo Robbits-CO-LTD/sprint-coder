@@ -873,6 +873,101 @@ export const teamResumeExecutionIntegrationInputSchema = z
 export type TeamResumeExecutionIntegrationInput = z.infer<
   typeof teamResumeExecutionIntegrationInputSchema
 >;
+
+/** The most retained worktrees one listing returns; `total` still counts every one (issue #544). */
+export const TEAM_RETAINED_WORKTREE_LIST_LIMIT = 200;
+/** The most file entries one inspection returns per list; the rest are only flagged as truncated. */
+export const TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT = 500;
+const retainedWorktreeGitHeadSchema = z.string().regex(/^[0-9a-f]{40,64}$/i);
+const retainedWorktreeOrdinalSchema = z.number().int().min(1).max(16);
+/** One repository worktree of a Team execution isolation, named for a read or a discard. */
+export const teamRetainedWorktreeRefSchema = z
+  .object({
+    taskId: idSchema,
+    executionId: idSchema,
+    repositoryOrdinal: retainedWorktreeOrdinalSchema,
+  })
+  .strict();
+export type TeamRetainedWorktreeRef = z.infer<typeof teamRetainedWorktreeRefSchema>;
+/**
+ * A worktree a Team Worker left on disk (issue #544): an execution isolation repository recorded as
+ * `quarantined`. Main decides `discardable`, and `blockedReason` says in Japanese why it is not.
+ */
+export const teamRetainedWorktreeSchema = z
+  .object({
+    executionId: idSchema,
+    repositoryOrdinal: retainedWorktreeOrdinalSchema,
+    agentId: idSchema,
+    role: z.string().min(1).max(200),
+    repoPath: z.string().min(1).max(4_096),
+    worktreePath: z.string().min(1).max(4_096),
+    baseHead: retainedWorktreeGitHeadSchema,
+    workerHead: retainedWorktreeGitHeadSchema.nullable(),
+    integratedHead: retainedWorktreeGitHeadSchema.nullable(),
+    /**
+     * Whether the change is in the Workspace: `none` when nothing was integrated, `confirmed` when
+     * the recorded integrated commit is in the repository's current history, and `unconfirmed` when
+     * it was recorded but Main no longer finds it there (or could not check).
+     */
+    integration: z.enum(['none', 'confirmed', 'unconfirmed']),
+    /**
+     * The worktree on disk holds a submodule (or Main could not tell). A Worker's commits inside
+     * one may exist only in this worktree while the Workspace refers to them, so an integrated
+     * change is no assurance that discarding it loses nothing.
+     */
+    submodules: z.boolean(),
+    /** Files the isolation recorded when it sealed a commit; the live state comes from inspect. */
+    changedFileCount: z.number().int().min(0).max(500),
+    reason: z.string().min(1).max(2_000).nullable(),
+    executionState: teamExecutionSummarySchema.shape.state,
+    existsOnDisk: z.boolean(),
+    discardable: z.boolean(),
+    blockedReason: z.string().min(1).max(500).nullable(),
+  })
+  .strict()
+  .refine(({ discardable, blockedReason }) => discardable === (blockedReason === null), {
+    message: 'A retained worktree is discardable exactly when it has no blocked reason',
+  })
+  .refine(
+    ({ integratedHead, integration }) => (integration === 'none') === (integratedHead === null),
+    {
+      message: 'Only a retained worktree without an integrated commit has no integration to check',
+    },
+  );
+export type TeamRetainedWorktree = z.infer<typeof teamRetainedWorktreeSchema>;
+export const teamRetainedWorktreeListSchema = z
+  .object({
+    worktrees: z.array(teamRetainedWorktreeSchema).max(TEAM_RETAINED_WORKTREE_LIST_LIMIT),
+    total: z.number().int().min(0),
+  })
+  .strict()
+  .refine(({ worktrees, total }) => total >= worktrees.length, {
+    message: 'Retained worktree total cannot be below the listed count',
+  });
+export type TeamRetainedWorktreeList = z.infer<typeof teamRetainedWorktreeListSchema>;
+/** What a retained worktree holds now, read from Git without changing it. */
+export const teamRetainedWorktreeInspectionSchema = z
+  .object({
+    executionId: idSchema,
+    repositoryOrdinal: retainedWorktreeOrdinalSchema,
+    head: retainedWorktreeGitHeadSchema,
+    /** Commits on HEAD that the base does not have; 0 while HEAD is still the base. */
+    commitsSinceBase: z.number().int().min(0),
+    /** `git status --porcelain` entries: the two-letter code and the path. */
+    status: z
+      .array(z.object({ code: z.string().length(2), path: z.string().min(1).max(4_096) }).strict())
+      .max(TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT),
+    statusTruncated: z.boolean(),
+    /** `git diff --name-status <base>` entries: tracked files changed since the base. */
+    changesFromBase: z
+      .array(
+        z.object({ status: z.string().min(1).max(8), path: z.string().min(1).max(4_096) }).strict(),
+      )
+      .max(TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT),
+    changesFromBaseTruncated: z.boolean(),
+  })
+  .strict();
+export type TeamRetainedWorktreeInspection = z.infer<typeof teamRetainedWorktreeInspectionSchema>;
 export const teamMissionCheckpointSchema = z
   .object({
     summary: z.string().min(1).max(4_000),
@@ -6634,6 +6729,15 @@ export interface SprintCoderApi {
     hireWorker(input: TeamHireWorkerInput): Promise<WorkerSummary>;
     resumeMission(input: TeamResumeMissionInput): Promise<TeamMissionSummary>;
     resumeExecutionIntegration(input: TeamResumeExecutionIntegrationInput): Promise<TeamDetail>;
+    /** Worktrees Team Workers left on disk for this Task (issue #544). */
+    listRetainedWorktrees(taskId: string): Promise<TeamRetainedWorktreeList>;
+    inspectRetainedWorktree(
+      input: TeamRetainedWorktreeRef,
+    ): Promise<TeamRetainedWorktreeInspection>;
+    /** Shows the retained worktree folder in the OS file manager. */
+    openRetainedWorktree(input: TeamRetainedWorktreeRef): Promise<void>;
+    /** Deletes the retained worktree with every change in it, and returns the list left. */
+    discardRetainedWorktree(input: TeamRetainedWorktreeRef): Promise<TeamRetainedWorktreeList>;
     sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
     stopAll(taskId: string): Promise<TeamDetail>;
@@ -6900,6 +7004,10 @@ export const IPC_CHANNELS = {
   teamsStopAll: 'sprint-coder:teams:stop-all',
   teamsResumeMission: 'sprint-coder:teams:resume-mission',
   teamsResumeExecutionIntegration: 'sprint-coder:teams:resume-execution-integration',
+  teamsListRetainedWorktrees: 'sprint-coder:teams:list-retained-worktrees',
+  teamsInspectRetainedWorktree: 'sprint-coder:teams:inspect-retained-worktree',
+  teamsOpenRetainedWorktree: 'sprint-coder:teams:open-retained-worktree',
+  teamsDiscardRetainedWorktree: 'sprint-coder:teams:discard-retained-worktree',
   teamsSubscribe: 'sprint-coder:teams:subscribe',
   teamsUnsubscribe: 'sprint-coder:teams:unsubscribe',
   teamsEvent: 'sprint-coder:teams:event',

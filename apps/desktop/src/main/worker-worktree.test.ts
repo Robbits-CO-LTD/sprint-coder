@@ -1,23 +1,73 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
+  rmdir,
   stat,
+  unlink,
   writeFile,
   rename,
   symlink,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { WorkerWorktreeManager, type ExecFileImpl } from './worker-worktree';
+import {
+  WorkerWorktreeManager,
+  removeTreeWithoutFollowingLinks,
+  type ExecFileImpl,
+  type TreeRemovalFs,
+} from './worker-worktree';
 
 const execFileAsync = promisify(execFile);
 const gitAvailable = isGitAvailable();
+const TEST_IDENTITY = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
+/**
+ * Clones a local submodule: Git refuses the file protocol unless it is allowed, and the clone keeps
+ * the committed bytes. A host `core.autocrlf` would otherwise leave the submodule looking modified to
+ * the manager's own Git (which reads no host configuration), and a status showing that change would
+ * keep the worktree whether or not submodules are checked.
+ */
+const SUBMODULE_CLONE = ['-c', 'protocol.file.allow=always', '-c', 'core.autocrlf=false'];
+/** A Windows junction needs no privilege; elsewhere a directory symlink is the same kind of link. */
+const DIRECTORY_LINK = process.platform === 'win32' ? 'junction' : 'dir';
+
+/**
+ * The real file system, except that removing a path `fails` names throws `code`, `times` times (a
+ * held Windows lock, or a removal cut short part way).
+ */
+function failingRemovalFs(
+  fails: (path: string) => boolean,
+  code: string,
+  times = Number.POSITIVE_INFINITY,
+): TreeRemovalFs {
+  let failures = 0;
+  const guard = (path: string, action: string): void => {
+    if (!fails(path) || failures >= times) return;
+    failures += 1;
+    throw Object.assign(new Error(`${code}: operation failed, ${action} '${path}'`), { code });
+  };
+  return {
+    lstat: (path) => lstat(path),
+    readdir: (path) => readdir(path),
+    unlink: async (path) => {
+      guard(path, 'unlink');
+      await unlink(path);
+    },
+    rmdir: async (path) => {
+      guard(path, 'rmdir');
+      await rmdir(path);
+    },
+    chmod: (path, mode) => chmod(path, mode),
+  };
+}
 
 function interceptWorktreeRemove(beforeRemove: () => void): ExecFileImpl {
   return async (file, args, options) => {
@@ -356,9 +406,30 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect(delays).toEqual([100, 200]);
   });
 
-  it('quarantines a clean Windows worktree while access denial persists', async () => {
+  it('quarantines a clean Windows worktree while a lock on its files persists', async () => {
     const { repoPath, worktreesRoot, manager } = await fixture();
     const created = await manager.create({ agentId: 'agent-locked', repoPath });
+    const locked = join(created.path, 'README.md');
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      treeRemovalFs: failingRemovalFs((path) => path === locked, 'EBUSY'),
+    });
+
+    await expect(retrying.cleanup({ agentId: 'agent-locked', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
+    expect(await readFile(locked, 'utf8')).toBe('hello\n');
+    // The files go before the registration, so the kept worktree is still registered.
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+  });
+
+  it('keeps the registration while Git refuses to drop it, and a later cleanup finishes it', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-unregister-locked', repoPath });
     const delays: number[] = [];
     const retrying = new WorkerWorktreeManager({
       worktreesRoot,
@@ -369,11 +440,17 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       }),
     });
 
-    await expect(retrying.cleanup({ agentId: 'agent-locked', repoPath })).resolves.toEqual({
-      outcome: 'quarantined',
-    });
+    await expect(
+      retrying.cleanup({ agentId: 'agent-unregister-locked', repoPath }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
     expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
-    expect((await stat(created.path)).isDirectory()).toBe(true);
+    await expect(stat(created.path)).rejects.toThrow();
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    await expect(
+      manager.cleanup({ agentId: 'agent-unregister-locked', repoPath }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
   });
 
   it('removes an unchanged worktree at its base and unregisters it', async () => {
@@ -515,9 +592,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       platform: 'win32',
       delay: async (milliseconds) => void delays.push(milliseconds),
-      execFileImpl: interceptWorktreeRemove(() => {
-        throw Object.assign(new Error('Access is denied'), { code: 'EPERM' });
-      }),
+      treeRemovalFs: failingRemovalFs((path) => path === created.path, 'EPERM'),
     });
 
     await expect(
@@ -529,6 +604,716 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     ).resolves.toEqual({ outcome: 'quarantined' });
     expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
     expect((await stat(created.path)).isDirectory()).toBe(true);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+  });
+
+  it('discards a changed worktree with its commit and untracked files and unregisters it (issue #544)', async () => {
+    const { repoPath, head, worktreesRoot } = await fixture();
+    const commands: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        commands.push([...args]);
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const branchesBefore = await git(['-C', repoPath, 'branch', '--list']);
+    const created = await manager.create({
+      agentId: 'agent-discard',
+      worktreeId: 'execution-discard-1',
+      repoPath,
+    });
+    await writeFile(join(created.path, 'committed.txt'), 'committed by worker\n');
+    await git(['-C', created.path, 'add', 'committed.txt']);
+    await git([
+      '-C',
+      created.path,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'worker commit',
+    ]);
+    await writeFile(join(created.path, 'README.md'), 'edited\n');
+    await writeFile(join(created.path, 'untracked.txt'), 'untracked\n');
+    // cleanup keeps changed work, which is why the retained worktree needs an explicit discard.
+    await expect(
+      manager.cleanup({ agentId: 'agent-discard', worktreeId: 'execution-discard-1', repoPath }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+
+    await expect(
+      manager.discard({
+        agentId: 'agent-discard',
+        worktreeId: 'execution-discard-1',
+        repoPath,
+        path: created.path,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(stat(created.path)).rejects.toThrow();
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(head);
+    expect(await git(['-C', repoPath, 'status', '--porcelain'])).toBe('');
+    expect(await git(['-C', repoPath, 'branch', '--list'])).toBe(branchesBefore);
+    // Git only drops the registration: it never deletes the files, so it is never forced.
+    expect(commands.some((args) => args.includes('worktree') && args.includes('remove'))).toBe(
+      true,
+    );
+    expect(commands.some((args) => args.includes('--force'))).toBe(false);
+    expect(commands.some((args) => args.includes('prune'))).toBe(false);
+  });
+
+  it('discards only its own missing worktree registration and keeps the user missing worktree', async () => {
+    const { repoPath, worktreesRoot } = await fixture();
+    const commands: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        commands.push([...args]);
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const created = await manager.create({ agentId: 'agent-discard-gone', repoPath });
+    const userRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-user-worktree-'));
+    cleanupRoots.push(userRoot);
+    const userWorktree = join(userRoot, 'on-unplugged-drive');
+    await git(['-C', repoPath, 'worktree', 'add', '-q', '--detach', userWorktree]);
+    await rm(created.path, { recursive: true, force: true });
+    await rm(userWorktree, { recursive: true, force: true });
+
+    await expect(
+      manager.discard({ agentId: 'agent-discard-gone', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    const registered = await registeredWorktrees(repoPath);
+    expect(registered).toContain(await samePathKey(userWorktree));
+    expect(registered).not.toContain(await samePathKey(created.path));
+    expect(commands.some((args) => args.includes('prune'))).toBe(false);
+    // Nothing is registered there any more, so a second discard has nothing left to do.
+    await expect(
+      manager.discard({ agentId: 'agent-discard-gone', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+  });
+
+  it('refuses to discard a path it does not own, a path unlike its record, or a link', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-owned', repoPath });
+    await writeFile(join(created.path, 'kept.txt'), 'kept\n');
+    const other = await manager.create({ agentId: 'agent-other', repoPath });
+
+    for (const path of [repoPath, other.path, join(created.path, '..', 'worktree-elsewhere')])
+      await expect(
+        manager.discard({ agentId: 'agent-owned', repoPath, path }),
+      ).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(await readFile(join(created.path, 'kept.txt'), 'utf8')).toBe('kept\n');
+    expect((await stat(other.path)).isDirectory()).toBe(true);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    // A link standing in for the owned directory is refused, and its target is left alone.
+    const linkedPath = manager.worktreePathFor('agent-linked');
+    await symlink(repoPath, linkedPath, process.platform === 'win32' ? 'junction' : 'dir');
+    await expect(
+      manager.discard({ agentId: 'agent-linked', repoPath, path: linkedPath }),
+    ).rejects.toThrow('own directory');
+    expect((await stat(join(repoPath, 'README.md'))).isFile()).toBe(true);
+  });
+
+  it('retries a discard through a temporary Windows lock on its files', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-discard-retry', repoPath });
+    const busy = join(created.path, 'change.txt');
+    await writeFile(busy, 'changed\n');
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      treeRemovalFs: failingRemovalFs((path) => path === busy, 'EBUSY', 2),
+    });
+
+    await expect(
+      retrying.discard({ agentId: 'agent-discard-retry', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    expect(delays).toEqual([100, 200]);
+    await expect(stat(created.path)).rejects.toThrow();
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('removes a directory tree without following a link into another folder (issue #544)', async () => {
+    const outside = await outsideFolder();
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-tree-removal-'));
+    cleanupRoots.push(root);
+    await mkdir(join(root, 'nested', 'deeper'), { recursive: true });
+    await writeFile(join(root, 'nested', 'deeper', 'own.txt'), 'own\n');
+    await symlink(outside, join(root, 'linked-out'), DIRECTORY_LINK);
+    await symlink(
+      join(outside, 'sub'),
+      join(root, 'nested', 'deeper', 'linked-sub'),
+      DIRECTORY_LINK,
+    );
+    const readOnly = join(root, 'nested', 'read-only.txt');
+    await writeFile(readOnly, 'read only\n');
+    await chmod(readOnly, 0o444);
+
+    await removeTreeWithoutFollowingLinks(root);
+
+    await expect(lstat(root)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expectOutsideIntact(outside);
+    // A missing tree is already removed, so a removal can simply run again.
+    await expect(removeTreeWithoutFollowingLinks(root)).resolves.toBeUndefined();
+  });
+
+  it('removes a link by itself: rmdir when unlink refuses a directory link, never chmod or readdir through it', async () => {
+    const root = join('tree-root');
+    const link = join(root, 'link');
+    const calls: string[] = [];
+    const refuse = (path: string, code: string) => {
+      throw Object.assign(new Error(`${code}: ${path}`), { code });
+    };
+    const fakeFs: TreeRemovalFs = {
+      lstat: async (path) => ({
+        isDirectory: () => path === root,
+        isSymbolicLink: () => path === link,
+      }),
+      readdir: async (path) => {
+        calls.push(`readdir ${path}`);
+        return path === root ? ['link'] : ['behind-the-link.txt'];
+      },
+      unlink: async (path) => {
+        calls.push(`unlink ${path}`);
+        // Windows refuses to unlink some directory links; only rmdir removes them.
+        refuse(path, 'EPERM');
+      },
+      rmdir: async (path) => {
+        calls.push(`rmdir ${path}`);
+      },
+      chmod: async (path) => {
+        // chmod follows a link, so it would change the folder the link points at.
+        calls.push(`chmod ${path}`);
+      },
+    };
+
+    await removeTreeWithoutFollowingLinks(root, fakeFs);
+
+    expect(calls).toEqual([`readdir ${root}`, `unlink ${link}`, `rmdir ${link}`, `rmdir ${root}`]);
+  });
+
+  it('discards a worktree holding a directory link without touching what it points at (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const outside = await outsideFolder();
+    const created = await manager.create({ agentId: 'agent-discard-link', repoPath });
+    await symlink(outside, join(created.path, 'junction-out'), DIRECTORY_LINK);
+    await mkdir(join(created.path, 'work'));
+    await symlink(join(outside, 'sub'), join(created.path, 'work', 'nested-link'), DIRECTORY_LINK);
+
+    await expect(
+      manager.discard({ agentId: 'agent-discard-link', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    await expectOutsideIntact(outside);
+  });
+
+  it('reclaims an unchanged worktree whose ignored link points outside, keeping the target (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    // No trailing slash: on Unix a directory symlink is a file entry for gitignore,
+    // so `linked/` (directories only) leaves `?? linked` and the reclaim path never runs.
+    // Windows junctions match both `linked` and `linked/`; use the portable form.
+    await writeFile(join(repoPath, '.gitignore'), 'linked\n');
+    await git(['-C', repoPath, 'add', '.gitignore']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'ignore linked',
+    ]);
+    const outside = await outsideFolder();
+    const created = await manager.create({ agentId: 'agent-ignored-link', repoPath });
+    await symlink(outside, join(created.path, 'linked'), DIRECTORY_LINK);
+    expect(await git(['-C', created.path, 'status', '--porcelain', '--untracked-files=all'])).toBe(
+      '',
+    );
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-ignored-link',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    await expectOutsideIntact(outside);
+  });
+
+  it('keeps the rest and the registration when a discard stops part way, and finishes on the next one', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-discard-partial', repoPath });
+    await writeFile(join(created.path, 'a.txt'), 'first\n');
+    const failing = join(created.path, 'b.txt');
+    await writeFile(failing, 'second\n');
+    const interrupted = new WorkerWorktreeManager({
+      worktreesRoot,
+      treeRemovalFs: failingRemovalFs((path) => path === failing, 'EIO', 1),
+    });
+
+    await expect(
+      interrupted.discard({ agentId: 'agent-discard-partial', repoPath, path: created.path }),
+    ).rejects.toMatchObject({ code: 'remove_failed' });
+    expect(await readFile(failing, 'utf8')).toBe('second\n');
+    // `.git` goes last, so what is left is still a worktree Git can read and unregister.
+    expect((await git(['-C', created.path, 'rev-parse', 'HEAD'])).trim()).toBe(created.baseHead);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    await expect(
+      manager.discard({ agentId: 'agent-discard-partial', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('inspects a retained worktree without changing it', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-inspect', repoPath });
+    await writeFile(join(created.path, 'committed.txt'), 'committed by worker\n');
+    await git(['-C', created.path, 'add', 'committed.txt']);
+    await git([
+      '-C',
+      created.path,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'worker commit',
+    ]);
+    await writeFile(join(created.path, 'README.md'), 'edited\n');
+    await mkdir(join(created.path, 'nested'));
+    await writeFile(join(created.path, 'nested', '日本語.txt'), 'untracked\n');
+    const input = {
+      agentId: 'agent-inspect',
+      repoPath,
+      path: created.path,
+      baseHead: created.baseHead,
+      limit: 500,
+    };
+    const statusBefore = await git(['-C', created.path, 'status', '--porcelain']);
+
+    const inspection = await manager.inspectChanges(input);
+
+    expect(inspection.head).not.toBe(created.baseHead);
+    expect(inspection.commitsSinceBase).toBe(1);
+    expect(inspection.status).toEqual([
+      { code: ' M', path: 'README.md' },
+      { code: '??', path: 'nested/日本語.txt' },
+    ]);
+    expect(inspection.statusTruncated).toBe(false);
+    expect(inspection.changesFromBase).toEqual([
+      { status: 'M', path: 'README.md' },
+      { status: 'A', path: 'committed.txt' },
+    ]);
+    expect(inspection.changesFromBaseTruncated).toBe(false);
+    expect(await git(['-C', created.path, 'status', '--porcelain'])).toBe(statusBefore);
+
+    const cut = await manager.inspectChanges({ ...input, limit: 1 });
+    expect(cut.status).toHaveLength(1);
+    expect(cut.statusTruncated).toBe(true);
+    expect(cut.changesFromBase).toHaveLength(1);
+    expect(cut.changesFromBaseTruncated).toBe(true);
+
+    const untouched = await manager.create({ agentId: 'agent-inspect-clean', repoPath });
+    await expect(
+      manager.inspectChanges({
+        ...input,
+        agentId: 'agent-inspect-clean',
+        path: untouched.path,
+      }),
+    ).resolves.toMatchObject({
+      head: untouched.baseHead,
+      commitsSinceBase: 0,
+      status: [],
+      changesFromBase: [],
+    });
+    await expect(manager.inspectChanges({ ...input, path: repoPath })).rejects.toMatchObject({
+      code: 'invalid_input',
+    });
+  });
+
+  it('keeps a worktree whose submodule holds a Worker commit when cleaning up without review (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    const created = await manager.create({ agentId: 'agent-submodule', repoPath });
+    await git(['-C', created.path, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    await git(['-C', created.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'add submodule']);
+    const sub = join(created.path, 'sub');
+    await writeFile(join(sub, 'worker.txt'), 'only here\n');
+    await git(['-C', sub, 'add', 'worker.txt']);
+    await git(['-C', sub, ...TEST_IDENTITY, 'commit', '-q', '-m', 'worker commit in submodule']);
+    const workerCommit = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', created.path, 'add', 'sub']);
+    await git(['-C', created.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'point at it']);
+    // Status is clean: nothing but the submodule store holds the Worker's submodule commit.
+    expect(await git(['-C', created.path, 'status', '--porcelain'])).toBe('');
+    const modules = resolve(
+      created.path,
+      (await git(['-C', created.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+    );
+    const gitDir = resolve(
+      created.path,
+      (await git(['-C', created.path, 'rev-parse', '--git-dir'])).trim(),
+    );
+
+    // The list reads the same test, so the discard confirmation can warn about the submodule.
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-submodule', repoPath, path: created.path }),
+    ).resolves.toBe(true);
+    const plain = await manager.create({ agentId: 'agent-no-submodule', repoPath });
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-no-submodule', repoPath, path: plain.path }),
+    ).resolves.toBe(false);
+    // A worktree it cannot read counts as holding one, so the user is warned, not reassured.
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-no-submodule', repoPath, path: repoPath }),
+    ).resolves.toBe(true);
+
+    await expect(manager.cleanup({ agentId: 'agent-submodule', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect((await stat(modules)).isDirectory()).toBe(true);
+    expect((await git(['-C', sub, 'cat-file', '-t', workerCommit])).trim()).toBe('commit');
+    expect(await readFile(join(sub, 'worker.txt'), 'utf8')).toBe('only here\n');
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    // A discard the user confirmed removes it, submodule store and all.
+    await expect(
+      manager.discard({ agentId: 'agent-submodule', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(lstat(gitDir)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('keeps an unchanged worktree with an initialized submodule, whose store status cannot vouch for (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    await git(['-C', repoPath, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    await git(['-C', repoPath, ...TEST_IDENTITY, 'commit', '-q', '-m', 'add submodule']);
+    const created = await manager.create({ agentId: 'agent-submodule-unchanged', repoPath });
+    await git(['-C', created.path, ...SUBMODULE_CLONE, 'submodule', 'update', '--init', '-q']);
+    const sub = join(created.path, 'sub');
+    const recorded = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', sub, 'checkout', '-q', '-b', 'worker']);
+    await git(['-C', sub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'worker']);
+    const workerCommit = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', sub, 'checkout', '-q', '--detach', recorded]);
+    expect(
+      await git([
+        '-C',
+        created.path,
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--ignore-submodules=none',
+      ]),
+    ).toBe('');
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-submodule-unchanged',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
+    expect((await git(['-C', sub, 'rev-parse', 'worker'])).trim()).toBe(workerCommit);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+  });
+
+  it('keeps a worktree when only its submodule store, or only a filled gitlink, holds Worker work (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    const cleanStatus = async (path: string) =>
+      expect(await git(['-C', path, 'status', '--porcelain'])).toBe('');
+
+    // A repository embedded as a gitlink keeps its own `.git`; there is no submodule store.
+    const embedded = await manager.create({ agentId: 'agent-embedded', repoPath });
+    const embeddedSub = join(embedded.path, 'sub');
+    await git(['-C', embedded.path, ...SUBMODULE_CLONE, 'clone', '-q', source, 'sub']);
+    await git(['-C', embeddedSub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'w']);
+    const embeddedCommit = (await git(['-C', embeddedSub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', embedded.path, 'add', 'sub']);
+    await git(['-C', embedded.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'embed']);
+    await cleanStatus(embedded.path);
+    const embeddedModules = resolve(
+      embedded.path,
+      (await git(['-C', embedded.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+    );
+    await expect(lstat(embeddedModules)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(manager.cleanup({ agentId: 'agent-embedded', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect((await git(['-C', embeddedSub, 'cat-file', '-t', embeddedCommit])).trim()).toBe(
+      'commit',
+    );
+
+    // A deinitialized submodule leaves an empty directory, and its commits only in the store.
+    const deinited = await manager.create({ agentId: 'agent-deinit', repoPath });
+    const deinitedSub = join(deinited.path, 'sub');
+    await git(['-C', deinited.path, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    await git(['-C', deinitedSub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'w']);
+    const storedCommit = (await git(['-C', deinitedSub, 'rev-parse', 'HEAD'])).trim();
+    await git(['-C', deinited.path, 'add', 'sub']);
+    await git(['-C', deinited.path, ...TEST_IDENTITY, 'commit', '-q', '-m', 'point at it']);
+    await git(['-C', deinited.path, 'submodule', 'deinit', '-q', '-f', 'sub']);
+    expect(await readdir(deinitedSub)).toEqual([]);
+    await cleanStatus(deinited.path);
+    const store = join(
+      resolve(
+        deinited.path,
+        (await git(['-C', deinited.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+      ),
+      'sub',
+    );
+    await expect(manager.cleanup({ agentId: 'agent-deinit', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect((await git(['--git-dir', store, 'cat-file', '-t', storedCommit])).trim()).toBe('commit');
+  });
+
+  it('finishes a removal that left only the locked root folder, without asking Git about it (issue #544)', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const unchanged = await manager.create({ agentId: 'agent-root-unchanged', repoPath });
+    const clean = await manager.create({ agentId: 'agent-root-clean', repoPath });
+    const discarded = await manager.create({ agentId: 'agent-root-discard', repoPath });
+    const roots = [unchanged.path, clean.path, discarded.path];
+    const lockedRoot = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async () => undefined,
+      // A terminal or Explorer window holding the folder itself open.
+      treeRemovalFs: failingRemovalFs((path) => roots.includes(path), 'EBUSY'),
+    });
+
+    // The files and `.git` go; only the root folder stays, with the registration.
+    await expect(
+      lockedRoot.cleanupUnchanged({
+        agentId: 'agent-root-unchanged',
+        repoPath,
+        baseHead: unchanged.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+    await expect(lockedRoot.cleanup({ agentId: 'agent-root-clean', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    await expect(
+      lockedRoot.discard({ agentId: 'agent-root-discard', repoPath, path: discarded.path }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+    for (const root of roots) {
+      expect(await readdir(root)).toEqual([]);
+      expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(root));
+    }
+    // Still locked, the next attempt keeps it again rather than failing on Git.
+    await expect(
+      lockedRoot.cleanupUnchanged({
+        agentId: 'agent-root-unchanged',
+        repoPath,
+        baseHead: unchanged.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+    await expect(
+      lockedRoot.hasSubmodules({ agentId: 'agent-root-clean', repoPath, path: clean.path }),
+    ).resolves.toBe(false);
+
+    // Once the folder is free, the automatic cleanups finish it without Git reading the folder.
+    const commands: string[][] = [];
+    const released = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        commands.push([...args]);
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    await expect(
+      released.cleanupUnchanged({
+        agentId: 'agent-root-unchanged',
+        repoPath,
+        baseHead: unchanged.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(released.cleanup({ agentId: 'agent-root-clean', repoPath })).resolves.toEqual({
+      outcome: 'removed',
+    });
+    const readFolder = (root: string) =>
+      commands.some((args) => args.some((arg, index) => arg === root && args[index - 1] === '-C'));
+    expect(readFolder(unchanged.path)).toBe(false);
+    expect(readFolder(clean.path)).toBe(false);
+    // So does a discard.
+    await expect(
+      released.discard({ agentId: 'agent-root-discard', repoPath, path: discarded.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    for (const root of roots) {
+      await expect(lstat(root)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(root));
+    }
+  });
+
+  it('keeps a folder whose `.git` is gone while it still holds files, and only a discard removes it (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-no-git', repoPath });
+    await rm(join(created.path, '.git'));
+
+    await expect(manager.cleanup({ agentId: 'agent-no-git', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    await expect(
+      manager.cleanupUnchanged({ agentId: 'agent-no-git', repoPath, baseHead: created.baseHead }),
+    ).resolves.toEqual({ outcome: 'quarantined', changed: true });
+    expect(await readFile(join(created.path, 'README.md'), 'utf8')).toBe('hello\n');
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+    // Git cannot account for these files, so the confirmation warns about a possible submodule.
+    await expect(
+      manager.hasSubmodules({ agentId: 'agent-no-git', repoPath, path: created.path }),
+    ).resolves.toBe(true);
+
+    await expect(
+      manager.discard({ agentId: 'agent-no-git', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('removes an emptied folder only while it stays empty (issue #544)', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-root-late', repoPath });
+    await rm(join(created.path, 'README.md'));
+    await rm(join(created.path, '.git'));
+    const late = join(created.path, 'late.txt');
+    let written = false;
+    const writingFs: TreeRemovalFs = {
+      lstat: (path) => lstat(path),
+      readdir: (path) => readdir(path),
+      unlink: (path) => unlink(path),
+      rmdir: async (path) => {
+        // Something writes into the folder after it was seen empty.
+        if (path === created.path && !written) {
+          written = true;
+          await writeFile(late, 'written late\n');
+        }
+        await rmdir(path);
+      },
+      chmod: (path, mode) => chmod(path, mode),
+    };
+    const racing = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async () => undefined,
+      treeRemovalFs: writingFs,
+    });
+
+    await expect(racing.cleanup({ agentId: 'agent-root-late', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect(await readFile(late, 'utf8')).toBe('written late\n');
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+  });
+
+  it('keeps a worktree Git holds locked when cleaning up, and refuses to discard it (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-git-locked', repoPath });
+    await git(['-C', repoPath, 'worktree', 'lock', '--reason', 'kept by the user', created.path]);
+
+    await expect(manager.cleanup({ agentId: 'agent-git-locked', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    // Unlocking may let it qualify later, so it is not reported as changed.
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-git-locked',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
+    await expect(
+      manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
+    ).rejects.toMatchObject({ code: 'locked' });
+    expect(await readFile(join(created.path, 'README.md'), 'utf8')).toBe('hello\n');
+
+    // The lock is read from the repository, so it holds even once the worktree's `.git` is gone.
+    await rm(join(created.path, '.git'));
+    await expect(
+      manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
+    ).rejects.toMatchObject({ code: 'locked' });
+    expect(await readFile(join(created.path, 'README.md'), 'utf8')).toBe('hello\n');
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    await git(['-C', repoPath, 'worktree', 'unlock', created.path]);
+    await expect(
+      manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('reads long change lists with a wide buffer and refuses one past it as too large', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-inspect-large', repoPath });
+    const buffers: Array<{ args: readonly string[]; maxBuffer: number | undefined }> = [];
+    let overflow = false;
+    const inspecting = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        buffers.push({ args, maxBuffer: options.maxBuffer });
+        if (overflow && args.includes('status'))
+          throw Object.assign(new Error('stdout maxBuffer length exceeded'), {
+            code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+          });
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+          ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const input = {
+      agentId: 'agent-inspect-large',
+      repoPath,
+      path: created.path,
+      baseHead: created.baseHead,
+      limit: 500,
+    };
+
+    await inspecting.inspectChanges(input);
+    for (const listing of ['status', 'diff'])
+      expect(
+        buffers.find(({ args }) => args.includes(listing) && !args.includes('--list'))?.maxBuffer,
+      ).toBeGreaterThanOrEqual(32 * 1024 * 1024);
+
+    overflow = true;
+    await expect(inspecting.inspectChanges(input)).rejects.toMatchObject({ code: 'too_large' });
   });
 
   it('collapses Worker changes into one commit and integrates them into a clean workspace', async () => {
@@ -936,6 +1721,28 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const worktreesRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-root-'));
     cleanupRoots.push(repoPath, worktreesRoot);
     return { repoPath, head, worktreesRoot, manager: new WorkerWorktreeManager({ worktreesRoot }) };
+  }
+
+  /** A separate local repository with one commit, to add as a submodule. */
+  async function submoduleSource(): Promise<string> {
+    const { repoPath } = await makeRepo();
+    cleanupRoots.push(repoPath);
+    return repoPath;
+  }
+
+  /** A folder outside every worktree, with a file at its top and one below. */
+  async function outsideFolder(): Promise<string> {
+    const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-outside-'));
+    cleanupRoots.push(outside);
+    await mkdir(join(outside, 'sub'));
+    await writeFile(join(outside, 'precious.txt'), 'precious\n');
+    await writeFile(join(outside, 'sub', 'deep.txt'), 'deep\n');
+    return outside;
+  }
+
+  async function expectOutsideIntact(outside: string): Promise<void> {
+    expect(await readFile(join(outside, 'precious.txt'), 'utf8')).toBe('precious\n');
+    expect(await readFile(join(outside, 'sub', 'deep.txt'), 'utf8')).toBe('deep\n');
   }
 });
 

@@ -24,8 +24,13 @@ import {
 } from './placement';
 import { ArrowLeft, List } from '../icons';
 import { TeamPolicyDialog, TeamPolicyTrigger } from '../TeamPolicyDialog';
+import {
+  TeamRetainedWorktreesDialog,
+  TeamRetainedWorktreesTrigger,
+} from '../TeamRetainedWorktrees';
 import { latestExecutionForWorker } from '../../lib/team-execution-display';
 import { currentTeamWorkerCount } from '../../lib/team-progress';
+import { retainedWorktreeCount } from '../../lib/team-retained-worktrees';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
 // Team Canvas: the spatial "promoted chat" experience from demo/index.html (§Team mode,
@@ -104,6 +109,7 @@ export function TeamCanvas({
   const resumeTeamExecutionIntegration = useAppStore((s) => s.resumeTeamExecutionIntegration);
   const stopAllTeamWorkers = useAppStore((s) => s.stopAllTeamWorkers);
   const [policyOpen, setPolicyOpen] = useState(false);
+  const [retainedOpen, setRetainedOpen] = useState(false);
 
   // Stable indirection into the (not-yet-defined-at-this-point) autosave scheduler, so it can be
   // passed into useCamera() before `scheduleSave` itself exists — see the `useEffect` near
@@ -990,6 +996,8 @@ export function TeamCanvas({
             onStopAll={() => void stopAllTeamWorkers(task.id)}
             onSwitchToListView={onSwitchToListView}
             onOpenPolicy={() => setPolicyOpen(true)}
+            retainedOpen={retainedOpen}
+            onOpenRetained={() => setRetainedOpen(true)}
           />
 
           <CanvasControlsOverlay
@@ -1045,6 +1053,13 @@ export function TeamCanvas({
           onClose={() => setPolicyOpen(false)}
         />
       )}
+      {detail && retainedOpen && (
+        <TeamRetainedWorktreesDialog
+          taskId={task.id}
+          detail={detail}
+          onClose={() => setRetainedOpen(false)}
+        />
+      )}
     </section>
   );
 }
@@ -1058,6 +1073,8 @@ function TeamHeaderOverlay({
   onStopAll,
   onSwitchToListView,
   onOpenPolicy,
+  retainedOpen,
+  onOpenRetained,
 }: {
   task: TaskSummary;
   detail: TeamDetail;
@@ -1067,6 +1084,8 @@ function TeamHeaderOverlay({
   onStopAll: () => void;
   onSwitchToListView: () => void;
   onOpenPolicy: () => void;
+  retainedOpen: boolean;
+  onOpenRetained: () => void;
 }) {
   return (
     <div className="team-header-overlay">
@@ -1086,6 +1105,11 @@ function TeamHeaderOverlay({
         <List size={14} /> List表示
       </button>
       <TeamPolicyTrigger onOpen={onOpenPolicy} />
+      <TeamRetainedWorktreesTrigger
+        count={retainedWorktreeCount(detail)}
+        open={retainedOpen}
+        onOpen={onOpenRetained}
+      />
       <button
         type="button"
         className="team-stop-all-btn"

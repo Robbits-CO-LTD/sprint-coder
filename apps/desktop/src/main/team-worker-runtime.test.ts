@@ -748,6 +748,42 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     subject.dispose();
   });
 
+  it('tells Main which execution a Turn may still be writing for until its exit is confirmed (issue #544)', async () => {
+    runtimeHostMock.starts.length = 0;
+    let confirmExit: (() => void) | undefined;
+    runtimeHostMock.waitForExit
+      .mockRejectedValueOnce(
+        new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            confirmExit = resolve;
+          }),
+      );
+    const subject = runtime();
+    const agent = worker(false);
+
+    await expect(
+      subject.execute({
+        worker: agent,
+        envelope: { ...envelope, targetAgentId: agent.id },
+        content: '調査する',
+        executionId: 'execution-1',
+      }),
+    ).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(2));
+
+    expect(subject.hasUnsettledTurn(agent.id, 'execution-1')).toBe(true);
+    // Another execution's worktree and another Worker are not held by that Turn.
+    expect(subject.hasUnsettledTurn(agent.id, 'execution-2')).toBe(false);
+    expect(subject.hasUnsettledTurn('worker-2', 'execution-1')).toBe(false);
+
+    confirmExit?.();
+    await vi.waitFor(() => expect(subject.hasUnsettledTurn(agent.id, 'execution-1')).toBe(false));
+    subject.dispose();
+  });
+
   it('keeps a Worker blocked and checking again when the Runtime Host goes away before the exit is confirmed', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const subject = runtime();

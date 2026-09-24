@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { chmod, lstat, mkdir, readdir, realpath, rmdir, stat, unlink } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeGitExec } from './safe-git';
 
 // Independent git-worktree isolation manager for write-capable Workers. Each agent gets
@@ -15,7 +15,11 @@ export type WorktreeErrorCode =
   | 'base_changed'
   | 'integration_failed'
   | 'remove_failed'
-  | 'invalid_input';
+  | 'invalid_input'
+  /** A read whose Git output is larger than this manager reads at once. */
+  | 'too_large'
+  /** A worktree Git holds locked (`git worktree lock`), which a discard does not override. */
+  | 'locked';
 
 export class WorktreeError extends Error {
   constructor(
@@ -33,6 +37,7 @@ export type ExecFileResult = Readonly<{ stdout: string; stderr: string }>;
 export type ExecFileOptions = Readonly<{
   env: NodeJS.ProcessEnv;
   timeout?: number;
+  maxBuffer?: number;
 }>;
 
 export type ExecFileImpl = (
@@ -41,11 +46,24 @@ export type ExecFileImpl = (
   options: ExecFileOptions,
 ) => Promise<ExecFileResult>;
 
+/**
+ * The file system calls `removeTreeWithoutFollowingLinks` makes. Tests replace them to make a
+ * removal fail part way, independently of how a Node version's own recursive removal behaves.
+ */
+export type TreeRemovalFs = Readonly<{
+  lstat(path: string): Promise<Readonly<{ isDirectory(): boolean; isSymbolicLink(): boolean }>>;
+  readdir(path: string): Promise<string[]>;
+  unlink(path: string): Promise<void>;
+  rmdir(path: string): Promise<void>;
+  chmod(path: string, mode: number): Promise<void>;
+}>;
+
 export type WorkerWorktreeManagerOptions = Readonly<{
   worktreesRoot: string;
   execFileImpl?: ExecFileImpl;
   platform?: NodeJS.Platform;
   delay?: (milliseconds: number) => Promise<void>;
+  treeRemovalFs?: TreeRemovalFs;
 }>;
 
 export type CreateWorktreeInput = Readonly<{
@@ -68,6 +86,28 @@ export type CleanupWorktreeInput = Readonly<{
 
 export type CleanupWorktreeResult = Readonly<{
   outcome: 'removed' | 'quarantined';
+}>;
+
+export type DiscardWorktreeInput = CleanupWorktreeInput &
+  Readonly<{
+    /** The path the caller recorded for this worktree. It must be this manager's own path. */
+    path: string;
+  }>;
+
+export type InspectWorktreeChangesInput = DiscardWorktreeInput &
+  Readonly<{
+    baseHead: string;
+    /** The most entries each list returns; the rest are only flagged as truncated. */
+    limit: number;
+  }>;
+
+export type WorktreeChangeInspection = Readonly<{
+  head: string;
+  commitsSinceBase: number;
+  status: readonly Readonly<{ code: string; path: string }>[];
+  statusTruncated: boolean;
+  changesFromBase: readonly Readonly<{ status: string; path: string }>[];
+  changesFromBaseTruncated: boolean;
 }>;
 
 export type CleanupUnchangedWorktreeInput = CleanupWorktreeInput & Readonly<{ baseHead: string }>;
@@ -115,6 +155,10 @@ export type CleanRepository = Readonly<{
 
 const WORKTREE_ID_PATTERN = /^[0-9a-zA-Z-]+$/;
 const GIT_TIMEOUT_MS = 30_000;
+/** How long a Windows lock on a worktree being removed is waited out before it is kept. */
+const WINDOWS_REMOVE_RETRY_DELAYS_MS = [100, 200, 400, 800, 1_600, 3_200] as const;
+/** Git file listings are read up to this size; a larger one is refused rather than cut. */
+const GIT_LISTING_MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 const WORKER_GIT_IDENTITY = [
   '-c',
   'user.name=Sprint Coder Worker',
@@ -127,6 +171,7 @@ export class WorkerWorktreeManager {
   private readonly execFileImpl: ExecFileImpl;
   private readonly platform: NodeJS.Platform;
   private readonly delay: (milliseconds: number) => Promise<void>;
+  private readonly treeRemovalFs: TreeRemovalFs;
 
   constructor(options: WorkerWorktreeManagerOptions) {
     this.worktreesRoot = options.worktreesRoot;
@@ -135,6 +180,7 @@ export class WorkerWorktreeManager {
     this.delay =
       options.delay ??
       ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    this.treeRemovalFs = options.treeRemovalFs ?? nodeTreeRemovalFs;
   }
 
   async requireCleanBase(repoPath: string): Promise<CleanRepositoryBase> {
@@ -386,8 +432,10 @@ export class WorkerWorktreeManager {
   }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath)))
-      return this.removeMissingWorktreeRegistration(repoPath, worktreePath);
+    if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
+    const withoutGit = await this.remainsWithoutGit(worktreePath);
+    if (withoutGit === 'empty') return this.removeEmptiedWorktree(repoPath, worktreePath);
+    if (withoutGit === 'contents') return { outcome: 'quarantined' };
     const { stdout: statusOutput } = await this.runGit(
       worktreePath,
       ['status', '--porcelain'],
@@ -396,14 +444,15 @@ export class WorkerWorktreeManager {
     // Cleanup policy: never destroy work. If the worktree has any changes, quarantine it
     // (leave it on disk, untouched) instead of removing it.
     if (statusOutput.trim().length > 0) return { outcome: 'quarantined' };
-    return this.removeRegisteredWorktree(repoPath, worktreePath);
+    const { outcome } = await this.removeUnreviewedWorktree(repoPath, worktreePath);
+    return { outcome };
   }
 
   /**
    * Remove a terminal worktree only when HEAD is still exactly `baseHead` and status is empty.
    * A Worker commit is clean in `git status`, so HEAD is checked before any removal. Ignored
-   * files do not block removal: they are never integrated, and `git worktree remove` deletes
-   * them with the directory.
+   * files do not block removal: they are never integrated, and they go with the directory (a link
+   * among them goes by itself, never what it points at).
    */
   async cleanupUnchanged({
     agentId,
@@ -414,11 +463,140 @@ export class WorkerWorktreeManager {
     validateWorktreeId(agentId);
     validateGitHead(baseHead);
     const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath)))
-      return this.removeMissingWorktreeRegistration(repoPath, worktreePath);
+    if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
+    const withoutGit = await this.remainsWithoutGit(worktreePath);
+    if (withoutGit === 'empty') return this.removeEmptiedWorktree(repoPath, worktreePath);
+    // Git cannot say what these files are, so they never qualify; a discard may remove them.
+    if (withoutGit === 'contents') return { outcome: 'quarantined', changed: true };
     if (await this.differsFromBase(worktreePath, baseHead, 'remove_failed'))
       return { outcome: 'quarantined', changed: true };
+    return this.removeUnreviewedWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * What is left of a worktree directory without its `.git`, or null while `.git` is there. A
+   * removal deletes `.git` last (see `removeTreeWithoutFollowingLinks`), so `empty` is a removal
+   * that only failed to remove the folder itself, such as a Windows terminal or Explorer window
+   * holding it open. Git must not be asked about such a folder: it would look upward for a
+   * repository and could read whichever one contains the worktrees root.
+   */
+  private async remainsWithoutGit(worktreePath: string): Promise<'empty' | 'contents' | null> {
+    if (await entryPresent(join(worktreePath, '.git'))) return null;
+    return (await directoryHasContent(worktreePath)) ? 'contents' : 'empty';
+  }
+
+  /**
+   * Finishes a removal that left only the empty folder and its registration, without Git reading
+   * the folder. The folder goes only while it is still empty; a Windows lock is waited out as in any
+   * removal, and one that outlasts the backoff keeps it `quarantined`. A worktree Git holds locked
+   * keeps its registration.
+   */
+  private async removeEmptiedWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupWorktreeResult> {
+    if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
+    if (!(await this.removeEmptyDirectory(worktreePath))) return { outcome: 'quarantined' };
+    return this.unregisterWorktree(repoPath, worktreePath);
+  }
+
+  /** Removes a directory only while it is empty; false when it stayed (a lock, or new content). */
+  private async removeEmptyDirectory(path: string): Promise<boolean> {
+    const attempt = async (): Promise<'removed' | 'retry' | 'kept'> => {
+      try {
+        await this.treeRemovalFs.rmdir(path);
+        return 'removed';
+      } catch (error) {
+        if (isEnoent(error)) return 'removed';
+        // Something was written into it meanwhile: leave it for a later look.
+        if (errorCode(error) === 'ENOTEMPTY' || errorCode(error) === 'EEXIST') return 'kept';
+        if (this.platform === 'win32' && isTransientRemovalError(error)) return 'retry';
+        throw new WorktreeError('remove_failed', errorMessage(error), { cause: error });
+      }
+    };
+    let result = await attempt();
+    for (const delayMs of WINDOWS_REMOVE_RETRY_DELAYS_MS) {
+      if (result !== 'retry') break;
+      await this.delay(delayMs);
+      result = await attempt();
+    }
+    return result === 'removed';
+  }
+
+  /**
+   * The removal `cleanup` and `cleanupUnchanged` make without anyone having looked at the worktree.
+   * It keeps two kinds of worktree `git status` cannot vouch for, as `git worktree remove` did before
+   * this manager deleted the files itself (issue #544):
+   *
+   * - One with a submodule: a Worker's commits inside it live only in this worktree's own submodule
+   *   store, and a submodule configured to be ignored hides its changes from `git status`. Such a
+   *   worktree will never qualify, so `cleanupUnchanged` reports it as `changed`.
+   * - One locked with `git worktree lock` (by the user, or by a `git worktree add` that stopped part
+   *   way). It is kept without `changed`: once unlocked it may qualify.
+   */
+  private async removeUnreviewedWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupUnchangedWorktreeResult> {
+    if (await this.containsSubmodules(worktreePath))
+      return { outcome: 'quarantined', changed: true };
+    if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
     return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Whether the worktree holds a submodule, by the test `git worktree remove` refuses a worktree
+   * with, or wider: this worktree's submodule store (`git rev-parse --git-path modules`) exists, or a
+   * gitlink (mode 160000) in its index has a directory that is not empty. Git itself only counts a
+   * populated gitlink; any content counts here.
+   */
+  private async containsSubmodules(worktreePath: string): Promise<boolean> {
+    // Without `.git` Git would read another repository: an emptied folder holds nothing, and
+    // contents Git cannot account for count as a possible submodule.
+    const withoutGit = await this.remainsWithoutGit(worktreePath);
+    if (withoutGit !== null) return withoutGit === 'contents';
+    const modules = (
+      await this.runGit(worktreePath, ['rev-parse', '--git-path', 'modules'], 'remove_failed')
+    ).stdout.trim();
+    if (modules === '' || (await entryPresent(resolve(worktreePath, modules)))) return true;
+    const staged = (
+      await this.runGit(
+        worktreePath,
+        ['ls-files', '--stage', '-z'],
+        'remove_failed',
+        GIT_LISTING_MAX_BUFFER_BYTES,
+      )
+    ).stdout;
+    for (const entry of staged.split('\0')) {
+      // `<mode> <object> <stage>\t<path>`
+      const tab = entry.indexOf('\t');
+      if (!entry.startsWith('160000 ') || tab < 0) continue;
+      if (await directoryHasContent(join(worktreePath, entry.slice(tab + 1)))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether Git holds the worktree locked (`git worktree lock`, or the lock `git worktree add` keeps
+   * while it initializes). Read from the repository's own worktree list, so it answers even when the
+   * worktree's `.git` is already gone.
+   */
+  private async isLocked(repoPath: string, worktreePath: string): Promise<boolean> {
+    const listed = (
+      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
+    ).stdout;
+    const wanted = await pathKeys(worktreePath);
+    let current: string | null = null;
+    for (const line of listed.split('\0')) {
+      if (line.startsWith('worktree ')) {
+        current = line.slice('worktree '.length);
+        continue;
+      }
+      if (current === null || (line !== 'locked' && !line.startsWith('locked '))) continue;
+      const keys = await pathKeys(current);
+      if (keys.some((key) => wanted.includes(key))) return true;
+    }
+    return false;
   }
 
   /**
@@ -439,6 +617,179 @@ export class WorkerWorktreeManager {
     return this.differsFromBase(worktreePath, baseHead, 'integration_failed');
   }
 
+  /**
+   * Delete a worktree this app created, with every change in it (issue #544). Only a discard the
+   * user confirmed comes here: `cleanup` and `cleanupUnchanged` never destroy work. The recorded
+   * path must be this manager's own path for `worktreeId`, and a link standing in for that directory
+   * is refused rather than followed. The directory goes the way `cleanup` removes one: its files
+   * first, never following a link inside it, then only this worktree's registration (never
+   * `git worktree prune`), so a removal that stops part way can be finished by the next discard.
+   * Worker worktrees are created detached, so there is no branch to delete. A Windows lock that
+   * outlasts the backoff keeps the rest of the worktree and reports `quarantined`. A submodule goes
+   * with it, since the user confirmed the discard; a worktree Git holds locked is refused before
+   * anything is deleted, with code `locked`.
+   */
+  async discard({
+    agentId,
+    repoPath,
+    path,
+    worktreeId = agentId,
+  }: DiscardWorktreeInput): Promise<CleanupWorktreeResult> {
+    validateWorktreeId(agentId);
+    const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
+    const ownPath = worktreePath ?? this.worktreePathFor(worktreeId);
+    if (await this.isLocked(repoPath, ownPath))
+      throw new WorktreeError('locked', `Worktree is locked by Git: ${ownPath}`);
+    if (worktreePath === null) return this.unregisterWorktree(repoPath, ownPath);
+    return this.removeRegisteredWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Whether a retained worktree holds a submodule, by the same test the automatic cleanup keeps one
+   * with (issue #544). Reads only. A worktree that is gone has none on disk; one this manager cannot
+   * read, or does not own, counts as holding one, so the user is warned rather than reassured.
+   */
+  async hasSubmodules(input: DiscardWorktreeInput): Promise<boolean> {
+    try {
+      const worktreePath = await this.locateOwnedWorktree(input);
+      return worktreePath !== null && (await this.containsSubmodules(worktreePath));
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Whether `commit` is in the history of the repository's current HEAD, read without changing
+   * anything. False also when Git cannot tell, so a caller never treats unverified work as merged.
+   */
+  async headContains(repoPath: string, commit: string): Promise<boolean> {
+    validateGitHead(commit);
+    return (
+      (await this.tryRunGit(repoPath, ['merge-base', '--is-ancestor', commit, 'HEAD'])) !== null
+    );
+  }
+
+  /**
+   * This manager's own directory for `worktreeId` when the recorded `path` names it and it is on
+   * disk, or null when it is gone. Throws for a path this app does not own, or for a link standing
+   * in for the directory.
+   */
+  async locateOwnedWorktree({
+    agentId,
+    path,
+    worktreeId = agentId,
+  }: DiscardWorktreeInput): Promise<string | null> {
+    validateWorktreeId(agentId);
+    if (!this.ownsWorktreePath(worktreeId, path))
+      throw new WorktreeError('invalid_input', 'Worktree path is not owned by Sprint Coder');
+    const worktreePath = this.worktreePathFor(worktreeId);
+    let entry;
+    try {
+      entry = await lstat(worktreePath);
+    } catch (error) {
+      if (isEnoent(error)) return null;
+      throw error;
+    }
+    if (!entry.isDirectory())
+      throw new WorktreeError('invalid_input', 'Worktree must be its own directory');
+    return worktreePath;
+  }
+
+  /**
+   * What a retained worktree holds now (issue #544), read without changing it: its HEAD, the
+   * commits since its base, `git status` with every untracked file, and the tracked files changed
+   * since the base. Each list stops at `limit` entries and says whether it was cut.
+   */
+  async inspectChanges({
+    agentId,
+    repoPath,
+    path,
+    baseHead,
+    limit,
+    worktreeId = agentId,
+  }: InspectWorktreeChangesInput): Promise<WorktreeChangeInspection> {
+    validateGitHead(baseHead);
+    const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
+    if (worktreePath === null)
+      throw new WorktreeError(
+        'invalid_input',
+        `worktree does not exist: ${this.worktreePathFor(worktreeId)}`,
+      );
+    // Git looks upward for a repository, so a directory that is no longer a worktree would be read
+    // as whichever repository contains the worktrees root.
+    if ((await this.resolveRepositoryPath(worktreePath)) !== (await realpath(worktreePath)))
+      throw new WorktreeError('invalid_input', 'Worktree directory is no longer a Git worktree');
+    const head = (
+      await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed')
+    ).stdout.trim();
+    validateGitHead(head);
+    let commitsSinceBase = 0;
+    if (head !== baseHead) {
+      const counted = (
+        await this.runGit(
+          worktreePath,
+          ['rev-list', '--count', `${baseHead}..${head}`],
+          'create_failed',
+        )
+      ).stdout.trim();
+      if (!/^\d+$/u.test(counted))
+        throw new WorktreeError(
+          'create_failed',
+          `Unexpected commit count: ${JSON.stringify(counted)}`,
+        );
+      commitsSinceBase = Number(counted);
+    }
+    // The file lists can be long; one that outgrows even the wider buffer is refused as too large
+    // rather than cut at an arbitrary byte.
+    const readList = async (args: readonly string[]): Promise<string> => {
+      try {
+        return (
+          await this.runGit(worktreePath, args, 'create_failed', GIT_LISTING_MAX_BUFFER_BYTES)
+        ).stdout;
+      } catch (error) {
+        if (isMaxBufferExceeded(error))
+          throw new WorktreeError('too_large', 'Worktree change list is too large to read', {
+            cause: error,
+          });
+        throw error;
+      }
+    };
+    // `-z` keeps every path byte-exact and `--no-renames` gives each entry exactly one path.
+    const status = (
+      await readList([
+        'status',
+        '--porcelain=v1',
+        '-z',
+        '--no-renames',
+        '--untracked-files=all',
+        '--ignore-submodules=none',
+      ])
+    )
+      .split('\0')
+      .filter((entry) => entry.length > 3)
+      .map((entry) => ({ code: entry.slice(0, 2), path: entry.slice(3) }));
+    const diffTokens = (
+      await readList(['diff', '--no-renames', '--name-status', '-z', baseHead, '--'])
+    ).split('\0');
+    const changesFromBase: { status: string; path: string }[] = [];
+    for (let index = 0; index + 1 < diffTokens.length; index += 2) {
+      const change = diffTokens[index]!;
+      const changedPath = diffTokens[index + 1]!;
+      if (change !== '' && changedPath !== '')
+        changesFromBase.push({ status: change, path: changedPath });
+    }
+    const bounded = <T extends { path: string }>(entries: readonly T[]): T[] =>
+      entries.slice(0, limit).map((entry) => ({ ...entry, path: entry.path.slice(0, 4_096) }));
+    return {
+      head,
+      commitsSinceBase,
+      status: bounded(status),
+      statusTruncated: status.length > limit,
+      changesFromBase: bounded(changesFromBase),
+      changesFromBaseTruncated: changesFromBase.length > limit,
+    };
+  }
+
   private async differsFromBase(
     worktreePath: string,
     baseHead: string,
@@ -455,52 +806,77 @@ export class WorkerWorktreeManager {
   }
 
   /**
-   * The directory is already gone, so unregister only this worktree. `git worktree prune` would
-   * also drop every other registration whose directory is missing, including the user's own
-   * worktrees on an unplugged drive. A registration Git refuses to remove (for example a locked
-   * one) stays, and the error reaches the caller so it records the reason.
+   * The directory is gone, so unregister only this worktree. `git worktree prune` would also drop
+   * every other registration whose directory is missing, including the user's own worktrees on an
+   * unplugged drive. A registration Git refuses to remove (for example a locked one) stays, and the
+   * error reaches the caller so it records the reason. A Windows lock that outlasts the backoff
+   * keeps the registration and reports `quarantined`, so a later cleanup finishes it.
    */
-  private async removeMissingWorktreeRegistration(
+  private async unregisterWorktree(
     repoPath: string,
     worktreePath: string,
   ): Promise<CleanupWorktreeResult> {
+    const unregister = async (): Promise<CleanupWorktreeResult> => {
+      try {
+        await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
+      } catch (error) {
+        // Nothing is registered at this path any more: there is nothing left to remove.
+        if (error instanceof WorktreeError && /is not a working tree/i.test(error.message))
+          return { outcome: 'removed' };
+        throw error;
+      }
+      return { outcome: 'removed' };
+    };
     try {
-      await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
+      return await unregister();
     } catch (error) {
-      // Nothing is registered at this path any more: there is nothing left to remove.
-      if (error instanceof WorktreeError && /is not a working tree/i.test(error.message))
-        return { outcome: 'removed' };
-      throw error;
+      if (this.platform !== 'win32' || !isPermissionDenied(error)) throw error;
+      for (const delayMs of WINDOWS_REMOVE_RETRY_DELAYS_MS) {
+        await this.delay(delayMs);
+        try {
+          return await unregister();
+        } catch (retryError) {
+          if (!isPermissionDenied(retryError)) throw retryError;
+        }
+      }
+      return { outcome: 'quarantined' };
     }
-    return { outcome: 'removed' };
   }
 
+  /**
+   * Remove a worktree directory and then its registration. Git never deletes the files: on Windows
+   * `git worktree remove` follows a directory junction inside the worktree and empties the folder it
+   * points at (issue #544). The files go first, so a removal that stops part way leaves the
+   * registration, and the next cleanup or discard finishes what is left.
+   */
   private async removeRegisteredWorktree(
     repoPath: string,
     worktreePath: string,
   ): Promise<CleanupWorktreeResult> {
-    try {
-      await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
-    } catch (error) {
-      // Defensive: a race could dirty the worktree between our status check and the
-      // remove call. Surface that distinctly rather than reporting a generic failure.
-      if (error instanceof WorktreeError && /modified or untracked files/i.test(error.message))
-        throw new WorktreeError('dirty', error.message, { cause: error });
-      if (this.platform === 'win32' && isPermissionDenied(error)) {
-        for (const delayMs of [100, 200, 400, 800, 1_600, 3_200]) {
-          await this.delay(delayMs);
-          try {
-            await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
-            return { outcome: 'removed' };
-          } catch (retryError) {
-            if (!isPermissionDenied(retryError)) throw retryError;
-          }
-        }
-        return { outcome: 'quarantined' };
+    if (!(await this.removeWorktreeDirectory(worktreePath))) return { outcome: 'quarantined' };
+    return this.unregisterWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Deletes the directory without following a link. False when a Windows lock (a file open in an
+   * editor, a terminal inside the folder) outlasted the backoff; what could not go stays.
+   */
+  private async removeWorktreeDirectory(worktreePath: string): Promise<boolean> {
+    const attempt = async (): Promise<boolean> => {
+      try {
+        await removeTreeWithoutFollowingLinks(worktreePath, this.treeRemovalFs);
+        return true;
+      } catch (error) {
+        if (this.platform === 'win32' && isTransientRemovalError(error)) return false;
+        throw new WorktreeError('remove_failed', errorMessage(error), { cause: error });
       }
-      throw error;
+    };
+    if (await attempt()) return true;
+    for (const delayMs of WINDOWS_REMOVE_RETRY_DELAYS_MS) {
+      await this.delay(delayMs);
+      if (await attempt()) return true;
     }
-    return { outcome: 'removed' };
+    return false;
   }
 
   /**
@@ -768,11 +1144,13 @@ export class WorkerWorktreeManager {
     dirArg: string,
     subArgs: readonly string[],
     failureCode: Exclude<WorktreeErrorCode, 'git_unavailable' | 'invalid_input'>,
+    maxBuffer?: number,
   ): Promise<ExecFileResult> {
     try {
       return await safeGitExec(this.execFileImpl, dirArg, subArgs, {
         env: process.env,
         timeout: GIT_TIMEOUT_MS,
+        ...(maxBuffer === undefined ? {} : { maxBuffer }),
       });
     } catch (error) {
       if (error instanceof WorktreeError) throw error;
@@ -875,10 +1253,170 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/** Whether anything is at `path`, without following a link; an unreadable entry counts. */
+async function entryPresent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    return !isEnoent(error);
+  }
+}
+
+/** Whether `path` has anything in it. Anything but an empty directory or nothing at all counts. */
+async function directoryHasContent(path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path);
+    return !entry.isDirectory() || (await readdir(path)).length > 0;
+  } catch (error) {
+    return !isEnoent(error);
+  }
+}
+
+/**
+ * The spellings a worktree path can have in `git worktree list`: resolved as given, and through the
+ * real path of its parent (Git records a real path where the temp folder is itself a link). Case is
+ * folded on Windows, where paths are case-insensitive.
+ */
+async function pathKeys(path: string): Promise<string[]> {
+  const fold = (value: string): string =>
+    process.platform === 'win32' ? value.toLocaleLowerCase('en-US') : value;
+  const keys = [fold(resolve(path))];
+  try {
+    keys.push(fold(join(await realpath(dirname(resolve(path))), basename(path))));
+  } catch {
+    // A parent that is gone leaves only the resolved spelling.
+  }
+  return keys;
+}
+
 function isEnoent(error: unknown): boolean {
+  return errorCode(error) === 'ENOENT';
+}
+
+function errorCode(error: unknown): string {
+  return error instanceof Error && 'code' in error
+    ? String((error as NodeJS.ErrnoException).code ?? '')
+    : '';
+}
+
+const nodeTreeRemovalFs: TreeRemovalFs = Object.freeze({
+  lstat: (path: string) => lstat(path),
+  readdir: (path: string) => readdir(path),
+  unlink: (path: string) => unlink(path),
+  rmdir: (path: string) => rmdir(path),
+  chmod: (path: string, mode: number) => chmod(path, mode),
+});
+
+/**
+ * Delete `root` and everything below it without ever following a link (issue #544). Every entry
+ * is examined with `lstat`: a link, including a Windows directory junction (which `lstat` reports as
+ * a link and not a directory), is removed by itself and what it points at is left alone. Neither
+ * `git worktree remove` nor a recursive `fs.rm` can be trusted with that: on Windows both empty the
+ * folder behind a junction (the latter in the Node that Electron ships).
+ *
+ * An entry that is already gone counts as removed, so a removal that stopped part way, or one that
+ * raced another, can simply run again. At the root `.git` goes last, so a removal that stops at a
+ * file inside still leaves a worktree Git can read. One that stops only at the root folder itself
+ * (a Windows terminal or Explorer window holding it open) leaves an empty folder without `.git`:
+ * `cleanup` and `cleanupUnchanged` recognize that and finish it without asking Git, and a discard
+ * finishes it as any other. Errors reach the caller unchanged.
+ */
+export async function removeTreeWithoutFollowingLinks(
+  root: string,
+  fs: TreeRemovalFs = nodeTreeRemovalFs,
+): Promise<void> {
+  await removeEntry(root, fs, true);
+}
+
+async function removeEntry(path: string, fs: TreeRemovalFs, root: boolean): Promise<void> {
+  let entry: Awaited<ReturnType<TreeRemovalFs['lstat']>>;
+  try {
+    entry = await fs.lstat(path);
+  } catch (error) {
+    if (isEnoent(error)) return;
+    throw error;
+  }
+  if (entry.isSymbolicLink()) return removeLink(path, fs);
+  if (!entry.isDirectory()) return removeFile(path, fs);
+  let names: string[];
+  try {
+    names = await fs.readdir(path);
+  } catch (error) {
+    if (isEnoent(error)) return;
+    throw error;
+  }
+  const ordered = root
+    ? [...names.filter((name) => name !== '.git'), ...names.filter((name) => name === '.git')]
+    : names;
+  for (const name of ordered) await removeEntry(join(path, name), fs, false);
+  await ignoreMissing(async () => {
+    try {
+      await fs.rmdir(path);
+    } catch (error) {
+      if (!isAccessError(error)) throw error;
+      // A read-only directory on Windows refuses removal until its attribute is cleared.
+      await fs.chmod(path, 0o777);
+      await fs.rmdir(path);
+    }
+  });
+}
+
+/** The link itself: `unlink` removes a file link, and `rmdir` a directory link or junction. */
+async function removeLink(path: string, fs: TreeRemovalFs): Promise<void> {
+  await ignoreMissing(async () => {
+    try {
+      await fs.unlink(path);
+    } catch (error) {
+      if (!isAccessError(error) && errorCode(error) !== 'EISDIR') throw error;
+      await fs.rmdir(path);
+    }
+  });
+}
+
+async function removeFile(path: string, fs: TreeRemovalFs): Promise<void> {
+  await ignoreMissing(async () => {
+    try {
+      await fs.unlink(path);
+    } catch (error) {
+      if (!isAccessError(error)) throw error;
+      // A read-only file on Windows refuses deletion until its attribute is cleared.
+      await fs.chmod(path, 0o666);
+      await fs.unlink(path);
+    }
+  });
+}
+
+async function ignoreMissing(action: () => Promise<void>): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+  }
+}
+
+function isAccessError(error: unknown): boolean {
+  const code = errorCode(error);
+  return code === 'EPERM' || code === 'EACCES';
+}
+
+/** A Windows removal error that a lock released later may clear. */
+function isTransientRemovalError(error: unknown): boolean {
+  const code = errorCode(error);
   return (
-    error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+    code === 'EBUSY' ||
+    code === 'ENOTEMPTY' ||
+    code === 'EPERM' ||
+    code === 'EACCES' ||
+    isPermissionDenied(error)
   );
+}
+
+/** Node's execFile reports output beyond `maxBuffer` with this code; it may arrive as a cause. */
+function isMaxBufferExceeded(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (errorCode(error) === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return true;
+  return 'cause' in error && isMaxBufferExceeded((error as Error & { cause?: unknown }).cause);
 }
 
 function errorMessage(error: unknown): string {
@@ -898,7 +1436,11 @@ const defaultExecFile: ExecFileImpl = (file, args, options) =>
     execFile(
       file,
       args as string[],
-      { env: options.env, timeout: options.timeout },
+      {
+        env: options.env,
+        timeout: options.timeout,
+        ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+      },
       (error, stdout, stderr) => {
         if (error) {
           reject(error);

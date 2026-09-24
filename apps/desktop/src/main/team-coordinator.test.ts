@@ -14,7 +14,12 @@ import { basename, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
-import type { AgentRecord, TeamSnapshot } from './persistence';
+import type {
+  AgentRecord,
+  TeamExecutionIsolationRecord,
+  TeamMissionRecord,
+  TeamSnapshot,
+} from './persistence';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import {
   DeterministicTeamWorkerRuntime,
@@ -41,7 +46,7 @@ import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
-import { WorkerWorktreeManager } from './worker-worktree';
+import { WorkerWorktreeManager, WorktreeError } from './worker-worktree';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
@@ -1226,7 +1231,7 @@ if (runsWithElectronAbi)
           ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
             persistence.getTeamMission(assigned.id).state,
           ),
-        5_000,
+        15_000,
       );
 
       const mission = persistence.getTeamMission(assigned.id);
@@ -1299,6 +1304,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
@@ -1360,6 +1367,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(observed).toEqual([
         {
@@ -1416,6 +1425,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
@@ -1478,6 +1489,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(verify).toHaveBeenCalledTimes(1);
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
@@ -1547,6 +1560,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       expect(readFileSync(join(workspace, 'steered.txt'), 'utf8')).toBe('first\n');
       persistence.close();
@@ -1594,6 +1609,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.getTeamExecutionIsolation(submission.executionId)?.repositories[0]?.state ===
           'cleaned',
+        // Cleanup reads the worktree for submodules and locks before it deletes (issue #544).
+        15_000,
       );
       persistence.close();
     });
@@ -5099,6 +5116,560 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 30_000);
 
+    it('lists only the quarantined worktree, reads it, and discards it after checking again (issue #544)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Retained worktree discard');
+      const succeeding = new TestWorkerRuntime();
+      let unsettled = false;
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          if (input.workspacePath === undefined || input.workspacePath === null)
+            throw new Error('write step did not receive an isolated worktree');
+          if (input.worker.role === 'finishing writer') {
+            writeFileSync(join(input.workspacePath, 'finished.txt'), 'integrated\n');
+            return succeeding.execute(input);
+          }
+          writeFileSync(join(input.workspacePath, 'kept.txt'), 'kept work\n');
+          throw new Error('deliberate failure after writing');
+        },
+        async stop() {},
+        hasUnsettledTurn: () => unsettled,
+      };
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const discard = vi.spyOn(manager, 'discard');
+      const published: string[] = [];
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        (taskId) => published.push(taskId),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        manager,
+        undefined,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      const finisher = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'finishing writer',
+        objective: 'integrate a change',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const finished = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: finisher.id,
+        content: 'write and finish',
+        doneCriteria: ['change is integrated'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () =>
+          persistence.getTeamExecutionIsolation(finished.executionId)?.repositories[0]?.state ===
+          'cleaned',
+        15_000,
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'failing writer',
+        objective: 'write and fail',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const failed = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write then fail',
+        doneCriteria: ['work is kept'],
+        accessMode: 'workspace-write',
+      });
+      // The automatic reclaim keeps a changed worktree; wait until it has decided.
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await expect(cleanupUnchanged.mock.results[0]?.value).resolves.toEqual({
+        outcome: 'quarantined',
+        changed: true,
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(failed.executionId).state === 'failed',
+        15_000,
+      );
+      const before = persistence.getTeamExecutionIsolation(failed.executionId)!;
+      const repository = before.repositories[0]!;
+      expect(repository.state).toBe('quarantined');
+
+      await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toEqual({
+        total: 1,
+        worktrees: [
+          {
+            executionId: failed.executionId,
+            repositoryOrdinal: 1,
+            agentId: writer.id,
+            role: 'failing writer',
+            repoPath: repository.repoPath,
+            worktreePath: repository.worktreePath,
+            baseHead: repository.baseHead,
+            workerHead: null,
+            integratedHead: null,
+            integration: 'none',
+            submodules: false,
+            changedFileCount: 0,
+            reason: before.reason,
+            executionState: 'failed',
+            existsOnDisk: true,
+            discardable: true,
+            blockedReason: null,
+          },
+        ],
+      });
+      await expect(
+        coordinator.listRetainedWorktrees(persistence.createTask('No Team').id),
+      ).resolves.toEqual({ worktrees: [], total: 0 });
+
+      await expect(
+        coordinator.inspectRetainedWorktree(task.id, failed.executionId, 1),
+      ).resolves.toMatchObject({
+        executionId: failed.executionId,
+        repositoryOrdinal: 1,
+        head: repository.baseHead,
+        commitsSinceBase: 0,
+        status: [{ code: '??', path: 'kept.txt' }],
+        changesFromBase: [],
+      });
+      // A listing past what Git can hand over at once is refused in words, not as a generic error.
+      vi.spyOn(manager, 'inspectChanges').mockRejectedValueOnce(
+        new WorktreeError('too_large', 'Worktree change list is too large to read'),
+      );
+      await expect(
+        coordinator.inspectRetainedWorktree(task.id, failed.executionId, 1),
+      ).rejects.toThrow('変更が多すぎて一覧を表示できません');
+      const opened: string[] = [];
+      await coordinator.openRetainedWorktree(task.id, failed.executionId, 1, async (path) => {
+        opened.push(path);
+      });
+      expect(opened).toEqual([manager.worktreePathFor(`${failed.executionId}-1`)]);
+
+      // Only a Graph Mission that has not ended keeps its step's worktree.
+      const missionFor = persistence.getTeamMissionForExecution.bind(persistence);
+      const mission = vi.spyOn(persistence, 'getTeamMissionForExecution');
+      for (const [mode, state, discardable] of [
+        ['graph', 'running', false],
+        ['graph', 'waiting_resume', false],
+        ['graph', 'completed', true],
+        ['sequential', 'running', true],
+      ] as const) {
+        mission.mockImplementation((executionId) =>
+          executionId === failed.executionId
+            ? ({ mode, state } as TeamMissionRecord)
+            : missionFor(executionId),
+        );
+        const listedForMission = (await coordinator.listRetainedWorktrees(task.id)).worktrees[0]!;
+        expect(listedForMission.discardable).toBe(discardable);
+        if (!discardable) expect(listedForMission.blockedReason).toContain('Graph Mission');
+      }
+      mission.mockRestore();
+
+      // While the Worker CLI may still be writing there, the list says so and the discard refuses.
+      unsettled = true;
+      const held = (await coordinator.listRetainedWorktrees(task.id)).worktrees[0]!;
+      expect(held).toMatchObject({ discardable: false });
+      expect(held.blockedReason).toContain('終了したことをまだ確認できていない');
+      await expect(
+        coordinator.discardRetainedWorktree(task.id, failed.executionId, 1),
+      ).rejects.toThrow('終了したことをまだ確認できていない');
+      expect(discard).not.toHaveBeenCalled();
+      expect(existsSync(join(repository.worktreePath, 'kept.txt'))).toBe(true);
+      unsettled = false;
+
+      // A submodule in the worktree is reported, so the confirmation can say what it may hold.
+      const source = mkdtempSync(join(tmpdir(), 'sprint-coder-team-submodule-source-'));
+      cleanup.push(source);
+      for (const args of [
+        ['init', '-q', source],
+        ['-C', source, 'commit', '-q', '--allow-empty', '-m', 'source'],
+        [
+          '-C',
+          repository.worktreePath,
+          '-c',
+          'protocol.file.allow=always',
+          '-c',
+          'core.autocrlf=false',
+          'submodule',
+          'add',
+          '-q',
+          source,
+          'sub',
+        ],
+      ])
+        expect(
+          spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args])
+            .status,
+        ).toBe(0);
+      await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        worktrees: [{ executionId: failed.executionId, submodules: true, discardable: true }],
+      });
+
+      published.length = 0;
+      await expect(
+        coordinator.discardRetainedWorktree(task.id, failed.executionId, 1),
+      ).resolves.toEqual({ worktrees: [], total: 0 });
+
+      expect(existsSync(repository.worktreePath)).toBe(false);
+      const after = persistence.getTeamExecutionIsolation(failed.executionId)!;
+      expect(after).toMatchObject({
+        phase: 'quarantined',
+        resumeKind: null,
+        reason: before.reason,
+        repositories: [{ ...repository, state: 'cleaned' }],
+      });
+      const listed = spawnSync('git', ['-C', workspace, 'worktree', 'list', '--porcelain'], {
+        encoding: 'utf8',
+      });
+      expect(listed.status).toBe(0);
+      expect(
+        listed.stdout.split(/\r?\n/).filter((line) => line.startsWith('worktree ')),
+      ).toHaveLength(1);
+      expect(published).toContain(task.id);
+      expect(diagnostics).toContainEqual(
+        expect.objectContaining({ event: 'team.worktree.discarded', workerId: writer.id }),
+      );
+      // The integrated change stays in the Workspace; nothing else was touched.
+      expect(readFileSync(join(workspace, 'finished.txt'), 'utf8')).toBe('integrated\n');
+      await expect(
+        coordinator.discardRetainedWorktree(task.id, failed.executionId, 1),
+      ).rejects.toThrow('もう残っていません');
+
+      // An integrated worktree left behind counts as integrated only while the Workspace history
+      // still has its integrated commit (a failed revalidation keeps the record but not the change).
+      const integrated = persistence.getTeamExecutionIsolation(finished.executionId)!;
+      const integratedRepository = integrated.repositories[0]!;
+      expect(integratedRepository.integratedHead).not.toBeNull();
+      const retain = (integratedHead: string) =>
+        persistence.updateTeamExecutionIsolation({
+          executionId: finished.executionId,
+          phase: 'quarantined',
+          repositories: [{ ...integratedRepository, integratedHead, state: 'quarantined' }],
+          now: new Date().toISOString(),
+        });
+      retain(integratedRepository.integratedHead!);
+      expect((await coordinator.listRetainedWorktrees(task.id)).worktrees).toMatchObject([
+        { executionId: finished.executionId, integration: 'confirmed', existsOnDisk: false },
+      ]);
+      const sideCommit = spawnSync(
+        'git',
+        ['-C', workspace, 'commit-tree', 'HEAD^{tree}', '-m', 'side'],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: 'Test',
+            GIT_AUTHOR_EMAIL: 'test@example.com',
+            GIT_COMMITTER_NAME: 'Test',
+            GIT_COMMITTER_EMAIL: 'test@example.com',
+          },
+        },
+      );
+      expect(sideCommit.status).toBe(0);
+      for (const outside of [sideCommit.stdout.trim(), 'f'.repeat(40)]) {
+        retain(outside);
+        expect((await coordinator.listRetainedWorktrees(task.id)).worktrees).toMatchObject([
+          { executionId: finished.executionId, integration: 'unconfirmed' },
+        ]);
+      }
+      persistence.close();
+    }, 45_000);
+
+    it('keeps what changed during the Git step and treats a worktree reclaimed meanwhile as discarded (issue #544)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Retained worktree races');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          if (input.workspacePath === undefined || input.workspacePath === null)
+            throw new Error('write step did not receive an isolated worktree');
+          writeFileSync(join(input.workspacePath, 'kept.txt'), 'kept work\n');
+          throw new Error('deliberate failure after writing');
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const executions: string[] = [];
+      // Both are hired first: a Team whose every Worker has finished takes no new one.
+      const writers = [];
+      for (const role of ['first writer', 'second writer'])
+        writers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: 'write and fail',
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        );
+      for (const writer of writers) {
+        const failed = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: writer.id,
+          content: 'write then fail',
+          doneCriteria: ['work is kept'],
+          accessMode: 'workspace-write',
+        });
+        await waitFor(() => cleanupUnchanged.mock.calls.length === executions.length + 1, 15_000);
+        await cleanupUnchanged.mock.results.at(-1)?.value;
+        await waitFor(
+          () => persistence.getTeamExecution(failed.executionId).state === 'failed',
+          15_000,
+        );
+        executions.push(failed.executionId);
+      }
+      const [first, second] = executions as [string, string];
+      const removeWorktree = manager.discard.bind(manager);
+      const noteRepository = (
+        executionId: string,
+        change: Partial<TeamExecutionIsolationRecord['repositories'][number]>,
+      ) => {
+        const current = persistence.getTeamExecutionIsolation(executionId)!;
+        persistence.updateTeamExecutionIsolation({
+          executionId,
+          phase: current.phase,
+          repositories: [{ ...current.repositories[0]!, ...change }],
+          now: new Date().toISOString(),
+        });
+      };
+
+      // A worktree Git holds locked is refused in words before anything is deleted.
+      const locked = persistence.getTeamExecutionIsolation(first)!.repositories[0]!;
+      const lockFirst = (action: 'lock' | 'unlock') =>
+        expect(
+          spawnSync('git', ['-C', locked.repoPath, 'worktree', action, locked.worktreePath]).status,
+        ).toBe(0);
+      lockFirst('lock');
+      await expect(coordinator.discardRetainedWorktree(task.id, first, 1)).rejects.toThrow(
+        'このworktreeはGitでロックされているため破棄できません。',
+      );
+      expect(existsSync(join(locked.worktreePath, 'kept.txt'))).toBe(true);
+      expect(persistence.getTeamExecutionIsolation(first)!.repositories[0]!.state).toBe(
+        'quarantined',
+      );
+      lockFirst('unlock');
+
+      // Something else records a fact on the same repository while Git removes the worktree.
+      vi.spyOn(manager, 'discard').mockImplementationOnce(async (input) => {
+        const result = await removeWorktree(input);
+        noteRepository(first, { changedFiles: ['noted-meanwhile.txt'] });
+        return result;
+      });
+      await expect(coordinator.discardRetainedWorktree(task.id, first, 1)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [{ executionId: second }],
+      });
+      expect(persistence.getTeamExecutionIsolation(first)!.repositories[0]).toMatchObject({
+        state: 'cleaned',
+        changedFiles: ['noted-meanwhile.txt'],
+      });
+
+      // An automatic reclaim removed and recorded the second worktree first: nothing is left to do.
+      vi.spyOn(manager, 'discard').mockImplementationOnce(async (input) => {
+        await removeWorktree(input);
+        noteRepository(second, { state: 'cleaned' });
+        return removeWorktree(input);
+      });
+      await expect(coordinator.discardRetainedWorktree(task.id, second, 1)).resolves.toEqual({
+        worktrees: [],
+        total: 0,
+      });
+      expect(persistence.getTeamExecutionIsolation(second)!.repositories[0]!.state).toBe('cleaned');
+      persistence.close();
+    }, 45_000);
+
+    it('never discards a retained worktree whose recorded path Sprint Coder does not own (issue #544)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Retained worktree ownership');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          if (input.workspacePath === undefined || input.workspacePath === null)
+            throw new Error('write step did not receive an isolated worktree');
+          writeFileSync(join(input.workspacePath, 'kept.txt'), 'kept work\n');
+          throw new Error('deliberate failure after writing');
+        },
+        async stop() {},
+      };
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const discard = vi.spyOn(manager, 'discard');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'failing writer',
+        objective: 'write and fail',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const failed = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write then fail',
+        doneCriteria: ['work is kept'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await cleanupUnchanged.mock.results[0]?.value;
+      await waitFor(
+        () => persistence.getTeamExecution(failed.executionId).state === 'failed',
+        15_000,
+      );
+      const isolation = persistence.getTeamExecutionIsolation(failed.executionId)!;
+      const worktreePath = isolation.repositories[0]!.worktreePath;
+      // A record that names another directory (here the user's own checkout) must never be removed.
+      persistence.updateTeamExecutionIsolation({
+        executionId: failed.executionId,
+        phase: 'quarantined',
+        repositories: [{ ...isolation.repositories[0]!, worktreePath: workspace }],
+        now: new Date().toISOString(),
+      });
+
+      const listed = (await coordinator.listRetainedWorktrees(task.id)).worktrees[0]!;
+      expect(listed).toMatchObject({ worktreePath: workspace, discardable: false });
+      expect(listed.blockedReason).toContain('一致しない');
+      await expect(
+        coordinator.discardRetainedWorktree(task.id, failed.executionId, 1),
+      ).rejects.toThrow('一致しない');
+      await expect(
+        coordinator.inspectRetainedWorktree(task.id, failed.executionId, 1),
+      ).rejects.toThrow('一致しない');
+      const opener = vi.fn(async () => undefined);
+      await expect(
+        coordinator.openRetainedWorktree(task.id, failed.executionId, 1, opener),
+      ).rejects.toThrow('一致しない');
+      expect(opener).not.toHaveBeenCalled();
+      expect(discard).not.toHaveBeenCalled();
+      expect(readFileSync(join(workspace, 'README.md'), 'utf8')).toBe('base\n');
+      expect(existsSync(join(worktreePath, 'kept.txt'))).toBe(true);
+      expect(
+        persistence.getTeamExecutionIsolation(failed.executionId)!.repositories[0]!.state,
+      ).toBe('quarantined');
+      persistence.close();
+    }, 30_000);
+
+    it('keeps the worktree of a Mission step that is still waiting to resume (issue #544)', async () => {
+      const persistence = createPersistence();
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-retained-repo-')));
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-retained-worktrees-'));
+      cleanup.push(repo, worktreesRoot);
+      expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+      writeFileSync(join(repo, 'README.md'), 'base\n');
+      expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+      expect(
+        spawnSync('git', [
+          '-C',
+          repo,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          'commit',
+          '-q',
+          '-m',
+          'base',
+        ]).status,
+      ).toBe(0);
+      const project = persistence.createProject({
+        name: 'Retained Mission worktree',
+        folders: [
+          {
+            id: '44400000-0000-4000-8000-000000000001',
+            path: repo,
+            canonicalPath: repo,
+            label: 'repo',
+            role: 'primary',
+            workspaceKey: '7'.repeat(64),
+            rootIdentityDigest: '8'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('Retained Mission step', false, project.id);
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          const primary = input.workspaceSet?.roots.find(({ role }) => role === 'primary');
+          if (primary === undefined) throw new Error('write step did not receive an isolated root');
+          writeFileSync(join(primary.path, 'partial.txt'), 'partial step work\n');
+          throw new Error('deliberate Mission step failure');
+        },
+        async stop() {},
+      };
+      const manager = new WorkerWorktreeManager({ worktreesRoot });
+      const discard = vi.spyOn(manager, 'discard');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'mission writer',
+        objective: 'fail a resumable step',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'resume later',
+        doneCriteria: ['step resumes'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write then fail',
+            doneCriteria: ['partial work kept'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: writer.id,
+            objective: 'verify',
+            doneCriteria: ['verified'],
+            access: 'read-only',
+          },
+        ],
+      });
+      const executionId = mission.steps[0]!.executionId;
+      await waitFor(
+        () =>
+          persistence.getTeamExecution(executionId).state === 'waiting_resume' &&
+          persistence.getTeamExecutionIsolation(executionId)?.phase === 'quarantined',
+        15_000,
+      );
+      const worktreePath =
+        persistence.getTeamExecutionIsolation(executionId)!.repositories[0]!.worktreePath;
+
+      const listed = (await coordinator.listRetainedWorktrees(task.id)).worktrees;
+      expect(listed).toHaveLength(1);
+      expect(listed[0]).toMatchObject({
+        executionId,
+        executionState: 'waiting_resume',
+        existsOnDisk: true,
+        discardable: false,
+      });
+      expect(listed[0]!.blockedReason).toContain('まだ終わっていない');
+      await expect(coordinator.discardRetainedWorktree(task.id, executionId, 1)).rejects.toThrow(
+        'まだ終わっていない',
+      );
+      expect(discard).not.toHaveBeenCalled();
+      expect(existsSync(join(worktreePath, 'partial.txt'))).toBe(true);
+      persistence.close();
+    }, 30_000);
+
     it('reclaims the worktree of an execution refused before it started because an earlier exit is unconfirmed', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Refused isolated start');
@@ -7023,13 +7594,14 @@ else
           cwd: process.cwd(),
           encoding: 'utf8',
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          // This bridge runs the coordinator integration cases in a second Electron process. A
-          // serialized Windows suite can take about a minute and still needs time for clean
+          // This bridge runs the coordinator integration cases in a second Electron process. On
+          // Windows CI the serialized suite already took about 160 seconds before the retained
+          // worktree cases (issue #544) were added, so it gets room beyond that plus a clean
           // Vitest/Electron shutdown.
-          timeout: 180_000,
+          timeout: 420_000,
           maxBuffer: 10 * 1024 * 1024,
         },
       );
       expect(result.stderr, result.stdout).not.toContain('Failed Tests');
-    }, 190_000);
+    }, 430_000);
   });

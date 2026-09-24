@@ -52,6 +52,11 @@ import {
   teamExecutionSummarySchema,
   teamExecutionIsolationSchema,
   teamResumeExecutionIntegrationInputSchema,
+  teamRetainedWorktreeInspectionSchema,
+  teamRetainedWorktreeListSchema,
+  teamRetainedWorktreeRefSchema,
+  TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT,
+  TEAM_RETAINED_WORKTREE_LIST_LIMIT,
   teamEventSchema,
   teamSubscriptionInputSchema,
   teamSubscriptionSnapshotSchema,
@@ -1068,6 +1073,103 @@ describe('public contracts', () => {
             state: 'ready',
           },
         ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('names a retained worktree and states why it cannot be discarded (issue #544)', () => {
+    const ref = { taskId: 'task-1', executionId: 'execution-1', repositoryOrdinal: 2 };
+    expect(teamRetainedWorktreeRefSchema.parse(ref)).toEqual(ref);
+    for (const repositoryOrdinal of [0, 17, 1.5])
+      expect(teamRetainedWorktreeRefSchema.safeParse({ ...ref, repositoryOrdinal }).success).toBe(
+        false,
+      );
+    expect(teamRetainedWorktreeRefSchema.safeParse({ ...ref, path: '/elsewhere' }).success).toBe(
+      false,
+    );
+
+    const worktree = {
+      executionId: 'execution-1',
+      repositoryOrdinal: 1,
+      agentId: 'worker-1',
+      role: 'writer',
+      repoPath: '/repo',
+      worktreePath: '/worktrees/worktree-execution-1-1',
+      baseHead: 'a'.repeat(40),
+      workerHead: null,
+      integratedHead: null,
+      integration: 'none',
+      submodules: false,
+      changedFileCount: 0,
+      reason: 'Worker failed',
+      executionState: 'failed',
+      existsOnDisk: true,
+      discardable: true,
+      blockedReason: null,
+    } as const;
+    expect(teamRetainedWorktreeListSchema.parse({ worktrees: [worktree], total: 1 })).toEqual({
+      worktrees: [worktree],
+      total: 1,
+    });
+    const blocked = {
+      ...worktree,
+      discardable: false,
+      blockedReason: '実行がまだ終わっていません',
+    };
+    expect(teamRetainedWorktreeListSchema.parse({ worktrees: [blocked], total: 3 }).total).toBe(3);
+    const integrated = { ...worktree, integratedHead: 'b'.repeat(40) };
+    for (const integration of ['confirmed', 'unconfirmed'] as const)
+      expect(
+        teamRetainedWorktreeListSchema.safeParse({
+          worktrees: [{ ...integrated, integration }],
+          total: 1,
+        }).success,
+      ).toBe(true);
+    // A discardable row never carries a reason, and a blocked one always does; an integration is
+    // checked exactly when a commit was integrated.
+    for (const row of [
+      { ...worktree, blockedReason: '理由' },
+      { ...worktree, discardable: false },
+      { ...worktree, integration: 'confirmed' },
+      { ...integrated, integration: 'none' },
+    ])
+      expect(teamRetainedWorktreeListSchema.safeParse({ worktrees: [row], total: 1 }).success).toBe(
+        false,
+      );
+    expect(
+      teamRetainedWorktreeListSchema.safeParse({ worktrees: [worktree], total: 0 }).success,
+    ).toBe(false);
+    expect(
+      teamRetainedWorktreeListSchema.safeParse({
+        worktrees: Array.from({ length: TEAM_RETAINED_WORKTREE_LIST_LIMIT + 1 }, () => worktree),
+        total: TEAM_RETAINED_WORKTREE_LIST_LIMIT + 1,
+      }).success,
+    ).toBe(false);
+
+    const inspection = {
+      executionId: 'execution-1',
+      repositoryOrdinal: 1,
+      head: 'b'.repeat(40),
+      commitsSinceBase: 1,
+      status: [{ code: '??', path: 'new.txt' }],
+      statusTruncated: false,
+      changesFromBase: [{ status: 'M', path: 'README.md' }],
+      changesFromBaseTruncated: false,
+    };
+    expect(teamRetainedWorktreeInspectionSchema.parse(inspection)).toEqual(inspection);
+    expect(
+      teamRetainedWorktreeInspectionSchema.safeParse({
+        ...inspection,
+        status: [{ code: '?', path: 'new.txt' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      teamRetainedWorktreeInspectionSchema.safeParse({
+        ...inspection,
+        status: Array.from({ length: TEAM_RETAINED_WORKTREE_INSPECTION_LIMIT + 1 }, () => ({
+          code: '??',
+          path: 'new.txt',
+        })),
       }).success,
     ).toBe(false);
   });
