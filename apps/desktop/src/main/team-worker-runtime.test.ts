@@ -821,11 +821,11 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       await settle();
       expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
 
-      // A stop ends such a hold at once.
+      // A stop ends such a hold at once, and reports it as the refusal it still is.
       const stopped = run();
       await settle();
       await subject.stop('worker-1');
-      await expect(stopped).rejects.toThrow('Worker execution stopped');
+      await expect(stopped).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
       expect(runtimeHostMock.starts).toHaveLength(1);
     } finally {
       subject.dispose();
@@ -935,19 +935,122 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       },
     );
 
-    it('lets a stop end the hold without starting a CLI', async () => {
+    it.each([
+      ['another execution', 'execution-2', true],
+      // A steer re-runs the same execution in the worktree the stopped Turn may still use.
+      ['the same execution', 'execution-1', false],
+    ])(
+      'lets a stop end the hold of %s without starting a CLI, reported as that refusal',
+      async (_label, executionId, startRefused) => {
+        runtimeHostMock.starts.length = 0;
+        runtimeHostMock.waitForExit.mockImplementationOnce(
+          () => new Promise<void>(() => undefined),
+        );
+        const subject = runtime();
+        void run(subject).catch(() => undefined);
+        await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+        await subject.stop('worker-1');
+        const second = run(subject, executionId).then(
+          () => 'started',
+          (caught: unknown) => caught,
+        );
+        await settle();
+
+        // The stop does not end the earlier Turn, so it is no confirmed stop of this execution.
+        await subject.stop('worker-1');
+        const outcome = await second;
+        expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+        expect(outcome).toMatchObject({ startRefused });
+        expect(runtimeStopConfirmed(outcome)).toBe(startRefused);
+        expect(runtimeHostMock.starts).toHaveLength(1);
+        subject.dispose();
+      },
+    );
+
+    it('keeps the hold-ending stop of an unconfirmed Turn from passing for a plain stop', async () => {
       runtimeHostMock.starts.length = 0;
-      runtimeHostMock.waitForExit.mockImplementationOnce(() => new Promise<void>(() => undefined));
+      runtimeHostMock.waitForExit
+        .mockRejectedValueOnce(
+          new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+        )
+        // The background check keeps waiting, so the exit stays unconfirmed.
+        .mockImplementationOnce(() => new Promise<void>(() => undefined));
       const subject = runtime();
-      void run(subject).catch(() => undefined);
-      await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
-      await subject.stop('worker-1');
-      const second = run(subject);
+      await expect(run(subject)).rejects.toMatchObject({ startRefused: false });
+      // A steer re-queues the same execution while its stopped Turn is still unconfirmed.
+      const second = run(subject).then(
+        () => 'started',
+        (caught: unknown) => caught,
+      );
       await settle();
 
       await subject.stop('worker-1');
-      await expect(second).rejects.toThrow('Worker execution stopped');
+      const outcome = await second;
+      expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(outcome).toMatchObject({ startRefused: false });
+      expect(runtimeStopConfirmed(outcome)).toBe(false);
       expect(runtimeHostMock.starts).toHaveLength(1);
+      subject.dispose();
+    });
+
+    it.each([
+      ['another execution', 'execution-2', true],
+      ['the same execution', 'execution-1', false],
+    ])(
+      'refuses an already stopped start of %s behind an unconfirmed Turn rather than just stopping it',
+      async (_label, executionId, startRefused) => {
+        runtimeHostMock.starts.length = 0;
+        runtimeHostMock.waitForExit
+          .mockRejectedValueOnce(
+            new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+          )
+          .mockImplementationOnce(() => new Promise<void>(() => undefined));
+        const subject = runtime();
+        await expect(run(subject)).rejects.toMatchObject({ startRefused: false });
+        const stopped = new AbortController();
+        stopped.abort(new Error('Worker execution stopped'));
+
+        const outcome = await subject
+          .execute({
+            worker: worker(false),
+            envelope: { ...envelope, targetAgentId: 'worker-1' },
+            content: '調査する',
+            executionId,
+            signal: stopped.signal,
+          })
+          .then(
+            () => 'started',
+            (caught: unknown) => caught,
+          );
+        expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+        expect(outcome).toMatchObject({ startRefused });
+        expect(runtimeStopConfirmed(outcome)).toBe(startRefused);
+        expect(runtimeHostMock.starts).toHaveLength(1);
+        subject.dispose();
+      },
+    );
+
+    it('still reports a stop as a stop when no earlier Turn blocks the Worker', async () => {
+      runtimeHostMock.starts.length = 0;
+      const subject = runtime();
+      const stopped = new AbortController();
+      stopped.abort(new Error('Worker execution stopped'));
+
+      const outcome = await subject
+        .execute({
+          worker: worker(false),
+          envelope: { ...envelope, targetAgentId: 'worker-1' },
+          content: '調査する',
+          executionId: 'execution-1',
+          signal: stopped.signal,
+        })
+        .then(
+          () => 'started',
+          (caught: unknown) => caught,
+        );
+      expect(outcome).not.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(outcome).toMatchObject({ message: 'Worker execution stopped' });
+      expect(runtimeHostMock.starts).toHaveLength(0);
       subject.dispose();
     });
 
