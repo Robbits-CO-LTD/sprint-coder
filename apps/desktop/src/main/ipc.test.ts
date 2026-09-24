@@ -1,7 +1,7 @@
 import { RetryableActionRegistry } from './retryable-action';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -173,6 +173,7 @@ import {
   shouldStartNextQueuedAfterCancel,
   resolveEffectiveWorkspaceRoot,
   verifyTurnWorkspaceIdentities,
+  toolPermissionFacts,
   toPublicError,
 } from './ipc';
 
@@ -208,8 +209,12 @@ import {
   ToolAuthorizationDeniedError,
   ToolBroker,
   type ToolAuthorizationDecision,
+  type ToolAuthorizationRequest,
 } from './tool-broker';
-import { ToolRegistry } from '@sprint-coder/domain';
+import { ToolRegistry, expandAccessPreset } from '@sprint-coder/domain';
+import { PermissionBroker } from './permission-broker';
+import { FileRevisionRegistry } from './file-revision';
+import { approvalFactsForTool } from './approval-coordinator';
 import { WORKSPACE_CREATE_FILE_TOOL } from './workspace-patch-tool';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
@@ -5662,6 +5667,265 @@ describe('Provider workspace tool capability fallback', () => {
     expect(source('preset_auto_unknown')).toBe('policy');
     expect(source('reviewer_safe', true)).toBe('reviewer');
   });
+});
+
+// issue #526: a batch apply_patch (or a rename) touches several paths, but its permission request
+// has one resource. Evaluating it as the first path let a protected later path (or a protected
+// rename destination) ride on a Workspace-classified request: auto-allowed by preset_auto_safe_edit,
+// allowed by preset_full, or offered as an ordinary approval card. These run the Main Turn path
+// and the Team Worker path the way `evaluateToolPermission` does: facts and guard from
+// `toolPermissionFacts`, then PermissionBroker (trusted-facts check and policy) per capability.
+describe('toolPermissionFacts over every path an Edit Saga call touches (issue #526)', () => {
+  type Decision = 'allow' | 'deny' | 'approval_required';
+  type Authority = 'sealed-team-isolation' | undefined;
+
+  async function classifiableRoot(): Promise<string> {
+    // tmpdir() sits under AppData on Windows, which would classify every file as app-private.
+    const base = process.platform === 'win32' ? process.cwd() : tmpdir();
+    const root = await mkdtemp(join(base, '.sprint-coder-issue-526-'));
+    await mkdir(join(root, '.git', 'hooks'), { recursive: true });
+    await mkdir(join(root, 'secrets'), { recursive: true });
+    await mkdir(join(root, 'docs'), { recursive: true });
+    await writeFile(join(root, 'notes.txt'), 'notes\n');
+    return realpath(root);
+  }
+
+  async function captureRequest(
+    root: string,
+    providerName: 'apply_patch' | 'create_file',
+    input: Record<string, unknown>,
+  ): Promise<{ request: ToolAuthorizationRequest; workspace: EffectiveWorkspaceSet }> {
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'Workspace', role: 'primary', status: 'available' },
+      ],
+      digest: 'e'.repeat(64),
+    };
+    let captured: ToolAuthorizationRequest | undefined;
+    const tools = new ManagedCodingHarness({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        captured = request;
+        return { decision: 'deny', reason: 'captured' };
+      },
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions: new FileRevisionRegistry(),
+        apply: async () => {
+          throw new Error('authorization must stop this call');
+        },
+        policyEpochFor: () => 1,
+      },
+    });
+    const context = {
+      taskId: 'task-526',
+      turnId: 'turn-526',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex');
+    await expect(
+      tools.broker.dispatch({ ...context, callId: 'call-526', providerName, input }),
+    ).rejects.toThrow(/authorization deny/u);
+    if (captured === undefined) throw new Error('authorizer was not reached');
+    return { request: captured, workspace };
+  }
+
+  function decide(
+    request: ToolAuthorizationRequest,
+    workspace: EffectiveWorkspaceSet,
+    preset: 'ask' | 'auto' | 'full',
+    workspaceAuthority: Authority,
+  ): { decision: Decision; reasons: string[] } {
+    const broker = new PermissionBroker({
+      getPermissionPolicy: () => ({
+        preset,
+        policyEpoch: 1,
+        expandedPolicy: expandAccessPreset(preset),
+        revokedCapabilities: [],
+      }),
+      listPermissionGrants: () => [],
+    } as never);
+    const decisions = request.entry.requiredCapabilities.map((capability) => {
+      const { facts, pathGuard } = toolPermissionFacts(request, capability, workspaceAuthority);
+      const sandboxProfile = sandboxProfileForToolAuthorization(
+        request.entry.implementationKind,
+        capability,
+      );
+      const ceiling = {
+        entries: [
+          {
+            capability,
+            resourceSet: facts.resourceSet,
+            operations: [facts.operation],
+            expiresAt: '2099-01-01T00:00:00.000Z',
+            providerEgress: ['none' as const],
+            sandboxProfiles: [sandboxProfile],
+          },
+        ],
+        maxWorkerDepth: 0,
+        maxConcurrentWorkers: 0,
+      };
+      return broker.preview({
+        taskId: request.context.taskId,
+        request: {
+          taskId: request.context.taskId,
+          subjectId: facts.subjectId,
+          capability,
+          resource: facts.resource,
+          operation: facts.operation,
+          providerEgress: 'none',
+          sandboxProfile,
+          executionSpecDigest: facts.specDigest,
+          reviewerInputDigest: 'c'.repeat(64),
+          risk: request.entry.risk,
+        },
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: ceiling,
+          modeCeiling: ceiling,
+          sandbox: { feasible: true, profile: sandboxProfile },
+        },
+        now: '2026-09-25T00:00:00.000Z',
+        workspace,
+        ...(pathGuard === undefined ? {} : { pathGuard }),
+        ...(workspaceAuthority === undefined ? {} : { workspaceAuthority }),
+      });
+    });
+    // Combined the way ApprovalCoordinator.authorizeTool combines capabilities.
+    const decision: Decision = decisions.some(({ decision }) => decision === 'deny')
+      ? 'deny'
+      : decisions.some(({ decision }) => decision === 'approval_required')
+        ? 'approval_required'
+        : 'allow';
+    return { decision, reasons: decisions.map(({ reason }) => reason) };
+  }
+
+  const protectedCalls = [
+    [
+      'a second add under .git/hooks',
+      {
+        operations: [
+          { kind: 'add', path: 'notes-2.txt', content: 'x\n' },
+          { kind: 'add', path: '.git/hooks/post-checkout', content: '#!/bin/sh\n' },
+        ],
+      },
+    ],
+    [
+      'a second add of .env',
+      {
+        operations: [
+          { kind: 'add', path: 'notes-2.txt', content: 'x\n' },
+          { kind: 'add', path: '.env', content: 'TOKEN=x\n' },
+        ],
+      },
+    ],
+    [
+      'a rename whose destination is a Git hook',
+      {
+        operations: [
+          {
+            kind: 'rename',
+            path: 'notes.txt',
+            destination: '.git/hooks/pre-commit',
+            revision: { version: 1, tokenId: 'token-526' },
+          },
+        ],
+      },
+    ],
+    [
+      'a second read guard in a protected directory',
+      {
+        operations: [
+          { kind: 'add', path: 'notes-2.txt', content: 'x\n' },
+          { kind: 'add', path: 'secrets/plain.txt', content: 'x\n' },
+        ],
+      },
+    ],
+  ] as const;
+
+  for (const workspaceAuthority of [undefined, 'sealed-team-isolation'] as const) {
+    const lane = workspaceAuthority === undefined ? 'Main Turn' : 'Team Worker';
+
+    it.each(protectedCalls)(
+      `${lane}: denies a batch with %s under every preset`,
+      async (_case, input) => {
+        const root = await classifiableRoot();
+        try {
+          const { request, workspace } = await captureRequest(root, 'apply_patch', input);
+          for (const preset of ['auto', 'full', 'ask'] as const)
+            expect(decide(request, workspace, preset, workspaceAuthority)).toMatchObject({
+              decision: 'deny',
+              reasons: expect.arrayContaining(['immutable_protected_resource']),
+            });
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it(`${lane}: auto-allows a batch that stays inside the Workspace and asks under Ask`, async () => {
+      const root = await classifiableRoot();
+      try {
+        const { request, workspace } = await captureRequest(root, 'apply_patch', {
+          operations: [
+            { kind: 'add', path: 'notes-2.txt', content: 'x\n' },
+            { kind: 'add', path: 'docs/guide.txt', content: 'y\n' },
+          ],
+        });
+        expect(decide(request, workspace, 'auto', workspaceAuthority)).toEqual({
+          decision: 'allow',
+          reasons: ['preset_auto_safe', 'preset_auto_safe_edit'],
+        });
+        expect(decide(request, workspace, 'full', workspaceAuthority)).toMatchObject({
+          decision: 'allow',
+          reasons: ['preset_auto_safe', 'preset_full'],
+        });
+        expect(decide(request, workspace, 'ask', workspaceAuthority)).toMatchObject({
+          decision: 'approval_required',
+        });
+        // The approval card still describes the batch as a whole, as it did before #526.
+        expect(approvalFactsForTool(request, 'workspace.write')).toMatchObject({
+          resourceSet: { kind: 'workspace' },
+          operation: 'write',
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it(`${lane}: keeps the single-path outcome unchanged`, async () => {
+      const root = await classifiableRoot();
+      try {
+        const plain = await captureRequest(root, 'create_file', {
+          path: 'fresh.txt',
+          content: 'x\n',
+        });
+        expect(decide(plain.request, plain.workspace, 'auto', workspaceAuthority)).toEqual({
+          decision: 'allow',
+          reasons: ['preset_auto_safe_edit'],
+        });
+        expect(decide(plain.request, plain.workspace, 'ask', workspaceAuthority)).toMatchObject({
+          decision: 'approval_required',
+        });
+        const secret = await captureRequest(root, 'create_file', { path: '.env', content: 'x' });
+        for (const preset of ['auto', 'full', 'ask'] as const)
+          expect(decide(secret.request, secret.workspace, preset, workspaceAuthority)).toEqual({
+            decision: 'deny',
+            reasons: ['immutable_protected_resource'],
+          });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 // Adversarial IPC hardening (Phase 7, IMPLEMENTATION_PLAN §10.4, NFR-SEC-03). Two independent

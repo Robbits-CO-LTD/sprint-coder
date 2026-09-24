@@ -377,9 +377,13 @@ export const AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON = 'preset_auto_safe_edit';
  * - `workspace.write` を要求するツールは Edit Saga の3つ（apply_patch / create_file /
  *   create_directory）だけなので、自動になるのはそれらによる Workspace 内のファイル変更だけ。
  * - 対象は Workspace に分類されたパスだけ。credential・アプリ領域・署名鍵などの保護パスは、
- *   評価順で先に来る IMMUTABLE_DENY_RULES が拒否したまま。
- * - コマンド（shell.execute）、Workspace 外への書き込み、ネットワーク、外部で開く操作は
- *   ここに含めず、これまでどおり自動レビューが判定する。
+ *   評価順で先に来る IMMUTABLE_DENY_RULES が拒否したまま。複数のパスに触れる呼び出し
+ *   （まとめた apply_patch、rename の書き込み先）は、Main が保護パスを1つでも含めばそのパスを
+ *   要求のリソースにする（workspaceToolPermissionGuard）ので、この許可は全パスが Workspace
+ *   分類のときだけ効く。
+ * - Workspace の外を指す編集は、この判定の前に PathGuard が PATH_ESCAPE で拒否する。
+ * - コマンド（shell.execute）、ネットワーク、外部で開く操作はここに含めず、これまでどおり
+ *   自動レビューが判定する。
  *
  * FULL_RULES が SAFE_AUTO_RULES を展開しているので、SAFE_AUTO_RULES には入れない。入れると
  * フルアクセスの展開が変わり、保存済みの規則がすべて改ざん扱いになる。

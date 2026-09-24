@@ -34,7 +34,7 @@ lane の bundle id は **`com.github.Electron`**（dev Electron）。`com.electr
 | preset | 表示 | 実 CLI（Claude / Codex の managed harness）で実際に起きること（2026-09-12 実測） |
 |---|---|---|
 | `ask` | 確認する | **すべての tool 呼び出しに承認カード**（`create_directory` / `create_file` / `read_file` / `exec_command` / `list_workspace`。読み取りも含む）。承認すれば書き込みもコマンドも実行される |
-| `auto` | 安全時は自動 | workspace の読み取りと、**Workspace 内のファイルの作成・編集（`create_directory` / `create_file` / `apply_patch`）を自動許可**（監査行 `自動許可 workspace.read preset_auto_safe` / `自動許可 workspace.write preset_auto_safe_edit`、承認カードなし）。`exec_command` などそれ以外は自動レビューが判定し、コマンドは **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。保護パスへの書き込みは `immutable_protected_resource` で拒否。書き込みの自動許可は #526 で変わった期待値で、実 CLI では未測定（2026-09-12 の実測では書き込みも `high_risk` で自動拒否だった）。mock の file-edits.spec（auto で編集が記録される）と同じ扱いになった |
+| `auto` | 安全時は自動 | workspace の読み取りと、**Workspace 内のファイルの作成・編集（`create_directory` / `create_file` / `apply_patch`）を自動許可**（監査行 `自動許可 workspace.read preset_auto_safe` / `自動許可 workspace.write preset_auto_safe_edit`、承認カードなし）。`exec_command` とネットワークは自動レビューが判定し、コマンドは **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。保護パスへの書き込みは、まとめた `apply_patch` の2つ目以降や rename の書き込み先に含まれる場合も `immutable_protected_resource` で呼び出し全体を拒否。Workspace 外を指す編集は PathGuard が拒否する（`PATH_ESCAPE`、相対の `..` は `RELATIVE_TRAVERSAL`。自動レビューには回らない）。書き込みの自動許可は #526 で変わった期待値で、実 CLI では未測定（2026-09-12 の実測では書き込みも `high_risk` で自動拒否だった）。mock の file-edits.spec（auto で編集が記録される）と同じ扱いになった |
 | `full` | フルアクセス | 切り替え時に **native の確認シート**（「フルアクセスを有効化」）。ファイル編集は承認なしで実行される。ただし `exec_command`（`OS sandboxなし`）は **依然として承認カードが出た**（設計かどうか未確定 → OBSERVED として報告） |
 
 この表と逆の期待値を書かない。ファイル編集とコマンド実行を「承認なし」で通したい case は `full` で行い、`ask` では承認カードを Computer Use で操作する。
@@ -108,7 +108,7 @@ background の `app_click` は「menu-presenting control」を拒否すること
 | RA-08 | auto | 高リスクコマンドの自動拒否 | P6 | 承認カードなし、監査行 `拒否 shell.execute high_risk`、Turn `完了` | `auto-deny` |
 | RA-09 | full | 承認なしのファイル編集 | Access を `フルアクセス`（native 確認シート）→ P5c → P5b（RA-07 で 2 行になっているので、一度 1 行に戻してから追記し直す） | どちらも承認カードなし、ファイル変更カード `変更`。P5c の後は 1 行、P5b の後は 2 行ちょうど | P5c の後 `auto-file --lines 1`、P5b の後 `auto-file --lines 2` |
 | RA-09b | full | コマンド実行 | P7 | コマンドカード `exit 0`、出力に `SC_FULL_OK:<lane>:<nonce>`（承認カードが出た場合は OBSERVED として記録し「今回のみ許可」で続行） | `full-command` |
-| RA-10 | — | scope 逸脱 | — | **NOT_RUN 既定**: full では外部書き込みが設計上許可され、auto では自動許可が Workspace 内の作成・編集だけで Workspace 外への書き込みは自動レビューが判定するため、止まっても scope の境界と自動レビューのどちらで止まったか判別できない。依頼で明示されたときだけ full で P8 を送り、`~/Desktop/sc-escape-<nonce>.txt` の有無を記録する | `escape` |
+| RA-10 | — | scope 逸脱 | — | **NOT_RUN 既定**（full では外部書き込みが設計上許可されるため）。依頼で明示されたときだけ P8 を送り、`~/Desktop/sc-escape-<nonce>.txt` の有無を記録する。auto で送る場合、Edit Saga は Workspace 外を受け付けず（PathGuard が `PATH_ESCAPE` / `RELATIVE_TRAVERSAL` で拒否）、コマンドは自動レビューが判定するので、止まった経路はツールのエラー（PathGuard のコード）か監査行（`拒否 shell.execute …`）で区別できる。auto でファイルができたら FAIL P0 `fail_scope_escape` | `escape` |
 | RA-11 | any | 停止 | P9 → `思考中` のうちに composer の停止ボタン（`実行を停止`） | Run Card `中止 部分回答`、部分回答が残る、composer が再び使える | — |
 | RA-12 | — | 再起動復元 | `app_menu(["Electron","Quit Sprint Coder"])` → `launch-dev-instance.sh --reuse-profile` | Task タイトル、メッセージ、ファイル変更カード、コマンドカード、監査行、Project、モデル、Access が戻る。`app.log` の新しい区切り以降に error なし | `all`（末尾状態） |
 

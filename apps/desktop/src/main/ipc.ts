@@ -57,7 +57,11 @@ import {
   resolve as resolvePath,
   sep,
 } from 'node:path';
-import { workspaceMutationBinding, workspacePermissionResourceFromGuard } from './path-guard';
+import {
+  workspaceMutationBinding,
+  workspacePermissionResourceFromGuard,
+  type PathGuard,
+} from './path-guard';
 import { CommandRunnerError } from './command-runner';
 import { ManagedStdinRejection } from './managed-command-stdin';
 import { configureApprovalDigestKey } from './approval-digest-key';
@@ -772,7 +776,7 @@ import {
   WorkspaceToolRejection,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
-  workspaceToolAuthorizationGuard,
+  workspaceToolPermissionGuard,
 } from './provider-workspace-tools';
 import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
 import { workspaceWriteLimitsOf } from './workspace-write-limits';
@@ -6101,22 +6105,7 @@ export class IpcRouter {
     // classify as Workspace files relative to that sealed root.
     const workspaceAuthority =
       managedWorkerWorkspace === undefined ? undefined : ('sealed-team-isolation' as const);
-    const rawFacts = approvalFactsForTool(request, capability, workspaceAuthority);
-    const pathGuard = workspaceToolAuthorizationGuard(
-      request.input,
-      rawFacts.operation === 'read' || rawFacts.operation === 'write'
-        ? rawFacts.operation
-        : undefined,
-    );
-    const facts =
-      managedWorkerWorkspace !== undefined &&
-      rawFacts.resource.kind === 'workspace-path' &&
-      pathGuard !== undefined
-        ? {
-            ...rawFacts,
-            resource: workspacePermissionResourceFromGuard(pathGuard, 'sealed-team-isolation'),
-          }
-        : rawFacts;
+    const { facts, pathGuard } = toolPermissionFacts(request, capability, workspaceAuthority);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     // Provider-issued process authority covers both starting a command and feeding one that is
     // already running: `write_stdin` carries `shell.execute` without being a command-runner Tool
@@ -10249,6 +10238,40 @@ export function managedLocalForcedRoundMessages(
     ...messages.filter(({ role }) => role === 'system'),
     { role: 'user', content: currentUserText },
   ];
+}
+
+/**
+ * A Tool call's permission facts and the PathGuard they were taken from, for the Main Turn
+ * (`workspaceAuthority` undefined) and for a managed Team Worker (`sealed-team-isolation`).
+ *
+ * The guard is `workspaceToolPermissionGuard`'s, not simply the first one: a batch that also
+ * touches a protected path is evaluated as that path, so the immutable deny refuses the whole call
+ * instead of a preset allow or an approval card covering it (issue #526). The resource and the
+ * guard come from the same choice, which is what PermissionBroker checks them against.
+ */
+export function toolPermissionFacts(
+  request: ToolAuthorizationRequest,
+  capability: Capability,
+  workspaceAuthority: 'sealed-team-isolation' | undefined,
+): { facts: ReturnType<typeof approvalFactsForTool>; pathGuard: PathGuard | undefined } {
+  const rawFacts = approvalFactsForTool(request, capability, workspaceAuthority);
+  const pathGuard = workspaceToolPermissionGuard(
+    request.input,
+    rawFacts.operation === 'read' || rawFacts.operation === 'write'
+      ? rawFacts.operation
+      : undefined,
+    workspaceAuthority,
+  );
+  const facts =
+    workspaceAuthority !== undefined &&
+    rawFacts.resource.kind === 'workspace-path' &&
+    pathGuard !== undefined
+      ? {
+          ...rawFacts,
+          resource: workspacePermissionResourceFromGuard(pathGuard, workspaceAuthority),
+        }
+      : rawFacts;
+  return { facts, pathGuard };
 }
 
 /**
