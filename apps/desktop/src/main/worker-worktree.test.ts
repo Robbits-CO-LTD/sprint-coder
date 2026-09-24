@@ -1,1 +1,1 @@
-PLACEHOLDER
+@/workspace/restore_content_only.ts
