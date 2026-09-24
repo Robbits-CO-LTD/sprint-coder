@@ -50,7 +50,7 @@ export const UNKNOWN_STATE_LABEL = '状態不明';
  * Access preset）は画面が知らない情報なので、確認のされ方（ask/auto/full）はここでは出さない —
  * それは割り当て結果（team_assign_task/team_assign_mission）の writeScopeNote の役目。 */
 export const WRITE_SCOPE_LABELS: Readonly<Record<TeamExecutionSummary['accessMode'], string>> = {
-  'read-only': '読み取り専用（Leaderの依頼）',
+  'read-only': '読み取り専用（依頼どおり）',
   'workspace-write': 'Workspaceへ書き込み（隔離worktreeで変更し、完了後に統合）',
 };
 
@@ -81,7 +81,7 @@ export function writeScopeLabel(accessMode: TeamExecutionSummary['accessMode']):
  * として下のフォールバック（コードのまま表示）に落ちる — 挙動は変えていない。
  */
 export const TERMINAL_REASON_LABELS: Readonly<Record<string, string>> = {
-  heartbeat_timeout: 'ハートビート応答なしで停止',
+  heartbeat_timeout: 'Workerの応答が途絶えたため停止',
   idle_timeout: '進捗が止まったため停止',
   hard_timeout: '実行時間の上限に到達',
   runtime_failure: '実行時エラー',

@@ -151,7 +151,7 @@ describe('describeExecution', () => {
 
   it('labels the write scope from accessMode (issue #551)', () => {
     expect(describeExecution(execution({ accessMode: 'read-only' })).writeScopeLabel).toBe(
-      '読み取り専用（Leaderの依頼）',
+      '読み取り専用（依頼どおり）',
     );
     expect(describeExecution(execution({ accessMode: 'workspace-write' })).writeScopeLabel).toBe(
       'Workspaceへ書き込み（隔離worktreeで変更し、完了後に統合）',
@@ -161,7 +161,7 @@ describe('describeExecution', () => {
   it('translates a known terminalReason code into Japanese (issue #551)', () => {
     expect(
       describeExecution(execution({ terminalReason: 'heartbeat_timeout' })).terminalReasonLabel,
-    ).toBe('ハートビート応答なしで停止');
+    ).toBe('Workerの応答が途絶えたため停止');
     expect(
       describeExecution(execution({ terminalReason: 'worker_reported_failure' }))
         .terminalReasonLabel,
@@ -190,7 +190,7 @@ describe('TeamExecutionStatus', () => {
 
   it('shows the write scope row for both accessMode values (issue #551)', () => {
     for (const [accessMode, expectedText] of [
-      ['read-only', '読み取り専用（Leaderの依頼）'],
+      ['read-only', '読み取り専用（依頼どおり）'],
       ['workspace-write', 'Workspaceへ書き込み（隔離worktreeで変更し、完了後に統合）'],
     ] as const) {
       const row = execution({ accessMode });
