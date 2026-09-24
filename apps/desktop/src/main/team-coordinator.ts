@@ -3386,8 +3386,18 @@ export class TeamCoordinator {
     missionWorktree: TeamMissionWorktreeRecord | null,
     executionIsolation: TeamExecutionIsolationRecord | null,
   ): Promise<void> {
-    const canceled = new Error('Execution canceled before runtime dispatch');
-    if (missionWorktree !== null) {
+    // A steered or resumed execution re-runs in the worktree its earlier attempt used, and that
+    // attempt's CLI may still be running in it (issue #548). Only a first dispatch, with no attempt
+    // yet, owns a worktree nothing else can be using, so only then is it removed here.
+    const reusedWorktree = this.persistence.listTeamAttempts(input.executionId).length > 0;
+    const canceled = new Error(
+      reusedWorktree
+        ? 'Execution canceled before runtime dispatch; an earlier attempt may still use its worktree'
+        : 'Execution canceled before runtime dispatch',
+    );
+    if (missionWorktree !== null && reusedWorktree)
+      this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
+    else if (missionWorktree !== null) {
       try {
         if (this.worktreeManager !== undefined) {
           const result = await this.worktreeManager.cleanup({
@@ -3411,11 +3421,12 @@ export class TeamCoordinator {
     }
     if (executionIsolation !== null) {
       this.quarantineExecutionIsolation(executionIsolation.executionId, canceled);
-      await this.cleanupIntegratedExecutionIsolation(
-        this.persistence.getTeamExecutionIsolation(executionIsolation.executionId) ??
-          executionIsolation,
-        workerId,
-      );
+      if (!reusedWorktree)
+        await this.cleanupIntegratedExecutionIsolation(
+          this.persistence.getTeamExecutionIsolation(executionIsolation.executionId) ??
+            executionIsolation,
+          workerId,
+        );
     }
     this.persistence.setWorkerCurrentActivity(workerId, null, this.isoNow());
     this.emit(input.taskId, input.teamId);

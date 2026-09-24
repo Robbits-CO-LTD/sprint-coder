@@ -275,7 +275,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       // Stopping this execution does not end an earlier Turn that still blocks its Worker, so it is
       // reported as that refusal: a plain stop would pass for a confirmed one and free a worktree
       // that Turn may still use.
-      const refusal = this.previousTurnRefusal(execution);
+      const refusal = this.previousTurnRefusal(execution, input.signal);
       if (refusal !== null) throw refusal;
       input.signal.throwIfAborted();
     }
@@ -663,16 +663,23 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     }
     // A stop during the hold does not end a Turn that still blocks the Worker, so that refusal comes
     // first; only without one is this merely a stopped execution.
-    const refusal = this.previousTurnRefusal(execution);
+    const refusal = this.previousTurnRefusal(execution, signal);
     if (refusal !== null) throw refusal;
     signal.throwIfAborted();
   }
 
-  /** The refusal owed to an execution whose Worker still has a blocking Turn, or null. */
-  private previousTurnRefusal(execution: TurnOwner): WorkerRuntimeExitUnconfirmedError | null {
+  /**
+   * The refusal owed to an execution whose Worker still has a blocking Turn, or null. A stop that
+   * already ended the execution becomes the refusal's cause.
+   */
+  private previousTurnRefusal(
+    execution: TurnOwner,
+    signal: AbortSignal,
+  ): WorkerRuntimeExitUnconfirmedError | null {
     const blocking = this.blockingTurns(execution.agentId).map(({ owner }) => owner);
     if (blocking.length === 0) return null;
     return new WorkerRuntimeExitUnconfirmedError(PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE, {
+      ...(signal.aborted ? { cause: signal.reason as unknown } : {}),
       // Refusing leaves this execution's own worktree unused only when every blocking Turn ran for
       // another execution. A steered execution reuses its worktree, which an earlier Turn of it may
       // still be using, and an unknown execution may be this one.

@@ -960,7 +960,11 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         await subject.stop('worker-1');
         const outcome = await second;
         expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
-        expect(outcome).toMatchObject({ startRefused });
+        // The stop that ended the hold is kept as the cause.
+        expect(outcome).toMatchObject({
+          startRefused,
+          cause: expect.objectContaining({ message: 'Worker execution stopped' }),
+        });
         expect(runtimeStopConfirmed(outcome)).toBe(startRefused);
         expect(runtimeHostMock.starts).toHaveLength(1);
         subject.dispose();
@@ -987,7 +991,10 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       await subject.stop('worker-1');
       const outcome = await second;
       expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
-      expect(outcome).toMatchObject({ startRefused: false });
+      expect(outcome).toMatchObject({
+        startRefused: false,
+        cause: expect.objectContaining({ message: 'Worker execution stopped' }),
+      });
       expect(runtimeStopConfirmed(outcome)).toBe(false);
       expect(runtimeHostMock.starts).toHaveLength(1);
       subject.dispose();
@@ -1008,7 +1015,8 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         const subject = runtime();
         await expect(run(subject)).rejects.toMatchObject({ startRefused: false });
         const stopped = new AbortController();
-        stopped.abort(new Error('Worker execution stopped'));
+        const stop = new Error('Worker execution stopped');
+        stopped.abort(stop);
 
         const outcome = await subject
           .execute({
@@ -1024,6 +1032,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
           );
         expect(outcome).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
         expect(outcome).toMatchObject({ startRefused });
+        expect((outcome as Error).cause).toBe(stop);
         expect(runtimeStopConfirmed(outcome)).toBe(startRefused);
         expect(runtimeHostMock.starts).toHaveLength(1);
         subject.dispose();
@@ -1139,6 +1148,8 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
           message: expect.stringContaining('前回のCLI実行が終了したことをまだ確認できていない'),
           startRefused,
         });
+        // Nothing stopped this execution; the hold simply ran out.
+        expect((refused as Error).cause).toBeUndefined();
         expect(runtimeStopConfirmed(refused)).toBe(startRefused);
         expect(runtimeHostMock.starts).toHaveLength(1);
       } finally {

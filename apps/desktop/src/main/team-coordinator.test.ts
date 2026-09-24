@@ -654,6 +654,41 @@ class FailOnceWorkerRuntime extends TestWorkerRuntime {
   }
 }
 
+/**
+ * Every stop leaves the stopped Turn's exit unconfirmed, like a CLI tree that outlived its stop
+ * (issue #548). `startRefused` stays false: neither that Turn nor a re-run of the same execution
+ * held behind it is a confirmed stop of this execution.
+ */
+function unconfirmedStopRuntime(): { runtime: TeamWorkerRuntime; executions(): number } {
+  const running = new Map<string, (error: Error) => void>();
+  let executions = 0;
+  return {
+    executions: () => executions,
+    runtime: {
+      async start() {
+        return { pid: null };
+      },
+      async execute(input) {
+        executions += 1;
+        await new Promise<void>((_resolve, reject) => {
+          running.set(input.worker.id, reject);
+        });
+        throw new Error('the execution was expected to be stopped');
+      },
+      async stop(agentId) {
+        const reject = running.get(agentId);
+        running.delete(agentId);
+        reject?.(
+          new WorkerRuntimeExitUnconfirmedError(
+            'Runtime process tree exit was not confirmed within 30 seconds',
+            { startRefused: false },
+          ),
+        );
+      },
+    },
+  };
+}
+
 function grokFailureDiagnostic(
   failureStage: 'billing_error' | 'protocol_error',
   httpStatus?: number,
@@ -4679,6 +4714,122 @@ if (runsWithElectronAbi)
           .listReclaimConfirmedTeamExecutionIsolations()
           .map(({ executionId }) => executionId),
       ).not.toContain(submission.executionId);
+      persistence.close();
+    }, 30_000);
+
+    it('keeps the isolated worktree when a steered write execution is canceled behind its unconfirmed earlier Turn', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Steer then cancel unconfirmed isolated write');
+      const { runtime, executions } = unconfirmedStopRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const reclaim = vi.spyOn(manager, 'cleanupUnchanged');
+      const remove = vi.spyOn(manager, 'cleanup');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'steered writer',
+        objective: 'be steered and then canceled',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'first instruction',
+        doneCriteria: ['execution is canceled'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => executions() === 1, 15_000);
+
+      // The steer re-runs the same execution in the same isolation while the stopped Turn's exit is
+      // still unconfirmed, and the cancel of that re-run is no confirmed stop either.
+      await coordinator.steerExecution(task.id, submission.executionId, 'revised instruction');
+      await waitFor(() => executions() === 2, 15_000);
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'quarantined' }],
+      });
+      expect(existsSync(isolation.repositories[0]!.worktreePath)).toBe(true);
+      expect(reclaim).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).not.toContain(submission.executionId);
+      persistence.close();
+    }, 30_000);
+
+    it('quarantines rather than removes the worktree of a steered write execution canceled before its re-dispatch', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel steered isolated write during preflight');
+      const { runtime, executions } = unconfirmedStopRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const remove = vi.spyOn(manager, 'cleanup');
+      let holdPreflight = false;
+      let preflightHeld = false;
+      let releasePreflight!: () => void;
+      const preflight = new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      });
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        manager,
+        async () => {
+          if (!holdPreflight) return;
+          preflightHeld = true;
+          await preflight;
+        },
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'steered writer',
+        objective: 'be canceled before the re-dispatch',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'first instruction',
+        doneCriteria: ['execution is canceled'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => executions() === 1, 15_000);
+
+      // The steer re-queues the same execution, which reuses the isolation the stopped Turn may
+      // still be using; hold that re-dispatch in preflight and cancel it there.
+      holdPreflight = true;
+      await coordinator.steerExecution(task.id, submission.executionId, 'revised instruction');
+      await waitFor(() => preflightHeld, 15_000);
+      await expect(
+        coordinator.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+      releasePreflight();
+      await waitFor(() => scheduler.snapshot().activeCount === 0, 15_000);
+
+      expect(executions()).toBe(1);
+      expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'quarantined' }],
+      });
+      expect(existsSync(isolation.repositories[0]!.worktreePath)).toBe(true);
+      expect(remove).not.toHaveBeenCalled();
       persistence.close();
     }, 30_000);
 
