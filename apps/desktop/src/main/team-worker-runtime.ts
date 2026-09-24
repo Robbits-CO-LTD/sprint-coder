@@ -128,6 +128,13 @@ const WORKSPACE_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 type WorkerWriteObservation = { committed: number; denied: number };
 
+/**
+ * How much text the Turn has produced, and how much of it came before its last tool call. The
+ * Turn's text is every delta joined, what the Worker wrote before a tool call included, so a
+ * per-criterion report is read only from the text after that call (issue #550).
+ */
+type WorkerOutputObservation = { length: number; lastToolAt: number };
+
 type PendingRun = {
   resolve: (finalText: string) => void;
   reject: (error: Error) => void;
@@ -140,6 +147,7 @@ type PendingRun = {
   sideEffectsObserved: boolean;
   writeScope: RuntimeWriteScope;
   writes: WorkerWriteObservation;
+  output: WorkerOutputObservation;
 };
 
 class TeamRuntimeExecutionError extends WorkerRuntimeFailureError {
@@ -209,6 +217,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
             at: new Date().toISOString(),
           });
         if (event.type === 'operation') {
+          // Every adapter reports a tool or command it starts as an operation (Claude tool_use,
+          // Codex tool and command items, Grok tool_call).
+          run.output.lastToolAt = run.output.length;
           if (event.sideEffect === true) run.sideEffectsObserved = true;
           run.onEvent?.({
             type: 'activity',
@@ -219,6 +230,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         }
         if (event.type === 'delta') {
           run.buffer.push(event.delta);
+          run.output.length += event.delta.length;
           run.deltaBuffer.push(event.delta);
           if (run.deltaTimer === null) run.deltaTimer = setTimeout(() => flushDelta(run), 75);
         }
@@ -368,7 +380,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           at: new Date().toISOString(),
         });
       try {
-        const { finalText, writes } = await this.executeChoice(
+        const { finalText, writes, reportFrom } = await this.executeChoice(
           input,
           choice,
           taskId,
@@ -378,7 +390,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           runtimeWorkspace,
           writeScope,
         );
-        const report = readWorkerCriteriaReport(finalText, input.doneCriteria);
+        const report = readWorkerCriteriaReport(finalText, input.doneCriteria, { reportFrom });
         const summary = report.summary;
         const criteria = report.criteria === undefined ? {} : { criteria: report.criteria };
         const runtimeVerification = {
@@ -462,9 +474,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     workspacePath: string | null,
     runtimeWorkspace: RuntimeWorkspaceSet | string | null,
     writeScope: RuntimeWriteScope,
-  ): Promise<{ finalText: string; writes: WorkerWriteObservation }> {
+  ): Promise<{ finalText: string; writes: WorkerWriteObservation; reportFrom: number }> {
     const turnId = randomUUID();
     const writes: WorkerWriteObservation = { committed: 0, denied: 0 };
+    const output: WorkerOutputObservation = { length: 0, lastToolAt: 0 };
     const normalizedWorkspace =
       typeof runtimeWorkspace === 'string' || runtimeWorkspace === null
         ? runtimeWorkspaceSetFromLegacyPath(runtimeWorkspace)
@@ -571,6 +584,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           sideEffectsObserved: false,
           writeScope,
           writes,
+          output,
         });
         this.activeByAgent.set(input.worker.id, { kind: choice.kind, taskId, turnId });
         runtimeStarted = this.client(choice.kind).start(
@@ -591,7 +605,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         const run = this.pending.get(turnId);
         if (run !== undefined) run.runtimeStarted = runtimeStarted;
       });
-      return { finalText, writes };
+      return { finalText, writes, reportFrom: output.lastToolAt };
     } catch (error) {
       turnFailure = { error };
       throw error;
@@ -769,6 +783,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   recordManagedToolResult(turnId: string, result: unknown): void {
     const run = this.pending.get(turnId);
     if (run === undefined) return;
+    run.output.lastToolAt = run.output.length;
     // Counted per committed write call, like denials, so a directory creation (which changes no
     // file) still shows that the Worker could write.
     if (isCommittedManagedWrite(result)) run.writes.committed += 1;
@@ -781,7 +796,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   /** Main reports a managed Workspace write that policy denied, so the outcome can say so. */
   recordManagedToolDenied(turnId: string, toolName: string): void {
     const run = this.pending.get(turnId);
-    if (run === undefined || !WORKSPACE_WRITE_TOOL_NAMES.has(toolName)) return;
+    if (run === undefined) return;
+    run.output.lastToolAt = run.output.length;
+    if (!WORKSPACE_WRITE_TOOL_NAMES.has(toolName)) return;
     run.writes.denied += 1;
   }
 

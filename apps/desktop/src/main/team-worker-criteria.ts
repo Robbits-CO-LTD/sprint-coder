@@ -67,31 +67,37 @@ export type WorkerCriteriaReportResult =
 /**
  * Reads the per-criterion report from the ```json block that ends a Worker's final answer. Every
  * criterion number must appear exactly once with a valid status, and a done criterion needs
- * evidence. Anything else — no block, an unclosed (cut off) block, a block followed by more text,
- * invalid JSON, an unknown, duplicate or missing number — is a reason, never a partial report. A
- * block with text after it was written before the answer ended (say, before a tool call whose
- * result the Worker then acted on), so it is not the final report. The criterion text is always
- * the task's own, whatever the model wrote. `text` is the answer without the report block.
+ * evidence. Anything else — no block, an unclosed (cut off) block, a block followed by more text
+ * or by a tool call, invalid JSON, an unknown, duplicate or missing number — is a reason, never a
+ * partial report. A block with text or a tool call after it was written before the answer ended
+ * (say, before a check whose result the Worker then acted on), so it is not the final report.
+ * `reportFrom` is where the text after the Worker's last tool call begins. The criterion text is
+ * always the task's own, whatever the model wrote. `text` is the answer without the report block.
  */
 export function parseWorkerCriteriaReport(
   finalText: string,
   doneCriteria: readonly string[],
+  reportFrom = 0,
 ): WorkerCriteriaReportResult {
   if (doneCriteria.length === 0) return { ok: true, criteria: [], text: finalText.trim() };
   const fail = (reason: string): WorkerCriteriaReportResult => ({ ok: false, reason });
   const block = lastJsonBlock(finalText);
   if (block === null) return fail('最終回答に完了条件ごとの報告（```json ブロック）がありません。');
-  if (block.close === null)
+  if (block.bodyEnd === null || block.end === null)
     return fail(
       '完了条件ごとの報告の ```json ブロックが閉じられていません（途中で切れています）。',
     );
-  if (finalText.slice(block.close + 3).trim() !== '')
+  if (block.start < reportFrom)
+    return fail(
+      '完了条件ごとの報告のあとにツールが実行されたため、この報告は最終の報告として扱いません。',
+    );
+  if (finalText.slice(block.end).trim() !== '')
     return fail(
       '完了条件ごとの報告の ```json ブロックが最終回答の最後にありません（ブロックのあとに文章が続いています）。',
     );
   let parsed: unknown;
   try {
-    parsed = JSON.parse(finalText.slice(block.bodyStart, block.close));
+    parsed = JSON.parse(finalText.slice(block.bodyStart, block.bodyEnd));
   } catch {
     return fail('完了条件ごとの報告をJSONとして読み取れません。');
   }
@@ -132,19 +138,23 @@ export function parseWorkerCriteriaReport(
  * report block, and either the criteria or a failed `criteria-report` verification. With no
  * `doneCriteria` nothing was asked for, so nothing is read. Only `finalText` is read for the
  * report; `precedingText`, what the Worker wrote before its final answer, only leads the summary.
+ * `reportFrom` is where in `finalText` the text after the Worker's last tool call begins.
  * The summary always fits the completion's 4000 characters, whatever the Worker wrote.
  */
 export function readWorkerCriteriaReport(
   finalText: string,
   doneCriteria: readonly string[] | undefined,
-  precedingText = '',
+  options: Readonly<{ precedingText?: string; reportFrom?: number }> = {},
 ): {
   summary: string;
   criteria: WorkerCriterionReport[] | undefined;
   verification: WorkerCompletion['verification'];
 } {
+  const precedingText = options.precedingText ?? '';
   const report =
-    doneCriteria === undefined ? null : parseWorkerCriteriaReport(finalText, doneCriteria);
+    doneCriteria === undefined
+      ? null
+      : parseWorkerCriteriaReport(finalText, doneCriteria, options.reportFrom);
   const block = report === null ? null : lastJsonBlock(finalText);
   // An unreadable report block is left out too: why it could not be read is in the verification.
   // Any other JSON block is part of the answer, such as a file the Worker was asked to produce.
@@ -283,16 +293,27 @@ function failWorkerCompletion(
   };
 }
 
-/** Where the last ```json block of a Worker answer starts, and where it closes if it does. */
+/**
+ * Where the last ```json block of a Worker answer starts, where its body ends and where the block
+ * ends, if it is closed. Both fences must stand on their own line: JSON escapes a newline inside a
+ * string, so a ``` inside an evidence string can never start a line and close the block early.
+ */
 function lastJsonBlock(
   finalText: string,
-): { start: number; bodyStart: number; close: number | null } | null {
+): { start: number; bodyStart: number; bodyEnd: number | null; end: number | null } | null {
   let opening: RegExpExecArray | null = null;
-  for (const match of finalText.matchAll(/```json\b/giu)) opening = match;
+  for (const match of finalText.matchAll(/^```json[^\S\r\n]*\r?$/gimu)) opening = match;
   if (opening === null) return null;
   const bodyStart = opening.index + opening[0].length;
-  const close = finalText.indexOf('```', bodyStart);
-  return { start: opening.index, bodyStart, close: close < 0 ? null : close };
+  const closing = /^```[^\S\r\n]*\r?$/gmu;
+  closing.lastIndex = bodyStart;
+  const close = closing.exec(finalText);
+  return {
+    start: opening.index,
+    bodyStart,
+    bodyEnd: close === null ? null : close.index,
+    end: close === null ? null : close.index + close[0].length,
+  };
 }
 
 /**
@@ -301,9 +322,9 @@ function lastJsonBlock(
  */
 function isFailedReportBlock(finalText: string, block: ReturnType<typeof lastJsonBlock>): boolean {
   if (block === null) return false;
-  if (block.close === null) return true;
+  if (block.bodyEnd === null) return true;
   try {
-    const parsed: unknown = JSON.parse(finalText.slice(block.bodyStart, block.close));
+    const parsed: unknown = JSON.parse(finalText.slice(block.bodyStart, block.bodyEnd));
     return isRecord(parsed) && Object.hasOwn(parsed, 'criteria');
   } catch {
     return true;
@@ -313,7 +334,7 @@ function isFailedReportBlock(finalText: string, block: ReturnType<typeof lastJso
 /** The answer without its last ```json block; an unclosed block runs to the end. */
 function withoutLastJsonBlock(finalText: string, block: ReturnType<typeof lastJsonBlock>): string {
   if (block === null) return finalText;
-  const after = block.close === null ? '' : finalText.slice(block.close + 3);
+  const after = block.end === null ? '' : finalText.slice(block.end);
   return `${finalText.slice(0, block.start)}${after}`;
 }
 

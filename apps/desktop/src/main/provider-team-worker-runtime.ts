@@ -417,11 +417,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       // The per-criterion report is read from the final answer only: a report written in an
       // earlier round, before a tool call whose result the Worker then acted on, is not its final
       // word. The summary still carries every round's text, as it always has.
-      const report = readWorkerCriteriaReport(
-        finalRound.join(''),
-        input.doneCriteria,
-        output.slice(0, output.length - finalRound.length).join(''),
-      );
+      const report = readWorkerCriteriaReport(finalRound.join(''), input.doneCriteria, {
+        precedingText: output.slice(0, output.length - finalRound.length).join(''),
+      });
       const summary = report.summary;
       return {
         claims: {

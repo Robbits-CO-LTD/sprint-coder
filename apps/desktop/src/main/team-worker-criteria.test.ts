@@ -92,6 +92,43 @@ describe('parseWorkerCriteriaReport', () => {
     expect(parsed.ok && parsed.text.endsWith('最終報告')).toBe(true);
   });
 
+  it('closes a report block only at a fence on its own line, so ``` in evidence is kept', () => {
+    const evidence = '次を実行しました:\n```\nnpm test\n```';
+    const text = answer({ criteria: [{ index: 1, status: 'done', evidence }] }, '終わりました。');
+    expect(parseWorkerCriteriaReport(text, ['テストが通る'])).toEqual({
+      ok: true,
+      criteria: [{ criterion: 'テストが通る', status: 'done', evidence }],
+      text: '終わりました。',
+    });
+  });
+
+  it('takes ``` that does not start a line as ordinary text', () => {
+    const report = answer({ criteria: [{ index: 1, status: 'done', evidence: 'ok' }] }, '');
+    const inline = 'コマンドは ```npm test``` と ```json {"a":1}``` です。';
+    expect(parseWorkerCriteriaReport(`${inline}${report}`, ['テストが通る'])).toMatchObject({
+      ok: true,
+      text: inline,
+    });
+    expect(parseWorkerCriteriaReport(inline, ['テストが通る'])).toEqual({
+      ok: false,
+      reason: expect.stringContaining('```json ブロック）がありません'),
+    });
+  });
+
+  it('rejects a report that starts before the text after the last tool call', () => {
+    const text = answer(
+      { criteria: [{ index: 1, status: 'done', evidence: 'ok' }] },
+      '確認します。',
+    );
+    expect(parseWorkerCriteriaReport(text, ['テストが通る'], text.length)).toEqual({
+      ok: false,
+      reason: expect.stringContaining('ツールが実行されたため'),
+    });
+    expect(parseWorkerCriteriaReport(text, ['テストが通る'], '確認します。'.length)).toMatchObject({
+      ok: true,
+    });
+  });
+
   it('rejects a report block followed by more text, as it is not the final report', () => {
     const done = answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] });
     const parsed = parseWorkerCriteriaReport(`${done}\n未完了です。`, ['答えを見つける']);
@@ -246,13 +283,15 @@ describe('readWorkerCriteriaReport', () => {
 
   it('reads the report from the final answer only, while the text before it leads the summary', () => {
     const earlier = `${answer({ criteria: [{ index: 1, status: 'done', evidence: '先に報告' }] }, '途中です。')}\n`;
-    const unreported = readWorkerCriteriaReport('未完了です。', ['答えを見つける'], earlier);
+    const unreported = readWorkerCriteriaReport('未完了です。', ['答えを見つける'], {
+      precedingText: earlier,
+    });
     expect(unreported.criteria).toBeUndefined();
     expect(unreported.summary).toBe(`${earlier}未完了です。`);
     const reported = readWorkerCriteriaReport(
       answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] }, '終わりました。'),
       ['答えを見つける'],
-      '途中です。\n',
+      { precedingText: '途中です。\n' },
     );
     expect(reported.criteria).toEqual([
       { criterion: '答えを見つける', status: 'done', evidence: '確認済み' },
