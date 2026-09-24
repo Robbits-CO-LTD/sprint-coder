@@ -9142,11 +9142,15 @@ export class IpcRouter {
     synthesizing: boolean,
     aggregateUsage: NormalizedProviderUsage | undefined,
   ): Promise<'completed' | 'failed'> {
+    const teamRequired = requiresTeamWorkersInput(input);
     return runRequiredTeamCompletion(
-      requiresTeamWorkersInput(input),
-      this.teamCoordinator
-        .get(taskId)
-        ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped').length ?? 0,
+      teamRequired,
+      teamRequired
+        ? countRequiredTeamWorkers(
+            this.teamCoordinator.get(taskId)?.workers ?? [],
+            this.persistence.getTurnCreatedAt(taskId, turnId),
+          )
+        : 0,
       {
         completed: async () => {
           if (aggregateUsage !== undefined)
@@ -9260,11 +9264,15 @@ export class IpcRouter {
     resolvedModel: string | undefined,
     finalText: string | undefined,
   ): Promise<'completed' | 'failed'> {
+    const teamRequired = this.teamRequiredTurns.has(turnId);
     return runRequiredTeamCompletion(
-      this.teamRequiredTurns.has(turnId),
-      this.teamCoordinator
-        .get(taskId)
-        ?.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped').length ?? 0,
+      teamRequired,
+      teamRequired
+        ? countRequiredTeamWorkers(
+            this.teamCoordinator.get(taskId)?.workers ?? [],
+            this.persistence.getTurnCreatedAt(taskId, turnId),
+          )
+        : 0,
       {
         completed: () => {
           if (resolvedModel !== undefined) this.resolvedModelByTurn.set(turnId, resolvedModel);
@@ -9886,6 +9894,24 @@ export function shouldBlockProviderLeaderCompletion(
 
 export function shouldFailRequiredTeamTurn(teamRequired: boolean, workerCount: number): boolean {
   return teamRequired && workerCount === 0;
+}
+
+/**
+ * Counts the Workers a required Team Turn can point to as proof it hired a Worker (issue #197's
+ * anti-fallback guard). A Worker the user dismissed (`state === 'stopped'`) mid-Turn still counts
+ * when it was hired during *this* Leader Turn — dismissal is not the same as never having hired
+ * anyone. A Worker stopped in an earlier Turn (hired before this Turn started) does not count, so
+ * it cannot carry a later required Turn that never hired anyone of its own.
+ */
+export function countRequiredTeamWorkers(
+  workers: readonly { kind: string; state: string; createdAt: string }[],
+  leaderTurnCreatedAt: string,
+): number {
+  const turnCreatedAtMs = Date.parse(leaderTurnCreatedAt);
+  return workers.filter(
+    ({ kind, state, createdAt }) =>
+      kind === 'worker' && (state !== 'stopped' || Date.parse(createdAt) >= turnCreatedAtMs),
+  ).length;
 }
 
 export function requiredTeamWorkerFailure(
