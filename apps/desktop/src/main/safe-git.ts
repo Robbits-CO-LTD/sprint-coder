@@ -5,7 +5,7 @@ export type SafeGitResult = Readonly<{ stdout: string; stderr: string }>;
 export type SafeGitExec = (
   file: string,
   args: readonly string[],
-  options: Readonly<{ env: NodeJS.ProcessEnv; timeout?: number }>,
+  options: Readonly<{ env: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }>,
 ) => Promise<SafeGitResult>;
 
 type SafeGitOptions = Readonly<{
@@ -134,6 +134,8 @@ export async function safeGitExec(
   return exec('git', safeGitInvocationArgs(cwd, command, config.stdout), {
     env,
     timeout: options.timeout,
+    // Only a caller that reads a long listing widens the default buffer.
+    ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
   });
 }
 

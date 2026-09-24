@@ -41,6 +41,7 @@ function worktree(overrides: Partial<TeamRetainedWorktree> = {}): TeamRetainedWo
     baseHead: 'a'.repeat(40),
     workerHead: null,
     integratedHead: null,
+    integration: 'none',
     changedFileCount: 0,
     reason: 'Worker failed after writing',
     executionState: 'failed',
@@ -57,6 +58,7 @@ const integrated = worktree({
   role: 'finisher',
   workerHead: 'b'.repeat(40),
   integratedHead: 'c'.repeat(40),
+  integration: 'confirmed',
   changedFileCount: 3,
   reason: 'Integrated repository worktree remained dirty during cleanup',
   executionState: 'completed',
@@ -193,13 +195,15 @@ describe('TeamRetainedWorktreesTrigger (issue #544)', () => {
 });
 
 describe('retainedWorktreeDiscardWarning (issue #544)', () => {
-  it('warns plainly when the change never reached the Workspace', () => {
-    expect(retainedWorktreeDiscardWarning({ integratedHead: null }).body).toBe(
-      UNINTEGRATED_WARNING,
-    );
-    expect(retainedWorktreeDiscardWarning({ integratedHead: 'c'.repeat(40) }).body).toBe(
+  it('warns plainly unless Main found the change in the Workspace history', () => {
+    expect(retainedWorktreeDiscardWarning({ integration: 'none' }).body).toBe(UNINTEGRATED_WARNING);
+    expect(retainedWorktreeDiscardWarning({ integration: 'confirmed' }).body).toBe(
       INTEGRATED_WARNING,
     );
+    // Recorded as integrated but no longer found: the worktree may hold the only copy.
+    const unconfirmed = retainedWorktreeDiscardWarning({ integration: 'unconfirmed' });
+    expect(unconfirmed.body).toBe(UNINTEGRATED_WARNING);
+    expect(unconfirmed.note).toContain('今のWorkspaceの履歴には見つかりません');
   });
 });
 
@@ -311,6 +315,26 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     // Closing the confirmation leaves the list open.
     expect(onClose).not.toHaveBeenCalled();
     expect(items()).toHaveLength(3);
+  });
+
+  it('treats a recorded integration Main could not find in the Workspace as unintegrated', async () => {
+    const unverified = worktree({
+      executionId: 'execution-4',
+      workerHead: 'b'.repeat(40),
+      integratedHead: 'c'.repeat(40),
+      integration: 'unconfirmed',
+      executionState: 'completed',
+    });
+    api.listRetainedWorktrees.mockResolvedValueOnce({ worktrees: [unverified], total: 1 });
+    await renderDialog();
+    const [item] = items();
+    expect(item!.querySelector('[data-testid="team-retained-state"]')?.textContent).toBe(
+      '完了 · 統合を確認できません（Workspaceの履歴に見つかりません）',
+    );
+    await click(button(item!, 'team-retained-discard'));
+    expect(
+      container.querySelector('[data-testid="team-retained-confirm-warning"]')?.textContent,
+    ).toBe(UNINTEGRATED_WARNING);
   });
 
   it("keeps the confirmation open with Main's reason when the discard is refused", async () => {

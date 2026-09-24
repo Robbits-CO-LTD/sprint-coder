@@ -44,33 +44,49 @@ export function TeamRetainedWorktreesTrigger({
   );
 }
 
+const UNINTEGRATED_DISCARD_BODY =
+  'このworktreeの変更はWorkspaceに統合されていません。破棄すると元に戻せません。';
+
 /**
- * What the discard confirmation says. A worktree whose change never reached the Workspace is the
- * only copy of that work, so that case says so first and plainly.
+ * What the discard confirmation says. A worktree whose change is not in the Workspace may hold the
+ * only copy of that work, so that case says so first and plainly. Only an integration Main found in
+ * the repository's current history counts: one it merely recorded is warned about as unintegrated.
  */
 export function retainedWorktreeDiscardWarning(
-  worktree: Pick<TeamRetainedWorktree, 'integratedHead'>,
+  worktree: Pick<TeamRetainedWorktree, 'integration'>,
 ): { title: string; body: string; note: string } {
-  return worktree.integratedHead === null
-    ? {
-        title: '統合されていない変更を破棄しますか？',
-        body: 'このworktreeの変更はWorkspaceに統合されていません。破棄すると元に戻せません。',
-        note: 'Workerが作ったコミットも、未コミットのファイルも、すべて削除されます。',
-      }
-    : {
+  switch (worktree.integration) {
+    case 'confirmed':
+      return {
         title: '残っているworktreeを削除しますか？',
         body: '変更はWorkspaceに統合済みです。残っている隔離worktreeを削除します。',
         note: '統合の後でこのworktreeに残ったファイルがあれば、それも削除され元に戻せません。',
       };
+    case 'unconfirmed':
+      return {
+        title: '統合を確認できない変更を破棄しますか？',
+        body: UNINTEGRATED_DISCARD_BODY,
+        note: '統合したと記録されていますが、今のWorkspaceの履歴には見つかりません。このworktreeにしか残っていない可能性があります。',
+      };
+    case 'none':
+      return {
+        title: '統合されていない変更を破棄しますか？',
+        body: UNINTEGRATED_DISCARD_BODY,
+        note: 'Workerが作ったコミットも、未コミットのファイルも、すべて削除されます。',
+      };
+  }
 }
 
-/** The state column: how far the execution got, and whether its change reached the Workspace. */
+/** The state column: how far the execution got, and whether its change is in the Workspace. */
 export function retainedWorktreeStateLabel(
-  worktree: Pick<TeamRetainedWorktree, 'executionState' | 'integratedHead'>,
+  worktree: Pick<TeamRetainedWorktree, 'executionState' | 'integration'>,
 ): string {
-  return `${EXECUTION_STATE_LABELS[worktree.executionState]} · ${
-    worktree.integratedHead === null ? '未統合（変更を保持）' : '統合済み（片付けに失敗）'
-  }`;
+  const integration = {
+    none: '未統合（変更を保持）',
+    confirmed: '統合済み（片付けに失敗）',
+    unconfirmed: '統合を確認できません（Workspaceの履歴に見つかりません）',
+  }[worktree.integration];
+  return `${EXECUTION_STATE_LABELS[worktree.executionState]} · ${integration}`;
 }
 
 type InspectionState =

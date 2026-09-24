@@ -2498,6 +2498,7 @@ export class TeamCoordinator {
           baseHead: repository.baseHead,
           workerHead: repository.workerHead,
           integratedHead: repository.integratedHead,
+          integration: await this.retainedWorktreeIntegration(repository),
           changedFileCount: repository.changedFiles.length,
           reason: isolation.reason,
           executionState: execution.state,
@@ -2590,7 +2591,9 @@ export class TeamCoordinator {
           'worktreeのファイルが使用中のため破棄できませんでした。このフォルダを開いているエディタやターミナルを閉じてから、もう一度お試しください。',
           true,
         );
-      // Re-read after the Git await, so a concurrent update to this isolation is not reverted.
+      // Re-read after the Git await, so a concurrent update to this isolation is not reverted. An
+      // automatic reclaim that removed and recorded the same worktree meanwhile leaves it `cleaned`,
+      // which is what this discard wanted too, so that is a success and nothing is written.
       const latest = this.persistence.getTeamExecutionIsolation(execution.id);
       const latestRepository = latest?.repositories.find(
         ({ ordinal }) => ordinal === repository.ordinal,
@@ -2661,6 +2664,22 @@ export class TeamCoordinator {
       runtimeUnsettled:
         this.runtime.hasUnsettledTurn?.(execution.assigneeAgentId, execution.id) === true,
     });
+  }
+
+  /**
+   * Whether a retained worktree's change is still in the Workspace. A recorded integrated commit is
+   * checked against the repository's current history (read only): after a failed revalidation the
+   * record keeps its integrated HEAD although the Workspace may no longer contain it, and such a
+   * worktree may then hold the only copy of the change.
+   */
+  private async retainedWorktreeIntegration(
+    repository: TeamExecutionIsolation['repositories'][number],
+  ): Promise<TeamRetainedWorktree['integration']> {
+    if (repository.integratedHead === null) return 'none';
+    const contained = await this.worktreeManager
+      ?.headContains(repository.repoPath, repository.integratedHead)
+      .catch(() => false);
+    return contained === true ? 'confirmed' : 'unconfirmed';
   }
 
   /** The retained worktree's own directory, refused unless Sprint Coder created it and it exists. */
@@ -6053,6 +6072,12 @@ async function retainedWorktreeGit<T>(failure: string, run: () => Promise<T>): P
   try {
     return await run();
   } catch (error) {
+    if (error instanceof WorktreeError && error.code === 'too_large')
+      throw new RetainedWorktreeError(
+        '変更が多すぎて一覧を表示できません。「フォルダを開く」から直接確認してください。',
+        false,
+        { cause: error },
+      );
     if (error instanceof WorktreeError)
       throw new RetainedWorktreeError(`${failure}: ${error.message}`, false, { cause: error });
     throw error;

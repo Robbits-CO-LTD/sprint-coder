@@ -904,6 +904,12 @@ export const teamRetainedWorktreeSchema = z
     baseHead: retainedWorktreeGitHeadSchema,
     workerHead: retainedWorktreeGitHeadSchema.nullable(),
     integratedHead: retainedWorktreeGitHeadSchema.nullable(),
+    /**
+     * Whether the change is in the Workspace: `none` when nothing was integrated, `confirmed` when
+     * the recorded integrated commit is in the repository's current history, and `unconfirmed` when
+     * it was recorded but Main no longer finds it there (or could not check).
+     */
+    integration: z.enum(['none', 'confirmed', 'unconfirmed']),
     /** Files the isolation recorded when it sealed a commit; the live state comes from inspect. */
     changedFileCount: z.number().int().min(0).max(500),
     reason: z.string().min(1).max(2_000).nullable(),
@@ -915,7 +921,13 @@ export const teamRetainedWorktreeSchema = z
   .strict()
   .refine(({ discardable, blockedReason }) => discardable === (blockedReason === null), {
     message: 'A retained worktree is discardable exactly when it has no blocked reason',
-  });
+  })
+  .refine(
+    ({ integratedHead, integration }) => (integration === 'none') === (integratedHead === null),
+    {
+      message: 'Only a retained worktree without an integrated commit has no integration to check',
+    },
+  );
 export type TeamRetainedWorktree = z.infer<typeof teamRetainedWorktreeSchema>;
 export const teamRetainedWorktreeListSchema = z
   .object({

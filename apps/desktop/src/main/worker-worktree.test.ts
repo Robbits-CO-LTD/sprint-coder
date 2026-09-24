@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
+  rmdir,
   stat,
+  unlink,
   writeFile,
   rename,
   symlink,
@@ -14,10 +19,47 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { WorkerWorktreeManager, type ExecFileImpl } from './worker-worktree';
+import {
+  WorkerWorktreeManager,
+  removeTreeWithoutFollowingLinks,
+  type ExecFileImpl,
+  type TreeRemovalFs,
+} from './worker-worktree';
 
 const execFileAsync = promisify(execFile);
 const gitAvailable = isGitAvailable();
+/** A Windows junction needs no privilege; elsewhere a directory symlink is the same kind of link. */
+const DIRECTORY_LINK = process.platform === 'win32' ? 'junction' : 'dir';
+
+/**
+ * The real file system, except that removing a path `fails` names throws `code`, `times` times (a
+ * held Windows lock, or a removal cut short part way).
+ */
+function failingRemovalFs(
+  fails: (path: string) => boolean,
+  code: string,
+  times = Number.POSITIVE_INFINITY,
+): TreeRemovalFs {
+  let failures = 0;
+  const guard = (path: string, action: string): void => {
+    if (!fails(path) || failures >= times) return;
+    failures += 1;
+    throw Object.assign(new Error(`${code}: operation failed, ${action} '${path}'`), { code });
+  };
+  return {
+    lstat: (path) => lstat(path),
+    readdir: (path) => readdir(path),
+    unlink: async (path) => {
+      guard(path, 'unlink');
+      await unlink(path);
+    },
+    rmdir: async (path) => {
+      guard(path, 'rmdir');
+      await rmdir(path);
+    },
+    chmod: (path, mode) => chmod(path, mode),
+  };
+}
 
 function interceptWorktreeRemove(beforeRemove: () => void): ExecFileImpl {
   return async (file, args, options) => {
@@ -356,9 +398,30 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect(delays).toEqual([100, 200]);
   });
 
-  it('quarantines a clean Windows worktree while access denial persists', async () => {
+  it('quarantines a clean Windows worktree while a lock on its files persists', async () => {
     const { repoPath, worktreesRoot, manager } = await fixture();
     const created = await manager.create({ agentId: 'agent-locked', repoPath });
+    const locked = join(created.path, 'README.md');
+    const delays: number[] = [];
+    const retrying = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      delay: async (milliseconds) => void delays.push(milliseconds),
+      treeRemovalFs: failingRemovalFs((path) => path === locked, 'EBUSY'),
+    });
+
+    await expect(retrying.cleanup({ agentId: 'agent-locked', repoPath })).resolves.toEqual({
+      outcome: 'quarantined',
+    });
+    expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
+    expect(await readFile(locked, 'utf8')).toBe('hello\n');
+    // The files go before the registration, so the kept worktree is still registered.
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+  });
+
+  it('keeps the registration while Git refuses to drop it, and a later cleanup finishes it', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-unregister-locked', repoPath });
     const delays: number[] = [];
     const retrying = new WorkerWorktreeManager({
       worktreesRoot,
@@ -369,11 +432,17 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       }),
     });
 
-    await expect(retrying.cleanup({ agentId: 'agent-locked', repoPath })).resolves.toEqual({
-      outcome: 'quarantined',
-    });
+    await expect(
+      retrying.cleanup({ agentId: 'agent-unregister-locked', repoPath }),
+    ).resolves.toEqual({ outcome: 'quarantined' });
     expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
-    expect((await stat(created.path)).isDirectory()).toBe(true);
+    await expect(stat(created.path)).rejects.toThrow();
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    await expect(
+      manager.cleanup({ agentId: 'agent-unregister-locked', repoPath }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
   });
 
   it('removes an unchanged worktree at its base and unregisters it', async () => {
@@ -515,9 +584,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       platform: 'win32',
       delay: async (milliseconds) => void delays.push(milliseconds),
-      execFileImpl: interceptWorktreeRemove(() => {
-        throw Object.assign(new Error('Access is denied'), { code: 'EPERM' });
-      }),
+      treeRemovalFs: failingRemovalFs((path) => path === created.path, 'EPERM'),
     });
 
     await expect(
@@ -529,6 +596,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     ).resolves.toEqual({ outcome: 'quarantined' });
     expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
     expect((await stat(created.path)).isDirectory()).toBe(true);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
   });
 
   it('discards a changed worktree with its commit and untracked files and unregisters it (issue #544)', async () => {
@@ -586,7 +654,11 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(head);
     expect(await git(['-C', repoPath, 'status', '--porcelain'])).toBe('');
     expect(await git(['-C', repoPath, 'branch', '--list'])).toBe(branchesBefore);
-    expect(commands.some((args) => args.includes('remove') && args.includes('--force'))).toBe(true);
+    // Git only drops the registration: it never deletes the files, so it is never forced.
+    expect(commands.some((args) => args.includes('worktree') && args.includes('remove'))).toBe(
+      true,
+    );
+    expect(commands.some((args) => args.includes('--force'))).toBe(false);
     expect(commands.some((args) => args.includes('prune'))).toBe(false);
   });
 
@@ -649,29 +721,163 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect((await stat(join(repoPath, 'README.md'))).isFile()).toBe(true);
   });
 
-  it('retries a discard through temporary Windows access denial', async () => {
+  it('retries a discard through a temporary Windows lock on its files', async () => {
     const { repoPath, worktreesRoot, manager } = await fixture();
     const created = await manager.create({ agentId: 'agent-discard-retry', repoPath });
-    await writeFile(join(created.path, 'change.txt'), 'changed\n');
-    let removeAttempts = 0;
+    const busy = join(created.path, 'change.txt');
+    await writeFile(busy, 'changed\n');
     const delays: number[] = [];
     const retrying = new WorkerWorktreeManager({
       worktreesRoot,
       platform: 'win32',
       delay: async (milliseconds) => void delays.push(milliseconds),
-      execFileImpl: interceptWorktreeRemove(() => {
-        removeAttempts += 1;
-        if (removeAttempts < 3)
-          throw Object.assign(new Error('Permission denied'), { code: 'EACCES' });
-      }),
+      treeRemovalFs: failingRemovalFs((path) => path === busy, 'EBUSY', 2),
     });
 
     await expect(
       retrying.discard({ agentId: 'agent-discard-retry', repoPath, path: created.path }),
     ).resolves.toEqual({ outcome: 'removed' });
-    expect(removeAttempts).toBe(3);
     expect(delays).toEqual([100, 200]);
     await expect(stat(created.path)).rejects.toThrow();
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+  });
+
+  it('removes a directory tree without following a link into another folder (issue #544)', async () => {
+    const outside = await outsideFolder();
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-tree-removal-'));
+    cleanupRoots.push(root);
+    await mkdir(join(root, 'nested', 'deeper'), { recursive: true });
+    await writeFile(join(root, 'nested', 'deeper', 'own.txt'), 'own\n');
+    await symlink(outside, join(root, 'linked-out'), DIRECTORY_LINK);
+    await symlink(
+      join(outside, 'sub'),
+      join(root, 'nested', 'deeper', 'linked-sub'),
+      DIRECTORY_LINK,
+    );
+    const readOnly = join(root, 'nested', 'read-only.txt');
+    await writeFile(readOnly, 'read only\n');
+    await chmod(readOnly, 0o444);
+
+    await removeTreeWithoutFollowingLinks(root);
+
+    await expect(lstat(root)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expectOutsideIntact(outside);
+    // A missing tree is already removed, so a removal can simply run again.
+    await expect(removeTreeWithoutFollowingLinks(root)).resolves.toBeUndefined();
+  });
+
+  it('removes a link by itself: rmdir when unlink refuses a directory link, never chmod or readdir through it', async () => {
+    const root = join('tree-root');
+    const link = join(root, 'link');
+    const calls: string[] = [];
+    const refuse = (path: string, code: string) => {
+      throw Object.assign(new Error(`${code}: ${path}`), { code });
+    };
+    const fakeFs: TreeRemovalFs = {
+      lstat: async (path) => ({
+        isDirectory: () => path === root,
+        isSymbolicLink: () => path === link,
+      }),
+      readdir: async (path) => {
+        calls.push(`readdir ${path}`);
+        return path === root ? ['link'] : ['behind-the-link.txt'];
+      },
+      unlink: async (path) => {
+        calls.push(`unlink ${path}`);
+        // Windows refuses to unlink some directory links; only rmdir removes them.
+        refuse(path, 'EPERM');
+      },
+      rmdir: async (path) => {
+        calls.push(`rmdir ${path}`);
+      },
+      chmod: async (path) => {
+        // chmod follows a link, so it would change the folder the link points at.
+        calls.push(`chmod ${path}`);
+      },
+    };
+
+    await removeTreeWithoutFollowingLinks(root, fakeFs);
+
+    expect(calls).toEqual([`readdir ${root}`, `unlink ${link}`, `rmdir ${link}`, `rmdir ${root}`]);
+  });
+
+  it('discards a worktree holding a directory link without touching what it points at (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    const outside = await outsideFolder();
+    const created = await manager.create({ agentId: 'agent-discard-link', repoPath });
+    await symlink(outside, join(created.path, 'junction-out'), DIRECTORY_LINK);
+    await mkdir(join(created.path, 'work'));
+    await symlink(join(outside, 'sub'), join(created.path, 'work', 'nested-link'), DIRECTORY_LINK);
+
+    await expect(
+      manager.discard({ agentId: 'agent-discard-link', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    await expectOutsideIntact(outside);
+  });
+
+  it('reclaims an unchanged worktree whose ignored link points outside, keeping the target (issue #544)', async () => {
+    const { repoPath, manager } = await fixture();
+    await writeFile(join(repoPath, '.gitignore'), 'linked/\n');
+    await git(['-C', repoPath, 'add', '.gitignore']);
+    await git([
+      '-C',
+      repoPath,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-q',
+      '-m',
+      'ignore linked',
+    ]);
+    const outside = await outsideFolder();
+    const created = await manager.create({ agentId: 'agent-ignored-link', repoPath });
+    await symlink(outside, join(created.path, 'linked'), DIRECTORY_LINK);
+    expect(await git(['-C', created.path, 'status', '--porcelain', '--untracked-files=all'])).toBe(
+      '',
+    );
+
+    await expect(
+      manager.cleanupUnchanged({
+        agentId: 'agent-ignored-link',
+        repoPath,
+        baseHead: created.baseHead,
+      }),
+    ).resolves.toEqual({ outcome: 'removed' });
+
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    await expectOutsideIntact(outside);
+  });
+
+  it('keeps the rest and the registration when a discard stops part way, and finishes on the next one', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-discard-partial', repoPath });
+    await writeFile(join(created.path, 'a.txt'), 'first\n');
+    const failing = join(created.path, 'b.txt');
+    await writeFile(failing, 'second\n');
+    const interrupted = new WorkerWorktreeManager({
+      worktreesRoot,
+      treeRemovalFs: failingRemovalFs((path) => path === failing, 'EIO', 1),
+    });
+
+    await expect(
+      interrupted.discard({ agentId: 'agent-discard-partial', repoPath, path: created.path }),
+    ).rejects.toMatchObject({ code: 'remove_failed' });
+    expect(await readFile(failing, 'utf8')).toBe('second\n');
+    // `.git` goes last, so what is left is still a worktree Git can read and unregister.
+    expect((await git(['-C', created.path, 'rev-parse', 'HEAD'])).trim()).toBe(created.baseHead);
+    expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+    await expect(
+      manager.discard({ agentId: 'agent-discard-partial', repoPath, path: created.path }),
+    ).resolves.toEqual({ outcome: 'removed' });
+    await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
   });
 
   it('inspects a retained worktree without changing it', async () => {
@@ -741,6 +947,45 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     await expect(manager.inspectChanges({ ...input, path: repoPath })).rejects.toMatchObject({
       code: 'invalid_input',
     });
+  });
+
+  it('reads long change lists with a wide buffer and refuses one past it as too large', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const created = await manager.create({ agentId: 'agent-inspect-large', repoPath });
+    const buffers: Array<{ args: readonly string[]; maxBuffer: number | undefined }> = [];
+    let overflow = false;
+    const inspecting = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        buffers.push({ args, maxBuffer: options.maxBuffer });
+        if (overflow && args.includes('status'))
+          throw Object.assign(new Error('stdout maxBuffer length exceeded'), {
+            code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
+          });
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+          ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const input = {
+      agentId: 'agent-inspect-large',
+      repoPath,
+      path: created.path,
+      baseHead: created.baseHead,
+      limit: 500,
+    };
+
+    await inspecting.inspectChanges(input);
+    for (const listing of ['status', 'diff'])
+      expect(
+        buffers.find(({ args }) => args.includes(listing) && !args.includes('--list'))?.maxBuffer,
+      ).toBeGreaterThanOrEqual(32 * 1024 * 1024);
+
+    overflow = true;
+    await expect(inspecting.inspectChanges(input)).rejects.toMatchObject({ code: 'too_large' });
   });
 
   it('collapses Worker changes into one commit and integrates them into a clean workspace', async () => {
@@ -1148,6 +1393,21 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const worktreesRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-root-'));
     cleanupRoots.push(repoPath, worktreesRoot);
     return { repoPath, head, worktreesRoot, manager: new WorkerWorktreeManager({ worktreesRoot }) };
+  }
+
+  /** A folder outside every worktree, with a file at its top and one below. */
+  async function outsideFolder(): Promise<string> {
+    const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-outside-'));
+    cleanupRoots.push(outside);
+    await mkdir(join(outside, 'sub'));
+    await writeFile(join(outside, 'precious.txt'), 'precious\n');
+    await writeFile(join(outside, 'sub', 'deep.txt'), 'deep\n');
+    return outside;
+  }
+
+  async function expectOutsideIntact(outside: string): Promise<void> {
+    expect(await readFile(join(outside, 'precious.txt'), 'utf8')).toBe('precious\n');
+    expect(await readFile(join(outside, 'sub', 'deep.txt'), 'utf8')).toBe('deep\n');
   }
 });
 

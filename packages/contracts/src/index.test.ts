@@ -1098,6 +1098,7 @@ describe('public contracts', () => {
       baseHead: 'a'.repeat(40),
       workerHead: null,
       integratedHead: null,
+      integration: 'none',
       changedFileCount: 0,
       reason: 'Worker failed',
       executionState: 'failed',
@@ -1115,10 +1116,21 @@ describe('public contracts', () => {
       blockedReason: '実行がまだ終わっていません',
     };
     expect(teamRetainedWorktreeListSchema.parse({ worktrees: [blocked], total: 3 }).total).toBe(3);
-    // A discardable row never carries a reason, and a blocked one always does.
+    const integrated = { ...worktree, integratedHead: 'b'.repeat(40) };
+    for (const integration of ['confirmed', 'unconfirmed'] as const)
+      expect(
+        teamRetainedWorktreeListSchema.safeParse({
+          worktrees: [{ ...integrated, integration }],
+          total: 1,
+        }).success,
+      ).toBe(true);
+    // A discardable row never carries a reason, and a blocked one always does; an integration is
+    // checked exactly when a commit was integrated.
     for (const row of [
       { ...worktree, blockedReason: '理由' },
       { ...worktree, discardable: false },
+      { ...worktree, integration: 'confirmed' },
+      { ...integrated, integration: 'none' },
     ])
       expect(teamRetainedWorktreeListSchema.safeParse({ worktrees: [row], total: 1 }).success).toBe(
         false,
