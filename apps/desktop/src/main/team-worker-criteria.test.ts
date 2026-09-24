@@ -155,6 +155,28 @@ describe('parseWorkerCriteriaReport', () => {
         reason: expect.stringContaining('```json ブロック）がありません'),
       });
     });
+
+    // The relaxed closings must not reopen a report followed by more text or by a tool call.
+    it.each([
+      ['a one-line block followed by text', `\`\`\`json ${json}\`\`\` 以上です。`],
+      [
+        'text between the JSON and a closing that ends the answer',
+        ['```json', json, '未完了です。```'].join('\n'),
+      ],
+    ])('does not take %s', (_label, text) => {
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'])).toMatchObject({ ok: false });
+    });
+
+    it.each([
+      ['written on one line', `確認します。\n\`\`\`json ${json}\`\`\``],
+      ['closed right after the JSON', ['確認します。', '```json', `${json}\`\`\``].join('\n')],
+    ])('does not take a report %s once a tool ran after it', (_label, text) => {
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'])).toMatchObject({ ok: true });
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'], text.length)).toEqual({
+        ok: false,
+        reason: expect.stringContaining('ツールが実行されたため'),
+      });
+    });
   });
 
   it('takes ``` that does not start a line as ordinary text', () => {
