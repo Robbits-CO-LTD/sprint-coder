@@ -174,8 +174,9 @@ export class WorkerRuntimeExitUnconfirmedError extends Error {
    */
   readonly originalError: unknown;
   /**
-   * The new execution was refused before it started anything, because an earlier Turn of its
-   * Worker is still unconfirmed. This execution itself left nothing running.
+   * The new execution was refused before it started anything, and every unconfirmed Turn that
+   * blocked it ran for another execution, so nothing of this execution can still be using its
+   * worktree. False when a blocking Turn may belong to this same execution (a steer reuses it).
    */
   readonly startRefused: boolean;
 
@@ -5524,7 +5525,7 @@ function workerRuntimeFailureOf(error: unknown): WorkerRuntimeFailureError | nul
  * worktree the CLI might still be using is never reclaimed after them.
  */
 export function runtimeStopConfirmed(error: unknown): boolean {
-  // An execution refused before it started ran nothing, so its own worktree is free to reclaim.
+  // Only a refusal caused by other executions' Turns leaves this execution's worktree unused.
   if (error instanceof WorkerRuntimeExitUnconfirmedError) return error.startRefused;
   return !(
     error instanceof WorkerRuntimeControlError &&

@@ -156,6 +156,9 @@ class TeamRuntimeExecutionError extends WorkerRuntimeFailureError {
 
 type TeamWorkerExecutionInput = Parameters<TeamWorkerRuntime['execute']>[0];
 
+/** The Worker and the Team execution a Turn ran for; the execution is unknown when none was given. */
+type TurnOwner = { agentId: string; executionId: string | undefined };
+
 export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
   private readonly executionAborts = new Map<string, AbortController>();
   private readonly simulator = new DeterministicTeamWorkerRuntime();
@@ -172,7 +175,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    */
   private readonly unconfirmedExits = new Map<
     string,
-    { agentId: string; kind: 'claude' | 'codex' | 'grok' }
+    TurnOwner & { kind: 'claude' | 'codex' | 'grok' }
   >();
   private readonly unconfirmedExitRechecks = new Set<NodeJS.Timeout>();
   /**
@@ -180,7 +183,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    * execution returns before that wait ends, so its Worker can be dispatched again meanwhile;
    * `settled` resolves once the wait has ended and any unconfirmed exit has been recorded.
    */
-  private readonly exitWaits = new Map<string, { agentId: string; settled: Promise<void> }>();
+  private readonly exitWaits = new Map<string, TurnOwner & { settled: Promise<void> }>();
   private disposed = false;
 
   constructor(private readonly deps: TeamWorkerRuntimeDeps) {}
@@ -274,7 +277,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         input.signal === undefined
           ? controller.signal
           : AbortSignal.any([input.signal, controller.signal]);
-      await this.awaitPreviousTurnExit(input.worker.id, signal);
+      await this.awaitPreviousTurnExit(
+        { agentId: input.worker.id, executionId: input.executionId },
+        signal,
+      );
       return await this.executeWithSignal({ ...input, signal });
     } finally {
       if (this.executionAborts.get(input.worker.id) === controller)
@@ -579,12 +585,13 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
     } finally {
       try {
         if (runtimeStarted) {
+          const owner: TurnOwner = { agentId: input.worker.id, executionId: input.executionId };
           // Starting inside a promise turns a synchronous throw from the exit wait into a rejection,
           // which is just as unconfirmed.
           const exited = Promise.resolve()
             .then(() => this.client(choice.kind).waitForTurnExit(turnId))
             .catch((error: unknown) => {
-              this.watchUnconfirmedExit(input.worker.id, choice.kind, turnId);
+              this.watchUnconfirmedExit(owner, choice.kind, turnId);
               // This error replaces the Turn's own failure, so it carries that failure along.
               throw new WorkerRuntimeExitUnconfirmedError(
                 error instanceof Error ? error.message : String(error),
@@ -594,7 +601,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
                 },
               );
             });
-          this.trackExitWait(input.worker.id, turnId, exited);
+          this.trackExitWait(owner, turnId, exited);
           await exited;
         }
       } finally {
@@ -614,10 +621,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    * confirmed (issue #548). A CLI that may still be running and writing never gets a second one
    * beside it.
    */
-  private async awaitPreviousTurnExit(agentId: string, signal: AbortSignal): Promise<void> {
+  private async awaitPreviousTurnExit(execution: TurnOwner, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
     const pending = [...this.exitWaits.values()]
-      .filter((wait) => wait.agentId === agentId)
+      .filter((wait) => wait.agentId === execution.agentId)
       .map(({ settled }) => settled);
     if (pending.length > 0) {
       let stopWaiting = (): void => undefined;
@@ -637,19 +644,26 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       }
     }
     signal.throwIfAborted();
-    if (
-      [...this.exitWaits.values(), ...this.unconfirmedExits.values()].some(
-        (turn) => turn.agentId === agentId,
-      )
-    )
+    const blocking = [...this.exitWaits.values(), ...this.unconfirmedExits.values()].filter(
+      (turn) => turn.agentId === execution.agentId,
+    );
+    if (blocking.length > 0)
       throw new WorkerRuntimeExitUnconfirmedError(PREVIOUS_TURN_EXIT_UNCONFIRMED_MESSAGE, {
-        startRefused: true,
+        // Refusing leaves this execution's own worktree unused only when every blocking Turn ran
+        // for another execution. A steered execution reuses its worktree, which an earlier Turn of
+        // it may still be using, and an unknown execution may be this one.
+        startRefused: blocking.every(
+          (turn) =>
+            turn.executionId !== undefined &&
+            execution.executionId !== undefined &&
+            turn.executionId !== execution.executionId,
+        ),
       });
   }
 
   /** Records a Turn's exit wait until it ends; see `exitWaits`. */
-  private trackExitWait(agentId: string, turnId: string, exited: Promise<void>): void {
-    const wait = { agentId, settled: Promise.resolve() };
+  private trackExitWait(owner: TurnOwner, turnId: string, exited: Promise<void>): void {
+    const wait = { ...owner, settled: Promise.resolve() };
     wait.settled = exited
       .then(
         () => undefined,
@@ -668,11 +682,11 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
    * never counts as an exit; only the Host's exit report does.
    */
   private watchUnconfirmedExit(
-    agentId: string,
+    owner: TurnOwner,
     kind: 'claude' | 'codex' | 'grok',
     turnId: string,
   ): void {
-    const record = { agentId, kind };
+    const record = { ...owner, kind };
     this.unconfirmedExits.set(turnId, record);
     const watching = (): boolean => !this.disposed && this.unconfirmedExits.get(turnId) === record;
     const wait = (): void => {

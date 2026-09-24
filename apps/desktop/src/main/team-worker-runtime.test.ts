@@ -120,7 +120,11 @@ import {
   chooseWorkerRuntime,
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
-import { WorkerRuntimeExitUnconfirmedError, WorkerRuntimeFailureError } from './team-coordinator';
+import {
+  WorkerRuntimeExitUnconfirmedError,
+  WorkerRuntimeFailureError,
+  runtimeStopConfirmed,
+} from './team-coordinator';
 import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
@@ -675,20 +679,23 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       );
     const subject = runtime();
     const readOnlyWorker = worker(false);
-    const run = (agent: AgentRecord) =>
+    const run = (agent: AgentRecord, executionId: string) =>
       subject.execute({
         worker: agent,
         envelope: { ...envelope, targetAgentId: agent.id },
         content: '調査する',
+        executionId,
       });
 
-    await expect(run(readOnlyWorker)).rejects.toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+    await expect(run(readOnlyWorker, 'execution-1')).rejects.toBeInstanceOf(
+      WorkerRuntimeExitUnconfirmedError,
+    );
     const unconfirmedTurnId = runtimeHostMock.starts[0]?.args[1];
     // The Worker keeps waiting for that same Turn to exit.
     await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledTimes(2));
     expect(runtimeHostMock.waitForExit).toHaveBeenLastCalledWith(unconfirmedTurnId);
 
-    const blocked = await run(readOnlyWorker).then(
+    const blocked = await run(readOnlyWorker, 'execution-2').then(
       () => {
         throw new Error('expected the Worker to stay blocked');
       },
@@ -702,14 +709,14 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts).toHaveLength(1);
 
     // Only that Worker is held back.
-    await expect(run({ ...readOnlyWorker, id: 'worker-2' })).resolves.toMatchObject({
+    await expect(run({ ...readOnlyWorker, id: 'worker-2' }, 'execution-3')).resolves.toMatchObject({
       completion: { status: 'succeeded' },
     });
     expect(runtimeHostMock.starts).toHaveLength(2);
 
     confirmExit?.();
     await new Promise((resolve) => setImmediate(resolve));
-    await expect(run(readOnlyWorker)).resolves.toMatchObject({
+    await expect(run(readOnlyWorker, 'execution-2')).resolves.toMatchObject({
       completion: { status: 'succeeded' },
     });
     expect(runtimeHostMock.starts).toHaveLength(3);
@@ -795,11 +802,12 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
   });
 
   describe('while the previous Turn of the Worker still waits for its exit', () => {
-    const run = (subject: RuntimeHostTeamWorkerRuntime) =>
+    const run = (subject: RuntimeHostTeamWorkerRuntime, executionId = 'execution-1') =>
       subject.execute({
         worker: worker(false),
         envelope: { ...envelope, targetAgentId: 'worker-1' },
         content: '調査する',
+        executionId,
       });
     const settle = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -829,45 +837,54 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       subject.dispose();
     });
 
-    it('refuses the held execution without starting a CLI when that exit goes unconfirmed', async () => {
-      runtimeHostMock.starts.length = 0;
-      let failExit: ((error: Error) => void) | undefined;
-      runtimeHostMock.waitForExit
-        .mockImplementationOnce(
-          () =>
-            new Promise<void>((_resolve, reject) => {
-              failExit = reject;
-            }),
-        )
-        // The background check keeps waiting, so the exit stays unconfirmed.
-        .mockImplementationOnce(() => new Promise<void>(() => undefined));
-      const subject = runtime();
-      const first = run(subject).then(
-        () => null,
-        (caught: unknown) => caught,
-      );
-      await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
-      await subject.stop('worker-1');
-      const second = run(subject).then(
-        () => null,
-        (caught: unknown) => caught,
-      );
-      await settle();
-      expect(runtimeHostMock.starts).toHaveLength(1);
+    it.each([
+      // Refused before starting, with nothing of its own left running: its worktree is free.
+      ['another execution', 'execution-2', true],
+      // A steer re-runs the same execution in the same worktree, which that Turn may still use.
+      ['the same execution', 'execution-1', false],
+    ])(
+      'refuses a held start for %s without starting a CLI when that exit goes unconfirmed',
+      async (_label, executionId, startRefused) => {
+        runtimeHostMock.starts.length = 0;
+        let failExit: ((error: Error) => void) | undefined;
+        runtimeHostMock.waitForExit
+          .mockImplementationOnce(
+            () =>
+              new Promise<void>((_resolve, reject) => {
+                failExit = reject;
+              }),
+          )
+          // The background check keeps waiting, so the exit stays unconfirmed.
+          .mockImplementationOnce(() => new Promise<void>(() => undefined));
+        const subject = runtime();
+        const first = run(subject).then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+        await vi.waitFor(() => expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce());
+        await subject.stop('worker-1');
+        const second = run(subject, executionId).then(
+          () => null,
+          (caught: unknown) => caught,
+        );
+        await settle();
+        expect(runtimeHostMock.starts).toHaveLength(1);
 
-      failExit?.(new Error('Runtime process tree exit was not confirmed within 30 seconds'));
-      const refused = await second;
-      expect(refused).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
-      expect(refused).toMatchObject({
-        message: expect.stringContaining('前回のCLI実行が終了したことをまだ確認できていない'),
-        startRefused: true,
-      });
-      const unconfirmed = await first;
-      expect(unconfirmed).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
-      expect(unconfirmed).toMatchObject({ startRefused: false });
-      expect(runtimeHostMock.starts).toHaveLength(1);
-      subject.dispose();
-    });
+        failExit?.(new Error('Runtime process tree exit was not confirmed within 30 seconds'));
+        const refused = await second;
+        expect(refused).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+        expect(refused).toMatchObject({
+          message: expect.stringContaining('前回のCLI実行が終了したことをまだ確認できていない'),
+          startRefused,
+        });
+        expect(runtimeStopConfirmed(refused)).toBe(startRefused);
+        const unconfirmed = await first;
+        expect(unconfirmed).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+        expect(unconfirmed).toMatchObject({ startRefused: false });
+        expect(runtimeHostMock.starts).toHaveLength(1);
+        subject.dispose();
+      },
+    );
 
     it('lets a stop end the hold without starting a CLI', async () => {
       runtimeHostMock.starts.length = 0;
@@ -897,7 +914,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         await settle();
         expect(runtimeHostMock.waitForExit).toHaveBeenCalledOnce();
         let outcome: unknown = 'pending';
-        void run(subject).then(
+        void run(subject, 'execution-2').then(
           () => {
             outcome = 'started';
           },
@@ -920,6 +937,44 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       }
     });
   });
+
+  it.each<[string, string | undefined, string | undefined, boolean]>([
+    ['another execution', 'execution-1', 'execution-2', true],
+    // A steer re-runs the same execution in the worktree that the unconfirmed Turn may still use.
+    ['the same execution', 'execution-1', 'execution-1', false],
+    ['an execution the unconfirmed Turn did not name', undefined, 'execution-2', false],
+    ['an execution that names none', 'execution-1', undefined, false],
+  ])(
+    'refuses a start for %s behind an unconfirmed Turn exit, marking it start-refused only for another execution',
+    async (_label, previousExecutionId, executionId, startRefused) => {
+      runtimeHostMock.starts.length = 0;
+      runtimeHostMock.waitForExit
+        .mockRejectedValueOnce(
+          new Error('Runtime process tree exit was not confirmed within 30 seconds'),
+        )
+        // The background check keeps waiting, so the exit stays unconfirmed.
+        .mockImplementationOnce(() => new Promise<void>(() => undefined));
+      const subject = runtime();
+      const run = (id: string | undefined) =>
+        subject.execute({
+          worker: worker(false),
+          envelope: { ...envelope, targetAgentId: 'worker-1' },
+          content: '調査する',
+          ...(id === undefined ? {} : { executionId: id }),
+        });
+
+      await expect(run(previousExecutionId)).rejects.toMatchObject({ startRefused: false });
+      const refused = await run(executionId).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(refused).toBeInstanceOf(WorkerRuntimeExitUnconfirmedError);
+      expect(refused).toMatchObject({ startRefused });
+      expect(runtimeStopConfirmed(refused)).toBe(startRefused);
+      expect(runtimeHostMock.starts).toHaveLength(1);
+      subject.dispose();
+    },
+  );
 
   it('applies inherited context and write capability to the CLI turn', async () => {
     runtimeHostMock.starts.length = 0;
